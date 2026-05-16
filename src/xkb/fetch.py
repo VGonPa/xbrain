@@ -8,12 +8,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Callable
+from urllib.parse import urlparse
 
 import trafilatura
 
 from xkb.models import Content, ContentSource, Item
 
 ArticleExtractor = Callable[[str], tuple[str | None, str | None]]
+
+_X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
 
 
 def extract_article(url: str) -> tuple[str | None, str | None]:
@@ -39,7 +42,16 @@ def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Con
                 error="El contenido de x.com no se extrae automáticamente en v1.",
             ))
             continue
-        title, text = extractor(link.url)
+        try:
+            title, text = extractor(link.url)
+        except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
+            sources.append(ContentSource(
+                kind="external_article",
+                url=link.url,
+                ok=False,
+                error=f"Error al descargar el artículo: {exc}",
+            ))
+            continue
         if text:
             sources.append(ContentSource(
                 kind="external_article",
@@ -82,4 +94,4 @@ def fetch_pending(
 
 
 def _is_x_url(url: str) -> bool:
-    return "x.com/" in url or "twitter.com/" in url
+    return (urlparse(url).hostname or "").lower() in _X_HOSTS
