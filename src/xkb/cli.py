@@ -1,8 +1,11 @@
 """Command-line interface for X Knowledge Base."""
 from __future__ import annotations
 
+import enum
+import functools
 import os
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -24,6 +27,12 @@ app = typer.Typer(help="X Knowledge Base — bookmarks y tweets de X a un wiki d
 _BOOKMARKS_URL = "https://x.com/i/bookmarks"
 
 
+class Source(str, enum.Enum):
+    bookmarks = "bookmarks"
+    tweets = "tweets"
+    all = "all"
+
+
 def _repo_root() -> Path:
     """Repo root — overridable via XKB_REPO_ROOT for tests."""
     override = os.environ.get("XKB_REPO_ROOT")
@@ -38,6 +47,29 @@ def _config() -> Config:
 
 def _parse_date(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+_OPERATOR_ERRORS = (
+    FileNotFoundError,
+    ValueError,
+    KeyError,
+    RuntimeError,
+    NotImplementedError,
+)
+
+
+def _handle_cli_errors(func: Callable) -> Callable:
+    """Surface expected operator errors as a clean message + exit code 1."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except _OPERATOR_ERRORS as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    return wrapper
 
 
 def _run_extract(cfg: Config, source: str,
@@ -62,7 +94,7 @@ def _run_extract(cfg: Config, source: str,
             cursor = state.bookmarks if src == "bookmark" else state.own_tweets
             if items:
                 cursor.last_seen_id = max(items, key=lambda i: int(i.id)).id
-            cursor.last_run = datetime.now()
+            cursor.last_run = datetime.now(timezone.utc)
             typer.echo(f"{src}: {added} nuevos items")
     save_store(store, cfg.items_path)
     save_state(state, cfg.state_path)
@@ -84,36 +116,40 @@ def _run_generate(cfg: Config) -> None:
 
 
 @app.command()
+@_handle_cli_errors
 def login() -> None:
     """Abre un navegador para iniciar sesión en X y guarda la sesión."""
     run_login(_config().storage_state_path)
 
 
 @app.command()
+@_handle_cli_errors
 def extract(
-    source: str = typer.Option("all", help="bookmarks | tweets | all"),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
 ) -> None:
     """Extrae bookmarks y/o tweets propios desde X."""
-    _run_extract(_config(), source, _parse_date(since), _parse_date(until))
+    _run_extract(_config(), source.value, _parse_date(since), _parse_date(until))
 
 
 @app.command(name="import-archive")
+@_handle_cli_errors
 def import_archive(zip_path: Path) -> None:
     """Backfill del histórico de tweets desde el archivo oficial de X."""
     cfg = _config()
     store = load_store(cfg.items_path)
+    state = load_state(cfg.state_path)
     author = Author(handle=cfg.x_handle, name=cfg.x_handle)
     added = merge_items(store, parse_archive(zip_path, author))
+    state.archive_imported = ArchiveImport(file=zip_path.name, at=datetime.now(timezone.utc))
     save_store(store, cfg.items_path)
-    state = load_state(cfg.state_path)
-    state.archive_imported = ArchiveImport(file=zip_path.name, at=datetime.now())
     save_state(state, cfg.state_path)
     typer.echo(f"Archivo importado: {added} tweets nuevos")
 
 
 @app.command()
+@_handle_cli_errors
 def fetch(
     since: str = typer.Option(None),
     until: str = typer.Option(None),
@@ -124,6 +160,7 @@ def fetch(
 
 
 @app.command()
+@_handle_cli_errors
 def enrich(executor: str = typer.Option("manual", help="manual | api | claude-code")) -> None:
     """Enriquecimiento con LLM (en pausa — ver spec §9)."""
     pending = run_enrich(load_store(_config().items_path), executor)
@@ -131,12 +168,14 @@ def enrich(executor: str = typer.Option("manual", help="manual | api | claude-co
 
 
 @app.command()
+@_handle_cli_errors
 def generate() -> None:
     """Genera las notas markdown en el vault."""
     _run_generate(_config())
 
 
 @app.command()
+@_handle_cli_errors
 def sync() -> None:
     """extract + fetch + generate en orden."""
     cfg = _config()
@@ -146,6 +185,7 @@ def sync() -> None:
 
 
 @app.command()
+@_handle_cli_errors
 def status() -> None:
     """Muestra contadores y última ejecución."""
     cfg = _config()
