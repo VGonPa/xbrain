@@ -1,0 +1,111 @@
+# tests/test_graphql.py
+from xkb.extract.graphql import parse_tweets
+
+SAMPLE_RESPONSE = {
+    "data": {
+        "bookmark_timeline_v2": {
+            "timeline": {
+                "instructions": [
+                    {
+                        "type": "TimelineAddEntries",
+                        "entries": [
+                            {
+                                "entryId": "tweet-111",
+                                "content": {
+                                    "itemContent": {
+                                        "itemType": "TimelineTweet",
+                                        "tweet_results": {
+                                            "result": {
+                                                "__typename": "Tweet",
+                                                "rest_id": "111",
+                                                "core": {
+                                                    "user_results": {
+                                                        "result": {
+                                                            "legacy": {
+                                                                "screen_name": "alice",
+                                                                "name": "Alice",
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                "legacy": {
+                                                    "full_text": "Great read https://t.co/abc",
+                                                    "created_at": "Wed May 10 14:23:00 +0000 2026",
+                                                    "entities": {
+                                                        "urls": [
+                                                            {
+                                                                "expanded_url": "https://example.com/post",
+                                                                "url": "https://t.co/abc",
+                                                            }
+                                                        ]
+                                                    },
+                                                },
+                                            }
+                                        },
+                                    }
+                                },
+                            },
+                            {
+                                "entryId": "cursor-bottom-xyz",
+                                "content": {
+                                    "itemContent": {"itemType": "TimelineTimelineCursor"}
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+}
+
+
+def test_parse_tweets_extracts_timeline_tweet():
+    items = parse_tweets(SAMPLE_RESPONSE, "bookmark")
+    assert len(items) == 1
+    item = items[0]
+    assert item.id == "111"
+    assert item.source == "bookmark"
+    assert item.author.handle == "alice"
+    assert item.text == "Great read https://t.co/abc"
+    assert item.url == "https://x.com/alice/status/111"
+    assert item.links[0].url == "https://example.com/post"
+    assert item.links[0].domain == "example.com"
+    assert item.created_at.year == 2026
+
+
+def test_parse_tweets_ignores_non_tweet_entries():
+    empty = {"data": {"timeline": {"instructions": []}}}
+    assert parse_tweets(empty, "bookmark") == []
+
+
+def test_parse_tweets_deduplicates_by_id():
+    doubled = {"a": SAMPLE_RESPONSE, "b": SAMPLE_RESPONSE}
+    assert len(parse_tweets(doubled, "bookmark")) == 1
+
+
+def test_parse_tweets_detects_self_thread():
+    sample = {
+        "tweet_results": {
+            "result": {
+                "__typename": "Tweet",
+                "rest_id": "222",
+                "core": {
+                    "user_results": {
+                        "result": {
+                            "legacy": {"screen_name": "alice", "name": "Alice"}
+                        }
+                    }
+                },
+                "legacy": {
+                    "full_text": "thread tweet",
+                    "created_at": "Wed May 10 14:23:00 +0000 2026",
+                    "entities": {"urls": []},
+                    "self_thread": {"id_str": "200"},
+                },
+            }
+        }
+    }
+    items = parse_tweets(sample, "own_tweet")
+    assert items[0].thread is not None
+    assert items[0].thread.root_id == "200"
