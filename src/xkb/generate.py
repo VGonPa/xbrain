@@ -26,10 +26,11 @@ def generate(
     since: datetime | None = None,
     until: datetime | None = None,
 ) -> None:
-    """Write _index.md, log.md and one note per linked item.
+    """Write _index.md, log.md and one note per noted item.
 
-    The index and log always reflect the whole store; `since`/`until` only
-    narrow which item notes are (re)generated.
+    A note is written for any item that has links or has been enriched. The
+    index and log always reflect the whole store; `since`/`until` only narrow
+    which item notes are (re)generated.
     """
     items = sorted(store.values(), key=lambda i: i.created_at, reverse=True)
     items_dir = output_dir / "items"
@@ -37,8 +38,13 @@ def generate(
     (output_dir / "_index.md").write_text(_render_index(items), encoding="utf-8")
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
-        if item.links and _in_range(item, since, until):
+        if _has_note(item) and _in_range(item, since, until):
             _write_note(items_dir, item)
+
+
+def _has_note(item: Item) -> bool:
+    """An item gets its own note if it has links or has been enriched."""
+    return bool(item.links) or item.enriched is not None
 
 
 def _in_range(item: Item, since: datetime | None, until: datetime | None) -> bool:
@@ -101,7 +107,14 @@ def _user_tail(existing: str) -> str:
 
 
 def _render_note(item: Item) -> str:
-    lines = [_frontmatter(item), "", f"# {_title(item)}", "", item.text, ""]
+    lines = [_frontmatter(item), "", f"# {_title(item)}", ""]
+    if item.enriched:
+        if item.enriched.summary:
+            lines += [item.enriched.summary, ""]
+        if item.enriched.topics:
+            topic_links = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
+            lines += [f"**Temas:** {topic_links}", ""]
+    lines += ["## Tweet", "", item.text, ""]
     if item.links:
         lines.append("## Enlaces")
         lines += [f"- <{link.url}>" for link in item.links]
@@ -112,21 +125,11 @@ def _render_note(item: Item) -> str:
             if source.ok and source.text:
                 heading = source.title or source.url
                 lines += [f"## Contenido: {heading}", "", source.text, ""]
-    lines.append("## Enrichment")
-    if item.enriched:
-        lines += [
-            f"- **Resumen:** {item.enriched.summary or '—'}",
-            f"- **Temas:** {', '.join(item.enriched.topics) or '—'}",
-            f"- **Cursos:** {', '.join(item.enriched.course_suggestions) or '—'}",
-        ]
-    else:
-        lines.append("_Pendiente de enriquecer._")
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def _frontmatter(item: Item) -> str:
     topics = ", ".join(item.enriched.topics) if item.enriched else ""
-    course = ", ".join(item.enriched.course_suggestions) if item.enriched else ""
     domains = ", ".join(sorted({link.domain for link in item.links}))
     tags = "x-knowledge" + (f", {topics}" if topics else "")
     return "\n".join([
@@ -138,7 +141,6 @@ def _frontmatter(item: Item) -> str:
         f"author: {item.author.handle}",
         f"domains: [{domains}]",
         f"tags: [{tags}]",
-        f'course: "{course}"',
         "---",
     ])
 
@@ -146,14 +148,13 @@ def _frontmatter(item: Item) -> str:
 def _render_index(items: list[Item]) -> str:
     bookmarks = sum(1 for i in items if i.source == "bookmark")
     own = sum(1 for i in items if i.source == "own_tweet")
-    with_links = sum(1 for i in items if i.links)
-    fetched = sum(1 for i in items if i.content)
+    noted = sum(1 for i in items if _has_note(i))
     enriched = sum(1 for i in items if i.enriched)
-    domains: dict[str, int] = {}
+    topic_freq: dict[str, int] = {}
     for item in items:
-        for link in item.links:
-            domains[link.domain] = domains.get(link.domain, 0) + 1
-    top = sorted(domains.items(), key=lambda kv: kv[1], reverse=True)[:15]
+        if item.enriched:
+            for topic in item.enriched.topics:
+                topic_freq[topic] = topic_freq.get(topic, 0) + 1
     lines = [
         "# X Knowledge Base",
         "",
@@ -163,18 +164,18 @@ def _render_index(items: list[Item]) -> str:
         "",
         f"- Items totales: {len(items)}",
         f"- Bookmarks: {bookmarks} · Tweets propios: {own}",
-        f"- Con enlace (tienen nota): {with_links}",
-        f"- Con contenido descargado: {fetched}",
+        f"- Con nota propia: {noted}",
         f"- Enriquecidos: {enriched}",
         "",
         "## Índices",
         "",
         "- [[log|Log cronológico completo]]",
         "",
-        "## Dominios más enlazados",
+        "## Temas",
         "",
     ]
-    lines += [f"- {domain}: {count}" for domain, count in top]
+    for topic, count in sorted(topic_freq.items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"- [[{topic}]] ({count})")
     return "\n".join(lines) + "\n"
 
 
@@ -185,7 +186,7 @@ def _render_log(items: list[Item]) -> str:
         snippet = item.text.replace("\n", " ")[:120]
         link = (
             f" → [[items/{Path(_note_filename(item)).stem}|nota]]"
-            if item.links
+            if _has_note(item)
             else ""
         )
         lines.append(f"- `{date}` @{item.author.handle}: {snippet}{link}")
