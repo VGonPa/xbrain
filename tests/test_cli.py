@@ -79,3 +79,35 @@ def test_cli_reports_missing_config_cleanly(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["status"])
     assert result.exit_code != 0
     assert "Error:" in result.output
+
+
+def test_parse_date_returns_utc_aware():
+    from xkb.cli import _parse_date
+
+    parsed = _parse_date("2025-01-01")
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert _parse_date(None) is None
+
+
+def test_cli_fetch_with_since_does_not_crash(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    old_item = _linked_item("1")
+    old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    save_store({"1": old_item}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["fetch", "--since", "2025-01-01"])
+    assert result.exit_code == 0
+
+
+def test_cli_generate_with_since_filters_notes(tmp_path: Path, monkeypatch):
+    vault = _setup_repo(tmp_path, monkeypatch)
+    old_item = _linked_item("1")
+    old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    new_item = _linked_item("2")
+    new_item.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    save_store({"1": old_item, "2": new_item}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--since", "2025-01-01"])
+    assert result.exit_code == 0
+    assert (vault / "x-knowledge" / "_index.md").exists()
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    assert len(notes) == 1

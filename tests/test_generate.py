@@ -104,3 +104,18 @@ def test_note_has_frontmatter(tmp_path: Path):
     assert "id:" in content
     assert "source:" in content
     assert "tags: [x-knowledge" in content
+
+
+def test_generate_since_until_filters_item_notes(tmp_path: Path):
+    old_item = _item("1", with_link=True, text="Old note")
+    old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    new_item = _item("2", with_link=True, text="New note")
+    new_item.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = {"1": old_item, "2": new_item}
+    generate(store, tmp_path, since=datetime(2023, 1, 1, tzinfo=timezone.utc))
+    notes = list((tmp_path / "items").glob("*.md"))
+    assert len(notes) == 1
+    assert "New note" in notes[0].read_text(encoding="utf-8")
+    log = (tmp_path / "log.md").read_text(encoding="utf-8")
+    assert "Old note" in log
+    assert "New note" in log

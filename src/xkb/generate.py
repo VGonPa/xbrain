@@ -20,16 +20,33 @@ _DEFAULT_TAIL = (
 )
 
 
-def generate(store: dict[str, Item], output_dir: Path) -> None:
-    """Write _index.md, log.md and one note per item that has links."""
+def generate(
+    store: dict[str, Item],
+    output_dir: Path,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> None:
+    """Write _index.md, log.md and one note per linked item.
+
+    The index and log always reflect the whole store; `since`/`until` only
+    narrow which item notes are (re)generated.
+    """
     items = sorted(store.values(), key=lambda i: i.created_at, reverse=True)
     items_dir = output_dir / "items"
     items_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "_index.md").write_text(_render_index(items), encoding="utf-8")
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
-        if item.links:
+        if item.links and _in_range(item, since, until):
             _write_note(items_dir, item)
+
+
+def _in_range(item: Item, since: datetime | None, until: datetime | None) -> bool:
+    if since and item.created_at < since:
+        return False
+    if until and item.created_at > until:
+        return False
+    return True
 
 
 def _write_note(items_dir: Path, item: Item) -> None:

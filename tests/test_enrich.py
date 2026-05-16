@@ -41,3 +41,15 @@ def test_enrich_manual_returns_pending_items():
 def test_enrich_api_executor_is_paused():
     with pytest.raises(NotImplementedError, match="pausa"):
         enrich({"1": _item("1")}, "api")
+
+
+def test_items_pending_respects_date_range():
+    old_item = _item("1")
+    old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    new_item = _item("2")
+    new_item.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = {"1": old_item, "2": new_item}
+    pending = items_pending_enrichment(
+        store, since=datetime(2023, 1, 1, tzinfo=timezone.utc)
+    )
+    assert {i.id for i in pending} == {"2"}

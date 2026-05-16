@@ -46,7 +46,12 @@ def _config() -> Config:
 
 
 def _parse_date(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 _OPERATOR_ERRORS = (
@@ -88,10 +93,17 @@ def _run_extract(cfg: Config, source: str,
     known_ids = set(store)
     with x_context(cfg.storage_state_path) as context:
         for src in chosen:
+            cursor = state.bookmarks if src == "bookmark" else state.own_tweets
+            first_run = cursor.last_seen_id is None
             items = extract_source(context, src, targets[src], known_ids,
                                    since, until)
+            if not items and first_run:
+                typer.echo(
+                    f"AVISO: {src} devolvió 0 items en una extracción inicial — "
+                    "revisa la sesión de X o el parser GraphQL (spec §6).",
+                    err=True,
+                )
             added = merge_items(store, items)
-            cursor = state.bookmarks if src == "bookmark" else state.own_tweets
             if items:
                 cursor.last_seen_id = max(items, key=lambda i: int(i.id)).id
             cursor.last_run = datetime.now(timezone.utc)
@@ -109,9 +121,10 @@ def _run_fetch(cfg: Config, since: datetime | None,
     typer.echo(f"Contenido descargado: {articles} artículos, {threads} hilos")
 
 
-def _run_generate(cfg: Config) -> None:
+def _run_generate(cfg: Config, since: datetime | None,
+                  until: datetime | None) -> None:
     store = load_store(cfg.items_path)
-    run_generate(store, cfg.output_dir)
+    run_generate(store, cfg.output_dir, since, until)
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 
 
@@ -161,17 +174,27 @@ def fetch(
 
 @app.command()
 @_handle_cli_errors
-def enrich(executor: str = typer.Option("manual", help="manual | api | claude-code")) -> None:
+def enrich(
+    executor: str = typer.Option("manual", help="manual | api | claude-code"),
+    since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
+    until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
+) -> None:
     """Enriquecimiento con LLM (en pausa — ver spec §9)."""
-    pending = run_enrich(load_store(_config().items_path), executor)
+    pending = run_enrich(
+        load_store(_config().items_path), executor,
+        _parse_date(since), _parse_date(until),
+    )
     typer.echo(f"{len(pending)} items pendientes de enriquecer")
 
 
 @app.command()
 @_handle_cli_errors
-def generate() -> None:
+def generate(
+    since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
+    until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
+) -> None:
     """Genera las notas markdown en el vault."""
-    _run_generate(_config())
+    _run_generate(_config(), _parse_date(since), _parse_date(until))
 
 
 @app.command()
@@ -181,7 +204,7 @@ def sync() -> None:
     cfg = _config()
     _run_extract(cfg, "all", None, None)
     _run_fetch(cfg, None, None, False)
-    _run_generate(cfg)
+    _run_generate(cfg, None, None)
 
 
 @app.command()
