@@ -2,17 +2,17 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xkb.generate import generate
+from xkb.generate import _slugify, generate
 from xkb.models import Author, Item, Link
 
 
-def _item(item_id: str, with_link: bool) -> Item:
+def _item(item_id: str, with_link: bool, text: str | None = None) -> Item:
     return Item(
         id=item_id,
         source="bookmark",
         url=f"https://x.com/a/status/{item_id}",
         author=Author(handle="alice", name="Alice"),
-        text=f"Note {item_id}",
+        text=text if text is not None else f"Note {item_id}",
         created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
         captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
         links=[Link(url="https://example.com/p", domain="example.com")] if with_link else [],
@@ -43,3 +43,52 @@ def test_log_lists_every_item(tmp_path: Path):
     log = (tmp_path / "log.md").read_text(encoding="utf-8")
     assert "Note 1" in log
     assert "Note 2" in log
+
+
+def test_slugify_handles_edge_cases():
+    slug = _slugify("Café del Día")
+    assert slug == slug.lower()
+    assert slug.isascii()
+    assert slug == "cafe-del-dia"
+    assert _slugify("") == "item"
+    assert _slugify("!!!") == "item"
+    long_slug = _slugify("a" * 200)
+    assert len(long_slug) <= 60
+
+
+def test_regeneration_replaces_generated_block(tmp_path: Path):
+    generate({"1": _item("1", with_link=True, text="Original text")}, tmp_path)
+    generate({"1": _item("1", with_link=True, text="Updated text")}, tmp_path)
+    notes = list((tmp_path / "items").glob("*.md"))
+    assert len(notes) == 1  # the stale-title note is migrated, not orphaned
+    content = notes[0].read_text(encoding="utf-8")
+    assert "Updated text" in content
+    assert "Original text" not in content
+
+
+def test_missing_end_marker_preserves_file(tmp_path: Path):
+    store = {"1": _item("1", with_link=True)}
+    generate(store, tmp_path)
+    note = next((tmp_path / "items").glob("*.md"))
+    note.write_text("contenido del usuario sin marcadores", encoding="utf-8")
+    generate(store, tmp_path)
+    assert "contenido del usuario sin marcadores" in note.read_text(encoding="utf-8")
+
+
+def test_note_filenames_do_not_collide(tmp_path: Path):
+    store = {
+        "1001": _item("1001", with_link=True, text="Mismo titulo"),
+        "2002": _item("2002", with_link=True, text="Mismo titulo"),
+    }
+    generate(store, tmp_path)
+    notes = list((tmp_path / "items").glob("*.md"))
+    assert len(notes) == 2
+
+
+def test_note_has_frontmatter(tmp_path: Path):
+    generate({"1": _item("1", with_link=True)}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md"))
+    content = note.read_text(encoding="utf-8")
+    assert "id:" in content
+    assert "source:" in content
+    assert "tags: [x-knowledge" in content

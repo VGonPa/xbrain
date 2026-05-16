@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from xkb.models import Item
 
 GEN_START = "<!-- xkb:generated:start -->"
 GEN_END = "<!-- xkb:generated:end -->"
-_DEFAULT_TAIL = "\n\n## Mis notas\n\n"
+_DEFAULT_TAIL = (
+    "\n\n## Mis notas\n\n"
+    "*(Escribe debajo. El bloque por encima de este punto se regenera "
+    "automáticamente; no lo edites.)*\n\n"
+)
 
 
 def generate(store: dict[str, Item], output_dir: Path) -> None:
@@ -22,25 +26,51 @@ def generate(store: dict[str, Item], output_dir: Path) -> None:
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
         if item.links:
-            _write_note(items_dir / _note_filename(item), _render_note(item))
+            _write_note(items_dir, item)
 
 
-def _write_note(path: Path, generated_block: str) -> None:
-    """Write a note, replacing only the generated region if the file exists."""
-    block = f"{GEN_START}\n{generated_block}\n{GEN_END}"
-    if path.exists():
-        tail = _user_tail(path.read_text(encoding="utf-8"))
+def _write_note(items_dir: Path, item: Item) -> None:
+    """Write an item's note, replacing only the generated region.
+
+    The filename is derived from the item's (mutable) title. The trailing
+    ``id`` fragment keeps it unique and lets us locate a note written for
+    this item under a previous title: that stale note is migrated so the
+    user's hand-written tail follows the item instead of being orphaned.
+    """
+    path = items_dir / _note_filename(item)
+    block = f"{GEN_START}\n{_render_note(item)}\n{GEN_END}"
+    source = path if path.exists() else _stale_note(items_dir, item, path)
+    if source is not None:
+        tail = _user_tail(source.read_text(encoding="utf-8"))
+        if source != path:
+            source.unlink()
     else:
         tail = _DEFAULT_TAIL
     path.write_text(block + tail, encoding="utf-8")
 
 
+def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
+    """Find a note previously written for this item under a different title."""
+    suffix = f"-{item.id[-6:]}.md"
+    for candidate in items_dir.glob(f"*{suffix}"):
+        if candidate != current:
+            return candidate
+    return None
+
+
 def _user_tail(existing: str) -> str:
-    """Return everything the user wrote after the generated end marker."""
+    """Return the content to preserve after the generated block.
+
+    Normally everything after GEN_END. If GEN_END is missing (markers
+    deleted or corrupted) but the file has content, preserve the whole
+    file rather than discarding the user's work.
+    """
     idx = existing.find(GEN_END)
-    if idx == -1:
-        return _DEFAULT_TAIL
-    return existing[idx + len(GEN_END):]
+    if idx != -1:
+        return existing[idx + len(GEN_END):]
+    if existing.strip():
+        return "\n\n" + existing
+    return _DEFAULT_TAIL
 
 
 def _render_note(item: Item) -> str:
@@ -100,7 +130,7 @@ def _render_index(items: list[Item]) -> str:
     lines = [
         "# X Knowledge Base",
         "",
-        f"> Generado: {datetime.now().date().isoformat()}",
+        f"> Generado: {datetime.now(timezone.utc).date().isoformat()}",
         "",
         "## Resumen",
         "",
@@ -126,7 +156,11 @@ def _render_log(items: list[Item]) -> str:
     for item in items:
         date = item.created_at.date().isoformat()
         snippet = item.text.replace("\n", " ")[:120]
-        link = f" → [[items/{_note_filename(item)[:-3]}|nota]]" if item.links else ""
+        link = (
+            f" → [[items/{Path(_note_filename(item)).stem}|nota]]"
+            if item.links
+            else ""
+        )
         lines.append(f"- `{date}` @{item.author.handle}: {snippet}{link}")
     return "\n".join(lines) + "\n"
 
@@ -140,7 +174,10 @@ def _title(item: Item) -> str:
 
 
 def _note_filename(item: Item) -> str:
-    return f"{item.created_at.date().isoformat()}-{_slugify(_title(item))}.md"
+    return (
+        f"{item.created_at.date().isoformat()}-"
+        f"{_slugify(_title(item))}-{item.id[-6:]}.md"
+    )
 
 
 def _slugify(text: str) -> str:
