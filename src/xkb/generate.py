@@ -1,12 +1,15 @@
 """Render the JSON store into Obsidian markdown notes."""
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
 from xkb.models import Item
+
+logger = logging.getLogger(__name__)
 
 GEN_START = "<!-- xkb:generated:start -->"
 GEN_END = "<!-- xkb:generated:end -->"
@@ -32,10 +35,11 @@ def generate(store: dict[str, Item], output_dir: Path) -> None:
 def _write_note(items_dir: Path, item: Item) -> None:
     """Write an item's note, replacing only the generated region.
 
-    The filename is derived from the item's (mutable) title. The trailing
-    ``id`` fragment keeps it unique and lets us locate a note written for
-    this item under a previous title: that stale note is migrated so the
-    user's hand-written tail follows the item instead of being orphaned.
+    The filename ends with the item's globally unique ``id``. That makes
+    every note path collision-free and lets us locate a note written for
+    this item under a previous title or date: that stale note is migrated
+    so the user's hand-written tail follows the item instead of being
+    orphaned.
     """
     path = items_dir / _note_filename(item)
     block = f"{GEN_START}\n{_render_note(item)}\n{GEN_END}"
@@ -44,15 +48,21 @@ def _write_note(items_dir: Path, item: Item) -> None:
         tail = _user_tail(source.read_text(encoding="utf-8"))
         if source != path:
             source.unlink()
+            logger.info("Migrated note %s -> %s", source.name, path.name)
     else:
         tail = _DEFAULT_TAIL
     path.write_text(block + tail, encoding="utf-8")
 
 
 def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
-    """Find a note previously written for this item under a different title."""
-    suffix = f"-{item.id[-6:]}.md"
-    for candidate in items_dir.glob(f"*{suffix}"):
+    """Find this item's previous note when a filename component changed.
+
+    The filename ends with the item's globally unique ``id``, so a glob on
+    that id matches at most one file. If that file is not the item's
+    current note path, the title slug or date changed and the note must be
+    migrated; otherwise there is nothing to migrate.
+    """
+    for candidate in items_dir.glob(f"*-{item.id}.md"):
         if candidate != current:
             return candidate
     return None
@@ -176,7 +186,7 @@ def _title(item: Item) -> str:
 def _note_filename(item: Item) -> str:
     return (
         f"{item.created_at.date().isoformat()}-"
-        f"{_slugify(_title(item))}-{item.id[-6:]}.md"
+        f"{_slugify(_title(item))}-{item.id}.md"
     )
 
 

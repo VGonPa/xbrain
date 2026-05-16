@@ -85,6 +85,18 @@ def test_note_filenames_do_not_collide(tmp_path: Path):
     assert len(notes) == 2
 
 
+def test_note_filenames_unique_for_similar_ids(tmp_path: Path):
+    # Same date, identical slug, ids sharing their last 6 characters.
+    # Keying filenames on the full id keeps both notes distinct.
+    store = {
+        "1000001": _item("1000001", with_link=True, text="Mismo titulo"),
+        "2000001": _item("2000001", with_link=True, text="Mismo titulo"),
+    }
+    generate(store, tmp_path)
+    notes = list((tmp_path / "items").glob("*.md"))
+    assert len({note.name for note in notes}) == 2
+
+
 def test_note_has_frontmatter(tmp_path: Path):
     generate({"1": _item("1", with_link=True)}, tmp_path)
     note = next((tmp_path / "items").glob("*.md"))
