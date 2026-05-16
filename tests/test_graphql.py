@@ -109,3 +109,98 @@ def test_parse_tweets_detects_self_thread():
     items = parse_tweets(sample, "own_tweet")
     assert items[0].thread is not None
     assert items[0].thread.root_id == "200"
+
+
+def _tweet_result(rest_id, handle, text, **legacy_extra):
+    """Build a minimal `tweet_results.result` Tweet block for tests."""
+    legacy = {
+        "full_text": text,
+        "created_at": "Wed May 10 14:23:00 +0000 2026",
+        "entities": {"urls": []},
+    }
+    legacy.update(legacy_extra)
+    return {
+        "__typename": "Tweet",
+        "rest_id": rest_id,
+        "core": {
+            "user_results": {
+                "result": {"legacy": {"screen_name": handle, "name": handle.title()}}
+            }
+        },
+        "legacy": legacy,
+    }
+
+
+def test_parse_tweets_skips_hydrated_quoted_tweet():
+    quoted = _tweet_result("999", "bob", "quoted original tweet")
+    bookmark = _tweet_result("333", "alice", "look at this")
+    bookmark["legacy"]["quoted_status_result"] = {"result": quoted}
+    response = {
+        "data": {
+            "bookmark_timeline_v2": {
+                "timeline": {
+                    "instructions": [
+                        {
+                            "type": "TimelineAddEntries",
+                            "entries": [
+                                {
+                                    "entryId": "tweet-333",
+                                    "content": {
+                                        "itemContent": {
+                                            "itemType": "TimelineTweet",
+                                            "tweet_results": {"result": bookmark},
+                                        }
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    items = parse_tweets(response, "bookmark")
+    assert len(items) == 1
+    assert items[0].id == "333"
+
+
+def test_parse_tweets_reads_author_from_core_path():
+    sample = {
+        "tweet_results": {
+            "result": {
+                "__typename": "Tweet",
+                "rest_id": "444",
+                "core": {
+                    "user_results": {
+                        "result": {
+                            "core": {"screen_name": "carol", "name": "Carol"}
+                        }
+                    }
+                },
+                "legacy": {
+                    "full_text": "core-path author",
+                    "created_at": "Wed May 10 14:23:00 +0000 2026",
+                    "entities": {"urls": []},
+                },
+            }
+        }
+    }
+    items = parse_tweets(sample, "bookmark")
+    assert len(items) == 1
+    assert items[0].author.handle == "carol"
+    assert items[0].author.name == "Carol"
+
+
+def test_parse_tweets_unwraps_visibility_envelope():
+    sample = {
+        "tweet_results": {
+            "result": {
+                "__typename": "TweetWithVisibilityResults",
+                "tweet": _tweet_result("555", "dave", "limited visibility tweet"),
+            }
+        }
+    }
+    items = parse_tweets(sample, "bookmark")
+    assert len(items) == 1
+    assert items[0].id == "555"
+    assert items[0].text == "limited visibility tweet"

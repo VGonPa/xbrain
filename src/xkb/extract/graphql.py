@@ -1,13 +1,17 @@
 """Parse X (Twitter) internal GraphQL responses into Item objects."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from xkb.models import Author, Item, Link, Media, ThreadInfo
 
+logger = logging.getLogger(__name__)
+
 X_DATE_FORMAT = "%a %b %d %H:%M:%S %z %Y"
+_NESTED_TWEET_KEYS = ("quoted_status_result", "retweeted_status_result")
 
 
 def parse_tweets(response: dict[str, Any], source: str) -> list[Item]:
@@ -35,16 +39,28 @@ def parse_tweets(response: dict[str, Any], source: str) -> list[Item]:
 
 
 def _find_tweet_results(obj: Any) -> Iterator[dict[str, Any]]:
-    """Yield every `tweet_results.result` dict found anywhere in the tree."""
+    """Yield every top-level `tweet_results.result` dict in the tree.
+
+    Skips quoted/retweeted sub-trees so a nested hydrated tweet is not
+    surfaced as a standalone timeline item.
+    """
     if isinstance(obj, dict):
         results = obj.get("tweet_results")
         if isinstance(results, dict) and isinstance(results.get("result"), dict):
             yield results["result"]
-        for value in obj.values():
-            yield from _find_tweet_results(value)
+        for key, value in obj.items():
+            if key not in _NESTED_TWEET_KEYS:
+                yield from _find_tweet_results(value)
     elif isinstance(obj, list):
         for value in obj:
             yield from _find_tweet_results(value)
+
+
+def _dig(obj: Any, *keys: str) -> dict[str, Any]:
+    """Walk nested dict keys, returning {} on any missing/null/non-dict node."""
+    for key in keys:
+        obj = obj.get(key) if isinstance(obj, dict) else None
+    return obj if isinstance(obj, dict) else {}
 
 
 def _unwrap(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -82,9 +98,9 @@ def _tweet_to_item(tweet: dict[str, Any], source: str) -> Item | None:
 
 
 def _extract_author(tweet: dict[str, Any]) -> Author | None:
-    user = tweet.get("core", {}).get("user_results", {}).get("result", {})
-    legacy = user.get("legacy", {})
-    core = user.get("core", {})  # newer responses moved name/handle here
+    user = _dig(tweet, "core", "user_results", "result")
+    legacy = _dig(user, "legacy")
+    core = _dig(user, "core")  # newer responses moved name/handle here
     handle = legacy.get("screen_name") or core.get("screen_name")
     name = legacy.get("name") or core.get("name")
     if not handle:
@@ -116,7 +132,7 @@ def _extract_media(legacy: dict[str, Any]) -> list[Media]:
 
 
 def _quoted_id(tweet: dict[str, Any]) -> str | None:
-    quoted = tweet.get("quoted_status_result", {}).get("result", {})
+    quoted = _dig(tweet, "quoted_status_result", "result")
     rest_id = quoted.get("rest_id")
     return str(rest_id) if rest_id else None
 
@@ -135,4 +151,5 @@ def _parse_x_date(value: str | None) -> datetime:
     try:
         return datetime.strptime(value, X_DATE_FORMAT)
     except ValueError:
+        logger.warning("unparseable X date %r, using now()", value)
         return datetime.now(timezone.utc)
