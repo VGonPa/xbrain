@@ -1,0 +1,11 @@
+[paths]
+# Absolute path to your Obsidian vault root.
+vault = "/absolute/path/to/your/obsidian/vault"
+# Output folder for generated markdown, relative to the vault root.
+output_subdir = "learnings/x-knowledge"
+# Data directory for the JSON store, relative to the repo root.
+data_dir = "data"
+
+[x]
+# Your X handle, without the @.
+handle = "your_handle"

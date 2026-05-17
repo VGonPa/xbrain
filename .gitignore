@@ -5,3 +5,9 @@ __pycache__/
 .ruff_cache/
 auth/storage_state.json
 *.tmp
+
+# Personal data and config — never commit (see launch plan §7)
+data/*
+!data/.gitkeep
+config.toml
+courses.yaml
