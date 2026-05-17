@@ -11,8 +11,8 @@ uv pip install -e ".[dev]" --index-url https://pypi.org/simple
 uv run playwright install chromium
 ```
 
-Copy `config.toml.example` to `config.toml` and `courses.yaml.example` to
-`courses.yaml`, then fill in your own values. Neither file is tracked by git.
+Copy `config.toml.example` to `config.toml` and fill in your own values. That
+file is not tracked by git.
 
 ## Before opening a pull request
 

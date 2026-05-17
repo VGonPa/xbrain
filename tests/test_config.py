@@ -16,24 +16,14 @@ def _write_repo(root: Path, handle: str = "vgonpa") -> None:
         f'handle = "{handle}"\n',
         encoding="utf-8",
     )
-    (root / "courses.yaml").write_text(
-        "courses:\n"
-        "  - id: TechEntre\n"
-        "    name: Tech-Powered Entrepreneurship\n"
-        "    institution: IE University\n"
-        "    themes: [lean-startup]\n",
-        encoding="utf-8",
-    )
 
 
-def test_load_config_resolves_paths_and_courses(tmp_path: Path):
+def test_load_config_resolves_paths(tmp_path: Path):
     _write_repo(tmp_path)
     cfg = load_config(tmp_path)
     assert cfg.x_handle == "vgonpa"
     assert cfg.output_dir == Path("/tmp/vault/learnings/x-knowledge")
     assert cfg.items_path == tmp_path / "data" / "items.json"
-    assert cfg.courses[0].id == "TechEntre"
-    assert cfg.courses[0].themes == ["lean-startup"]
 
 
 def test_load_config_rejects_empty_handle(tmp_path: Path):

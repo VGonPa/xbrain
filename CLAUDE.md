@@ -17,8 +17,8 @@ generates an Obsidian wiki.
 ## Conventions
 - TDD: every module has a `tests/test_*.py`. Run `uv run pytest -v`.
 - The X GraphQL parser anchors on key names, not paths — X's private API drifts.
-- Never commit personal data: `auth/storage_state.json`, `data/`, `config.toml`,
-  `courses.yaml`. All are gitignored.
+- Never commit personal data: `auth/storage_state.json`, `data/`, `config.toml`.
+  All are gitignored.
 
 ## Git workflow
 - This repo has only `main`: `feature-branch → PR → main`.

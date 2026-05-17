@@ -1,6 +1,0 @@
-# Optional: courses used by the `enrich` stage to suggest course mappings.
-courses:
-  - id: ExampleCourse
-    name: Example Course Name
-    institution: Your Institution
-    themes: [topic-one, topic-two, topic-three]

@@ -1,4 +1,4 @@
-"""Command-line interface for X Knowledge Base."""
+"""Command-line interface for XBrain."""
 from __future__ import annotations
 
 import enum
@@ -22,7 +22,7 @@ from xbrain.generate import generate as run_generate
 from xbrain.models import ArchiveImport, Author
 from xbrain.store import load_state, load_store, merge_items, save_state, save_store
 
-app = typer.Typer(help="X Knowledge Base — bookmarks y tweets de X a un wiki de Obsidian")
+app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
 
 _BOOKMARKS_URL = "https://x.com/i/bookmarks"
 
@@ -34,8 +34,8 @@ class Source(str, enum.Enum):
 
 
 def _repo_root() -> Path:
-    """Repo root — overridable via XKB_REPO_ROOT for tests."""
-    override = os.environ.get("XKB_REPO_ROOT")
+    """Repo root — overridable via XBRAIN_REPO_ROOT for tests."""
+    override = os.environ.get("XBRAIN_REPO_ROOT")
     if override:
         return Path(override)
     return Path(__file__).resolve().parents[2]

@@ -23,9 +23,8 @@ def _setup_repo(tmp_path: Path, monkeypatch) -> Path:
         'handle = "vgonpa"\n',
         encoding="utf-8",
     )
-    (tmp_path / "courses.yaml").write_text("courses: []\n", encoding="utf-8")
     (tmp_path / "data").mkdir()
-    monkeypatch.setenv("XKB_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
     return vault
 
 
@@ -75,7 +74,7 @@ def test_generate_writes_item_note_for_linked_item(tmp_path: Path, monkeypatch):
 
 
 def test_cli_reports_missing_config_cleanly(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("XKB_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
     result = runner.invoke(app, ["status"])
     assert result.exit_code != 0
     assert "Error:" in result.output

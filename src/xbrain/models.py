@@ -1,4 +1,4 @@
-"""Data models for the X Knowledge Base store."""
+"""Data models for the XBrain store."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -47,7 +47,6 @@ class Enrichment(BaseModel):
     executor: Literal["manual", "api", "claude-code"]
     summary: str | None = None
     topics: list[str] = Field(default_factory=list)
-    course_suggestions: list[str] = Field(default_factory=list)
     note_worthiness: Literal["high", "medium", "low"] | None = None
     user_notes: str | None = None
 

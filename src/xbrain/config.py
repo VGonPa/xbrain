@@ -1,19 +1,9 @@
-"""Configuration loading for X Knowledge Base."""
+"""Configuration loading for XBrain."""
 from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-
-import yaml
-
-
-@dataclass(frozen=True)
-class Course:
-    id: str
-    name: str
-    institution: str
-    themes: list[str]
 
 
 @dataclass(frozen=True)
@@ -23,7 +13,6 @@ class Config:
     output_dir: Path
     data_dir: Path
     x_handle: str
-    courses: list[Course]
 
     @property
     def items_path(self) -> Path:
@@ -39,7 +28,7 @@ class Config:
 
 
 def load_config(repo_root: Path) -> Config:
-    """Load config.toml + courses.yaml from a repo root into a Config."""
+    """Load config.toml from a repo root into a Config."""
     settings = tomllib.loads((repo_root / "config.toml").read_text(encoding="utf-8"))
     paths = settings["paths"]
     x_settings = settings["x"]
@@ -52,20 +41,4 @@ def load_config(repo_root: Path) -> Config:
         output_dir=vault / paths["output_subdir"],
         data_dir=repo_root / paths["data_dir"],
         x_handle=x_settings["handle"],
-        courses=_load_courses(repo_root / "courses.yaml"),
     )
-
-
-def _load_courses(path: Path) -> list[Course]:
-    if not path.exists():
-        return []
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return [
-        Course(
-            id=course["id"],
-            name=course["name"],
-            institution=course.get("institution", ""),
-            themes=list(course.get("themes", [])),
-        )
-        for course in data.get("courses", [])
-    ]

@@ -1,4 +1,4 @@
-"""JSON-backed store for X Knowledge Base items and extraction state."""
+"""JSON-backed store for XBrain items and extraction state."""
 from __future__ import annotations
 
 import json

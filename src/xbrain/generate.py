@@ -156,7 +156,7 @@ def _render_index(items: list[Item]) -> str:
             for topic in item.enriched.topics:
                 topic_freq[topic] = topic_freq.get(topic, 0) + 1
     lines = [
-        "# X Knowledge Base",
+        "# XBrain",
         "",
         f"> Generado: {datetime.now(timezone.utc).date().isoformat()}",
         "",

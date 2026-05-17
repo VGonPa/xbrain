@@ -1,14 +1,13 @@
 [project]
 name = "xbrain"
 version = "0.1.0"
-description = "X Knowledge Base — extract X bookmarks and tweets into an Obsidian wiki"
+description = "XBrain — extract X bookmarks and tweets into an Obsidian wiki"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.6",
     "typer>=0.12",
     "playwright>=1.44",
     "trafilatura>=1.9",
-    "pyyaml>=6.0",
 ]
 
 [project.scripts]
