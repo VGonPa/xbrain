@@ -1,8 +1,8 @@
 # tests/test_fetch.py
 from datetime import datetime, timezone
 
-from xkb.fetch import fetch_item, fetch_pending
-from xkb.models import Author, Item, Link
+from xbrain.fetch import fetch_item, fetch_pending
+from xbrain.models import Author, Item, Link
 
 
 def _item(item_id: str, urls: list[str]) -> Item:

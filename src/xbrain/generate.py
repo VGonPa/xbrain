@@ -7,12 +7,12 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xkb.models import Item
+from xbrain.models import Item
 
 logger = logging.getLogger(__name__)
 
-GEN_START = "<!-- xkb:generated:start -->"
-GEN_END = "<!-- xkb:generated:end -->"
+GEN_START = "<!-- xbrain:generated:start -->"
+GEN_END = "<!-- xbrain:generated:end -->"
 _DEFAULT_TAIL = (
     "\n\n## Mis notas\n\n"
     "*(Escribe debajo. El bloque por encima de este punto se regenera "

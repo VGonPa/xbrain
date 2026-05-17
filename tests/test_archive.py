@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from xkb.archive import parse_archive
-from xkb.models import Author
+from xbrain.archive import parse_archive
+from xbrain.models import Author
 
 
 def _make_archive(tmp_path: Path, filename: str = "data/tweets.js") -> Path:

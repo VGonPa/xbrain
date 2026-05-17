@@ -1,5 +1,5 @@
 # tests/test_graphql.py
-from xkb.extract.graphql import parse_tweets
+from xbrain.extract.graphql import parse_tweets
 
 SAMPLE_RESPONSE = {
     "data": {

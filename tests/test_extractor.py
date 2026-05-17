@@ -1,6 +1,6 @@
 # tests/test_extractor.py
 from test_graphql import SAMPLE_RESPONSE
-from xkb.extract.extractor import collect_new_items
+from xbrain.extract.extractor import collect_new_items
 
 
 def test_collect_new_items_returns_parsed_items():

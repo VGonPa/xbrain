@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from xkb.models import Enrichment, Item
+from xbrain.models import Enrichment, Item
 
 
 def items_pending_enrichment(

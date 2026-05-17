@@ -2,8 +2,8 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xkb.models import Author, Item, State
-from xkb.store import (
+from xbrain.models import Author, Item, State
+from xbrain.store import (
     load_state, load_store, merge_items, save_state, save_store,
 )
 

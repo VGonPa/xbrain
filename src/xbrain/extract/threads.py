@@ -6,9 +6,9 @@ from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Response
 
-from xkb.extract.browser import is_logged_out, x_context
-from xkb.extract.graphql import parse_tweets
-from xkb.models import Content, ContentSource, Item
+from xbrain.extract.browser import is_logged_out, x_context
+from xbrain.extract.graphql import parse_tweets
+from xbrain.models import Content, ContentSource, Item
 
 _SETTLE_MS = 4000
 
@@ -72,7 +72,7 @@ def _fetch_thread_text(context: BrowserContext, item: Item) -> str:
         except Exception:  # noqa: BLE001 - navigation failure -> empty thread
             return ""
         if is_logged_out(page.url):
-            raise RuntimeError("Sesión de X caducada. Ejecuta `xkb login`.")
+            raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
         return assemble_thread(captured, item.author.handle)
     finally:
         page.close()

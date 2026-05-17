@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from xkb.extract.graphql import _parse_x_date
-from xkb.models import Author, Item, Link, Media
+from xbrain.extract.graphql import _parse_x_date
+from xbrain.models import Author, Item, Link, Media
 
 logger = logging.getLogger(__name__)
 

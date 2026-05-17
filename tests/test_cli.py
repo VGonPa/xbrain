@@ -4,9 +4,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from xkb.cli import app
-from xkb.models import Author, Item, Link
-from xkb.store import save_store
+from xbrain.cli import app
+from xbrain.models import Author, Item, Link
+from xbrain.store import save_store
 
 runner = CliRunner()
 
@@ -82,7 +82,7 @@ def test_cli_reports_missing_config_cleanly(tmp_path: Path, monkeypatch):
 
 
 def test_parse_date_returns_utc_aware():
-    from xkb.cli import _parse_date
+    from xbrain.cli import _parse_date
 
     parsed = _parse_date("2025-01-01")
     assert parsed is not None

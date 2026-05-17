@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from xkb.config import load_config
+from xbrain.config import load_config
 
 
 def _write_repo(root: Path, handle: str = "vgonpa") -> None:

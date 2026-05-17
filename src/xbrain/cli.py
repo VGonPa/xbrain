@@ -10,17 +10,17 @@ from pathlib import Path
 
 import typer
 
-from xkb.archive import parse_archive
-from xkb.config import Config, load_config
-from xkb.enrich import enrich as run_enrich
-from xkb.extract.browser import login as run_login
-from xkb.extract.browser import x_context
-from xkb.extract.extractor import extract_source
-from xkb.extract.threads import expand_threads
-from xkb.fetch import fetch_pending
-from xkb.generate import generate as run_generate
-from xkb.models import ArchiveImport, Author
-from xkb.store import load_state, load_store, merge_items, save_state, save_store
+from xbrain.archive import parse_archive
+from xbrain.config import Config, load_config
+from xbrain.enrich import enrich as run_enrich
+from xbrain.extract.browser import login as run_login
+from xbrain.extract.browser import x_context
+from xbrain.extract.extractor import extract_source
+from xbrain.extract.threads import expand_threads
+from xbrain.fetch import fetch_pending
+from xbrain.generate import generate as run_generate
+from xbrain.models import ArchiveImport, Author
+from xbrain.store import load_state, load_store, merge_items, save_state, save_store
 
 app = typer.Typer(help="X Knowledge Base — bookmarks y tweets de X a un wiki de Obsidian")
 

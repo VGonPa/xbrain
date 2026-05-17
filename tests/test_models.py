@@ -1,7 +1,7 @@
 # tests/test_models.py
 from datetime import datetime, timezone
 
-from xkb.models import Author, Item, Link, State
+from xbrain.models import Author, Item, Link, State
 
 
 def test_item_round_trips_through_json():

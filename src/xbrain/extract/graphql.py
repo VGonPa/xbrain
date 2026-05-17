@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
-from xkb.models import Author, Item, Link, Media, ThreadInfo
+from xbrain.models import Author, Item, Link, Media, ThreadInfo
 
 logger = logging.getLogger(__name__)
 

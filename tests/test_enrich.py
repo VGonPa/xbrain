@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from xkb.enrich import apply_enrichment, enrich, items_pending_enrichment
-from xkb.models import Author, Enrichment, Item
+from xbrain.enrich import apply_enrichment, enrich, items_pending_enrichment
+from xbrain.models import Author, Enrichment, Item
 
 
 def _item(item_id: str) -> Item:

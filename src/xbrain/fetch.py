@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import trafilatura
 
-from xkb.models import Content, ContentSource, Item
+from xbrain.models import Content, ContentSource, Item
 
 ArticleExtractor = Callable[[str], tuple[str | None, str | None]]
 

@@ -39,7 +39,7 @@ def x_context(
     """Yield a Playwright context authenticated with the saved X session."""
     if not storage_state_path.exists():
         raise FileNotFoundError(
-            f"No hay sesión guardada en {storage_state_path}. Ejecuta `xkb login`."
+            f"No hay sesión guardada en {storage_state_path}. Ejecuta `xbrain login`."
         )
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(

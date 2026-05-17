@@ -1,5 +1,5 @@
 # tests/test_threads.py
-from xkb.extract.threads import assemble_thread
+from xbrain.extract.threads import assemble_thread
 
 
 def _tweet(rest_id: str, handle: str, text: str, created: str) -> dict:

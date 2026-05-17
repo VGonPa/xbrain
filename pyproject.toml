@@ -1,5 +1,5 @@
 [project]
-name = "xkb"
+name = "xbrain"
 version = "0.1.0"
 description = "X Knowledge Base — extract X bookmarks and tweets into an Obsidian wiki"
 requires-python = ">=3.12"
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-xkb = "xkb.cli:app"
+xbrain = "xbrain.cli:app"
 
 [project.optional-dependencies]
 dev = [
@@ -25,7 +25,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xkb"]
+packages = ["src/xbrain"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

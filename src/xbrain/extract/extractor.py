@@ -6,9 +6,9 @@ from datetime import datetime
 
 from playwright.sync_api import BrowserContext, Response
 
-from xkb.extract.browser import is_logged_out
-from xkb.extract.graphql import parse_tweets
-from xkb.models import Item
+from xbrain.extract.browser import is_logged_out
+from xbrain.extract.graphql import parse_tweets
+from xbrain.models import Item
 
 _OPERATIONS = {"bookmark": "Bookmarks", "own_tweet": "UserTweets"}
 # Deliberately slow, human-paced scrolling — avoids X rate-limiting / account bans.
@@ -65,7 +65,7 @@ def extract_source(
     page.wait_for_timeout(_SETTLE_MS)
     if is_logged_out(page.url):
         page.close()
-        raise RuntimeError("Sesión de X caducada. Ejecuta `xkb login`.")
+        raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
 
     idle = 0
     last_count = 0

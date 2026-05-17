@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from xkb.extract.browser import is_logged_out, x_context
+from xbrain.extract.browser import is_logged_out, x_context
 
 
 def test_is_logged_out_detects_login_pages():
@@ -17,6 +17,6 @@ def test_is_logged_out_false_for_normal_pages():
 
 
 def test_x_context_requires_saved_session(tmp_path: Path):
-    with pytest.raises(FileNotFoundError, match="xkb login"):
+    with pytest.raises(FileNotFoundError, match="xbrain login"):
         with x_context(tmp_path / "missing.json"):
             pass

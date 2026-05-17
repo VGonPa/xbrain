@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from xkb.models import Item, State
+from xbrain.models import Item, State
 
 
 def load_store(path: Path) -> dict[str, Item]:

@@ -2,8 +2,8 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xkb.generate import _slugify, generate
-from xkb.models import Author, Item, Link
+from xbrain.generate import _slugify, generate
+from xbrain.models import Author, Item, Link
 
 
 def _item(item_id: str, with_link: bool, text: str | None = None) -> Item:
