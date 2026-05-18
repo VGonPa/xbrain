@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from xbrain.models import Item, State
+from xbrain.models import Item, State, TopicPage
 
 
 def load_store(path: Path) -> dict[str, Item]:
@@ -34,6 +34,22 @@ def merge_items(store: dict[str, Item], new_items: list[Item]) -> int:
             store[item.id] = item
             added += 1
     return added
+
+
+def load_topic_pages(path: Path) -> dict[str, TopicPage]:
+    """Load the topic-page store; an empty dict if the file does not exist."""
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {slug: TopicPage.model_validate(data) for slug, data in raw.items()}
+
+
+def save_topic_pages(pages: dict[str, TopicPage], path: Path) -> None:
+    """Persist the topic-page store as pretty, sorted, UTF-8 JSON (atomic write)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {slug: page.model_dump(mode="json") for slug, page in pages.items()}
+    text = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
+    _atomic_write(path, text)
 
 
 def load_state(path: Path) -> State:

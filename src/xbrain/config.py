@@ -20,6 +20,7 @@ class Config:
     enrich_executor: ExecutorName
     enrich_model: str
     vocab_target_count: int
+    topics_resynth_threshold: int
 
     @property
     def items_path(self) -> Path:
@@ -28,6 +29,10 @@ class Config:
     @property
     def state_path(self) -> Path:
         return self.data_dir / "state.json"
+
+    @property
+    def topics_path(self) -> Path:
+        return self.data_dir / "topics.json"
 
     @property
     def storage_state_path(self) -> Path:
@@ -53,6 +58,10 @@ def load_config(repo_root: Path) -> Config:
     target_count = int(vocab.get("target_count", 30))
     if target_count < 1:
         raise ValueError("config.toml: [vocab].target_count must be >= 1")
+    topics = settings.get("topics", {})
+    resynth_threshold = int(topics.get("resynth_threshold", 25))
+    if resynth_threshold < 1:
+        raise ValueError("config.toml: [topics].resynth_threshold must be >= 1")
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -62,4 +71,5 @@ def load_config(repo_root: Path) -> Config:
         enrich_executor=executor,
         enrich_model=enrich.get("model", "claude-haiku-4-5-20251001"),
         vocab_target_count=target_count,
+        topics_resynth_threshold=resynth_threshold,
     )

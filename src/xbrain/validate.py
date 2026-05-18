@@ -55,3 +55,51 @@ def validate_judgment(judgment: dict, vocab_slugs: Iterable[str]) -> list[str]:
             errors.append(f"primary_topic '{primary}' is not inside topics")
 
     return errors
+
+
+# The only keys a topic-overview judgment may contain.
+_ALLOWED_OVERVIEW_KEYS = {"overview", "notes"}
+
+
+def _validate_overview_notes(notes: list, rules: dict) -> list[str]:
+    """Validate the `notes` list — count bounds and per-entry string typing."""
+    errors: list[str] = []
+    lo, hi = rules.get("notes_min", 0), rules.get("notes_max", 15)
+    if not (lo <= len(notes) <= hi):
+        errors.append(f"notes has {len(notes)} entries, must be {lo}-{hi}")
+    if any(not isinstance(n, str) for n in notes):
+        errors.append("notes entries must all be strings")
+    return errors
+
+
+def validate_overview(judgment: dict) -> list[str]:
+    """Return a list of human-readable errors; an empty list means valid.
+
+    Enforces the hard rule mechanically: a topic overview is plain prose — any
+    wikilink (`[[`) is an identifier the LLM must never emit.
+    """
+    rules = load_guardrails().get("topic_overview", {})
+    errors: list[str] = []
+
+    extra = set(judgment) - _ALLOWED_OVERVIEW_KEYS
+    if extra:
+        errors.append(f"unexpected keys (LLM must emit only judgment): {sorted(extra)}")
+
+    overview = judgment.get("overview")
+    if rules.get("overview_required", True) and not (
+        isinstance(overview, str) and overview.strip()
+    ):
+        errors.append("overview must be a non-empty string")
+
+    notes = judgment.get("notes")
+    if not isinstance(notes, list):
+        errors.append("notes must be a list")
+        return errors
+
+    errors += _validate_overview_notes(notes, rules)
+
+    blob = str(overview or "") + " ".join(str(note) for note in notes)
+    if "[[" in blob:
+        errors.append("overview/notes must not contain a wikilink ('[[')")
+
+    return errors

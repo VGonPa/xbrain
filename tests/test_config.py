@@ -91,3 +91,27 @@ def test_load_config_rejects_zero_target_count(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="target_count must be >= 1"):
         load_config(tmp_path)
+
+
+def test_config_topics_threshold_defaults_to_25(tmp_path):
+    from xbrain.config import load_config
+
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/v"\noutput_subdir = "o"\ndata_dir = "data"\n[x]\nhandle = "h"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.topics_resynth_threshold == 25
+    assert cfg.topics_path == tmp_path / "data" / "topics.json"
+
+
+def test_config_topics_threshold_is_configurable(tmp_path):
+    from xbrain.config import load_config
+
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/v"\noutput_subdir = "o"\ndata_dir = "data"\n'
+        '[x]\nhandle = "h"\n'
+        "[topics]\nresynth_threshold = 50\n",
+        encoding="utf-8",
+    )
+    assert load_config(tmp_path).topics_resynth_threshold == 50

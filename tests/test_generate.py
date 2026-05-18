@@ -2,8 +2,9 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import _slugify, generate
+from xbrain.generate import generate
 from xbrain.models import Author, Item, Link
+from xbrain.notes_io import slugify
 
 
 def _item(item_id: str, with_link: bool, text: str | None = None) -> Item:
@@ -46,13 +47,13 @@ def test_log_lists_every_item(tmp_path: Path):
 
 
 def test_slugify_handles_edge_cases():
-    slug = _slugify("Café del Día")
+    slug = slugify("Café del Día")
     assert slug == slug.lower()
     assert slug.isascii()
     assert slug == "cafe-del-dia"
-    assert _slugify("") == "item"
-    assert _slugify("!!!") == "item"
-    long_slug = _slugify("a" * 200)
+    assert slugify("") == "item"
+    assert slugify("!!!") == "item"
+    long_slug = slugify("a" * 200)
     assert len(long_slug) <= 60
 
 
@@ -149,3 +150,47 @@ def test_generate_since_until_filters_item_notes(tmp_path: Path):
     log = (tmp_path / "log.md").read_text(encoding="utf-8")
     assert "Old note" in log
     assert "New note" in log
+
+
+def test_failure_es_covers_every_failure_reason():
+    from typing import get_args
+
+    from xbrain.generate import _FAILURE_ES
+    from xbrain.models import FailureReason
+
+    assert set(_FAILURE_ES) == set(get_args(FailureReason))
+
+
+def test_note_renders_broken_link_evidence(tmp_path):
+    from datetime import datetime, timezone
+
+    from xbrain.generate import generate
+    from xbrain.models import Author, Content, ContentSource, Item, Link
+
+    item = Item(
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="t",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        links=[Link(url="https://dead.example.com/p", domain="dead.example.com")],
+        content=Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            sources=[
+                ContentSource(
+                    kind="external_article",
+                    url="https://dead.example.com/p",
+                    ok=False,
+                    http_status=404,
+                    failure_reason="not_found",
+                )
+            ],
+        ),
+    )
+    generate({"1": item}, tmp_path)
+    note = next((tmp_path / "items").glob("*-1.md")).read_text(encoding="utf-8")
+    assert "Enlace roto" in note
+    assert "HTTP 404" in note
+    assert "2026-05-17" in note

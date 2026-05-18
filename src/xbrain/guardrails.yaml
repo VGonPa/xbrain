@@ -10,3 +10,11 @@ enrichment:
   topics_max: 4
   # `summary` must be present and non-empty
   summary_required: true
+
+# Mechanical constraints on a topic-overview judgment (validate_overview).
+topic_overview:
+  # `overview` must be present and non-empty
+  overview_required: true
+  # allowed size of the `notes` list
+  notes_min: 0
+  notes_max: 15

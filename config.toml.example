@@ -22,3 +22,8 @@ model = "claude-haiku-4-5-20251001"
 [vocab]
 # Number of topics the `vocab` stage induces from the corpus.
 target_count = 30
+
+[topics]
+# Re-synthesize a topic's overview when it has grown by this many posts since
+# the last synthesis. `xbrain topics --resynth` re-synthesizes every stale one.
+resynth_threshold = 25

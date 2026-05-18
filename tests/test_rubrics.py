@@ -29,3 +29,11 @@ def test_save_then_load_vocab_roundtrips(tmp_path: Path):
 
 def test_load_vocab_missing_file_returns_empty(tmp_path: Path):
     assert load_vocab(tmp_path / "nope.yaml") == []
+
+
+def test_topic_page_rubric_loads():
+    from xbrain.rubrics import load_rubric
+
+    text = load_rubric("topic-page")
+    assert "overview" in text
+    assert "notes" in text

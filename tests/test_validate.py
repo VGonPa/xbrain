@@ -51,3 +51,58 @@ def test_duplicate_topics_are_rejected():
     bad["topics"] = ["ai-coding", "ai-coding"]
     bad["primary_topic"] = "ai-coding"
     assert any("duplicate" in e for e in validate_judgment(bad, VOCAB))
+
+
+def test_validate_overview_accepts_a_clean_judgment():
+    from xbrain.validate import validate_overview
+
+    assert validate_overview({"overview": "Un resumen.", "notes": ["Una nota."]}) == []
+
+
+def test_validate_overview_rejects_empty_overview():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "", "notes": []})
+    assert any("overview" in e for e in errors)
+
+
+def test_validate_overview_rejects_wikilinks():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "Mira [[items/algo]].", "notes": ["limpio"]})
+    assert any("wikilink" in e for e in errors)
+
+
+def test_validate_overview_rejects_non_list_notes():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "ok", "notes": "no soy lista"})
+    assert any("notes must be a list" in e for e in errors)
+
+
+def test_validate_overview_rejects_unexpected_keys():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "ok", "notes": [], "slug": "ai-coding"})
+    assert any("unexpected keys" in e for e in errors)
+
+
+def test_validate_overview_rejects_non_string_overview():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": {"a": 1}, "notes": ["limpio"]})
+    assert any("overview" in e for e in errors)
+
+
+def test_validate_overview_rejects_non_string_note_element():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "Un resumen.", "notes": [42]})
+    assert any("notes entries must all be strings" in e for e in errors)
+
+
+def test_validate_overview_rejects_too_many_notes():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "Un resumen.", "notes": ["n"] * 16})
+    assert any("notes has 16 entries" in e for e in errors)

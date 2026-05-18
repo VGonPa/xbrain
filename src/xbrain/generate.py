@@ -3,22 +3,35 @@
 from __future__ import annotations
 
 import logging
-import re
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.models import Item
+from xbrain.models import Content, ContentSource, FailureReason, Item
+from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
 logger = logging.getLogger(__name__)
 
-GEN_START = "<!-- xbrain:generated:start -->"
-GEN_END = "<!-- xbrain:generated:end -->"
-_DEFAULT_TAIL = (
-    "\n\n## Mis notas\n\n"
-    "*(Escribe debajo. El bloque por encima de este punto se regenera "
-    "automáticamente; no lo edites.)*\n\n"
-)
+_FAILURE_ES: dict[FailureReason, str] = {
+    "not_found": "no encontrado",
+    "forbidden": "acceso denegado",
+    "paywall": "muro de pago",
+    "timeout": "tiempo de espera agotado",
+    "dns_error": "dominio no resuelto",
+    "js_required": "requiere JavaScript",
+    "empty_content": "sin contenido extraíble",
+}
+
+
+def _broken_link_line(source: ContentSource, fetched_at: datetime) -> str:
+    """A one-line, human-readable record of a link that could not be fetched."""
+    bits: list[str] = []
+    if source.http_status:
+        bits.append(f"HTTP {source.http_status}")
+    if source.failure_reason:
+        bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
+    detail = " · ".join(bits) or "no se pudo recuperar"
+    date = fetched_at.date().isoformat()
+    return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
 
 
 def generate(
@@ -65,16 +78,16 @@ def _write_note(items_dir: Path, item: Item) -> None:
     so the user's hand-written tail follows the item instead of being
     orphaned.
     """
-    path = items_dir / _note_filename(item)
-    block = f"{GEN_START}\n{_render_note(item)}\n{GEN_END}"
+    path = items_dir / note_filename(item)
+    block = wrap(_render_note(item))
     source = path if path.exists() else _stale_note(items_dir, item, path)
     if source is not None:
-        tail = _user_tail(source.read_text(encoding="utf-8"))
+        tail = user_tail(source.read_text(encoding="utf-8"), DEFAULT_TAIL)
         if source != path:
             source.unlink()
             logger.info("Migrated note %s -> %s", source.name, path.name)
     else:
-        tail = _DEFAULT_TAIL
+        tail = DEFAULT_TAIL
     path.write_text(block + tail, encoding="utf-8")
 
 
@@ -92,29 +105,34 @@ def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
     return None
 
 
-def _user_tail(existing: str) -> str:
-    """Return the content to preserve after the generated block.
+def _enrichment_lines(item: Item) -> list[str]:
+    """Summary + topic links for an enriched item (empty if not enriched)."""
+    if not item.enriched:
+        return []
+    lines: list[str] = []
+    if item.enriched.summary:
+        lines += [item.enriched.summary, ""]
+    if item.enriched.topics:
+        links = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
+        lines += [f"**Temas:** {links}", ""]
+    return lines
 
-    Normally everything after GEN_END. If GEN_END is missing (markers
-    deleted or corrupted) but the file has content, preserve the whole
-    file rather than discarding the user's work.
-    """
-    idx = existing.find(GEN_END)
-    if idx != -1:
-        return existing[idx + len(GEN_END) :]
-    if existing.strip():
-        return "\n\n" + existing
-    return _DEFAULT_TAIL
+
+def _content_lines(content: Content) -> list[str]:
+    """Rendered article bodies + broken-link evidence for a fetched item."""
+    lines: list[str] = []
+    for source in content.sources:
+        if source.ok and source.text:
+            heading = source.title or source.url
+            lines += [f"## Contenido: {heading}", "", source.text, ""]
+        elif not source.ok and source.kind in ("external_article", "x_article"):
+            lines += [_broken_link_line(source, content.fetched_at), ""]
+    return lines
 
 
 def _render_note(item: Item) -> str:
-    lines = [_frontmatter(item), "", f"# {_title(item)}", ""]
-    if item.enriched:
-        if item.enriched.summary:
-            lines += [item.enriched.summary, ""]
-        if item.enriched.topics:
-            topic_links = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
-            lines += [f"**Temas:** {topic_links}", ""]
+    lines = [_frontmatter(item), "", f"# {title_of(item)}", ""]
+    lines += _enrichment_lines(item)
     lines += ["## Tweet", "", item.text, ""]
     if item.links:
         lines.append("## Enlaces")
@@ -122,10 +140,7 @@ def _render_note(item: Item) -> str:
         lines.append("")
     lines += [f"[Ver tweet original]({item.url})", ""]
     if item.content:
-        for source in item.content.sources:
-            if source.ok and source.text:
-                heading = source.title or source.url
-                lines += [f"## Contenido: {heading}", "", source.text, ""]
+        lines += _content_lines(item.content)
     return "\n".join(lines).rstrip()
 
 
@@ -135,7 +150,7 @@ def _frontmatter(item: Item) -> str:
     if item.enriched:
         tags += item.enriched.topics  # topics already includes primary_topic
     if item.bookmark_folder:
-        tags.append(_slugify(item.bookmark_folder))
+        tags.append(slugify(item.bookmark_folder))
     tags = list(dict.fromkeys(tags))
     lines = [
         "---",
@@ -192,25 +207,6 @@ def _render_log(items: list[Item]) -> str:
     for item in items:
         date = item.created_at.date().isoformat()
         snippet = item.text.replace("\n", " ")[:120]
-        link = f" → [[items/{Path(_note_filename(item)).stem}|nota]]" if _has_note(item) else ""
+        link = f" → [[items/{Path(note_filename(item)).stem}|nota]]" if _has_note(item) else ""
         lines.append(f"- `{date}` @{item.author.handle}: {snippet}{link}")
     return "\n".join(lines) + "\n"
-
-
-def _title(item: Item) -> str:
-    if item.content:
-        for source in item.content.sources:
-            if source.title:
-                return source.title
-    return item.text.replace("\n", " ")[:80] or item.id
-
-
-def _note_filename(item: Item) -> str:
-    return f"{item.created_at.date().isoformat()}-{_slugify(_title(item))}-{item.id}.md"
-
-
-def _slugify(text: str) -> str:
-    normalized = unicodedata.normalize("NFKD", text)
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii").lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
-    return slug[:60] or "item"

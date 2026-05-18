@@ -48,3 +48,30 @@ def test_state_round_trips(tmp_path: Path):
     path = tmp_path / "state.json"
     save_state(state, path)
     assert load_state(path).bookmarks.last_seen_id == "999"
+
+
+def test_topic_pages_round_trip(tmp_path):
+    from datetime import datetime, timezone
+
+    from xbrain.models import TopicPage
+    from xbrain.store import load_topic_pages, save_topic_pages
+
+    pages = {
+        "ai-coding": TopicPage(
+            slug="ai-coding",
+            overview="o",
+            notes=["n"],
+            synthesized_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+            post_count_at_synth=10,
+        )
+    }
+    path = tmp_path / "topics.json"
+    save_topic_pages(pages, path)
+    restored = load_topic_pages(path)
+    assert restored["ai-coding"].post_count_at_synth == 10
+
+
+def test_load_topic_pages_returns_empty_when_absent(tmp_path):
+    from xbrain.store import load_topic_pages
+
+    assert load_topic_pages(tmp_path / "missing.json") == {}
