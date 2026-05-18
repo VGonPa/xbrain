@@ -24,6 +24,11 @@ def test_classify_x_url():
     assert _classify_x_url("https://x.com/some_profile") == "other"
 
 
+def test_classify_x_url_does_not_misroute_article_containing_status():
+    # An X article URL that itself contains a /status/ segment stays an article.
+    assert _classify_x_url("https://x.com/i/article/foo/status/1") == "article"
+
+
 def test_x_status_id_extracts_the_tweet_id():
     assert _x_status_id("https://x.com/jack/status/123") == "123"
     assert _x_status_id("https://x.com/i/article/9") is None
@@ -103,6 +108,43 @@ def test_fetch_x_articles_skips_already_fetched_unless_forced():
     assert fetch_x_articles(store, None, link_fetcher=fetcher) == 1
     assert fetch_x_articles(store, None, link_fetcher=fetcher) == 0
     assert fetch_x_articles(store, None, force=True, link_fetcher=fetcher) == 1
+
+
+def test_fetch_x_articles_requires_storage_state_without_link_fetcher():
+    import pytest
+
+    store = {"1": _item("1", ["https://x.com/jack/status/9"])}
+    with pytest.raises(ValueError, match="storage_state_path"):
+        fetch_x_articles(store, storage_state_path=None)
+
+
+def test_fetch_x_articles_respects_since_until():
+    early = _item("1", ["https://x.com/jack/status/9"])
+    early.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    late = _item("2", ["https://x.com/jack/status/10"])
+    late.created_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    store = {"1": early, "2": late}
+    count = fetch_x_articles(
+        store,
+        storage_state_path=None,
+        since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        until=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        link_fetcher=lambda url: ContentSource(kind="x_article", url=url, text="x", ok=True),
+    )
+    assert count == 1
+    assert store["1"].content is None
+    assert store["2"].content is not None
+
+
+def test_fetch_x_articles_dedups_repeated_x_urls():
+    store = {"1": _item("1", ["https://x.com/jack/status/9", "https://x.com/jack/status/9"])}
+    fetch_x_articles(
+        store,
+        storage_state_path=None,
+        link_fetcher=lambda url: ContentSource(kind="x_article", url=url, text="hilo", ok=True),
+    )
+    sources = store["1"].content.sources
+    assert len(sources) == 1
 
 
 def test_fetch_x_articles_preserves_external_sources():

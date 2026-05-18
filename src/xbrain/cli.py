@@ -147,10 +147,14 @@ def _run_extract(cfg: Config, source: str, since: datetime | None, until: dateti
 
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
     store = load_store(cfg.items_path)
-    articles = fetch_pending(store, since, until, force)
-    x_articles = fetch_x_articles(store, cfg.storage_state_path, force)
-    threads = expand_threads(store, cfg.storage_state_path, force)
-    save_store(store, cfg.items_path)
+    try:
+        articles = fetch_pending(store, since, until, force)
+        x_articles = fetch_x_articles(store, cfg.storage_state_path, force, since, until)
+        threads = expand_threads(store, cfg.storage_state_path, force)
+    finally:
+        # Persist whatever was fetched even if a later stage raised — a stage
+        # error (e.g. an expired X session) must not discard in-memory work.
+        save_store(store, cfg.items_path)
     typer.echo(f"Contenido descargado: {articles} artículos, {x_articles} de X, {threads} hilos")
 
 

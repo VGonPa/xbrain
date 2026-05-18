@@ -58,6 +58,7 @@ class ContentSource(BaseModel):
     error: str | None = None
     http_status: int | None = None
     failure_reason: FailureReason | None = None
+    # extraction attempts: 1 = single pass, 2 = + Firecrawl fallback; 0 only on pre-Fase-2 records
     attempts: int = 0
 
 

@@ -164,6 +164,15 @@ def test_fetch_pending_respects_since_until():
     assert store["2"].content is not None
 
 
+def test_fetch_item_dedups_repeated_link_urls():
+    # An item whose links repeat the same URL must yield a single source.
+    content = fetch_item(
+        _item("1", ["https://example.com/p", "https://example.com/p"]), _fake_extractor
+    )
+    urls = [s.url for s in content.sources]
+    assert urls == ["https://example.com/p"]
+
+
 def test_fetch_pending_force_refetches():
     store = {"1": _item("1", ["https://example.com/p"])}
     assert fetch_pending(store, extractor=_fake_extractor) == 1
@@ -248,3 +257,96 @@ def test_extract_article_does_not_retry_hard_failures():
     result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
     assert result.failure_reason == "not_found"
     assert calls == []
+
+
+class _CtxResp:
+    """A minimal context-manager response object for fake openers."""
+
+    def __init__(self, body: bytes = b"", status: int = 200):
+        self._body = body
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_probe_status_success_path_marks_js_required():
+    # A reachable URL trafilatura could not parse -> categorised as js_required.
+    def opener(req, timeout=0):
+        return _CtxResp(status=200)
+
+    status, reason, error = _probe_status("https://e.com/x", opener=opener)
+    assert status == 200
+    assert reason == "js_required"
+    assert error
+
+
+def test_probe_status_categorizes_url_error_wrapping_timeout():
+    def opener(req, timeout=0):
+        raise urllib.error.URLError(socket.timeout())
+
+    status, reason, _ = _probe_status("https://e.com/x", opener=opener)
+    assert status is None
+    assert reason == "timeout"
+
+
+def test_probe_status_categorizes_url_error_wrapping_dns_error():
+    def opener(req, timeout=0):
+        raise urllib.error.URLError(socket.gaierror())
+
+    status, reason, _ = _probe_status("https://e.com/x", opener=opener)
+    assert status is None
+    assert reason == "dns_error"
+
+
+def test_firecrawl_extract_returns_error_result_when_opener_raises(monkeypatch):
+    from xbrain.fetch import _firecrawl_extract
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+
+    def opener(req, timeout=0):
+        raise urllib.error.URLError("network down")
+
+    result = _firecrawl_extract("https://e.com/a", opener=opener)
+    assert result is not None
+    assert result.text is None
+    assert "Firecrawl falló" in (result.error or "")
+
+
+def test_firecrawl_extract_detects_error_envelope(monkeypatch):
+    import json
+
+    from xbrain.fetch import _firecrawl_extract
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    payload = {"success": False, "error": "rate limited"}
+
+    def opener(req, timeout=0):
+        return _CtxResp(json.dumps(payload).encode())
+
+    result = _firecrawl_extract("https://e.com/a", opener=opener)
+    assert result is not None
+    assert result.text is None
+    assert "rate limited" in (result.error or "")
+
+
+def test_extract_article_merges_firecrawl_error_when_both_fail():
+    from xbrain.fetch import FetchResult, extract_article
+
+    def primary(url):
+        return FetchResult(failure_reason="js_required", error="js", attempts=1)
+
+    def firecrawl(url):
+        # Firecrawl reachable but returned no text — carries its own evidence.
+        return FetchResult(error="Firecrawl no devolvió contenido.", attempts=1)
+
+    result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
+    assert result.text is None
+    assert result.attempts == 2
+    assert "Firecrawl: Firecrawl no devolvió contenido." in (result.error or "")

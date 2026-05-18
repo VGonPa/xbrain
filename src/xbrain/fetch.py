@@ -142,8 +142,13 @@ def _firecrawl_extract(
     try:
         with opener(req, timeout=_FIRECRAWL_TIMEOUT) as resp:
             payload = json.loads(resp.read())
-    except Exception as exc:  # noqa: BLE001 - a fallback failure must not abort the batch
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         return FetchResult(error=f"Firecrawl falló: {exc}", attempts=1)
+    if payload.get("success") is False or payload.get("error"):
+        return FetchResult(
+            error=f"Firecrawl falló: {payload.get('error') or 'respuesta de error'}",
+            attempts=1,
+        )
     data = payload.get("data") or {}
     text = data.get("markdown")
     if text:
@@ -173,26 +178,29 @@ def extract_article(
         fallback.attempts = result.attempts + 1
         return fallback
     result.attempts = result.attempts + 1  # both attempts exhausted; keep first evidence
+    if fallback.error:
+        result.error = f"{result.error or 'sin contenido'} | Firecrawl: {fallback.error}"
     return result
 
 
 def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Content:
     """Build/refresh the `external_article` sources of an item.
 
-    x.com links are skipped (see `xbrain.fetch_x`). Non-external sources already
-    on the item (threads, x_article) are preserved across a re-fetch.
+    x.com links are skipped (see `xbrain.fetch_x`). Only `external_article`
+    sources are rebuilt; every other source kind already on the item is
+    preserved across a re-fetch.
     """
     new_sources: list[ContentSource] = []
-    for link in item.links:
-        if is_x_url(link.url):
-            continue
+    # Dedup: an item whose links repeat a URL must not yield duplicate sources.
+    non_x_urls = dict.fromkeys(link.url for link in item.links if not is_x_url(link.url))
+    for url in non_x_urls:
         try:
-            result = extractor(link.url)
+            result = extractor(url)
         except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
             new_sources.append(
                 ContentSource(
                     kind="external_article",
-                    url=link.url,
+                    url=url,
                     ok=False,
                     error=f"Error al descargar el artículo: {exc}",
                     attempts=1,
@@ -203,7 +211,7 @@ def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Con
             new_sources.append(
                 ContentSource(
                     kind="external_article",
-                    url=link.url,
+                    url=url,
                     title=result.title,
                     text=result.text,
                     ok=True,
@@ -215,7 +223,7 @@ def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Con
             new_sources.append(
                 ContentSource(
                     kind="external_article",
-                    url=link.url,
+                    url=url,
                     ok=False,
                     error=result.error,
                     http_status=result.http_status,
@@ -237,7 +245,8 @@ def fetch_pending(
     """Fetch external content for items that have non-x links and no content yet."""
     fetched = 0
     for item in store.values():
-        if not any(not is_x_url(link.url) for link in item.links):
+        # all links are x.com — handled by fetch_x
+        if all(is_x_url(link.url) for link in item.links):
             continue
         if item.content is not None and not force:
             continue
