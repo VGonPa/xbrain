@@ -24,10 +24,16 @@ def _article_text(item: Item) -> str | None:
     return None
 
 
-def export_worksheet(items: list[Item], vocab: list[Topic], path: Path) -> None:
-    """Write a worksheet with everything needed to enrich `items` by hand."""
+def export_worksheet(items: list[Item], vocab: list[Topic], path: Path,
+                     executor: str) -> None:
+    """Write a worksheet with everything needed to enrich `items` by hand.
+
+    `executor` is recorded in the payload so `--apply` attributes the
+    judgments to the track that produced the worksheet.
+    """
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "executor": executor,
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with "
             "keys {item_id, summary, primary_topic, topics}. Use only slugs from "
@@ -57,12 +63,17 @@ def export_worksheet(items: list[Item], vocab: list[Topic], path: Path) -> None:
                     encoding="utf-8")
 
 
-def import_worksheet(path: Path) -> list[dict]:
-    """Read the `judgments` array from a filled worksheet."""
+def import_worksheet(path: Path) -> tuple[str, list[dict]]:
+    """Read `(executor, judgments)` from a filled worksheet.
+
+    `executor` falls back to ``"claude-code"`` for worksheets written before
+    the executor key existed.
+    """
     if not path.exists():
         raise FileNotFoundError(f"Worksheet not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     judgments = data.get("judgments", [])
     if not isinstance(judgments, list):
         raise ValueError("worksheet `judgments` must be a list")
-    return judgments
+    executor = data.get("executor", "claude-code")
+    return executor, judgments

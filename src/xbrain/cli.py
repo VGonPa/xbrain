@@ -202,8 +202,9 @@ def enrich(
     if apply is not None:
         if not vocab_topics:
             raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+        executor_name, judgments = import_worksheet(apply)
         enriched, invalid = apply_worksheet_judgments(
-            store, import_worksheet(apply), vocab_topics)
+            store, judgments, vocab_topics, executor_name)
         save_store(store, cfg.items_path)
         typer.echo(f"Worksheet aplicada: {enriched} items enriquecidos")
         _report_invalid(invalid)
@@ -220,7 +221,7 @@ def enrich(
             typer.echo("No hay items pendientes de enriquecer.")
             return
         worksheet = cfg.data_dir / "enrich-worksheet.json"
-        export_worksheet(pending, vocab_topics, worksheet)
+        export_worksheet(pending, vocab_topics, worksheet, chosen)
         typer.echo(
             f"{len(pending)} items exportados a {worksheet}\n"
             f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
