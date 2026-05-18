@@ -68,3 +68,16 @@ omit = ["*/tests/*"]
 
 [tool.coverage.report]
 fail_under = 78
+
+[tool.poe.tasks]
+lint       = "ruff check src tests"
+format     = "ruff format --check src tests"
+types      = "mypy src/xbrain"
+complexity = "radon cc src/xbrain -s"
+security   = "bandit -r src/xbrain -ll -q"
+deadcode   = "vulture src/xbrain --min-confidence 80"
+docs       = "interrogate src/xbrain"
+secrets    = "detect-secrets scan src/xbrain tests scripts"
+deps       = "deptry ."
+test       = "pytest -q"
+check      = "bash scripts/check.sh"
