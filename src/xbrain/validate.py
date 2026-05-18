@@ -3,6 +3,7 @@
 The LLM emits only judgment (summary + topics). This module proves, with code,
 that the judgment is structurally sound — it never trusts the LLM for that.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable

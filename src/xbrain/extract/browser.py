@@ -1,4 +1,5 @@
 """Playwright browser session management for X extraction."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -33,9 +34,7 @@ def login(storage_state_path: Path) -> None:
 
 
 @contextmanager
-def x_context(
-    storage_state_path: Path, headless: bool = True
-) -> Iterator[BrowserContext]:
+def x_context(storage_state_path: Path, headless: bool = True) -> Iterator[BrowserContext]:
     """Yield a Playwright context authenticated with the saved X session."""
     if not storage_state_path.exists():
         raise FileNotFoundError(

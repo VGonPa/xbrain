@@ -1,4 +1,5 @@
 """Command-line interface for XBrain."""
+
 from __future__ import annotations
 
 import enum
@@ -12,8 +13,7 @@ import typer
 
 from xbrain.archive import parse_archive
 from xbrain.config import Config, load_config
-from xbrain.enrich import (apply_worksheet_judgments, enrich_with_executor,
-                           items_pending_enrichment)
+from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
 from xbrain.extract.browser import x_context
@@ -89,8 +89,7 @@ def _report_invalid(invalid: list[tuple[str, list[str]]]) -> None:
             typer.echo(f"  {item_id}: {'; '.join(errors)}", err=True)
 
 
-def _run_extract(cfg: Config, source: str,
-                  since: datetime | None, until: datetime | None) -> None:
+def _run_extract(cfg: Config, source: str, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
     state = load_state(cfg.state_path)
     targets = {
@@ -107,8 +106,7 @@ def _run_extract(cfg: Config, source: str,
         for src in chosen:
             cursor = state.bookmarks if src == "bookmark" else state.own_tweets
             first_run = cursor.last_seen_id is None
-            items = extract_source(context, src, targets[src], known_ids,
-                                   since, until)
+            items = extract_source(context, src, targets[src], known_ids, since, until)
             if not items and first_run:
                 typer.echo(
                     f"AVISO: {src} devolvió 0 items en una extracción inicial — "
@@ -124,8 +122,7 @@ def _run_extract(cfg: Config, source: str,
     save_state(state, cfg.state_path)
 
 
-def _run_fetch(cfg: Config, since: datetime | None,
-               until: datetime | None, force: bool) -> None:
+def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
     store = load_store(cfg.items_path)
     articles = fetch_pending(store, since, until, force)
     threads = expand_threads(store, cfg.storage_state_path, force)
@@ -133,8 +130,7 @@ def _run_fetch(cfg: Config, since: datetime | None,
     typer.echo(f"Contenido descargado: {articles} artículos, {threads} hilos")
 
 
-def _run_generate(cfg: Config, since: datetime | None,
-                  until: datetime | None) -> None:
+def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
     run_generate(store, cfg.output_dir, since, until)
     typer.echo(f"Markdown generado en {cfg.output_dir}")
@@ -188,9 +184,9 @@ def fetch(
 @_handle_cli_errors
 def enrich(
     executor: str = typer.Option(
-        None, help="api | manual | claude-code (default: the enrich executor set in config.toml)"),
-    apply: Path = typer.Option(
-        None, "--apply", help="Import a filled worksheet and apply it"),
+        None, help="api | manual | claude-code (default: the enrich executor set in config.toml)"
+    ),
+    apply: Path = typer.Option(None, "--apply", help="Import a filled worksheet and apply it"),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
 ) -> None:
@@ -203,8 +199,7 @@ def enrich(
 
     if apply is not None:
         executor_name, judgments = import_worksheet(apply)
-        enriched, invalid = apply_worksheet_judgments(
-            store, judgments, vocab_topics, executor_name)
+        enriched, invalid = apply_worksheet_judgments(store, judgments, vocab_topics, executor_name)
         save_store(store, cfg.items_path)
         typer.echo(f"Worksheet aplicada: {enriched} items enriquecidos")
         _report_invalid(invalid)
@@ -213,8 +208,7 @@ def enrich(
     chosen = executor or cfg.enrich_executor
 
     if chosen in ("manual", "claude-code"):
-        pending = items_pending_enrichment(
-            store, _parse_date(since), _parse_date(until))
+        pending = items_pending_enrichment(store, _parse_date(since), _parse_date(until))
         if not pending:
             typer.echo("No hay items pendientes de enriquecer.")
             return
@@ -223,15 +217,20 @@ def enrich(
         typer.echo(
             f"{len(pending)} items exportados a {worksheet}\n"
             f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
-            f"  xbrain enrich --apply {worksheet}")
+            f"  xbrain enrich --apply {worksheet}"
+        )
         return
 
     if chosen != "api":
         raise ValueError(f"Ejecutor desconocido: {chosen!r}")
 
     enriched, invalid = enrich_with_executor(
-        store, ApiExecutor(model=cfg.enrich_model), vocab_topics,
-        _parse_date(since), _parse_date(until))
+        store,
+        ApiExecutor(model=cfg.enrich_model),
+        vocab_topics,
+        _parse_date(since),
+        _parse_date(until),
+    )
     save_store(store, cfg.items_path)
     typer.echo(f"Enriquecidos: {enriched} items")
     _report_invalid(invalid)
@@ -241,8 +240,8 @@ def enrich(
 @_handle_cli_errors
 def vocab(
     regenerate: bool = typer.Option(
-        False,
-        help="Regenerate the taxonomy and mark every item for re-enrichment"),
+        False, help="Regenerate the taxonomy and mark every item for re-enrichment"
+    ),
 ) -> None:
     """Induce the topic vocabulary (data/vocab.yaml) from the corpus."""
     cfg = _config()
@@ -256,8 +255,7 @@ def vocab(
             item.enriched = None
         save_store(store, cfg.items_path)
         typer.echo("Todos los items marcados para re-enriquecer.")
-    typer.echo(f"Vocabulario inducido: {len(topics)} topics "
-               f"→ {cfg.data_dir / 'vocab.yaml'}")
+    typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
 
 
 @app.command()

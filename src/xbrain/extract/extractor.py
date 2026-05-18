@@ -1,4 +1,5 @@
 """Orchestrate scrolling X and intercepting GraphQL responses."""
+
 from __future__ import annotations
 
 import random
@@ -74,9 +75,7 @@ def extract_source(
         if hit_known:
             break
         page.mouse.wheel(0, 4000)
-        page.wait_for_timeout(
-            random.randint(_SCROLL_PAUSE_MIN_MS, _SCROLL_PAUSE_MAX_MS)
-        )
+        page.wait_for_timeout(random.randint(_SCROLL_PAUSE_MIN_MS, _SCROLL_PAUSE_MAX_MS))
         if len(captured) == last_count:
             idle += 1
         else:

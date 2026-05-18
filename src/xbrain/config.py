@@ -1,4 +1,5 @@
 """Configuration loading for XBrain."""
+
 from __future__ import annotations
 
 import tomllib
@@ -47,8 +48,8 @@ def load_config(repo_root: Path) -> Config:
     valid_executors = get_args(ExecutorName)
     if executor not in valid_executors:
         raise ValueError(
-            "config.toml: [enrich].executor must be "
-            f"manual|api|claude-code, got {executor!r}")
+            f"config.toml: [enrich].executor must be manual|api|claude-code, got {executor!r}"
+        )
     target_count = int(vocab.get("target_count", 30))
     if target_count < 1:
         raise ValueError("config.toml: [vocab].target_count must be >= 1")

@@ -1,4 +1,5 @@
 """Parse X (Twitter) internal GraphQL responses into Item objects."""
+
 from __future__ import annotations
 
 import logging
@@ -118,9 +119,8 @@ def _extract_links(legacy: dict[str, Any]) -> list[Link]:
 
 
 def _extract_media(legacy: dict[str, Any]) -> list[Media]:
-    entries = (
-        legacy.get("extended_entities", {}).get("media")
-        or legacy.get("entities", {}).get("media", [])
+    entries = legacy.get("extended_entities", {}).get("media") or legacy.get("entities", {}).get(
+        "media", []
     )
     media: list[Media] = []
     for entry in entries:

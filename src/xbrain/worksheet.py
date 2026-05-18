@@ -5,6 +5,7 @@ vocabulary and the rubrics into one JSON worksheet. A human or a Claude Code
 session fills the `judgments` array. `xbrain enrich --apply <file>` reads it
 back. XBrain never handles a Claude OAuth token — it only moves JSON.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,8 +25,7 @@ def _article_text(item: Item) -> str | None:
     return None
 
 
-def export_worksheet(items: list[Item], vocab: list[Topic], path: Path,
-                     executor: str) -> None:
+def export_worksheet(items: list[Item], vocab: list[Topic], path: Path, executor: str) -> None:
     """Write a worksheet with everything needed to enrich `items` by hand.
 
     `executor` is recorded in the payload so `--apply` attributes the
@@ -50,8 +50,7 @@ def export_worksheet(items: list[Item], vocab: list[Topic], path: Path,
                 "author": it.author.handle,
                 "text": it.text,
                 "bookmark_folder": it.bookmark_folder,
-                "links": [{"url": ln.url, "domain": ln.domain}
-                          for ln in it.links],
+                "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
             }
             for it in items
@@ -59,8 +58,7 @@ def export_worksheet(items: list[Item], vocab: list[Topic], path: Path,
         "judgments": [],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                    encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def import_worksheet(path: Path) -> tuple[str, list[dict]]:

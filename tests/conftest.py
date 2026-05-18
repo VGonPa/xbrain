@@ -10,6 +10,7 @@ them in order from ``.messages.create(...)``, recording every call. A payload
 that is an ``Exception`` instance is raised instead of returned, so a single
 fake can simulate a transient API failure mid-batch.
 """
+
 from __future__ import annotations
 
 import json

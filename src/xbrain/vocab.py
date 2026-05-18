@@ -4,6 +4,7 @@ Map-reduce: each chunk of posts proposes candidate topics (map); one
 consolidation call merges all candidates into exactly `target_count` topics
 (reduce). The Anthropic client is injected so tests run offline.
 """
+
 from __future__ import annotations
 
 from xbrain.llm_json import json_from_response
@@ -15,12 +16,14 @@ _REDUCE_MAX_TOKENS = 2000
 
 
 def _chunks(items: list[Item], size: int) -> list[list[Item]]:
-    return [items[i:i + size] for i in range(0, len(items), size)]
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def _call(client, model: str, max_tokens: int, system: str, user: str) -> dict:
     response = client.messages.create(
-        model=model, max_tokens=max_tokens, system=system,
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
         messages=[{"role": "user", "content": user}],
     )
     return json_from_response(response, context="vocab")
@@ -48,25 +51,23 @@ def induce_vocab(
         posts = "\n".join(f"- {it.text}" for it in chunk)
         user = (
             "MAP STEP. Propose candidate topics for these posts. Respond with "
-            'JSON: {"candidates": [{"slug": "...", "description": "..."}]}\n\n'
-            + posts
+            'JSON: {"candidates": [{"slug": "...", "description": "..."}]}\n\n' + posts
         )
         result = _call(client, model, _MAP_MAX_TOKENS, system, user)
         cands = result.get("candidates")
         if not isinstance(cands, list):
             raise ValueError(
                 "vocab map step: response has no 'candidates' list — "
-                "the map call failed or was truncated")
+                "the map call failed or was truncated"
+            )
         candidates.extend(cands)
 
     # --- Reduce: consolidate into exactly target_count topics ---
-    cand_block = "\n".join(
-        f"- {c.get('slug')}: {c.get('description')}" for c in candidates)
+    cand_block = "\n".join(f"- {c.get('slug')}: {c.get('description')}" for c in candidates)
     user = (
         f"REDUCE STEP. Consolidate these candidate topics into exactly "
         f"{target_count} final topics. Respond with JSON: "
-        '{"topics": [{"slug": "...", "description": "..."}]}\n\n'
-        + cand_block
+        '{"topics": [{"slug": "...", "description": "..."}]}\n\n' + cand_block
     )
     final = _call(client, model, _REDUCE_MAX_TOKENS, system, user)
     topics: list[Topic] = []
@@ -74,6 +75,5 @@ def induce_vocab(
         try:
             topics.append(Topic(**entry))
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(
-                f"invalid topic in vocab reduce output: {entry!r} ({exc})") from exc
+            raise ValueError(f"invalid topic in vocab reduce output: {entry!r} ({exc})") from exc
     return topics

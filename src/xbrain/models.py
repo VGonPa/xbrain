@@ -1,4 +1,5 @@
 """Data models for the XBrain store."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -57,6 +58,7 @@ class Enrichment(BaseModel):
 
 class Topic(BaseModel):
     """One entry of the induced topic vocabulary (data/vocab.yaml)."""
+
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str
 

@@ -3,8 +3,7 @@ from xbrain.llm_json import extract_json, json_from_response
 
 
 def test_extract_json_handles_a_fenced_block():
-    fenced = ('Here:\n```json\n{"summary":"r","primary_topic":"misc",'
-              '"topics":["misc"]}\n```')
+    fenced = 'Here:\n```json\n{"summary":"r","primary_topic":"misc","topics":["misc"]}\n```'
     assert extract_json(fenced)["primary_topic"] == "misc"
 
 
@@ -27,9 +26,11 @@ def test_extract_json_raises_value_error_on_malformed_json():
 def test_extract_json_finds_object_amid_prose_with_stray_braces():
     # Prose with a lone `{` before the real object — a greedy `{.*}` regex
     # would start at the stray brace and fail; raw_decode scanning recovers.
-    text = ('The model said something like { and then later gave us '
-            '{"summary": "r", "primary_topic": "misc", "topics": ["misc"]} '
-            'as the answer.')
+    text = (
+        "The model said something like { and then later gave us "
+        '{"summary": "r", "primary_topic": "misc", "topics": ["misc"]} '
+        "as the answer."
+    )
     result = extract_json(text)
     assert result["primary_topic"] == "misc"
     assert result["topics"] == ["misc"]
@@ -57,10 +58,12 @@ class _Response:
 
 
 def test_json_from_response_joins_text_blocks():
-    response = _Response([
-        _TextBlock('{"summary": "r", '),
-        _TextBlock('"primary_topic": "misc", "topics": ["misc"]}'),
-    ])
+    response = _Response(
+        [
+            _TextBlock('{"summary": "r", '),
+            _TextBlock('"primary_topic": "misc", "topics": ["misc"]}'),
+        ]
+    )
     assert json_from_response(response)["primary_topic"] == "misc"
 
 
