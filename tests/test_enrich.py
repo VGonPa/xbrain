@@ -1,9 +1,7 @@
 # tests/test_enrich.py
 from datetime import datetime, timezone
 
-import pytest
-
-from xbrain.enrich import apply_enrichment, enrich, items_pending_enrichment
+from xbrain.enrich import apply_enrichment, items_pending_enrichment
 from xbrain.models import Author, Enrichment, Item
 
 
@@ -33,14 +31,56 @@ def test_apply_enrichment_attaches_result():
     assert items_pending_enrichment({"1": item}) == []
 
 
-def test_enrich_manual_returns_pending_items():
+def test_enrich_with_executor_attaches_valid_judgments():
+    from xbrain.enrich import enrich_with_executor
+    from xbrain.executors.base import EnrichmentJudgment
+    from xbrain.models import Topic
+
+    store = {"1": _item("1"), "2": _item("2")}
+    vocab = [Topic(slug="ai-coding", description="d"),
+             Topic(slug="misc", description="d")]
+
+    class _Fake:
+        def enrich_items(self, items, vocab):
+            return [EnrichmentJudgment(item_id=i.id, summary="resumen",
+                                       primary_topic="ai-coding",
+                                       topics=["ai-coding"]) for i in items]
+
+    enriched, invalid = enrich_with_executor(store, _Fake(), vocab)
+    assert enriched == 2 and invalid == []
+    assert store["1"].enriched.primary_topic == "ai-coding"
+
+
+def test_enrich_with_executor_rejects_invalid_judgment():
+    from xbrain.enrich import enrich_with_executor
+    from xbrain.executors.base import EnrichmentJudgment
+    from xbrain.models import Topic
+
     store = {"1": _item("1")}
-    assert len(enrich(store, "manual")) == 1
+
+    class _Bad:
+        def enrich_items(self, items, vocab):
+            return [EnrichmentJudgment(item_id="1", summary="r",
+                                       primary_topic="not-in-vocab",
+                                       topics=["not-in-vocab"])]
+
+    enriched, invalid = enrich_with_executor(
+        store, _Bad(), [Topic(slug="ai-coding", description="d")])
+    assert enriched == 0 and len(invalid) == 1
+    assert store["1"].enriched is None
 
 
-def test_enrich_api_executor_is_paused():
-    with pytest.raises(NotImplementedError, match="pausa"):
-        enrich({"1": _item("1")}, "api")
+def test_apply_worksheet_judgments_attaches_valid_dicts():
+    from xbrain.enrich import apply_worksheet_judgments
+    from xbrain.models import Topic
+
+    store = {"1": _item("1")}
+    judgments = [{"item_id": "1", "summary": "s", "primary_topic": "misc",
+                  "topics": ["misc"]}]
+    enriched, invalid = apply_worksheet_judgments(
+        store, judgments, [Topic(slug="misc", description="d")])
+    assert enriched == 1 and invalid == []
+    assert store["1"].enriched.executor == "claude-code"
 
 
 def test_items_pending_respects_date_range():
