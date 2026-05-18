@@ -64,3 +64,15 @@ def test_import_worksheet_missing_file_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         import_worksheet(tmp_path / "nope.json")
+
+
+def test_import_worksheet_rejects_non_list_judgments(tmp_path):
+    import pytest
+
+    # A worksheet whose `judgments` is not a list (e.g. an object) is a clean
+    # up-front error, not an obscure failure when the loop tries to iterate it.
+    path = tmp_path / "ws.json"
+    path.write_text(json.dumps({"judgments": {}}), encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        import_worksheet(path)
+    assert "must be a list" in str(exc_info.value)

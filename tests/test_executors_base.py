@@ -1,8 +1,11 @@
 # tests/test_executors_base.py
+from datetime import datetime, timezone
+
 import pytest
 from pydantic import ValidationError
 
 from xbrain.executors.base import EnrichmentExecutor, EnrichmentJudgment
+from xbrain.models import Author, Item, Topic
 
 
 def test_judgment_holds_summary_and_topics():
@@ -27,4 +30,12 @@ def test_a_minimal_executor_satisfies_the_protocol():
                     for i in items]
 
     executor: EnrichmentExecutor = Fake()
-    assert hasattr(executor, "enrich_items")
+    item = Item(
+        id="1", source="bookmark", url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"), text="t",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+    )
+    out = executor.enrich_items([item], [Topic(slug="misc", description="d")])
+    assert [j.item_id for j in out] == ["1"]
+    assert out[0].primary_topic == "misc"

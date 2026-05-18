@@ -158,3 +158,87 @@ def test_enrich_apply_imports_a_filled_worksheet(tmp_path, monkeypatch):
     from xbrain.store import load_store
     store = load_store(tmp_path / "data" / "items.json")
     assert store["1"].enriched is not None
+
+
+def test_enrich_api_executor_enriches_the_store(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import load_store, save_store
+    from xbrain.rubrics import save_vocab
+    from xbrain.models import Topic
+    from xbrain.executors.base import EnrichmentJudgment
+    import xbrain.cli as cli
+
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    save_vocab([Topic(slug="misc", description="d")],
+               tmp_path / "data" / "vocab.yaml")
+
+    class _FakeApiExecutor:
+        def __init__(self, *a, **k):
+            pass
+
+        def enrich_items(self, items, vocab):
+            return [EnrichmentJudgment(item_id=i.id, summary="resumen",
+                                       primary_topic="misc", topics=["misc"])
+                    for i in items]
+
+    monkeypatch.setattr(cli, "ApiExecutor", _FakeApiExecutor)
+    result = runner.invoke(app, ["enrich", "--executor", "api"])
+    assert result.exit_code == 0
+    store = load_store(tmp_path / "data" / "items.json")
+    assert store["1"].enriched is not None
+
+
+def test_enrich_rejects_unknown_executor(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import save_store
+    from xbrain.rubrics import save_vocab
+    from xbrain.models import Topic
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    save_vocab([Topic(slug="misc", description="d")],
+               tmp_path / "data" / "vocab.yaml")
+    result = runner.invoke(app, ["enrich", "--executor", "bogus"])
+    assert result.exit_code == 1
+    assert "bogus" in result.output
+    assert "desconocido" in result.output
+
+
+def test_enrich_manual_without_vocab_fails(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import save_store
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["enrich", "--executor", "manual"])
+    assert result.exit_code == 1
+    assert "vocabulario" in result.output
+
+
+def test_enrich_apply_without_vocab_fails(tmp_path, monkeypatch):
+    import json
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import save_store
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(json.dumps({"judgments": []}), encoding="utf-8")
+    result = runner.invoke(app, ["enrich", "--apply", str(ws)])
+    assert result.exit_code == 1
+    assert "vocabulario" in result.output
+
+
+def test_enrich_manual_with_no_pending_items_writes_no_worksheet(
+        tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import save_store
+    from xbrain.rubrics import save_vocab
+    from xbrain.models import Enrichment, Topic
+
+    item = _linked_item("1")
+    item.enriched = Enrichment(
+        enriched_at=datetime.now(timezone.utc), executor="manual",
+        summary="s", primary_topic="misc", topics=["misc"])
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    save_vocab([Topic(slug="misc", description="d")],
+               tmp_path / "data" / "vocab.yaml")
+    result = runner.invoke(app, ["enrich", "--executor", "manual"])
+    assert result.exit_code == 0
+    assert "No hay items pendientes" in result.output
+    assert not (tmp_path / "data" / "enrich-worksheet.json").exists()

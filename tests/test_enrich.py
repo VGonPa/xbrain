@@ -115,6 +115,25 @@ def test_apply_worksheet_judgments_rejects_invalid_executor():
     assert store["1"].enriched is None
 
 
+def test_apply_worksheet_judgments_reports_unknown_item_id():
+    from xbrain.enrich import apply_worksheet_judgments
+    from xbrain.models import Topic
+
+    # A judgment that is structurally valid but names an item_id absent from
+    # the store must surface in `invalid` with an "unknown item id" error —
+    # the shared `_validate_and_attach` unknown-id branch.
+    store = {"1": _item("1")}
+    judgments = [{"item_id": "999", "summary": "s", "primary_topic": "misc",
+                  "topics": ["misc"]}]
+    enriched, invalid = apply_worksheet_judgments(
+        store, judgments, [Topic(slug="misc", description="d")])
+    assert enriched == 0 and len(invalid) == 1
+    bad_id, errors = invalid[0]
+    assert bad_id == "999"
+    assert any("unknown item id" in e for e in errors)
+    assert store["1"].enriched is None
+
+
 def test_items_pending_respects_date_range():
     old_item = _item("1")
     old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)

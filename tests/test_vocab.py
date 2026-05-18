@@ -1,9 +1,10 @@
 # tests/test_vocab.py
-import json
 from datetime import datetime, timezone
 
 from xbrain.models import Author, Item
 from xbrain.vocab import induce_vocab
+
+from tests.conftest import FakeAnthropic
 
 
 def _item(item_id: str, text: str) -> Item:
@@ -15,33 +16,9 @@ def _item(item_id: str, text: str) -> Item:
     )
 
 
-class _FakeMessages:
-    def __init__(self, payloads: list[dict]):
-        self._payloads = list(payloads)
-        self.calls: list[dict] = []
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        payload = self._payloads.pop(0)
-
-        class _Block:
-            type = "text"
-            text = json.dumps(payload)
-
-        class _Resp:
-            content = [_Block()]
-
-        return _Resp()
-
-
-class _FakeClient:
-    def __init__(self, payloads):
-        self.messages = _FakeMessages(payloads)
-
-
 def test_induce_vocab_runs_map_then_reduce():
     store = {str(i): _item(str(i), f"post {i}") for i in range(3)}
-    client = _FakeClient([
+    client = FakeAnthropic([
         {"candidates": [{"slug": "ai", "description": "AI."}]},
         {"topics": [
             {"slug": "ai-coding", "description": "LLMs writing software."},
@@ -55,7 +32,7 @@ def test_induce_vocab_runs_map_then_reduce():
 
 def test_induce_vocab_chunks_the_corpus():
     store = {str(i): _item(str(i), f"post {i}") for i in range(5)}
-    client = _FakeClient([
+    client = FakeAnthropic([
         {"candidates": []}, {"candidates": []}, {"candidates": []},
         {"topics": [{"slug": "misc", "description": "Noise."}]},
     ])
@@ -69,7 +46,7 @@ def test_induce_vocab_raises_when_map_response_has_no_candidates():
     # A truncated / malformed map response with no 'candidates' list must
     # surface as an error, not silently contribute nothing (BLOCKING B1).
     store = {str(i): _item(str(i), f"post {i}") for i in range(3)}
-    client = _FakeClient([
+    client = FakeAnthropic([
         {"wrong_key": "the map call failed"},
         {"topics": [{"slug": "misc", "description": "Noise."}]},
     ])
