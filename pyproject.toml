@@ -46,3 +46,25 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+files = ["src/xbrain"]
+
+[tool.interrogate]
+ignore-init-method = true
+ignore-magic = true
+ignore-private = true
+fail-under = 60
+exclude = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+
+[tool.coverage.run]
+source = ["src/xbrain"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+fail_under = 78
