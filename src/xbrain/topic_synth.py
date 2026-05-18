@@ -23,7 +23,12 @@ _MAX_TOKENS = 2000
 
 
 class OverviewJudgment(BaseModel):
-    """One synthesized topic overview — judgment only, no identifiers."""
+    """One synthesized topic overview.
+
+    The LLM emits only the judgment ``{overview, notes}``; `slug` is the
+    caller-supplied topic identifier stitched in after validation, never
+    produced by the LLM.
+    """
 
     slug: str
     overview: str
@@ -137,6 +142,9 @@ def apply_overview_judgments(
     valid: list[OverviewJudgment] = []
     invalid: list[tuple[str, list[str]]] = []
     for judgment in judgments:
+        if not isinstance(judgment, dict):
+            invalid.append(("", ["worksheet judgment is not a JSON object"]))
+            continue
         slug = str(judgment.get("slug", ""))
         candidate = {"overview": judgment.get("overview"), "notes": judgment.get("notes")}
         errors = validate_overview(candidate)

@@ -32,7 +32,9 @@ def compute_topic_posts(store: dict[str, Item], vocab: list[Topic]) -> dict[str,
     """Group enriched items into per-topic primary / also-relevant lists.
 
     A post is *primary* under its `primary_topic` and *also-relevant* under each
-    of its other topics. Lists are sorted newest-first.
+    of its other topics. Lists are sorted newest-first. An item whose
+    `primary_topic` is not in the current vocabulary is skipped from the primary
+    block (its also-relevant placements still apply).
     """
     result: dict[str, TopicPosts] = {topic.slug: TopicPosts() for topic in vocab}
     for item in store.values():
@@ -41,20 +43,13 @@ def compute_topic_posts(store: dict[str, Item], vocab: list[Topic]) -> dict[str,
             continue
         if enriched.primary_topic in result:
             result[enriched.primary_topic].primary.append(item)
-        for slug in enriched.topics:
+        for slug in dict.fromkeys(enriched.topics):
             if slug != enriched.primary_topic and slug in result:
                 result[slug].also.append(item)
     for posts in result.values():
         posts.primary.sort(key=lambda i: i.created_at, reverse=True)
         posts.also.sort(key=lambda i: i.created_at, reverse=True)
     return result
-
-
-_TOPIC_DEFAULT_TAIL = (
-    "\n\n## Mis notas\n\n"
-    "*(Escribe debajo. El bloque por encima de este punto se regenera "
-    "automáticamente; no lo edites.)*\n\n"
-)
 
 
 def _post_block(heading: str, items: list[Item]) -> list[str]:
@@ -99,7 +94,7 @@ def render_topic_page(topic: Topic, posts: TopicPosts, page: TopicPage | None) -
     if page is None:
         lines += ["*(Overview pendiente — ejecuta `xbrain topics`.)*", ""]
     else:
-        if posts.total != page.post_count_at_synth:
+        if posts.total > page.post_count_at_synth:
             delta = posts.total - page.post_count_at_synth
             lines += [
                 f"> ⚠ Overview desactualizado: {delta:+d} posts desde la última "
@@ -133,9 +128,9 @@ def write_topic_pages(
         block = render_topic_page(topic, posts, pages.get(topic.slug))
         path = topics_dir / f"{topic.slug}.md"
         tail = (
-            notes_io.user_tail(path.read_text(encoding="utf-8"), _TOPIC_DEFAULT_TAIL)
+            notes_io.user_tail(path.read_text(encoding="utf-8"), notes_io.DEFAULT_TAIL)
             if path.exists()
-            else _TOPIC_DEFAULT_TAIL
+            else notes_io.DEFAULT_TAIL
         )
         path.write_text(block + tail, encoding="utf-8")
         written += 1
@@ -179,15 +174,16 @@ def build_topic_inputs(
     by_slug = {topic.slug: topic for topic in vocab}
     inputs: list[TopicInput] = []
     for slug in slugs:
+        topic = by_slug.get(slug)
+        if topic is None:
+            raise ValueError(f"slug '{slug}' is not in the vocabulary")
         posts = all_posts.get(slug, TopicPosts())
         summaries = [
             item.enriched.summary
             for item in (posts.primary + posts.also)
             if item.enriched and item.enriched.summary
         ]
-        inputs.append(
-            TopicInput(slug=slug, description=by_slug[slug].description, summaries=summaries)
-        )
+        inputs.append(TopicInput(slug=slug, description=topic.description, summaries=summaries))
     return inputs
 
 

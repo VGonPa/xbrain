@@ -352,3 +352,64 @@ def test_topics_without_vocab_fails(tmp_path, monkeypatch):
     result = runner.invoke(app, ["topics"])
     assert result.exit_code == 1
     assert "vocabulario" in result.output
+
+
+def test_topics_run_with_no_stale_overviews(tmp_path, monkeypatch):
+    # Store enriched + an up-to-date TopicPage (count matches the live posts):
+    # nothing is stale, so the run only refreshes the lists.
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.models import Topic, TopicPage
+    from xbrain.rubrics import save_vocab
+    from xbrain.store import save_topic_pages
+
+    save_store({"1": _enriched_item("1")}, tmp_path / "data" / "items.json")
+    save_vocab([Topic(slug="misc", description="d")], tmp_path / "data" / "vocab.yaml")
+    save_topic_pages(
+        {
+            "misc": TopicPage(
+                slug="misc",
+                overview="Overview ya sintetizado.",
+                notes=[],
+                synthesized_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+                post_count_at_synth=1,
+            )
+        },
+        tmp_path / "data" / "topics.json",
+    )
+    result = runner.invoke(app, ["topics"])
+    assert result.exit_code == 0
+    assert "sin overviews pendientes" in result.output
+
+
+def test_topics_resynth_succeeds(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    import xbrain.cli as cli
+    from xbrain.models import Topic, TopicPage
+    from xbrain.rubrics import save_vocab
+    from xbrain.store import save_topic_pages
+    from xbrain.topic_synth import OverviewJudgment
+
+    save_store({"1": _enriched_item("1")}, tmp_path / "data" / "items.json")
+    save_vocab([Topic(slug="misc", description="d")], tmp_path / "data" / "vocab.yaml")
+    # Page synthesized when the topic had 0 posts — a resynth picks up the change.
+    save_topic_pages(
+        {
+            "misc": TopicPage(
+                slug="misc",
+                overview="Overview viejo.",
+                notes=[],
+                synthesized_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+                post_count_at_synth=0,
+            )
+        },
+        tmp_path / "data" / "topics.json",
+    )
+
+    def _fake_synth(inputs, model, **kwargs):
+        return [OverviewJudgment(slug="misc", overview="Re-sintetizado.", notes=[])]
+
+    monkeypatch.setattr(cli, "synthesize_overviews_api", _fake_synth)
+    result = runner.invoke(app, ["topics", "--resynth", "--executor", "api"])
+    assert result.exit_code == 0
+    page = (tmp_path / "vault" / "x-knowledge" / "topics" / "misc.md").read_text(encoding="utf-8")
+    assert "Re-sintetizado." in page

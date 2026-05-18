@@ -15,6 +15,15 @@ from xbrain.models import Item
 GEN_START = "<!-- xbrain:generated:start -->"
 GEN_END = "<!-- xbrain:generated:end -->"
 
+# The default "Mis notas" tail appended after the generated block of a freshly
+# created page — shared by item notes (`xbrain.generate`) and topic pages
+# (`xbrain.topics`).
+DEFAULT_TAIL = (
+    "\n\n## Mis notas\n\n"
+    "*(Escribe debajo. El bloque por encima de este punto se regenera "
+    "automáticamente; no lo edites.)*\n\n"
+)
+
 
 def wrap(body: str) -> str:
     """Surround a generated body with the start / end markers."""

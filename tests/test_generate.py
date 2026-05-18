@@ -152,6 +152,15 @@ def test_generate_since_until_filters_item_notes(tmp_path: Path):
     assert "New note" in log
 
 
+def test_failure_es_covers_every_failure_reason():
+    from typing import get_args
+
+    from xbrain.generate import _FAILURE_ES
+    from xbrain.models import FailureReason
+
+    assert set(_FAILURE_ES) == set(get_args(FailureReason))
+
+
 def test_note_renders_broken_link_evidence(tmp_path):
     from datetime import datetime, timezone
 

@@ -61,6 +61,17 @@ def validate_judgment(judgment: dict, vocab_slugs: Iterable[str]) -> list[str]:
 _ALLOWED_OVERVIEW_KEYS = {"overview", "notes"}
 
 
+def _validate_overview_notes(notes: list, rules: dict) -> list[str]:
+    """Validate the `notes` list — count bounds and per-entry string typing."""
+    errors: list[str] = []
+    lo, hi = rules.get("notes_min", 0), rules.get("notes_max", 15)
+    if not (lo <= len(notes) <= hi):
+        errors.append(f"notes has {len(notes)} entries, must be {lo}-{hi}")
+    if any(not isinstance(n, str) for n in notes):
+        errors.append("notes entries must all be strings")
+    return errors
+
+
 def validate_overview(judgment: dict) -> list[str]:
     """Return a list of human-readable errors; an empty list means valid.
 
@@ -75,17 +86,17 @@ def validate_overview(judgment: dict) -> list[str]:
         errors.append(f"unexpected keys (LLM must emit only judgment): {sorted(extra)}")
 
     overview = judgment.get("overview")
-    if rules.get("overview_required", True) and not (overview and str(overview).strip()):
-        errors.append("overview is missing or empty")
+    if rules.get("overview_required", True) and not (
+        isinstance(overview, str) and overview.strip()
+    ):
+        errors.append("overview must be a non-empty string")
 
     notes = judgment.get("notes")
     if not isinstance(notes, list):
         errors.append("notes must be a list")
         return errors
 
-    lo, hi = rules.get("notes_min", 0), rules.get("notes_max", 15)
-    if not (lo <= len(notes) <= hi):
-        errors.append(f"notes has {len(notes)} entries, must be {lo}-{hi}")
+    errors += _validate_overview_notes(notes, rules)
 
     blob = str(overview or "") + " ".join(str(note) for note in notes)
     if "[[" in blob:

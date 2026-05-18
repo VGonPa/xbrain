@@ -100,3 +100,15 @@ def test_apply_overview_judgments_rejects_wikilink_in_overview():
     )
     assert valid == []
     assert any("wikilink" in e for e in invalid[0][1])
+
+
+def test_apply_overview_judgments_rejects_a_non_dict_entry():
+    from xbrain.topic_synth import apply_overview_judgments
+
+    judgments = [
+        "oops",
+        {"slug": "good", "overview": "Resumen.", "notes": ["n"]},
+    ]
+    valid, invalid = apply_overview_judgments(judgments)
+    assert [j.slug for j in valid] == ["good"]
+    assert any("not a JSON object" in e for e in invalid[0][1])

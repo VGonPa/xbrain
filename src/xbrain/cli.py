@@ -328,7 +328,7 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
     merge_overviews(pages, judgments, posts)
     save_topic_pages(pages, cfg.topics_path)
     written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
-    typer.echo(f"Topics sintetizados: {len(judgments)} · {written} páginas escritas")
+    typer.echo(f"Topics sintetizados: {len(judgments)}/{len(inputs)} · {written} páginas escritas")
 
 
 @app.command()

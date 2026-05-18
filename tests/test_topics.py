@@ -184,6 +184,25 @@ def test_build_topic_inputs_collects_post_summaries():
     assert inputs[0].summaries == ["s"]
 
 
+def test_build_topic_inputs_rejects_an_unknown_slug():
+    import pytest
+
+    from xbrain.topics import build_topic_inputs
+
+    with pytest.raises(ValueError, match="vocabulary"):
+        build_topic_inputs(["not-a-real-topic"], _VOCAB, {})
+
+
+def test_compute_topic_posts_dedups_duplicate_slugs_in_topics():
+    # A store record with a duplicate slug in `enriched.topics` (pre-validation
+    # data) must place the item once, not twice, in the also-relevant list.
+    store = {
+        "1": _enriched("1", "ai-coding", ["ai-coding", "career", "career"]),
+    }
+    posts = compute_topic_posts(store, _VOCAB)
+    assert [i.id for i in posts["career"].also] == ["1"]
+
+
 def test_merge_overviews_records_the_synthesis_count():
     from xbrain.topic_synth import OverviewJudgment
     from xbrain.topics import merge_overviews

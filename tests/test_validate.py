@@ -85,3 +85,24 @@ def test_validate_overview_rejects_unexpected_keys():
 
     errors = validate_overview({"overview": "ok", "notes": [], "slug": "ai-coding"})
     assert any("unexpected keys" in e for e in errors)
+
+
+def test_validate_overview_rejects_non_string_overview():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": {"a": 1}, "notes": ["limpio"]})
+    assert any("overview" in e for e in errors)
+
+
+def test_validate_overview_rejects_non_string_note_element():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "Un resumen.", "notes": [42]})
+    assert any("notes entries must all be strings" in e for e in errors)
+
+
+def test_validate_overview_rejects_too_many_notes():
+    from xbrain.validate import validate_overview
+
+    errors = validate_overview({"overview": "Un resumen.", "notes": ["n"] * 16})
+    assert any("notes has 16 entries" in e for e in errors)
