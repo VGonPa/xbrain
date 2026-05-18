@@ -66,8 +66,11 @@ def test_item_has_optional_bookmark_folder():
     from xbrain.models import Author, Item
 
     base = dict(
-        id="1", source="bookmark", url="https://x.com/a/status/1",
-        author=Author(handle="a", name="A"), text="t",
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="t",
         created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
     )

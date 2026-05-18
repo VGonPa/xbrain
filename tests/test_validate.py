@@ -5,8 +5,11 @@ VOCAB = {"ai-coding", "ai-and-work", "misc"}
 
 
 def _ok():
-    return {"summary": "un resumen", "primary_topic": "ai-coding",
-            "topics": ["ai-coding", "ai-and-work"]}
+    return {
+        "summary": "un resumen",
+        "primary_topic": "ai-coding",
+        "topics": ["ai-coding", "ai-and-work"],
+    }
 
 
 def test_valid_judgment_has_no_errors():

@@ -11,13 +11,19 @@ uv pip install -e ".[dev]" --index-url https://pypi.org/simple
 uv run playwright install chromium
 ```
 
+The `[dev]` extra above also installs the quality-gate tools (`poe`, `ruff`,
+`mypy`, and the rest).
+
 Copy `config.toml.example` to `config.toml` and fill in your own values. That
 file is not tracked by git.
 
 ## Before opening a pull request
 
-- Run the full test suite: `uv run pytest -v`. It must be green.
-- Run the linter: `uv run ruff check .`.
+- Run the full quality gate: `uv run poe check`. It must be green — warnings are
+  OK, failures are not.
+- Individual checks are available too: `uv run poe test`, `uv run poe lint`,
+  `uv run poe types`, and the rest of the `poe` tasks.
+- CI runs the same gate on every PR.
 - Every new module needs a matching `tests/test_*.py`. This project is built
   test-first.
 - Keep the PR focused on one change. No drive-by refactors.

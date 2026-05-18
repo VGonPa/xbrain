@@ -8,8 +8,11 @@ from xbrain.worksheet import export_worksheet, import_worksheet
 
 def _item(item_id: str) -> Item:
     return Item(
-        id=item_id, source="bookmark", url=f"https://x.com/a/status/{item_id}",
-        author=Author(handle="a", name="A"), text="post text",
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="a", name="A"),
+        text="post text",
         created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
         links=[Link(url="https://arxiv.org/abs/1", domain="arxiv.org")],
@@ -44,8 +47,8 @@ def test_import_worksheet_reads_filled_judgments(tmp_path):
     export_worksheet([_item("1")], VOCAB, path, "claude-code")
     data = json.loads(path.read_text(encoding="utf-8"))
     data["judgments"] = [
-        {"item_id": "1", "summary": "s", "primary_topic": "misc",
-         "topics": ["misc"]}]
+        {"item_id": "1", "summary": "s", "primary_topic": "misc", "topics": ["misc"]}
+    ]
     path.write_text(json.dumps(data), encoding="utf-8")
     executor, judgments = import_worksheet(path)
     assert executor == "claude-code"
@@ -62,6 +65,7 @@ def test_import_worksheet_reads_executor_back(tmp_path):
 
 def test_import_worksheet_missing_file_raises(tmp_path):
     import pytest
+
     with pytest.raises(FileNotFoundError):
         import_worksheet(tmp_path / "nope.json")
 

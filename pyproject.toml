@@ -19,6 +19,15 @@ xbrain = "xbrain.cli:app"
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    "poethepoet>=0.27",
+    "radon>=6.0",
+    "mypy>=1.10",
+    "bandit>=1.7",
+    "vulture>=2.11",
+    "interrogate>=1.7",
+    "detect-secrets>=1.5",
+    "deptry>=0.16",
+    "pytest-cov>=5.0",
 ]
 
 [build-system]
@@ -37,3 +46,67 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+files = ["src/xbrain"]
+
+[tool.interrogate]
+ignore-init-method = true
+ignore-magic = true
+ignore-private = true
+fail-under = 60
+exclude = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+
+[tool.deptry]
+# `xbrain` is the local package importing its own submodules — not a
+# transitive third-party dependency. Marking it first-party silences the
+# 43 DEP003 false positives.
+known_first_party = ["xbrain"]
+
+[tool.deptry.per_rule_ignores]
+# DEP002: the dev/CLI quality tools are invoked as commands by scripts/check.sh
+# and the poe tasks — they are never `import`ed, so deptry cannot see their use.
+DEP002 = [
+    "poethepoet",
+    "radon",
+    "mypy",
+    "bandit",
+    "vulture",
+    "interrogate",
+    "detect-secrets",
+    "deptry",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+# DEP001: scripts/import_chrome_session.py imports browser-cookie3 behind a
+# guarded `try/except ImportError` — it is a deliberately optional helper
+# dependency, installed on demand, not a declared runtime requirement.
+DEP001 = ["browser_cookie3"]
+
+[tool.coverage.run]
+source = ["src/xbrain"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+fail_under = 78
+
+[tool.poe.tasks]
+lint       = "ruff check src tests"
+format     = "ruff format --check src tests"
+types      = "mypy src/xbrain"
+complexity = "radon cc src/xbrain -s"
+security   = "bandit -r src/xbrain -ll -q"
+deadcode   = "vulture src/xbrain --min-confidence 80"
+docs       = "interrogate src/xbrain"
+# No standalone `secrets` task: a bare `detect-secrets scan` always exits 0
+# regardless of new secrets, giving a false green. The real secrets gate is
+# the baseline diff inside `poe check` (scripts/check.sh).
+deps       = "deptry ."
+test       = "pytest -q"
+check      = "bash scripts/check.sh"

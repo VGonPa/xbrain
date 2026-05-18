@@ -16,9 +16,7 @@ def _make_archive(tmp_path: Path, filename: str = "data/tweets.js") -> Path:
                 "id_str": "555",
                 "created_at": "Wed May 10 14:23:00 +0000 2026",
                 "full_text": "hello https://t.co/x",
-                "entities": {
-                    "urls": [{"expanded_url": "https://example.com/post"}]
-                },
+                "entities": {"urls": [{"expanded_url": "https://example.com/post"}]},
             }
         }
     ]

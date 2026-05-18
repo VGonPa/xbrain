@@ -1,4 +1,5 @@
 """Orchestrate scrolling X and intercepting GraphQL responses."""
+
 from __future__ import annotations
 
 import random
@@ -8,7 +9,7 @@ from playwright.sync_api import BrowserContext, Response
 
 from xbrain.extract.browser import is_logged_out
 from xbrain.extract.graphql import parse_tweets
-from xbrain.models import Item
+from xbrain.models import Item, SourceName
 
 _OPERATIONS = {"bookmark": "Bookmarks", "own_tweet": "UserTweets"}
 # Deliberately slow, human-paced scrolling — avoids X rate-limiting / account bans.
@@ -19,7 +20,7 @@ _MAX_IDLE_SCROLLS = 4
 
 
 def collect_new_items(
-    responses: list[dict], source: str, known_ids: set[str]
+    responses: list[dict], source: SourceName, known_ids: set[str]
 ) -> tuple[list[Item], bool]:
     """Parse responses into items, flagging when a known id is reached.
 
@@ -38,7 +39,7 @@ def collect_new_items(
 
 def extract_source(
     context: BrowserContext,
-    source: str,
+    source: SourceName,
     url: str,
     known_ids: set[str],
     since: datetime | None = None,
@@ -74,9 +75,7 @@ def extract_source(
         if hit_known:
             break
         page.mouse.wheel(0, 4000)
-        page.wait_for_timeout(
-            random.randint(_SCROLL_PAUSE_MIN_MS, _SCROLL_PAUSE_MAX_MS)
-        )
+        page.wait_for_timeout(random.randint(_SCROLL_PAUSE_MIN_MS, _SCROLL_PAUSE_MAX_MS))
         if len(captured) == last_count:
             idle += 1
         else:

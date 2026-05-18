@@ -1,4 +1,5 @@
 """JSON-backed store for XBrain items and extraction state."""
+
 from __future__ import annotations
 
 import json

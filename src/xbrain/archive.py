@@ -1,4 +1,5 @@
 """Parse the official X data archive (tweets.js) into Item objects."""
+
 from __future__ import annotations
 
 import json
@@ -46,9 +47,7 @@ def _parse_js_array(raw: str, tweets_file: str) -> list:
     try:
         return json.loads(raw[bracket:])
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{tweets_file}: malformed JSON in archive tweets file: {exc}"
-        ) from exc
+        raise ValueError(f"{tweets_file}: malformed JSON in archive tweets file: {exc}") from exc
 
 
 def _archive_tweet_to_item(entry: dict[str, Any], author: Author) -> Item | None:
@@ -69,15 +68,12 @@ def _archive_tweet_to_item(entry: dict[str, Any], author: Author) -> Item | None
         for url_entity in tweet.get("entities", {}).get("urls", [])
         if url_entity.get("expanded_url")
     ]
-    media_entries = (
-        tweet.get("extended_entities", {}).get("media")
-        or tweet.get("entities", {}).get("media", [])
-    )
+    media_entries = tweet.get("extended_entities", {}).get("media") or tweet.get(
+        "entities", {}
+    ).get("media", [])
     media = [
         Media(
-            type="video"
-            if media_entity.get("type") in ("video", "animated_gif")
-            else "photo",
+            type="video" if media_entity.get("type") in ("video", "animated_gif") else "photo",
             url=media_entity.get("media_url_https") or media_entity["expanded_url"],
         )
         for media_entity in media_entries

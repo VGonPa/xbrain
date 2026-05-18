@@ -1,4 +1,5 @@
 """Render the JSON store into Obsidian markdown notes."""
+
 from __future__ import annotations
 
 import logging
@@ -100,7 +101,7 @@ def _user_tail(existing: str) -> str:
     """
     idx = existing.find(GEN_END)
     if idx != -1:
-        return existing[idx + len(GEN_END):]
+        return existing[idx + len(GEN_END) :]
     if existing.strip():
         return "\n\n" + existing
     return _DEFAULT_TAIL
@@ -191,11 +192,7 @@ def _render_log(items: list[Item]) -> str:
     for item in items:
         date = item.created_at.date().isoformat()
         snippet = item.text.replace("\n", " ")[:120]
-        link = (
-            f" → [[items/{Path(_note_filename(item)).stem}|nota]]"
-            if _has_note(item)
-            else ""
-        )
+        link = f" → [[items/{Path(_note_filename(item)).stem}|nota]]" if _has_note(item) else ""
         lines.append(f"- `{date}` @{item.author.handle}: {snippet}{link}")
     return "\n".join(lines) + "\n"
 
@@ -209,10 +206,7 @@ def _title(item: Item) -> str:
 
 
 def _note_filename(item: Item) -> str:
-    return (
-        f"{item.created_at.date().isoformat()}-"
-        f"{_slugify(_title(item))}-{item.id}.md"
-    )
+    return f"{item.created_at.date().isoformat()}-{_slugify(_title(item))}-{item.id}.md"
 
 
 def _slugify(text: str) -> str:

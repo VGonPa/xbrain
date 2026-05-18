@@ -47,9 +47,7 @@ SAMPLE_RESPONSE = {
                             },
                             {
                                 "entryId": "cursor-bottom-xyz",
-                                "content": {
-                                    "itemContent": {"itemType": "TimelineTimelineCursor"}
-                                },
+                                "content": {"itemContent": {"itemType": "TimelineTimelineCursor"}},
                             },
                         ],
                     }
@@ -92,9 +90,7 @@ def test_parse_tweets_detects_self_thread():
                 "rest_id": "222",
                 "core": {
                     "user_results": {
-                        "result": {
-                            "legacy": {"screen_name": "alice", "name": "Alice"}
-                        }
+                        "result": {"legacy": {"screen_name": "alice", "name": "Alice"}}
                     }
                 },
                 "legacy": {
@@ -123,9 +119,7 @@ def _tweet_result(rest_id, handle, text, **legacy_extra):
         "__typename": "Tweet",
         "rest_id": rest_id,
         "core": {
-            "user_results": {
-                "result": {"legacy": {"screen_name": handle, "name": handle.title()}}
-            }
+            "user_results": {"result": {"legacy": {"screen_name": handle, "name": handle.title()}}}
         },
         "legacy": legacy,
     }
@@ -171,11 +165,7 @@ def test_parse_tweets_reads_author_from_core_path():
                 "__typename": "Tweet",
                 "rest_id": "444",
                 "core": {
-                    "user_results": {
-                        "result": {
-                            "core": {"screen_name": "carol", "name": "Carol"}
-                        }
-                    }
+                    "user_results": {"result": {"core": {"screen_name": "carol", "name": "Carol"}}}
                 },
                 "legacy": {
                     "full_text": "core-path author",

@@ -1,4 +1,5 @@
 """Expand X threads into concatenated text via the TweetDetail operation."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -29,9 +30,7 @@ def assemble_thread(responses: list[dict], author_handle: str) -> str:
     return "\n\n".join(tweet.text for tweet in tweets)
 
 
-def expand_threads(
-    store: dict[str, Item], storage_state_path: Path, force: bool = False
-) -> int:
+def expand_threads(store: dict[str, Item], storage_state_path: Path, force: bool = False) -> int:
     """Fetch full thread text for every item flagged as a thread."""
     pending = [
         item
@@ -43,13 +42,16 @@ def expand_threads(
     with x_context(storage_state_path) as context:
         for item in pending:
             text = _fetch_thread_text(context, item)
-            _attach_thread(item, ContentSource(
-                kind="thread",
-                url=item.url,
-                text=text or None,
-                ok=bool(text),
-                error=None if text else "No se pudo recuperar el hilo.",
-            ))
+            _attach_thread(
+                item,
+                ContentSource(
+                    kind="thread",
+                    url=item.url,
+                    text=text or None,
+                    ok=bool(text),
+                    error=None if text else "No se pudo recuperar el hilo.",
+                ),
+            )
     return len(pending)
 
 
@@ -86,9 +88,7 @@ def _already_expanded(item: Item, force: bool) -> bool:
 
 def _attach_thread(item: Item, source: ContentSource) -> None:
     if item.content is None:
-        item.content = Content(
-            fetched_at=datetime.now(timezone.utc), sources=[source]
-        )
+        item.content = Content(fetched_at=datetime.now(timezone.utc), sources=[source])
     else:
         kept = [s for s in item.content.sources if s.kind != "thread"]
         item.content.sources = kept + [source]

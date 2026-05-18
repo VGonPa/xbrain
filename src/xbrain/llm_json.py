@@ -1,4 +1,5 @@
 """Shared helper: extract a JSON object from an LLM text response."""
+
 from __future__ import annotations
 
 import json
@@ -32,9 +33,7 @@ def extract_json(text: str) -> dict:
 
     if not found_brace:
         raise ValueError(f"no JSON object in model response: {text[:200]!r}")
-    raise ValueError(
-        f"malformed JSON in model response: {last_error} -- snippet: {text[:200]!r}"
-    )
+    raise ValueError(f"malformed JSON in model response: {last_error} -- snippet: {text[:200]!r}")
 
 
 def json_from_response(response, context: str = "") -> dict:

@@ -112,21 +112,27 @@ def test_frontmatter_includes_topics_and_folder_as_tags(tmp_path):
     from xbrain.models import Author, Enrichment, Item, Link
 
     item = Item(
-        id="1", source="bookmark", url="https://x.com/a/status/1",
-        author=Author(handle="a", name="A"), text="t",
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="t",
         created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
         links=[Link(url="https://arxiv.org/abs/1", domain="arxiv.org")],
         bookmark_folder="AI papers",
         enriched=Enrichment(
-            enriched_at=datetime.now(timezone.utc), executor="api",
-            summary="s", primary_topic="ai-coding",
-            topics=["ai-coding", "ai-and-work"]),
+            enriched_at=datetime.now(timezone.utc),
+            executor="api",
+            summary="s",
+            primary_topic="ai-coding",
+            topics=["ai-coding", "ai-and-work"],
+        ),
     )
     generate({"1": item}, tmp_path)
     note = next((tmp_path / "items").glob("*-1.md")).read_text(encoding="utf-8")
     assert "ai-coding" in note and "ai-and-work" in note
-    assert "ai-papers" in note          # folder, slugified, as a tag
+    assert "ai-papers" in note  # folder, slugified, as a tag
     assert "bookmark_folder: AI papers" in note
 
 

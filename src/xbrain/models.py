@@ -1,4 +1,5 @@
 """Data models for the XBrain store."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,6 +10,10 @@ from pydantic import BaseModel, Field
 # The set of enrichment executor names — one source of truth shared by the
 # data model, the config loader and the enrichment phase.
 ExecutorName = Literal["manual", "api", "claude-code"]
+
+# The set of item source names — one source of truth shared by the data model
+# and the GraphQL parser.
+SourceName = Literal["bookmark", "own_tweet"]
 
 
 class Author(BaseModel):
@@ -57,13 +62,14 @@ class Enrichment(BaseModel):
 
 class Topic(BaseModel):
     """One entry of the induced topic vocabulary (data/vocab.yaml)."""
+
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str
 
 
 class Item(BaseModel):
     id: str
-    source: Literal["bookmark", "own_tweet"]
+    source: SourceName
     url: str
     author: Author
     text: str
