@@ -110,3 +110,18 @@ def test_cli_generate_with_since_filters_notes(tmp_path: Path, monkeypatch):
     assert (vault / "x-knowledge" / "_index.md").exists()
     notes = list((vault / "x-knowledge" / "items").glob("*.md"))
     assert len(notes) == 1
+
+
+def test_vocab_command_persists_induced_topics(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.store import save_store
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    from xbrain.models import Topic
+    import xbrain.cli as cli
+    monkeypatch.setattr(
+        cli, "induce_vocab",
+        lambda *a, **k: [Topic(slug="misc", description="Noise.")])
+    result = runner.invoke(app, ["vocab"])
+    assert result.exit_code == 0
+    from xbrain.rubrics import load_vocab
+    assert [t.slug for t in load_vocab(tmp_path / "data" / "vocab.yaml")] == ["misc"]
