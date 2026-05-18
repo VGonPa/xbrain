@@ -83,6 +83,19 @@ def test_apply_worksheet_judgments_attaches_valid_dicts():
     assert store["1"].enriched.executor == "claude-code"
 
 
+def test_apply_worksheet_judgments_handles_null_topics():
+    from xbrain.enrich import apply_worksheet_judgments
+    from xbrain.models import Topic
+
+    store = {"1": _item("1")}
+    judgments = [{"item_id": "1", "summary": "s", "primary_topic": "misc",
+                  "topics": None}]
+    enriched, invalid = apply_worksheet_judgments(
+        store, judgments, [Topic(slug="misc", description="d")])
+    assert enriched == 0 and len(invalid) == 1
+    assert store["1"].enriched is None
+
+
 def test_items_pending_respects_date_range():
     old_item = _item("1")
     old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)

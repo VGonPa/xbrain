@@ -87,7 +87,7 @@ def apply_worksheet_judgments(
         item_id = str(j.get("item_id", ""))
         errors = _validate_and_attach(
             store, item_id, str(j.get("summary", "")),
-            str(j.get("primary_topic", "")), list(j.get("topics", [])),
+            str(j.get("primary_topic", "")), j.get("topics") or [],
             vocab_slugs, executor_name)
         if errors:
             invalid.append((item_id, errors))

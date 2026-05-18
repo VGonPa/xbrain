@@ -188,7 +188,7 @@ def fetch(
 @_handle_cli_errors
 def enrich(
     executor: str = typer.Option(
-        None, help="api | manual | claude-code (default: config [enrich].executor)"),
+        None, help="api | manual | claude-code (default: the enrich executor set in config.toml)"),
     apply: Path = typer.Option(
         None, "--apply", help="Import a filled worksheet and apply it"),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
