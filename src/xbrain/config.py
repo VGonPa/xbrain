@@ -13,6 +13,9 @@ class Config:
     output_dir: Path
     data_dir: Path
     x_handle: str
+    enrich_executor: str
+    enrich_model: str
+    vocab_target_count: int
 
     @property
     def items_path(self) -> Path:
@@ -35,10 +38,15 @@ def load_config(repo_root: Path) -> Config:
     if not x_settings.get("handle"):
         raise ValueError("config.toml: [x].handle is empty — set your X handle")
     vault = Path(paths["vault"]).expanduser()
+    enrich = settings.get("enrich", {})
+    vocab = settings.get("vocab", {})
     return Config(
         repo_root=repo_root,
         vault=vault,
         output_dir=vault / paths["output_subdir"],
         data_dir=repo_root / paths["data_dir"],
         x_handle=x_settings["handle"],
+        enrich_executor=enrich.get("executor", "claude-code"),
+        enrich_model=enrich.get("model", "claude-haiku-4-5-20251001"),
+        vocab_target_count=int(vocab.get("target_count", 30)),
     )

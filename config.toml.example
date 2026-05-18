@@ -9,3 +9,16 @@ data_dir = "data"
 [x]
 # Your X handle, without the @.
 handle = "your_handle"
+
+[enrich]
+# Executor that produces the LLM judgment:
+#   "claude-code" - exports a worksheet a Claude Code session fills (no API cost) [default]
+#   "api"         - calls the Anthropic API (needs ANTHROPIC_API_KEY, pay-per-token)
+#   "manual"      - exports a worksheet to fill by hand
+executor = "claude-code"
+# Model used by the "api" executor. A cheap model for volume; a stronger one for quality.
+model = "claude-haiku-4-5-20251001"
+
+[vocab]
+# Number of topics the `vocab` stage induces from the corpus.
+target_count = 30
