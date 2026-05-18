@@ -378,15 +378,40 @@ fi
 # ============================================================================
 # 8. DETECT-SECRETS - Secret detection  (CRITICAL)
 # ============================================================================
+# Scans, then diffs the result against .secrets.baseline so only NEW secrets
+# fail the gate. The baseline holds audited false positives (status-variable
+# names in this very script) — see the commit that introduced it for the
+# audit notes. Comparison is by hashed_secret value (line-number stable).
 print_info "Running detect-secrets scan (src, tests, scripts)..."
 SECRETS_OUTPUT=$(uv run detect-secrets scan src/xbrain tests scripts 2>&1)
 
-if echo "$SECRETS_OUTPUT" | grep -q '"results": {}'; then
-    print_success "Detect-secrets: no secrets found"
+SECRETS_NEW=$(echo "$SECRETS_OUTPUT" | python3 -c "
+import json, sys
+scan = json.load(sys.stdin)
+try:
+    with open('.secrets.baseline') as f:
+        baseline = json.load(f)
+except (OSError, ValueError):
+    baseline = {'results': {}}
+known = {s['hashed_secret'] for ss in baseline.get('results', {}).values() for s in ss}
+new = [
+    (f, s)
+    for f, ss in scan.get('results', {}).items()
+    for s in ss
+    if s['hashed_secret'] not in known
+]
+for f, s in new:
+    print(f\"  {f}: line {s.get('line_number', '?')} - {s['type']}\")
+sys.exit(1 if new else 0)
+" 2>&1)
+SECRETS_EXIT=$?
+
+if [ "$SECRETS_EXIT" -eq 0 ]; then
+    print_success "Detect-secrets: no new secrets (baseline up to date)"
     SECRETS_STATUS="pass"
 else
-    print_error "Detect-secrets: potential secrets detected"
-    echo "$SECRETS_OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'  {f}: line {s.get(\"line_number\",\"?\")} - {s[\"type\"]}') for f,ss in d['results'].items() for s in ss]" 2>/dev/null || echo "$SECRETS_OUTPUT" | head -30
+    print_error "Detect-secrets: NEW potential secrets detected (not in baseline)"
+    echo "$SECRETS_NEW"
     SECRETS_STATUS="fail"
     mark_failed "Secrets"
 fi
