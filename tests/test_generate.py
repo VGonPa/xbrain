@@ -106,6 +106,30 @@ def test_note_has_frontmatter(tmp_path: Path):
     assert "tags: [x-knowledge" in content
 
 
+def test_frontmatter_includes_topics_and_folder_as_tags(tmp_path):
+    from datetime import datetime, timezone
+    from xbrain.generate import generate
+    from xbrain.models import Author, Enrichment, Item, Link
+
+    item = Item(
+        id="1", source="bookmark", url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"), text="t",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        links=[Link(url="https://arxiv.org/abs/1", domain="arxiv.org")],
+        bookmark_folder="AI papers",
+        enriched=Enrichment(
+            enriched_at=datetime.now(timezone.utc), executor="api",
+            summary="s", primary_topic="ai-coding",
+            topics=["ai-coding", "ai-and-work"]),
+    )
+    generate({"1": item}, tmp_path)
+    note = next((tmp_path / "items").glob("*-1.md")).read_text(encoding="utf-8")
+    assert "ai-coding" in note and "ai-and-work" in note
+    assert "ai-papers" in note          # folder, slugified, as a tag
+    assert "bookmark_folder: AI papers" in note
+
+
 def test_generate_since_until_filters_item_notes(tmp_path: Path):
     old_item = _item("1", with_link=True, text="Old note")
     old_item.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
