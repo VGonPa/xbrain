@@ -2,8 +2,9 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import _slugify, generate
+from xbrain.generate import generate
 from xbrain.models import Author, Item, Link
+from xbrain.notes_io import slugify
 
 
 def _item(item_id: str, with_link: bool, text: str | None = None) -> Item:
@@ -46,13 +47,13 @@ def test_log_lists_every_item(tmp_path: Path):
 
 
 def test_slugify_handles_edge_cases():
-    slug = _slugify("Café del Día")
+    slug = slugify("Café del Día")
     assert slug == slug.lower()
     assert slug.isascii()
     assert slug == "cafe-del-dia"
-    assert _slugify("") == "item"
-    assert _slugify("!!!") == "item"
-    long_slug = _slugify("a" * 200)
+    assert slugify("") == "item"
+    assert slugify("!!!") == "item"
+    long_slug = slugify("a" * 200)
     assert len(long_slug) <= 60
 
 
