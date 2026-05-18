@@ -2,7 +2,7 @@
 import json
 from datetime import datetime, timezone
 
-from xbrain.executors.api import ApiExecutor, _extract_json, _user_prompt
+from xbrain.executors.api import ApiExecutor, _user_prompt
 from xbrain.models import Author, Item, Link, Topic
 
 
@@ -66,28 +66,6 @@ def test_user_prompt_includes_link_domains_and_folder():
     prompt = _user_prompt(item, VOCAB)
     assert "arxiv.org" in prompt
     assert "AI papers" in prompt
-
-
-def test_extract_json_handles_a_fenced_block():
-    fenced = ('Here:\n```json\n{"summary":"r","primary_topic":"misc",'
-              '"topics":["misc"]}\n```')
-    assert _extract_json(fenced)["primary_topic"] == "misc"
-
-
-def test_extract_json_raises_value_error_on_garbage():
-    import pytest
-
-    with pytest.raises(ValueError):
-        _extract_json("totally not json at all")
-
-
-def test_extract_json_raises_value_error_on_malformed_json():
-    import pytest
-
-    # A bracketed blob that the regex matches but json.loads cannot parse.
-    with pytest.raises(ValueError) as exc_info:
-        _extract_json('{"summary": "r", "primary_topic": missing-quotes}')
-    assert "malformed JSON" in str(exc_info.value)
 
 
 def test_user_prompt_includes_folder_when_no_links():

@@ -7,29 +7,12 @@ the article body was not fetched (design §15.2).
 """
 from __future__ import annotations
 
-import json
-import re
-
 from xbrain.executors.base import EnrichmentJudgment
+from xbrain.llm_json import extract_json
 from xbrain.models import Item, Topic
 from xbrain.rubrics import load_rubric
 
 _MAX_TOKENS = 600
-_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
-
-
-def _extract_json(text: str) -> dict:
-    """Pull the first JSON object out of a model response (fenced or bare)."""
-    match = _JSON_OBJECT.search(text)
-    if not match:
-        raise ValueError(f"no JSON object in model response: {text[:200]!r}")
-    snippet = match.group(0)
-    try:
-        return json.loads(snippet)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"malformed JSON in model response: {exc} -- snippet: {snippet[:200]!r}"
-        ) from exc
 
 
 def _vocab_block(vocab: list[Topic]) -> str:
@@ -104,7 +87,7 @@ class ApiExecutor:
                 raise ValueError(
                     f"no text block in model response for item {item.id}"
                 )
-            judgment = _extract_json(blocks[0].text)
+            judgment = extract_json(blocks[0].text)
             results.append(EnrichmentJudgment(
                 item_id=item.id,
                 summary=str(judgment.get("summary", "")),

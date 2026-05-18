@@ -25,6 +25,7 @@ class _FakeMessages:
         payload = self._payloads.pop(0)
 
         class _Block:
+            type = "text"
             text = json.dumps(payload)
 
         class _Resp:

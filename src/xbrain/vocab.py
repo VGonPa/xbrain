@@ -6,22 +6,12 @@ consolidation call merges all candidates into exactly `target_count` topics
 """
 from __future__ import annotations
 
-import json
-import re
-
+from xbrain.llm_json import extract_json
 from xbrain.models import Item, Topic
 from xbrain.rubrics import load_rubric
 
 _MAP_MAX_TOKENS = 1000
 _REDUCE_MAX_TOKENS = 2000
-_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
-
-
-def _extract_json(text: str) -> dict:
-    match = _JSON_OBJECT.search(text)
-    if not match:
-        raise ValueError(f"no JSON object in model response: {text[:200]!r}")
-    return json.loads(match.group(0))
 
 
 def _chunks(items: list[Item], size: int) -> list[list[Item]]:
@@ -33,7 +23,10 @@ def _call(client, model: str, max_tokens: int, system: str, user: str) -> dict:
         model=model, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}],
     )
-    return _extract_json(response.content[0].text)
+    blocks = [b for b in response.content if getattr(b, "type", None) == "text"]
+    if not blocks:
+        raise ValueError("no text block in model response")
+    return extract_json(blocks[0].text)
 
 
 def induce_vocab(
@@ -75,4 +68,11 @@ def induce_vocab(
         + cand_block
     )
     final = _call(client, model, _REDUCE_MAX_TOKENS, system, user)
-    return [Topic(**entry) for entry in final.get("topics", [])]
+    topics: list[Topic] = []
+    for entry in final.get("topics", []):
+        try:
+            topics.append(Topic(**entry))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"invalid topic in vocab reduce output: {entry!r} ({exc})") from exc
+    return topics
