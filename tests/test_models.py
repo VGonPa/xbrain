@@ -50,6 +50,17 @@ def test_topic_model_holds_slug_and_description():
     assert t.slug == "ai-coding"
 
 
+def test_topic_rejects_non_kebab_case_slug():
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import Topic
+
+    for bad in ["AI Coding", "ai_coding", "-ai", "ai-", "ai--coding"]:
+        with pytest.raises(ValidationError):
+            Topic(slug=bad, description="d")
+
+
 def test_item_has_optional_bookmark_folder():
     from datetime import datetime, timezone
     from xbrain.models import Author, Item

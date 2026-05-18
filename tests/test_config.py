@@ -59,3 +59,35 @@ def test_load_config_pipeline_settings_have_defaults(tmp_path: Path):
     assert cfg.enrich_executor == "claude-code"  # subscription is the default
     assert cfg.enrich_model == "claude-haiku-4-5-20251001"
     assert cfg.vocab_target_count == 30
+
+
+def test_load_config_rejects_unknown_executor(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[paths]\n'
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        '[x]\n'
+        'handle = "vgonpa"\n'
+        '[enrich]\n'
+        'executor = "gpt"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="executor must be"):
+        load_config(tmp_path)
+
+
+def test_load_config_rejects_zero_target_count(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[paths]\n'
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        '[x]\n'
+        'handle = "vgonpa"\n'
+        '[vocab]\n'
+        'target_count = 0\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="target_count must be >= 1"):
+        load_config(tmp_path)

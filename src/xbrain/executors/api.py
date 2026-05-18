@@ -12,7 +12,7 @@ import sys
 from xbrain.executors.base import EnrichmentJudgment
 from xbrain.llm_json import json_from_response
 from xbrain.models import Item, Topic
-from xbrain.rubrics import load_rubric
+from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 
 _MAX_TOKENS = 600
 
@@ -53,7 +53,7 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
         for src in item.content.sources:
             if src.ok and src.text:
                 parts += ["", f"Linked article ({src.title or src.url}):",
-                          src.text[:4000]]
+                          src.text[:ARTICLE_CHAR_LIMIT]]
     return "\n".join(parts)
 
 

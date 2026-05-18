@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# The set of enrichment executor names — one source of truth shared by the
+# data model, the config loader and the enrichment phase.
+ExecutorName = Literal["manual", "api", "claude-code"]
+
 
 class Author(BaseModel):
     handle: str
@@ -44,7 +48,7 @@ class Content(BaseModel):
 
 class Enrichment(BaseModel):
     enriched_at: datetime
-    executor: Literal["manual", "api", "claude-code"]
+    executor: ExecutorName
     summary: str | None = None
     primary_topic: str | None = None
     topics: list[str] = Field(default_factory=list)
@@ -53,7 +57,7 @@ class Enrichment(BaseModel):
 
 class Topic(BaseModel):
     """One entry of the induced topic vocabulary (data/vocab.yaml)."""
-    slug: str
+    slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str
 
 

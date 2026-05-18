@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import get_args
 
-from xbrain.models import Enrichment, Item, Topic
+from xbrain.executors.base import EnrichmentExecutor
+from xbrain.models import Enrichment, ExecutorName, Item, Topic
 from xbrain.validate import validate_judgment
 
 
@@ -53,7 +55,7 @@ def _validate_and_attach(
 
 
 def enrich_with_executor(
-    store: dict[str, Item], executor, vocab: list[Topic],
+    store: dict[str, Item], executor: EnrichmentExecutor, vocab: list[Topic],
     since: datetime | None = None, until: datetime | None = None,
 ) -> tuple[int, list[tuple[str, list[str]]]]:
     """Enrich pending items with an in-process executor (the `api` track).
@@ -80,7 +82,7 @@ def apply_worksheet_judgments(
     executor_name: str = "claude-code",
 ) -> tuple[int, list[tuple[str, list[str]]]]:
     """Validate + attach judgments from a filled worksheet (the worksheet track)."""
-    if executor_name not in ("manual", "api", "claude-code"):
+    if executor_name not in get_args(ExecutorName):
         raise ValueError(
             f"worksheet has an invalid executor: {executor_name!r}")
     vocab_slugs = {t.slug for t in vocab}

@@ -135,8 +135,7 @@ def _frontmatter(item: Item) -> str:
         tags += item.enriched.topics  # topics already includes primary_topic
     if item.bookmark_folder:
         tags.append(_slugify(item.bookmark_folder))
-    seen: set[str] = set()
-    tags = [t for t in tags if not (t in seen or seen.add(t))]
+    tags = list(dict.fromkeys(tags))
     lines = [
         "---",
         f'id: "{item.id}"',

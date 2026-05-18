@@ -198,10 +198,10 @@ def enrich(
     cfg = _config()
     store = load_store(cfg.items_path)
     vocab_topics = load_vocab(cfg.data_dir / "vocab.yaml")
+    if not vocab_topics:
+        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
 
     if apply is not None:
-        if not vocab_topics:
-            raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
         executor_name, judgments = import_worksheet(apply)
         enriched, invalid = apply_worksheet_judgments(
             store, judgments, vocab_topics, executor_name)
@@ -210,8 +210,6 @@ def enrich(
         _report_invalid(invalid)
         return
 
-    if not vocab_topics:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
     chosen = executor or cfg.enrich_executor
 
     if chosen in ("manual", "claude-code"):

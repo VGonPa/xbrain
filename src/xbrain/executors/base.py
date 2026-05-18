@@ -15,11 +15,15 @@ from xbrain.models import Item, Topic
 
 
 class EnrichmentJudgment(BaseModel):
-    """One executor result for one item — judgment only, no identifiers."""
+    """One executor result for one item — judgment only, no identifiers.
+
+    `topics` always carries at least the primary topic, so an empty list is an
+    illegal state and fails construction.
+    """
     item_id: str
     summary: str
     primary_topic: str
-    topics: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(min_length=1)
 
 
 class EnrichmentExecutor(Protocol):

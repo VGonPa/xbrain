@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.models import Item, Topic
-from xbrain.rubrics import load_rubric
+from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 
 
 def _article_text(item: Item) -> str | None:
@@ -20,7 +20,7 @@ def _article_text(item: Item) -> str | None:
         return None
     for src in item.content.sources:
         if src.ok and src.text:
-            return src.text[:4000]
+            return src.text[:ARTICLE_CHAR_LIMIT]
     return None
 
 

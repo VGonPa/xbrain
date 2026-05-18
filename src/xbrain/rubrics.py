@@ -15,6 +15,10 @@ _PKG = Path(__file__).resolve().parent
 _RUBRICS_DIR = _PKG / "rubrics"
 _GUARDRAILS = _PKG / "guardrails.yaml"
 
+# Max characters of linked-article body passed to an executor. Shared by the
+# `api` executor prompt and the worksheet export so both truncate identically.
+ARTICLE_CHAR_LIMIT = 4000
+
 
 def load_rubric(name: str) -> str:
     """Return the text of `rubrics/rubric-<name>.md`."""
