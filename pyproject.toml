@@ -8,6 +8,8 @@ dependencies = [
     "typer>=0.12",
     "playwright>=1.44",
     "trafilatura>=1.9",
+    "anthropic>=0.39",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
