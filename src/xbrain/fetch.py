@@ -8,6 +8,8 @@ they are handled by `xbrain.fetch_x`.
 
 from __future__ import annotations
 
+import json
+import os
 import socket
 import urllib.error
 import urllib.request
@@ -23,6 +25,8 @@ from xbrain.models import Content, ContentSource, FailureReason, Item
 _X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
 _UA = "Mozilla/5.0 (compatible; XBrain/1.0)"
 _TIMEOUT = 20
+_FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape"
+_FIRECRAWL_TIMEOUT = 60
 
 
 @dataclass
@@ -79,7 +83,11 @@ def _probe_status(
     try:
         with opener(req, timeout=_TIMEOUT) as resp:
             status = getattr(resp, "status", None) or 200
-        return status, "js_required", "Descargable pero sin artículo extraíble (posible JavaScript)."
+        return (
+            status,
+            "js_required",
+            "Descargable pero sin artículo extraíble (posible JavaScript).",
+        )
     except urllib.error.HTTPError as exc:
         return exc.code, _reason_for_status(exc.code), f"HTTP {exc.code}: {exc.reason}"
     except urllib.error.URLError as exc:
@@ -113,10 +121,59 @@ def trafilatura_extract(
     return FetchResult(title=title, text=text, http_status=200, attempts=1)
 
 
-def extract_article(url: str) -> FetchResult:
-    """Default extractor — trafilatura only. The Firecrawl fallback is wired in
-    a later task, which replaces this function."""
-    return trafilatura_extract(url)
+def _firecrawl_extract(
+    url: str, *, opener: Callable = urllib.request.urlopen
+) -> FetchResult | None:
+    """Second-attempt extraction via Firecrawl (renders JavaScript).
+
+    Returns `None` when `FIRECRAWL_API_KEY` is unset — the fallback is optional,
+    so XBrain users without a key simply do not get it.
+    """
+    key = os.environ.get("FIRECRAWL_API_KEY")
+    if not key:
+        return None
+    body = json.dumps({"url": url, "formats": ["markdown"], "onlyMainContent": True}).encode()
+    req = urllib.request.Request(
+        _FIRECRAWL_URL,
+        data=body,
+        method="POST",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    try:
+        with opener(req, timeout=_FIRECRAWL_TIMEOUT) as resp:
+            payload = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001 - a fallback failure must not abort the batch
+        return FetchResult(error=f"Firecrawl falló: {exc}", attempts=1)
+    data = payload.get("data") or {}
+    text = data.get("markdown")
+    if text:
+        title = (data.get("metadata") or {}).get("title")
+        return FetchResult(title=title, text=text, http_status=200, attempts=1)
+    return FetchResult(
+        failure_reason="empty_content", error="Firecrawl no devolvió contenido.", attempts=1
+    )
+
+
+def extract_article(
+    url: str,
+    *,
+    primary: Callable = trafilatura_extract,
+    firecrawl: Callable = _firecrawl_extract,
+) -> FetchResult:
+    """Default extractor: trafilatura, then Firecrawl for JS-rendered pages."""
+    result = primary(url)
+    if result.text:
+        return result
+    if result.failure_reason not in ("js_required", "empty_content"):
+        return result  # a hard failure (404, dns, ...) — Firecrawl will not help
+    fallback = firecrawl(url)
+    if fallback is None:
+        return result  # Firecrawl not configured — keep the original evidence
+    if fallback.text:
+        fallback.attempts = result.attempts + 1
+        return fallback
+    result.attempts = result.attempts + 1  # both attempts exhausted; keep first evidence
+    return result
 
 
 def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Content:
@@ -166,11 +223,7 @@ def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Con
                     attempts=result.attempts,
                 )
             )
-    kept = (
-        [s for s in item.content.sources if s.kind != "external_article"]
-        if item.content
-        else []
-    )
+    kept = [s for s in item.content.sources if s.kind != "external_article"] if item.content else []
     return Content(fetched_at=datetime.now(timezone.utc), sources=kept + new_sources)
 
 

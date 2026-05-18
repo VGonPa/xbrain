@@ -169,3 +169,82 @@ def test_fetch_pending_force_refetches():
     assert fetch_pending(store, extractor=_fake_extractor) == 1
     assert fetch_pending(store, extractor=_fake_extractor) == 0
     assert fetch_pending(store, force=True, extractor=_fake_extractor) == 1
+
+
+def test_firecrawl_extract_returns_none_without_api_key(monkeypatch):
+    from xbrain.fetch import _firecrawl_extract
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    assert _firecrawl_extract("https://e.com/a") is None
+
+
+def test_firecrawl_extract_parses_markdown(monkeypatch):
+    import io
+    import json
+
+    from xbrain.fetch import _firecrawl_extract
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    payload = {"data": {"markdown": "el cuerpo", "metadata": {"title": "T"}}}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout=0):
+        return _Resp(json.dumps(payload).encode())
+
+    result = _firecrawl_extract("https://e.com/a", opener=opener)
+    assert result is not None
+    assert result.text == "el cuerpo"
+    assert result.title == "T"
+
+
+def test_extract_article_falls_back_to_firecrawl_on_js_required():
+    from xbrain.fetch import FetchResult, extract_article
+
+    def primary(url):
+        return FetchResult(failure_reason="js_required", error="js", attempts=1)
+
+    def firecrawl(url):
+        return FetchResult(text="rescatado por firecrawl", attempts=1)
+
+    result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
+    assert result.text == "rescatado por firecrawl"
+    assert result.attempts == 2
+
+
+def test_extract_article_keeps_evidence_when_firecrawl_unavailable():
+    from xbrain.fetch import FetchResult, extract_article
+
+    def primary(url):
+        return FetchResult(failure_reason="js_required", error="js", attempts=1)
+
+    def firecrawl(url):
+        return None
+
+    result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
+    assert result.text is None
+    assert result.failure_reason == "js_required"
+    assert result.attempts == 1
+
+
+def test_extract_article_does_not_retry_hard_failures():
+    from xbrain.fetch import FetchResult, extract_article
+
+    # A 404 is definitive — Firecrawl must not even be called.
+    calls = []
+
+    def primary(url):
+        return FetchResult(http_status=404, failure_reason="not_found", attempts=1)
+
+    def firecrawl(url):
+        calls.append(url)
+        return FetchResult(text="x")
+
+    result = extract_article("https://e.com/a", primary=primary, firecrawl=firecrawl)
+    assert result.failure_reason == "not_found"
+    assert calls == []
