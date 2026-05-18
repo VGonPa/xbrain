@@ -262,3 +262,16 @@ def test_enrich_manual_with_no_pending_items_writes_no_worksheet(tmp_path, monke
     assert result.exit_code == 0
     assert "No hay items pendientes" in result.output
     assert not (tmp_path / "data" / "enrich-worksheet.json").exists()
+
+
+def test_cli_fetch_reports_x_articles(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    import xbrain.cli as cli
+
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr(cli, "fetch_pending", lambda *a, **k: 0)
+    monkeypatch.setattr(cli, "fetch_x_articles", lambda *a, **k: 3)
+    monkeypatch.setattr(cli, "expand_threads", lambda *a, **k: 0)
+    result = runner.invoke(app, ["fetch"])
+    assert result.exit_code == 0
+    assert "3 de X" in result.output

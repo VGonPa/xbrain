@@ -20,6 +20,7 @@ from xbrain.extract.browser import x_context
 from xbrain.extract.extractor import extract_source
 from xbrain.extract.threads import expand_threads
 from xbrain.fetch import fetch_pending
+from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
 from xbrain.models import ArchiveImport, Author, SourceName
 from xbrain.rubrics import load_vocab, save_vocab
@@ -126,9 +127,10 @@ def _run_extract(cfg: Config, source: str, since: datetime | None, until: dateti
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
     store = load_store(cfg.items_path)
     articles = fetch_pending(store, since, until, force)
+    x_articles = fetch_x_articles(store, cfg.storage_state_path, force)
     threads = expand_threads(store, cfg.storage_state_path, force)
     save_store(store, cfg.items_path)
-    typer.echo(f"Contenido descargado: {articles} artículos, {threads} hilos")
+    typer.echo(f"Contenido descargado: {articles} artículos, {x_articles} de X, {threads} hilos")
 
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:

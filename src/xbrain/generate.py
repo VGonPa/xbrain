@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.models import Item
+from xbrain.models import ContentSource, Item
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,28 @@ _DEFAULT_TAIL = (
     "*(Escribe debajo. El bloque por encima de este punto se regenera "
     "automáticamente; no lo edites.)*\n\n"
 )
+
+_FAILURE_ES = {
+    "not_found": "no encontrado",
+    "forbidden": "acceso denegado",
+    "paywall": "muro de pago",
+    "timeout": "tiempo de espera agotado",
+    "dns_error": "dominio no resuelto",
+    "js_required": "requiere JavaScript",
+    "empty_content": "sin contenido extraíble",
+}
+
+
+def _broken_link_line(source: ContentSource, fetched_at: datetime) -> str:
+    """A one-line, human-readable record of a link that could not be fetched."""
+    bits: list[str] = []
+    if source.http_status:
+        bits.append(f"HTTP {source.http_status}")
+    if source.failure_reason:
+        bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
+    detail = " · ".join(bits) or "no se pudo recuperar"
+    date = fetched_at.date().isoformat()
+    return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
 
 
 def generate(
@@ -126,6 +148,8 @@ def _render_note(item: Item) -> str:
             if source.ok and source.text:
                 heading = source.title or source.url
                 lines += [f"## Contenido: {heading}", "", source.text, ""]
+            elif not source.ok and source.kind in ("external_article", "x_article"):
+                lines += [_broken_link_line(source, item.content.fetched_at), ""]
     return "\n".join(lines).rstrip()
 
 
