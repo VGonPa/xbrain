@@ -104,7 +104,9 @@ complexity = "radon cc src/xbrain -s"
 security   = "bandit -r src/xbrain -ll -q"
 deadcode   = "vulture src/xbrain --min-confidence 80"
 docs       = "interrogate src/xbrain"
-secrets    = "detect-secrets scan src/xbrain tests scripts"
+# No standalone `secrets` task: a bare `detect-secrets scan` always exits 0
+# regardless of new secrets, giving a false green. The real secrets gate is
+# the baseline diff inside `poe check` (scripts/check.sh).
 deps       = "deptry ."
 test       = "pytest -q"
 check      = "bash scripts/check.sh"

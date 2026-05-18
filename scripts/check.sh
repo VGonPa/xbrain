@@ -10,24 +10,26 @@
 #
 # Check severities:
 #   CRITICAL (exit 1 on failure): ruff check, ruff format, mypy, bandit,
-#                                 detect-secrets, pytest, coverage, radon D/E/F
-#   WARN ONLY (never blocks)     : radon grade C, vulture, interrogate, deptry
+#                                 detect-secrets, pytest, coverage
+#   radon: D/E/F = critical (exit 1), C = warn-only (never blocks)
+#   WARN ONLY (never blocks)     : vulture, interrogate, deptry
 
 set -euo pipefail
 
-# Detect CI environment
+# Detect CI environment (used to guard the GITHUB_STEP_SUMMARY output)
 IS_CI="${GITHUB_ACTIONS:-false}"
 
-# Color codes (disabled in CI)
-if [ "$IS_CI" = "true" ]; then
-    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' NC=''
-else
+# Color codes: enabled only on an interactive TTY, with NO_COLOR unset, and
+# not in CI. Anything else (pipes, files, CI logs) gets blank codes.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "$IS_CI" != "true" ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[1;33m'
     CYAN='\033[0;36m'
     BOLD='\033[1m'
     NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' NC=''
 fi
 
 # Track results
@@ -65,6 +67,87 @@ mark_failed() {
     fi
 }
 
+# ----------------------------------------------------------------------------
+# Summary rendering
+#
+# Both the terminal summary and the GitHub markdown table are driven from ONE
+# ordered list of check records, built by build_check_records(). Each record
+# is a single line with five "|"-separated fields:
+#
+#   name | status | term_detail | gh_detail | severity
+#
+#     name        - display label (terminal pads it to a fixed width)
+#     status      - resolved status: pass | warn | fail
+#     term_detail - trailing detail shown in the terminal row ("" = none)
+#     gh_detail   - "Details" cell text in the GitHub table
+#     severity    - record category (informational; renderers key on status)
+#
+# The delimiter is "|" (not a tab) on purpose: `read` treats tab as IFS
+# whitespace and would coalesce an empty term_detail field, dropping a column.
+# No detail string contains "|". Adding a check means adding ONE record here;
+# both renderers pick it up.
+# ----------------------------------------------------------------------------
+
+# Resolved status for radon (pass shows "All A/B", warn/fail show the grade).
+radon_term_detail() {
+    case "$RADON_STATUS" in
+        pass) echo "All A/B" ;;
+        *)    echo "Has grade ${RADON_MAX_GRADE}" ;;
+    esac
+}
+radon_gh_detail() {
+    case "$RADON_STATUS" in
+        pass) echo "All functions grade A/B" ;;
+        warn) echo "Has grade ${RADON_MAX_GRADE}" ;;
+        *)    echo "Has grade ${RADON_MAX_GRADE} (D/E/F)" ;;
+    esac
+}
+
+build_check_records() {
+    # name | status | term_detail | gh_detail | severity
+    printf '%s|%s|%s|%s|%s\n' \
+        "Ruff (linting)" "$RUFF_STATUS" "" \
+        "$([ "$RUFF_STATUS" = pass ] && echo 'Code is clean' || echo 'Linting errors')" "critical"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Ruff (format)" "$FORMAT_STATUS" "" \
+        "$([ "$FORMAT_STATUS" = pass ] && echo 'Code is formatted' || echo 'Formatting errors')" "critical"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Mypy (types)" "$MYPY_STATUS" "" \
+        "$([ "$MYPY_STATUS" = pass ] && echo 'Type checks passed' || echo 'Type errors found')" "critical"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Radon (complexity)" "$RADON_STATUS" "$(radon_term_detail)" \
+        "$(radon_gh_detail)" "critical"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Bandit (security)" "$BANDIT_STATUS" "" \
+        "$([ "$BANDIT_STATUS" = pass ] && echo 'No security issues' || echo 'Security issues found')" "critical"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Vulture (dead code)" "$VULTURE_STATUS" "" \
+        "$([ "$VULTURE_STATUS" = pass ] && echo 'No dead code' || echo 'Possible dead code')" "warn"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Interrogate (docs)" "$INTERROGATE_STATUS" "${INTERROGATE_PCT}%" \
+        "$([ "$INTERROGATE_STATUS" = pass ] && echo "${INTERROGATE_PCT}% coverage" || echo "${INTERROGATE_PCT}% (target 60%)")" "warn"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Detect-secrets" "$SECRETS_STATUS" "" \
+        "$([ "$SECRETS_STATUS" = pass ] && echo 'No secrets found' || echo 'Potential secrets detected')" "critical"
+    printf '%s|%s|%s|%s|%s\n' \
+        "Tests" "$TESTS_STATUS" \
+        "$([ "$TESTS_STATUS" = pass ] && echo "${TESTS_COUNT} tests" || echo '')" \
+        "$([ "$TESTS_STATUS" = pass ] && echo "${TESTS_COUNT:-All} tests passed" || echo 'Test failures')" "critical"
+    if [ -n "$COVERAGE_PCT" ]; then
+        local gh_cov
+        case "$COVERAGE_STATUS" in
+            pass) gh_cov="Above ${COVERAGE_MIN}% minimum" ;;
+            warn) gh_cov="Within 5pts of ${COVERAGE_MIN}% minimum" ;;
+            *)    gh_cov="Below ${COVERAGE_MIN}% minimum" ;;
+        esac
+        printf '%s|%s|%s|%s|%s\n' \
+            "Coverage" "$COVERAGE_STATUS" "${COVERAGE_PCT}%" "$gh_cov" "coverage"
+    fi
+    printf '%s|%s|%s|%s|%s\n' \
+        "Deptry (deps)" "$DEPTRY_STATUS" "" \
+        "$([ "$DEPTRY_STATUS" = pass ] && echo 'Dependencies OK' || echo 'Dependency notes')" "warn"
+}
+
 print_summary() {
     echo ""
     echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
@@ -72,88 +155,26 @@ print_summary() {
     echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
     echo ""
 
-    # Ruff (linting)
-    if [ "$RUFF_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Ruff (linting)       ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${RED}❌${NC} Ruff (linting)       ${RED}FAIL${NC}"
-    fi
-
-    # Ruff (format)
-    if [ "$FORMAT_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Ruff (format)        ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${RED}❌${NC} Ruff (format)        ${RED}FAIL${NC}"
-    fi
-
-    # Mypy
-    if [ "$MYPY_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Mypy (types)         ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${RED}❌${NC} Mypy (types)         ${RED}FAIL${NC}"
-    fi
-
-    # Radon
-    if [ "$RADON_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Radon (complexity)   ${GREEN}PASS${NC} - All A/B"
-    elif [ "$RADON_STATUS" = "warn" ]; then
-        echo -e "  ${YELLOW}⚠️${NC}  Radon (complexity)   ${YELLOW}WARN${NC} - Has grade ${RADON_MAX_GRADE}"
-    else
-        echo -e "  ${RED}❌${NC} Radon (complexity)   ${RED}FAIL${NC} - Has grade ${RADON_MAX_GRADE}"
-    fi
-
-    # Bandit
-    if [ "$BANDIT_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Bandit (security)    ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${RED}❌${NC} Bandit (security)    ${RED}FAIL${NC}"
-    fi
-
-    # Vulture
-    if [ "$VULTURE_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Vulture (dead code)  ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${YELLOW}⚠️${NC}  Vulture (dead code)  ${YELLOW}WARN${NC}"
-    fi
-
-    # Interrogate
-    if [ "$INTERROGATE_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Interrogate (docs)   ${GREEN}PASS${NC} - ${INTERROGATE_PCT}%"
-    else
-        echo -e "  ${YELLOW}⚠️${NC}  Interrogate (docs)   ${YELLOW}WARN${NC} - ${INTERROGATE_PCT}%"
-    fi
-
-    # Detect-secrets
-    if [ "$SECRETS_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Detect-secrets       ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${RED}❌${NC} Detect-secrets       ${RED}FAIL${NC}"
-    fi
-
-    # Tests
-    if [ "$TESTS_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Tests                ${GREEN}PASS${NC} - ${TESTS_COUNT} tests"
-    else
-        echo -e "  ${RED}❌${NC} Tests                ${RED}FAIL${NC}"
-    fi
-
-    # Coverage
-    if [ -n "$COVERAGE_PCT" ]; then
-        if [ "$COVERAGE_STATUS" = "pass" ]; then
-            echo -e "  ${GREEN}✅${NC} Coverage             ${GREEN}${COVERAGE_PCT}%${NC}"
-        elif [ "$COVERAGE_STATUS" = "warn" ]; then
-            echo -e "  ${YELLOW}⚠️${NC}  Coverage             ${YELLOW}${COVERAGE_PCT}%${NC}"
+    local name status term_detail gh_detail severity
+    while IFS='|' read -r name status term_detail gh_detail severity; do
+        [ -z "$name" ] && continue
+        local icon color verdict
+        if [ "$status" = "pass" ]; then
+            icon="${GREEN}✅${NC}" color="$GREEN" verdict="PASS"
+        elif [ "$status" = "warn" ]; then
+            icon="${YELLOW}⚠️${NC} " color="$YELLOW" verdict="WARN"
         else
-            echo -e "  ${RED}❌${NC} Coverage             ${RED}${COVERAGE_PCT}%${NC}"
+            icon="${RED}❌${NC}" color="$RED" verdict="FAIL"
         fi
-    fi
-
-    # Deptry
-    if [ "$DEPTRY_STATUS" = "pass" ]; then
-        echo -e "  ${GREEN}✅${NC} Deptry (deps)        ${GREEN}PASS${NC}"
-    else
-        echo -e "  ${YELLOW}⚠️${NC}  Deptry (deps)        ${YELLOW}WARN${NC}"
-    fi
+        if [ "$name" = "Coverage" ]; then
+            # Coverage row prints the percentage in place of PASS/WARN/FAIL.
+            printf "  %b %-20s ${color}%s${NC}\n" "$icon" "$name" "$term_detail"
+        elif [ -n "$term_detail" ]; then
+            printf "  %b %-20s ${color}%s${NC} - %s\n" "$icon" "$name" "$verdict" "$term_detail"
+        else
+            printf "  %b %-20s ${color}%s${NC}\n" "$icon" "$name" "$verdict"
+        fi
+    done < <(build_check_records)
 
     echo ""
     echo -e "${BOLD}───────────────────────────────────────────────────────────${NC}"
@@ -176,77 +197,28 @@ print_github_summary() {
         echo "| Check | Status | Details |"
         echo "|-------|--------|---------|"
 
-        if [ "$RUFF_STATUS" = "pass" ]; then
-            echo "| Ruff (linting) | ✅ PASS | Code is clean |"
-        else
-            echo "| Ruff (linting) | ❌ FAIL | Linting errors |"
-        fi
-
-        if [ "$FORMAT_STATUS" = "pass" ]; then
-            echo "| Ruff (format) | ✅ PASS | Code is formatted |"
-        else
-            echo "| Ruff (format) | ❌ FAIL | Formatting errors |"
-        fi
-
-        if [ "$MYPY_STATUS" = "pass" ]; then
-            echo "| Mypy (types) | ✅ PASS | Type checks passed |"
-        else
-            echo "| Mypy (types) | ❌ FAIL | Type errors found |"
-        fi
-
-        if [ "$RADON_STATUS" = "pass" ]; then
-            echo "| Radon (complexity) | ✅ PASS | All functions grade A/B |"
-        elif [ "$RADON_STATUS" = "warn" ]; then
-            echo "| Radon (complexity) | ⚠️ WARN | Has grade ${RADON_MAX_GRADE} |"
-        else
-            echo "| Radon (complexity) | ❌ FAIL | Has grade ${RADON_MAX_GRADE} (D/E/F) |"
-        fi
-
-        if [ "$BANDIT_STATUS" = "pass" ]; then
-            echo "| Bandit (security) | ✅ PASS | No security issues |"
-        else
-            echo "| Bandit (security) | ❌ FAIL | Security issues found |"
-        fi
-
-        if [ "$VULTURE_STATUS" = "pass" ]; then
-            echo "| Vulture (dead code) | ✅ PASS | No dead code |"
-        else
-            echo "| Vulture (dead code) | ⚠️ WARN | Possible dead code |"
-        fi
-
-        if [ "$INTERROGATE_STATUS" = "pass" ]; then
-            echo "| Interrogate (docs) | ✅ PASS | ${INTERROGATE_PCT}% coverage |"
-        else
-            echo "| Interrogate (docs) | ⚠️ WARN | ${INTERROGATE_PCT}% (target 60%) |"
-        fi
-
-        if [ "$SECRETS_STATUS" = "pass" ]; then
-            echo "| Detect-secrets | ✅ PASS | No secrets found |"
-        else
-            echo "| Detect-secrets | ❌ FAIL | Potential secrets detected |"
-        fi
-
-        if [ "$TESTS_STATUS" = "pass" ]; then
-            echo "| Tests | ✅ PASS | ${TESTS_COUNT:-All} tests passed |"
-        else
-            echo "| Tests | ❌ FAIL | Test failures |"
-        fi
-
-        if [ -n "$COVERAGE_PCT" ]; then
-            if [ "$COVERAGE_STATUS" = "pass" ]; then
-                echo "| Coverage | ✅ ${COVERAGE_PCT}% | Above ${COVERAGE_MIN}% minimum |"
-            elif [ "$COVERAGE_STATUS" = "warn" ]; then
-                echo "| Coverage | ⚠️ ${COVERAGE_PCT}% | Within 5pts of ${COVERAGE_MIN}% minimum |"
+        local name status term_detail gh_detail severity
+        while IFS='|' read -r name status term_detail gh_detail severity; do
+            [ -z "$name" ] && continue
+            local cell
+            if [ "$name" = "Coverage" ]; then
+                # Coverage status cell carries an icon + the percentage.
+                if [ "$status" = "pass" ]; then
+                    cell="✅ ${term_detail}"
+                elif [ "$status" = "warn" ]; then
+                    cell="⚠️ ${term_detail}"
+                else
+                    cell="❌ ${term_detail}"
+                fi
+            elif [ "$status" = "pass" ]; then
+                cell="✅ PASS"
+            elif [ "$status" = "warn" ]; then
+                cell="⚠️ WARN"
             else
-                echo "| Coverage | ❌ ${COVERAGE_PCT}% | Below ${COVERAGE_MIN}% minimum |"
+                cell="❌ FAIL"
             fi
-        fi
-
-        if [ "$DEPTRY_STATUS" = "pass" ]; then
-            echo "| Deptry (deps) | ✅ PASS | Dependencies OK |"
-        else
-            echo "| Deptry (deps) | ⚠️ WARN | Dependency notes |"
-        fi
+            echo "| ${name} | ${cell} | ${gh_detail} |"
+        done < <(build_check_records)
 
         echo ""
         if [ -n "$FAILED_CHECKS" ]; then
@@ -300,11 +272,13 @@ fi
 # 4. RADON - Complexity analysis  (WARN on C, FAIL on D/E/F)
 # ============================================================================
 print_info "Analyzing code complexity with Radon (src/xbrain)..."
-RADON_OUTPUT=$(uv run radon cc src/xbrain -s 2>&1)
+# radon's exit code is not consulted — grade detection is done by grep below —
+# so `|| true` keeps a radon error from aborting the whole script under set -e.
+RADON_OUTPUT=$(uv run radon cc src/xbrain -s 2>&1) || true
 
 if echo "$RADON_OUTPUT" | grep -qE ' - [D-F] \([0-9]+\)$'; then
     # Grade D/E/F is a hard failure
-    RADON_MAX_GRADE=$(echo "$RADON_OUTPUT" | grep -oE ' - [D-F] ' | head -1 | tr -d ' -')
+    RADON_MAX_GRADE=$(echo "$RADON_OUTPUT" | grep -oE ' - [D-F] \([0-9]+\)$' | grep -oE '[D-F]' | head -1)
     print_error "Radon: complexity grade ${RADON_MAX_GRADE} detected (D/E/F is not allowed)"
     echo "$RADON_OUTPUT" | grep -E ' - [D-F] \([0-9]+\)$'
     RADON_STATUS="fail"
@@ -361,8 +335,8 @@ INTERROGATE_OUTPUT=$(uv run interrogate src/xbrain -v 2>&1)
 INTERROGATE_EXIT=$?
 set -e
 
-# Extract coverage percentage
-INTERROGATE_PCT=$(echo "$INTERROGATE_OUTPUT" | grep -oE 'actual: [0-9.]+' | grep -oE '[0-9.]+' | head -1)
+# Extract coverage percentage from the "actual: NN.N%" field in one pass.
+INTERROGATE_PCT=$(echo "$INTERROGATE_OUTPUT" | sed -nE 's/.*actual: ([0-9.]+).*/\1/p' | head -1)
 INTERROGATE_PCT=${INTERROGATE_PCT:-0}
 
 echo "$INTERROGATE_OUTPUT"
@@ -381,10 +355,23 @@ fi
 # Scans, then diffs the result against .secrets.baseline so only NEW secrets
 # fail the gate. The baseline holds audited false positives (status-variable
 # names in this very script) — see the commit that introduced it for the
-# audit notes. Comparison is by hashed_secret value (line-number stable).
+# audit notes.
+#
+# The inline diff is deliberate: `detect-secrets scan --baseline` rewrites the
+# baseline file in place and gives no clean pass/fail signal, so we scan fresh
+# and diff in Python instead. The comparison key is the (filename,
+# hashed_secret) tuple — NOT the hash alone — so the same secret value
+# relocated into a real source file is still flagged rather than silently
+# whitelisted by a baseline entry for a different file.
+#
+# The capture below is wrapped in `set +e`/`set -e`: the RHS is a pipeline and
+# the python stage exits 1 when a new secret is found. Under `set -euo
+# pipefail` an unguarded non-zero pipeline at an assignment would abort the
+# whole script here, so the gate could never fail cleanly.
 print_info "Running detect-secrets scan (src, tests, scripts)..."
 SECRETS_OUTPUT=$(uv run detect-secrets scan src/xbrain tests scripts 2>&1)
 
+set +e
 SECRETS_NEW=$(echo "$SECRETS_OUTPUT" | python3 -c "
 import json, sys
 scan = json.load(sys.stdin)
@@ -393,18 +380,26 @@ try:
         baseline = json.load(f)
 except (OSError, ValueError):
     baseline = {'results': {}}
-known = {s['hashed_secret'] for ss in baseline.get('results', {}).values() for s in ss}
+# Key by (filename, hashed_secret): a secret is 'known' only if the SAME value
+# was audited in the SAME file. The baseline filename comes from each entry's
+# own 'filename' field, falling back to the results-dict key.
+known = {
+    (s.get('filename', f), s['hashed_secret'])
+    for f, ss in baseline.get('results', {}).items()
+    for s in ss
+}
 new = [
     (f, s)
     for f, ss in scan.get('results', {}).items()
     for s in ss
-    if s['hashed_secret'] not in known
+    if (s.get('filename', f), s['hashed_secret']) not in known
 ]
 for f, s in new:
     print(f\"  {f}: line {s.get('line_number', '?')} - {s['type']}\")
 sys.exit(1 if new else 0)
 " 2>&1)
 SECRETS_EXIT=$?
+set -e
 
 if [ "$SECRETS_EXIT" -eq 0 ]; then
     print_success "Detect-secrets: no new secrets (baseline up to date)"
@@ -446,6 +441,14 @@ if [ -n "$COVERAGE_PCT" ]; then
     else
         COVERAGE_STATUS="pass"
     fi
+elif [ "$TEST_EXIT_CODE" -eq 0 ]; then
+    # Tests passed but the TOTAL line could not be parsed — coverage is
+    # unmeasurable. A gate that cannot measure coverage must fail loudly,
+    # not silently vanish. Set a placeholder so the summary row still renders.
+    print_error "Coverage: could not parse coverage from pytest output"
+    COVERAGE_PCT="?"
+    COVERAGE_STATUS="fail"
+    mark_failed "Coverage"
 fi
 
 if [ "$TEST_EXIT_CODE" -eq 0 ]; then
