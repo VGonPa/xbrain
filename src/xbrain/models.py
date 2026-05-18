@@ -46,9 +46,15 @@ class Enrichment(BaseModel):
     enriched_at: datetime
     executor: Literal["manual", "api", "claude-code"]
     summary: str | None = None
+    primary_topic: str | None = None
     topics: list[str] = Field(default_factory=list)
-    note_worthiness: Literal["high", "medium", "low"] | None = None
     user_notes: str | None = None
+
+
+class Topic(BaseModel):
+    """One entry of the induced topic vocabulary (data/vocab.yaml)."""
+    slug: str
+    description: str
 
 
 class Item(BaseModel):
@@ -65,6 +71,7 @@ class Item(BaseModel):
     thread: ThreadInfo | None = None
     content: Content | None = None
     enriched: Enrichment | None = None
+    bookmark_folder: str | None = None
 
 
 class SourceCursor(BaseModel):
