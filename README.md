@@ -44,10 +44,12 @@ it through a worksheet hand-off (see [Execution modes](#execution-modes)).
 ## Why XBrain
 
 A personal knowledge base — a "second brain" — captures everything you
-**produce**: your notes, your drafts, your decisions. It captures almost nothing
-of what you **consume** — the articles you read, the threads you save, the posts
-you write on a platform that is not your vault. That gap is real, and it is
-shaped exactly like everything you found worth keeping.
+**produce**: your notes, your drafts, your decisions.
+
+But it is worthless if it does not capture what you **consume** — the articles
+you read, the threads you save, the posts you write on a platform that is not
+your vault. That gap is real, and it is shaped exactly like everything you found
+worth keeping.
 
 Months of bookmarks are not noise. Every one was a decision that *this is worth
 coming back to* — a quiet, honest signal about what you care about and how your
