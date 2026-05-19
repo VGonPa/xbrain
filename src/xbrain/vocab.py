@@ -114,6 +114,8 @@ def import_vocab_worksheet(path: Path) -> list[dict]:
     if not path.exists():
         raise FileNotFoundError(f"Worksheet not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("worksheet must be a JSON object")
     topics = data.get("topics", [])
     if not isinstance(topics, list):
         raise ValueError("worksheet `topics` must be a list")
@@ -136,6 +138,10 @@ def apply_vocab_worksheet(
             invalid.append(("", ["topic entry is not a JSON object"]))
             continue
         slug = str(entry.get("slug", ""))
+        extra = set(entry) - {"slug", "description"}
+        if extra:
+            invalid.append((slug, [f"unexpected keys: {sorted(extra)}"]))
+            continue
         try:
             topic = Topic(**entry)
         except Exception as exc:  # noqa: BLE001 - collect, do not abort the batch

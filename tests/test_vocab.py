@@ -129,6 +129,21 @@ def test_import_vocab_worksheet_missing_file_raises(tmp_path):
         import_vocab_worksheet(tmp_path / "absent.json")
 
 
+def test_import_vocab_worksheet_rejects_non_dict_root(tmp_path):
+    import json
+
+    import pytest
+
+    from xbrain.vocab import import_vocab_worksheet
+
+    # A worksheet whose top-level JSON is a list (not an object) must surface a
+    # clean ValueError, not an uncaught AttributeError from `data.get(...)`.
+    path = tmp_path / "ws.json"
+    path.write_text(json.dumps(["a", "b"]), encoding="utf-8")
+    with pytest.raises(ValueError):
+        import_vocab_worksheet(path)
+
+
 def test_apply_vocab_worksheet_validates_topics():
     from xbrain.vocab import apply_vocab_worksheet
 
@@ -163,3 +178,19 @@ def test_apply_vocab_worksheet_rejects_non_dict_entry():
     valid, invalid = apply_vocab_worksheet(["oops"])
     assert valid == []
     assert invalid and "not a JSON object" in invalid[0][1][0]
+
+
+def test_apply_vocab_worksheet_rejects_unexpected_keys():
+    from xbrain.vocab import apply_vocab_worksheet
+
+    # `Topic` is lenient, so an entry with an extra key would otherwise be
+    # accepted with the extra key silently dropped — reject it instead.
+    valid, invalid = apply_vocab_worksheet(
+        [
+            {"slug": "ai", "description": "d", "notes": []},
+            {"slug": "ml", "description": "clean sibling"},
+        ]
+    )
+    assert [t.slug for t in valid] == ["ml"]
+    assert invalid and invalid[0][0] == "ai"
+    assert any("unexpected keys" in e for e in invalid[0][1])

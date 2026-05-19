@@ -216,10 +216,12 @@ def fetch(
 @app.command()
 @_handle_cli_errors
 def enrich(
-    executor: str = typer.Option(
+    executor: str | None = typer.Option(
         None, help="api | manual | claude-code (default: the enrich executor set in config.toml)"
     ),
-    apply: Path = typer.Option(None, "--apply", help="Import a filled worksheet and apply it"),
+    apply: Path | None = typer.Option(
+        None, "--apply", help="Import a filled worksheet and apply it"
+    ),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
 ) -> None:
@@ -281,12 +283,14 @@ def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:
 def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> None:
     """`xbrain vocab --apply` — import a filled vocab worksheet."""
     topics, invalid = apply_vocab_worksheet(import_vocab_worksheet(apply))
+    _report_invalid(invalid)
     if not topics:
         raise RuntimeError("La worksheet no produjo ningún topic válido.")
-    save_vocab(topics, cfg.data_dir / "vocab.yaml")
+    # Mark the store first: a crash here leaves items pending (a re-run re-marks
+    # idempotently) — safer than vocab.yaml updated while items stay stale.
     _mark_for_regenerate(store, cfg, regenerate)
+    save_vocab(topics, cfg.data_dir / "vocab.yaml")
     typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
-    _report_invalid(invalid)
 
 
 def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool) -> None:
@@ -295,7 +299,7 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
     if chosen in ("manual", "claude-code"):
         worksheet = cfg.data_dir / "vocab-worksheet.json"
         export_vocab_worksheet(store, cfg.vocab_target_count, worksheet)
-        regen = "  --regenerate" if regenerate else ""
+        regen = " --regenerate" if regenerate else ""
         typer.echo(
             f"Corpus exportado a {worksheet}\n"
             f"Induce la taxonomía (con Claude Code o a mano) y ejecuta:\n"
@@ -316,10 +320,10 @@ def vocab(
     regenerate: bool = typer.Option(
         False, help="Marca todos los items para re-enriquecer contra la taxonomía nueva"
     ),
-    executor: str = typer.Option(
+    executor: str | None = typer.Option(
         None, help="api | manual | claude-code (default: el de config.toml)"
     ),
-    apply: Path = typer.Option(None, "--apply", help="Importar una vocab worksheet rellena"),
+    apply: Path | None = typer.Option(None, "--apply", help="Importar una vocab worksheet rellena"),
 ) -> None:
     """Induce el vocabulario de topics (data/vocab.yaml) desde el corpus."""
     cfg = _config()
@@ -381,8 +385,10 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
 @_handle_cli_errors
 def topics(
     resynth: bool = typer.Option(False, help="Re-sintetizar todos los overviews obsoletos"),
-    apply: Path = typer.Option(None, "--apply", help="Importar un worksheet de overviews relleno"),
-    executor: str = typer.Option(
+    apply: Path | None = typer.Option(
+        None, "--apply", help="Importar un worksheet de overviews relleno"
+    ),
+    executor: str | None = typer.Option(
         None, help="api | manual | claude-code (default: el de config.toml)"
     ),
 ) -> None:

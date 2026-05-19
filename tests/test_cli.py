@@ -519,6 +519,9 @@ def test_vocab_apply_with_no_valid_topics_fails(tmp_path, monkeypatch):
     ws.write_text(json.dumps({"topics": [{"slug": "BAD SLUG"}]}), encoding="utf-8")
     result = runner.invoke(app, ["vocab", "--apply", str(ws)])
     assert result.exit_code == 1
+    # `_report_invalid` must run BEFORE the raise — the user needs to see WHY
+    # the topic was rejected, so the bad slug shows up in the output.
+    assert "BAD SLUG" in result.output
 
 
 def test_vocab_api_executor_still_works(tmp_path, monkeypatch):
