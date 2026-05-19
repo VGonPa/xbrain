@@ -6,19 +6,24 @@
 
 > Your X bookmarks and posts, turned into a second brain.
 
-A second brain captures what you *write*. It rarely captures what you *consume* —
-the things you bookmark, quote and reply to on X. XBrain closes that gap: it
-extracts your X bookmarks and your own tweets, stores them as structured JSON,
-and generates a layered, cross-linked Obsidian wiki you can actually navigate,
-search and think with.
+You bookmark a sharp thread, a research paper, a tool someone shipped over the
+weekend — and a small part of your brain checks a box: *handled, I have that
+now.* Then you never see it again. A bookmark folder is not a library; it is a
+graveyard with good intentions.
 
-It runs locally. The LLM work can run with **no paid API** — a Claude Code
-session does it through a worksheet hand-off (see [Execution modes](#execution-modes)).
+XBrain digs it up. It extracts your X bookmarks and your own posts, stores them
+as structured JSON, and generates a layered, cross-linked Obsidian wiki you can
+actually navigate, search and think with — in the same vault, the same graph,
+as the notes you already keep.
+
+It runs locally. The LLM work needs **no paid API** — a Claude Code session does
+it through a worksheet hand-off (see [Execution modes](#execution-modes)).
 
 ---
 
 ## Table of contents
 
+- [Why XBrain](#why-xbrain)
 - [What you get](#what-you-get)
 - [Quick start](#quick-start)
 - [Prerequisites](#prerequisites)
@@ -36,27 +41,136 @@ session does it through a worksheet hand-off (see [Execution modes](#execution-m
 
 ---
 
+## Why XBrain
+
+A personal knowledge base — a "second brain" — captures everything you
+**produce**: your notes, your drafts, your decisions. It captures almost nothing
+of what you **consume** — the articles you read, the threads you save, the posts
+you write on a platform that is not your vault. That gap is real, and it is
+shaped exactly like everything you found worth keeping.
+
+Months of bookmarks are not noise. Every one was a decision that *this is worth
+coming back to* — a quiet, honest signal about what you care about and how your
+thinking moves. Left inside X, that signal is just a pile you walk away from.
+XBrain pulls the consumption side of your brain into the same place as the
+production side, so your bookmarks and your notes finally link to each other.
+
+**Who it is for** — anyone who uses X as a feed of things worth keeping and
+already thinks in a tool like Obsidian. If you have a bookmark graveyard of your
+own, you already have the raw material.
+
+---
+
 ## What you get
 
 A **three-layer wiki** inside your Obsidian vault. Each layer is denser than the
-one below it, so you can read top-down (the map) or bottom-up (a single post):
+one below it — read top-down for the map, or bottom-up for a single post.
 
 ```mermaid
 flowchart TB
-    Index["<b>Index + Log</b><br/>the map: every topic, the full chronology"]
-    Topics["<b>Topics</b><br/>synthesis pages — an overview that distils<br/>dozens-to-hundreds of posts, plus the post lists"]
-    Items["<b>Items</b><br/>one note per bookmark / tweet:<br/>summary, topics, the linked article fetched in full"]
+    Index["<b>Index + Log</b><br/>the map — every topic, the full chronology"]
+    Topics["<b>Topics</b><br/>an essay per theme,<br/>distilling dozens-to-hundreds of posts"]
+    Items["<b>Items</b><br/>one note per bookmark / tweet —<br/>summary, topics, the linked article fetched in full"]
     Index --> Topics --> Items
 ```
 
-| Layer | File(s) | What it is |
-|-------|---------|------------|
-| **Items** | `items/<date>-<slug>-<id>.md` | One note per bookmark or own-tweet — a Spanish summary, its topics, the fetched article body, and a region for *your* notes that survives regeneration. |
-| **Topics** | `topics/<slug>.md` | One page per topic — an LLM-synthesised overview + "important notes", then the mechanical list of posts (primary + also-relevant). |
-| **Index** | `_index.md`, `log.md` | Counts, the topic map, and the full chronological log. |
+### Layer 1 — Items
+
+One note per bookmark or own-tweet: the original text, the link, the **linked
+article fetched and stored inline**, an LLM summary and its topics. A saved link
+stops being a URL that will quietly rot and becomes a saved *article*.
+
+```markdown
+---
+id: "2010040815176085621"
+source: bookmark
+author: codestirring
+tags: [x-knowledge, ai-coding, software-engineering, ai-economy]
+---
+
+# Code Is Cheap Now. Software Isn't.
+
+Enlaza un artículo que sostiene que el código se ha abaratado pero el software
+no: Claude Code y Opus 4.5 democratizan la creación de software y abren la era
+del software personal y desechable...
+
+**Temas:** [[ai-coding]] · [[software-engineering]] · [[ai-economy]]
+
+## Tweet
+Code Is Cheap Now. Software Isn't.  https://t.co/J9m5RzQNbW
+
+## Contenido: Code Is Cheap Now. Software Isn't.
+<the full text of the linked article, fetched and stored inline>
+```
+
+Everything above the `xbrain:generated` marker is regenerated on every run;
+anything *you* write below it is preserved.
+
+### Layer 2 — Topics
+
+The layer that makes XBrain more than a tidy backup. **A topic page is not a
+list of links — it is an essay.** XBrain reads every post filed under a theme
+and writes one synthesis: where the thinking started, how it moved, what it kept
+circling back to. Then it lists the posts — the ones the topic is *about*
+(primary), and the ones that merely touch it (also-relevant).
+
+```markdown
+---
+topic: ai-coding
+posts: 299
+primary_posts: 103
+---
+
+# ai-coding
+
+> Construir software con IA: vibe coding, el cambio en cómo se escribe el
+> código y la IA como pair-programmer.
+
+## Overview
+
+Es el tema más voluminoso del corpus y narra, casi mes a mes, la transformación
+del oficio de programar bajo la presión de la IA. El arco es muy nítido: del
+autocompletado y el vibe coding de 2025 se pasa a la ingeniería agéntica de
+2026...
+
+## Notas importantes
+- ...
+
+## Posts primarios (103)
+- `2026-01-10` · @codestirring · [[items/...|Code Is Cheap Now. Software Isn't.]]
+
+## También relevante (196)
+- ...
+```
+
+The overview is plain prose — the LLM writes the synthesis, the *code* writes
+every link (see [How it works](#how-it-works)), so regenerating never breaks one.
+
+### Layer 3 — Index
+
+`_index.md` is the map — the corpus counts and every topic ranked by size.
+`log.md` is the full chronology.
+
+```markdown
+# XBrain
+
+## Resumen
+- Items totales: 1884
+- Bookmarks: 1123 · Tweets propios: 761
+- Enriquecidos: 1884
+
+## Temas
+- [[ai-coding]] (299)
+- [[ai-industry]] (225)
+- [[ai-and-work]] (220)
+  ...
+```
 
 The markdown is **derived and disposable** — regenerate it any time. The source
 of truth is `data/items.json`.
+
+> The example notes are in Spanish because the summary and overview language is
+> set by the rubrics in `src/xbrain/rubrics/` — plain markdown you can edit.
 
 ---
 
