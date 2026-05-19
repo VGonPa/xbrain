@@ -123,7 +123,7 @@ def test_vocab_command_persists_induced_topics(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli, "induce_vocab", lambda *a, **k: [Topic(slug="misc", description="Noise.")]
     )
-    result = runner.invoke(app, ["vocab"])
+    result = runner.invoke(app, ["vocab", "--executor", "api"])
     assert result.exit_code == 0
     from xbrain.rubrics import load_vocab
 
@@ -457,3 +457,87 @@ def test_topics_resynth_succeeds(tmp_path, monkeypatch):
     assert result.exit_code == 0
     page = (tmp_path / "vault" / "x-knowledge" / "topics" / "misc.md").read_text(encoding="utf-8")
     assert "Re-sintetizado." in page
+
+
+def test_vocab_claude_code_exports_a_worksheet(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["vocab", "--executor", "claude-code"])
+    assert result.exit_code == 0
+    assert (tmp_path / "data" / "vocab-worksheet.json").exists()
+
+
+def test_vocab_apply_writes_vocab_yaml(tmp_path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps({"topics": [{"slug": "misc", "description": "Ruido."}]}), encoding="utf-8"
+    )
+    result = runner.invoke(app, ["vocab", "--apply", str(ws)])
+    assert result.exit_code == 0
+    from xbrain.rubrics import load_vocab
+
+    assert [t.slug for t in load_vocab(tmp_path / "data" / "vocab.yaml")] == ["misc"]
+
+
+def test_vocab_apply_regenerate_marks_items(tmp_path, monkeypatch):
+    import json
+    from datetime import datetime, timezone
+
+    from xbrain.models import Enrichment
+
+    _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("1")
+    item.enriched = Enrichment(
+        enriched_at=datetime.now(timezone.utc),
+        executor="manual",
+        summary="s",
+        primary_topic="misc",
+        topics=["misc"],
+    )
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps({"topics": [{"slug": "misc", "description": "Ruido."}]}), encoding="utf-8"
+    )
+    result = runner.invoke(app, ["vocab", "--apply", str(ws), "--regenerate"])
+    assert result.exit_code == 0
+    from xbrain.store import load_store as _ls
+
+    assert _ls(tmp_path / "data" / "items.json")["1"].enriched is None
+
+
+def test_vocab_apply_with_no_valid_topics_fails(tmp_path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(json.dumps({"topics": [{"slug": "BAD SLUG"}]}), encoding="utf-8")
+    result = runner.invoke(app, ["vocab", "--apply", str(ws)])
+    assert result.exit_code == 1
+
+
+def test_vocab_api_executor_still_works(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    import xbrain.cli as cli
+    from xbrain.models import Topic
+
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr(cli, "induce_vocab", lambda *a, **k: [Topic(slug="misc", description="d")])
+    result = runner.invoke(app, ["vocab", "--executor", "api"])
+    assert result.exit_code == 0
+    from xbrain.rubrics import load_vocab
+
+    assert [t.slug for t in load_vocab(tmp_path / "data" / "vocab.yaml")] == ["misc"]
+
+
+def test_vocab_rejects_unknown_executor(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["vocab", "--executor", "bogus"])
+    assert result.exit_code == 1
+    assert "bogus" in result.output
