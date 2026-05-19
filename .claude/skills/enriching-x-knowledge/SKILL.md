@@ -1,6 +1,6 @@
 ---
 name: enriching-x-knowledge
-description: Use when the user wants to enrich their XBrain knowledge base (item summaries + topics) or synthesize its topic-page overviews with their Claude subscription instead of the paid API. Drives the `xbrain enrich` and `xbrain topics` worksheet flows end to end.
+description: Use when the user wants to induce their XBrain topic vocabulary, enrich their knowledge base (item summaries + topics) or synthesize its topic-page overviews with their Claude subscription instead of the paid API. Drives the `xbrain vocab`, `xbrain enrich` and `xbrain topics` worksheet flows end to end.
 ---
 
 # Enriching the XBrain knowledge base
@@ -39,6 +39,30 @@ paid `api` executor.
 4. **Apply.** Run `xbrain enrich --apply data/enrich-worksheet.json`. It validates
    and attaches the valid judgments. If it reports rejected items, fix those
    judgments in the worksheet and run `--apply` again.
+
+## Vocabulary induction
+
+The `vocab` stage induces the controlled topic taxonomy from the corpus — also
+via a worksheet, at no API cost.
+
+1. **Export the worksheet.** Run `xbrain vocab --executor claude-code`. It writes
+   `data/vocab-worksheet.json` with the full corpus (`corpus`), the induction
+   `rubric` and the `target_count`.
+
+2. **Read `data/vocab-worksheet.json`.** Induce the taxonomy with a map-reduce
+   method: chunk `corpus`, propose candidate topics per chunk (dispatch one
+   subagent per chunk for a large corpus), then consolidate the candidates into
+   exactly `target_count` topics. Follow the embedded `rubric` — always include
+   a `misc` topic; topics must be distinct and comparably grained.
+
+3. **Fill `topics`.** Write the final taxonomy into the worksheet's `topics`
+   array as `{slug, description}` objects — `slug` is kebab-case (`[a-z0-9-]`),
+   `description` is one sentence. Never reuse a slug.
+
+4. **Apply.** Run `xbrain vocab --apply data/vocab-worksheet.json` (add
+   `--regenerate` to re-mark every item for re-enrichment against the new
+   taxonomy). It validates each entry and writes `data/vocab.yaml`. If it
+   reports rejected topics, fix them and run `--apply` again.
 
 ## Topic-page overviews
 

@@ -7,6 +7,10 @@ consolidation call merges all candidates into exactly `target_count` topics
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
 from xbrain.llm_json import json_from_response
 from xbrain.models import Item, Topic
 from xbrain.rubrics import load_rubric
@@ -77,3 +81,75 @@ def induce_vocab(
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"invalid topic in vocab reduce output: {entry!r} ({exc})") from exc
     return topics
+
+
+def export_vocab_worksheet(store: dict[str, Item], target_count: int, path: Path) -> None:
+    """Export the corpus + rubric so an executor can induce the taxonomy.
+
+    The no-API-cost track for the `vocab` stage: a Claude Code session (or a
+    person) reads this worksheet, induces the taxonomy and fills `topics`.
+    XBrain only moves JSON — it never handles a Claude OAuth token.
+    """
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_count": target_count,
+        "instructions": (
+            "Induce a controlled topic taxonomy from `corpus`, following the "
+            "embedded `rubric`. Use a map-reduce method: chunk the corpus, "
+            "propose candidate topics per chunk, then consolidate to exactly "
+            f"{target_count} topics. Write the final taxonomy into `topics` as "
+            "objects {slug, description} — `slug` is kebab-case ([a-z0-9-]). "
+            "Then run: xbrain vocab --apply <this file>."
+        ),
+        "rubric": load_rubric("vocab"),
+        "corpus": [item.text for item in store.values()],
+        "topics": [],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def import_vocab_worksheet(path: Path) -> list[dict]:
+    """Read the filled `topics` list from a vocab worksheet."""
+    if not path.exists():
+        raise FileNotFoundError(f"Worksheet not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("worksheet must be a JSON object")
+    topics = data.get("topics", [])
+    if not isinstance(topics, list):
+        raise ValueError("worksheet `topics` must be a list")
+    return topics
+
+
+def apply_vocab_worksheet(
+    topics_data: list[dict],
+) -> tuple[list[Topic], list[tuple[str, list[str]]]]:
+    """Validate worksheet topic entries into `Topic`s. Returns `(valid, invalid)`.
+
+    Rejects malformed entries, invalid slugs (the `Topic` pattern) and duplicate
+    slugs — the taxonomy's join key must be unique and well-formed.
+    """
+    valid: list[Topic] = []
+    invalid: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for entry in topics_data:
+        if not isinstance(entry, dict):
+            invalid.append(("", ["topic entry is not a JSON object"]))
+            continue
+        slug = str(entry.get("slug", ""))
+        extra = set(entry) - {"slug", "description"}
+        if extra:
+            invalid.append((slug, [f"unexpected keys: {sorted(extra)}"]))
+            continue
+        try:
+            topic = Topic(**entry)
+        except Exception as exc:  # noqa: BLE001 - collect, do not abort the batch
+            invalid.append((slug, [f"invalid topic: {exc}"]))
+            continue
+        if topic.slug in seen:
+            invalid.append((topic.slug, ["duplicate slug"]))
+            continue
+        seen.add(topic.slug)
+        valid.append(topic)
+    return valid, invalid

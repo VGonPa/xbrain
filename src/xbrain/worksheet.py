@@ -70,6 +70,8 @@ def import_worksheet(path: Path) -> tuple[str, list[dict]]:
     if not path.exists():
         raise FileNotFoundError(f"Worksheet not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("worksheet must be a JSON object")
     judgments = data.get("judgments", [])
     if not isinstance(judgments, list):
         raise ValueError("worksheet `judgments` must be a list")

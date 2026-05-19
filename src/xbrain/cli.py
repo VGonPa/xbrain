@@ -46,7 +46,12 @@ from xbrain.topics import (
     topics_needing_synth,
     write_topic_pages,
 )
-from xbrain.vocab import induce_vocab
+from xbrain.vocab import (
+    apply_vocab_worksheet,
+    export_vocab_worksheet,
+    import_vocab_worksheet,
+    induce_vocab,
+)
 from xbrain.worksheet import export_worksheet, import_worksheet
 
 app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
@@ -211,10 +216,12 @@ def fetch(
 @app.command()
 @_handle_cli_errors
 def enrich(
-    executor: str = typer.Option(
+    executor: str | None = typer.Option(
         None, help="api | manual | claude-code (default: the enrich executor set in config.toml)"
     ),
-    apply: Path = typer.Option(None, "--apply", help="Import a filled worksheet and apply it"),
+    apply: Path | None = typer.Option(
+        None, "--apply", help="Import a filled worksheet and apply it"
+    ),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
 ) -> None:
@@ -264,26 +271,69 @@ def enrich(
     _report_invalid(invalid)
 
 
-@app.command()
-@_handle_cli_errors
-def vocab(
-    regenerate: bool = typer.Option(
-        False, help="Regenerate the taxonomy and mark every item for re-enrichment"
-    ),
-) -> None:
-    """Induce the topic vocabulary (data/vocab.yaml) from the corpus."""
-    cfg = _config()
-    store = load_store(cfg.items_path)
-    if not store:
-        raise RuntimeError("El store está vacío — ejecuta `xbrain extract` antes.")
-    topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model)
-    save_vocab(topics, cfg.data_dir / "vocab.yaml")
+def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:
+    """When `--regenerate` is set, drop every item's enrichment and persist."""
     if regenerate:
         for item in store.values():
             item.enriched = None
         save_store(store, cfg.items_path)
         typer.echo("Todos los items marcados para re-enriquecer.")
+
+
+def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> None:
+    """`xbrain vocab --apply` — import a filled vocab worksheet."""
+    topics, invalid = apply_vocab_worksheet(import_vocab_worksheet(apply))
+    _report_invalid(invalid)
+    if not topics:
+        raise RuntimeError("La worksheet no produjo ningún topic válido.")
+    # Mark the store first: a crash here leaves items pending (a re-run re-marks
+    # idempotently) — safer than vocab.yaml updated while items stay stale.
+    _mark_for_regenerate(store, cfg, regenerate)
+    save_vocab(topics, cfg.data_dir / "vocab.yaml")
+    typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+
+
+def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool) -> None:
+    """`xbrain vocab` — induce the taxonomy (worksheet export, or `api`)."""
+    chosen = executor or cfg.enrich_executor
+    if chosen in ("manual", "claude-code"):
+        worksheet = cfg.data_dir / "vocab-worksheet.json"
+        export_vocab_worksheet(store, cfg.vocab_target_count, worksheet)
+        regen = " --regenerate" if regenerate else ""
+        typer.echo(
+            f"Corpus exportado a {worksheet}\n"
+            f"Induce la taxonomía (con Claude Code o a mano) y ejecuta:\n"
+            f"  xbrain vocab --apply {worksheet}{regen}"
+        )
+        return
+    if chosen != "api":
+        raise ValueError(f"Ejecutor desconocido: {chosen!r}")
+    topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model)
+    save_vocab(topics, cfg.data_dir / "vocab.yaml")
+    _mark_for_regenerate(store, cfg, regenerate)
     typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+
+
+@app.command()
+@_handle_cli_errors
+def vocab(
+    regenerate: bool = typer.Option(
+        False, help="Marca todos los items para re-enriquecer contra la taxonomía nueva"
+    ),
+    executor: str | None = typer.Option(
+        None, help="api | manual | claude-code (default: el de config.toml)"
+    ),
+    apply: Path | None = typer.Option(None, "--apply", help="Importar una vocab worksheet rellena"),
+) -> None:
+    """Induce el vocabulario de topics (data/vocab.yaml) desde el corpus."""
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    if not store:
+        raise RuntimeError("El store está vacío — ejecuta `xbrain extract` antes.")
+    if apply is not None:
+        _vocab_apply(cfg, store, apply, regenerate)
+    else:
+        _vocab_run(cfg, store, executor, regenerate)
 
 
 def _topics_apply(cfg: Config, store: dict, vocab: list, apply: Path) -> None:
@@ -335,8 +385,10 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
 @_handle_cli_errors
 def topics(
     resynth: bool = typer.Option(False, help="Re-sintetizar todos los overviews obsoletos"),
-    apply: Path = typer.Option(None, "--apply", help="Importar un worksheet de overviews relleno"),
-    executor: str = typer.Option(
+    apply: Path | None = typer.Option(
+        None, "--apply", help="Importar un worksheet de overviews relleno"
+    ),
+    executor: str | None = typer.Option(
         None, help="api | manual | claude-code (default: el de config.toml)"
     ),
 ) -> None:
