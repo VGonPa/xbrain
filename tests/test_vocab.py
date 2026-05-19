@@ -66,3 +66,100 @@ def test_induce_vocab_raises_when_map_response_has_no_candidates():
     with pytest.raises(ValueError) as exc_info:
         induce_vocab(store, target_count=1, model="m", client=client, chunk_size=50)
     assert "candidates" in str(exc_info.value)
+
+
+def test_export_vocab_worksheet_writes_corpus_and_rubric(tmp_path):
+    from datetime import datetime, timezone
+
+    from xbrain.models import Author, Item
+    from xbrain.vocab import export_vocab_worksheet
+
+    def _item(i):
+        return Item(
+            id=str(i),
+            source="bookmark",
+            url=f"https://x.com/a/status/{i}",
+            author=Author(handle="a", name="A"),
+            text=f"post {i}",
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+
+    store = {"1": _item(1), "2": _item(2)}
+    path = tmp_path / "vocab-worksheet.json"
+    export_vocab_worksheet(store, target_count=45, path=path)
+    import json
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["target_count"] == 45
+    assert payload["corpus"] == ["post 1", "post 2"]
+    assert "rubric" in payload and payload["rubric"]
+    assert payload["topics"] == []
+
+
+def test_import_vocab_worksheet_round_trips(tmp_path):
+    import json
+
+    from xbrain.vocab import import_vocab_worksheet
+
+    path = tmp_path / "ws.json"
+    path.write_text(json.dumps({"topics": [{"slug": "ai", "description": "d"}]}), encoding="utf-8")
+    assert import_vocab_worksheet(path) == [{"slug": "ai", "description": "d"}]
+
+
+def test_import_vocab_worksheet_rejects_non_list_topics(tmp_path):
+    import json
+
+    import pytest
+
+    from xbrain.vocab import import_vocab_worksheet
+
+    path = tmp_path / "ws.json"
+    path.write_text(json.dumps({"topics": "no soy lista"}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        import_vocab_worksheet(path)
+
+
+def test_import_vocab_worksheet_missing_file_raises(tmp_path):
+    import pytest
+
+    from xbrain.vocab import import_vocab_worksheet
+
+    with pytest.raises(FileNotFoundError):
+        import_vocab_worksheet(tmp_path / "absent.json")
+
+
+def test_apply_vocab_worksheet_validates_topics():
+    from xbrain.vocab import apply_vocab_worksheet
+
+    valid, invalid = apply_vocab_worksheet(
+        [
+            {"slug": "ai-coding", "description": "Desarrollo con IA."},
+            {"slug": "BAD SLUG", "description": "espacios y mayúsculas"},
+            {"slug": "misc"},  # missing description
+        ]
+    )
+    assert [t.slug for t in valid] == ["ai-coding"]
+    assert {row[0] for row in invalid} == {"BAD SLUG", "misc"}
+
+
+def test_apply_vocab_worksheet_rejects_duplicate_slugs():
+    from xbrain.vocab import apply_vocab_worksheet
+
+    valid, invalid = apply_vocab_worksheet(
+        [
+            {"slug": "ai", "description": "d1"},
+            {"slug": "ai", "description": "d2"},
+        ]
+    )
+    assert [t.slug for t in valid] == ["ai"]
+    assert invalid and invalid[0][0] == "ai"
+    assert any("duplicate" in e for e in invalid[0][1])
+
+
+def test_apply_vocab_worksheet_rejects_non_dict_entry():
+    from xbrain.vocab import apply_vocab_worksheet
+
+    valid, invalid = apply_vocab_worksheet(["oops"])
+    assert valid == []
+    assert invalid and "not a JSON object" in invalid[0][1][0]
