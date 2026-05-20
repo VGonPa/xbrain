@@ -72,6 +72,8 @@ All three layers are markdown notes inside a single Obsidian vault, under
 `learnings/x-knowledge/`. Each layer is denser than the one below it: many
 posts → fewer topics → one index.
 
+**Example layout — three notes side by side, as they appear in the vault:**
+
 <table>
 <tr>
 <th align="center" width="33%">📄 Items</th>
@@ -99,7 +101,7 @@ posts → fewer topics → one index.
 │   (fetched in    │
 │    full)         │
 │                  │
-│ Temas:           │
+│ Topics:          │
 │  [[ai-coding]]   │
 │  [[software-..]] │
 └──────────────────┘
@@ -135,12 +137,12 @@ posts → fewer topics → one index.
 ┌──────────────────┐
 │ XBrain           │
 │                  │
-│ ▸ Resumen        │
+│ ▸ Summary        │
 │   1884 items     │
 │   1123 bookmarks │
 │   761 own tweets │
 │                  │
-│ ▸ Temas          │
+│ ▸ Topics         │
 │   [[ai-coding]]  │
 │         (299)    │
 │   [[ai-industry]]│
@@ -176,16 +178,16 @@ tags: [x-knowledge, ai-coding, software-engineering, ai-economy]
 
 # Code Is Cheap Now. Software Isn't.
 
-Enlaza un artículo que sostiene que el código se ha abaratado pero el software
-no: Claude Code y Opus 4.5 democratizan la creación de software y abren la era
-del software personal y desechable...
+Links an article arguing that code itself has become cheap but software has
+not: Claude Code and Opus 4.5 democratise software creation and open the era
+of personal, throwaway software...
 
-**Temas:** [[ai-coding]] · [[software-engineering]] · [[ai-economy]]
+**Topics:** [[ai-coding]] · [[software-engineering]] · [[ai-economy]]
 
 ## Tweet
 Code Is Cheap Now. Software Isn't.  https://t.co/J9m5RzQNbW
 
-## Contenido: Code Is Cheap Now. Software Isn't.
+## Content: Code Is Cheap Now. Software Isn't.
 <the full text of the linked article, fetched and stored inline>
 ```
 
@@ -211,23 +213,23 @@ primary_posts: 103
 
 # ai-coding
 
-> Construir software con IA: vibe coding, el cambio en cómo se escribe el
-> código y la IA como pair-programmer.
+> Building software with AI: vibe coding, the shift in how code gets written,
+> and AI as a pair-programmer.
 
 ## Overview
 
-Es el tema más voluminoso del corpus y narra, casi mes a mes, la transformación
-del oficio de programar bajo la presión de la IA. El arco es muy nítido: del
-autocompletado y el vibe coding de 2025 se pasa a la ingeniería agéntica de
-2026...
+The largest topic in the corpus, narrating — almost month by month — how the
+craft of programming has been transformed under the pressure of AI. The arc
+is sharp: from autocomplete and vibe coding in 2025 to agentic engineering
+in 2026...
 
-## Notas importantes
+## Key notes
 - ...
 
-## Posts primarios (103)
+## Primary posts (103)
 - `2026-01-10` · @codestirring · [[items/...|Code Is Cheap Now. Software Isn't.]]
 
-## También relevante (196)
+## Also relevant (196)
 - ...
 ```
 
@@ -244,12 +246,12 @@ every link (see [How it works](#how-it-works)), so regenerating never breaks one
 ```markdown
 # XBrain
 
-## Resumen
-- Items totales: 1884
-- Bookmarks: 1123 · Tweets propios: 761
-- Enriquecidos: 1884
+## Summary
+- Total items: 1884
+- Bookmarks: 1123 · Own tweets: 761
+- Enriched: 1884
 
-## Temas
+## Topics
 - [[ai-coding]] (299)
 - [[ai-industry]] (225)
 - [[ai-and-work]] (220)
@@ -259,8 +261,10 @@ every link (see [How it works](#how-it-works)), so regenerating never breaks one
 The markdown is **derived and disposable** — regenerate it any time. The source
 of truth is `data/items.json`.
 
-> The example notes are in Spanish because the summary and overview language is
-> set by the rubrics in `src/xbrain/rubrics/` — plain markdown you can edit.
+> The examples above are shown in English for clarity. Today the output language
+> (summaries, overviews, section headers like "Topics" / "Content") is fixed by
+> the rubrics in `src/xbrain/rubrics/` — Spanish on the live system; a config
+> parameter to switch languages is on the roadmap ([#16](https://github.com/VGonPa/xbrain/issues/16)).
 
 ---
 
@@ -400,13 +404,23 @@ flowchart TB
     E3 --> E4["④ enrich"]
     E4 --> E5["⑤ topics"]
     E5 --> E6["⑥ generate"]
-    E6 --> KB[["🧠 Obsidian<br/>knowledge base"]]
 
     E1 -.->|writes| Items[("data/items.json")]
     E2 -.->|mutates| Items
     E3 -.->|writes| Vy[("data/vocab.yaml")]
     E4 -.->|mutates| Items
     E5 -.->|writes| Tj[("data/topics.json")]
+
+    subgraph KB["🧠 Obsidian knowledge base"]
+        direction TB
+        ItemsMd["📄 items/*.md<br/>~1k+ notes"]
+        TopicsMd["📑 topics/*.md<br/>~30-45 notes"]
+        IndexMd["🗺️ _index.md"]
+    end
+
+    E6 ==> ItemsMd
+    E6 ==> TopicsMd
+    E6 ==> IndexMd
 
     classDef stage fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#1f2937
     classDef artifact fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1f2937
@@ -415,20 +429,26 @@ flowchart TB
     class E1,E2,E3,E4,E5,E6 stage
     class Items,Vy,Tj artifact
     class X ext
-    class KB wiki
+    class ItemsMd,TopicsMd,IndexMd wiki
 ```
 
 Six stages, top to bottom. The chain on the left is the order of execution;
-the cylinders on the right are the `data/` files each stage writes. The hub
-of all of them is `data/items.json` — three stages mutate it, every later
-stage reads it. `vocab.yaml` (the closed taxonomy) is read by `enrich`,
-`topics` and `generate`. `topics.json` (the synthesised overviews) is read
-by `generate`.
+the cylinders on the right are the `data/` files each stage writes; the box
+at the bottom is what ends up inside your Obsidian vault — three kinds of
+plain markdown notes.
 
-The Obsidian knowledge base is the final render: `⑥ generate` turns
-`items.json` into `items/*.md` notes and `topics.json` into `topics/*.md`
-pages inside your vault. Delete the whole vault and `xbrain generate`
-rebuilds it bit-for-bit from `data/`.
+- **`data/items.json`** is the hub. Three stages mutate it (`extract`,
+  `fetch`, `enrich`); every later stage reads it.
+- **`data/vocab.yaml`** is the closed taxonomy. Read by `enrich` (to assign
+  topics from it), `topics` (to know which pages to synthesise) and
+  `generate` (for the tags).
+- **`data/topics.json`** is the synthesised topic overviews. Read by
+  `generate`.
+
+`⑥ generate` is the only stage that writes into the vault. It turns
+`items.json` into `items/*.md`, `topics.json` into `topics/*.md`, and writes
+the `_index.md`. Delete the whole vault and `xbrain generate` rebuilds it
+bit-for-bit from `data/`.
 
 | # | Stage | Mechanical / LLM | Writes to | What it does |
 |---|-------|------------------|-----------|--------------|
