@@ -535,7 +535,7 @@ sequenceDiagram
 
     alt executor = claude-code (default)
         CLI->>Data: write enrich-worksheet.json
-        Note over U,LLM: You open a Claude Code session;<br>the enriching-x-knowledge skill fills<br>the worksheet's judgments[]
+        Note over U,LLM: You open a Claude Code session; the enriching-x-knowledge skill fills the worksheet's judgments[]
         U->>CLI: xbrain enrich --apply worksheet.json
         CLI->>CLI: validate (rubrics + guardrails)
         CLI->>Data: write items.json (enriched)
