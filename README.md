@@ -401,6 +401,8 @@ flow for all three stages.
 
 ## How it works
 
+> For the full picture — every stage, every artifact, the rubrics, the executors and the invariants — see [ARCHITECTURE.md](ARCHITECTURE.md). The summary below is the 5-minute version.
+
 **One hard rule** runs through the whole design: the **LLM emits only judgment** —
 a summary, a topic choice, an overview. It never produces a filename, a wikilink
 or any structural identifier. The *code* generates every id and link; a
@@ -492,6 +494,7 @@ client. Respect X's Terms of Service.
 
 | Document | Description |
 |----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How XBrain is shaped: pipeline stages, artifacts, rubrics, executors, invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — including PRs written with AI agents. |
 | [LICENSE](LICENSE) | MIT. |
 
