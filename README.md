@@ -531,7 +531,7 @@ sequenceDiagram
     participant LLM as LLM
     participant Data as data/
 
-    U->>CLI: xbrain enrich --executor <mode>
+    U->>CLI: xbrain enrich --executor MODE
 
     alt executor = claude-code (default)
         CLI->>Data: write enrich-worksheet.json
