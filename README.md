@@ -306,15 +306,18 @@ and writes it back. The wiki is generated from it at the end.
 
 ```mermaid
 flowchart LR
-    X((X / Twitter)) -->|"① extract"| D[(data/items.json)]
-    D -->|"② fetch"| D
-    D -->|"③ vocab"| V[(vocab.yaml)]
-    D -->|"④ enrich"| D
-    V -.->|reads| D
-    D -->|"⑤ topics"| T[(topics.json)]
-    D -->|"⑥ generate"| W[/"Obsidian wiki"/]
-    T -.->|reads| W
+    X((X)) --> E["① extract"]
+    E --> F["② fetch"]
+    F --> V["③ vocab"]
+    V --> En["④ enrich"]
+    En --> T["⑤ topics"]
+    T --> G["⑥ generate"]
+    G --> W[/Obsidian wiki/]
 ```
+
+Behind every stage, `data/items.json` is the shared hub — most stages read it,
+enrich it and write it back. The other artifacts (`vocab.yaml`, `topics.json`)
+are written by their own stage and read by the rest.
 
 | # | Stage | Mechanical / LLM | What it does |
 |---|-------|------------------|--------------|

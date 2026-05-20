@@ -92,6 +92,43 @@ Each stage is a separate command (`xbrain extract`, `xbrain fetch`, …). You ca
 
 ## The pipeline
 
+### Step by step
+
+A full run, in the order the stages execute. The diagram above is the *architectural* view (what reads what); the one below is the *temporal* view (what happens, in sequence, when you start from an empty install and end with a wiki).
+
+```mermaid
+flowchart TB
+    start([Fresh install: empty data/, fresh vault])
+
+    s0["<b>0 · xbrain login</b><br/>One-time browser auth — you log in to X manually in the Playwright window<br/><i>writes:</i> auth/storage_state.json"]
+
+    s1["<b>1 · xbrain extract</b> — mechanical<br/>Drives the logged-in browser, intercepts X's internal GraphQL,<br/>pulls bookmarks + own tweets, slow scrolls with random pauses<br/><i>reads:</i> state.json (cursors per source)<br/><i>writes:</i> items.json (merged by id) + state.json (updated cursors)<br/><b>incremental</b> — stops at the last known id per source"]
+
+    s2["<b>2 · xbrain fetch</b> — mechanical<br/>For each item with links, downloads the article body<br/>(HTTP + Trafilatura, optional Firecrawl fallback, Playwright for x.com)<br/><i>reads:</i> items.json<br/><i>writes:</i> items.json — each item's content + content_source[]<br/><b>cached</b> — already-fetched items are skipped (use --force to refetch)<br/><b>failures recorded as evidence</b> — http_status + failure_reason, never silently dropped"]
+
+    s3["<b>3 · xbrain vocab</b> — LLM<br/>Reads the whole corpus, induces a closed taxonomy of ~30-45 topics<br/>map step: candidate topics per chunk → reduce step: consolidated to target_count<br/><i>reads:</i> items.json<br/><i>writes:</i> vocab.yaml (slug + description list)<br/><b>always includes a misc topic</b> for posts with no thematic core"]
+
+    s4["<b>4 · xbrain enrich</b> — LLM<br/>Per item: writes summary + chooses primary_topic + 0-3 secondaries from the vocab<br/><i>reads:</i> items.json + vocab.yaml<br/><i>writes:</i> items.json — each item's enriched (Enrichment record)<br/><b>only LLM judgment</b> — no identifiers, no wikilinks (validator rejects them)<br/><b>skips already-enriched</b> — use --regenerate after vocab or rubric changes"]
+
+    s5["<b>5 · xbrain topics</b> — LLM<br/>Synthesizes one topic page per slug: 1-3 paragraph overview + up to 15 notes<br/><i>reads:</i> items.json + vocab.yaml + topics.json (to detect stale pages)<br/><i>writes:</i> topics.json — TopicPage per slug<br/><b>plain prose only</b> — the post lists are added later by 'generate', not the LLM<br/><b>derived staleness</b> — a page is stale when live_count > post_count_at_synth + threshold"]
+
+    s6["<b>6 · xbrain generate</b> — mechanical<br/>Renders every item note, topic page and the index into the vault<br/><i>reads:</i> items.json + topics.json + vocab.yaml<br/><i>writes:</i> vault/learnings/x-knowledge/{items,topics,_index.md,log.md}<br/><b>deterministic</b> — no LLM, no network<br/><b>your tail is preserved</b> — content below xbrain:generated:end stays untouched"]
+
+    done([Wiki ready in Obsidian])
+
+    start --> s0 --> s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> done
+```
+
+Three extra ops sit outside the main loop:
+
+- **`xbrain import-archive <zip>`** — imports your X data archive (the official ZIP export from `x.com/settings/your_archive`) to backfill historical own-tweets beyond what `extract` can reach via the live browser.
+- **`xbrain sync`** — convenience: runs `extract → fetch → generate` back-to-back. No enrichment (which is the expensive LLM step you run on your own cadence).
+- **`xbrain status`** — read-only diagnostics: item counts, how many have links / content / enrichment, last extraction time per source.
+
+### Per-stage detail
+
+The numbered stages above are summarised; the sections below cover each one in depth.
+
 ### extract
 
 **What it does.** Drives a real browser (Playwright + your logged-in session) to pull your bookmarks and own posts from X. Listens to X's internal GraphQL traffic — the same calls the X web app makes to itself — and parses the responses. No public API, no scraping of rendered HTML, no API key.
