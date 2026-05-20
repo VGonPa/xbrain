@@ -70,46 +70,54 @@ one below it — read top-down for the map, or bottom-up for a single post.
 
 ```mermaid
 flowchart LR
-    subgraph L1["📄 Items"]
-        direction TB
-        I1[Post 1]
-        I2[Post 2]
-        I3[...]
-        I4[Post ~1k+]
-    end
+    subgraph KB["🧠 Obsidian knowledge base"]
+        direction LR
 
-    subgraph L2["📑 Topics"]
-        direction TB
-        T1["AI coding"]
-        T2["Software engineering"]
-        T3["..."]
-        T4["~30-45 topics"]
-    end
+        subgraph L1["📄 Items · ~1k+ notes"]
+            direction TB
+            I1>"Post 1<br/>summary · topics<br/>fetched article"]
+            I2>"Post 2"]
+            I3>"..."]
+            I4>"Post ~1k+"]
+        end
 
-    subgraph L3["🗺️ Index"]
-        IDX["_index.md<br/>the map"]
-    end
+        subgraph L2["📑 Topics · ~30-45 notes"]
+            direction TB
+            T1>"AI coding<br/>essay across<br/>231 posts"]
+            T2>"Software<br/>engineering"]
+            T3>"..."]
+        end
 
-    L1 -->|grouped under| L2
-    L2 -->|listed in| L3
+        subgraph L3["🗺️ Index"]
+            direction TB
+            IDX>"_index.md<br/>the map<br/>across all topics"]
+        end
+
+        L1 ==>|grouped under| L2
+        L2 ==>|mapped from| L3
+    end
 
     classDef item fill:#ede9fe,stroke:#7c3aed,color:#1f2937
     classDef topic fill:#fef3c7,stroke:#d97706,color:#1f2937
     classDef idx fill:#dcfce7,stroke:#16a34a,color:#1f2937
     class I1,I2,I3,I4 item
-    class T1,T2,T3,T4 topic
+    class T1,T2,T3 topic
     class IDX idx
 ```
 
-- **Items** — one note per saved X post: original text, fetched article, summary, topics.
-- **Topics** — one note per theme: a synthesised essay across every post in that theme.
-- **Index** — the map: every topic with its counts, links to everything.
+Three layers, increasingly distilled:
+
+- **Items** — one note per saved X post: original text, fetched article, an LLM summary, and the topics it belongs to.
+- **Topics** — one note per theme: a synthesised essay across every post in that theme, plus links back to all of them.
+- **Index** — the map: every topic with its counts and links to everything.
 
 ### Layer 1 — Items
 
 One note per bookmark or own-tweet: the original text, the link, the **linked
 article fetched and stored inline**, an LLM summary and its topics. A saved link
 stops being a URL that will quietly rot and becomes a saved *article*.
+
+*Example:*
 
 ```markdown
 ---
@@ -144,6 +152,8 @@ list of links — it is an essay.** XBrain reads every post filed under a theme
 and writes one synthesis: where the thinking started, how it moved, what it kept
 circling back to. Then it lists the posts — the ones the topic is *about*
 (primary), and the ones that merely touch it (also-relevant).
+
+*Example:*
 
 ```markdown
 ---
@@ -181,6 +191,8 @@ every link (see [How it works](#how-it-works)), so regenerating never breaks one
 
 `_index.md` is the map — the corpus counts and every topic ranked by size.
 `log.md` is the full chronology.
+
+*Example:*
 
 ```markdown
 # XBrain
@@ -341,13 +353,17 @@ flowchart TB
     E3 --> E4["④ enrich"]
     E4 --> E5["⑤ topics"]
     E5 --> E6["⑥ generate"]
-    E6 --> W[/Obsidian wiki/]
+    E6 --> W[["🧠 Obsidian<br/>knowledge base"]]
 
     E1 -.->|writes| Items[("data/items.json")]
     E2 -.->|mutates| Items
     E3 -.->|writes| Vy[("data/vocab.yaml")]
     E4 -.->|mutates| Items
     E5 -.->|writes| Tj[("data/topics.json")]
+
+    Vy -.->|reads| E4
+    Vy -.->|reads| E5
+    Tj -.->|reads| E6
 
     classDef stage fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#1f2937
     classDef artifact fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1f2937
@@ -359,10 +375,23 @@ flowchart TB
     class W wiki
 ```
 
-Six stages, one direction. The chain on the left is the order of execution; the
-artifacts on the right are what each stage writes. `data/items.json` is the
-hub — three stages mutate it, every later stage reads it. The Obsidian wiki is
-a pure render — safe to delete and regenerate from `data/`.
+Six stages, top to bottom. The chain on the left is the order of execution;
+the artifacts on the right are the `data/` files each stage produces and
+consumes.
+
+- **`data/items.json`** — the source of truth: every saved post with its
+  fetched article, summary, topics. Three stages mutate it (`extract`,
+  `fetch`, `enrich`); every later stage reads it.
+- **`data/vocab.yaml`** — the closed topic taxonomy. Written by `③ vocab`;
+  read by `④ enrich` (to assign topics from it), `⑤ topics` (to know
+  which topic pages to synthesise) and `⑥ generate` (for the tags).
+- **`data/topics.json`** — the synthesised topic-page overviews. Written
+  by `⑤ topics`; read by `⑥ generate`.
+
+The Obsidian knowledge base is the final render — `⑥ generate` turns
+`items.json` into `items/*.md` notes, `topics.json` into `topics/*.md`
+pages, and writes the index. Delete the whole vault and `xbrain generate`
+rebuilds it bit-for-bit from `data/`.
 
 | # | Stage | Mechanical / LLM | Writes to | What it does |
 |---|-------|------------------|-----------|--------------|
