@@ -36,19 +36,29 @@ XBrain takes your X bookmarks and your own posts and turns them into an Obsidian
 The system is built around one principle: **the JSON store is the source of truth, and the wiki is a rendering of it.** Every transformation reads structured data, writes structured data, and never depends on the markdown output. You can delete the entire wiki and regenerate it bit-for-bit from `data/` — that is a property the architecture protects on purpose.
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif',
+    'fontSize': '14px',
+    'lineColor': '#64748b',
+    'background': 'transparent',
+    'edgeLabelBackground': '#f8fafc'
+  }
+}}%%
 flowchart TB
     subgraph Sources["🌐 External"]
-        X[X / Twitter]
-        Web[The open web]
+        X(X / Twitter)
+        Web(The open web)
     end
 
     subgraph Pipeline["⚙️ Pipeline stages"]
-        E[extract]
-        F[fetch]
-        V[vocab]
-        En[enrich]
-        T[topics]
-        G[generate]
+        E(extract)
+        F(fetch)
+        V(vocab)
+        En(enrich)
+        T(topics)
+        G(generate)
     end
 
     subgraph Data["💾 data/ — source of truth (gitignored)"]
@@ -59,9 +69,9 @@ flowchart TB
     end
 
     subgraph Wiki["📚 Obsidian vault (derivable)"]
-        ItemNotes[items/*.md]
-        TopicNotes[topics/*.md]
-        Index[_index.md, log.md]
+        ItemNotes("items/*.md")
+        TopicNotes("topics/*.md")
+        Index("_index.md, log.md")
     end
 
     X --> E
@@ -85,10 +95,10 @@ flowchart TB
     G --> TopicNotes
     G --> Index
 
-    classDef ext fill:#dbeafe,stroke:#2563eb,color:#1f2937
-    classDef stage fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#1f2937
-    classDef artifact fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1f2937
-    classDef wiki fill:#dcfce7,stroke:#16a34a,color:#1f2937
+    classDef ext fill:#0ea5e9,stroke:#0369a1,stroke-width:1.5px,color:#fff,font-weight:500
+    classDef stage fill:#7c3aed,stroke:#5b21b6,stroke-width:1.5px,color:#fff,font-weight:500
+    classDef artifact fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#451a03
+    classDef wiki fill:#d1fae5,stroke:#047857,stroke-width:1.5px,color:#064e3b
     class X,Web ext
     class E,F,V,En,T,G stage
     class State,Items,Vocab,Topics artifact
@@ -106,6 +116,15 @@ Each stage is a separate command (`xbrain extract`, `xbrain fetch`, …). You ca
 A full run, in the order the stages execute. The diagram above is the *architectural* view (what reads what); the one below is the *temporal* view (what happens, in sequence, when you start from an empty install and end with a wiki).
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif',
+    'fontSize': '13px',
+    'lineColor': '#64748b',
+    'background': 'transparent'
+  }
+}}%%
 flowchart TB
     start([Fresh install: empty data/, fresh vault])
 
@@ -127,9 +146,9 @@ flowchart TB
 
     start --> s0 --> s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> done
 
-    classDef mech fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#1f2937,text-align:left
-    classDef llm fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1f2937,text-align:left
-    classDef io fill:#dbeafe,stroke:#2563eb,color:#1f2937
+    classDef mech fill:#ede9fe,stroke:#5b21b6,stroke-width:1.5px,color:#1e1b4b,text-align:left
+    classDef llm fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#451a03,text-align:left
+    classDef io fill:#0ea5e9,stroke:#0369a1,stroke-width:1.5px,color:#fff,font-weight:500
     class s0,s1,s2,s6 mech
     class s3,s4,s5 llm
     class start,done io

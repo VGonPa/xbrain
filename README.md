@@ -397,13 +397,23 @@ Six stages. `data/items.json` is the hub — every stage reads it, enriches it,
 and writes it back. The wiki is generated from it at the end.
 
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif',
+    'fontSize': '14px',
+    'lineColor': '#64748b',
+    'background': 'transparent',
+    'edgeLabelBackground': '#f8fafc'
+  }
+}}%%
 flowchart TB
-    X((X / Twitter)) --> E1["① extract"]
-    E1 --> E2["② fetch"]
-    E2 --> E3["③ vocab"]
-    E3 --> E4["④ enrich"]
-    E4 --> E5["⑤ topics"]
-    E5 --> E6["⑥ generate"]
+    X((X / Twitter)) --> E1("① extract")
+    E1 --> E2("② fetch")
+    E2 --> E3("③ vocab")
+    E3 --> E4("④ enrich")
+    E4 --> E5("⑤ topics")
+    E5 --> E6("⑥ generate")
 
     E1 -.->|writes| Items[("data/items.json")]
     E2 -.->|mutates| Items
@@ -413,19 +423,19 @@ flowchart TB
 
     subgraph KB["🧠 Obsidian knowledge base"]
         direction TB
-        ItemsMd["📄 items/*.md<br/>one note per post"]
-        TopicsMd["📑 topics/*.md<br/>one note per topic"]
-        IndexMd["🗺️ _index.md"]
+        ItemsMd("📄 items/*.md<br/><sub>one note per post</sub>")
+        TopicsMd("📑 topics/*.md<br/><sub>one note per topic</sub>")
+        IndexMd("🗺️ _index.md")
     end
 
     E6 ==> ItemsMd
     E6 ==> TopicsMd
     E6 ==> IndexMd
 
-    classDef stage fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#1f2937
-    classDef artifact fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#1f2937
-    classDef ext fill:#dbeafe,stroke:#2563eb,color:#1f2937
-    classDef wiki fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#1f2937
+    classDef stage fill:#7c3aed,stroke:#5b21b6,stroke-width:1.5px,color:#fff,font-weight:500
+    classDef artifact fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#451a03
+    classDef ext fill:#0ea5e9,stroke:#0369a1,stroke-width:1.5px,color:#fff,font-weight:500
+    classDef wiki fill:#d1fae5,stroke:#047857,stroke-width:1.5px,color:#064e3b
     class E1,E2,E3,E4,E5,E6 stage
     class Items,Vy,Tj artifact
     class X ext
