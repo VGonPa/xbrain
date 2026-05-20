@@ -48,20 +48,18 @@ The system is built around one principle: **the JSON store is the source of trut
 }}%%
 flowchart TB
     subgraph Sources["🌐 External"]
+        direction LR
         X(X / Twitter)
         Web(The open web)
     end
 
-    subgraph Pipeline["⚙️ Pipeline stages"]
-        E(extract)
-        F(fetch)
-        V(vocab)
-        En(enrich)
-        T(topics)
-        G(generate)
+    subgraph Pipeline["⚙️ Pipeline stages — in order"]
+        direction LR
+        E(extract) --> F(fetch) --> V(vocab) --> En(enrich) --> T(topics) --> G(generate)
     end
 
     subgraph Data["💾 data/ — source of truth (gitignored)"]
+        direction LR
         State[(state.json)]
         Items[(items.json)]
         Vocab[(vocab.yaml)]
@@ -69,6 +67,7 @@ flowchart TB
     end
 
     subgraph Wiki["📚 Obsidian vault (derivable)"]
+        direction LR
         ItemNotes("items/*.md")
         TopicNotes("topics/*.md")
         Index("_index.md, log.md")
@@ -76,24 +75,17 @@ flowchart TB
 
     X --> E
     Web --> F
-    E --> Items
-    E --> State
-    Items --> F
-    F --> Items
-    Items --> V
-    V --> Vocab
-    Vocab --> En
-    Items --> En
-    En --> Items
-    Items --> T
-    Vocab --> T
-    T --> Topics
-    Items --> G
-    Topics --> G
-    Vocab --> G
-    G --> ItemNotes
-    G --> TopicNotes
-    G --> Index
+
+    E -.writes.-> State
+    E -.writes.-> Items
+    F -.mutates.-> Items
+    V -.writes.-> Vocab
+    En -.mutates.-> Items
+    T -.writes.-> Topics
+
+    G ==> ItemNotes
+    G ==> TopicNotes
+    G ==> Index
 
     classDef ext fill:#0ea5e9,stroke:#0369a1,stroke-width:1.5px,color:#fff,font-weight:500
     classDef stage fill:#7c3aed,stroke:#5b21b6,stroke-width:1.5px,color:#fff,font-weight:500
@@ -105,6 +97,12 @@ flowchart TB
     class ItemNotes,TopicNotes,Index wiki
 ```
 
+The diagram shows **what each stage writes**: solid arrows for the pipeline
+order, dashed arrows for the writes/mutations into `data/`, thick arrows for
+the final render into the vault. **Reads are intentionally omitted** — they
+fan out from `items.json` to almost every later stage; see the Step-by-step
+below for the per-stage read/write detail.
+
 Each stage is a separate command (`xbrain extract`, `xbrain fetch`, …). You can run them individually or chain them. The pipeline is intentionally idempotent at every step: re-running a stage on a corpus that already has its outputs is a cheap no-op except where you explicitly ask for regeneration.
 
 ---
@@ -115,44 +113,97 @@ Each stage is a separate command (`xbrain extract`, `xbrain fetch`, …). You ca
 
 A full run, in the order the stages execute. The diagram above is the *architectural* view (what reads what); the one below is the *temporal* view (what happens, in sequence, when you start from an empty install and end with a wiki).
 
-```mermaid
-%%{init: {
-  'theme': 'base',
-  'themeVariables': {
-    'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif',
-    'fontSize': '13px',
-    'lineColor': '#64748b',
-    'background': 'transparent'
-  }
-}}%%
-flowchart TB
-    start([Fresh install: empty data/, fresh vault])
+> **Start:** fresh install — empty `data/`, fresh Obsidian vault.
 
-    s0["<b>0 · xbrain login</b><br/>One-time browser auth — you log in to X manually in the Playwright window<br/><i>writes:</i> auth/storage_state.json"]
+<table>
+<tr><td>
 
-    s1["<b>1 · xbrain extract</b> — mechanical<br/>Drives the logged-in browser, intercepts X's internal GraphQL,<br/>pulls bookmarks + own tweets, slow scrolls with random pauses<br/><i>reads:</i> state.json (cursors per source)<br/><i>writes:</i> items.json (merged by id) + state.json (updated cursors)<br/><b>incremental</b> — stops at the last known id per source"]
+#### 0 · `xbrain login` — setup
 
-    s2["<b>2 · xbrain fetch</b> — mechanical<br/>For each item with links, downloads the article body<br/>(HTTP + Trafilatura, optional Firecrawl fallback, Playwright for x.com)<br/><i>reads:</i> items.json<br/><i>writes:</i> items.json — each item's content + content_source[]<br/><b>cached</b> — already-fetched items are skipped (use --force to refetch)<br/><b>failures recorded as evidence</b> — http_status + failure_reason, never silently dropped"]
+One-time browser auth. Opens X in a Playwright window; you log in manually.
 
-    s3["<b>3 · xbrain vocab</b> — LLM<br/>Reads the whole corpus, induces a closed taxonomy of ~30-45 topics<br/>map step: candidate topics per chunk → reduce step: consolidated to target_count<br/><i>reads:</i> items.json<br/><i>writes:</i> vocab.yaml (slug + description list)<br/><b>always includes a misc topic</b> for posts with no thematic core"]
+- **Reads:** *(nothing)*
+- **Writes:** `auth/storage_state.json`
 
-    s4["<b>4 · xbrain enrich</b> — LLM<br/>Per item: writes summary + chooses primary_topic + 0-3 secondaries from the vocab<br/><i>reads:</i> items.json + vocab.yaml<br/><i>writes:</i> items.json — each item's enriched (Enrichment record)<br/><b>only LLM judgment</b> — no identifiers, no wikilinks (validator rejects them)<br/><b>skips already-enriched</b> — use --regenerate after vocab or rubric changes"]
+</td></tr>
+<tr><td>
 
-    s5["<b>5 · xbrain topics</b> — LLM<br/>Synthesizes one topic page per slug: 1-3 paragraph overview + up to 15 notes<br/><i>reads:</i> items.json + vocab.yaml + topics.json (to detect stale pages)<br/><i>writes:</i> topics.json — TopicPage per slug<br/><b>plain prose only</b> — the post lists are added later by 'generate', not the LLM<br/><b>derived staleness</b> — a page is stale when live_count > post_count_at_synth + threshold"]
+#### 1 · `xbrain extract` — mechanical
 
-    s6["<b>6 · xbrain generate</b> — mechanical<br/>Renders every item note, topic page and the index into the vault<br/><i>reads:</i> items.json + topics.json + vocab.yaml<br/><i>writes:</i> vault/learnings/x-knowledge/{items,topics,_index.md,log.md}<br/><b>deterministic</b> — no LLM, no network<br/><b>your tail is preserved</b> — content below xbrain:generated:end stays untouched"]
+Drives the logged-in browser, intercepts X's internal GraphQL, pulls
+bookmarks + own tweets. Slow scrolls with random 5-12s pauses (anti-ban).
 
-    done([Wiki ready in Obsidian])
+- **Reads:** `state.json` (cursors per source)
+- **Writes:** `items.json` (merged by id) + `state.json` (updated cursors)
+- **Incremental** — stops at the last known id per source.
 
-    start --> s0 --> s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> done
+</td></tr>
+<tr><td>
 
-    classDef mech fill:#ede9fe,stroke:#5b21b6,stroke-width:1.5px,color:#1e1b4b,text-align:left
-    classDef llm fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#451a03,text-align:left
-    classDef io fill:#0ea5e9,stroke:#0369a1,stroke-width:1.5px,color:#fff,font-weight:500
-    class s0,s1,s2,s6 mech
-    class s3,s4,s5 llm
-    class start,done io
-```
+#### 2 · `xbrain fetch` — mechanical
+
+For each item with links, downloads the article body (HTTP + Trafilatura,
+optional Firecrawl fallback, Playwright for x.com).
+
+- **Reads:** `items.json`
+- **Writes:** `items.json` — each item's `content` + `content_source[]`
+- **Cached** — already-fetched items are skipped (use `--force` to refetch).
+- **Failures recorded as evidence** — `http_status` + `failure_reason`, never silently dropped.
+
+</td></tr>
+<tr><td>
+
+#### 3 · `xbrain vocab` — LLM
+
+Reads the whole corpus, induces a closed taxonomy of ~30-45 topics. Map
+step proposes candidates per chunk; reduce step consolidates to `target_count`.
+
+- **Reads:** `items.json`
+- **Writes:** `vocab.yaml` (slug + description list)
+- **Always includes a `misc` topic** for posts with no thematic core.
+
+</td></tr>
+<tr><td>
+
+#### 4 · `xbrain enrich` — LLM
+
+Per item: writes a summary, chooses `primary_topic` + 0-3 secondaries from
+the vocab.
+
+- **Reads:** `items.json` + `vocab.yaml`
+- **Writes:** `items.json` — each item's `enriched` field (`Enrichment` record)
+- **Only LLM judgment** — no identifiers, no wikilinks (validator rejects them).
+- **Skips already-enriched** — use `--regenerate` after vocab or rubric changes.
+
+</td></tr>
+<tr><td>
+
+#### 5 · `xbrain topics` — LLM
+
+Synthesizes one topic page per slug: 1-3 paragraph overview + up to 15
+notes.
+
+- **Reads:** `items.json` + `vocab.yaml` + `topics.json` (to detect stale pages)
+- **Writes:** `topics.json` — one `TopicPage` per slug
+- **Plain prose only** — the post lists are added later by `generate`, not the LLM.
+- **Derived staleness** — a page is stale when `live_count > post_count_at_synth + threshold`.
+
+</td></tr>
+<tr><td>
+
+#### 6 · `xbrain generate` — mechanical
+
+Renders every item note, topic page and the index into the vault.
+
+- **Reads:** `items.json` + `topics.json` + `vocab.yaml`
+- **Writes:** `vault/learnings/x-knowledge/{items,topics,_index.md,log.md}`
+- **Deterministic** — no LLM, no network.
+- **Your tail is preserved** — content below the `xbrain:generated:end` marker is left untouched.
+
+</td></tr>
+</table>
+
+> **Done:** wiki ready in Obsidian. Open `_index.md` to start.
 
 Three extra ops sit outside the main loop:
 
