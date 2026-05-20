@@ -306,31 +306,22 @@ and writes it back. The wiki is generated from it at the end.
 
 ```mermaid
 flowchart LR
-    X((X / Twitter)) -->|① extract| D[(data/items.json)]
-    D --> Fe["② fetch"] --> D
-    D --> Vo["③ vocab"] --> V[(data/vocab.yaml)]
-    D --> En["④ enrich"] --> D
-    V -.->|reads| En
-    D --> To["⑤ topics"] --> T[(data/topics.json)]
-    V -.->|reads| To
-    D --> Ge["⑥ generate"] --> W[/Obsidian wiki/]
-    V -.->|reads| Ge
-    T -.->|reads| Ge
+    X((X)) --> E1["① extract"] --> E2["② fetch"] --> E3["③ vocab"] --> E4["④ enrich"] --> E5["⑤ topics"] --> E6["⑥ generate"] --> W[/Obsidian wiki/]
 ```
 
-`data/items.json` is the hub — `extract` writes new items into it, `fetch` and
-`enrich` mutate it, and every later stage reads from it. `vocab.yaml` and
-`topics.json` are the artifacts of their own stages and feed the ones
-downstream. The Obsidian wiki is a pure render of all three.
+| # | Stage | Mechanical / LLM | Writes to | What it does |
+|---|-------|------------------|-----------|--------------|
+| ① | `extract` | mechanical | `items.json` + `state.json` | Pulls new bookmarks + own tweets from X (incremental — stops at known ids). |
+| ② | `fetch` | mechanical | `items.json` | Downloads linked article bodies, expands threads, fetches linked X content. Records structured evidence for broken links. |
+| ③ | `vocab` | **LLM** | `vocab.yaml` | Induces the controlled topic taxonomy from the whole corpus. |
+| ④ | `enrich` | **LLM** | `items.json` | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy. |
+| ⑤ | `topics` | **LLM** | `topics.json` | Synthesises each topic page's overview; builds the mechanical post lists. |
+| ⑥ | `generate` | mechanical | the Obsidian vault | Renders the three-layer wiki: `items/*.md`, `topics/*.md`, `_index.md`. |
 
-| # | Stage | Mechanical / LLM | What it does |
-|---|-------|------------------|--------------|
-| ① | `extract` | mechanical | Pulls new bookmarks + own tweets from X (incremental — stops at known ids). |
-| ② | `fetch` | mechanical | Downloads linked article bodies, expands threads, fetches linked X content. Records structured evidence for broken links. |
-| ③ | `vocab` | **LLM** | Induces the controlled topic taxonomy from the whole corpus → `vocab.yaml`. |
-| ④ | `enrich` | **LLM** | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy. |
-| ⑤ | `topics` | **LLM** | Synthesises each topic page's overview; builds the mechanical post lists. |
-| ⑥ | `generate` | mechanical | Renders the three-layer wiki into your vault. |
+`data/items.json` is the hub — most stages read from it and three of them write
+back into it. `vocab.yaml` and `topics.json` are the artifacts of their own
+stages and feed the ones downstream. The Obsidian wiki is a pure render of all
+three — safe to delete and regenerate.
 
 Every stage is **idempotent and incremental** — re-running it only processes
 what is new. `vocab --regenerate` is the deliberate exception: it re-induces the
