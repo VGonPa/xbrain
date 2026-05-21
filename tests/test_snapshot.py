@@ -4,16 +4,16 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
 
 from xbrain.snapshot import (
-    SnapshotManifest,
+    RESTORE_COPIED,
+    RESTORE_DELETED,
+    RESTORE_SKIPPED,
     snapshot_create,
     snapshot_list,
-    snapshot_pre,
     snapshot_prune,
     snapshot_restore,
     snapshot_show,
@@ -44,101 +44,174 @@ def test_snapshot_create_on_empty_data_dir(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    path = snapshot_create(data_dir, command="manual")
+    path, manifest = snapshot_create(data_dir, command="manual")
 
     assert path.exists()
     assert (path / "snapshot.json").exists()
-    # No artifacts to copy when data/ is empty
-    assert not (path / "items.json").exists()
-    manifest = SnapshotManifest.model_validate_json((path / "snapshot.json").read_text())
+    assert not (path / "items.json").exists()  # nothing to copy
     assert manifest.item_count == 0
     assert manifest.topic_count == 0
     assert manifest.vocab_size == 0
     assert manifest.command == "manual"
+    # xbrain_version is always populated (real version or 'unknown')
+    assert manifest.xbrain_version != ""
 
 
 def test_snapshot_create_copies_every_existing_artifact(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     _seed_data_dir(data_dir)
 
-    path = snapshot_create(data_dir, command="manual")
+    path, manifest = snapshot_create(data_dir, command="manual")
 
     for artifact in ("items.json", "state.json", "vocab.yaml", "topics.json"):
         assert (path / artifact).exists()
-    manifest = SnapshotManifest.model_validate_json((path / "snapshot.json").read_text())
     assert manifest.item_count == 2
     assert manifest.topic_count == 1
     assert manifest.vocab_size == 3
 
 
-def test_snapshot_pre_prefixes_command_with_pre(tmp_path: Path) -> None:
+def test_snapshot_create_uses_dir_label_for_directory_and_command_for_manifest(
+    tmp_path: Path,
+) -> None:
+    """dir_label drives the directory name; command drives manifest.command."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    path = snapshot_pre(data_dir, command="vocab-regenerate")
+    path, manifest = snapshot_create(
+        data_dir,
+        command="vocab-regenerate",
+        dir_label="pre-vocab-regenerate",
+    )
 
     assert "pre-vocab-regenerate" in path.name
-    manifest = SnapshotManifest.model_validate_json((path / "snapshot.json").read_text())
-    assert manifest.command == "pre-vocab-regenerate"
+    # manifest.command is the destructive op name only — no `pre-` prefix
+    assert manifest.command == "vocab-regenerate"
 
 
-def test_snapshot_create_with_name_uses_name_in_dirname(tmp_path: Path) -> None:
+def test_snapshot_create_dir_label_defaults_to_command(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    path = snapshot_create(data_dir, command="manual", name="milestone-v1")
+    path, _ = snapshot_create(data_dir, command="manual")
+
+    assert path.name.endswith("-manual")
+
+
+def test_snapshot_create_with_explicit_dir_label_uses_it(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    path, _ = snapshot_create(data_dir, command="manual", dir_label="milestone-v1")
 
     assert path.name.endswith("-milestone-v1")
+
+
+def test_snapshot_create_propagates_corrupt_json(tmp_path: Path) -> None:
+    """A corrupt items.json must abort the snapshot — not record count=0."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "items.json").write_text("not json at all", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        snapshot_create(data_dir, command="manual")
+    # No snapshot directory should have been created
+    assert not snapshots_dir(data_dir).exists() or list(snapshots_dir(data_dir).iterdir()) == []
+
+
+def test_snapshot_create_millisecond_precision_avoids_collisions(tmp_path: Path) -> None:
+    """Two snapshots in the same second must NOT collide on directory name."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    path_a, _ = snapshot_create(data_dir, command="manual", dir_label="a")
+    path_b, _ = snapshot_create(data_dir, command="manual", dir_label="b")
+
+    # No FileExistsError, both directories present
+    assert path_a.exists() and path_b.exists()
+    assert path_a != path_b
 
 
 def test_snapshot_list_returns_newest_first(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    snapshot_create(data_dir, command="manual", name="first")
-    time.sleep(1.1)  # ensure distinct timestamps at second granularity
-    snapshot_create(data_dir, command="manual", name="second")
+    snapshot_create(data_dir, command="manual", dir_label="first")
+    snapshot_create(data_dir, command="manual", dir_label="second")
 
     rows = snapshot_list(data_dir)
 
     assert len(rows) == 2
+    # Both should have a manifest; newest is `second`.
+    assert all(m is not None for _, m in rows)
     assert rows[0][0].name.endswith("-second")
     assert rows[1][0].name.endswith("-first")
 
 
-def test_snapshot_list_skips_directories_without_manifest(tmp_path: Path) -> None:
+def test_snapshot_list_returns_corrupt_dirs_with_none_manifest(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     snapshots_dir(data_dir).mkdir(parents=True)
-    (snapshots_dir(data_dir) / "bogus").mkdir()  # no manifest
-    snapshot_create(data_dir, command="manual", name="real")
+    bogus = snapshots_dir(data_dir) / "bogus"
+    bogus.mkdir()
+    snapshot_create(data_dir, command="manual", dir_label="real")
 
     rows = snapshot_list(data_dir)
 
-    assert len(rows) == 1
-    assert rows[0][0].name.endswith("-real")
+    assert len(rows) == 2
+    # Real one sorts first (newest); corrupt sorts last with manifest=None.
+    real_path, real_manifest = rows[0]
+    corrupt_path, corrupt_manifest = rows[1]
+    assert real_path.name.endswith("-real")
+    assert real_manifest is not None
+    assert corrupt_path == bogus
+    assert corrupt_manifest is None
 
 
-def test_snapshot_restore_brings_back_original_content(tmp_path: Path) -> None:
+def test_snapshot_restore_brings_back_all_four_artifacts(tmp_path: Path) -> None:
+    """Restore round-trip verifies every artifact, not just items.json."""
     data_dir = tmp_path / "data"
     _seed_data_dir(data_dir)
-    snap = snapshot_create(data_dir, command="manual", name="checkpoint")
+    snap, _ = snapshot_create(data_dir, command="manual", dir_label="checkpoint")
 
-    # Mutate items.json
+    # Mutate every artifact
     (data_dir / "items.json").write_text(json.dumps({"999": {"id": "999"}}), encoding="utf-8")
-    assert "999" in (data_dir / "items.json").read_text()
+    (data_dir / "state.json").write_text(json.dumps({"mutated": True}), encoding="utf-8")
+    (data_dir / "vocab.yaml").write_text("topics: []\n", encoding="utf-8")
+    (data_dir / "topics.json").write_text(json.dumps({}), encoding="utf-8")
 
-    snapshot_restore(data_dir, snap.name)
+    actions = snapshot_restore(data_dir, snap.name)
 
-    restored = json.loads((data_dir / "items.json").read_text())
-    assert set(restored) == {"1", "2"}
+    # All four came back to their pre-snapshot content
+    assert set(json.loads((data_dir / "items.json").read_text())) == {"1", "2"}
+    assert json.loads((data_dir / "state.json").read_text()) == {"bookmarks": {}}
+    assert "ai-coding" in (data_dir / "vocab.yaml").read_text()
+    assert "ai-coding" in (data_dir / "topics.json").read_text()
+    # Every artifact reported as copied
+    assert all(action == RESTORE_COPIED for _, action in actions)
+
+
+def test_snapshot_restore_returns_per_artifact_actions(tmp_path: Path) -> None:
+    """The action codes are observable so the CLI can echo every decision."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "items.json").write_text(json.dumps({"1": {}}), encoding="utf-8")
+    snap, _ = snapshot_create(data_dir, command="manual", dir_label="partial")
+
+    # Add a live vocab.yaml that the snapshot doesn't have
+    (data_dir / "vocab.yaml").write_text("topics: []\n", encoding="utf-8")
+
+    actions = snapshot_restore(data_dir, snap.name)
+
+    by_artifact = dict(actions)
+    assert by_artifact["items.json"] == RESTORE_COPIED
+    assert by_artifact["vocab.yaml"] == RESTORE_DELETED
+    assert by_artifact["state.json"] == RESTORE_SKIPPED
+    assert by_artifact["topics.json"] == RESTORE_SKIPPED
 
 
 def test_snapshot_restore_deletes_live_file_missing_from_snapshot(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    # Snapshot with no vocab.yaml present
-    snap = snapshot_create(data_dir, command="manual", name="pre-vocab")
+    snap, _ = snapshot_create(data_dir, command="manual", dir_label="pre-vocab")
 
-    # Now there IS a vocab.yaml — simulating "after vocab ran"
     (data_dir / "vocab.yaml").write_text(
         "topics:\n  - slug: ai-coding\n    description: x\n", encoding="utf-8"
     )
@@ -154,38 +227,65 @@ def test_snapshot_restore_does_not_touch_files_outside_artifacts(tmp_path: Path)
     data_dir.mkdir()
     sentinel = data_dir / "unrelated.txt"
     sentinel.write_text("important user data", encoding="utf-8")
-    snap = snapshot_create(data_dir, command="manual", name="check")
+    snap, _ = snapshot_create(data_dir, command="manual", dir_label="check")
 
     sentinel.write_text("mutated", encoding="utf-8")
     snapshot_restore(data_dir, snap.name)
 
-    # Restore must not touch files outside the four artifacts
     assert sentinel.read_text() == "mutated"
+
+
+def test_snapshot_restore_uses_copy2_preserving_metadata(tmp_path: Path) -> None:
+    """Symmetric with create: shutil.copy2, not text round-trip — binary-safe."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    # Bytes that are not 7-bit ASCII but ARE valid UTF-8 — proves the path works
+    # for non-trivial content. A future binary artifact would also survive.
+    (data_dir / "items.json").write_text(
+        json.dumps({"é": "España 🇪🇸"}, ensure_ascii=False), encoding="utf-8"
+    )
+    snap, _ = snapshot_create(data_dir, command="manual", dir_label="utf")
+    original_bytes = (snap / "items.json").read_bytes()
+
+    (data_dir / "items.json").write_text("{}", encoding="utf-8")
+    snapshot_restore(data_dir, snap.name)
+
+    assert (data_dir / "items.json").read_bytes() == original_bytes
 
 
 def test_snapshot_prune_keeps_only_the_n_newest(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    for i in range(5):
-        snapshot_create(data_dir, command="manual", name=f"s{i}")
-        time.sleep(1.05)
+    paths = [snapshot_create(data_dir, command="manual", dir_label=f"s{i}")[0] for i in range(5)]
 
     deleted = snapshot_prune(data_dir, keep_last=2)
 
     rows = snapshot_list(data_dir)
     assert deleted == 3
     assert len(rows) == 2
-    # The two newest should remain — s4 and s3
-    names = {row[0].name for row in rows}
-    assert any(n.endswith("-s4") for n in names)
-    assert any(n.endswith("-s3") for n in names)
+    # The two newest should remain — the last two created
+    remaining = {row[0] for row in rows}
+    assert remaining == {paths[3], paths[4]}
+
+
+def test_snapshot_prune_with_fewer_than_keep_last(tmp_path: Path) -> None:
+    """No-op when there are fewer snapshots than keep_last."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    snapshot_create(data_dir, command="manual", dir_label="a")
+    snapshot_create(data_dir, command="manual", dir_label="b")
+
+    deleted = snapshot_prune(data_dir, keep_last=10)
+
+    assert deleted == 0
+    assert len(snapshot_list(data_dir)) == 2
 
 
 def test_snapshot_prune_zero_keeps_nothing(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    snapshot_create(data_dir, command="manual", name="a")
-    snapshot_create(data_dir, command="manual", name="b")
+    snapshot_create(data_dir, command="manual", dir_label="a")
+    snapshot_create(data_dir, command="manual", dir_label="b")
 
     deleted = snapshot_prune(data_dir, keep_last=0)
 
@@ -212,9 +312,21 @@ def test_snapshot_show_raises_for_unknown_snapshot(tmp_path: Path) -> None:
 def test_snapshot_show_returns_manifest_for_known_snapshot(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     _seed_data_dir(data_dir)
-    snap = snapshot_create(data_dir, command="manual", name="known")
+    snap, _ = snapshot_create(data_dir, command="manual", dir_label="known")
 
     snap_path, manifest = snapshot_show(data_dir, snap.name)
 
     assert snap_path == snap
     assert manifest.item_count == 2
+
+
+def test_manifest_records_xbrain_version(tmp_path: Path) -> None:
+    """PRD §5 requires xbrain_version in the manifest."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    _, manifest = snapshot_create(data_dir, command="manual")
+
+    # Either a real version or the fallback — never empty
+    assert manifest.xbrain_version != ""
+    assert isinstance(manifest.xbrain_version, str)

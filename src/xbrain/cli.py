@@ -93,6 +93,10 @@ _OPERATOR_ERRORS = (
     KeyError,
     RuntimeError,
     NotImplementedError,
+    # OSError covers PermissionError, FileExistsError, IsADirectoryError, etc.
+    # The snapshot module hits these on permission or disk issues — they should
+    # surface as a clean exit-1, not a raw traceback.
+    OSError,
 )
 
 
@@ -152,14 +156,22 @@ def _run_extract(cfg: Config, source: str, since: datetime | None, until: dateti
 
 
 def _auto_snapshot(cfg: Config, command: str) -> None:
-    """Snapshot data/ before a destructive op and echo the path to stdout.
+    """Snapshot data/ before a destructive op and echo the path + item count.
 
     Called from every destructive code path (vocab --regenerate, topics
-    --resynth, fetch --force). Any failure here propagates and aborts the
-    destructive op — a snapshot we can't take must not be silently skipped.
+    --resynth, fetch --force). The manifest's `command` field carries the
+    destructive op name (e.g. `vocab-regenerate`); the directory label uses
+    the `pre-<op>` prefix so the listing is self-describing.
+
+    Any failure here propagates and aborts the destructive op — a snapshot we
+    can't take must not be silently skipped.
     """
-    path = snapshot.snapshot_pre(cfg.data_dir, command=command)
-    typer.echo(f"Snapshot creado: {path}")
+    path, manifest = snapshot.snapshot_create(
+        cfg.data_dir,
+        command=command,
+        dir_label=f"pre-{command}",
+    )
+    typer.echo(f"Snapshot created: {path.name} ({manifest.item_count} items)")
 
 
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
@@ -466,26 +478,34 @@ app.add_typer(snapshot_app, name="snapshot")
 @snapshot_app.command("create")
 @_handle_cli_errors
 def snapshot_create_cmd(
-    name: str | None = typer.Option(
-        None, help="Etiqueta opcional para el snapshot (por defecto: 'manual')"
-    ),
+    name: str | None = typer.Option(None, help="Optional directory label (default: 'manual')"),
 ) -> None:
-    """Crea un snapshot de data/ ahora mismo."""
+    """Create a snapshot of data/ right now."""
     cfg = _config()
-    path = snapshot.snapshot_create(cfg.data_dir, command="manual", name=name)
-    typer.echo(f"Snapshot creado: {path}")
+    path, manifest = snapshot.snapshot_create(
+        cfg.data_dir,
+        command="manual",
+        dir_label=name,
+    )
+    typer.echo(f"Snapshot created: {path.name} ({manifest.item_count} items)")
 
 
 @snapshot_app.command("list")
 @_handle_cli_errors
 def snapshot_list_cmd() -> None:
-    """Lista los snapshots disponibles, del más nuevo al más antiguo."""
+    """List snapshots, newest first. Corrupt entries surface as CORRUPT."""
     cfg = _config()
     rows = snapshot.snapshot_list(cfg.data_dir)
     if not rows:
-        typer.echo("No hay snapshots.")
+        typer.echo("No snapshots.")
         return
     for path, manifest in rows:
+        if manifest is None:
+            typer.echo(
+                f"{path.name}  CORRUPT — manifest missing or unreadable",
+                err=True,
+            )
+            continue
         typer.echo(
             f"{path.name}  {manifest.command:<28}  "
             f"items={manifest.item_count}  topics={manifest.topic_count}  "
@@ -495,8 +515,8 @@ def snapshot_list_cmd() -> None:
 
 @snapshot_app.command("show")
 @_handle_cli_errors
-def snapshot_show_cmd(name: str = typer.Argument(..., help="Nombre del directorio")) -> None:
-    """Muestra el manifest de un snapshot concreto."""
+def snapshot_show_cmd(name: str = typer.Argument(..., help="Snapshot directory name")) -> None:
+    """Print the manifest of one snapshot."""
     cfg = _config()
     _, manifest = snapshot.snapshot_show(cfg.data_dir, name)
     typer.echo(manifest.model_dump_json(indent=2))
@@ -504,22 +524,29 @@ def snapshot_show_cmd(name: str = typer.Argument(..., help="Nombre del directori
 
 @snapshot_app.command("restore")
 @_handle_cli_errors
-def snapshot_restore_cmd(name: str = typer.Argument(..., help="Nombre del directorio")) -> None:
-    """Restaura data/ desde un snapshot (no toca el vault: ejecuta `generate` después)."""
+def snapshot_restore_cmd(name: str = typer.Argument(..., help="Snapshot directory name")) -> None:
+    """Restore data/ from a snapshot.
+
+    The vault is NOT touched — run `xbrain generate` next to refresh it.
+    Every per-artifact action is echoed so 'a file vanished' never happens
+    silently.
+    """
     cfg = _config()
-    snapshot.snapshot_restore(cfg.data_dir, name)
-    typer.echo(f"Restaurado {name}. Ejecuta `xbrain generate` para refrescar el vault.")
+    actions = snapshot.snapshot_restore(cfg.data_dir, name)
+    for artifact, action in actions:
+        typer.echo(f"  {artifact}: {action}")
+    typer.echo(f"Restored {name}. Run `xbrain generate` to refresh the vault.")
 
 
 @snapshot_app.command("prune")
 @_handle_cli_errors
 def snapshot_prune_cmd(
-    keep_last: int = typer.Option(10, "--keep-last", help="Conserva los N más recientes"),
+    keep_last: int = typer.Option(10, "--keep-last", help="Keep the N newest snapshots"),
 ) -> None:
-    """Elimina los snapshots antiguos, conservando los N más recientes."""
+    """Delete older snapshots, keeping the N newest."""
     cfg = _config()
     deleted = snapshot.snapshot_prune(cfg.data_dir, keep_last=keep_last)
-    typer.echo(f"Snapshots eliminados: {deleted}")
+    typer.echo(f"Snapshots deleted: {deleted}")
 
 
 if __name__ == "__main__":

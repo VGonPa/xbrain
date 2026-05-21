@@ -29,6 +29,17 @@ file is not tracked by git.
 - Keep the PR focused on one change. No drive-by refactors.
 - Describe what changed and why, in your own words.
 
+## Safety: destructive operations auto-snapshot
+
+Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`)
+copy the full `data/` directory to `data/snapshots/<UTC-ts>-pre-<command>/`
+before they write anything. If your change introduces or modifies a destructive
+operation, **wire the auto-snapshot** — see `_auto_snapshot` in `src/xbrain/cli.py`
+and the unit + integration tests under `tests/test_snapshot*.py`. A snapshot
+failure must propagate and abort the destructive op; never `try/except`-swallow
+it. Manual snapshots are available via `xbrain snapshot create`; restore via
+`xbrain snapshot restore <name>`.
+
 ## Pull requests written with AI agents
 
 XBrain is built with AI coding agents, and PRs written that way are welcome — under

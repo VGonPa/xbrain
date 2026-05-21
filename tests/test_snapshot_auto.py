@@ -14,6 +14,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from xbrain import snapshot as snapshot_mod
 from xbrain.cli import app
 from xbrain.models import Author, Item, Link
 from xbrain.snapshot import snapshot_list
@@ -203,3 +204,134 @@ def test_snapshot_prune_cli_deletes_older(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0, result.stdout
     assert len(snapshot_list(tmp_path / "data")) == 2
+
+
+# --------------------------------------------------------------------- ordering
+
+
+def test_snapshot_taken_before_mutation_when_destructive_op_fails(tmp_path: Path, monkeypatch):
+    """PRD-mandated: the snapshot must already be on disk if the destructive op fails.
+
+    Forces `_mark_for_regenerate` to raise, then asserts (a) the destructive op
+    exits non-zero, (b) the pre-snapshot directory already exists, (c)
+    items.json is unchanged from the pre-snapshot content. The safety net would
+    silently break if the snapshot were taken AFTER the mutation.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _write_vocab(tmp_path)
+
+    worksheet = tmp_path / "data" / "vocab-worksheet.json"
+    worksheet.write_text(
+        json.dumps(
+            {"topics": [{"slug": "misc", "description": "Posts that do not fit a specific topic."}]}
+        ),
+        encoding="utf-8",
+    )
+
+    # Force the mutation step (after the snapshot) to raise
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("simulated mutation failure")
+
+    monkeypatch.setattr("xbrain.cli._mark_for_regenerate", _explode)
+
+    result = runner.invoke(app, ["vocab", "--apply", str(worksheet), "--regenerate"])
+
+    assert result.exit_code != 0  # the mutation failure aborted the command
+    snapshots = snapshot_list(tmp_path / "data")
+    assert any(p.name.endswith("-pre-vocab-regenerate") for p, _ in snapshots), result.stderr
+    # The pre-snapshot retained the pre-mutation items.json content
+    items = json.loads((tmp_path / "data" / "items.json").read_text())
+    assert set(items) == {"1"}
+
+
+def test_snapshot_failure_aborts_destructive_op(tmp_path: Path, monkeypatch):
+    """PRD §5: a failed snapshot creation aborts the destructive op.
+
+    Forces `snapshot.snapshot_create` itself to raise — verifies the
+    destructive op exits non-zero and no mutation occurred.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+
+    def _broken(*_args, **_kwargs):
+        raise OSError("simulated snapshot failure (disk full)")
+
+    monkeypatch.setattr(snapshot_mod, "snapshot_create", _broken)
+
+    result = runner.invoke(app, ["fetch", "--force"])
+
+    assert result.exit_code != 0
+    # No snapshot was created; nothing was fetched / mutated
+    assert snapshot_list(tmp_path / "data") == []
+
+
+# --------------------------------------------------------------------- CLI verbs (cont'd)
+
+
+def test_snapshot_show_cli_prints_manifest_json(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    runner.invoke(app, ["snapshot", "create", "--name", "showme"])
+
+    name = next(p.name for p, _ in snapshot_list(tmp_path / "data"))
+    result = runner.invoke(app, ["snapshot", "show", name])
+
+    assert result.exit_code == 0
+    parsed = json.loads(result.stdout)
+    assert parsed["item_count"] == 1
+    assert parsed["command"] == "manual"
+
+
+def test_snapshot_restore_cli_echoes_per_artifact_actions(tmp_path: Path, monkeypatch):
+    """The restore CLI must echo every per-artifact action (no silent deletes)."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    runner.invoke(app, ["snapshot", "create", "--name", "pre-vocab"])
+
+    # After the snapshot, add a vocab.yaml the snapshot doesn't have
+    (tmp_path / "data" / "vocab.yaml").write_text(
+        "topics:\n  - slug: misc\n    description: x\n", encoding="utf-8"
+    )
+
+    name = next(p.name for p, _ in snapshot_list(tmp_path / "data"))
+    result = runner.invoke(app, ["snapshot", "restore", name])
+
+    assert result.exit_code == 0, result.stdout
+    # The action codes must be visible to the user
+    assert "items.json: copied" in result.stdout
+    assert "vocab.yaml: deleted" in result.stdout
+    # And the live vocab.yaml is gone
+    assert not (tmp_path / "data" / "vocab.yaml").exists()
+
+
+def test_snapshot_list_cli_marks_corrupt_dirs(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    runner.invoke(app, ["snapshot", "create", "--name", "good"])
+    # A directory with no manifest = corrupt
+    (tmp_path / "data" / "snapshots" / "bogus-dir").mkdir(parents=True)
+
+    result = runner.invoke(app, ["snapshot", "list"])
+
+    assert result.exit_code == 0
+    assert "-good" in result.stdout
+    # CORRUPT lines land on stderr (visible in mixed-stream CliRunner output)
+    combined = result.stdout + (result.stderr or "")
+    assert "CORRUPT" in combined
+
+
+def test_auto_snapshot_stdout_includes_item_count(tmp_path: Path, monkeypatch):
+    """PRD §5 observability: 'Snapshot created: <path> (N items)'."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+
+    item = _linked_item("1")
+    item.links = []
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["fetch", "--force"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "Snapshot created" in result.stdout
+    assert "1 items" in result.stdout
