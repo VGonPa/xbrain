@@ -33,6 +33,7 @@ it through a worksheet hand-off (see [Execution modes](#execution-modes)).
 - [The pipeline](#the-pipeline)
 - [Commands](#commands)
 - [Execution modes](#execution-modes)
+- [Snapshots & safety](#snapshots--safety)
 - [How it works](#how-it-works)
 - [Project structure](#project-structure)
 - [Development](#development)
@@ -503,10 +504,34 @@ uv run xbrain <command> [options]
 | `generate` | Render the wiki into the vault. |
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
+| `snapshot` | Manage `data/` snapshots: `create`, `list`, `show`, `restore`, `prune`. See [Snapshots & safety](#snapshots--safety). |
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
 
 Every stage accepts `--since` / `--until` (ISO dates) to narrow the date window.
 Run `uv run xbrain <command> --help` for the full option list.
+
+---
+
+## Snapshots & safety
+
+Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`)
+**auto-snapshot** `data/` before they touch anything. The snapshot is a complete
+copy of `items.json`, `state.json`, `vocab.yaml` and `topics.json` under
+`data/snapshots/<UTC-timestamp>-pre-<command>/`, with a `snapshot.json` manifest
+capturing counts and the running `xbrain` version. If a re-run produces worse
+output, a single `xbrain snapshot restore <name>` brings the previous good
+state back.
+
+```bash
+xbrain snapshot list                        # newest first
+xbrain snapshot create --name pre-rubric-v2 # mark a known-good state
+xbrain snapshot restore <name>              # roll back data/ (run `generate` next)
+xbrain snapshot prune --keep-last 10        # cap disk use
+```
+
+The Obsidian vault is **not** snapshotted — it is fully derived from `data/`
+via `xbrain generate`. `restore` rolls back `data/`; you run `xbrain generate`
+to rebuild the wiki from it.
 
 ---
 

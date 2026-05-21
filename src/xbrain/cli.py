@@ -11,6 +11,7 @@ from pathlib import Path
 
 import typer
 
+from xbrain import snapshot
 from xbrain.archive import parse_archive
 from xbrain.config import Config, load_config
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
@@ -150,7 +151,20 @@ def _run_extract(cfg: Config, source: str, since: datetime | None, until: dateti
     save_state(state, cfg.state_path)
 
 
+def _auto_snapshot(cfg: Config, command: str) -> None:
+    """Snapshot data/ before a destructive op and echo the path to stdout.
+
+    Called from every destructive code path (vocab --regenerate, topics
+    --resynth, fetch --force). Any failure here propagates and aborts the
+    destructive op — a snapshot we can't take must not be silently skipped.
+    """
+    path = snapshot.snapshot_pre(cfg.data_dir, command=command)
+    typer.echo(f"Snapshot creado: {path}")
+
+
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
+    if force:
+        _auto_snapshot(cfg, "fetch-force")
     store = load_store(cfg.items_path)
     try:
         articles = fetch_pending(store, since, until, force)
@@ -286,6 +300,8 @@ def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> Non
     _report_invalid(invalid)
     if not topics:
         raise RuntimeError("La worksheet no produjo ningún topic válido.")
+    if regenerate:
+        _auto_snapshot(cfg, "vocab-regenerate")
     # Mark the store first: a crash here leaves items pending (a re-run re-marks
     # idempotently) — safer than vocab.yaml updated while items stay stale.
     _mark_for_regenerate(store, cfg, regenerate)
@@ -308,6 +324,8 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
         return
     if chosen != "api":
         raise ValueError(f"Ejecutor desconocido: {chosen!r}")
+    if regenerate:
+        _auto_snapshot(cfg, "vocab-regenerate")
     topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     _mark_for_regenerate(store, cfg, regenerate)
@@ -350,6 +368,8 @@ def _topics_apply(cfg: Config, store: dict, vocab: list, apply: Path) -> None:
 
 def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: str | None) -> None:
     """`xbrain topics` — update lists and (re)synthesize stale overviews."""
+    if resynth:
+        _auto_snapshot(cfg, "topics-resynth")
     pages = load_topic_pages(cfg.topics_path)
     posts = compute_topic_posts(store, vocab)
     stale = topics_needing_synth(vocab, posts, pages, cfg.topics_resynth_threshold, resynth)
@@ -437,6 +457,69 @@ def status() -> None:
     typer.echo(f"  enriquecidos: {sum(1 for i in store.values() if i.enriched)}")
     typer.echo(f"  última extracción bookmarks: {state.bookmarks.last_run}")
     typer.echo(f"  última extracción tweets: {state.own_tweets.last_run}")
+
+
+snapshot_app = typer.Typer(help="Gestionar snapshots de data/")
+app.add_typer(snapshot_app, name="snapshot")
+
+
+@snapshot_app.command("create")
+@_handle_cli_errors
+def snapshot_create_cmd(
+    name: str | None = typer.Option(
+        None, help="Etiqueta opcional para el snapshot (por defecto: 'manual')"
+    ),
+) -> None:
+    """Crea un snapshot de data/ ahora mismo."""
+    cfg = _config()
+    path = snapshot.snapshot_create(cfg.data_dir, command="manual", name=name)
+    typer.echo(f"Snapshot creado: {path}")
+
+
+@snapshot_app.command("list")
+@_handle_cli_errors
+def snapshot_list_cmd() -> None:
+    """Lista los snapshots disponibles, del más nuevo al más antiguo."""
+    cfg = _config()
+    rows = snapshot.snapshot_list(cfg.data_dir)
+    if not rows:
+        typer.echo("No hay snapshots.")
+        return
+    for path, manifest in rows:
+        typer.echo(
+            f"{path.name}  {manifest.command:<28}  "
+            f"items={manifest.item_count}  topics={manifest.topic_count}  "
+            f"vocab={manifest.vocab_size}"
+        )
+
+
+@snapshot_app.command("show")
+@_handle_cli_errors
+def snapshot_show_cmd(name: str = typer.Argument(..., help="Nombre del directorio")) -> None:
+    """Muestra el manifest de un snapshot concreto."""
+    cfg = _config()
+    _, manifest = snapshot.snapshot_show(cfg.data_dir, name)
+    typer.echo(manifest.model_dump_json(indent=2))
+
+
+@snapshot_app.command("restore")
+@_handle_cli_errors
+def snapshot_restore_cmd(name: str = typer.Argument(..., help="Nombre del directorio")) -> None:
+    """Restaura data/ desde un snapshot (no toca el vault: ejecuta `generate` después)."""
+    cfg = _config()
+    snapshot.snapshot_restore(cfg.data_dir, name)
+    typer.echo(f"Restaurado {name}. Ejecuta `xbrain generate` para refrescar el vault.")
+
+
+@snapshot_app.command("prune")
+@_handle_cli_errors
+def snapshot_prune_cmd(
+    keep_last: int = typer.Option(10, "--keep-last", help="Conserva los N más recientes"),
+) -> None:
+    """Elimina los snapshots antiguos, conservando los N más recientes."""
+    cfg = _config()
+    deleted = snapshot.snapshot_prune(cfg.data_dir, keep_last=keep_last)
+    typer.echo(f"Snapshots eliminados: {deleted}")
 
 
 if __name__ == "__main__":
