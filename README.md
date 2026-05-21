@@ -535,25 +535,25 @@ sequenceDiagram
 
     alt executor = claude-code (default)
         CLI->>Data: write enrich-worksheet.json
-        Note over U,LLM: You open a Claude Code session; the enriching-x-knowledge skill fills the worksheet's judgments[]
+        Note over U,LLM: A Claude Code session fills the worksheet judgments
         U->>CLI: xbrain enrich --apply worksheet.json
-        CLI->>CLI: validate (rubrics + guardrails)
-        CLI->>Data: write items.json (enriched)
+        CLI->>CLI: validate against rubrics and guardrails
+        CLI->>Data: write items.json with enrichment
 
     else executor = api (unattended)
         loop for each pending item
-            CLI->>LLM: prompt(rubric + item + vocab)
-            LLM-->>CLI: { summary, primary_topic, topics[] }
-            CLI->>CLI: validate (rubrics + guardrails)
+            CLI->>LLM: prompt with rubric, item and vocab
+            LLM-->>CLI: summary, primary topic, topics
+            CLI->>CLI: validate against rubrics and guardrails
         end
-        CLI->>Data: write items.json (enriched)
+        CLI->>Data: write items.json with enrichment
 
     else executor = manual
         CLI->>Data: write enrich-worksheet.json
         Note over U: You fill the worksheet by hand
         U->>CLI: xbrain enrich --apply worksheet.json
-        CLI->>CLI: validate (rubrics + guardrails)
-        CLI->>Data: write items.json (enriched)
+        CLI->>CLI: validate against rubrics and guardrails
+        CLI->>Data: write items.json with enrichment
     end
 ```
 
