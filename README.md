@@ -542,8 +542,29 @@ at zero extra cost.
 Claude Code is open, you want to enrich a batch.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'ui-sans-serif, system-ui, sans-serif','fontSize':'13px','background':'transparent'}}}%%
+%%{init: {
+  'theme':'base',
+  'themeVariables':{
+    'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+    'fontSize':'13px',
+    'background':'transparent',
+    'actorBkg':'#7c3aed',
+    'actorBorder':'#5b21b6',
+    'actorTextColor':'#fff',
+    'actorLineColor':'#cbd5e1',
+    'noteBkgColor':'#fef3c7',
+    'noteBorderColor':'#b45309',
+    'noteTextColor':'#451a03',
+    'signalColor':'#475569',
+    'signalTextColor':'#1f2937',
+    'labelBoxBkgColor':'#0ea5e9',
+    'labelBoxBorderColor':'#0369a1',
+    'labelTextColor':'#fff',
+    'sequenceNumberColor':'#fff'
+  }
+}}%%
 sequenceDiagram
+    autonumber
     actor U as You
     participant CLI as xbrain CLI
     participant CC as Claude Code session
@@ -574,8 +595,30 @@ you pay per token.
 ([#7](https://github.com/VGonPa/xbrain/issues/7)) builds on this mode.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'ui-sans-serif, system-ui, sans-serif','fontSize':'13px','background':'transparent'}}}%%
+%%{init: {
+  'theme':'base',
+  'themeVariables':{
+    'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+    'fontSize':'13px',
+    'background':'transparent',
+    'actorBkg':'#7c3aed',
+    'actorBorder':'#5b21b6',
+    'actorTextColor':'#fff',
+    'actorLineColor':'#cbd5e1',
+    'noteBkgColor':'#fef3c7',
+    'noteBorderColor':'#b45309',
+    'noteTextColor':'#451a03',
+    'signalColor':'#475569',
+    'signalTextColor':'#1f2937',
+    'labelBoxBkgColor':'#0ea5e9',
+    'labelBoxBorderColor':'#0369a1',
+    'labelTextColor':'#fff',
+    'loopTextColor':'#5b21b6',
+    'sequenceNumberColor':'#fff'
+  }
+}}%%
 sequenceDiagram
+    autonumber
     actor U as You
     participant CLI as xbrain CLI
     participant API as Anthropic API
@@ -605,8 +648,29 @@ no API, no Claude Code, just JSON in / JSON out.
 that need editorial judgment beyond what the rubric captures.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'ui-sans-serif, system-ui, sans-serif','fontSize':'13px','background':'transparent'}}}%%
+%%{init: {
+  'theme':'base',
+  'themeVariables':{
+    'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+    'fontSize':'13px',
+    'background':'transparent',
+    'actorBkg':'#7c3aed',
+    'actorBorder':'#5b21b6',
+    'actorTextColor':'#fff',
+    'actorLineColor':'#cbd5e1',
+    'noteBkgColor':'#fef3c7',
+    'noteBorderColor':'#b45309',
+    'noteTextColor':'#451a03',
+    'signalColor':'#475569',
+    'signalTextColor':'#1f2937',
+    'labelBoxBkgColor':'#0ea5e9',
+    'labelBoxBorderColor':'#0369a1',
+    'labelTextColor':'#fff',
+    'sequenceNumberColor':'#fff'
+  }
+}}%%
 sequenceDiagram
+    autonumber
     actor U as You
     participant CLI as xbrain CLI
     participant Data as data/
