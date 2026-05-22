@@ -26,6 +26,45 @@ def test_load_config_resolves_paths(tmp_path: Path):
     assert cfg.items_path == tmp_path / "data" / "items.json"
 
 
+def test_load_config_defaults_output_language_to_english(tmp_path: Path):
+    """No [output] section → English default."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.output_language == "English"
+
+
+def test_load_config_round_trips_spanish_language(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[output]\n"
+        'language = "Spanish"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.output_language == "Spanish"
+
+
+def test_load_config_rejects_unknown_language(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[output]\n"
+        'language = "Klingon"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Klingon"):
+        load_config(tmp_path)
+
+
 def test_load_config_rejects_empty_handle(tmp_path: Path):
     _write_repo(tmp_path, handle="")
     with pytest.raises(ValueError, match="handle"):

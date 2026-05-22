@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from xbrain.i18n import Strings, strings_for
 from xbrain.models import Content, ContentSource, FailureReason, Item
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
@@ -39,21 +40,24 @@ def generate(
     output_dir: Path,
     since: datetime | None = None,
     until: datetime | None = None,
+    output_language: str = "English",
 ) -> None:
     """Write _index.md, log.md and one note per noted item.
 
     A note is written for any item that has links or has been enriched. The
     index and log always reflect the whole store; `since`/`until` only narrow
-    which item notes are (re)generated.
+    which item notes are (re)generated. `output_language` drives the section
+    headers (Topics:, Content:, Summary, ...) via `xbrain.i18n`.
     """
+    strings = strings_for(output_language)
     items = sorted(store.values(), key=lambda i: i.created_at, reverse=True)
     items_dir = output_dir / "items"
     items_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "_index.md").write_text(_render_index(items), encoding="utf-8")
+    (output_dir / "_index.md").write_text(_render_index(items, strings), encoding="utf-8")
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
-            _write_note(items_dir, item)
+            _write_note(items_dir, item, strings)
 
 
 def _has_note(item: Item) -> bool:
@@ -69,7 +73,7 @@ def _in_range(item: Item, since: datetime | None, until: datetime | None) -> boo
     return True
 
 
-def _write_note(items_dir: Path, item: Item) -> None:
+def _write_note(items_dir: Path, item: Item, strings: Strings) -> None:
     """Write an item's note, replacing only the generated region.
 
     The filename ends with the item's globally unique ``id``. That makes
@@ -79,7 +83,7 @@ def _write_note(items_dir: Path, item: Item) -> None:
     orphaned.
     """
     path = items_dir / note_filename(item)
-    block = wrap(_render_note(item))
+    block = wrap(_render_note(item, strings))
     source = path if path.exists() else _stale_note(items_dir, item, path)
     if source is not None:
         tail = user_tail(source.read_text(encoding="utf-8"), DEFAULT_TAIL)
@@ -105,7 +109,7 @@ def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
     return None
 
 
-def _enrichment_lines(item: Item) -> list[str]:
+def _enrichment_lines(item: Item, strings: Strings) -> list[str]:
     """Summary + topic links for an enriched item (empty if not enriched)."""
     if not item.enriched:
         return []
@@ -114,25 +118,25 @@ def _enrichment_lines(item: Item) -> list[str]:
         lines += [item.enriched.summary, ""]
     if item.enriched.topics:
         links = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
-        lines += [f"**Temas:** {links}", ""]
+        lines += [f"**{strings.topics_label}:** {links}", ""]
     return lines
 
 
-def _content_lines(content: Content) -> list[str]:
+def _content_lines(content: Content, strings: Strings) -> list[str]:
     """Rendered article bodies + broken-link evidence for a fetched item."""
     lines: list[str] = []
     for source in content.sources:
         if source.ok and source.text:
             heading = source.title or source.url
-            lines += [f"## Contenido: {heading}", "", source.text, ""]
+            lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
         elif not source.ok and source.kind in ("external_article", "x_article"):
             lines += [_broken_link_line(source, content.fetched_at), ""]
     return lines
 
 
-def _render_note(item: Item) -> str:
+def _render_note(item: Item, strings: Strings) -> str:
     lines = [_frontmatter(item), "", f"# {title_of(item)}", ""]
-    lines += _enrichment_lines(item)
+    lines += _enrichment_lines(item, strings)
     lines += ["## Tweet", "", item.text, ""]
     if item.links:
         lines.append("## Enlaces")
@@ -140,7 +144,7 @@ def _render_note(item: Item) -> str:
         lines.append("")
     lines += [f"[Ver tweet original]({item.url})", ""]
     if item.content:
-        lines += _content_lines(item.content)
+        lines += _content_lines(item.content, strings)
     return "\n".join(lines).rstrip()
 
 
@@ -168,7 +172,7 @@ def _frontmatter(item: Item) -> str:
     return "\n".join(lines)
 
 
-def _render_index(items: list[Item]) -> str:
+def _render_index(items: list[Item], strings: Strings) -> str:
     bookmarks = sum(1 for i in items if i.source == "bookmark")
     own = sum(1 for i in items if i.source == "own_tweet")
     noted = sum(1 for i in items if _has_note(i))
@@ -183,7 +187,7 @@ def _render_index(items: list[Item]) -> str:
         "",
         f"> Generado: {datetime.now(timezone.utc).date().isoformat()}",
         "",
-        "## Resumen",
+        f"## {strings.summary_header}",
         "",
         f"- Items totales: {len(items)}",
         f"- Bookmarks: {bookmarks} · Tweets propios: {own}",
@@ -194,7 +198,7 @@ def _render_index(items: list[Item]) -> str:
         "",
         "- [[log|Log cronológico completo]]",
         "",
-        "## Temas",
+        f"## {strings.topics_label}",
         "",
     ]
     for topic, count in sorted(topic_freq.items(), key=lambda kv: (-kv[1], kv[0])):

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.generate import generate
-from xbrain.models import Author, Item, Link
+from xbrain.models import Author, Content, ContentSource, Enrichment, Item, Link
 from xbrain.notes_io import slugify
 
 
@@ -194,3 +194,76 @@ def test_note_renders_broken_link_evidence(tmp_path):
     assert "Enlace roto" in note
     assert "HTTP 404" in note
     assert "2026-05-17" in note
+
+
+# --------------------------------------------------------------------- i18n
+
+
+def _enriched_item(item_id: str = "9") -> Item:
+    """An item with enrichment + a fetched article — exercises every header."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=f"Body {item_id}",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        links=[Link(url="https://example.com/p", domain="example.com")],
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            executor="api",
+            summary="Resumen del item.",
+            primary_topic="ai-coding",
+            topics=["ai-coding", "software"],
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSource(
+                    kind="external_article",
+                    url="https://example.com/p",
+                    title="Article title",
+                    text="Article body",
+                )
+            ],
+        ),
+    )
+
+
+def test_generate_english_headers_by_default(tmp_path: Path):
+    """Default language English: headers and labels read in English."""
+    generate({"9": _enriched_item()}, tmp_path)
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert "## Summary" in index
+    assert "## Topics" in index
+    assert "## Resumen" not in index
+    assert "## Temas" not in index
+
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "**Topics:**" in note
+    assert "## Content: Article title" in note
+    assert "**Temas:**" not in note
+    assert "## Contenido:" not in note
+
+
+def test_generate_spanish_headers_when_requested(tmp_path: Path):
+    """Explicit Spanish: every code-generated header reads in Spanish."""
+    generate({"9": _enriched_item()}, tmp_path, output_language="Spanish")
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert "## Resumen" in index
+    assert "## Temas" in index
+    assert "## Summary" not in index
+
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "**Temas:**" in note
+    assert "## Contenido: Article title" in note
+    assert "**Topics:**" not in note
+
+
+def test_generate_rejects_unsupported_language(tmp_path: Path):
+    """A bogus language must surface as ValueError, not silent default."""
+    import pytest
+
+    with pytest.raises(ValueError, match="Klingon"):
+        generate({"9": _enriched_item()}, tmp_path, output_language="Klingon")
