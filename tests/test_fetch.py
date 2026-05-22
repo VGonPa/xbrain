@@ -8,11 +8,12 @@ from xbrain.fetch import (
     _categorize_url_error,
     _probe_status,
     _reason_for_status,
+    _should_refetch,
     fetch_item,
     fetch_pending,
     trafilatura_extract,
 )
-from xbrain.models import Author, Item, Link
+from xbrain.models import Author, Content, ContentSource, Item, Link
 
 
 def _item(item_id: str, urls: list[str]) -> Item:
@@ -124,8 +125,6 @@ def test_fetch_item_isolates_extractor_exception():
 
 
 def test_fetch_item_preserves_non_external_sources_on_refetch():
-    from xbrain.models import Content, ContentSource
-
     item = _item("1", ["https://example.com/p"])
     item.content = Content(
         fetched_at=datetime.now(timezone.utc),
@@ -357,8 +356,6 @@ def test_extract_article_merges_firecrawl_error_when_both_fail():
 
 def _content_with_source(*, ok: bool, failure_reason=None, kind="external_article", text=None):
     """Helper: build a Content with a single ContentSource of the requested shape."""
-    from xbrain.models import Content, ContentSource
-
     return Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
@@ -371,12 +368,6 @@ def _content_with_source(*, ok: bool, failure_reason=None, kind="external_articl
             )
         ],
     )
-
-
-def _should_refetch(content, force):
-    from xbrain.fetch import _should_refetch as impl
-
-    return impl(content, force)
 
 
 # --- Truth table on _should_refetch ---
@@ -439,8 +430,6 @@ def test_should_refetch_terminal_with_force():
 
 def test_should_skip_mixed_transient_and_terminal():
     """Any terminal failure poisons the retry — the link is dead, retry is waste."""
-    from xbrain.models import Content, ContentSource
-
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
@@ -453,8 +442,6 @@ def test_should_skip_mixed_transient_and_terminal():
 
 def test_should_skip_mixed_transient_and_success():
     """One source succeeded — there is good content here, do not re-hit."""
-    from xbrain.models import Content, ContentSource
-
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
@@ -467,8 +454,6 @@ def test_should_skip_mixed_transient_and_success():
 
 def test_should_skip_only_x_sources():
     """fetch_pending must not act on items whose only sources are x.com — that is fetch_x's job."""
-    from xbrain.models import Content, ContentSource
-
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
@@ -529,3 +514,58 @@ def test_fetch_pending_skips_transient_failures_outside_date_range():
     assert count == 0
     # And the recorded failure is preserved
     assert store["1"].content.sources[0].failure_reason == "timeout"
+
+
+# --- Additional fixes from PR #26 review pipeline ---
+
+
+def test_should_refetch_uncategorized_failure_treated_as_transient():
+    """A failure with `failure_reason=None` (default field, pre-Fase-2 records,
+    uncaught extractor exceptions) is treated as transient — re-fetching gives
+    those anomalous records a chance to land on a categorised result rather
+    than staying invisibly stuck under a default-skip policy.
+    """
+    c = _content_with_source(ok=False, failure_reason=None)
+    assert _should_refetch(c, force=False) is True
+
+
+def test_should_refetch_external_transient_alongside_xcom_source():
+    """`_should_refetch` filters to external_article sources before deciding.
+    An item with a transient-failed external_article PLUS an x.com source
+    (any state) should retry on the external — the x.com source is fetch_x's
+    job and must not block the external retry.
+    """
+    c = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSource(
+                kind="external_article",
+                url="https://ext.com/a",
+                ok=False,
+                failure_reason="timeout",
+            ),
+            ContentSource(
+                kind="x_article",
+                url="https://x.com/i/article/9",
+                ok=False,
+                failure_reason="not_found",
+            ),
+        ],
+    )
+    assert _should_refetch(c, force=False) is True
+
+
+def test_fetch_pending_replaces_sources_does_not_append():
+    """PRD §5 invariant: a re-fetch *replaces* external_article sources, never
+    appends. A transient-failed item with 1 source must still have 1 source
+    after the retry (overwritten), not 2.
+    """
+    item = _item("1", ["https://example.com/p"])
+    item.content = _content_with_source(ok=False, failure_reason="timeout")
+    assert len(item.content.sources) == 1
+    store = {"1": item}
+    fetch_pending(store, extractor=_fake_extractor)
+    assert len(store["1"].content.sources) == 1
+    # And the lone source is now the fresh successful fetch
+    src = store["1"].content.sources[0]
+    assert src.ok and src.text is not None

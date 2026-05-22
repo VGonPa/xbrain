@@ -246,11 +246,16 @@ def _should_refetch(content: Content | None, force: bool) -> bool:
 
     - `content is None` (never fetched) → True.
     - `force=True` → True regardless of recorded state.
-    - Otherwise, True only if every `external_article` source on `content` is a
-      failure with a `failure_reason in _TRANSIENT_FAILURES`. A single
-      successful source, or any terminal failure, skips. No `external_article`
-      sources at all → skip (there is nothing here for `fetch_pending`; the
-      x.com sources are handled by `fetch_x`).
+    - Otherwise, True only if every `external_article` source on `content` is
+      a failure whose `failure_reason` is in `_TRANSIENT_FAILURES` OR `None`.
+      `failure_reason=None` is treated as transient: an `ok=False` source
+      with no categorised reason is anomalous (pre-Fase-2 records, an
+      uncaught `extractor` exception path, …) — re-fetching gives that case
+      a chance to land on a categorised result rather than staying invisibly
+      stuck. A single successful source, or any *categorised* terminal
+      failure, skips. No `external_article` sources at all → skip (there is
+      nothing here for `fetch_pending`; the x.com sources are handled by
+      `fetch_x`).
     """
     if content is None:
         return True
@@ -259,7 +264,10 @@ def _should_refetch(content: Content | None, force: bool) -> bool:
     external = [s for s in content.sources if s.kind == "external_article"]
     if not external:
         return False
-    return all((not src.ok) and src.failure_reason in _TRANSIENT_FAILURES for src in external)
+    return all(
+        (not src.ok) and (src.failure_reason is None or src.failure_reason in _TRANSIENT_FAILURES)
+        for src in external
+    )
 
 
 def fetch_pending(
