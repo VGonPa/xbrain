@@ -12,7 +12,7 @@ live `data/` dir; the module does not distinguish). The CLI is the only thing
 that knows what a "snapshot name" is and resolves it via
 `xbrain.snapshot.snapshot_show`.
 
-Overview drift uses a pure-Python TF cosine similarity (see `_tfidf_cosine`).
+Overview drift uses a pure-Python TF cosine similarity (see `_tf_cosine`).
 No new dependencies: scikit-learn or sentence-transformers would tax the
 install for one CLI feature, and the offline-by-default invariant rules out
 API-call embeddings. LLM-judged similarity is the explicit follow-up tied to
@@ -109,11 +109,16 @@ class TopicsDiff(BaseModel):
 
 
 class VocabDiff(BaseModel):
-    """Slug-level set difference between two `vocab.yaml` files."""
+    """Slug-level set difference between two `vocab.yaml` files.
+
+    `unchanged_count` carries the cardinality of slugs present in both vocabs
+    — only the count is consumed downstream (text renderer, JSON snapshot),
+    so the full list is not stored.
+    """
 
     added: list[str] = Field(default_factory=list)
     removed: list[str] = Field(default_factory=list)
-    unchanged: list[str] = Field(default_factory=list)
+    unchanged_count: int = 0
 
 
 class DiffSummary(BaseModel):
@@ -160,13 +165,42 @@ def diff_snapshots(
 
     The thresholds tune which transitions get flagged but do not affect the
     raw counts. Defaults match PRD §5.2.
+
+    Raises:
+        FileNotFoundError: if either directory does not exist on disk, or if
+            both directories are completely empty (no `items.json`,
+            `vocab.yaml` or `topics.json`). Without this guard a `diff` against
+            an accidentally-deleted `data/` would silently report
+            "everything removed" — surfacing as a clean error is safer.
+        ValueError: a context-adding wrap around the corrupt-file errors
+            raised by the underlying loaders, so the operator sees *which*
+            file is the problem rather than a bare pydantic / json traceback.
     """
-    items_a = load_store(a_dir / "items.json")
-    items_b = load_store(b_dir / "items.json")
-    vocab_a = load_vocab(a_dir / "vocab.yaml")
-    vocab_b = load_vocab(b_dir / "vocab.yaml")
-    pages_a = load_topic_pages(a_dir / "topics.json")
-    pages_b = load_topic_pages(b_dir / "topics.json")
+    for label, path in (("A", a_dir), ("B", b_dir)):
+        if not path.exists():
+            raise FileNotFoundError(f"diff side {label}: directory not found: {path}")
+
+    def _load_or_explain(path: Path, loader):
+        try:
+            return loader(path)
+        except (ValueError, OSError) as exc:  # pydantic ValidationError is a ValueError
+            raise ValueError(f"failed to load {path}: {exc}") from exc
+
+    items_a = _load_or_explain(a_dir / "items.json", load_store)
+    items_b = _load_or_explain(b_dir / "items.json", load_store)
+    vocab_a = _load_or_explain(a_dir / "vocab.yaml", load_vocab)
+    vocab_b = _load_or_explain(b_dir / "vocab.yaml", load_vocab)
+    pages_a = _load_or_explain(a_dir / "topics.json", load_topic_pages)
+    pages_b = _load_or_explain(b_dir / "topics.json", load_topic_pages)
+
+    a_empty = not (items_a or vocab_a or pages_a)
+    b_empty = not (items_b or vocab_b or pages_b)
+    if a_empty and b_empty:
+        raise FileNotFoundError(
+            f"Both diff sides are empty (no items.json / vocab.yaml / topics.json "
+            f"present under {a_dir} or {b_dir}). Confirm the snapshot names and "
+            "that data/ is populated."
+        )
 
     items_diff = _compute_items_diff(items_a, items_b, top_n=top_n_transitions)
     vocab_diff = _compute_vocab_diff(vocab_a, vocab_b)
@@ -308,21 +342,21 @@ def _compute_vocab_diff(vocab_a: list[Topic], vocab_b: list[Topic]) -> VocabDiff
     return VocabDiff(
         added=sorted(slugs_b - slugs_a),
         removed=sorted(slugs_a - slugs_b),
-        unchanged=sorted(slugs_a & slugs_b),
+        unchanged_count=len(slugs_a & slugs_b),
     )
 
 
-# ----------------------------------------------------------------------- TF-IDF cosine
+# --------------------------------------------------------------------------- TF cosine
 
 
-def _tfidf_cosine(text_a: str, text_b: str) -> float:
+def _tf_cosine(text_a: str, text_b: str) -> float:
     """Return TF cosine similarity in [0.0, 1.0] for two short prose strings.
 
     Tokenization: lowercase, runs of ASCII or Romance-Latin letters/digits of
-    length >= 2. With only two documents, IDF degenerates; we use plain TF
-    cosine — relative ordering across topic pairs is what matters for the
-    `identical / similar / different` bucket assignment, not the absolute
-    score.
+    length >= 2. With only two documents IDF degenerates, so this is plain TF
+    cosine (not TF-IDF) — relative ordering across topic pairs is what matters
+    for the `identical / similar / different` bucket assignment, not the
+    absolute score.
 
     Edge cases:
       - Either text empty or contains no qualifying tokens → 0.0.
@@ -387,7 +421,7 @@ def format_text(report: DiffReport) -> str:
         f"  removed ({len(report.vocab.removed)}): "
         f"{', '.join(report.vocab.removed) if report.vocab.removed else '(none)'}"
     )
-    lines.append(f"  unchanged: {len(report.vocab.unchanged)} slugs")
+    lines.append(f"  unchanged: {report.vocab.unchanged_count} slugs")
     return "\n".join(lines)
 
 
@@ -497,7 +531,7 @@ def _classify_overview(
     """Compute similarity and bucket it into the OverviewFlag enum."""
     if text_a is None or text_b is None:
         return None, "not_comparable"
-    similarity = _tfidf_cosine(text_a, text_b)
+    similarity = _tf_cosine(text_a, text_b)
     if similarity >= _IDENTICAL_SIMILARITY:
         return similarity, "identical"
     if similarity >= threshold:

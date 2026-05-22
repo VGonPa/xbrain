@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from xbrain.cli import app
 from xbrain.diff import (
     DiffReport,
-    _tfidf_cosine,
+    _tf_cosine,
     diff_snapshots,
     format_json,
     format_text,
@@ -97,24 +97,24 @@ def _page(slug: str, overview: str, count: int = 5) -> TopicPage:
 
 def test_tfidf_identical_strings_return_one() -> None:
     text = "the quick brown fox jumps"
-    assert _tfidf_cosine(text, text) == pytest.approx(1.0)
+    assert _tf_cosine(text, text) == pytest.approx(1.0)
 
 
 def test_tfidf_empty_or_singleton_returns_zero() -> None:
-    assert _tfidf_cosine("", "anything") == 0.0
-    assert _tfidf_cosine("text", "") == 0.0
+    assert _tf_cosine("", "anything") == 0.0
+    assert _tf_cosine("text", "") == 0.0
     # Single-character tokens get filtered (length >= 2 floor)
-    assert _tfidf_cosine("a a a", "b b b") == 0.0
+    assert _tf_cosine("a a a", "b b b") == 0.0
 
 
 def test_tfidf_disjoint_vocabularies_return_zero() -> None:
-    assert _tfidf_cosine("alpha bravo charlie", "xenon yankee zulu") == 0.0
+    assert _tf_cosine("alpha bravo charlie", "xenon yankee zulu") == 0.0
 
 
 def test_tfidf_partial_overlap_is_between_zero_and_one() -> None:
     text_a = "the agentic workflow runs locally with full traces"
     text_b = "the agentic workflow runs locally with full visibility"
-    similarity = _tfidf_cosine(text_a, text_b)
+    similarity = _tf_cosine(text_a, text_b)
     assert 0.5 < similarity < 1.0
 
 
@@ -123,7 +123,7 @@ def test_tfidf_accented_tokens_survive_lowercasing() -> None:
     # accented text compared to itself must score 1.0 — proves we didn't
     # silently strip the accented chars to nothing.
     text = "el árbol creció con vigor"
-    assert _tfidf_cosine(text, text) == pytest.approx(1.0)
+    assert _tf_cosine(text, text) == pytest.approx(1.0)
 
 
 # ----------------------------------------------------------------- diff_snapshots end-to-end
@@ -357,7 +357,7 @@ def test_vocab_added_and_removed_set_correctly(tmp_path: Path) -> None:
 
     assert report.vocab.added == ["delta"]
     assert report.vocab.removed == ["alpha"]
-    assert report.vocab.unchanged == ["bravo", "charlie"]
+    assert report.vocab.unchanged_count == 2
 
 
 def test_missing_vocab_yaml_on_one_side_does_not_crash(tmp_path: Path) -> None:
@@ -522,3 +522,57 @@ def test_cli_diff_unknown_format_exits_1(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "format" in result.output.lower()
+
+
+# --- PR #28 review fixes: input validation ---
+
+
+def test_diff_snapshots_raises_when_dir_does_not_exist(tmp_path):
+    """Missing snapshot dir surfaces as clean FileNotFoundError, not silent empty diff."""
+    import pytest
+
+    from xbrain.diff import diff_snapshots
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "items.json").write_text("{}", encoding="utf-8")
+    ghost = tmp_path / "does-not-exist"
+
+    with pytest.raises(FileNotFoundError, match="directory not found"):
+        diff_snapshots(real, ghost)
+
+
+def test_diff_snapshots_raises_when_both_sides_are_empty(tmp_path):
+    """Both sides empty → clean FileNotFoundError naming the dirs.
+
+    Guards against the silent-failure case where data/ was deleted out-of-band
+    and diff would otherwise report a clean 'no changes' against a real snapshot.
+    """
+    import pytest
+
+    from xbrain.diff import diff_snapshots
+
+    a = tmp_path / "a"
+    a.mkdir()
+    b = tmp_path / "b"
+    b.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="Both diff sides are empty"):
+        diff_snapshots(a, b)
+
+
+def test_diff_snapshots_wraps_corrupt_file_with_context(tmp_path):
+    """A corrupt items.json surfaces with the path in the error message."""
+    import pytest
+
+    from xbrain.diff import diff_snapshots
+
+    a = tmp_path / "a"
+    a.mkdir()
+    (a / "items.json").write_text("not json at all", encoding="utf-8")
+    b = tmp_path / "b"
+    b.mkdir()
+    (b / "items.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="failed to load.*items.json"):
+        diff_snapshots(a, b)
