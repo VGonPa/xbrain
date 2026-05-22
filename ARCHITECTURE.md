@@ -148,6 +148,7 @@ optional Firecrawl fallback, Playwright for x.com).
 - **Reads:** `items.json`
 - **Writes:** `items.json` — each item's `content` + `content_source[]`
 - **Cached** — already-fetched items are skipped (use `--force` to refetch).
+- **Transient retries** — items whose only previous failures were `timeout` / `dns_error` are re-fetched on the next run without `--force`. Terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`.
 - **Failures recorded as evidence** — `http_status` + `failure_reason`, never silently dropped.
 - **Snapshots `data/` before `--force`** — recovery path if a forced refetch makes things worse.
 

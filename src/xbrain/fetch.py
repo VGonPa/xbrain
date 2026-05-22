@@ -235,6 +235,33 @@ def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Con
     return Content(fetched_at=datetime.now(timezone.utc), sources=kept + new_sources)
 
 
+# Failure reasons that justify an automatic retry on the next run. Everything
+# else (`not_found`, `forbidden`, `paywall`, `js_required`, `empty_content`)
+# is treated as terminal — only `--force` re-fetches those.
+_TRANSIENT_FAILURES: frozenset[FailureReason] = frozenset({"timeout", "dns_error"})
+
+
+def _should_refetch(content: Content | None, force: bool) -> bool:
+    """Return True if `fetch_pending` should (re)fetch this item.
+
+    - `content is None` (never fetched) → True.
+    - `force=True` → True regardless of recorded state.
+    - Otherwise, True only if every `external_article` source on `content` is a
+      failure with a `failure_reason in _TRANSIENT_FAILURES`. A single
+      successful source, or any terminal failure, skips. No `external_article`
+      sources at all → skip (there is nothing here for `fetch_pending`; the
+      x.com sources are handled by `fetch_x`).
+    """
+    if content is None:
+        return True
+    if force:
+        return True
+    external = [s for s in content.sources if s.kind == "external_article"]
+    if not external:
+        return False
+    return all((not src.ok) and src.failure_reason in _TRANSIENT_FAILURES for src in external)
+
+
 def fetch_pending(
     store: dict[str, Item],
     since: datetime | None = None,
@@ -242,13 +269,18 @@ def fetch_pending(
     force: bool = False,
     extractor: ArticleExtractor = extract_article,
 ) -> int:
-    """Fetch external content for items that have non-x links and no content yet."""
+    """Fetch external content for items that have non-x links and no content yet.
+
+    A previous fetch whose only failures were transient (timeout, dns_error)
+    is automatically retried — `--force` is only needed to retry terminal
+    failures (404, paywall, …) or to re-hit already-successful items.
+    """
     fetched = 0
     for item in store.values():
         # all links are x.com — handled by fetch_x
         if all(is_x_url(link.url) for link in item.links):
             continue
-        if item.content is not None and not force:
+        if not _should_refetch(item.content, force):
             continue
         if since and item.created_at < since:
             continue
