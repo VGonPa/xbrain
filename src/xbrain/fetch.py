@@ -321,8 +321,7 @@ def _should_refetch(content: Content | None, force: bool) -> bool:
     if not external:
         return False
     return all(
-        isinstance(src, ContentSourceFailure)
-        and src.failure_reason in _TRANSIENT_FAILURES
+        isinstance(src, ContentSourceFailure) and src.failure_reason in _TRANSIENT_FAILURES
         for src in external
     )
 

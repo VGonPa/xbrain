@@ -367,9 +367,7 @@ def test_extract_article_merges_firecrawl_error_when_both_fail():
 # --------------------------------------------------------------------- #19: transient retry
 
 
-def _content_with_source(
-    *, ok: bool, failure_reason="timeout", kind="external_article", text=None
-):
+def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_article", text=None):
     """Helper: build a Content with a single ContentSource of the requested shape.
 
     `ok=True` builds a `ContentSourceSuccess` (text required); `ok=False`
@@ -377,9 +375,7 @@ def _content_with_source(
     ``"timeout"`` — the transient bucket).
     """
     if ok:
-        source = ContentSourceSuccess(
-            kind=kind, url="https://example.com/p", text=text or "body"
-        )
+        source = ContentSourceSuccess(kind=kind, url="https://example.com/p", text=text or "body")
     else:
         source = ContentSourceFailure(
             kind=kind, url="https://example.com/p", failure_reason=failure_reason
@@ -453,12 +449,8 @@ def test_should_skip_mixed_transient_and_terminal():
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
-            ContentSourceFailure(
-                kind="external_article", url="a", failure_reason="timeout"
-            ),
-            ContentSourceFailure(
-                kind="external_article", url="b", failure_reason="not_found"
-            ),
+            ContentSourceFailure(kind="external_article", url="a", failure_reason="timeout"),
+            ContentSourceFailure(kind="external_article", url="b", failure_reason="not_found"),
         ],
     )
     assert _should_refetch(c, force=False) is False
@@ -469,9 +461,7 @@ def test_should_skip_mixed_transient_and_success():
     c = Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
         sources=[
-            ContentSourceFailure(
-                kind="external_article", url="a", failure_reason="timeout"
-            ),
+            ContentSourceFailure(kind="external_article", url="a", failure_reason="timeout"),
             ContentSourceSuccess(kind="external_article", url="b", text="got it"),
         ],
     )
@@ -569,9 +559,7 @@ def test_should_refetch_legacy_uncategorized_failure_migrates_to_transient():
     )
     assert isinstance(src, ContentSourceFailure)
     assert src.failure_reason == "timeout"  # migrator picked the transient bucket
-    c = Content(
-        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=[src]
-    )
+    c = Content(fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=[src])
     assert _should_refetch(c, force=False) is True
 
 
