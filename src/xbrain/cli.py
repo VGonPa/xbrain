@@ -191,7 +191,7 @@ def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, forc
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
-    run_generate(store, cfg.output_dir, since, until, cfg.output_language)
+    run_generate(store, cfg.output_dir, since, until, cfg.output_language, cfg.topic_style)
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 
 

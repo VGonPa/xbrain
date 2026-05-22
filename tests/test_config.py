@@ -154,3 +154,44 @@ def test_config_topics_threshold_is_configurable(tmp_path):
         encoding="utf-8",
     )
     assert load_config(tmp_path).topics_resynth_threshold == 50
+
+
+def test_load_config_defaults_topic_style_to_wikilink(tmp_path: Path):
+    """No `[output] topic_style` key → wikilink default (backwards-compat)."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.topic_style == "wikilink"
+
+
+def test_load_config_round_trips_hashtag_topic_style(tmp_path: Path):
+    """Explicit `topic_style = "hashtag"` round-trips."""
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[output]\n"
+        'topic_style = "hashtag"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.topic_style == "hashtag"
+
+
+def test_load_config_rejects_unknown_topic_style(tmp_path: Path):
+    """Unknown topic_style fails fast with the supported list in the message."""
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[output]\n"
+        'topic_style = "bogus"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="topic_style"):
+        load_config(tmp_path)

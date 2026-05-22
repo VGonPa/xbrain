@@ -267,3 +267,67 @@ def test_generate_rejects_unsupported_language(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Klingon"):
         generate({"9": _enriched_item()}, tmp_path, output_language="Klingon")
+
+
+# --------------------------------------------------------------- topic_style
+
+
+def _hashtag_item() -> Item:
+    """Enriched item with two topics — exercises the topic-line rendering."""
+    return Item(
+        id="42",
+        source="bookmark",
+        url="https://x.com/a/status/42",
+        author=Author(handle="alice", name="Alice"),
+        text="Body 42",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        links=[Link(url="https://example.com/p", domain="example.com")],
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            executor="api",
+            summary="Resumen.",
+            primary_topic="ai-coding",
+            topics=["ai-coding", "software-engineering"],
+        ),
+    )
+
+
+def test_generate_renders_topics_as_wikilinks_by_default(tmp_path: Path):
+    """Default `topic_style` keeps the byte-for-byte current wikilink form."""
+    generate({"42": _hashtag_item()}, tmp_path)
+    note = next((tmp_path / "items").glob("*-42.md")).read_text(encoding="utf-8")
+    assert "**Topics:** [[ai-coding]] · [[software-engineering]]" in note
+    assert "#ai-coding" not in note
+    assert "#software-engineering" not in note
+
+
+def test_generate_renders_topics_as_hashtags_when_requested(tmp_path: Path):
+    """`topic_style="hashtag"` emits Obsidian tags space-separated on the line."""
+    generate({"42": _hashtag_item()}, tmp_path, topic_style="hashtag")
+    note = next((tmp_path / "items").glob("*-42.md")).read_text(encoding="utf-8")
+    assert "**Topics:** #ai-coding #software-engineering" in note
+    assert "[[ai-coding]]" not in note
+    assert "[[software-engineering]]" not in note
+    # Orthogonality invariant: frontmatter `tags:` are unchanged across modes.
+    # Both slugs must still be present in the frontmatter as native Obsidian tags.
+    assert "tags: [x-knowledge, ai-coding, software-engineering]" in note
+
+
+def test_generate_hashtag_mode_does_not_affect_index_or_topic_page_lists(tmp_path: Path):
+    """Hashtag mode is in-body-only — the `_index.md` ## Topics section stays wikilinks."""
+    generate({"42": _hashtag_item()}, tmp_path, topic_style="hashtag")
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    # The index ranks topics with wikilink-plus-count — independent of topic_style.
+    assert "[[ai-coding]] (1)" in index
+    assert "[[software-engineering]] (1)" in index
+    # And the index never carries the in-body `**Topics:**` line at all.
+    assert "**Topics:**" not in index
+
+
+def test_generate_rejects_unknown_topic_style(tmp_path: Path):
+    """Unknown topic_style at the generator boundary surfaces a ValueError."""
+    import pytest
+
+    with pytest.raises(ValueError, match="topic_style"):
+        generate({"42": _hashtag_item()}, tmp_path, topic_style="bogus")
