@@ -54,10 +54,17 @@ def slugify(text: str) -> str:
 
 
 def title_of(item: Item) -> str:
-    """A display title for an item — a fetched article title, else the text."""
+    """A display title for an item — a fetched article title, else the text.
+
+    Only the success variant of `ContentSource` carries a `title` field; the
+    failure variant has no title, so the isinstance narrowing both satisfies
+    mypy and silently skips broken-link sources.
+    """
+    from xbrain.models import ContentSourceSuccess
+
     if item.content:
         for source in item.content.sources:
-            if source.title:
+            if isinstance(source, ContentSourceSuccess) and source.title:
                 return source.title
     return item.text.replace("\n", " ")[:80] or item.id
 

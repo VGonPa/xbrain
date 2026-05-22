@@ -12,15 +12,21 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.models import Item, Topic
+from xbrain.models import ContentSourceSuccess, Item, Topic
 from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 
 
 def _article_text(item: Item) -> str | None:
+    """First successful fetched article body, truncated, or None.
+
+    Only the success variant of `ContentSource` carries `text`. The
+    isinstance narrowing satisfies mypy and silently skips broken-link
+    sources, matching the pre-#20 ``src.ok and src.text`` behaviour.
+    """
     if not item.content:
         return None
     for src in item.content.sources:
-        if src.ok and src.text:
+        if isinstance(src, ContentSourceSuccess) and src.text:
             return src.text[:ARTICLE_CHAR_LIMIT]
     return None
 

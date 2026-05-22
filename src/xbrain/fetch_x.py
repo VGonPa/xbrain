@@ -20,7 +20,13 @@ from playwright.sync_api import BrowserContext, Response
 from xbrain.extract.browser import is_logged_out, x_context
 from xbrain.extract.graphql import parse_tweets
 from xbrain.fetch import is_x_url
-from xbrain.models import Content, ContentSource, Item
+from xbrain.models import (
+    Content,
+    ContentSource,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Item,
+)
 
 _SETTLE_MS = 4000
 _STATUS_RE = re.compile(r"/[^/]+/status/(\d+)")
@@ -86,10 +92,9 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(_SETTLE_MS)
         except Exception:  # noqa: BLE001 - navigation failure -> empty result
-            return ContentSource(
+            return ContentSourceFailure(
                 kind="x_article",
                 url=url,
-                ok=False,
                 failure_reason="timeout",
                 error="No se pudo cargar el tweet.",
                 attempts=1,
@@ -100,11 +105,10 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
     finally:
         page.close()
     if text:
-        return ContentSource(kind="x_article", url=url, text=text, ok=True, attempts=1)
-    return ContentSource(
+        return ContentSourceSuccess(kind="x_article", url=url, text=text, attempts=1)
+    return ContentSourceFailure(
         kind="x_article",
         url=url,
-        ok=False,
         failure_reason="empty_content",
         error="No se pudo recuperar el contenido del tweet.",
         attempts=1,
@@ -119,10 +123,9 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(_SETTLE_MS)
         except Exception:  # noqa: BLE001 - navigation failure -> empty result
-            return ContentSource(
+            return ContentSourceFailure(
                 kind="x_article",
                 url=url,
-                ok=False,
                 failure_reason="timeout",
                 error="No se pudo cargar el artículo de X.",
                 attempts=1,
@@ -134,13 +137,12 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
         page.close()
     text = trafilatura.extract(html)
     if text:
-        return ContentSource(
-            kind="x_article", url=url, text=text, ok=True, http_status=200, attempts=1
+        return ContentSourceSuccess(
+            kind="x_article", url=url, text=text, http_status=200, attempts=1
         )
-    return ContentSource(
+    return ContentSourceFailure(
         kind="x_article",
         url=url,
-        ok=False,
         failure_reason="empty_content",
         error="No se pudo extraer el contenido del artículo de X.",
         attempts=1,

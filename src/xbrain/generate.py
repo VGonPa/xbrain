@@ -8,7 +8,13 @@ from pathlib import Path
 
 from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.i18n import Strings, strings_for
-from xbrain.models import Content, ContentSource, FailureReason, Item
+from xbrain.models import (
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    FailureReason,
+    Item,
+)
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
 logger = logging.getLogger(__name__)
@@ -21,16 +27,20 @@ _FAILURE_ES: dict[FailureReason, str] = {
     "dns_error": "dominio no resuelto",
     "js_required": "requiere JavaScript",
     "empty_content": "sin contenido extraíble",
+    "unknown_error": "error desconocido",
 }
 
 
-def _broken_link_line(source: ContentSource, fetched_at: datetime) -> str:
-    """A one-line, human-readable record of a link that could not be fetched."""
+def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
+    """A one-line, human-readable record of a link that could not be fetched.
+
+    Accepts only the failure variant — the type system enforces that
+    `failure_reason` is present (no Optional check needed).
+    """
     bits: list[str] = []
     if source.http_status:
         bits.append(f"HTTP {source.http_status}")
-    if source.failure_reason:
-        bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
+    bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
     detail = " · ".join(bits) or "no se pudo recuperar"
     date = fetched_at.date().isoformat()
     return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
@@ -148,13 +158,20 @@ def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[st
 
 
 def _content_lines(content: Content, strings: Strings) -> list[str]:
-    """Rendered article bodies + broken-link evidence for a fetched item."""
+    """Rendered article bodies + broken-link evidence for a fetched item.
+
+    Switches on the `ContentSource` variant: the success variant is
+    rendered as a content block; the failure variant is rendered as a
+    broken-link line *only* for external articles and X articles (a
+    failed thread fetch is silently elided, matching the pre-refactor
+    behaviour — `source.kind` is what guarded that path before).
+    """
     lines: list[str] = []
     for source in content.sources:
-        if source.ok and source.text:
+        if isinstance(source, ContentSourceSuccess):
             heading = source.title or source.url
             lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
-        elif not source.ok and source.kind in ("external_article", "x_article"):
+        elif source.kind in ("external_article", "x_article"):
             lines += [_broken_link_line(source, content.fetched_at), ""]
     return lines
 

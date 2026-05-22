@@ -3,7 +3,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.generate import generate
-from xbrain.models import Author, Content, ContentSource, Enrichment, Item, Link
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Link,
+)
 from xbrain.notes_io import slugify
 
 
@@ -165,7 +173,6 @@ def test_note_renders_broken_link_evidence(tmp_path):
     from datetime import datetime, timezone
 
     from xbrain.generate import generate
-    from xbrain.models import Author, Content, ContentSource, Item, Link
 
     item = Item(
         id="1",
@@ -179,10 +186,9 @@ def test_note_renders_broken_link_evidence(tmp_path):
         content=Content(
             fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
             sources=[
-                ContentSource(
+                ContentSourceFailure(
                     kind="external_article",
                     url="https://dead.example.com/p",
-                    ok=False,
                     http_status=404,
                     failure_reason="not_found",
                 )
@@ -220,7 +226,7 @@ def _enriched_item(item_id: str = "9") -> Item:
         content=Content(
             fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
             sources=[
-                ContentSource(
+                ContentSourceSuccess(
                     kind="external_article",
                     url="https://example.com/p",
                     title="Article title",

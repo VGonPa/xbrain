@@ -75,3 +75,113 @@ def test_load_topic_pages_returns_empty_when_absent(tmp_path):
     from xbrain.store import load_topic_pages
 
     assert load_topic_pages(tmp_path / "missing.json") == {}
+
+
+def test_load_store_migrates_legacy_content_source_records_in_place(tmp_path: Path):
+    """Pre-#20 `data/items.json` files use `ok: bool` on each ContentSource.
+
+    `load_store` must read those records into the new tagged-union variants,
+    and the next `save_store` must persist them with the `outcome`
+    discriminator (no `ok` field). This is the load-bearing test for the
+    upgrade story: existing users do not need to run any migration command —
+    a single read/write cycle is enough.
+    """
+    import json
+
+    from xbrain.models import ContentSourceFailure, ContentSourceSuccess
+
+    legacy_items = {
+        "1": {
+            "id": "1",
+            "source": "bookmark",
+            "url": "https://x.com/a/status/1",
+            "author": {"handle": "a", "name": "A"},
+            "text": "t",
+            "created_at": "2026-05-10T00:00:00+00:00",
+            "captured_at": "2026-05-16T00:00:00+00:00",
+            "media": [],
+            "links": [],
+            "content": {
+                "fetched_at": "2026-05-17T00:00:00+00:00",
+                "sources": [
+                    {
+                        "kind": "external_article",
+                        "url": "https://e.com/good",
+                        "ok": True,
+                        "title": "T",
+                        "text": "body",
+                        "http_status": 200,
+                        "failure_reason": None,
+                        "error": None,
+                        "attempts": 1,
+                    },
+                    {
+                        "kind": "external_article",
+                        "url": "https://e.com/dead",
+                        "ok": False,
+                        "title": None,
+                        "text": None,
+                        "http_status": 404,
+                        "failure_reason": "not_found",
+                        "error": "HTTP 404",
+                        "attempts": 2,
+                    },
+                ],
+            },
+        }
+    }
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps(legacy_items), encoding="utf-8")
+
+    store = load_store(path)
+    sources = store["1"].content.sources
+    assert isinstance(sources[0], ContentSourceSuccess)
+    assert sources[0].text == "body"
+    assert sources[0].title == "T"
+    assert isinstance(sources[1], ContentSourceFailure)
+    assert sources[1].failure_reason == "not_found"
+    assert sources[1].error == "HTTP 404"
+
+    save_store(store, path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    persisted = raw["1"]["content"]["sources"]
+    assert persisted[0]["outcome"] == "success"
+    assert "ok" not in persisted[0]
+    assert "failure_reason" not in persisted[0]
+    assert persisted[1]["outcome"] == "failure"
+    assert "ok" not in persisted[1]
+    assert "title" not in persisted[1]
+
+    # The post-migration file is itself idempotent under reload.
+    assert load_store(path) == store
+
+
+def test_load_store_rejects_content_source_without_any_discriminator(tmp_path: Path):
+    """A record with neither `outcome` nor `ok` must fail loudly, not default."""
+    import json
+
+    import pytest
+
+    legacy_items = {
+        "1": {
+            "id": "1",
+            "source": "bookmark",
+            "url": "https://x.com/a/status/1",
+            "author": {"handle": "a", "name": "A"},
+            "text": "t",
+            "created_at": "2026-05-10T00:00:00+00:00",
+            "captured_at": "2026-05-16T00:00:00+00:00",
+            "media": [],
+            "links": [],
+            "content": {
+                "fetched_at": "2026-05-17T00:00:00+00:00",
+                "sources": [
+                    {"kind": "external_article", "url": "https://e.com/x"},
+                ],
+            },
+        }
+    }
+    path = tmp_path / "items.json"
+    path.write_text(json.dumps(legacy_items), encoding="utf-8")
+    with pytest.raises(Exception):  # noqa: BLE001 - pydantic ValidationError wraps the ValueError
+        load_store(path)
