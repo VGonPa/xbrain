@@ -44,10 +44,13 @@ class TopicInput:
     summaries: list[str]
 
 
-def _system_prompt() -> str:
-    """The rubric is the system prompt — the declarative source of truth."""
+def _system_prompt(language: str) -> str:
+    """The rubric is the system prompt — the declarative source of truth.
+
+    `language` substitutes the `{language}` placeholder in `rubric-topic-page.md`.
+    """
     return (
-        load_rubric("topic-page") + "\n\n---\n\n"
+        load_rubric("topic-page", language=language) + "\n\n---\n\n"
         "Respond with a single JSON object and nothing else:\n"
         '{"overview": "...", "notes": ["...", ...]}'
     )
@@ -75,14 +78,17 @@ def _judgment_from_response(response, slug: str) -> OverviewJudgment:
 
 
 def synthesize_overviews_api(
-    inputs: list[TopicInput], model: str, client=None
+    inputs: list[TopicInput],
+    model: str,
+    output_language: str,
+    client=None,
 ) -> list[OverviewJudgment]:
     """Synthesize topic overviews via the Anthropic API — one call per topic."""
     if client is None:
         from anthropic import Anthropic  # lazy: tests inject a fake
 
         client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
-    system = _system_prompt()
+    system = _system_prompt(output_language)
     results: list[OverviewJudgment] = []
     for topic in inputs:
         try:
@@ -104,17 +110,18 @@ def synthesize_overviews_api(
     return results
 
 
-def export_topic_worksheet(inputs: list[TopicInput], path: Path) -> None:
+def export_topic_worksheet(inputs: list[TopicInput], path: Path, output_language: str) -> None:
     """Write a worksheet a Claude Code session (or a person) fills with overviews."""
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "instructions": (
-            "For each entry in `topics`, append one object to `judgments` with "
-            "keys {slug, overview, notes}. `overview` is plain Spanish prose; "
-            "`notes` is a list of plain-prose strings. No wikilinks, no "
-            "filenames. Then run: xbrain topics --apply <this file>."
+            f"For each entry in `topics`, append one object to `judgments` with "
+            f"keys {{slug, overview, notes}}. `overview` is plain prose in "
+            f"{output_language}; `notes` is a list of plain-prose strings in "
+            f"{output_language}. No wikilinks, no filenames. Then run: "
+            f"xbrain topics --apply <this file>."
         ),
-        "rubric": load_rubric("topic-page"),
+        "rubric": load_rubric("topic-page", language=output_language),
         "topics": [
             {"slug": t.slug, "description": t.description, "summaries": t.summaries} for t in inputs
         ],

@@ -2,7 +2,7 @@
 
 Produce a `summary` for one X post (a bookmark or the user's own tweet).
 
-- **Language:** Spanish, regardless of the post's language.
+- **Language:** {language}, regardless of the post's language.
 - **Length:** 1-3 sentences. Concise. No preamble ("Este post trata de...").
 - **Faithful:** state only what the post (and its fetched article, if any) says.
   Never invent facts, numbers or claims. No hallucination.

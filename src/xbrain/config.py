@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
 
+from xbrain.i18n import strings_for
 from xbrain.models import ExecutorName
 
 
@@ -21,6 +22,7 @@ class Config:
     enrich_model: str
     vocab_target_count: int
     topics_resynth_threshold: int
+    output_language: str  # one of xbrain.i18n.SUPPORTED_LANGUAGES
 
     @property
     def items_path(self) -> Path:
@@ -62,6 +64,10 @@ def load_config(repo_root: Path) -> Config:
     resynth_threshold = int(topics.get("resynth_threshold", 25))
     if resynth_threshold < 1:
         raise ValueError("config.toml: [topics].resynth_threshold must be >= 1")
+    output_language = settings.get("output", {}).get("language", "English")
+    # Validate via strings_for: it already raises ValueError listing supported
+    # languages on an unknown value. Single source of truth for the check.
+    strings_for(output_language)
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -72,4 +78,5 @@ def load_config(repo_root: Path) -> Config:
         enrich_model=enrich.get("model", "claude-haiku-4-5-20251001"),
         vocab_target_count=target_count,
         topics_resynth_threshold=resynth_threshold,
+        output_language=output_language,
     )

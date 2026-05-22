@@ -33,6 +33,7 @@ it through a worksheet hand-off (see [Execution modes](#execution-modes)).
 - [The pipeline](#the-pipeline)
 - [Commands](#commands)
 - [Execution modes](#execution-modes)
+- [Snapshots & safety](#snapshots--safety)
 - [How it works](#how-it-works)
 - [Project structure](#project-structure)
 - [Development](#development)
@@ -68,19 +69,105 @@ own, you already have the raw material.
 A **three-layer wiki** inside your Obsidian vault. Each layer is denser than the
 one below it — read top-down for the map, or bottom-up for a single post.
 
-```mermaid
-flowchart TB
-    Index["<b>Index + Log</b><br/>the map — every topic, the full chronology"]
-    Topics["<b>Topics</b><br/>an essay per theme,<br/>distilling dozens-to-hundreds of posts"]
-    Items["<b>Items</b><br/>one note per bookmark / tweet —<br/>summary, topics, the linked article fetched in full"]
-    Index --> Topics --> Items
+All three layers are markdown notes inside a single Obsidian vault, under
+`learnings/x-knowledge/`. Each layer is denser than the one below it: many
+posts → fewer topics → one index.
+
+**Example layout — three notes side by side, as they appear in the vault:**
+
+<table>
+<tr>
+<th align="center" width="33%">📄 Items</th>
+<th align="center" width="33%">📑 Topics</th>
+<th align="center" width="34%">🗺️ Index</th>
+</tr>
+<tr>
+<td align="center"><sub>one per saved post · scales with your X corpus</sub></td>
+<td align="center"><sub>one per topic · ~30 by default (configurable)</sub></td>
+<td align="center"><sub>one note · the map</sub></td>
+</tr>
+<tr>
+<td valign="top">
+
+```text
+┌──────────────────┐
+│ Code Is Cheap... │
+│                  │
+│ @codestirring    │
+│ tags: ai-coding  │
+│                  │
+│ ▸ Summary        │
+│ ▸ Tweet text     │
+│ ▸ Linked article │
+│   (fetched in    │
+│    full)         │
+│                  │
+│ Topics:          │
+│  [[ai-coding]]   │
+│  [[software-..]] │
+└──────────────────┘
 ```
+
+</td>
+<td valign="top">
+
+```text
+┌──────────────────┐
+│ ai-coding (299)  │
+│                  │
+│ ▸ Overview       │
+│   "The arc from  │
+│    vibe coding   │
+│    to agent      │
+│    orchestration │
+│    over 16 mo."  │
+│                  │
+│ ▸ Primary (103)  │
+│   - [[post 1]]   │
+│   - [[post 2]]   │
+│                  │
+│ ▸ Also relevant  │
+│   (196)          │
+└──────────────────┘
+```
+
+</td>
+<td valign="top">
+
+```text
+┌──────────────────┐
+│ XBrain           │
+│                  │
+│ ▸ Summary        │
+│   1884 items     │
+│   1123 bookmarks │
+│   761 own tweets │
+│                  │
+│ ▸ Topics         │
+│   [[ai-coding]]  │
+│         (299)    │
+│   [[ai-industry]]│
+│         (225)    │
+│   ...            │
+└──────────────────┘
+```
+
+</td>
+</tr>
+<tr>
+<td valign="top"><sub>The original post, the linked article fetched and stored inline, an LLM summary, and the topics it belongs to.</sub></td>
+<td valign="top"><sub>A synthesised essay across every post in this theme — where your thinking started, how it moved — plus links back to every post.</sub></td>
+<td valign="top"><sub>Every topic ranked by size, links to everything. Open this first.</sub></td>
+</tr>
+</table>
 
 ### Layer 1 — Items
 
 One note per bookmark or own-tweet: the original text, the link, the **linked
 article fetched and stored inline**, an LLM summary and its topics. A saved link
 stops being a URL that will quietly rot and becomes a saved *article*.
+
+*Example:*
 
 ```markdown
 ---
@@ -92,16 +179,16 @@ tags: [x-knowledge, ai-coding, software-engineering, ai-economy]
 
 # Code Is Cheap Now. Software Isn't.
 
-Enlaza un artículo que sostiene que el código se ha abaratado pero el software
-no: Claude Code y Opus 4.5 democratizan la creación de software y abren la era
-del software personal y desechable...
+Links an article arguing that code itself has become cheap but software has
+not: Claude Code and Opus 4.5 democratise software creation and open the era
+of personal, throwaway software...
 
-**Temas:** [[ai-coding]] · [[software-engineering]] · [[ai-economy]]
+**Topics:** [[ai-coding]] · [[software-engineering]] · [[ai-economy]]
 
 ## Tweet
 Code Is Cheap Now. Software Isn't.  https://t.co/J9m5RzQNbW
 
-## Contenido: Code Is Cheap Now. Software Isn't.
+## Content: Code Is Cheap Now. Software Isn't.
 <the full text of the linked article, fetched and stored inline>
 ```
 
@@ -116,6 +203,8 @@ and writes one synthesis: where the thinking started, how it moved, what it kept
 circling back to. Then it lists the posts — the ones the topic is *about*
 (primary), and the ones that merely touch it (also-relevant).
 
+*Example:*
+
 ```markdown
 ---
 topic: ai-coding
@@ -125,23 +214,23 @@ primary_posts: 103
 
 # ai-coding
 
-> Construir software con IA: vibe coding, el cambio en cómo se escribe el
-> código y la IA como pair-programmer.
+> Building software with AI: vibe coding, the shift in how code gets written,
+> and AI as a pair-programmer.
 
 ## Overview
 
-Es el tema más voluminoso del corpus y narra, casi mes a mes, la transformación
-del oficio de programar bajo la presión de la IA. El arco es muy nítido: del
-autocompletado y el vibe coding de 2025 se pasa a la ingeniería agéntica de
-2026...
+The largest topic in the corpus, narrating — almost month by month — how the
+craft of programming has been transformed under the pressure of AI. The arc
+is sharp: from autocomplete and vibe coding in 2025 to agentic engineering
+in 2026...
 
-## Notas importantes
+## Key notes
 - ...
 
-## Posts primarios (103)
+## Primary posts (103)
 - `2026-01-10` · @codestirring · [[items/...|Code Is Cheap Now. Software Isn't.]]
 
-## También relevante (196)
+## Also relevant (196)
 - ...
 ```
 
@@ -153,15 +242,17 @@ every link (see [How it works](#how-it-works)), so regenerating never breaks one
 `_index.md` is the map — the corpus counts and every topic ranked by size.
 `log.md` is the full chronology.
 
+*Example:*
+
 ```markdown
 # XBrain
 
-## Resumen
-- Items totales: 1884
-- Bookmarks: 1123 · Tweets propios: 761
-- Enriquecidos: 1884
+## Summary
+- Total items: 1884
+- Bookmarks: 1123 · Own tweets: 761
+- Enriched: 1884
 
-## Temas
+## Topics
 - [[ai-coding]] (299)
 - [[ai-industry]] (225)
 - [[ai-and-work]] (220)
@@ -171,8 +262,10 @@ every link (see [How it works](#how-it-works)), so regenerating never breaks one
 The markdown is **derived and disposable** — regenerate it any time. The source
 of truth is `data/items.json`.
 
-> The example notes are in Spanish because the summary and overview language is
-> set by the rubrics in `src/xbrain/rubrics/` — plain markdown you can edit.
+> The examples above are shown in English for clarity. Today the output language
+> (summaries, overviews, section headers like "Topics" / "Content") is fixed by
+> the rubrics in `src/xbrain/rubrics/` — Spanish on the live system; a config
+> parameter to switch languages is on the roadmap ([#16](https://github.com/VGonPa/xbrain/issues/16)).
 
 ---
 
@@ -281,6 +374,9 @@ target_count = 45                         # how many topics to induce
 
 [topics]
 resynth_threshold = 25                    # re-synthesise an overview after N new posts
+
+[output]
+language = "English"                      # English | Spanish
 ```
 
 | Section | Key | Default | Purpose |
@@ -293,6 +389,14 @@ resynth_threshold = 25                    # re-synthesise an overview after N ne
 | `[enrich]` | `model` | `claude-haiku-4-5` | Model for the `api` executor. |
 | `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
+| `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
+
+Switching `[output].language` after the corpus is already enriched is supported
+— but does not retroactively translate existing summaries. To convert the
+whole corpus to the new language, run `xbrain enrich --regenerate` and
+`xbrain topics --resynth` (both auto-snapshotted, see
+[Snapshots & safety](#snapshots--safety)). Otherwise new items get the new
+language while old summaries stay as they were.
 
 Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
 only** — never in `config.toml`, never in the repo.
@@ -305,25 +409,77 @@ Six stages. `data/items.json` is the hub — every stage reads it, enriches it,
 and writes it back. The wiki is generated from it at the end.
 
 ```mermaid
-flowchart LR
-    X((X / Twitter)) -->|"① extract"| D[(data/items.json)]
-    D -->|"② fetch"| D
-    D -->|"③ vocab"| V[(vocab.yaml)]
-    D -->|"④ enrich"| D
-    V -.->|reads| D
-    D -->|"⑤ topics"| T[(topics.json)]
-    D -->|"⑥ generate"| W[/"Obsidian wiki"/]
-    T -.->|reads| W
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'fontFamily': 'ui-sans-serif, system-ui, -apple-system, sans-serif',
+    'fontSize': '14px',
+    'lineColor': '#64748b',
+    'background': 'transparent',
+    'edgeLabelBackground': '#f8fafc'
+  }
+}}%%
+flowchart TB
+    X((X / Twitter)) --> E1("① extract")
+    E1 --> E2("② fetch")
+    E2 --> E3("③ vocab")
+    E3 --> E4("④ enrich")
+    E4 --> E5("⑤ topics")
+    E5 --> E6("⑥ generate")
+
+    E1 -.->|writes| Items[("data/items.json")]
+    E2 -.->|mutates| Items
+    E3 -.->|writes| Vy[("data/vocab.yaml")]
+    E4 -.->|mutates| Items
+    E5 -.->|writes| Tj[("data/topics.json")]
+
+    subgraph KB["🧠 Obsidian knowledge base"]
+        direction TB
+        ItemsMd("📄 items/*.md<br/><sub>one note per post</sub>")
+        TopicsMd("📑 topics/*.md<br/><sub>one note per topic</sub>")
+        IndexMd("🗺️ _index.md")
+    end
+
+    E6 ==> ItemsMd
+    E6 ==> TopicsMd
+    E6 ==> IndexMd
+
+    classDef stage fill:#1e293b,stroke:#475569,stroke-width:1.5px,color:#fff,font-weight:500
+    classDef artifact fill:#fef3c7,stroke:#b45309,stroke-width:1.5px,color:#451a03
+    classDef ext fill:#0ea5e9,stroke:#0369a1,stroke-width:1.5px,color:#fff,font-weight:500
+    classDef wiki fill:#d1fae5,stroke:#047857,stroke-width:1.5px,color:#064e3b
+    class E1,E2,E3,E4,E5,E6 stage
+    class Items,Vy,Tj artifact
+    class X ext
+    class ItemsMd,TopicsMd,IndexMd wiki
 ```
 
-| # | Stage | Mechanical / LLM | What it does |
-|---|-------|------------------|--------------|
-| ① | `extract` | mechanical | Pulls new bookmarks + own tweets from X (incremental — stops at known ids). |
-| ② | `fetch` | mechanical | Downloads linked article bodies, expands threads, fetches linked X content. Records structured evidence for broken links. |
-| ③ | `vocab` | **LLM** | Induces the controlled topic taxonomy from the whole corpus → `vocab.yaml`. |
-| ④ | `enrich` | **LLM** | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy. |
-| ⑤ | `topics` | **LLM** | Synthesises each topic page's overview; builds the mechanical post lists. |
-| ⑥ | `generate` | mechanical | Renders the three-layer wiki into your vault. |
+Six stages, top to bottom. The chain on the left is the order of execution;
+the cylinders on the right are the `data/` files each stage writes; the box
+at the bottom is what ends up inside your Obsidian vault — three kinds of
+plain markdown notes.
+
+- **`data/items.json`** is the hub. Three stages mutate it (`extract`,
+  `fetch`, `enrich`); every later stage reads it.
+- **`data/vocab.yaml`** is the closed taxonomy. Read by `enrich` (to assign
+  topics from it), `topics` (to know which pages to synthesise) and
+  `generate` (for the tags).
+- **`data/topics.json`** is the synthesised topic overviews. Read by
+  `generate`.
+
+`⑥ generate` is the only stage that writes into the vault. It turns
+`items.json` into `items/*.md`, `topics.json` into `topics/*.md`, and writes
+the `_index.md`. Delete the whole vault and `xbrain generate` rebuilds it
+bit-for-bit from `data/`.
+
+| # | Stage | Mechanical / LLM | Writes to | What it does |
+|---|-------|------------------|-----------|--------------|
+| ① | `extract` | mechanical | `items.json` + `state.json` | Pulls new bookmarks + own tweets from X (incremental — stops at known ids). |
+| ② | `fetch` | mechanical | `items.json` | Downloads linked article bodies, expands threads, fetches linked X content. Records structured evidence for broken links. |
+| ③ | `vocab` | **LLM** | `vocab.yaml` | Induces the controlled topic taxonomy from the whole corpus. |
+| ④ | `enrich` | **LLM** | `items.json` | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy. |
+| ⑤ | `topics` | **LLM** | `topics.json` | Synthesises each topic page's overview; builds the mechanical post lists. |
+| ⑥ | `generate` | mechanical | the Obsidian vault | Renders the three-layer wiki: `items/*.md`, `topics/*.md`, `_index.md`. |
 
 Every stage is **idempotent and incremental** — re-running it only processes
 what is new. `vocab --regenerate` is the deliberate exception: it re-induces the
@@ -359,6 +515,7 @@ uv run xbrain <command> [options]
 | `generate` | Render the wiki into the vault. |
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
+| `snapshot` | Manage `data/` snapshots: `create`, `list`, `show`, `restore`, `prune`. See [Snapshots & safety](#snapshots--safety). |
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
 
 Every stage accepts `--since` / `--until` (ISO dates) to narrow the date window.
@@ -366,40 +523,207 @@ Run `uv run xbrain <command> --help` for the full option list.
 
 ---
 
+## Snapshots & safety
+
+Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`)
+**auto-snapshot** `data/` before they touch anything. The snapshot is a complete
+copy of `items.json`, `state.json`, `vocab.yaml` and `topics.json` under
+`data/snapshots/<UTC-timestamp>-pre-<command>/`, with a `snapshot.json` manifest
+capturing counts and the running `xbrain` version. If a re-run produces worse
+output, a single `xbrain snapshot restore <name>` brings the previous good
+state back.
+
+```bash
+xbrain snapshot list                        # newest first
+xbrain snapshot create --name pre-rubric-v2 # mark a known-good state
+xbrain snapshot restore <name>              # roll back data/ (run `generate` next)
+xbrain snapshot prune --keep-last 10        # cap disk use
+```
+
+The Obsidian vault is **not** snapshotted — it is fully derived from `data/`
+via `xbrain generate`. `restore` rolls back `data/`; you run `xbrain generate`
+to rebuild the wiki from it.
+
+---
+
 ## Execution modes
 
 `vocab`, `enrich` and `topics` need an LLM. XBrain never embeds a Claude
 subscription token — instead the LLM work is **pluggable**, with three modes,
-selected by `--executor` or `config.toml`'s `[enrich].executor`:
+selected by `--executor` or `config.toml`'s `[enrich].executor`.
+
+| Mode | Cost | When you reach for it |
+|------|------|----------------------|
+| **`claude-code`** *(default)* | None | You have Claude Code open. Day-to-day enrichment. |
+| **`api`** | Pay per token (cheap on Haiku) | Unattended runs (cron, CI, future `/schedule`). No human in the loop. |
+| **`manual`** | None | Spot fixes, hand-curating a few items, fallback when the others fail. |
+
+All three modes end the same way — `xbrain` validates the judgments against the
+rubrics and `guardrails.yaml`, then writes them into `data/items.json`. They
+only differ in *how the LLM judgment gets produced*.
+
+### Mode 1 — `claude-code` *(default)*
+
+**What it does.** The CLI exports a worksheet (`data/enrich-worksheet.json`).
+You open a Claude Code session, the `enriching-x-knowledge` skill (in
+`.claude/skills/`) fills the worksheet's judgments using the rubrics. You run
+`xbrain enrich --apply` to validate and persist.
+
+**Why this mode exists.** Most XBrain users already have a Claude Code
+subscription. Spending another budget on the Anthropic API to do the same
+work is wasteful — this mode lets the existing subscription do the LLM work
+at zero extra cost.
+
+**When to use it.** Default for interactive runs. You are at your machine,
+Claude Code is open, you want to enrich a batch.
 
 ```mermaid
-flowchart TB
-    S["LLM stages<br/>vocab · enrich · topics"]
-    S --> CC["<b>claude-code</b> (default)<br/>exports a worksheet → a Claude Code<br/>session fills it → <code>--apply</code><br/>no API key · no cost"]
-    S --> API["<b>api</b><br/>calls the Anthropic API directly,<br/>unattended<br/>needs ANTHROPIC_API_KEY · pay per token"]
-    S --> MAN["<b>manual</b><br/>exports the same worksheet,<br/>filled in by hand<br/>no API key · no cost"]
+%%{init: {
+  'theme':'base',
+  'themeVariables':{
+    'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+    'fontSize':'13px',
+    'background':'transparent',
+    'actorBkg':'#1e293b',
+    'actorBorder':'#475569',
+    'actorTextColor':'#fff',
+    'actorLineColor':'#cbd5e1',
+    'noteBkgColor':'#fef3c7',
+    'noteBorderColor':'#b45309',
+    'noteTextColor':'#451a03',
+    'signalColor':'#475569',
+    'signalTextColor':'#1f2937',
+    'labelBoxBkgColor':'#0ea5e9',
+    'labelBoxBorderColor':'#0369a1',
+    'labelTextColor':'#fff',
+    'sequenceNumberColor':'#fff'
+  }
+}}%%
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant CLI as xbrain CLI
+    participant CC as Claude Code session
+    participant Data as data/
+
+    U->>CLI: xbrain enrich --executor claude-code
+    CLI->>Data: write enrich-worksheet.json
+    Data-->>CC: open the worksheet
+    CC->>CC: fill judgments using the skill
+    CC->>Data: save filled worksheet
+    U->>CLI: xbrain enrich --apply worksheet.json
+    CLI->>CLI: validate against rubrics and guardrails
+    CLI->>Data: write items.json with enrichment
 ```
 
-| Mode | How | Cost | When |
-|------|-----|------|------|
-| `claude-code` | `xbrain enrich` writes a JSON worksheet; a Claude Code session reads it, fills the `judgments` array, then `xbrain enrich --apply <file>` validates and applies it. | None | Default. You have Claude Code open. |
-| `api` | `xbrain enrich --executor api` calls the Anthropic API and applies the result in one shot. | Pay per token (cheap on Haiku). | Unattended runs, CI, no session. |
-| `manual` | Same worksheet as `claude-code`, filled by a person. | None | Fallback / spot fixes. |
+### Mode 2 — `api`
 
-The worksheet flow, end-to-end:
+**What it does.** The CLI loops over every pending item, calls the Anthropic
+API once per item with the rubric, item content and vocab. Each judgment is
+validated, then a single store write at the end persists everything.
 
-```bash
-uv run xbrain enrich --executor claude-code   # writes data/enrich-worksheet.json
-# → a Claude Code session fills the `judgments` array
-uv run xbrain enrich --apply data/enrich-worksheet.json
+**Why this mode exists.** The `claude-code` mode needs a human present. A
+scheduled job, a cron, or a CI run cannot pop open a Claude Code session.
+The `api` mode runs end-to-end with zero interaction — the trade is that
+you pay per token.
+
+**When to use it.** Unattended runs. The future `/schedule` integration
+([#7](https://github.com/VGonPa/xbrain/issues/7)) builds on this mode.
+
+```mermaid
+%%{init: {
+  'theme':'base',
+  'themeVariables':{
+    'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+    'fontSize':'13px',
+    'background':'transparent',
+    'actorBkg':'#1e293b',
+    'actorBorder':'#475569',
+    'actorTextColor':'#fff',
+    'actorLineColor':'#cbd5e1',
+    'noteBkgColor':'#fef3c7',
+    'noteBorderColor':'#b45309',
+    'noteTextColor':'#451a03',
+    'signalColor':'#475569',
+    'signalTextColor':'#1f2937',
+    'labelBoxBkgColor':'#0ea5e9',
+    'labelBoxBorderColor':'#0369a1',
+    'labelTextColor':'#fff',
+    'loopTextColor':'#475569',
+    'sequenceNumberColor':'#fff'
+  }
+}}%%
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant CLI as xbrain CLI
+    participant API as Anthropic API
+    participant Data as data/
+
+    U->>CLI: xbrain enrich --executor api
+    loop for each pending item
+        CLI->>API: prompt with rubric, item and vocab
+        API-->>CLI: summary, primary topic, topics
+        CLI->>CLI: validate against rubrics and guardrails
+    end
+    CLI->>Data: write items.json with enrichment
 ```
 
-The `enriching-x-knowledge` Claude Code skill (in `.claude/skills/`) drives this
-flow for all three stages.
+### Mode 3 — `manual`
+
+**What it does.** Identical worksheet plumbing as `claude-code`, but you fill
+the judgments by hand instead of letting an LLM do it.
+
+**Why this mode exists.** Two reasons. First, escape hatch: if the LLM keeps
+producing wrong judgments for a corner of the corpus, you can fix those items
+yourself without rewriting the rubric. Second, the same worksheet format means
+the manual path is the lowest common denominator the system always supports —
+no API, no Claude Code, just JSON in / JSON out.
+
+**When to use it.** Spot fixes, corrections, hand-curating a handful of items
+that need editorial judgment beyond what the rubric captures.
+
+```mermaid
+%%{init: {
+  'theme':'base',
+  'themeVariables':{
+    'fontFamily':'ui-sans-serif, system-ui, sans-serif',
+    'fontSize':'13px',
+    'background':'transparent',
+    'actorBkg':'#1e293b',
+    'actorBorder':'#475569',
+    'actorTextColor':'#fff',
+    'actorLineColor':'#cbd5e1',
+    'noteBkgColor':'#fef3c7',
+    'noteBorderColor':'#b45309',
+    'noteTextColor':'#451a03',
+    'signalColor':'#475569',
+    'signalTextColor':'#1f2937',
+    'labelBoxBkgColor':'#0ea5e9',
+    'labelBoxBorderColor':'#0369a1',
+    'labelTextColor':'#fff',
+    'sequenceNumberColor':'#fff'
+  }
+}}%%
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant CLI as xbrain CLI
+    participant Data as data/
+
+    U->>CLI: xbrain enrich --executor manual
+    CLI->>Data: write enrich-worksheet.json
+    Note over U: You fill the worksheet by hand
+    U->>CLI: xbrain enrich --apply worksheet.json
+    CLI->>CLI: validate against rubrics and guardrails
+    CLI->>Data: write items.json with enrichment
+```
 
 ---
 
 ## How it works
+
+> For the full picture — every stage, every artifact, the rubrics, the executors and the invariants — see [ARCHITECTURE.md](ARCHITECTURE.md). The summary below is the 5-minute version.
 
 **One hard rule** runs through the whole design: the **LLM emits only judgment** —
 a summary, a topic choice, an overview. It never produces a filename, a wikilink
@@ -492,6 +816,7 @@ client. Respect X's Terms of Service.
 
 | Document | Description |
 |----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How XBrain is shaped: pipeline stages, artifacts, rubrics, executors, invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — including PRs written with AI agents. |
 | [LICENSE](LICENSE) | MIT. |
 

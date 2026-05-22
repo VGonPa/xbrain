@@ -11,6 +11,7 @@ from pathlib import Path
 
 import typer
 
+from xbrain import snapshot
 from xbrain.archive import parse_archive
 from xbrain.config import Config, load_config
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
@@ -92,6 +93,10 @@ _OPERATOR_ERRORS = (
     KeyError,
     RuntimeError,
     NotImplementedError,
+    # OSError covers PermissionError, FileExistsError, IsADirectoryError, etc.
+    # The snapshot module hits these on permission or disk issues — they should
+    # surface as a clean exit-1, not a raw traceback.
+    OSError,
 )
 
 
@@ -150,7 +155,28 @@ def _run_extract(cfg: Config, source: str, since: datetime | None, until: dateti
     save_state(state, cfg.state_path)
 
 
+def _auto_snapshot(cfg: Config, command: str) -> None:
+    """Snapshot data/ before a destructive op and echo the path + item count.
+
+    Called from every destructive code path (vocab --regenerate, topics
+    --resynth, fetch --force). The manifest's `command` field carries the
+    destructive op name (e.g. `vocab-regenerate`); the directory label uses
+    the `pre-<op>` prefix so the listing is self-describing.
+
+    Any failure here propagates and aborts the destructive op — a snapshot we
+    can't take must not be silently skipped.
+    """
+    path, manifest = snapshot.snapshot_create(
+        cfg.data_dir,
+        command=command,
+        dir_label=f"pre-{command}",
+    )
+    typer.echo(f"Snapshot created: {path.name} ({manifest.item_count} items)")
+
+
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
+    if force:
+        _auto_snapshot(cfg, "fetch-force")
     store = load_store(cfg.items_path)
     try:
         articles = fetch_pending(store, since, until, force)
@@ -165,7 +191,7 @@ def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, forc
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
-    run_generate(store, cfg.output_dir, since, until)
+    run_generate(store, cfg.output_dir, since, until, cfg.output_language)
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 
 
@@ -248,7 +274,7 @@ def enrich(
             typer.echo("No hay items pendientes de enriquecer.")
             return
         worksheet = cfg.data_dir / "enrich-worksheet.json"
-        export_worksheet(pending, vocab_topics, worksheet, chosen)
+        export_worksheet(pending, vocab_topics, worksheet, chosen, cfg.output_language)
         typer.echo(
             f"{len(pending)} items exportados a {worksheet}\n"
             f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
@@ -261,7 +287,7 @@ def enrich(
 
     enriched, invalid = enrich_with_executor(
         store,
-        ApiExecutor(model=cfg.enrich_model),
+        ApiExecutor(model=cfg.enrich_model, output_language=cfg.output_language),
         vocab_topics,
         _parse_date(since),
         _parse_date(until),
@@ -286,6 +312,8 @@ def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> Non
     _report_invalid(invalid)
     if not topics:
         raise RuntimeError("La worksheet no produjo ningún topic válido.")
+    if regenerate:
+        _auto_snapshot(cfg, "vocab-regenerate")
     # Mark the store first: a crash here leaves items pending (a re-run re-marks
     # idempotently) — safer than vocab.yaml updated while items stay stale.
     _mark_for_regenerate(store, cfg, regenerate)
@@ -298,7 +326,7 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
     chosen = executor or cfg.enrich_executor
     if chosen in ("manual", "claude-code"):
         worksheet = cfg.data_dir / "vocab-worksheet.json"
-        export_vocab_worksheet(store, cfg.vocab_target_count, worksheet)
+        export_vocab_worksheet(store, cfg.vocab_target_count, worksheet, cfg.output_language)
         regen = " --regenerate" if regenerate else ""
         typer.echo(
             f"Corpus exportado a {worksheet}\n"
@@ -308,7 +336,9 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
         return
     if chosen != "api":
         raise ValueError(f"Ejecutor desconocido: {chosen!r}")
-    topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model)
+    if regenerate:
+        _auto_snapshot(cfg, "vocab-regenerate")
+    topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model, cfg.output_language)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     _mark_for_regenerate(store, cfg, regenerate)
     typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
@@ -343,28 +373,30 @@ def _topics_apply(cfg: Config, store: dict, vocab: list, apply: Path) -> None:
     valid, invalid = apply_overview_judgments(import_topic_worksheet(apply))
     merge_overviews(pages, valid, posts)
     save_topic_pages(pages, cfg.topics_path)
-    written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+    written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
     typer.echo(f"Worksheet aplicada: {len(valid)} overviews · {written} páginas escritas")
     _report_invalid(invalid)
 
 
 def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: str | None) -> None:
     """`xbrain topics` — update lists and (re)synthesize stale overviews."""
+    if resynth:
+        _auto_snapshot(cfg, "topics-resynth")
     pages = load_topic_pages(cfg.topics_path)
     posts = compute_topic_posts(store, vocab)
     stale = topics_needing_synth(vocab, posts, pages, cfg.topics_resynth_threshold, resynth)
     inputs = build_topic_inputs(stale, vocab, posts)
 
     if not inputs:
-        written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+        written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
         typer.echo(f"Topic pages actualizadas: {written} páginas (sin overviews pendientes).")
         return
 
     chosen = executor or cfg.enrich_executor
     if chosen in ("manual", "claude-code"):
         worksheet = cfg.data_dir / "topic-worksheet.json"
-        export_topic_worksheet(inputs, worksheet)
-        written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+        export_topic_worksheet(inputs, worksheet, cfg.output_language)
+        written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
         typer.echo(
             f"{len(inputs)} topics exportados a {worksheet} · {written} páginas escritas\n"
             f"Rellena el array `judgments` y ejecuta:\n"
@@ -374,10 +406,10 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
     if chosen != "api":
         raise ValueError(f"Ejecutor desconocido: {chosen!r}")
 
-    judgments = synthesize_overviews_api(inputs, cfg.enrich_model)
+    judgments = synthesize_overviews_api(inputs, cfg.enrich_model, cfg.output_language)
     merge_overviews(pages, judgments, posts)
     save_topic_pages(pages, cfg.topics_path)
-    written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+    written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
     typer.echo(f"Topics sintetizados: {len(judgments)}/{len(inputs)} · {written} páginas escritas")
 
 
@@ -437,6 +469,84 @@ def status() -> None:
     typer.echo(f"  enriquecidos: {sum(1 for i in store.values() if i.enriched)}")
     typer.echo(f"  última extracción bookmarks: {state.bookmarks.last_run}")
     typer.echo(f"  última extracción tweets: {state.own_tweets.last_run}")
+
+
+snapshot_app = typer.Typer(help="Gestionar snapshots de data/")
+app.add_typer(snapshot_app, name="snapshot")
+
+
+@snapshot_app.command("create")
+@_handle_cli_errors
+def snapshot_create_cmd(
+    name: str | None = typer.Option(None, help="Optional directory label (default: 'manual')"),
+) -> None:
+    """Create a snapshot of data/ right now."""
+    cfg = _config()
+    path, manifest = snapshot.snapshot_create(
+        cfg.data_dir,
+        command="manual",
+        dir_label=name,
+    )
+    typer.echo(f"Snapshot created: {path.name} ({manifest.item_count} items)")
+
+
+@snapshot_app.command("list")
+@_handle_cli_errors
+def snapshot_list_cmd() -> None:
+    """List snapshots, newest first. Corrupt entries surface as CORRUPT."""
+    cfg = _config()
+    rows = snapshot.snapshot_list(cfg.data_dir)
+    if not rows:
+        typer.echo("No snapshots.")
+        return
+    for path, manifest in rows:
+        if manifest is None:
+            typer.echo(
+                f"{path.name}  CORRUPT — manifest missing or unreadable",
+                err=True,
+            )
+            continue
+        typer.echo(
+            f"{path.name}  {manifest.command:<28}  "
+            f"items={manifest.item_count}  topics={manifest.topic_count}  "
+            f"vocab={manifest.vocab_size}"
+        )
+
+
+@snapshot_app.command("show")
+@_handle_cli_errors
+def snapshot_show_cmd(name: str = typer.Argument(..., help="Snapshot directory name")) -> None:
+    """Print the manifest of one snapshot."""
+    cfg = _config()
+    _, manifest = snapshot.snapshot_show(cfg.data_dir, name)
+    typer.echo(manifest.model_dump_json(indent=2))
+
+
+@snapshot_app.command("restore")
+@_handle_cli_errors
+def snapshot_restore_cmd(name: str = typer.Argument(..., help="Snapshot directory name")) -> None:
+    """Restore data/ from a snapshot.
+
+    The vault is NOT touched — run `xbrain generate` next to refresh it.
+    Every per-artifact action is echoed so 'a file vanished' never happens
+    silently.
+    """
+    cfg = _config()
+    actions = snapshot.snapshot_restore(cfg.data_dir, name)
+    for artifact, action in actions:
+        typer.echo(f"  {artifact}: {action}")
+    typer.echo(f"Restored {name}. Run `xbrain generate` to refresh the vault.")
+
+
+@snapshot_app.command("prune")
+@_handle_cli_errors
+def snapshot_prune_cmd(
+    keep_last: int = typer.Option(10, "--keep-last", help="Keep the N newest snapshots"),
+) -> None:
+    """Delete older snapshots, keeping the N newest."""
+    cfg = _config()
+    deleted = snapshot.snapshot_prune(cfg.data_dir, keep_last=keep_last)
+    typer.echo(f"Snapshots deleted: {deleted}")
 
 
 if __name__ == "__main__":

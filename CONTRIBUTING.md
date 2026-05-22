@@ -29,6 +29,17 @@ file is not tracked by git.
 - Keep the PR focused on one change. No drive-by refactors.
 - Describe what changed and why, in your own words.
 
+## Safety: destructive operations auto-snapshot
+
+Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`)
+copy the full `data/` directory to `data/snapshots/<UTC-ts>-pre-<command>/`
+before they write anything. If your change introduces or modifies a destructive
+operation, **wire the auto-snapshot** — see `_auto_snapshot` in `src/xbrain/cli.py`
+and the unit + integration tests under `tests/test_snapshot*.py`. A snapshot
+failure must propagate and abort the destructive op; never `try/except`-swallow
+it. Manual snapshots are available via `xbrain snapshot create`; restore via
+`xbrain snapshot restore <name>`.
+
 ## Pull requests written with AI agents
 
 XBrain is built with AI coding agents, and PRs written that way are welcome — under
@@ -46,6 +57,20 @@ the same bar as hand-written code:
   AI agent") is enough and appreciated.
 - **Do not point agents at this repo's dependencies** or open agent-generated PRs
   to upstream projects from this work.
+
+## Adding an output language
+
+XBrain's output language (LLM summaries/overviews + wiki section headers) is
+parameterised via `[output].language` in `config.toml`. Today's supported
+values are `English` (default) and `Spanish`. To add a third language:
+
+1. Append a new entry to `_STRINGS` in `src/xbrain/i18n.py` with the
+   translated wiki headers (`topics_label`, `content_header`, etc.).
+2. Update `config.toml.example` and the README's Configuration table to list
+   the new value.
+3. That is it — `SUPPORTED_LANGUAGES` is derived from the dict, and the
+   `{language}` placeholder in `rubric-summary.md` / `rubric-topic-page.md` /
+   `rubric-vocab.md` is substituted verbatim. The LLM does the translation.
 
 ## Scope and responsible use
 

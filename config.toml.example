@@ -27,3 +27,10 @@ target_count = 30
 # Re-synthesize a topic's overview when it has grown by this many posts since
 # the last synthesis. `xbrain topics --resynth` re-synthesizes every stale one.
 resynth_threshold = 25
+
+[output]
+# Output language for LLM-generated summaries/overviews AND the wiki's
+# section headers (Topics:, Content:, Summary, ...). Supported values:
+#   "English" - default
+#   "Spanish"
+language = "English"

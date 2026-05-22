@@ -380,7 +380,7 @@ def test_topics_api_executor_synthesizes(tmp_path, monkeypatch):
     save_store({"1": _enriched_item("1")}, tmp_path / "data" / "items.json")
     save_vocab([Topic(slug="misc", description="d")], tmp_path / "data" / "vocab.yaml")
 
-    def _fake_synth(inputs, model, **kwargs):
+    def _fake_synth(inputs, model, output_language="English", **kwargs):
         return [OverviewJudgment(slug="misc", overview="Sintetizado por API.", notes=[])]
 
     monkeypatch.setattr(cli, "synthesize_overviews_api", _fake_synth)
@@ -449,7 +449,7 @@ def test_topics_resynth_succeeds(tmp_path, monkeypatch):
         tmp_path / "data" / "topics.json",
     )
 
-    def _fake_synth(inputs, model, **kwargs):
+    def _fake_synth(inputs, model, output_language="English", **kwargs):
         return [OverviewJudgment(slug="misc", overview="Re-sintetizado.", notes=[])]
 
     monkeypatch.setattr(cli, "synthesize_overviews_api", _fake_synth)

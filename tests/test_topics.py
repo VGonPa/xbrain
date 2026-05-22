@@ -1,8 +1,12 @@
 # tests/test_topics.py
 from datetime import datetime, timezone
 
+from xbrain.i18n import strings_for
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.topics import TopicPosts, compute_topic_posts
+
+_STRINGS_EN = strings_for("English")
+_STRINGS_ES = strings_for("Spanish")
 
 
 def _enriched(item_id: str, primary: str, topics: list[str], day: int = 1) -> Item:
@@ -92,13 +96,13 @@ def test_render_topic_page_has_frontmatter_overview_and_post_blocks():
     posts.primary.append(_enriched("1", "ai-coding", ["ai-coding"]))
     posts.also.append(_enriched("2", "career", ["career", "ai-coding"]))
     page = _topic_page("ai-coding", count=2)
-    rendered = render_topic_page(_VOCAB[0], posts, page)
+    rendered = render_topic_page(_VOCAB[0], posts, page, _STRINGS_EN)
     assert "tags: [x-knowledge-topic, ai-coding]" in rendered
     assert "posts: 2" in rendered
     assert "El overview." in rendered
     assert "## Notas importantes" in rendered
-    assert "## Posts primarios (1)" in rendered
-    assert "## También relevante (1)" in rendered
+    assert "## Primary posts (1)" in rendered
+    assert "## Also relevant (1)" in rendered
     assert "[[items/" in rendered
 
 
@@ -109,7 +113,7 @@ def test_render_topic_page_marks_a_stale_overview():
     for n in range(5):
         posts.primary.append(_enriched(str(n), "ai-coding", ["ai-coding"]))
     page = _topic_page("ai-coding", count=2)  # synthesized when the topic had 2
-    rendered = render_topic_page(_VOCAB[0], posts, page)
+    rendered = render_topic_page(_VOCAB[0], posts, page, _STRINGS_EN)
     assert "Overview desactualizado" in rendered
 
 
@@ -118,7 +122,7 @@ def test_render_topic_page_handles_a_missing_overview():
 
     posts = TopicPosts()
     posts.primary.append(_enriched("1", "ai-coding", ["ai-coding"]))
-    rendered = render_topic_page(_VOCAB[0], posts, None)
+    rendered = render_topic_page(_VOCAB[0], posts, None, _STRINGS_EN)
     assert "Overview pendiente" in rendered
 
 
