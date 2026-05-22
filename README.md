@@ -195,6 +195,11 @@ Code Is Cheap Now. Software Isn't.  https://t.co/J9m5RzQNbW
 Everything above the `xbrain:generated` marker is regenerated on every run;
 anything *you* write below it is preserved.
 
+> Set `[output] topic_style = "hashtag"` in `config.toml` to render the
+> in-body `**Topics:**` line as `#ai-coding #software-engineering` instead of
+> wikilinks — useful if you navigate primarily via Obsidian's tag pane. The
+> frontmatter `tags:` are native Obsidian tags in either mode.
+
 ### Layer 2 — Topics
 
 The layer that makes XBrain more than a tidy backup. **A topic page is not a
@@ -377,6 +382,7 @@ resynth_threshold = 25                    # re-synthesise an overview after N ne
 
 [output]
 language = "English"                      # English | Spanish
+topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: line)
 ```
 
 | Section | Key | Default | Purpose |
@@ -390,6 +396,7 @@ language = "English"                      # English | Spanish
 | `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
+| `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the

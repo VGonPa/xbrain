@@ -10,6 +10,11 @@ from typing import get_args
 from xbrain.i18n import strings_for
 from xbrain.models import ExecutorName
 
+# In-body `**Topics:**` line styles. `wikilink` (default) keeps the current
+# navigation-first behaviour; `hashtag` emits Obsidian tags so the line pivots
+# into the tag pane. Frontmatter `tags:` are unaffected by this toggle.
+SUPPORTED_TOPIC_STYLES: tuple[str, ...] = ("wikilink", "hashtag")
+
 
 @dataclass(frozen=True)
 class Config:
@@ -23,6 +28,7 @@ class Config:
     vocab_target_count: int
     topics_resynth_threshold: int
     output_language: str  # one of xbrain.i18n.SUPPORTED_LANGUAGES
+    topic_style: str  # one of xbrain.config.SUPPORTED_TOPIC_STYLES
 
     @property
     def items_path(self) -> Path:
@@ -64,10 +70,17 @@ def load_config(repo_root: Path) -> Config:
     resynth_threshold = int(topics.get("resynth_threshold", 25))
     if resynth_threshold < 1:
         raise ValueError("config.toml: [topics].resynth_threshold must be >= 1")
-    output_language = settings.get("output", {}).get("language", "English")
+    output = settings.get("output", {})
+    output_language = output.get("language", "English")
     # Validate via strings_for: it already raises ValueError listing supported
     # languages on an unknown value. Single source of truth for the check.
     strings_for(output_language)
+    topic_style = output.get("topic_style", "wikilink")
+    if topic_style not in SUPPORTED_TOPIC_STYLES:
+        raise ValueError(
+            f"config.toml: [output].topic_style must be one of "
+            f"{list(SUPPORTED_TOPIC_STYLES)}, got {topic_style!r}"
+        )
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -79,4 +92,5 @@ def load_config(repo_root: Path) -> Config:
         vocab_target_count=target_count,
         topics_resynth_threshold=resynth_threshold,
         output_language=output_language,
+        topic_style=topic_style,
     )
