@@ -433,6 +433,7 @@ xbrain/
 │   ├── notes_io.py          ← per-note read/write + user-tail preservation
 │   ├── store.py             ← items.json / topics.json / state.json I/O
 │   ├── snapshot.py          ← data/ snapshot lifecycle (create/list/restore/prune)
+│   ├── diff.py              ← structured diff between two snapshot data dirs
 │   ├── worksheet.py         ← enrich worksheet export/import
 │   ├── validate.py          ← guardrails enforcement
 │   ├── llm_json.py          ← extract JSON from LLM responses

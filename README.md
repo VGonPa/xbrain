@@ -523,6 +523,7 @@ uv run xbrain <command> [options]
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
 | `snapshot` | Manage `data/` snapshots: `create`, `list`, `show`, `restore`, `prune`. See [Snapshots & safety](#snapshots--safety). |
+| `diff` | Compare two snapshots (or one snapshot vs. the live `data/`). Surfaces reassigned items, topic growth, overview drift, vocab changes. `--format text\|json`. |
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
 
 Every stage accepts `--since` / `--until` (ISO dates) to narrow the date window.
@@ -550,6 +551,19 @@ xbrain snapshot prune --keep-last 10        # cap disk use
 The Obsidian vault is **not** snapshotted — it is fully derived from `data/`
 via `xbrain generate`. `restore` rolls back `data/`; you run `xbrain generate`
 to rebuild the wiki from it.
+
+After a destructive run, `xbrain diff <pre-snapshot>` shows exactly what
+moved — items whose `primary_topic` was reassigned, topic memberships that
+grew or shrank, overview text that drifted, and vocab slugs added or
+removed. The B side defaults to the live `data/`, so the common case is one
+short command. Add `--format json` to pipe the report into `jq` or a CI
+gate.
+
+```bash
+xbrain diff 2026-05-22T18-30-15Z-pre-vocab-regenerate    # vs. live data/
+xbrain diff <snap-a> <snap-b>                            # two named snapshots
+xbrain diff <snap-a> --format json | jq '.summary.reassigned_pct'
+```
 
 ---
 
