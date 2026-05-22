@@ -2,14 +2,14 @@
 
 Synthesize the overview of one topic page from the summaries of its posts.
 
-You receive a topic `slug`, its `description`, and the Spanish summaries of
+You receive a topic `slug`, its `description`, and the summaries of
 every post filed under it. Produce two things:
 
-- **`overview`** — 1 to 3 paragraphs, in Spanish. Synthesize what this topic is
+- **`overview`** — 1 to 3 paragraphs, in {language}. Synthesize what this topic is
   about *in this corpus*: the recurring ideas, the arc over time, the tensions
   or debates. Write for someone deciding whether to read the posts. Be faithful
   to the summaries — never invent facts, names or numbers that are not in them.
-- **`notes`** — a list of 0 to 15 short strings, in Spanish. Each note is one
+- **`notes`** — a list of 0 to 15 short strings, in {language}. Each note is one
   important thread, claim or pattern in the topic. One idea per note, a plain
   sentence. Use an empty list only for a topic with no thematic core.
 

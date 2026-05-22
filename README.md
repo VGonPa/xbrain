@@ -374,6 +374,9 @@ target_count = 45                         # how many topics to induce
 
 [topics]
 resynth_threshold = 25                    # re-synthesise an overview after N new posts
+
+[output]
+language = "English"                      # English | Spanish
 ```
 
 | Section | Key | Default | Purpose |
@@ -386,6 +389,14 @@ resynth_threshold = 25                    # re-synthesise an overview after N ne
 | `[enrich]` | `model` | `claude-haiku-4-5` | Model for the `api` executor. |
 | `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
+| `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
+
+Switching `[output].language` after the corpus is already enriched is supported
+— but does not retroactively translate existing summaries. To convert the
+whole corpus to the new language, run `xbrain enrich --regenerate` and
+`xbrain topics --resynth` (both auto-snapshotted, see
+[Snapshots & safety](#snapshots--safety)). Otherwise new items get the new
+language while old summaries stay as they were.
 
 Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
 only** — never in `config.toml`, never in the repo.

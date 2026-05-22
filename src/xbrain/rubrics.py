@@ -21,12 +21,23 @@ _GUARDRAILS = _PKG / "guardrails.yaml"
 ARTICLE_CHAR_LIMIT = 4000
 
 
-def load_rubric(name: str) -> str:
-    """Return the text of `rubrics/rubric-<name>.md`."""
+def load_rubric(name: str, *, language: str | None = None) -> str:
+    """Return the text of `rubrics/rubric-<name>.md`.
+
+    When `language` is set, any `{language}` placeholder in the rubric is
+    substituted with the given value (e.g. ``"English"``). When ``None``
+    (tests, manual inspection), the placeholder is preserved verbatim.
+
+    Substitution is plain `str.replace`; rubrics without a placeholder are
+    returned unchanged regardless of `language`.
+    """
     path = _RUBRICS_DIR / f"rubric-{name}.md"
     if not path.exists():
         raise FileNotFoundError(f"Rubric not found: {path}")
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    if language is not None:
+        text = text.replace("{language}", language)
+    return text
 
 
 def load_guardrails() -> dict:

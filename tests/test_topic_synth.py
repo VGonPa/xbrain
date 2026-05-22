@@ -15,7 +15,7 @@ def test_synthesize_overviews_api_returns_one_judgment_per_topic():
         TopicInput(slug="ai-coding", description="d", summaries=["s1", "s2"]),
         TopicInput(slug="career", description="d", summaries=["s3"]),
     ]
-    results = synthesize_overviews_api(inputs, model="m", client=client)
+    results = synthesize_overviews_api(inputs, model="m", output_language="English", client=client)
     assert [r.slug for r in results] == ["ai-coding", "career"]
     assert results[0].overview == "Resumen de ai-coding."
 
@@ -33,7 +33,7 @@ def test_synthesize_overviews_api_skips_an_invalid_judgment():
         TopicInput(slug="bad", description="d", summaries=["s"]),
         TopicInput(slug="good", description="d", summaries=["s"]),
     ]
-    results = synthesize_overviews_api(inputs, model="m", client=client)
+    results = synthesize_overviews_api(inputs, model="m", output_language="English", client=client)
     assert [r.slug for r in results] == ["good"]
 
 
@@ -43,7 +43,7 @@ def test_synthesize_overviews_api_isolates_an_api_error():
         TopicInput(slug="first", description="d", summaries=["s"]),
         TopicInput(slug="second", description="d", summaries=["s"]),
     ]
-    results = synthesize_overviews_api(inputs, model="m", client=client)
+    results = synthesize_overviews_api(inputs, model="m", output_language="English", client=client)
     assert [r.slug for r in results] == ["second"]
 
 
@@ -59,7 +59,7 @@ def test_export_and_import_topic_worksheet_round_trip(tmp_path):
 
     inputs = [TopicInput(slug="ai-coding", description="d", summaries=["s1", "s2"])]
     path = tmp_path / "topic-worksheet.json"
-    export_topic_worksheet(inputs, path)
+    export_topic_worksheet(inputs, path, output_language="English")
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["topics"][0]["slug"] == "ai-coding"
     assert payload["topics"][0]["summaries"] == ["s1", "s2"]

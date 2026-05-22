@@ -32,7 +32,9 @@ def test_induce_vocab_runs_map_then_reduce():
             },
         ]
     )
-    topics = induce_vocab(store, target_count=2, model="m", client=client, chunk_size=50)
+    topics = induce_vocab(
+        store, target_count=2, model="m", output_language="English", client=client, chunk_size=50
+    )
     assert [t.slug for t in topics] == ["ai-coding", "misc"]
     assert len(client.messages.calls) == 2
 
@@ -47,7 +49,9 @@ def test_induce_vocab_chunks_the_corpus():
             {"topics": [{"slug": "misc", "description": "Noise."}]},
         ]
     )
-    induce_vocab(store, target_count=1, model="m", client=client, chunk_size=2)
+    induce_vocab(
+        store, target_count=1, model="m", output_language="English", client=client, chunk_size=2
+    )
     assert len(client.messages.calls) == 4  # 3 map chunks + 1 reduce
 
 
@@ -64,7 +68,14 @@ def test_induce_vocab_raises_when_map_response_has_no_candidates():
         ]
     )
     with pytest.raises(ValueError) as exc_info:
-        induce_vocab(store, target_count=1, model="m", client=client, chunk_size=50)
+        induce_vocab(
+            store,
+            target_count=1,
+            model="m",
+            output_language="English",
+            client=client,
+            chunk_size=50,
+        )
     assert "candidates" in str(exc_info.value)
 
 
@@ -87,7 +98,7 @@ def test_export_vocab_worksheet_writes_corpus_and_rubric(tmp_path):
 
     store = {"1": _item(1), "2": _item(2)}
     path = tmp_path / "vocab-worksheet.json"
-    export_vocab_worksheet(store, target_count=45, path=path)
+    export_vocab_worksheet(store, target_count=45, path=path, output_language="English")
     import json
 
     payload = json.loads(path.read_text(encoding="utf-8"))

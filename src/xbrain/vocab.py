@@ -37,6 +37,7 @@ def induce_vocab(
     store: dict[str, Item],
     target_count: int,
     model: str,
+    output_language: str,
     client=None,
     chunk_size: int = 80,
 ) -> list[Topic]:
@@ -46,7 +47,7 @@ def induce_vocab(
 
         client = Anthropic()
 
-    system = load_rubric("vocab")
+    system = load_rubric("vocab", language=output_language)
     items = list(store.values())
 
     # --- Map: each chunk proposes candidate topics ---
@@ -83,7 +84,9 @@ def induce_vocab(
     return topics
 
 
-def export_vocab_worksheet(store: dict[str, Item], target_count: int, path: Path) -> None:
+def export_vocab_worksheet(
+    store: dict[str, Item], target_count: int, path: Path, output_language: str
+) -> None:
     """Export the corpus + rubric so an executor can induce the taxonomy.
 
     The no-API-cost track for the `vocab` stage: a Claude Code session (or a
@@ -101,7 +104,7 @@ def export_vocab_worksheet(store: dict[str, Item], target_count: int, path: Path
             "objects {slug, description} — `slug` is kebab-case ([a-z0-9-]). "
             "Then run: xbrain vocab --apply <this file>."
         ),
-        "rubric": load_rubric("vocab"),
+        "rubric": load_rubric("vocab", language=output_language),
         "corpus": [item.text for item in store.values()],
         "topics": [],
     }

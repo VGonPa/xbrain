@@ -9,6 +9,34 @@ def test_load_rubric_returns_file_text():
     assert "summary" in load_rubric("summary").lower()
 
 
+def test_load_rubric_substitutes_language_placeholder():
+    """When language is provided, {language} is replaced verbatim."""
+    text = load_rubric("summary", language="English")
+    assert "{language}" not in text
+    assert "**Language:** English" in text
+
+
+def test_load_rubric_supports_spanish_language():
+    text = load_rubric("topic-page", language="Spanish")
+    assert "{language}" not in text
+    # The placeholder appears twice in topic-page (overview + notes)
+    assert text.count("in Spanish") == 2
+
+
+def test_load_rubric_preserves_placeholder_when_language_none():
+    """No-language calls (tests, inspection) keep the literal `{language}`."""
+    text = load_rubric("summary")
+    assert "{language}" in text
+
+
+def test_load_rubric_topics_has_no_placeholder():
+    """rubric-topics emits only slugs; no language placeholder; passing one is a no-op."""
+    a = load_rubric("topics")
+    b = load_rubric("topics", language="English")
+    assert a == b
+    assert "{language}" not in a
+
+
 def test_load_guardrails_returns_enrichment_constraints():
     g = load_guardrails()
     assert g["enrichment"]["topics_max"] == 4

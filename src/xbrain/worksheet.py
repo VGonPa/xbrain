@@ -25,7 +25,13 @@ def _article_text(item: Item) -> str | None:
     return None
 
 
-def export_worksheet(items: list[Item], vocab: list[Topic], path: Path, executor: str) -> None:
+def export_worksheet(
+    items: list[Item],
+    vocab: list[Topic],
+    path: Path,
+    executor: str,
+    output_language: str,
+) -> None:
     """Write a worksheet with everything needed to enrich `items` by hand.
 
     `executor` is recorded in the payload so `--apply` attributes the
@@ -40,8 +46,8 @@ def export_worksheet(items: list[Item], vocab: list[Topic], path: Path, executor
             "`vocab`. Then run: xbrain enrich --apply <this file>."
         ),
         "rubrics": {
-            "summary": load_rubric("summary"),
-            "topics": load_rubric("topics"),
+            "summary": load_rubric("summary", language=output_language),
+            "topics": load_rubric("topics", language=output_language),
         },
         "vocab": [t.model_dump() for t in vocab],
         "items": [

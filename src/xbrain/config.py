@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
 
+from xbrain.i18n import SUPPORTED_LANGUAGES
 from xbrain.models import ExecutorName
 
 
@@ -21,6 +22,7 @@ class Config:
     enrich_model: str
     vocab_target_count: int
     topics_resynth_threshold: int
+    output_language: str  # one of xbrain.i18n.SUPPORTED_LANGUAGES
 
     @property
     def items_path(self) -> Path:
@@ -62,6 +64,13 @@ def load_config(repo_root: Path) -> Config:
     resynth_threshold = int(topics.get("resynth_threshold", 25))
     if resynth_threshold < 1:
         raise ValueError("config.toml: [topics].resynth_threshold must be >= 1")
+    output = settings.get("output", {})
+    output_language = output.get("language", "English")
+    if output_language not in SUPPORTED_LANGUAGES:
+        raise ValueError(
+            f"config.toml: [output].language must be one of {SUPPORTED_LANGUAGES}, "
+            f"got {output_language!r}"
+        )
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -72,4 +81,5 @@ def load_config(repo_root: Path) -> Config:
         enrich_model=enrich.get("model", "claude-haiku-4-5-20251001"),
         vocab_target_count=target_count,
         topics_resynth_threshold=resynth_threshold,
+        output_language=output_language,
     )

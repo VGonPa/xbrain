@@ -58,6 +58,20 @@ the same bar as hand-written code:
 - **Do not point agents at this repo's dependencies** or open agent-generated PRs
   to upstream projects from this work.
 
+## Adding an output language
+
+XBrain's output language (LLM summaries/overviews + wiki section headers) is
+parameterised via `[output].language` in `config.toml`. Today's supported
+values are `English` (default) and `Spanish`. To add a third language:
+
+1. Append a new entry to `_STRINGS` in `src/xbrain/i18n.py` with the
+   translated wiki headers (`topics_label`, `content_header`, etc.).
+2. Update `config.toml.example` and the README's Configuration table to list
+   the new value.
+3. That is it — `SUPPORTED_LANGUAGES` is derived from the dict, and the
+   `{language}` placeholder in `rubric-summary.md` / `rubric-topic-page.md` /
+   `rubric-vocab.md` is substituted verbatim. The LLM does the translation.
+
 ## Scope and responsible use
 
 XBrain reads X through X's internal endpoints, for personal use, with your own

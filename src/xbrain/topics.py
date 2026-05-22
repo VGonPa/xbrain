@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain import notes_io
+from xbrain.i18n import Strings, strings_for
 from xbrain.models import Item, Topic, TopicPage
 from xbrain.topic_synth import OverviewJudgment, TopicInput
 
@@ -79,7 +80,9 @@ def _topic_frontmatter(topic: Topic, posts: TopicPosts) -> str:
     )
 
 
-def render_topic_page(topic: Topic, posts: TopicPosts, page: TopicPage | None) -> str:
+def render_topic_page(
+    topic: Topic, posts: TopicPosts, page: TopicPage | None, strings: Strings
+) -> str:
     """Render one topic page's generated block (frontmatter, overview, lists)."""
     lines = [
         _topic_frontmatter(topic, posts),
@@ -106,8 +109,8 @@ def render_topic_page(topic: Topic, posts: TopicPosts, page: TopicPage | None) -
             lines += ["## Notas importantes", ""]
             lines += [f"- {note}" for note in page.notes]
             lines += [""]
-    lines += _post_block("Posts primarios", posts.primary)
-    lines += _post_block("También relevante", posts.also)
+    lines += _post_block(strings.primary_posts, posts.primary)
+    lines += _post_block(strings.also_relevant, posts.also)
     return notes_io.wrap("\n".join(lines).rstrip())
 
 
@@ -116,8 +119,10 @@ def write_topic_pages(
     vocab: list[Topic],
     all_posts: dict[str, TopicPosts],
     pages: dict[str, TopicPage],
+    output_language: str = "English",
 ) -> int:
     """Write `topics/<slug>.md` for every non-empty topic. Returns the count."""
+    strings = strings_for(output_language)
     topics_dir = output_dir / "topics"
     topics_dir.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -125,7 +130,7 @@ def write_topic_pages(
         posts = all_posts.get(topic.slug, TopicPosts())
         if posts.total == 0:
             continue
-        block = render_topic_page(topic, posts, pages.get(topic.slug))
+        block = render_topic_page(topic, posts, pages.get(topic.slug), strings)
         path = topics_dir / f"{topic.slug}.md"
         tail = (
             notes_io.user_tail(path.read_text(encoding="utf-8"), notes_io.DEFAULT_TAIL)

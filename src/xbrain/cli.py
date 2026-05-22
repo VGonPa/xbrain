@@ -191,7 +191,7 @@ def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, forc
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
-    run_generate(store, cfg.output_dir, since, until)
+    run_generate(store, cfg.output_dir, since, until, cfg.output_language)
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 
 
@@ -274,7 +274,7 @@ def enrich(
             typer.echo("No hay items pendientes de enriquecer.")
             return
         worksheet = cfg.data_dir / "enrich-worksheet.json"
-        export_worksheet(pending, vocab_topics, worksheet, chosen)
+        export_worksheet(pending, vocab_topics, worksheet, chosen, cfg.output_language)
         typer.echo(
             f"{len(pending)} items exportados a {worksheet}\n"
             f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
@@ -287,7 +287,7 @@ def enrich(
 
     enriched, invalid = enrich_with_executor(
         store,
-        ApiExecutor(model=cfg.enrich_model),
+        ApiExecutor(model=cfg.enrich_model, output_language=cfg.output_language),
         vocab_topics,
         _parse_date(since),
         _parse_date(until),
@@ -326,7 +326,7 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
     chosen = executor or cfg.enrich_executor
     if chosen in ("manual", "claude-code"):
         worksheet = cfg.data_dir / "vocab-worksheet.json"
-        export_vocab_worksheet(store, cfg.vocab_target_count, worksheet)
+        export_vocab_worksheet(store, cfg.vocab_target_count, worksheet, cfg.output_language)
         regen = " --regenerate" if regenerate else ""
         typer.echo(
             f"Corpus exportado a {worksheet}\n"
@@ -338,7 +338,7 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
         raise ValueError(f"Ejecutor desconocido: {chosen!r}")
     if regenerate:
         _auto_snapshot(cfg, "vocab-regenerate")
-    topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model)
+    topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model, cfg.output_language)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     _mark_for_regenerate(store, cfg, regenerate)
     typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
@@ -373,7 +373,7 @@ def _topics_apply(cfg: Config, store: dict, vocab: list, apply: Path) -> None:
     valid, invalid = apply_overview_judgments(import_topic_worksheet(apply))
     merge_overviews(pages, valid, posts)
     save_topic_pages(pages, cfg.topics_path)
-    written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+    written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
     typer.echo(f"Worksheet aplicada: {len(valid)} overviews · {written} páginas escritas")
     _report_invalid(invalid)
 
@@ -388,15 +388,15 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
     inputs = build_topic_inputs(stale, vocab, posts)
 
     if not inputs:
-        written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+        written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
         typer.echo(f"Topic pages actualizadas: {written} páginas (sin overviews pendientes).")
         return
 
     chosen = executor or cfg.enrich_executor
     if chosen in ("manual", "claude-code"):
         worksheet = cfg.data_dir / "topic-worksheet.json"
-        export_topic_worksheet(inputs, worksheet)
-        written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+        export_topic_worksheet(inputs, worksheet, cfg.output_language)
+        written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
         typer.echo(
             f"{len(inputs)} topics exportados a {worksheet} · {written} páginas escritas\n"
             f"Rellena el array `judgments` y ejecuta:\n"
@@ -406,10 +406,10 @@ def _topics_run(cfg: Config, store: dict, vocab: list, resynth: bool, executor: 
     if chosen != "api":
         raise ValueError(f"Ejecutor desconocido: {chosen!r}")
 
-    judgments = synthesize_overviews_api(inputs, cfg.enrich_model)
+    judgments = synthesize_overviews_api(inputs, cfg.enrich_model, cfg.output_language)
     merge_overviews(pages, judgments, posts)
     save_topic_pages(pages, cfg.topics_path)
-    written = write_topic_pages(cfg.output_dir, vocab, posts, pages)
+    written = write_topic_pages(cfg.output_dir, vocab, posts, pages, cfg.output_language)
     typer.echo(f"Topics sintetizados: {len(judgments)}/{len(inputs)} · {written} páginas escritas")
 
 

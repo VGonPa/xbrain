@@ -25,7 +25,7 @@ VOCAB = [Topic(slug="misc", description="Noise.")]
 
 def test_export_worksheet_writes_items_vocab_and_rubrics(tmp_path):
     path = tmp_path / "ws.json"
-    export_worksheet([_item("1"), _item("2")], VOCAB, path, "claude-code")
+    export_worksheet([_item("1"), _item("2")], VOCAB, path, "claude-code", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert {it["item_id"] for it in data["items"]} == {"1", "2"}
     assert data["items"][0]["bookmark_folder"] == "AI papers"
@@ -37,14 +37,14 @@ def test_export_worksheet_writes_items_vocab_and_rubrics(tmp_path):
 
 def test_export_worksheet_records_executor(tmp_path):
     path = tmp_path / "ws.json"
-    export_worksheet([_item("1")], VOCAB, path, "manual")
+    export_worksheet([_item("1")], VOCAB, path, "manual", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["executor"] == "manual"
 
 
 def test_import_worksheet_reads_filled_judgments(tmp_path):
     path = tmp_path / "ws.json"
-    export_worksheet([_item("1")], VOCAB, path, "claude-code")
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     data["judgments"] = [
         {"item_id": "1", "summary": "s", "primary_topic": "misc", "topics": ["misc"]}
@@ -57,7 +57,7 @@ def test_import_worksheet_reads_filled_judgments(tmp_path):
 
 def test_import_worksheet_reads_executor_back(tmp_path):
     path = tmp_path / "ws.json"
-    export_worksheet([_item("1")], VOCAB, path, "manual")
+    export_worksheet([_item("1")], VOCAB, path, "manual", "English")
     executor, judgments = import_worksheet(path)
     assert executor == "manual"
     assert judgments == []
