@@ -34,3 +34,8 @@ resynth_threshold = 25
 #   "English" - default
 #   "Spanish"
 language = "English"
+# How the in-body `**Topics:**` line is rendered on each item note.
+# Frontmatter `tags:` are unaffected by this setting. Supported values:
+#   "wikilink" - **Topics:** [[ai-coding]] · [[software-engineering]]  (default)
+#   "hashtag"  - **Topics:** #ai-coding #software-engineering
+topic_style = "wikilink"

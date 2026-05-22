@@ -14,6 +14,7 @@ import typer
 from xbrain import snapshot
 from xbrain.archive import parse_archive
 from xbrain.config import Config, load_config
+from xbrain.diff import diff_snapshots, format_json, format_text
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
@@ -191,7 +192,7 @@ def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, forc
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
-    run_generate(store, cfg.output_dir, since, until, cfg.output_language)
+    run_generate(store, cfg.output_dir, since, until, cfg.output_language, cfg.topic_style)
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 
 
@@ -547,6 +548,57 @@ def snapshot_prune_cmd(
     cfg = _config()
     deleted = snapshot.snapshot_prune(cfg.data_dir, keep_last=keep_last)
     typer.echo(f"Snapshots deleted: {deleted}")
+
+
+def _resolve_data_dir(cfg: Config, name: str | None) -> Path:
+    """Resolve a snapshot name to its data dir, or `None` to the live `data/`.
+
+    `xbrain diff` accepts a snapshot name (resolved via `snapshot_show`) OR
+    `None` to mean "the current live `data/`" — the most common B-side of the
+    comparison the user runs after a destructive op.
+    """
+    if name is None:
+        return cfg.data_dir
+    snapshot_dir, _ = snapshot.snapshot_show(cfg.data_dir, name)
+    return snapshot_dir
+
+
+@app.command()
+@_handle_cli_errors
+def diff(
+    snapshot_a: str = typer.Argument(..., help="Snapshot name on the A side."),
+    snapshot_b: str | None = typer.Argument(
+        None,
+        help="Snapshot name on the B side. Defaults to the live data/ directory.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: 'text' (default) or 'json'.",
+    ),
+) -> None:
+    """Compare two snapshots and surface drift.
+
+    Reports reassigned items, topic-membership shifts, topic-overview drift
+    (TF cosine similarity) and vocab changes. The B side defaults to the live
+    `data/` directory so `xbrain diff <pre-snapshot>` answers "what did the
+    last destructive op move?" with no extra arguments.
+    """
+    cfg = _config()
+    if output_format not in ("text", "json"):
+        raise ValueError(f"--format must be 'text' or 'json', got {output_format!r}")
+    a_dir = _resolve_data_dir(cfg, snapshot_a)
+    b_dir = _resolve_data_dir(cfg, snapshot_b)
+    report = diff_snapshots(a_dir, b_dir)
+    if output_format == "json":
+        typer.echo(format_json(report))
+    else:
+        b_label = snapshot_b if snapshot_b is not None else "live data/"
+        typer.echo("Comparing:")
+        typer.echo(f"  A: {snapshot_a}")
+        typer.echo(f"  B: {b_label}")
+        typer.echo("")
+        typer.echo(format_text(report))
 
 
 if __name__ == "__main__":

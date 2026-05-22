@@ -78,34 +78,160 @@ def test_item_has_optional_bookmark_folder():
     assert Item(**base, bookmark_folder="AI papers").bookmark_folder == "AI papers"
 
 
-def test_content_source_carries_failure_evidence():
-    from xbrain.models import ContentSource
+def test_content_source_failure_variant_carries_failure_evidence():
+    from xbrain.models import ContentSourceFailure
 
-    src = ContentSource(
+    src = ContentSourceFailure(
         kind="external_article",
         url="https://example.com/x",
-        ok=False,
         http_status=404,
         failure_reason="not_found",
         attempts=2,
         error="HTTP 404",
     )
+    assert src.outcome == "failure"
     assert src.http_status == 404
     assert src.failure_reason == "not_found"
     assert src.attempts == 2
 
 
-def test_content_source_failure_fields_default_cleanly():
-    # An old-shape dict (no failure fields) must still validate — the existing
-    # items.json predates these fields.
-    from xbrain.models import ContentSource
+def test_content_source_loads_legacy_ok_true_shape():
+    """A pre-#20 record with `ok=True` must read into the success variant."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess
 
-    src = ContentSource.model_validate(
-        {"kind": "external_article", "url": "https://e.com", "ok": True}
+    src = ContentSourceAdapter.validate_python(
+        {
+            "kind": "external_article",
+            "url": "https://e.com/x",
+            "ok": True,
+            "title": "T",
+            "text": "body",
+            "http_status": 200,
+            "failure_reason": None,
+            "error": None,
+            "attempts": 1,
+        }
     )
-    assert src.http_status is None
-    assert src.failure_reason is None
-    assert src.attempts == 0
+    assert isinstance(src, ContentSourceSuccess)
+    assert src.outcome == "success"
+    assert src.text == "body"
+    assert src.http_status == 200
+
+
+def test_content_source_loads_legacy_ok_false_shape():
+    """A pre-#20 record with `ok=False` must read into the failure variant."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceFailure
+
+    src = ContentSourceAdapter.validate_python(
+        {
+            "kind": "external_article",
+            "url": "https://e.com/x",
+            "ok": False,
+            "title": None,
+            "text": None,
+            "http_status": 404,
+            "failure_reason": "not_found",
+            "error": "HTTP 404",
+            "attempts": 2,
+        }
+    )
+    assert isinstance(src, ContentSourceFailure)
+    assert src.outcome == "failure"
+    assert src.failure_reason == "not_found"
+    assert src.error == "HTTP 404"
+
+
+def test_content_source_dumps_with_outcome_discriminator():
+    """A success variant dumps with `outcome: "success"` and NO `ok` field."""
+    from xbrain.models import ContentSourceSuccess
+
+    src = ContentSourceSuccess(kind="external_article", url="u", text="t")
+    dumped = src.model_dump(mode="json")
+    assert dumped["outcome"] == "success"
+    assert "ok" not in dumped
+
+
+def test_content_source_failure_dumps_with_outcome_discriminator():
+    """A failure variant dumps with `outcome: "failure"` and NO `ok` field."""
+    from xbrain.models import ContentSourceFailure
+
+    src = ContentSourceFailure(kind="external_article", url="u", failure_reason="not_found")
+    dumped = src.model_dump(mode="json")
+    assert dumped["outcome"] == "failure"
+    assert "ok" not in dumped
+
+
+def test_content_source_rejects_record_with_neither_discriminator():
+    """Silently inventing `outcome` would mask data corruption — reject loudly."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ContentSourceAdapter
+
+    with pytest.raises(ValidationError):
+        ContentSourceAdapter.validate_python({"kind": "external_article", "url": "u"})
+
+
+def test_content_source_success_requires_text():
+    """The whole point of the refactor: a success without text is a type error.
+
+    Pydantic raises a ValidationError at construction; mypy raises an error
+    statically (see tests/test_type_safety.py).
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ContentSourceSuccess
+
+    with pytest.raises(ValidationError):
+        ContentSourceSuccess(kind="external_article", url="u")  # missing `text`
+
+
+def test_content_source_failure_requires_failure_reason():
+    """Symmetric: a failure without a `failure_reason` is not demonstrable evidence."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ContentSourceFailure
+
+    with pytest.raises(ValidationError):
+        ContentSourceFailure(kind="external_article", url="u")  # missing `failure_reason`
+
+
+def test_content_source_legacy_failure_without_reason_buckets_as_transient():
+    """A pre-#20 record with `ok=False, failure_reason=None` (e.g. HTTP 429 that
+    the old code did not categorise) migrates losslessly: the `error` text is
+    preserved, and `failure_reason` is bucketed under `unknown_error` (a
+    transient retry-worthy reason added in the #20 review pass) so:
+
+    1. The wiki still renders a broken-link line.
+    2. The next `fetch_pending` run auto-retries the record (issue #19
+       retries `timeout`/`dns_error`/`unknown_error`), giving it one chance
+       to land on a proper category rather than staying invisibly stuck.
+
+    `unknown_error` is preferred over `timeout` for honesty — "timeout"
+    would mislabel 429s / SSL handshake failures / other distinct error
+    modes that the legacy code dumped without a reason.
+    """
+    from xbrain.models import ContentSourceAdapter, ContentSourceFailure
+
+    src = ContentSourceAdapter.validate_python(
+        {
+            "kind": "external_article",
+            "url": "https://e.com/throttled",
+            "ok": False,
+            "title": None,
+            "text": None,
+            "http_status": 429,
+            "failure_reason": None,
+            "error": "HTTP 429: Too Many Requests",
+            "attempts": 1,
+        }
+    )
+    assert isinstance(src, ContentSourceFailure)
+    assert src.failure_reason == "unknown_error"
+    assert src.error == "HTTP 429: Too Many Requests"
+    assert src.http_status == 429
 
 
 def test_topic_page_model_round_trips():

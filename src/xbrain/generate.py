@@ -6,8 +6,15 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.i18n import Strings, strings_for
-from xbrain.models import Content, ContentSource, FailureReason, Item
+from xbrain.models import (
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    FailureReason,
+    Item,
+)
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
 logger = logging.getLogger(__name__)
@@ -20,16 +27,20 @@ _FAILURE_ES: dict[FailureReason, str] = {
     "dns_error": "dominio no resuelto",
     "js_required": "requiere JavaScript",
     "empty_content": "sin contenido extraíble",
+    "unknown_error": "error desconocido",
 }
 
 
-def _broken_link_line(source: ContentSource, fetched_at: datetime) -> str:
-    """A one-line, human-readable record of a link that could not be fetched."""
+def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
+    """A one-line, human-readable record of a link that could not be fetched.
+
+    Accepts only the failure variant — the type system enforces that
+    `failure_reason` is present (no Optional check needed).
+    """
     bits: list[str] = []
     if source.http_status:
         bits.append(f"HTTP {source.http_status}")
-    if source.failure_reason:
-        bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
+    bits.append(_FAILURE_ES.get(source.failure_reason, source.failure_reason))
     detail = " · ".join(bits) or "no se pudo recuperar"
     date = fetched_at.date().isoformat()
     return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
@@ -41,6 +52,7 @@ def generate(
     since: datetime | None = None,
     until: datetime | None = None,
     output_language: str = "English",
+    topic_style: str = "wikilink",
 ) -> None:
     """Write _index.md, log.md and one note per noted item.
 
@@ -48,7 +60,17 @@ def generate(
     index and log always reflect the whole store; `since`/`until` only narrow
     which item notes are (re)generated. `output_language` drives the section
     headers (Topics:, Content:, Summary, ...) via `xbrain.i18n`.
+
+    `topic_style` controls how the in-body ``**Topics:**`` line is rendered:
+    ``"wikilink"`` (default) emits ``[[slug]]`` links, ``"hashtag"`` emits
+    Obsidian ``#slug`` tags. The toggle does not affect frontmatter ``tags:``,
+    the index ``## Topics`` section, or the topic-page post lists — those
+    stay wikilinks by design.
     """
+    if topic_style not in SUPPORTED_TOPIC_STYLES:
+        raise ValueError(
+            f"Unsupported topic_style: {topic_style!r}. Supported: {SUPPORTED_TOPIC_STYLES}"
+        )
     strings = strings_for(output_language)
     items = sorted(store.values(), key=lambda i: i.created_at, reverse=True)
     items_dir = output_dir / "items"
@@ -57,7 +79,7 @@ def generate(
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
-            _write_note(items_dir, item, strings)
+            _write_note(items_dir, item, strings, topic_style)
 
 
 def _has_note(item: Item) -> bool:
@@ -73,7 +95,7 @@ def _in_range(item: Item, since: datetime | None, until: datetime | None) -> boo
     return True
 
 
-def _write_note(items_dir: Path, item: Item, strings: Strings) -> None:
+def _write_note(items_dir: Path, item: Item, strings: Strings, topic_style: str) -> None:
     """Write an item's note, replacing only the generated region.
 
     The filename ends with the item's globally unique ``id``. That makes
@@ -83,7 +105,7 @@ def _write_note(items_dir: Path, item: Item, strings: Strings) -> None:
     orphaned.
     """
     path = items_dir / note_filename(item)
-    block = wrap(_render_note(item, strings))
+    block = wrap(_render_note(item, strings, topic_style))
     source = path if path.exists() else _stale_note(items_dir, item, path)
     if source is not None:
         tail = user_tail(source.read_text(encoding="utf-8"), DEFAULT_TAIL)
@@ -109,34 +131,54 @@ def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
     return None
 
 
-def _enrichment_lines(item: Item, strings: Strings) -> list[str]:
-    """Summary + topic links for an enriched item (empty if not enriched)."""
+def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[str]:
+    """Summary + topic refs for an enriched item (empty if not enriched).
+
+    `topic_style` selects the in-body topic-line rendering:
+    - ``"wikilink"`` → ``**Topics:** [[ai-coding]] · [[software-engineering]]``
+    - ``"hashtag"``  → ``**Topics:** #ai-coding #software-engineering``
+
+    The hashtag mode uses a bare space as separator: Obsidian's tag parser
+    consumes a trailing middle-dot as part of the tag boundary on some
+    renderers, which produces broken tags. Frontmatter ``tags:`` are emitted
+    by ``_frontmatter`` and are independent of this toggle.
+    """
     if not item.enriched:
         return []
     lines: list[str] = []
     if item.enriched.summary:
         lines += [item.enriched.summary, ""]
     if item.enriched.topics:
-        links = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
-        lines += [f"**{strings.topics_label}:** {links}", ""]
+        if topic_style == "hashtag":
+            refs = " ".join(f"#{t}" for t in item.enriched.topics)
+        else:
+            refs = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
+        lines += [f"**{strings.topics_label}:** {refs}", ""]
     return lines
 
 
 def _content_lines(content: Content, strings: Strings) -> list[str]:
-    """Rendered article bodies + broken-link evidence for a fetched item."""
+    """Rendered article bodies + broken-link evidence for a fetched item.
+
+    Switches on the `ContentSource` variant: the success variant is
+    rendered as a content block; the failure variant is rendered as a
+    broken-link line *only* for external articles and X articles (a
+    failed thread fetch is silently elided, matching the pre-refactor
+    behaviour — `source.kind` is what guarded that path before).
+    """
     lines: list[str] = []
     for source in content.sources:
-        if source.ok and source.text:
+        if isinstance(source, ContentSourceSuccess):
             heading = source.title or source.url
             lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
-        elif not source.ok and source.kind in ("external_article", "x_article"):
+        elif source.kind in ("external_article", "x_article"):
             lines += [_broken_link_line(source, content.fetched_at), ""]
     return lines
 
 
-def _render_note(item: Item, strings: Strings) -> str:
+def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
     lines = [_frontmatter(item), "", f"# {title_of(item)}", ""]
-    lines += _enrichment_lines(item, strings)
+    lines += _enrichment_lines(item, strings, topic_style)
     lines += ["## Tweet", "", item.text, ""]
     if item.links:
         lines.append("## Enlaces")

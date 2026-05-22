@@ -283,7 +283,7 @@ def test_cli_fetch_persists_partial_work_when_a_stage_raises(tmp_path, monkeypat
     # earlier stages already produced. This proves that `finally` contract.
     _setup_repo(tmp_path, monkeypatch)
     import xbrain.cli as cli
-    from xbrain.models import Content, ContentSource
+    from xbrain.models import Content, ContentSourceSuccess
     from xbrain.store import load_store
 
     save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
@@ -294,11 +294,10 @@ def test_cli_fetch_persists_partial_work_when_a_stage_raises(tmp_path, monkeypat
         store["1"].content = Content(
             fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
             sources=[
-                ContentSource(
+                ContentSourceSuccess(
                     kind="external_article",
                     url="https://example.com/p",
                     text="cuerpo",
-                    ok=True,
                 )
             ],
         )

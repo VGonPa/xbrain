@@ -195,6 +195,11 @@ Code Is Cheap Now. Software Isn't.  https://t.co/J9m5RzQNbW
 Everything above the `xbrain:generated` marker is regenerated on every run;
 anything *you* write below it is preserved.
 
+> Set `[output] topic_style = "hashtag"` in `config.toml` to render the
+> in-body `**Topics:**` line as `#ai-coding #software-engineering` instead of
+> wikilinks — useful if you navigate primarily via Obsidian's tag pane. The
+> frontmatter `tags:` are native Obsidian tags in either mode.
+
 ### Layer 2 — Topics
 
 The layer that makes XBrain more than a tidy backup. **A topic page is not a
@@ -377,6 +382,7 @@ resynth_threshold = 25                    # re-synthesise an overview after N ne
 
 [output]
 language = "English"                      # English | Spanish
+topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: line)
 ```
 
 | Section | Key | Default | Purpose |
@@ -390,6 +396,7 @@ language = "English"                      # English | Spanish
 | `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
+| `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
@@ -508,7 +515,7 @@ uv run xbrain <command> [options]
 |---------|-------------|
 | `extract` | Extract bookmarks and/or own tweets from X. `--source bookmarks\|tweets\|all`. |
 | `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
-| `fetch` | Download linked article content, expand threads, fetch linked X content. `--force` re-fetches everything. |
+| `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
@@ -516,6 +523,7 @@ uv run xbrain <command> [options]
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
 | `snapshot` | Manage `data/` snapshots: `create`, `list`, `show`, `restore`, `prune`. See [Snapshots & safety](#snapshots--safety). |
+| `diff` | Compare two snapshots (or one snapshot vs. the live `data/`). Surfaces reassigned items, topic growth, overview drift, vocab changes. `--format text\|json`. |
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
 
 Every stage accepts `--since` / `--until` (ISO dates) to narrow the date window.
@@ -543,6 +551,19 @@ xbrain snapshot prune --keep-last 10        # cap disk use
 The Obsidian vault is **not** snapshotted — it is fully derived from `data/`
 via `xbrain generate`. `restore` rolls back `data/`; you run `xbrain generate`
 to rebuild the wiki from it.
+
+After a destructive run, `xbrain diff <pre-snapshot>` shows exactly what
+moved — items whose `primary_topic` was reassigned, topic memberships that
+grew or shrank, overview text that drifted, and vocab slugs added or
+removed. The B side defaults to the live `data/`, so the common case is one
+short command. Add `--format json` to pipe the report into `jq` or a CI
+gate.
+
+```bash
+xbrain diff 2026-05-22T18-30-15Z-pre-vocab-regenerate    # vs. live data/
+xbrain diff <snap-a> <snap-b>                            # two named snapshots
+xbrain diff <snap-a> --format json | jq '.summary.reassigned_pct'
+```
 
 ---
 

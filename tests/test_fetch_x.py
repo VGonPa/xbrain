@@ -2,7 +2,13 @@
 from datetime import datetime, timezone
 
 from xbrain.fetch_x import _classify_x_url, _x_status_id, assemble_linked_thread, fetch_x_articles
-from xbrain.models import Author, Content, ContentSource, Item, Link
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceSuccess,
+    Item,
+    Link,
+)
 
 
 def _item(item_id: str, urls: list[str]) -> Item:
@@ -82,7 +88,7 @@ def test_fetch_x_articles_attaches_sources_via_injected_fetcher():
     fetched = fetch_x_articles(
         store,
         storage_state_path=None,
-        link_fetcher=lambda url: ContentSource(kind="x_article", url=url, text="hilo", ok=True),
+        link_fetcher=lambda url: ContentSourceSuccess(kind="x_article", url=url, text="hilo"),
     )
     assert fetched == 1
     assert store["1"].content is not None
@@ -103,7 +109,7 @@ def test_fetch_x_articles_skips_already_fetched_unless_forced():
     store = {"1": _item("1", ["https://x.com/jack/status/9"])}
 
     def fetcher(url):
-        return ContentSource(kind="x_article", url=url, text="hilo", ok=True)
+        return ContentSourceSuccess(kind="x_article", url=url, text="hilo")
 
     assert fetch_x_articles(store, None, link_fetcher=fetcher) == 1
     assert fetch_x_articles(store, None, link_fetcher=fetcher) == 0
@@ -129,7 +135,7 @@ def test_fetch_x_articles_respects_since_until():
         storage_state_path=None,
         since=datetime(2026, 5, 1, tzinfo=timezone.utc),
         until=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        link_fetcher=lambda url: ContentSource(kind="x_article", url=url, text="x", ok=True),
+        link_fetcher=lambda url: ContentSourceSuccess(kind="x_article", url=url, text="x"),
     )
     assert count == 1
     assert store["1"].content is None
@@ -141,7 +147,7 @@ def test_fetch_x_articles_dedups_repeated_x_urls():
     fetch_x_articles(
         store,
         storage_state_path=None,
-        link_fetcher=lambda url: ContentSource(kind="x_article", url=url, text="hilo", ok=True),
+        link_fetcher=lambda url: ContentSourceSuccess(kind="x_article", url=url, text="hilo"),
     )
     sources = store["1"].content.sources
     assert len(sources) == 1
@@ -151,13 +157,13 @@ def test_fetch_x_articles_preserves_external_sources():
     item = _item("1", ["https://x.com/jack/status/9"])
     item.content = Content(
         fetched_at=datetime.now(timezone.utc),
-        sources=[ContentSource(kind="external_article", url="https://e.com", text="art", ok=True)],
+        sources=[ContentSourceSuccess(kind="external_article", url="https://e.com", text="art")],
     )
     store = {"1": item}
     fetch_x_articles(
         store,
         None,
-        link_fetcher=lambda url: ContentSource(kind="x_article", url=url, text="x", ok=True),
+        link_fetcher=lambda url: ContentSourceSuccess(kind="x_article", url=url, text="x"),
     )
     kinds = {s.kind for s in store["1"].content.sources}
     assert kinds == {"external_article", "x_article"}

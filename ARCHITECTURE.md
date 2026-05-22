@@ -148,6 +148,7 @@ optional Firecrawl fallback, Playwright for x.com).
 - **Reads:** `items.json`
 - **Writes:** `items.json` — each item's `content` + `content_source[]`
 - **Cached** — already-fetched items are skipped (use `--force` to refetch).
+- **Transient retries** — items whose only previous failures were `timeout` / `dns_error` are re-fetched on the next run without `--force`. Terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`.
 - **Failures recorded as evidence** — `http_status` + `failure_reason`, never silently dropped.
 - **Snapshots `data/` before `--force`** — recovery path if a forced refetch makes things worse.
 
@@ -394,6 +395,7 @@ These are the rules the rest of the architecture rests on. Breaking any of them 
 6. **`fetch` is cached per item id.** Re-runs do not re-hit the network without `--force` (or, in the future, transient-retry — issue #19).
 7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break.
 8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact (`vocab --regenerate`, `topics --resynth`, `fetch --force`) snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op.
+9. **Fetch records are tagged unions.** A `ContentSource` on `items.json` is either a `Success` (with required `text`) or a `Failure` (with required `failure_reason`). Mixed shapes are not representable — pydantic rejects them at construction, and mypy rejects them statically (via the `pydantic.mypy` plugin). Legacy records with `ok: bool` (pre-#20) are normalised on read by a `BeforeValidator` on the union, so existing `data/items.json` files keep working without a manual migration. The static contract is pinned by `tests/type_probes/illegal_states.py`.
 
 ---
 
@@ -432,6 +434,7 @@ xbrain/
 │   ├── notes_io.py          ← per-note read/write + user-tail preservation
 │   ├── store.py             ← items.json / topics.json / state.json I/O
 │   ├── snapshot.py          ← data/ snapshot lifecycle (create/list/restore/prune)
+│   ├── diff.py              ← structured diff between two snapshot data dirs
 │   ├── worksheet.py         ← enrich worksheet export/import
 │   ├── validate.py          ← guardrails enforcement
 │   ├── llm_json.py          ← extract JSON from LLM responses

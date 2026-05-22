@@ -9,7 +9,13 @@ from playwright.sync_api import BrowserContext, Response
 
 from xbrain.extract.browser import is_logged_out, x_context
 from xbrain.extract.graphql import parse_tweets
-from xbrain.models import Content, ContentSource, Item
+from xbrain.models import (
+    Content,
+    ContentSource,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Item,
+)
 
 _SETTLE_MS = 4000
 
@@ -42,16 +48,17 @@ def expand_threads(store: dict[str, Item], storage_state_path: Path, force: bool
     with x_context(storage_state_path) as context:
         for item in pending:
             text = _fetch_thread_text(context, item)
-            _attach_thread(
-                item,
-                ContentSource(
+            source: ContentSource
+            if text:
+                source = ContentSourceSuccess(kind="thread", url=item.url, text=text)
+            else:
+                source = ContentSourceFailure(
                     kind="thread",
                     url=item.url,
-                    text=text or None,
-                    ok=bool(text),
-                    error=None if text else "No se pudo recuperar el hilo.",
-                ),
-            )
+                    failure_reason="empty_content",
+                    error="No se pudo recuperar el hilo.",
+                )
+            _attach_thread(item, source)
     return len(pending)
 
 

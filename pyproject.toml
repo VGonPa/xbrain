@@ -51,6 +51,17 @@ target-version = "py312"
 python_version = "3.12"
 ignore_missing_imports = true
 files = ["src/xbrain"]
+# Pydantic mypy plugin turns model __init__ into a typed signature so
+# mypy can flag missing required fields (e.g. ContentSourceSuccess
+# without `text`). The #20 refactor relies on this to make illegal
+# states unrepresentable at the type level — verified by the
+# tests/type_probes/illegal_states.py probe.
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
 
 [tool.interrogate]
 ignore-init-method = true
