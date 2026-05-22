@@ -17,33 +17,33 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Strings:
-    """Localised section headers and labels written by the wiki generators."""
+    """Localised section headers and labels written by the wiki generators.
 
-    topics_label: str  # "Temas" / "Topics" — per-item line listing topics
-    content_header: str  # "Contenido" / "Content" — linked-article body section
-    tweet_header: str  # "Tweet" / "Tweet" — the post body section
-    summary_header: str  # "Resumen" / "Summary" — index summary section
-    index_topics_header: str  # "Temas" / "Topics" — index topics list
-    primary_posts: str  # "Posts primarios" / "Primary posts" — topic page
-    also_relevant: str  # "También relevante" / "Also relevant" — topic page
+    `topics_label` covers both the per-item line ("**Topics:** ...") and the
+    index topics section ("## Topics"). These are identical within each
+    language, so a single field carries both — adding a second variant would
+    suggest variance that does not exist.
+    """
+
+    topics_label: str  # "Temas" / "Topics"
+    content_header: str  # "Contenido" / "Content"
+    summary_header: str  # "Resumen" / "Summary"
+    primary_posts: str  # "Posts primarios" / "Primary posts"
+    also_relevant: str  # "También relevante" / "Also relevant"
 
 
 _STRINGS: dict[str, Strings] = {
     "English": Strings(
         topics_label="Topics",
         content_header="Content",
-        tweet_header="Tweet",
         summary_header="Summary",
-        index_topics_header="Topics",
         primary_posts="Primary posts",
         also_relevant="Also relevant",
     ),
     "Spanish": Strings(
         topics_label="Temas",
         content_header="Contenido",
-        tweet_header="Tweet",
         summary_header="Resumen",
-        index_topics_header="Temas",
         primary_posts="Posts primarios",
         also_relevant="También relevante",
     ),

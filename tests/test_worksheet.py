@@ -33,6 +33,10 @@ def test_export_worksheet_writes_items_vocab_and_rubrics(tmp_path):
     assert "topics" in data["rubrics"]
     assert [t["slug"] for t in data["vocab"]] == ["misc"]
     assert data["judgments"] == []
+    # The rubrics shipped in the worksheet must already have `{language}`
+    # substituted — the Claude Code session reads them as-is.
+    assert "{language}" not in data["rubrics"]["summary"]
+    assert "**Language:** English" in data["rubrics"]["summary"]
 
 
 def test_export_worksheet_records_executor(tmp_path):

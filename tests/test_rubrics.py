@@ -37,6 +37,27 @@ def test_load_rubric_topics_has_no_placeholder():
     assert "{language}" not in a
 
 
+def test_load_rubric_defensive_check_catches_unsubstituted_placeholder(tmp_path, monkeypatch):
+    """A typo like {Language} (capital L) survives str.replace and would
+    silently ship the literal placeholder to the LLM. The defensive regex
+    catches it and raises a loud ValueError naming the typo.
+    """
+    import pytest
+
+    from xbrain import rubrics as rubrics_mod
+
+    typo_dir = tmp_path / "rubrics"
+    typo_dir.mkdir()
+    (typo_dir / "rubric-typo.md").write_text(
+        "**Language:** {Language}, regardless of the post.\n",  # capital L typo
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", typo_dir)
+
+    with pytest.raises(ValueError, match=r"\{Language\}"):
+        load_rubric("typo", language="English")
+
+
 def test_load_guardrails_returns_enrichment_constraints():
     g = load_guardrails()
     assert g["enrichment"]["topics_max"] == 4

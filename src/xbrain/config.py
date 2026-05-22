@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import get_args
 
-from xbrain.i18n import SUPPORTED_LANGUAGES
+from xbrain.i18n import strings_for
 from xbrain.models import ExecutorName
 
 
@@ -64,13 +64,10 @@ def load_config(repo_root: Path) -> Config:
     resynth_threshold = int(topics.get("resynth_threshold", 25))
     if resynth_threshold < 1:
         raise ValueError("config.toml: [topics].resynth_threshold must be >= 1")
-    output = settings.get("output", {})
-    output_language = output.get("language", "English")
-    if output_language not in SUPPORTED_LANGUAGES:
-        raise ValueError(
-            f"config.toml: [output].language must be one of {SUPPORTED_LANGUAGES}, "
-            f"got {output_language!r}"
-        )
+    output_language = settings.get("output", {}).get("language", "English")
+    # Validate via strings_for: it already raises ValueError listing supported
+    # languages on an unknown value. Single source of truth for the check.
+    strings_for(output_language)
     return Config(
         repo_root=repo_root,
         vault=vault,

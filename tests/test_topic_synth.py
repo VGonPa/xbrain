@@ -20,6 +20,23 @@ def test_synthesize_overviews_api_returns_one_judgment_per_topic():
     assert results[0].overview == "Resumen de ai-coding."
 
 
+def test_synthesize_overviews_api_substitutes_language_in_system_prompt():
+    """The topic-page rubric has two {language} placeholders. Both must be
+    substituted before the prompt is sent to the LLM.
+    """
+    client = FakeAnthropic([{"overview": "ok", "notes": []}])
+    synthesize_overviews_api(
+        [TopicInput(slug="x", description="d", summaries=["s"])],
+        model="m",
+        output_language="Spanish",
+        client=client,
+    )
+    system = client.messages.calls[0]["system"]
+    assert "{language}" not in system
+    # Two placeholders in the rubric → two "in Spanish" mentions after substitution
+    assert system.count("in Spanish") == 2
+
+
 def test_synthesize_overviews_api_skips_an_invalid_judgment():
     # A judgment containing a wikilink fails validate_overview and is dropped;
     # the batch continues.

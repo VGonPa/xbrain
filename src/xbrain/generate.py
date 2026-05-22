@@ -137,7 +137,7 @@ def _content_lines(content: Content, strings: Strings) -> list[str]:
 def _render_note(item: Item, strings: Strings) -> str:
     lines = [_frontmatter(item), "", f"# {title_of(item)}", ""]
     lines += _enrichment_lines(item, strings)
-    lines += [f"## {strings.tweet_header}", "", item.text, ""]
+    lines += ["## Tweet", "", item.text, ""]
     if item.links:
         lines.append("## Enlaces")
         lines += [f"- <{link.url}>" for link in item.links]
@@ -198,7 +198,7 @@ def _render_index(items: list[Item], strings: Strings) -> str:
         "",
         "- [[log|Log cronológico completo]]",
         "",
-        f"## {strings.index_topics_header}",
+        f"## {strings.topics_label}",
         "",
     ]
     for topic, count in sorted(topic_freq.items(), key=lambda kv: (-kv[1], kv[0])):

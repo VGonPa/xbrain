@@ -33,6 +33,18 @@ def test_spanish_strings_returned_for_spanish() -> None:
     assert s.also_relevant == "También relevante"
 
 
+def test_strings_dataclass_has_exactly_five_fields() -> None:
+    """If a field is added or removed, every translation must be updated."""
+    field_names = {f.name for f in dataclasses.fields(Strings)}
+    assert field_names == {
+        "topics_label",
+        "content_header",
+        "summary_header",
+        "primary_posts",
+        "also_relevant",
+    }
+
+
 def test_unknown_language_raises_with_supported_list() -> None:
     with pytest.raises(ValueError) as exc:
         strings_for("Klingon")

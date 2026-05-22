@@ -37,6 +37,13 @@ def test_induce_vocab_runs_map_then_reduce():
     )
     assert [t.slug for t in topics] == ["ai-coding", "misc"]
     assert len(client.messages.calls) == 2
+    # Regression guard: the vocab rubric carries a `{language}` placeholder
+    # (so topic descriptions land in the configured language). If a future
+    # refactor calls load_rubric("vocab") without language=, the placeholder
+    # leaks into the prompt and descriptions come out wrong.
+    for call in client.messages.calls:
+        assert "{language}" not in call["system"]
+        assert "English" in call["system"]
 
 
 def test_induce_vocab_chunks_the_corpus():
