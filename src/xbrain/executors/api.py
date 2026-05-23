@@ -145,5 +145,10 @@ class ApiExecutor:
                 f"All {failures} items failed enrichment; see warnings above for details."
             )
         if failures > 0:
-            print(f"enriched: {len(results)}, failed: {failures}", file=sys.stderr)
+            # SUMMARY prefix so the line is distinguishable from the per-item
+            # `warn:` lines that precede it in a partial-failure batch.
+            print(
+                f"SUMMARY: enriched: {len(results)}, failed: {failures}",
+                file=sys.stderr,
+            )
         return results

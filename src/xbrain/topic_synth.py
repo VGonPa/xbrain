@@ -143,7 +143,12 @@ def synthesize_overviews_api(
             f"All {failures} topics failed synthesis; see warnings above for details."
         )
     if failures > 0:
-        print(f"synthesized: {len(results)}, failed: {failures}", file=sys.stderr)
+        # SUMMARY prefix so the line stands out from the per-topic `warn:`
+        # lines that precede it in a partial-failure batch.
+        print(
+            f"SUMMARY: synthesized: {len(results)}, failed: {failures}",
+            file=sys.stderr,
+        )
     return results
 
 
