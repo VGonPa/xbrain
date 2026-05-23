@@ -77,19 +77,49 @@ def _judgment_from_response(response, slug: str) -> OverviewJudgment:
     )
 
 
+def _recoverable_errors() -> tuple[type[Exception], ...]:
+    """Exception classes a per-topic failure should swallow + log + continue on.
+
+    Mirrors `xbrain.executors.api._recoverable_errors`. See that helper for
+    rationale. `anthropic.APIError` is lazy-imported because `anthropic` is
+    optional in the test environment (the client is faked).
+    """
+    try:
+        import json as _json
+        from anthropic import APIError
+
+        return (APIError, ValueError, _json.JSONDecodeError, KeyError)
+    except ImportError:
+        import json as _json
+
+        return (ValueError, _json.JSONDecodeError, KeyError)
+
+
 def synthesize_overviews_api(
     inputs: list[TopicInput],
     model: str,
     output_language: str,
     client=None,
 ) -> list[OverviewJudgment]:
-    """Synthesize topic overviews via the Anthropic API — one call per topic."""
+    """Synthesize topic overviews via the Anthropic API — one call per topic.
+
+    A `RuntimeError` is raised when EVERY input topic fails — exposed as a
+    non-zero exit through the CLI's `_handle_cli_errors` wrapper. Partial
+    success (some topics synthesise, some fail) returns the successes and
+    prints a summary line to stderr.
+
+    Programmer bugs (`AttributeError`, ...) and `KeyboardInterrupt` are not
+    in the recoverable set — they propagate so the developer sees the
+    traceback and Ctrl-C still works.
+    """
     if client is None:
         from anthropic import Anthropic  # lazy: tests inject a fake
 
         client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
     system = _system_prompt(output_language)
+    recoverable = _recoverable_errors()
     results: list[OverviewJudgment] = []
+    failures = 0
     for topic in inputs:
         try:
             response = client.messages.create(
@@ -99,14 +129,21 @@ def synthesize_overviews_api(
                 messages=[{"role": "user", "content": _user_prompt(topic)}],
             )
             results.append(_judgment_from_response(response, topic.slug))
-        except Exception as exc:  # noqa: BLE001
-            # One failed topic must not abort the batch — it stays unsynthesized
-            # and is retried on the next run.
+        except recoverable as exc:
+            # One failed topic must not abort the batch — it stays
+            # unsynthesized and is retried on the next run.
+            failures += 1
             print(
                 f"warn: topic synthesis failed for {topic.slug}: {exc}",
                 file=sys.stderr,
             )
             continue
+    if inputs and not results and failures > 0:
+        raise RuntimeError(
+            f"All {failures} topics failed synthesis; see warnings above for details."
+        )
+    if failures > 0:
+        print(f"synthesized: {len(results)}, failed: {failures}", file=sys.stderr)
     return results
 
 

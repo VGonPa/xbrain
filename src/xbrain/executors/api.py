@@ -8,6 +8,7 @@ the article body was not fetched (design §15.2).
 
 from __future__ import annotations
 
+import json
 import sys
 
 from xbrain.executors.base import EnrichmentJudgment
@@ -16,6 +17,26 @@ from xbrain.models import ContentSourceSuccess, Item, Topic
 from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 
 _MAX_TOKENS = 600
+
+
+def _recoverable_errors() -> tuple[type[Exception], ...]:
+    """Exception classes a per-item failure should swallow + log + continue on.
+
+    `anthropic.APIError` covers auth, rate-limit, server-side and network
+    errors the SDK normalises. `ValueError` covers validator rejections and
+    `pydantic.ValidationError` (a `ValueError` subclass in pydantic v2).
+    `json.JSONDecodeError` covers a malformed LLM response. `KeyError` covers
+    a response missing an expected field.
+
+    Lazy-imported because `anthropic` is an optional dependency in the test
+    environment (the client is faked).
+    """
+    try:
+        from anthropic import APIError
+
+        return (APIError, ValueError, json.JSONDecodeError, KeyError)
+    except ImportError:
+        return (ValueError, json.JSONDecodeError, KeyError)
 
 
 def _vocab_block(vocab: list[Topic]) -> str:
@@ -82,7 +103,9 @@ class ApiExecutor:
 
     def enrich_items(self, items: list[Item], vocab: list[Topic]) -> list[EnrichmentJudgment]:
         system = _system_prompt(self._output_language)
+        recoverable = _recoverable_errors()
         results: list[EnrichmentJudgment] = []
+        failures = 0
         for item in items:
             try:
                 response = self._client.messages.create(
@@ -105,12 +128,22 @@ class ApiExecutor:
                         topics=list(judgment["topics"]),
                     )
                 )
-            except Exception as exc:  # noqa: BLE001
+            except recoverable as exc:
                 # One transient/malformed response must not abort the batch:
-                # the item stays pending and is retried on the next run.
+                # the item stays pending and is retried on the next run. Note:
+                # programmer bugs (`AttributeError`, …) and `KeyboardInterrupt`
+                # are NOT in `recoverable` — they propagate so the developer
+                # sees the traceback and Ctrl-C still works.
+                failures += 1
                 print(
                     f"warn: enrichment failed for item {item.id}: {exc}",
                     file=sys.stderr,
                 )
                 continue
+        if items and not results and failures > 0:
+            raise RuntimeError(
+                f"All {failures} items failed enrichment; see warnings above for details."
+            )
+        if failures > 0:
+            print(f"enriched: {len(results)}, failed: {failures}", file=sys.stderr)
         return results
