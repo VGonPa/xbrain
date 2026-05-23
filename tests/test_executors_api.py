@@ -101,13 +101,96 @@ def test_api_executor_skips_wrong_shape_response(capsys):
 
 def test_api_executor_skips_item_on_api_failure(capsys):
     # A transient API failure on one item must not abort the whole batch.
+    from anthropic import APIError
+
     client = FakeAnthropic(
         [
-            RuntimeError("503 service unavailable"),
+            APIError("503 service unavailable", request=None, body=None),
             {"summary": "r", "primary_topic": "misc", "topics": ["misc"]},
         ]
     )
     ex = ApiExecutor(model="m", output_language="English", client=client)
     out = ex.enrich_items([_item("1"), _item("2")], VOCAB)
     assert {j.item_id for j in out} == {"2"}
-    assert "enrichment failed for item 1" in capsys.readouterr().err
+    captured = capsys.readouterr().err
+    assert "enrichment failed for item 1" in captured
+    # Partial-failure summary line is visible on stderr
+    assert "SUMMARY: enriched: 1, failed: 1" in captured
+
+
+def test_api_executor_raises_when_all_items_fail():
+    """An API key revocation / total outage must surface as non-zero exit, not
+    silent empty result. The CLI's _handle_cli_errors catches RuntimeError."""
+    import pytest
+    from anthropic import APIError
+
+    client = FakeAnthropic(
+        [
+            APIError("401 unauthorized", request=None, body=None),
+            APIError("401 unauthorized", request=None, body=None),
+        ]
+    )
+    ex = ApiExecutor(model="m", output_language="English", client=client)
+    with pytest.raises(RuntimeError, match="All 2 items failed enrichment"):
+        ex.enrich_items([_item("1"), _item("2")], VOCAB)
+
+
+def test_api_executor_propagates_programmer_bugs():
+    """`AttributeError` and other non-recoverable exceptions must NOT be
+    swallowed — the developer needs to see the traceback.
+    """
+    import pytest
+
+    class _Boom:
+        class messages:  # noqa: N801
+            @staticmethod
+            def create(*_args, **_kwargs):
+                raise AttributeError("programmer bug — undefined attribute")
+
+    ex = ApiExecutor(model="m", output_language="English", client=_Boom())
+    with pytest.raises(AttributeError, match="programmer bug"):
+        ex.enrich_items([_item("1")], VOCAB)
+
+
+def test_api_executor_propagates_keyboard_interrupt():
+    """Ctrl-C must NOT be swallowed by the recoverable-errors tuple. The
+    narrow catch uses Exception subclasses; KeyboardInterrupt inherits from
+    BaseException and falls through. This is the property of Python, but
+    pin it as a regression test — a future refactor that switches the
+    tuple to BaseException would silently break Ctrl-C without any failing
+    test.
+    """
+    import pytest
+
+    class _CtrlC:
+        class messages:  # noqa: N801
+            @staticmethod
+            def create(*_args, **_kwargs):
+                raise KeyboardInterrupt
+
+    ex = ApiExecutor(model="m", output_language="English", client=_CtrlC())
+    with pytest.raises(KeyboardInterrupt):
+        ex.enrich_items([_item("1")], VOCAB)
+
+
+def test_api_executor_emits_no_summary_on_total_failure(capsys):
+    """The all-failed branch raises before printing the summary — there is
+    no `SUMMARY: enriched: 0, ...` line on a total-failure run. The raised
+    RuntimeError is the signal."""
+    import pytest
+    from anthropic import APIError
+
+    client = FakeAnthropic([APIError("503", request=None, body=None)])
+    ex = ApiExecutor(model="m", output_language="English", client=client)
+    with pytest.raises(RuntimeError):
+        ex.enrich_items([_item("1")], VOCAB)
+    assert "SUMMARY:" not in capsys.readouterr().err
+
+
+def test_api_executor_emits_no_summary_when_all_succeed(capsys):
+    """No failures, no noise: a clean batch stays silent on stderr."""
+    payload = {"summary": "r", "primary_topic": "misc", "topics": ["misc"]}
+    client = FakeAnthropic([payload])
+    ex = ApiExecutor(model="m", output_language="English", client=client)
+    ex.enrich_items([_item("1")], VOCAB)
+    assert "SUMMARY:" not in capsys.readouterr().err

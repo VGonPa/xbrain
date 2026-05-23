@@ -54,14 +54,64 @@ def test_synthesize_overviews_api_skips_an_invalid_judgment():
     assert [r.slug for r in results] == ["good"]
 
 
-def test_synthesize_overviews_api_isolates_an_api_error():
-    client = FakeAnthropic([RuntimeError("API caída"), {"overview": "ok", "notes": []}])
+def test_synthesize_overviews_api_isolates_an_api_error(capsys):
+    from anthropic import APIError
+
+    client = FakeAnthropic(
+        [
+            APIError("API caída", request=None, body=None),
+            {"overview": "ok", "notes": []},
+        ]
+    )
     inputs = [
         TopicInput(slug="first", description="d", summaries=["s"]),
         TopicInput(slug="second", description="d", summaries=["s"]),
     ]
     results = synthesize_overviews_api(inputs, model="m", output_language="English", client=client)
     assert [r.slug for r in results] == ["second"]
+    # Partial-failure summary line is visible on stderr
+    assert "SUMMARY: synthesized: 1, failed: 1" in capsys.readouterr().err
+
+
+def test_synthesize_overviews_api_raises_when_all_topics_fail():
+    """Total failure (every API call raises) must surface non-zero exit, not
+    silent empty result. The CLI's _handle_cli_errors catches RuntimeError."""
+    import pytest
+    from anthropic import APIError
+
+    client = FakeAnthropic(
+        [
+            APIError("401 unauthorized", request=None, body=None),
+            APIError("401 unauthorized", request=None, body=None),
+        ]
+    )
+    inputs = [
+        TopicInput(slug="a", description="d", summaries=["s"]),
+        TopicInput(slug="b", description="d", summaries=["s"]),
+    ]
+    with pytest.raises(RuntimeError, match="All 2 topics failed synthesis"):
+        synthesize_overviews_api(inputs, model="m", output_language="English", client=client)
+
+
+def test_synthesize_overviews_api_propagates_programmer_bugs():
+    """`AttributeError` and other non-recoverable exceptions must NOT be
+    swallowed — the developer needs to see the traceback.
+    """
+    import pytest
+
+    class _Boom:
+        class messages:  # noqa: N801
+            @staticmethod
+            def create(*_args, **_kwargs):
+                raise AttributeError("programmer bug — undefined attribute")
+
+    with pytest.raises(AttributeError, match="programmer bug"):
+        synthesize_overviews_api(
+            [TopicInput(slug="x", description="d", summaries=["s"])],
+            model="m",
+            output_language="English",
+            client=_Boom(),
+        )
 
 
 def test_overview_judgment_is_a_model():
@@ -129,3 +179,53 @@ def test_apply_overview_judgments_rejects_a_non_dict_entry():
     valid, invalid = apply_overview_judgments(judgments)
     assert [j.slug for j in valid] == ["good"]
     assert any("not a JSON object" in e for e in invalid[0][1])
+
+
+def test_synthesize_overviews_api_propagates_keyboard_interrupt():
+    """Ctrl-C must propagate — falls through the narrow catch because
+    KeyboardInterrupt inherits from BaseException, not Exception. Regression
+    test against a future refactor that widens the catch.
+    """
+    import pytest
+
+    class _CtrlC:
+        class messages:  # noqa: N801
+            @staticmethod
+            def create(*_args, **_kwargs):
+                raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        synthesize_overviews_api(
+            [TopicInput(slug="x", description="d", summaries=["s"])],
+            model="m",
+            output_language="English",
+            client=_CtrlC(),
+        )
+
+
+def test_synthesize_overviews_api_emits_no_summary_on_total_failure(capsys):
+    """The all-failed branch raises before printing the summary."""
+    import pytest
+    from anthropic import APIError
+
+    client = FakeAnthropic([APIError("503", request=None, body=None)])
+    with pytest.raises(RuntimeError):
+        synthesize_overviews_api(
+            [TopicInput(slug="x", description="d", summaries=["s"])],
+            model="m",
+            output_language="English",
+            client=client,
+        )
+    assert "SUMMARY:" not in capsys.readouterr().err
+
+
+def test_synthesize_overviews_api_emits_no_summary_when_all_succeed(capsys):
+    """No failures, no noise: a clean batch stays silent on stderr."""
+    client = FakeAnthropic([{"overview": "ok", "notes": []}])
+    synthesize_overviews_api(
+        [TopicInput(slug="x", description="d", summaries=["s"])],
+        model="m",
+        output_language="English",
+        client=client,
+    )
+    assert "SUMMARY:" not in capsys.readouterr().err
