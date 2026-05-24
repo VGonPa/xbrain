@@ -305,6 +305,122 @@ def test_media_discriminator_rejects_unknown_kind():
         )
 
 
+def test_media_photo_downloaded_rejects_absolute_local_path():
+    """An absolute `local_path` would let a poisoned items.json exfiltrate
+    bytes outside `data/media/`. The validator must reject it at construction.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="/etc/passwd",
+            width=1,
+            height=1,
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_photo_downloaded_rejects_parent_traversal_local_path():
+    """A `local_path` containing `..` would let a poisoned items.json escape
+    the media root via path concatenation. The validator must reject it.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="../x/y.jpg",
+            width=1,
+            height=1,
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_photo_downloaded_rejects_zero_bytes_size():
+    """A zero-byte download is nonsense — the downloader records bytes_size
+    after writing, so a value of 0 either means a failed write was persisted
+    as success or the record was hand-edited. Reject at the boundary.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="123/0.jpg",
+            width=1,
+            height=1,
+            bytes_size=0,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_photo_downloaded_rejects_zero_width():
+    """A zero-width image cannot have been decoded — reject as data corruption."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="123/0.jpg",
+            width=0,
+            height=1,
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_photo_downloaded_rejects_zero_height():
+    """A zero-height image cannot have been decoded — reject as data corruption."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="123/0.jpg",
+            width=1,
+            height=0,
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_photo_failed_rejects_zero_attempts():
+    """A `MediaPhotoFailed` with `attempts=0` is semantically nonsense — the
+    downloader increments `attempts` before constructing any failed record,
+    so 0 cannot occur naturally. The validator must reject it.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoFailed
+
+    with pytest.raises(ValidationError):
+        MediaPhotoFailed(
+            url="https://pbs.twimg.com/media/X.jpg",
+            failure_reason="not_found",
+            attempts=0,
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
 def test_media_failed_requires_failure_reason():
     """Symmetric with ContentSourceFailure: a failure without a reason is a
     type error. The validator constructs the variant via pydantic, which
