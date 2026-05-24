@@ -58,10 +58,10 @@ class Link(BaseModel):
 # (`_TRANSIENT_MEDIA_FAILURES` in `xbrain.media`) is retried on the next
 # `xbrain media` run; permanent reasons stay as-is unless `--force` is passed.
 MediaFailureReason = Literal[
-    "http_4xx",       # permanent: dead URL / cdn-removed media
-    "http_5xx",       # transient: server-side, may succeed on retry
-    "timeout",        # transient: network blip / cdn slow path
-    "format_error",   # permanent: bytes downloaded but Pillow rejected them
+    "http_4xx",  # permanent: dead URL / cdn-removed media
+    "http_5xx",  # transient: server-side, may succeed on retry
+    "timeout",  # transient: network blip / cdn slow path
+    "format_error",  # permanent: bytes downloaded but Pillow rejected them
     "unknown_error",  # bare-except bucket; transient by default (mirrors fetch.py #20)
 ]
 

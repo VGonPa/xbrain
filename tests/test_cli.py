@@ -92,9 +92,7 @@ def test_media_command_runs_on_empty_store(tmp_path: Path, monkeypatch):
     assert any("pre-media" in p.name for p in snapshots)
 
 
-def test_media_command_creates_media_dir_and_downloads_pending_photos(
-    tmp_path: Path, monkeypatch
-):
+def test_media_command_creates_media_dir_and_downloads_pending_photos(tmp_path: Path, monkeypatch):
     """End-to-end through the CLI with a fake session.
 
     The test patches `xbrain.media.requests.Session` to inject canned

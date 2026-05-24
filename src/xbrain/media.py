@@ -200,9 +200,7 @@ def download_all(
                     report.photos_skipped_already_downloaded += 1
                 continue
             # `_is_eligible` already excluded `MediaVideoPending`; narrow for mypy.
-            assert isinstance(
-                entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded)
-            )
+            assert isinstance(entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded))
             report.photos_attempted += 1
             if remaining is not None:
                 remaining -= 1

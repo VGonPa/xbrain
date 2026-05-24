@@ -168,9 +168,7 @@ def test_download_all_records_local_path_and_dims_on_success(tmp_path: Path):
     """A pending photo downloads cleanly and lands as MediaPhotoDownloaded."""
     bytes_data = _png_bytes(width=10, height=7)
     item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/A.png")])
-    session = FakeSession(
-        responses={"pbs.twimg.com/media/A.png": [FakeResponse(200, bytes_data)]}
-    )
+    session = FakeSession(responses={"pbs.twimg.com/media/A.png": [FakeResponse(200, bytes_data)]})
     report = download_all(
         {"123": item},
         media_root=tmp_path,
@@ -200,9 +198,7 @@ def test_download_all_idempotent_for_already_downloaded(tmp_path: Path):
     )
     item = _item_with_media([downloaded])
     session = FakeSession()
-    report = download_all(
-        {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    report = download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert report.photos_attempted == 0
     assert report.photos_skipped_already_downloaded == 1
     assert session.calls == []  # no HTTP call
@@ -220,9 +216,7 @@ def test_download_all_falls_back_to_large_when_orig_404s(tmp_path: Path):
             ]
         }
     )
-    report = download_all(
-        {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    report = download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert isinstance(item.media[0], MediaPhotoDownloaded)
     assert report.photos_downloaded == 1
     # Two HTTP calls (orig then large), each with the corresponding name= param.
@@ -350,9 +344,7 @@ def test_download_all_retries_transient_failures_on_next_run(tmp_path: Path):
     session = FakeSession(
         responses={"pbs.twimg.com/media/H.png": [FakeResponse(200, _png_bytes())]}
     )
-    report = download_all(
-        {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    report = download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert isinstance(item.media[0], MediaPhotoDownloaded)
     assert report.photos_attempted == 1
     assert report.photos_downloaded == 1
@@ -371,9 +363,7 @@ def test_download_all_skips_permanent_failures_without_force(tmp_path: Path):
         ]
     )
     session = FakeSession()
-    report = download_all(
-        {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    report = download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert report.photos_attempted == 0
     assert session.calls == []
 
@@ -393,9 +383,7 @@ def test_download_all_force_redownloads_already_downloaded(tmp_path: Path):
         ]
     )
     new_bytes = _png_bytes(width=20, height=15)
-    session = FakeSession(
-        responses={"pbs.twimg.com/media/I.png": [FakeResponse(200, new_bytes)]}
-    )
+    session = FakeSession(responses={"pbs.twimg.com/media/I.png": [FakeResponse(200, new_bytes)]})
     report = download_all(
         {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0, force=True
     )
@@ -484,9 +472,7 @@ def test_download_all_never_touches_video_pending(tmp_path: Path):
     video = MediaVideoPending(url="https://video.twimg.com/x.mp4")
     item = _item_with_media([video])
     session = FakeSession()
-    report = download_all(
-        {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    report = download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert report.photos_attempted == 0
     assert isinstance(item.media[0], MediaVideoPending)
     assert session.calls == []
@@ -529,9 +515,7 @@ def test_download_all_propagates_keyboard_interrupt(tmp_path: Path):
 
     item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/N.png")])
     with pytest.raises(KeyboardInterrupt):
-        download_all(
-            {"123": item}, media_root=tmp_path, session=_CtrlC(), throttle_seconds=0
-        )
+        download_all({"123": item}, media_root=tmp_path, session=_CtrlC(), throttle_seconds=0)
 
 
 def test_download_all_raises_on_total_failure(tmp_path: Path):
@@ -568,9 +552,7 @@ def test_download_all_partial_failure_does_not_raise(tmp_path: Path):
             ],
         }
     )
-    report = download_all(
-        items_dict, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    report = download_all(items_dict, media_root=tmp_path, session=session, throttle_seconds=0)
     assert report.photos_downloaded == 1
     assert report.photos_failed_permanent == 1
 
@@ -579,12 +561,8 @@ def test_download_all_writes_bytes_atomically(tmp_path: Path):
     """Local file is created via a tmp+rename so partial writes are impossible."""
     bytes_data = _png_bytes()
     item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/Q.png")])
-    session = FakeSession(
-        responses={"pbs.twimg.com/media/Q.png": [FakeResponse(200, bytes_data)]}
-    )
-    download_all(
-        {"123": item}, media_root=tmp_path, session=session, throttle_seconds=0
-    )
+    session = FakeSession(responses={"pbs.twimg.com/media/Q.png": [FakeResponse(200, bytes_data)]})
+    download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     # No leftover .part files; only the final file exists.
     assert sorted(p.name for p in (tmp_path / "123").iterdir()) == ["0.png"]
 

@@ -471,9 +471,7 @@ def test_diff_reports_media_state_counts(tmp_path: Path) -> None:
 
     a = tmp_path / "a"
     b = tmp_path / "b"
-    item_a = _item_with_media(
-        "1", [MediaPhotoPending(url="https://pbs.twimg.com/media/A.png")]
-    )
+    item_a = _item_with_media("1", [MediaPhotoPending(url="https://pbs.twimg.com/media/A.png")])
     item_b = _item_with_media(
         "1",
         [
@@ -524,9 +522,7 @@ def test_diff_media_counts_video_pending_separately(tmp_path: Path) -> None:
     _seed(
         b,
         items={
-            "1": _item_with_media(
-                "1", [MediaVideoPending(url="https://video.twimg.com/x.mp4")]
-            )
+            "1": _item_with_media("1", [MediaVideoPending(url="https://video.twimg.com/x.mp4")])
         },
         vocab_slugs=[],
     )
