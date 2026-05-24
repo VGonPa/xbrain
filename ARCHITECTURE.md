@@ -266,6 +266,35 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 **Snapshot trigger.** `xbrain media` always snapshots `data/` first (label `pre-media`), mirroring the destructive-op recovery boundary. The snapshot covers `items.json` / `state.json` / `vocab.yaml` / `topics.json` only — the binary photo bytes under `data/media/` are NOT included; re-downloading via `xbrain media` is the recovery path.
 
+### describe
+
+**What it does.** Sends every downloaded photo to a Claude vision model, asks for a 1-3 sentence prose description plus a `is_decorative` classification, and persists the prose on the entry. The entry transitions from `MediaPhotoDownloaded` to `MediaPhotoDescribed` (a fifth variant on the `MediaEntry` union, on top of the four `media` already exposes). Decorative photos (avatars, reaction memes, abstract backgrounds) are classified as such with an empty description so downstream prompts can filter them out without re-classifying.
+
+**Reads.** `data/items.json` + `data/media/<id>/<n>.<ext>` (the bytes the downloader wrote).
+
+**Writes.** `data/items.json` — each described photo entry carries `is_decorative` + `description` + `description_lang` + `description_version` + `described_at`. No new on-disk binary state; the bytes from the prior `MediaPhotoDownloaded` are inherited verbatim.
+
+**State machine.** Each `xbrain describe` run advances eligible photo entries:
+- `Downloaded` → `Described` (description on the entry, bytes unchanged).
+- `Described` (stale version) → `Described` (current version), automatically.
+- `Described` (current version) → no-op (skipped) unless `--force`.
+
+Eligibility ignores `Pending` / `Failed` / `VideoPending`: describe only runs on photos with bytes on disk. The description-version tag is the rubric-evolution lever: bumping `[describe].version` in `config.toml` invalidates persisted entries so the next run re-describes them without `--force`.
+
+**Batching.** Default batch size is 5 images per API call (the spec's quality / cost sweet spot — ~12-15 % token saving vs per-image, modest added complexity). Override with `--batch-size N`.
+
+**Refusals.** Vision refusals (faces, NSFW) are NOT a hard failure: the entry is persisted as decorative with an empty description, and the run continues. The same `is_decorative` flag downstream consumers already use for "no topic signal" handles the refusal uniformly.
+
+**Failure isolation.** Per-batch error isolation: one failing API call does not abort the run. A total-failure run (every batch errored) raises `RuntimeError` so the CLI surfaces non-zero exit. The orchestrator's `on_progress` callback writes `items.json` between batches so Ctrl-C mid-run leaves the store coherent — same recovery contract as `media`.
+
+**Snapshot trigger.** `xbrain describe` always snapshots `data/` first (label `pre-describe`), mirroring `media`'s recovery boundary. A botched run — wrong model, runaway prompt — can be undone with `xbrain snapshot restore`.
+
+**Feeds the LLM stages.** Once described, the prose is consumed automatically:
+- `xbrain enrich` (in `executors/api.py:_user_prompt`) splices an `Images in this post:` section between the post body and the links/article block when the item has content-bearing described photos. Decoratives are filtered.
+- `xbrain topics` (in `topic_synth.py:_user_prompt`) appends the flat list of content-bearing image descriptions across every post in a topic, after the per-post summaries.
+
+This is how a tweet that is mostly a screenshot of a paper becomes searchable by what the screenshot was actually about.
+
 ### vocab
 
 **What it does.** Induces a closed taxonomy of ~30-45 topics from the whole corpus. Map step: chunks the corpus, asks an LLM to propose candidate topics per chunk. Reduce step: asks the LLM to consolidate the union of candidates down to `vocab.target_count` topics. Always includes a `misc` topic for posts with no thematic core.
@@ -333,7 +362,7 @@ Everything XBrain knows lives in four files inside `data/` (gitignored). They ar
 
 | File | Format | What it is | Mutated by |
 |------|--------|------------|------------|
-| `items.json` | JSON array of `Item` | The source of truth — every post XBrain has ever seen, with all fetched content and enrichment | `extract`, `fetch`, `enrich`, `media` |
+| `items.json` | JSON array of `Item` | The source of truth — every post XBrain has ever seen, with all fetched content, enrichment, and per-photo vision descriptions | `extract`, `fetch`, `enrich`, `media`, `describe` |
 | `state.json` | JSON | Extractor cursors (`last_seen_id`, `last_run`) per source, archive-import marker | `extract`, `import-archive` |
 | `vocab.yaml` | YAML list of `Topic` | The controlled topic taxonomy — closed list of slugs + descriptions | `vocab` |
 | `topics.json` | JSON dict of `TopicPage` | The synthesized topic-page overviews and notes, keyed by slug | `topics` |
@@ -355,6 +384,7 @@ The LLM-driven stages (`vocab`, `enrich`, `topics`) do not have their instructio
 | `rubric-topics.md` | `enrich` | Assign one `primary_topic` + 0-3 secondaries from the closed vocab. Never invent slugs |
 | `rubric-summary.md` | `enrich` | Write a 1-3 sentence summary, faithful to the post and the fetched article, no hallucination |
 | `rubric-topic-page.md` | `topics` | Synthesize 1-3 paragraphs of plain prose + up to 15 short notes per topic, zero wikilinks |
+| `rubric-describe-image.md` | `describe` | Classify each photo as decorative vs content-bearing and describe content-bearing ones in 1-3 sentences. Refusals fall through as decorative with empty description |
 
 **Why a separate file per rubric.** Changing how XBrain summarizes posts is editing one markdown file, not chasing a string through the codebase. The rubric is the *contract* between code and LLM; the code only handles structure, transport and validation.
 
@@ -438,7 +468,7 @@ These are the rules the rest of the architecture rests on. Breaking any of them 
 7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break.
 8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact (`vocab --regenerate`, `topics --resynth`, `fetch --force`) snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op.
 9. **Fetch records are tagged unions.** A `ContentSource` on `items.json` is either a `Success` (with required `text`) or a `Failure` (with required `failure_reason`). Mixed shapes are not representable — pydantic rejects them at construction, and mypy rejects them statically (via the `pydantic.mypy` plugin). Legacy records with `ok: bool` (pre-#20) are normalised on read by a `BeforeValidator` on the union, so existing `data/items.json` files keep working without a manual migration. The static contract is pinned by `tests/type_probes/illegal_states.py`.
-10. **Media variants are mutually exclusive states.** A `MediaEntry` on `items.json` is one of `MediaPhotoPending` / `MediaPhotoDownloaded` / `MediaPhotoFailed` / `MediaVideoPending`, discriminated by `kind`. State transitions happen only via `xbrain media`. Legacy records with the flat `{type, url}` shape are normalised on read by a `BeforeValidator` on the union — no manual migration needed. (See the `### media` section above for the retry contract and storage layout.)
+10. **Media variants are mutually exclusive states.** A `MediaEntry` on `items.json` is one of `MediaPhotoPending` / `MediaPhotoDownloaded` / `MediaPhotoFailed` / `MediaPhotoDescribed` / `MediaVideoPending`, discriminated by `kind`. The photo states form a linear pipeline: `Pending → Downloaded → Described` (with `Failed` as the off-ramp from `Pending`). State transitions happen only via `xbrain media` (advances `Pending` and retries `Failed`) and `xbrain describe` (advances `Downloaded` to `Described`). Legacy records with the flat `{type, url}` shape are normalised on read by a `BeforeValidator` on the union — no manual migration needed. (See the `### media` and `### describe` sections above for the per-stage contracts.)
 
 ---
 

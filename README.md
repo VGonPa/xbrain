@@ -397,6 +397,8 @@ topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: 
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
 | `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
+| `[describe]` | `model` | `claude-sonnet-4-6` | Vision model for `xbrain describe`. Override per run with `--model`. |
+| `[describe]` | `version` | `v1` | Tag persisted on every described photo. Bumping invalidates existing descriptions so the next `xbrain describe` re-describes stale entries. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
@@ -517,6 +519,7 @@ uv run xbrain <command> [options]
 | `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
 | `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
 | `media` | Download X-post photos referenced in `Item.media` and render them inline in the wiki. `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
+| `describe` | Describe downloaded photos with a vision LLM (Claude Sonnet 4.6 by default) and feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described photos unless `[describe].version` is bumped in `config.toml`. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
@@ -583,7 +586,31 @@ Failures are categorised on the item itself
   the next `xbrain media` run.
 
 Run `xbrain diff <snapshot>` after a media run to see how many photos
-moved from `pending` / `failed` into `downloaded`.
+moved from `pending` / `failed` into `downloaded` (or, after `xbrain
+describe`, into `described`).
+
+**Vision descriptions**
+
+Once `xbrain media` has the bytes on disk, `xbrain describe` runs every
+photo through Claude vision and stores a short prose description on
+the entry (transitioning `MediaPhotoDownloaded` → `MediaPhotoDescribed`).
+Descriptions are 1-3 sentences, faithful, in the configured
+`output_language`. Decorative photos (avatars, reaction memes,
+abstract backgrounds) are classified as such and persisted with an
+empty description so they introduce no topic noise downstream.
+
+`xbrain enrich` and `xbrain topics` consume the descriptions
+automatically: an item with content-bearing photos gets an
+`Images in this post:` block in the enrichment prompt; topic-page
+synthesis sees the flat list of content image descriptions across the
+topic's posts. This is how a tweet that is mostly a screenshot of a
+paper becomes searchable by what the screenshot was actually about.
+
+Describing the full corpus costs about $3-5 with the default model
+(Sonnet 4.6, 5 images per call). Bump `[describe].version` in
+`config.toml` to invalidate stored descriptions when you change the
+rubric — the next `xbrain describe` run re-describes stale entries
+automatically without `--force`.
 
 ---
 

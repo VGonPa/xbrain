@@ -174,9 +174,7 @@ def topics_needing_synth(
 
 def _collect_summaries(item_pool: list[Item]) -> list[str]:
     """Flatten the non-empty `enriched.summary` strings across a pool of items."""
-    return [
-        item.enriched.summary for item in item_pool if item.enriched and item.enriched.summary
-    ]
+    return [item.enriched.summary for item in item_pool if item.enriched and item.enriched.summary]
 
 
 def _collect_image_descriptions(item_pool: list[Item]) -> list[str]:
@@ -190,9 +188,7 @@ def _collect_image_descriptions(item_pool: list[Item]) -> list[str]:
         entry.description
         for item in item_pool
         for entry in item.media
-        if isinstance(entry, MediaPhotoDescribed)
-        and not entry.is_decorative
-        and entry.description
+        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
     ]
 
 

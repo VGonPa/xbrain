@@ -72,9 +72,7 @@ def _content_image_descriptions(item: Item) -> list[str]:
     return [
         entry.description
         for entry in item.media
-        if isinstance(entry, MediaPhotoDescribed)
-        and not entry.is_decorative
-        and entry.description
+        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
     ]
 
 
@@ -100,8 +98,7 @@ def _links_section(item: Item) -> list[str]:
         return []
     lines = [
         "",
-        "Links in the post (the domain is topic signal even when "
-        "the article body is unavailable):",
+        "Links in the post (the domain is topic signal even when the article body is unavailable):",
     ]
     lines += [f"- {ln.url}  (domain: {ln.domain})" for ln in item.links]
     return lines
