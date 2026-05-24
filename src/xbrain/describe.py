@@ -652,22 +652,6 @@ def describe_all(
     return report
 
 
-def _user_directive_text(batch_size: int) -> dict:
-    """Build the trailing text block for the user turn — index-range directive.
-
-    Tells the model the index range so the JSON list it emits is
-    contractually one-to-one with the input order. Indices are
-    zero-based to match Python and the rubric's example.
-    """
-    return {
-        "type": "text",
-        "text": (
-            f"Describe images 0 through {batch_size - 1}. "
-            "Return a JSON list with one entry per image, in the order received."
-        ),
-    }
-
-
 def _run_one_batch(
     *,
     batch: list[_Candidate],
@@ -773,7 +757,18 @@ def _build_user_blocks(batch: list[_Candidate], media_root: Path) -> list[dict]:
     for candidate in batch:
         data = _load_bytes(media_root, candidate.entry.local_path)
         blocks.append(_build_image_block(data, _media_type(candidate.entry.local_path)))
-    blocks.append(_user_directive_text(len(batch)))
+    # Trailing text directive: tell the model the index range so its JSON
+    # list is contractually one-to-one with the input order. Indices are
+    # zero-based to match Python and the rubric's example.
+    blocks.append(
+        {
+            "type": "text",
+            "text": (
+                f"Describe images 0 through {len(batch) - 1}. "
+                "Return a JSON list with one entry per image, in the order received."
+            ),
+        }
+    )
     return blocks
 
 
