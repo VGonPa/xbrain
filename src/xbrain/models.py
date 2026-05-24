@@ -118,6 +118,7 @@ class MediaPhotoDownloaded(_MediaPhotoBase):
     @field_validator("local_path")
     @classmethod
     def _reject_path_traversal(cls, value: str) -> str:
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
         """Reject absolute paths and `..` components.
 
         `local_path` is joined onto `data/media/` at render and download

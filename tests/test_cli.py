@@ -189,9 +189,11 @@ def test_media_command_resume_after_interrupt_completes_remaining(tmp_path: Path
             self.call_count += 1
             if self.call_count == 2:
                 raise KeyboardInterrupt
+
             class _Resp:
                 status_code = 200
                 content = png
+
             return _Resp()
 
     monkeypatch.setattr("xbrain.media.requests.Session", _InterruptingSession)
@@ -219,6 +221,7 @@ def test_media_command_resume_after_interrupt_completes_remaining(tmp_path: Path
             class _Resp:
                 status_code = 200
                 content = png
+
             return _Resp()
 
     monkeypatch.setattr("xbrain.media.requests.Session", _OkSession)
@@ -303,13 +306,17 @@ def test_media_command_verbose_lists_failed_urls(tmp_path: Path, monkeypatch):
 
         def get(self, url, *, timeout):
             if "V1" in url:
+
                 class _Ok:
                     status_code = 200
                     content = png
+
                 return _Ok()
+
             class _Fail:
                 status_code = 404
                 content = b""
+
             return _Fail()
 
     monkeypatch.setattr("xbrain.media.requests.Session", _MixedSession)
