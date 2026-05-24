@@ -16,6 +16,7 @@ from xbrain.models import (
     ContentSourceSuccess,
     FailureReason,
     Item,
+    MediaPhotoDescribed,
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
@@ -196,10 +197,16 @@ def _render_media_lines(item: Item) -> list[str]:
     """One line per `Item.media` entry, ready to splice into the Tweet section.
 
     Variant handling:
-    - `MediaPhotoDownloaded` → Obsidian embed `![[_media/<id>/<n>.<ext>]]`.
-      The vault is self-contained: `generate()` mirrors the file from
-      `data/media/` into `<output_dir>/_media/` before rendering, so the
-      embed resolves with no user configuration.
+    - `MediaPhotoDownloaded` / `MediaPhotoDescribed` → Obsidian embed
+      `![[_media/<id>/<n>.<ext>]]`. The vault is self-contained:
+      `generate()` mirrors the file from `data/media/` into
+      `<output_dir>/_media/` before rendering, so the embed resolves
+      with no user configuration. The described variant inherits the
+      same on-disk file — the description is consumed by the LLM
+      prompts in `executors/api.py` / `topic_synth.py`, NOT shown as
+      alt-text in this phase. Decorative photos are still embedded;
+      the `is_decorative` flag only filters them out of the LLM prompts,
+      never out of the visual rendering.
     - `MediaPhotoFailed`      → one-line ⚠ warning carrying the failure
       reason and the original URL — visible evidence, not a silent drop.
     - `MediaPhotoPending`     → silent. Not an error, just "the next
@@ -213,7 +220,7 @@ def _render_media_lines(item: Item) -> list[str]:
     """
     lines: list[str] = []
     for entry in item.media:
-        if isinstance(entry, MediaPhotoDownloaded):
+        if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
             lines.append(f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]")
         elif isinstance(entry, MediaPhotoFailed):
             reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
@@ -259,7 +266,9 @@ def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> N
     """
     vault_media_dir.mkdir(parents=True, exist_ok=True)
     for entry in item.media:
-        if not isinstance(entry, MediaPhotoDownloaded):
+        # The described variant inherits the on-disk bytes from the
+        # prior downloaded state — both shapes hit the same mirror path.
+        if not isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
             continue
         source = media_root / entry.local_path
         destination = vault_media_dir / entry.local_path

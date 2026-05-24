@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from xbrain.models import (
     Item,
+    MediaPhotoDescribed,
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
@@ -132,13 +133,15 @@ class VocabDiff(BaseModel):
 class MediaStateCounts(BaseModel):
     """Counts of media variants on one side of a diff.
 
-    Mirrors the four-variant union: downloaded / pending / failed
-    / video_pending. Counts are global across all items in the store —
-    per-item resolution lives on the items themselves (already
-    diff-able via the items round-trip).
+    Mirrors the five-variant union: downloaded / described / pending /
+    failed / video_pending. Counts are global across all items in the
+    store — per-item resolution lives on the items themselves (already
+    diff-able via the items round-trip). `described` is the terminal
+    state for content-bearing photos after a vision-describe pass.
     """
 
     downloaded: int = 0
+    described: int = 0
     pending: int = 0
     failed: int = 0
     video_pending: int = 0
@@ -149,14 +152,18 @@ class MediaDiff(BaseModel):
 
     `delta_downloaded = b.downloaded - a.downloaded` answers the
     operator's first question after `xbrain media`: "how many new photos
-    landed?" Same for the other three variants. Negative deltas are
-    legal — `xbrain media --force` can move a previously-downloaded
-    photo back to `failed` if the URL turned 404 in the meantime.
+    landed?" `delta_described` answers the analogous question after
+    `xbrain describe`: "how many photos transitioned from downloaded to
+    described?" Negative deltas are legal — `--force` runs can move
+    photos backwards along the pipeline (e.g. a `describe --force`
+    behind a CDN change drops the previous description; a
+    `media --force` re-download collapses described back to downloaded).
     """
 
     a: MediaStateCounts = Field(default_factory=MediaStateCounts)
     b: MediaStateCounts = Field(default_factory=MediaStateCounts)
     delta_downloaded: int = 0
+    delta_described: int = 0
     delta_pending: int = 0
     delta_failed: int = 0
     delta_video_pending: int = 0
@@ -176,6 +183,7 @@ class DiffSummary(BaseModel):
     topic_pages_a: int
     topic_pages_b: int
     media_delta_downloaded: int = 0
+    media_delta_described: int = 0
     media_delta_failed: int = 0
 
 
@@ -271,6 +279,7 @@ def diff_snapshots(
         topic_pages_a=len(pages_a),
         topic_pages_b=len(pages_b),
         media_delta_downloaded=media_diff.delta_downloaded,
+        media_delta_described=media_diff.delta_described,
         media_delta_failed=media_diff.delta_failed,
     )
     return DiffReport(
@@ -400,6 +409,7 @@ def _compute_media_diff(
         a=counts_a,
         b=counts_b,
         delta_downloaded=counts_b.downloaded - counts_a.downloaded,
+        delta_described=counts_b.described - counts_a.described,
         delta_pending=counts_b.pending - counts_a.pending,
         delta_failed=counts_b.failed - counts_a.failed,
         delta_video_pending=counts_b.video_pending - counts_a.video_pending,
@@ -407,12 +417,14 @@ def _compute_media_diff(
 
 
 def _count_media_variants(items: dict[str, Item]) -> MediaStateCounts:
-    """Tally the four media variants across every item in the store."""
+    """Tally the five media variants across every item in the store."""
     counts = MediaStateCounts()
     for item in items.values():
         for entry in item.media:
             if isinstance(entry, MediaPhotoDownloaded):
                 counts.downloaded += 1
+            elif isinstance(entry, MediaPhotoDescribed):
+                counts.described += 1
             elif isinstance(entry, MediaPhotoPending):
                 counts.pending += 1
             elif isinstance(entry, MediaPhotoFailed):
@@ -528,6 +540,8 @@ def _format_media_block(media: MediaDiff) -> list[str]:
     return [
         f"  downloaded:    A={media.a.downloaded:>5}  B={media.b.downloaded:>5}  "
         f"({_format_delta(media.delta_downloaded)})",
+        f"  described:     A={media.a.described:>5}  B={media.b.described:>5}  "
+        f"({_format_delta(media.delta_described)})",
         f"  pending:       A={media.a.pending:>5}  B={media.b.pending:>5}  "
         f"({_format_delta(media.delta_pending)})",
         f"  failed:        A={media.a.failed:>5}  B={media.b.failed:>5}  "

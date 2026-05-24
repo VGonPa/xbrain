@@ -156,6 +156,62 @@ class MediaPhotoFailed(_MediaPhotoBase):
     last_attempt_at: datetime
 
 
+class MediaPhotoDescribed(_MediaPhotoBase):
+    """A downloaded photo that has also been described by a vision LLM.
+
+    The terminal state for a content-bearing photo: the bytes still live
+    at `local_path` (every `MediaPhotoDownloaded` invariant carries over)
+    AND a vision pass has classified the image and written a short prose
+    description. Decorative photos (avatars, reaction memes, abstract
+    backgrounds) reach this variant too — they carry `is_decorative=True`
+    and an empty `description`, so downstream callers can filter them out
+    without re-classifying.
+
+    `description_version` is the rubric/version tag the description was
+    produced under. Bumping the configured version invalidates existing
+    entries: the next `xbrain describe` run treats them as stale and
+    re-describes (no `--force` needed). `description_lang` records the
+    language the prose was written in so a vault that switches
+    `output_language` mid-corpus can be re-described selectively.
+
+    `description` is empty for decorative photos by contract — the
+    vision rubric returns an empty string in that case and a refusal
+    (faces, NSFW) is also bucketed as decorative with empty description.
+    No `gt=0` constraint here for that reason.
+    """
+
+    kind: Literal["photo_described"] = "photo_described"
+    local_path: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    bytes_size: int = Field(gt=0)
+    downloaded_at: datetime
+    is_decorative: bool
+    description: str
+    description_lang: str
+    description_version: str
+    described_at: datetime
+
+    @field_validator("local_path")
+    @classmethod
+    def _reject_path_traversal(cls, value: str) -> str:
+        """Reject absolute paths and `..` components.
+
+        Mirrors `MediaPhotoDownloaded._reject_path_traversal` — the
+        described variant inherits the same on-disk path contract because
+        the bytes from the prior Downloaded state are still referenced
+        verbatim. Persisted `items.json` is on-disk plain JSON the user
+        can edit, so the defence in depth is reapplied here.
+        """
+        _ = cls
+        if value.startswith("/") or value.startswith("\\"):
+            raise ValueError(f"local_path must be relative, got {value!r}")
+        for part in value.replace("\\", "/").split("/"):
+            if part == "..":
+                raise ValueError(f"local_path must not contain '..' components: {value!r}")
+        return value
+
+
 class MediaVideoPending(BaseModel):
     """A video URL captured but not downloaded.
 
@@ -181,9 +237,12 @@ def _normalise_legacy_media(value: Any) -> Any:
 
     Records that already carry a ``kind`` field are passed through
     unchanged — they are either fresh (extract-time) or already in the
-    tagged-union shape. A record with neither `kind` nor a recognised
-    `type` is passed through unchanged so pydantic raises a clean
-    discriminator error rather than this validator inventing a state.
+    tagged-union shape (`photo_pending` / `photo_downloaded` /
+    `photo_failed` / `photo_described` / `video_pending`). A record with
+    neither `kind` nor a recognised `type` is passed through unchanged
+    so pydantic raises a clean discriminator error rather than this
+    validator inventing a state. The described variant has no legacy
+    shape — it can only originate from a vision-describe run.
     """
     if not isinstance(value, dict):
         return value
@@ -203,7 +262,13 @@ def _normalise_legacy_media(value: Any) -> Any:
 # (see the long comment above): the discriminator check must run AFTER
 # the legacy normaliser, otherwise legacy records get rejected.
 _MediaTagged = Annotated[
-    Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending],
+    Union[
+        MediaPhotoPending,
+        MediaPhotoDownloaded,
+        MediaPhotoFailed,
+        MediaPhotoDescribed,
+        MediaVideoPending,
+    ],
     Field(discriminator="kind"),
 ]
 MediaEntry = Annotated[
@@ -215,7 +280,13 @@ MediaEntry = Annotated[
 # TypeAdapter for tests / ad-hoc validation of a single entry outside an
 # `Item` context (mirrors `ContentSourceAdapter`).
 MediaEntryAdapter: TypeAdapter[
-    Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending]
+    Union[
+        MediaPhotoPending,
+        MediaPhotoDownloaded,
+        MediaPhotoFailed,
+        MediaPhotoDescribed,
+        MediaVideoPending,
+    ]
 ] = TypeAdapter(MediaEntry)
 
 

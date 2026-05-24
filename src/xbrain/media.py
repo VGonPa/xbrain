@@ -35,6 +35,7 @@ from xbrain.models import (
     Item,
     MediaEntry,
     MediaFailureReason,
+    MediaPhotoDescribed,
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
@@ -210,12 +211,21 @@ def download_all(
 
 
 def _is_eligible(entry: MediaEntry, *, force: bool) -> bool:
-    """Decide whether `download_all` should attempt this entry on THIS run."""
+    """Decide whether `download_all` should attempt this entry on THIS run.
+
+    The described variant inherits the downloaded contract: a re-download
+    only happens under `--force`. A `--force` re-download drops the
+    description (the entry collapses back to `MediaPhotoDownloaded`) —
+    `xbrain describe` is the path that re-adds it. Forcing the bytes
+    without re-describing is the rare case (e.g. the X CDN replaced the
+    asset); the operator is expected to follow with `xbrain describe
+    --force` if the new bytes warrant it.
+    """
     if isinstance(entry, MediaVideoPending):
         return False
     if isinstance(entry, MediaPhotoPending):
         return True
-    if isinstance(entry, MediaPhotoDownloaded):
+    if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
         return force
     if isinstance(entry, MediaPhotoFailed):
         if force:
@@ -243,15 +253,24 @@ def _iter_eligible_attempts(
     limit: int | None,
     force: bool,
     report: MediaReport,
-) -> Iterator[tuple[str, Item, int, MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded]]:
+) -> Iterator[
+    tuple[
+        str,
+        Item,
+        int,
+        MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded | MediaPhotoDescribed,
+    ]
+]:
     """Yield each (item_id, item, index, entry) pair eligible for download.
 
     Encapsulates the empty-media skip + per-entry eligibility cascade +
     global limit countdown that `download_all` would otherwise interleave
     with the download orchestration. Side effects on `report`: bumps
     `items_processed` once per item that has media, and
-    `photos_skipped_already_downloaded` once per Downloaded entry passed
-    over (without `--force`). Stops yielding once `limit` is exhausted.
+    `photos_skipped_already_downloaded` once per Downloaded / Described
+    entry passed over (without `--force`) — both share the
+    "bytes-already-on-disk" semantics from the downloader's perspective.
+    Stops yielding once `limit` is exhausted.
     """
     remaining = limit
     for item_id, item in items.items():
@@ -262,11 +281,19 @@ def _iter_eligible_attempts(
             if remaining is not None and remaining <= 0:
                 return
             if not _is_eligible(entry, force=force):
-                if isinstance(entry, MediaPhotoDownloaded):
+                if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
                     report.photos_skipped_already_downloaded += 1
                 continue
             # `_is_eligible` already excluded `MediaVideoPending`; narrow for mypy.
-            assert isinstance(entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded))
+            assert isinstance(
+                entry,
+                (
+                    MediaPhotoPending,
+                    MediaPhotoFailed,
+                    MediaPhotoDownloaded,
+                    MediaPhotoDescribed,
+                ),
+            )
             if remaining is not None:
                 remaining -= 1
             yield item_id, item, index, entry
@@ -305,7 +332,7 @@ def _record_outcome(
 
 
 def _download_one(
-    entry: MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded,
+    entry: MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded | MediaPhotoDescribed,
     *,
     item_id: str,
     index: int,
