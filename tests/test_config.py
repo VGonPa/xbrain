@@ -195,3 +195,30 @@ def test_load_config_rejects_unknown_topic_style(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="topic_style"):
         load_config(tmp_path)
+
+
+def test_load_config_describe_settings_have_defaults(tmp_path: Path):
+    """No [describe] section → Sonnet 4.6 + version v1 (the spec defaults)."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.describe_model == "claude-sonnet-4-6"
+    assert cfg.describe_version == "v1"
+
+
+def test_load_config_round_trips_describe_overrides(tmp_path: Path):
+    """[describe] section overrides — operators can pin a different model + version."""
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[describe]\n"
+        'model = "claude-opus-4-1"\n'
+        'version = "v3"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.describe_model == "claude-opus-4-1"
+    assert cfg.describe_version == "v3"

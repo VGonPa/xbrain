@@ -29,6 +29,17 @@ class Config:
     topics_resynth_threshold: int
     output_language: str  # one of xbrain.i18n.SUPPORTED_LANGUAGES
     topic_style: str  # one of xbrain.config.SUPPORTED_TOPIC_STYLES
+    # `describe_model` defaults to Sonnet 4.6 — the spec settled on it as the
+    # quality / cost sweet spot for vision (~$3-5 for a 2k-image corpus).
+    # Override per run via `xbrain describe --model ...` when iterating on
+    # prompt or budget; the CLI flag wins over the config value.
+    describe_model: str
+    # `describe_version` tags every produced description so a prompt
+    # evolution can be rolled out incrementally: bumping the value here
+    # makes the next `xbrain describe` run re-describe stale entries
+    # automatically (no `--force` needed). The string is exact-match —
+    # there is no ordering relation, only equality.
+    describe_version: str
 
     @property
     def items_path(self) -> Path:
@@ -95,6 +106,7 @@ def load_config(repo_root: Path) -> Config:
             f"config.toml: [output].topic_style must be one of "
             f"{list(SUPPORTED_TOPIC_STYLES)}, got {topic_style!r}"
         )
+    describe = settings.get("describe", {})
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -107,4 +119,6 @@ def load_config(repo_root: Path) -> Config:
         topics_resynth_threshold=resynth_threshold,
         output_language=output_language,
         topic_style=topic_style,
+        describe_model=describe.get("model", "claude-sonnet-4-6"),
+        describe_version=describe.get("version", "v1"),
     )

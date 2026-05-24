@@ -14,6 +14,8 @@ import typer
 from xbrain import snapshot
 from xbrain.archive import parse_archive
 from xbrain.config import Config, load_config
+from xbrain.describe import describe_all as run_describe_all
+from xbrain.describe import emit_summary_line as describe_emit_summary_line
 from xbrain.diff import diff_snapshots, format_json, format_text
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
 from xbrain.executors.api import ApiExecutor
@@ -357,6 +359,132 @@ def media(
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
     _run_media(cfg, force=force, limit=limit, items_filter=items_filter, verbose=verbose)
+
+
+def _run_describe(
+    cfg: Config,
+    *,
+    force: bool,
+    limit: int | None,
+    items_filter: list[str] | None,
+    model: str,
+    batch_size: int,
+    verbose: bool,
+) -> None:
+    """Run the vision-describe orchestrator and persist after every batch.
+
+    Always snapshots `data/` first (the same recovery boundary as
+    `xbrain media`): a botched run — a wrong model, a runaway prompt
+    — can be undone with `xbrain snapshot restore`. Persistence
+    happens twice for the same reason as `_run_media`: once after
+    every batch (the `on_progress` callback fires between batches so
+    Ctrl-C mid-run leaves `items.json` coherent), and once
+    unconditionally at the end so the elapsed-described timestamps
+    are captured even if the orchestrator raised on total failure.
+    """
+    if items_filter:
+        target = set(items_filter)
+        store_ids = set(load_store(cfg.items_path))
+        missing = target - store_ids
+        if missing and not (target & store_ids):
+            typer.echo(
+                f"AVISO: --items {','.join(items_filter)} no coincide con ningún item "
+                f"del store ({len(store_ids)} items). El run será un no-op.",
+                err=True,
+            )
+    _auto_snapshot(cfg, "describe")
+    store = load_store(cfg.items_path)
+
+    def _persist() -> None:
+        save_store(store, cfg.items_path)
+
+    try:
+        report = run_describe_all(
+            store,
+            cfg.media_dir,
+            model=model,
+            output_language=cfg.output_language,
+            description_version=cfg.describe_version,
+            force=force,
+            limit=limit,
+            items_filter=items_filter,
+            batch_size=batch_size,
+            on_progress=_persist,
+        )
+    finally:
+        # Persist whatever transitioned, even if `describe_all` raised. A
+        # RuntimeError on total failure must not discard the per-photo
+        # MediaPhotoDescribed records that landed before the raise.
+        save_store(store, cfg.items_path)
+    describe_emit_summary_line(report)
+    typer.echo(
+        f"Describe: descritas {report.photos_described}, "
+        f"fallidas {report.photos_failed}, "
+        f"saltadas {report.photos_skipped_already_described}"
+    )
+    if verbose and report.per_item_failures:
+        typer.echo("Failed photos:", err=True)
+        for item_id, failures in sorted(report.per_item_failures.items()):
+            for url, error in failures:
+                typer.echo(f"  {item_id}  {url}  {error}", err=True)
+
+
+@app.command()
+@_handle_cli_errors
+def describe(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-describir todas las fotos, incluso las ya descritas en la versión actual.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Máximo número de fotos a describir en esta ejecución.",
+    ),
+    items: str | None = typer.Option(
+        None,
+        "--items",
+        help="IDs de items separados por comas para limitar el alcance del run.",
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Modelo de visión a usar. Si no se pasa, se usa el del config (`describe.model`).",
+    ),
+    batch_size: int = typer.Option(
+        5,
+        "--batch-size",
+        min=1,
+        help="Número de imágenes por llamada a la API. 5 es el sweet spot (12-15%% ahorro de tokens).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Imprime cada foto fallida (item_id, URL, error) al final del run.",
+    ),
+) -> None:
+    """Describe las fotos descargadas con un LLM de visión.
+
+    Solo describe fotos con bytes en disco (`MediaPhotoDownloaded`).
+    Las entradas ya descritas en la versión actual se saltan; bumpear
+    `[describe].version` en `config.toml` fuerza un re-describe
+    automático sin `--force`. Las descripciones se persisten en
+    `items.json` y son consumidas por `xbrain enrich` y `xbrain topics`
+    en las llamadas LLM subsiguientes.
+    """
+    cfg = _config()
+    items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
+    chosen_model = model or cfg.describe_model
+    _run_describe(
+        cfg,
+        force=force,
+        limit=limit,
+        items_filter=items_filter,
+        model=chosen_model,
+        batch_size=batch_size,
+        verbose=verbose,
+    )
 
 
 @app.command()

@@ -39,3 +39,14 @@ language = "English"
 #   "wikilink" - **Topics:** [[ai-coding]] · [[software-engineering]]  (default)
 #   "hashtag"  - **Topics:** #ai-coding #software-engineering
 topic_style = "wikilink"
+
+[describe]
+# Vision model used by `xbrain describe`. Sonnet 4.6 is the default —
+# the quality / cost sweet spot (~$3-5 for a 2k-image corpus). Override
+# per run with `--model` while iterating; the CLI flag wins.
+model = "claude-sonnet-4-6"
+# Description-version tag persisted on every described photo. Bumping
+# this value invalidates existing descriptions: the next `xbrain
+# describe` run re-describes stale entries automatically. Use it when
+# you change the describe-image rubric or expectations.
+version = "v1"

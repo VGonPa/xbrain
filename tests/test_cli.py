@@ -834,3 +834,148 @@ def test_vocab_rejects_unknown_executor(tmp_path, monkeypatch):
     result = runner.invoke(app, ["vocab", "--executor", "bogus"])
     assert result.exit_code == 1
     assert "bogus" in result.output
+
+
+# ----------------------------------------------------------------------- describe
+
+
+def _setup_describe_repo(tmp_path: Path, monkeypatch) -> Path:
+    """Like `_setup_repo` but with a pre-populated photo on disk + Downloaded variant."""
+    import io as _io
+    from datetime import datetime, timezone
+
+    from PIL import Image
+
+    from xbrain.models import Author, Item, MediaPhotoDownloaded
+
+    _setup_repo(tmp_path, monkeypatch)
+    media_root = tmp_path / "data" / "media"
+    (media_root / "42").mkdir(parents=True, exist_ok=True)
+    buffer = _io.BytesIO()
+    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(buffer, format="JPEG")
+    (media_root / "42" / "0.jpg").write_bytes(buffer.getvalue())
+
+    item = Item(
+        id="42",
+        source="bookmark",
+        url="https://x.com/a/status/42",
+        author=Author(handle="a", name="A"),
+        text="text",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        media=[
+            MediaPhotoDownloaded(
+                url="https://pbs.twimg.com/media/42-0.jpg",
+                local_path="42/0.jpg",
+                width=8,
+                height=6,
+                bytes_size=200,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    save_store({"42": item}, tmp_path / "data" / "items.json")
+    return tmp_path
+
+
+def test_describe_command_transitions_downloaded_to_described(tmp_path: Path, monkeypatch):
+    """End-to-end: a Downloaded photo becomes Described via the CLI command."""
+    import json as _json
+
+    from xbrain.models import MediaPhotoDescribed
+    from xbrain.store import load_store
+
+    _setup_describe_repo(tmp_path, monkeypatch)
+
+    class _FakeBlock:
+        type = "text"
+
+        def __init__(self, text: str):
+            self.text = text
+
+    class _FakeResp:
+        def __init__(self, text: str):
+            self.content = [_FakeBlock(text)]
+
+    class _FakeMessages:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            payload = _json.dumps([{"index": 0, "is_decorative": False, "description": "A chart."}])
+            return _FakeResp(payload)
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = _FakeMessages()
+
+    import xbrain.cli as cli
+
+    fake_client = _FakeClient()
+
+    def _patched_run(store, media_root, **kwargs):
+        kwargs["client"] = fake_client
+        return _orig(store, media_root, **kwargs)
+
+    _orig = cli.run_describe_all
+    monkeypatch.setattr(cli, "run_describe_all", _patched_run)
+
+    result = runner.invoke(app, ["describe"])
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    entry = reloaded["42"].media[0]
+    assert isinstance(entry, MediaPhotoDescribed)
+    assert entry.description == "A chart."
+    assert entry.description_lang == "English"
+    assert entry.description_version == "v1"
+
+
+def test_describe_command_runs_on_empty_store(tmp_path: Path, monkeypatch):
+    """No items → describe is a no-op exit-0, with a snapshot still taken."""
+    _setup_repo(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["describe"])
+    assert result.exit_code == 0
+    # A snapshot was created — recovery boundary mirrors media.
+    snapshots = list((tmp_path / "data" / "snapshots").glob("*-describe"))
+    assert snapshots, "describe must auto-snapshot data/ before running"
+
+
+def test_describe_command_warns_when_items_filter_matches_nothing(tmp_path, monkeypatch):
+    """`--items` with no matches surfaces an AVISO line — same pattern as media."""
+    _setup_describe_repo(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["describe", "--items", "no-such-id"])
+    assert result.exit_code == 0
+    assert "AVISO" in result.output or "AVISO" in (result.stderr or "")
+
+
+def test_describe_command_propagates_total_failure_as_exit_1(tmp_path, monkeypatch):
+    """A total-failure RuntimeError surfaces as exit code 1 via `_handle_cli_errors`."""
+    from anthropic import APIError
+
+    _setup_describe_repo(tmp_path, monkeypatch)
+
+    class _AlwaysFailingMessages:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            raise APIError("401 unauthorized", request=None, body=None)
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = _AlwaysFailingMessages()
+
+    import xbrain.cli as cli
+
+    def _patched(store, media_root, **kwargs):
+        kwargs["client"] = _FakeClient()
+        return _orig(store, media_root, **kwargs)
+
+    _orig = cli.run_describe_all
+    monkeypatch.setattr(cli, "run_describe_all", _patched)
+
+    result = runner.invoke(app, ["describe"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
