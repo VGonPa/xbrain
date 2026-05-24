@@ -1594,6 +1594,7 @@ dependencies = [
     { name = "playwright" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "trafilatura" },
     { name = "typer" },
 ]
@@ -1634,6 +1635,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "radon", marker = "extra == 'dev'", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.34.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "trafilatura", specifier = ">=1.9" },
     { name = "typer", specifier = ">=0.12" },
