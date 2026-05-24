@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +69,11 @@ MediaFailureReason = Literal[
 class _MediaPhotoBase(BaseModel):
     """Common fields for the three photo variants.
 
-    `type` is kept as the legacy discriminator that pre-Phase-A records used
-    so a re-dump after migration still carries it. The Phase A discriminator
-    is `kind` (see the variant subclasses) — globally unique across photo +
-    video variants because `state="pending"` would collide between
+    `type` is preserved for wire-compatibility with legacy records that
+    used the flat `{type, url}` shape — a re-dump after migration still
+    carries it. The discriminator is `kind` (see the variant subclasses)
+    — globally unique across photo + video variants because the
+    `state="pending"` shape would otherwise collide between
     `MediaPhotoPending` and `MediaVideoPending`.
     """
 
@@ -100,14 +101,40 @@ class MediaPhotoDownloaded(_MediaPhotoBase):
     captured for completeness — they let `xbrain diff` answer "did the
     download cascade pick a smaller size on a re-run?" without re-reading
     every file.
+
+    Dimensions and byte size are `gt=0`: a zero-pixel or zero-byte
+    "downloaded" photo is semantically illegal — Pillow validation in
+    `xbrain.media._decode_image` rules out the dim=0 case at the seam,
+    and the type constraint pins it at the data layer too.
     """
 
     kind: Literal["photo_downloaded"] = "photo_downloaded"
     local_path: str
-    width: int
-    height: int
-    bytes_size: int
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    bytes_size: int = Field(gt=0)
     downloaded_at: datetime
+
+    @field_validator("local_path")
+    @classmethod
+    def _reject_path_traversal(cls, value: str) -> str:
+        """Reject absolute paths and `..` components.
+
+        `local_path` is joined onto `data/media/` at render and download
+        time. A persisted record like ``"/etc/passwd"`` or ``"../../x"``
+        would let a poisoned `items.json` exfiltrate bytes outside the
+        media root. The downloader code never builds such a path, but
+        the persisted store is on-disk plain JSON the user can edit —
+        defence in depth at the type boundary is cheap.
+        """
+        if value.startswith("/") or value.startswith("\\"):
+            raise ValueError(f"local_path must be relative, got {value!r}")
+        # Normalise separators before scanning components so a Windows-style
+        # path persisted on a foreign machine is still caught.
+        for part in value.replace("\\", "/").split("/"):
+            if part == "..":
+                raise ValueError(f"local_path must not contain '..' components: {value!r}")
+        return value
 
 
 class MediaPhotoFailed(_MediaPhotoBase):
@@ -116,13 +143,15 @@ class MediaPhotoFailed(_MediaPhotoBase):
     Mirrors `ContentSourceFailure`: `failure_reason` is required so a
     failure is always demonstrable evidence (no Optional, no silent loss).
     `attempts` counts how many `xbrain media` runs have tried this URL —
-    each transient retry bumps it.
+    each transient retry bumps it. `attempts` is `ge=1`: a "failed but
+    never attempted" record is semantically nonsense, and the downloader
+    increments before producing any `MediaPhotoFailed`.
     """
 
     kind: Literal["photo_failed"] = "photo_failed"
     failure_reason: MediaFailureReason
     error: str | None = None
-    attempts: int = 0
+    attempts: int = Field(ge=1)
     last_attempt_at: datetime
 
 
@@ -188,19 +217,21 @@ MediaEntryAdapter: TypeAdapter[
 ] = TypeAdapter(MediaEntry)
 
 
-def Media(*, type: Literal["photo", "video"], url: str) -> MediaPhotoPending | MediaVideoPending:
-    """Backward-compatible factory matching the pre-Phase-A constructor.
+def Media(  # noqa: N802  -- factory keeps the legacy PascalCase call site
+    *, type: Literal["photo", "video"], url: str
+) -> MediaPhotoPending | MediaVideoPending:
+    """Backward-compatible factory matching the pre-tagged-union constructor.
 
-    The pre-Phase-A `Media` class was a flat `BaseModel(type, url)`. The
+    The previous `Media` class was a flat `BaseModel(type, url)`. The
     extractor (`extract/graphql.py`) and the archive importer
-    (`archive.py`) call `Media(type="photo", url=...)` directly — they
-    are deliberately out of scope for Phase A (issue #33), so this
-    factory keeps their call sites working without modification by
-    returning the appropriate variant.
+    (`archive.py`) still call `Media(type="photo", url=...)` directly —
+    this factory keeps those call sites working by returning the
+    appropriate variant. Photo URLs become `MediaPhotoPending` (the
+    initial state); video URLs become `MediaVideoPending`.
 
-    Photo URLs become `MediaPhotoPending` (the initial state for
-    `xbrain media` to advance); video URLs become `MediaVideoPending`
-    (terminal in Phase A).
+    TODO: when the LLM-description phase migrates `extract/graphql.py`
+    and `archive.py` to construct the variants directly, drop this
+    factory.
     """
     if type == "photo":
         return MediaPhotoPending(url=url)

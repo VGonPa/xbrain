@@ -98,6 +98,7 @@ def test_generate_renders_failed_photo_as_warning(tmp_path: Path):
         MediaPhotoFailed(
             url="https://pbs.twimg.com/media/dead.png",
             failure_reason="http_4xx",
+            attempts=1,
             last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
         )
     ]
@@ -280,6 +281,7 @@ def test_generate_works_without_media_root_argument(tmp_path: Path):
         MediaPhotoFailed(
             url="https://pbs.twimg.com/media/B.png",
             failure_reason="http_4xx",
+            attempts=1,
             last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
         ),
     ]

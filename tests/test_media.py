@@ -149,11 +149,13 @@ def test_is_eligible_failed_distinguishes_transient_from_permanent():
     transient = MediaPhotoFailed(
         url="u",
         failure_reason="http_5xx",
+        attempts=1,
         last_attempt_at=datetime.now(timezone.utc),
     )
     permanent = MediaPhotoFailed(
         url="u",
         failure_reason="http_4xx",
+        attempts=1,
         last_attempt_at=datetime.now(timezone.utc),
     )
     assert _is_eligible(transient, force=False) is True
