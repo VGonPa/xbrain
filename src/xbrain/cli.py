@@ -375,12 +375,12 @@ def _run_describe(
 
     Always snapshots `data/` first (the same recovery boundary as
     `xbrain media`): a botched run — a wrong model, a runaway prompt
-    — can be undone with `xbrain snapshot restore`. Persistence
-    happens twice for the same reason as `_run_media`: once after
-    every batch (the `on_progress` callback fires between batches so
-    Ctrl-C mid-run leaves `items.json` coherent), and once
-    unconditionally at the end so the elapsed-described timestamps
-    are captured even if the orchestrator raised on total failure.
+    — can be undone with `xbrain snapshot restore`. Coherence on a
+    Ctrl-C mid-run is held by the outer `try/finally` below, which
+    saves the store unconditionally even when the orchestrator raises;
+    the `on_progress` callback is for incremental persistence between
+    batches on a clean run (so a long describe run never loses more
+    than one batch of work to a process death).
     """
     if items_filter:
         target = set(items_filter)

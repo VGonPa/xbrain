@@ -979,3 +979,204 @@ def test_describe_command_propagates_total_failure_as_exit_1(tmp_path, monkeypat
     result = runner.invoke(app, ["describe"])
     assert result.exit_code == 1
     assert "Error" in result.output
+
+
+def test_describe_command_emits_exactly_one_summary_on_partial_failure(tmp_path, monkeypatch):
+    """The CLI is the single source of truth for the SUMMARY line.
+
+    A partial-failure run must emit EXACTLY one `SUMMARY:` on stderr —
+    if the orchestrator regrows a second emitter the count goes to 2
+    and this pins it. Mirrors the dedup test on the orchestrator
+    side (`test_describe_all_does_not_emit_summary_on_partial_failure`).
+    """
+    import io as _io
+    import json as _json
+    from datetime import datetime, timezone
+
+    from anthropic import APIError
+    from PIL import Image
+
+    from xbrain.models import Author, Item, MediaPhotoDownloaded
+    from xbrain.store import save_store as _save_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    media_root = tmp_path / "data" / "media"
+    (media_root / "1").mkdir(parents=True, exist_ok=True)
+    (media_root / "2").mkdir(parents=True, exist_ok=True)
+    buf = _io.BytesIO()
+    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(buf, format="JPEG")
+    (media_root / "1" / "0.jpg").write_bytes(buf.getvalue())
+    (media_root / "2" / "0.jpg").write_bytes(buf.getvalue())
+
+    def _build_item(item_id: str) -> Item:
+        return Item(
+            id=item_id,
+            source="bookmark",
+            url=f"https://x.com/a/status/{item_id}",
+            author=Author(handle="a", name="A"),
+            text="text",
+            created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            media=[
+                MediaPhotoDownloaded(
+                    url=f"https://pbs.twimg.com/media/{item_id}-0.jpg",
+                    local_path=f"{item_id}/0.jpg",
+                    width=8,
+                    height=6,
+                    bytes_size=200,
+                    downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+                )
+            ],
+        )
+
+    _save_store(
+        {"1": _build_item("1"), "2": _build_item("2")},
+        tmp_path / "data" / "items.json",
+    )
+
+    class _PartialFailMessages:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._counter = 0
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            self._counter += 1
+            if self._counter == 1:
+                # First batch fails.
+                raise APIError("503", request=None, body=None)
+
+            # Second batch returns one judgment.
+            class _Block:
+                type = "text"
+
+                def __init__(self, text: str):
+                    self.text = text
+
+            class _Resp:
+                def __init__(self, text: str):
+                    self.content = [_Block(text)]
+                    self.stop_reason = "end_turn"
+
+            return _Resp(_json.dumps([{"index": 0, "is_decorative": False, "description": "ok"}]))
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = _PartialFailMessages()
+
+    import xbrain.cli as cli
+
+    fake = _FakeClient()
+
+    def _patched(store, media_root, **kwargs):
+        kwargs["client"] = fake
+        kwargs["batch_size"] = 1
+        return _orig(store, media_root, **kwargs)
+
+    _orig = cli.run_describe_all
+    monkeypatch.setattr(cli, "run_describe_all", _patched)
+
+    result = runner.invoke(app, ["describe"])
+    assert result.exit_code == 0
+    # Exactly one SUMMARY emission — the CLI's `emit_summary_line` is
+    # the single source of truth; the orchestrator stays silent.
+    assert result.output.count("SUMMARY:") == 1
+
+
+def test_describe_command_verbose_lists_failed_photos(tmp_path, monkeypatch):
+    """`--verbose` prints `Failed photos:` plus per-failure rows on partial failure.
+
+    Pins the diagnostic branch in `_run_describe` so a future refactor
+    that drops the verbose output is caught.
+    """
+    import io as _io
+    import json as _json
+    from datetime import datetime, timezone
+
+    from anthropic import APIError
+    from PIL import Image
+
+    from xbrain.models import Author, Item, MediaPhotoDownloaded
+    from xbrain.store import save_store as _save_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    media_root = tmp_path / "data" / "media"
+    (media_root / "1").mkdir(parents=True, exist_ok=True)
+    (media_root / "2").mkdir(parents=True, exist_ok=True)
+    buf = _io.BytesIO()
+    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(buf, format="JPEG")
+    (media_root / "1" / "0.jpg").write_bytes(buf.getvalue())
+    (media_root / "2" / "0.jpg").write_bytes(buf.getvalue())
+
+    def _build_item(item_id: str) -> Item:
+        return Item(
+            id=item_id,
+            source="bookmark",
+            url=f"https://x.com/a/status/{item_id}",
+            author=Author(handle="a", name="A"),
+            text="text",
+            created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            media=[
+                MediaPhotoDownloaded(
+                    url=f"https://pbs.twimg.com/media/{item_id}-0.jpg",
+                    local_path=f"{item_id}/0.jpg",
+                    width=8,
+                    height=6,
+                    bytes_size=200,
+                    downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+                )
+            ],
+        )
+
+    _save_store(
+        {"1": _build_item("1"), "2": _build_item("2")},
+        tmp_path / "data" / "items.json",
+    )
+
+    class _PartialFailMessages:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._counter = 0
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            self._counter += 1
+            if self._counter == 1:
+                raise APIError("503", request=None, body=None)
+
+            class _Block:
+                type = "text"
+
+                def __init__(self, text: str):
+                    self.text = text
+
+            class _Resp:
+                def __init__(self, text: str):
+                    self.content = [_Block(text)]
+                    self.stop_reason = "end_turn"
+
+            return _Resp(_json.dumps([{"index": 0, "is_decorative": False, "description": "ok"}]))
+
+    class _FakeClient:
+        def __init__(self):
+            self.messages = _PartialFailMessages()
+
+    import xbrain.cli as cli
+
+    fake = _FakeClient()
+
+    def _patched(store, media_root, **kwargs):
+        kwargs["client"] = fake
+        kwargs["batch_size"] = 1
+        return _orig(store, media_root, **kwargs)
+
+    _orig = cli.run_describe_all
+    monkeypatch.setattr(cli, "run_describe_all", _patched)
+
+    result = runner.invoke(app, ["describe", "--verbose"])
+    assert result.exit_code == 0
+    assert "Failed photos:" in result.output
+    # The failed item id (1 or 2 — order is filesystem-dependent) and the URL
+    # both appear on the verbose row.
+    assert "pbs.twimg.com" in result.output

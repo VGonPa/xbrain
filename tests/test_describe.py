@@ -27,7 +27,7 @@ import pytest
 
 from xbrain.describe import (
     DescribeReport,
-    _eligible,
+    _is_eligible,
     _parse_batch_response,
     _validate_judgment_entry,
     describe_all,
@@ -163,14 +163,50 @@ class _FakeListResponse:
     `json.dumps(payload)` — that path expects a dict. For describe we
     need to ship a list payload, so we build a parallel response
     type that mirrors the shape `_parse_batch_response` consumes.
+
+    `stop_reason` defaults to `"end_turn"` (the SDK's normal terminus);
+    pass `stop_reason="refusal"` to simulate a safety-policy refusal,
+    or any other string to simulate a max-tokens truncation etc.
     """
 
-    def __init__(self, judgments: list[dict]):
+    def __init__(self, judgments: list[dict], *, stop_reason: str = "end_turn"):
         import json
 
         self.content = [type(FakeBlock(payload={}))(payload={})]  # placeholder block
         # Overwrite the text on the block with the JSON list serialisation.
         self.content[0].text = json.dumps(judgments)
+        self.stop_reason = stop_reason
+
+
+class _FakeRefusalResponse:
+    """A response object simulating Anthropic SDK refusal.
+
+    `stop_reason="refusal"` is the SDK's signal that the model declined
+    to answer (identifiable face, NSFW, ...). The orchestrator must
+    detect this and convert the batch to decorative+empty rather than
+    fail it. `content` is intentionally empty — a real refusal response
+    can carry no text blocks.
+    """
+
+    def __init__(self):
+        self.content: list = []
+        self.stop_reason = "refusal"
+
+
+class _FakeTruncatedResponse:
+    """A response with `stop_reason="max_tokens"` and malformed JSON text.
+
+    Simulates the failure mode where the model hit the token cap mid-emit
+    and the SDK returns a truncated, unparseable JSON fragment. The
+    orchestrator must surface `stop_reason` in the warning log line so
+    the operator can diagnose the cause from logs alone.
+    """
+
+    def __init__(self, truncated_text: str = '[{"index": 0, "is_dec'):
+        block = type(FakeBlock(payload={}))(payload={})
+        block.text = truncated_text
+        self.content = [block]
+        self.stop_reason = "max_tokens"
 
 
 class _FakeMessagesList:
@@ -178,18 +214,25 @@ class _FakeMessagesList:
 
     Mirrors `tests.conftest.FakeMessages` but uses `_FakeListResponse`
     so the payload is a JSON list. Exception instances are raised
-    rather than wrapped (same convention).
+    rather than wrapped (same convention). A payload that is already a
+    response object (e.g. `_FakeRefusalResponse`) is returned as-is so
+    tests can simulate stop-reason variants without a wrapper.
     """
 
     def __init__(self, payloads: list):
         self._payloads = list(payloads)
         self.calls: list[dict] = []
 
-    def create(self, **kwargs) -> _FakeListResponse:
+    def create(self, **kwargs):
         self.calls.append(kwargs)
         payload = self._payloads.pop(0)
         if isinstance(payload, Exception):
             raise payload
+        # Pass pre-built response objects through unchanged so callers
+        # can ship refusal / truncation / custom-stop-reason responses
+        # without a `_FakeListResponse` wrapper around a JSON list.
+        if hasattr(payload, "content") and hasattr(payload, "stop_reason"):
+            return payload
         return _FakeListResponse(payload)
 
 
@@ -204,23 +247,43 @@ class _FakeVisionClient:
 
 
 def test_eligible_downloaded_always_eligible():
-    """Downloaded entries are always eligible regardless of force/version."""
+    """Downloaded entries are always eligible regardless of force/version/language."""
     entry = _downloaded()
-    assert _eligible(entry, force=False, current_version="v1") is True
-    assert _eligible(entry, force=True, current_version="v1") is True
+    assert (
+        _is_eligible(entry, force=False, current_version="v1", current_language="English") is True
+    )
+    assert _is_eligible(entry, force=True, current_version="v1", current_language="English") is True
 
 
 def test_eligible_described_current_version_only_with_force():
-    """A described entry on the current version is skipped without --force."""
+    """A described entry on the current version+language is skipped without --force."""
     entry = _described(version="v1")
-    assert _eligible(entry, force=False, current_version="v1") is False
-    assert _eligible(entry, force=True, current_version="v1") is True
+    assert (
+        _is_eligible(entry, force=False, current_version="v1", current_language="English") is False
+    )
+    assert _is_eligible(entry, force=True, current_version="v1", current_language="English") is True
 
 
 def test_eligible_described_stale_version_is_eligible():
     """A described entry on a stale version is eligible without --force."""
     entry = _described(version="v1")
-    assert _eligible(entry, force=False, current_version="v2") is True
+    assert (
+        _is_eligible(entry, force=False, current_version="v2", current_language="English") is True
+    )
+
+
+def test_eligible_described_stale_language_is_eligible():
+    """A described entry whose language drifted vs the current config is eligible.
+
+    Guards against the mixed-language vault regression: switching
+    `output_language` from English → Spanish (or vice-versa) must mark
+    previously-described entries stale on the next run so the enrich
+    prompt does not splice the wrong language into the new vault.
+    """
+    entry = _described(version="v1")  # described_lang="English" by default
+    assert (
+        _is_eligible(entry, force=False, current_version="v1", current_language="Spanish") is True
+    )
 
 
 def test_eligible_pending_failed_video_are_never_eligible():
@@ -235,8 +298,14 @@ def test_eligible_pending_failed_video_are_never_eligible():
     )
     video = MediaVideoPending(url="https://video.twimg.com/x.mp4")
     for entry in (pending, failed, video):
-        assert _eligible(entry, force=False, current_version="v1") is False
-        assert _eligible(entry, force=True, current_version="v1") is False
+        assert (
+            _is_eligible(entry, force=False, current_version="v1", current_language="English")
+            is False
+        )
+        assert (
+            _is_eligible(entry, force=True, current_version="v1", current_language="English")
+            is False
+        )
 
 
 # --------------------------------------------------------------------- parser
@@ -907,6 +976,168 @@ def test_describe_all_uses_injectable_clock(tmp_path: Path):
     described = item.media[0]
     assert isinstance(described, MediaPhotoDescribed)
     assert described.described_at == fixed
+
+
+# --------------------------------------------------------------------- payload shape
+
+
+def test_describe_all_sends_payload_with_expected_kwarg_shape(tmp_path: Path):
+    """The kwargs sent to `messages.create` must match the wire contract.
+
+    A regression in the payload shape (wrong `max_tokens`, dropped
+    `system`, role flip, image-block restructure) is otherwise invisible
+    until production. Pins the structure end-to-end.
+    """
+    media_root = tmp_path / "media"
+    item = _item(
+        "1",
+        [_downloaded(item_id="1", index=i, media_root=media_root) for i in range(2)],
+    )
+    store = {"1": item}
+    client = _FakeVisionClient([[_judgment(0), _judgment(1)]])
+    describe_all(
+        store,
+        media_root,
+        model="claude-sonnet-4-6",
+        output_language="English",
+        description_version="v1",
+        batch_size=2,
+        client=client,
+    )
+    kwargs = client.messages.calls[0]
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert kwargs["max_tokens"] == 1200
+    assert isinstance(kwargs["system"], str) and kwargs["system"]
+    messages = kwargs["messages"]
+    assert isinstance(messages, list) and len(messages) == 1
+    assert messages[0]["role"] == "user"
+    content = messages[0]["content"]
+    # 2 image blocks + exactly one trailing text directive.
+    assert len(content) == 3
+    image_blocks = content[:2]
+    for block in image_blocks:
+        assert block["type"] == "image"
+        source = block["source"]
+        assert source["type"] == "base64"
+        assert source["media_type"] == "image/jpeg"
+        assert isinstance(source["data"], str) and source["data"]
+    text_block = content[2]
+    assert text_block["type"] == "text"
+    assert "Describe images 0 through 1" in text_block["text"]
+
+
+# --------------------------------------------------------------------- refusal
+
+
+def test_describe_all_handles_refusal_as_decorative_empty(tmp_path: Path):
+    """SDK `stop_reason="refusal"` must transition every photo to decorative+empty.
+
+    The Anthropic safety policy refuses identifiable faces / NSFW; the
+    rubric says "if undescribable, mark decorative with empty
+    description". The orchestrator applies that contract at the SDK
+    level too so the batch makes progress instead of churning forever.
+    """
+    media_root = tmp_path / "media"
+    item = _item(
+        "1",
+        [_downloaded(item_id="1", index=i, media_root=media_root) for i in range(5)],
+    )
+    store = {"1": item}
+    client = _FakeVisionClient([_FakeRefusalResponse()])
+    report = describe_all(
+        store,
+        media_root,
+        model="m",
+        output_language="English",
+        description_version="v1",
+        batch_size=5,
+        client=client,
+    )
+    # All five photos must be Described as decorative + empty.
+    for media_entry in item.media:
+        assert isinstance(media_entry, MediaPhotoDescribed)
+        assert media_entry.is_decorative is True
+        assert media_entry.description == ""
+    # Refusal handling counts as described, not failed — the photo made
+    # progress out of Downloaded.
+    assert report.photos_described == 5
+    assert report.photos_failed == 0
+
+
+def test_describe_all_logs_stop_reason_on_json_decode_failure(tmp_path: Path, caplog):
+    """A `max_tokens` truncation must surface stop_reason in the warning log.
+
+    Otherwise the operator gets only "Expecting value: line N column M"
+    and cannot tell whether the cause is a truncated response, a
+    refusal, or a malformed model emission.
+    """
+    media_root = tmp_path / "media"
+    item = _item("1", [_downloaded(item_id="1", index=0, media_root=media_root)])
+    store = {"1": item}
+    client = _FakeVisionClient([_FakeTruncatedResponse()])
+    with caplog.at_level("WARNING", logger="xbrain.describe"):
+        # Total failure raises (1 batch attempted, 0 described).
+        with pytest.raises(RuntimeError):
+            describe_all(
+                store,
+                media_root,
+                model="m",
+                output_language="English",
+                description_version="v1",
+                batch_size=1,
+                client=client,
+            )
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "stop_reason='max_tokens'" in messages or "stop_reason=" in messages
+
+
+# --------------------------------------------------------------------- fence variants
+
+
+def test_parse_batch_response_strips_fence_without_language_tag():
+    """Some models emit ``` ... ``` (no `json` after the opening fence)."""
+    import json
+
+    class _Fenced:
+        content = [type("B", (), {"type": "text", "text": ""})()]
+
+    fenced_text = "```\n" + json.dumps([_judgment(0)]) + "\n```"
+    _Fenced.content[0].text = fenced_text
+    out = _parse_batch_response(_Fenced(), batch_size=1)
+    assert out[0]["index"] == 0
+
+
+# --------------------------------------------------------------------- partial-data batch
+
+
+def test_describe_all_partial_judgments_count_as_batch_failed(tmp_path: Path):
+    """A batch with missing judgments must bump batches_failed (not 0).
+
+    The vision model returned 1 of 2 expected judgments. One photo
+    transitions to Described, the other stays Downloaded, and the
+    batch counts as a failure because it did NOT return complete
+    data for the API call we made.
+    """
+    media_root = tmp_path / "media"
+    item = _item(
+        "1",
+        [_downloaded(item_id="1", index=i, media_root=media_root) for i in range(2)],
+    )
+    store = {"1": item}
+    # Only one judgment for a 2-image batch.
+    client = _FakeVisionClient([[_judgment(0, description="ok")]])
+    report = describe_all(
+        store,
+        media_root,
+        model="m",
+        output_language="English",
+        description_version="v1",
+        batch_size=2,
+        client=client,
+    )
+    assert report.photos_described == 1
+    assert report.photos_failed == 1
+    assert report.batches_failed == 1
 
 
 # --------------------------------------------------------------------- summary line

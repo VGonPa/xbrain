@@ -268,7 +268,7 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 ### describe
 
-**What it does.** Sends every downloaded photo to a Claude vision model, asks for a 1-3 sentence prose description plus a `is_decorative` classification, and persists the prose on the entry. The entry transitions from `MediaPhotoDownloaded` to `MediaPhotoDescribed` (a fifth variant on the `MediaEntry` union, on top of the four `media` already exposes). Decorative photos (avatars, reaction memes, abstract backgrounds) are classified as such with an empty description so downstream prompts can filter them out without re-classifying.
+**What it does.** Sends every downloaded photo to a Claude vision model, asks for a 1-3 sentence prose description plus a `is_decorative` classification, and persists the prose on the entry. The entry transitions from `MediaPhotoDownloaded` to `MediaPhotoDescribed` (a new variant on the `MediaEntry` union). Decorative photos (avatars, reaction memes, abstract backgrounds) are classified as such with an empty description so downstream prompts can filter them out without re-classifying.
 
 **Reads.** `data/items.json` + `data/media/<id>/<n>.<ext>` (the bytes the downloader wrote).
 
@@ -276,10 +276,10 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 **State machine.** Each `xbrain describe` run advances eligible photo entries:
 - `Downloaded` → `Described` (description on the entry, bytes unchanged).
-- `Described` (stale version) → `Described` (current version), automatically.
-- `Described` (current version) → no-op (skipped) unless `--force`.
+- `Described` (stale version OR stale language) → `Described` (current version + current language), automatically.
+- `Described` (current version + current language) → no-op (skipped) unless `--force`.
 
-Eligibility ignores `Pending` / `Failed` / `VideoPending`: describe only runs on photos with bytes on disk. The description-version tag is the rubric-evolution lever: bumping `[describe].version` in `config.toml` invalidates persisted entries so the next run re-describes them without `--force`.
+Eligibility ignores `Pending` / `Failed` / `VideoPending`: describe only runs on photos with bytes on disk. The description-version tag is the rubric-evolution lever: bumping `[describe].version` in `config.toml` invalidates persisted entries so the next run re-describes them without `--force`. The `description_lang` check is the mixed-vault guard: switching `[paths].output_language` from Spanish → English (or back) marks every previously-described entry stale so the enrich prompt never splices the wrong-language prose into a new vault.
 
 **Batching.** Default batch size is 5 images per API call (the spec's quality / cost sweet spot — ~12-15 % token saving vs per-image, modest added complexity). Override with `--batch-size N`.
 

@@ -3,29 +3,23 @@
 The `describe_all` orchestrator walks every photo entry the downloader
 has produced, batches the bytes into vision-API calls (default: 5 images
 per call to Claude Sonnet), parses the per-image JSON judgments, and
-transitions matched entries to `MediaPhotoDescribed`. The persisted
-description is consumed by the enrich-time prompt in `executors.api`
-and the topic-synth prompt in `topic_synth` — decorative photos are
-filtered out at that consumption seam so they introduce no topic noise.
+transitions matched entries to `MediaPhotoDescribed`. Decorative photos
+(avatars, reaction memes) are filtered at the downstream consumption
+seam so they introduce no topic noise.
 
-The structure mirrors `xbrain.executors.api` and `xbrain.topic_synth`:
-a recoverable-errors tuple, per-batch failure isolation,
-`logger.warning` on every failure, and `RuntimeError` on total failure.
-Programmer bugs (`AttributeError`) and `KeyboardInterrupt` propagate
-— narrow `except` clauses only. The `SUMMARY: described: N, failed: M,
+The structure mirrors `xbrain.executors.api` and `xbrain.media`:
+recoverable-errors tuple, per-batch failure isolation, `logger.warning`
+on every failure, `RuntimeError` on total failure. Programmer bugs and
+`KeyboardInterrupt` propagate. The `SUMMARY: described: N, failed: M,
 skipped: K` stderr line is emitted exclusively by the CLI via
-`emit_summary_line` (single source of truth, same shape as `media`).
-
-I/O dependencies (the Anthropic client, the media root path) are
-keyword-injectable so tests run offline. The store mutation is in
-place; the caller wraps each transition with a store-write
-(the `on_progress` callback fires after every batch).
+`emit_summary_line` (single source of truth).
 """
 
 from __future__ import annotations
 
 import base64
 import io
+import itertools
 import json
 import logging
 import sys
@@ -34,11 +28,13 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol
 
 from xbrain.models import (
     Item,
     MediaPhotoDescribed,
     MediaPhotoDownloaded,
+    SupportedLanguage,
 )
 from xbrain.rubrics import load_rubric
 
@@ -56,13 +52,42 @@ _DEFAULT_BATCH_SIZE = 5
 _MAX_TOKENS = 1200
 
 # Map file extensions to the Anthropic vision media-type strings. The
-# downloader writes one of these three (see `xbrain.media._FORMAT_EXTENSIONS`).
+# downloader writes one of these four (`.jpg` is mapped twice — once for
+# `.jpg`, once for `.jpeg` — so the cardinality of distinct media types
+# is three: image/jpeg, image/png, image/webp). See
+# `xbrain.media._FORMAT_EXTENSIONS` for the producer side.
 _MEDIA_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
 }
+
+
+class MessagesClient(Protocol):
+    """Minimal structural type for the Anthropic SDK `client.messages` seam.
+
+    Defined locally so the orchestrator does not need to type-ignore an
+    untyped `client.messages.create(...)` call. The real
+    `anthropic.Anthropic().messages` satisfies this Protocol; the test
+    fakes (`tests.conftest.FakeAnthropic`, `_FakeVisionClient`) do too.
+    """
+
+    def create(self, **kwargs: object) -> object:
+        """Send one Anthropic `messages.create` call; return the raw response."""
+        ...
+
+
+class VisionClient(Protocol):
+    """Minimal structural type for the Anthropic SDK client itself.
+
+    Drops the `# type: ignore[attr-defined]` that would otherwise be
+    needed on `client.messages.create(...)`. The protocol is local to
+    this module because describe is the only consumer; `executors.api`
+    still uses a duck-typed client for now (out of scope for this PR).
+    """
+
+    messages: MessagesClient
 
 
 def _utcnow() -> datetime:
@@ -83,9 +108,10 @@ class DescribeReport:
     no-op re-run with no version bump must report every previously
     described photo here. `batches_attempted` counts API calls actually
     issued; `batches_failed` counts the ones the recoverable-errors
-    tuple swallowed. A run with `photos_attempted > 0 and
-    photos_described == 0` raises before this report leaves the
-    orchestrator.
+    tuple swallowed PLUS batches where the SDK refused or the model
+    returned fewer judgments than the batch size. A run with
+    `photos_attempted > 0 and photos_described == 0` raises before
+    this report leaves the orchestrator.
     """
 
     items_processed: int = 0
@@ -107,8 +133,8 @@ class _Candidate:
 
     Holds back-references to `Item` and the media-list `index` so the
     orchestrator can swap the transitioned variant back into place
-    without re-scanning the store. `bytes_data` is loaded lazily by
-    `_load_bytes` — failing to read the file is a per-photo failure,
+    without re-scanning the store. Bytes are loaded lazily by
+    `_load_bytes` — failing to read the file is a per-batch failure,
     not a total-run abort.
     """
 
@@ -142,32 +168,44 @@ def _recoverable_errors() -> tuple[type[Exception], ...]:
         return (ValueError, json.JSONDecodeError, KeyError, OSError)
 
 
-def _is_stale(entry: MediaPhotoDescribed, *, current_version: str) -> bool:
-    """A described entry is stale when its version no longer matches the config.
-
-    Bumping `describe_version` in `config.toml` is the manual trigger to
-    re-describe the whole corpus against a new rubric — no `--force`
-    needed. The version check is exact-string: there is no ordering
-    relation between versions, only equality, so a deliberate downgrade
-    is also a "describe again" signal.
-    """
-    return entry.description_version != current_version
-
-
-def _eligible(
-    entry: object,
+def _is_stale(
+    entry: MediaPhotoDescribed,
     *,
-    force: bool,
     current_version: str,
+    current_language: str,
+) -> bool:
+    """A described entry is stale when its version OR language drifted.
+
+    Two triggers, both no-`--force`:
+
+    1. `description_version != current_version` — bumping
+       `[describe].version` in `config.toml` invalidates the corpus
+       against a new rubric.
+    2. `description_lang != current_language` — switching
+       `[paths].output_language` from Spanish to English (or back)
+       leaves stale-language prose in place that would otherwise
+       drift into the enrich prompt as a mixed-language vault.
+
+    Equality is exact-string for both: there is no ordering relation
+    between versions or languages, so a deliberate downgrade also
+    triggers re-describe.
+    """
+    if entry.description_version != current_version:
+        return True
+    return entry.description_lang != current_language
+
+
+def _is_eligible(
+    entry: object, *, force: bool, current_version: str, current_language: str
 ) -> bool:
     """Decide whether `describe_all` should attempt this entry on THIS run.
 
     `MediaPhotoDownloaded` entries are always eligible — they have not
     been described yet by definition. `MediaPhotoDescribed` entries are
-    eligible only when `--force` is set or the persisted version is
-    stale vs the current `describe_version` config. Every other
-    variant (`MediaPhotoPending`, `MediaPhotoFailed`, `MediaVideoPending`)
-    is out of scope — describing only runs over photos whose bytes are
+    eligible only when `--force` is set or the persisted version/language
+    is stale vs the current config. Every other variant
+    (`MediaPhotoPending`, `MediaPhotoFailed`, `MediaVideoPending`) is
+    out of scope — describing only runs over photos whose bytes are
     already on disk.
     """
     if isinstance(entry, MediaPhotoDownloaded):
@@ -175,139 +213,130 @@ def _eligible(
     if isinstance(entry, MediaPhotoDescribed):
         if force:
             return True
-        return _is_stale(entry, current_version=current_version)
+        return _is_stale(
+            entry,
+            current_version=current_version,
+            current_language=current_language,
+        )
     return False
 
 
-def _tally_skipped(
+def _tally_idempotency_skip(
     entry: object,
     *,
     current_version: str,
+    current_language: str,
     report: DescribeReport,
 ) -> None:
-    """Bump `photos_skipped_already_described` when this entry is a no-op skip.
+    """Bump `photos_skipped_already_described` for same-version+same-language describes.
 
-    Pulled out of the candidate iterator so the loop body in
-    `_iter_candidates` keeps a low complexity grade. Only described
-    entries on the current version count as skips — pending/failed/
-    video entries are silently out of scope for `xbrain describe`.
+    Only fresh `MediaPhotoDescribed` entries count as idempotency skips.
+    Pending/failed/video entries are silently out of scope for
+    `xbrain describe`. Pulled out of the candidate iterator so the loop
+    body stays under radon grade C.
     """
     if isinstance(entry, MediaPhotoDescribed) and not _is_stale(
-        entry, current_version=current_version
+        entry,
+        current_version=current_version,
+        current_language=current_language,
     ):
         report.photos_skipped_already_described += 1
 
 
-def _iter_item_candidates(
-    item_id: str,
-    item: Item,
-    *,
-    force: bool,
-    current_version: str,
-    report: DescribeReport,
-) -> Iterator[_Candidate]:
-    """Yield every eligible candidate inside one item's media list.
+def _filtered_items(
+    items: dict[str, Item],
+    items_filter: set[str] | None,
+) -> Iterator[tuple[str, Item]]:
+    """Yield `(item_id, item)` pairs the run should scan, skipping empty media.
 
-    Pulled out of the cross-item iterator so the outer scan stays
-    flat. Per-entry tallies (skips) go on the report; the caller
-    decides whether the item itself counts as processed by checking
-    if this iterator yielded anything.
+    Pulled out so `_iter_eligible_candidates` stays under radon grade C.
+    An `items_filter` of `None` is "every item"; an empty media list
+    is silently skipped (no photos to consider).
     """
-    for index, entry in enumerate(item.media):
-        if not _eligible(entry, force=force, current_version=current_version):
-            _tally_skipped(entry, current_version=current_version, report=report)
+    for item_id, item in items.items():
+        if items_filter is not None and item_id not in items_filter:
             continue
-        assert isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed))
-        yield _Candidate(item_id=item_id, item=item, index=index, entry=entry)
+        if not item.media:
+            continue
+        yield item_id, item
 
 
-def _take_with_limit(candidates: Iterator[_Candidate], limit: int | None) -> Iterator[_Candidate]:
-    """Yield from `candidates`, stopping after `limit` items.
-
-    Pulled out so `_iter_candidates` does not interleave the
-    limit-countdown with the per-item bookkeeping. `None` means "no
-    limit" — yields everything.
-    """
-    if limit is None:
-        yield from candidates
-        return
-    remaining = limit
-    for candidate in candidates:
-        if remaining <= 0:
-            return
-        remaining -= 1
-        yield candidate
-
-
-def _iter_candidates(
+def _iter_eligible_candidates(
     items: dict[str, Item],
     *,
     force: bool,
     limit: int | None,
     items_filter: set[str] | None,
     current_version: str,
+    current_language: str,
     report: DescribeReport,
 ) -> Iterator[_Candidate]:
-    """Yield each candidate eligible for description on THIS run.
+    """Yield each candidate eligible for description, with all bookkeeping inline.
 
-    Side effects on `report`: bumps `items_processed` once per item
-    that contributes at least one yielded candidate, and bumps
-    `photos_skipped_already_described` for each `MediaPhotoDescribed`
-    entry passed over (via `_tally_skipped`). Stops yielding once
-    `limit` is exhausted.
+    Side effects on `report` (mirrors `media._iter_eligible_attempts`):
 
-    `items_processed` is bumped on the FIRST yielded candidate of an
-    item, not at the end of its scan — that way a `limit` that
-    truncates mid-item still counts the item as processed (work
-    happened on it). Items whose every photo was skipped do NOT count
-    as processed.
+    - bumps `items_processed` once per item that contributes at least
+      one yielded candidate (first yielded candidate of an item — a
+      `limit` that truncates mid-item still counts the item, items
+      whose every photo was skipped do NOT count);
+    - bumps `photos_skipped_already_described` for each
+      `MediaPhotoDescribed` entry on the current version+language that
+      gets passed over (via `_tally_idempotency_skip`).
+
+    Stops yielding once `limit` is exhausted. Replaces the four-helper
+    chain that was here before (`_tally_skipped` + `_iter_item_candidates`
+    + `_take_with_limit` + outer `_iter_candidates`).
     """
+    remaining = limit
     seen_item_ids: set[str] = set()
-
-    def _all_eligible() -> Iterator[_Candidate]:
-        for item_id, item in items.items():
-            if items_filter is not None and item_id not in items_filter:
-                continue
-            if not item.media:
-                continue
-            yield from _iter_item_candidates(
-                item_id,
-                item,
+    for item_id, item in _filtered_items(items, items_filter):
+        for index, entry in enumerate(item.media):
+            if remaining is not None and remaining <= 0:
+                return
+            if not _is_eligible(
+                entry,
                 force=force,
                 current_version=current_version,
-                report=report,
-            )
-
-    for candidate in _take_with_limit(_all_eligible(), limit):
-        if candidate.item_id not in seen_item_ids:
-            seen_item_ids.add(candidate.item_id)
-            report.items_processed += 1
-        yield candidate
-
-
-def _chunked(candidates: list[_Candidate], size: int) -> Iterator[list[_Candidate]]:
-    """Split a candidate list into batches of at most `size` entries.
-
-    `size` is guaranteed positive by the CLI layer (`Typer` validates
-    integer ranges); this helper does not re-validate. An empty input
-    yields nothing — the orchestrator never issues a no-op API call.
-    """
-    for start in range(0, len(candidates), size):
-        yield candidates[start : start + size]
+                current_language=current_language,
+            ):
+                _tally_idempotency_skip(
+                    entry,
+                    current_version=current_version,
+                    current_language=current_language,
+                    report=report,
+                )
+                continue
+            assert isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed))
+            if item_id not in seen_item_ids:
+                seen_item_ids.add(item_id)
+                report.items_processed += 1
+            if remaining is not None:
+                remaining -= 1
+            yield _Candidate(item_id=item_id, item=item, index=index, entry=entry)
 
 
 def _media_type(local_path: str) -> str:
     """Map an on-disk path's extension to its Anthropic media-type string.
 
-    The downloader writes one of `.jpg` / `.png` / `.webp` (see
-    `xbrain.media._FORMAT_EXTENSIONS`). Anything else came from a hand
-    edit of `items.json` or a future format we have not registered —
-    fall back to `image/jpeg` and let Anthropic reject it if the bytes
-    do not match. The fall-back keeps a per-photo failure out of the
-    total-failure raise path.
+    The downloader writes one of `.jpg` / `.jpeg` / `.png` / `.webp`
+    (see `xbrain.media._FORMAT_EXTENSIONS`). Anything else came from a
+    hand edit of `items.json` or a future format we have not registered
+    — we emit a `logger.warning` (so the operator can see the wrong
+    MIME type was sent) and fall back to `image/jpeg`. Anthropic will
+    reject the request if the bytes do not match; that surfaces as a
+    per-batch failure rather than a silent total-failure raise.
     """
     suffix = Path(local_path).suffix.lower()
-    return _MEDIA_TYPES.get(suffix, "image/jpeg")
+    media_type = _MEDIA_TYPES.get(suffix)
+    if media_type is None:
+        logger.warning(
+            "describe: unknown extension %r for local_path %s; "
+            "sending as image/jpeg (Anthropic may reject)",
+            suffix,
+            local_path,
+        )
+        return "image/jpeg"
+    return media_type
 
 
 def _load_bytes(media_root: Path, local_path: str) -> bytes:
@@ -315,7 +344,7 @@ def _load_bytes(media_root: Path, local_path: str) -> bytes:
 
     Raises `OSError` (a `FileNotFoundError` subclass when the file is
     missing). The orchestrator's `_recoverable_errors` tuple catches it
-    so a missing file is a per-photo failure (the operator can re-run
+    so a missing file is a per-batch failure (the operator can re-run
     `xbrain media` to repopulate), never a whole-batch abort.
     """
     return (media_root / local_path).read_bytes()
@@ -343,20 +372,6 @@ def _system_prompt(language: str) -> str:
     return load_rubric("describe-image", language=language)
 
 
-def _user_directive(batch_size: int) -> str:
-    """Plain-text directive that follows the image blocks in the user turn.
-
-    Tells the model the index range so the JSON list it emits is
-    contractually one-to-one with the input order. Indices are
-    zero-based to match Python and the rubric's example.
-    """
-    last = batch_size - 1
-    return (
-        f"Describe images 0 through {last}. "
-        "Return a JSON list with one entry per image, in the order received."
-    )
-
-
 def _extract_response_text(response: object) -> str:
     """Pull the JSON-bearing text out of a vision response, stripping fences.
 
@@ -364,8 +379,8 @@ def _extract_response_text(response: object) -> str:
     of typed blocks; only `text` blocks carry JSON. Some models wrap
     the JSON in a ```json ... ``` Markdown fence despite the rubric
     explicitly forbidding it — strip a single leading/trailing fence
-    pair so the downstream `json.loads` does not trip on a Markdown
-    artefact.
+    pair (with or without a language tag) so the downstream
+    `json.loads` does not trip on a Markdown artefact.
     """
     blocks = [b for b in getattr(response, "content", []) if getattr(b, "type", None) == "text"]
     if not blocks:
@@ -420,7 +435,9 @@ def _parse_batch_response(response: object, batch_size: int) -> list[dict]:
     with shape (list of judgments with unique indices), and
     `_validate_judgment_entry` deals with per-entry typing. Each step
     raises `ValueError` so the orchestrator's `_recoverable_errors`
-    tuple catches every shape violation as a per-batch failure.
+    tuple catches every shape violation as a per-batch failure. The
+    caller logs `response.stop_reason` alongside any `JSONDecodeError`
+    so a `max_tokens` truncation surfaces as a diagnosable cause.
     """
     text = _extract_response_text(response)
     decoded = json.loads(text)
@@ -442,7 +459,7 @@ def _apply_judgment(
     candidate: _Candidate,
     judgment: dict,
     *,
-    language: str,
+    language: SupportedLanguage,
     version: str,
     described_at: datetime,
 ) -> MediaPhotoDescribed:
@@ -496,71 +513,110 @@ def _record_batch_failure(
         )
 
 
+def _apply_batch_as_decorative_empty(
+    *,
+    batch: list[_Candidate],
+    language: SupportedLanguage,
+    version: str,
+    described_at: datetime,
+    report: DescribeReport,
+) -> None:
+    """Mark every photo in a refused batch as decorative + empty description.
+
+    The Anthropic SDK returns `stop_reason="refusal"` on safety-policy
+    refusals (identifiable faces, NSFW, ...). The rubric already says
+    "if undescribable, mark decorative with empty description" — we
+    apply that at the SDK level too, so the batch makes progress
+    instead of churning forever. Each photo transitions to
+    `MediaPhotoDescribed(is_decorative=True, description="")` and
+    counts toward `photos_described`, not `photos_failed`.
+    """
+    for candidate in batch:
+        new_entry = MediaPhotoDescribed(
+            url=candidate.entry.url,
+            local_path=candidate.entry.local_path,
+            width=candidate.entry.width,
+            height=candidate.entry.height,
+            bytes_size=candidate.entry.bytes_size,
+            downloaded_at=candidate.entry.downloaded_at,
+            is_decorative=True,
+            description="",
+            description_lang=language,
+            description_version=version,
+            described_at=described_at,
+        )
+        candidate.item.media[candidate.index] = new_entry
+        report.photos_described += 1
+
+
 def describe_all(
     items: dict[str, Item],
     media_root: Path,
     *,
     model: str,
-    output_language: str,
+    output_language: SupportedLanguage,
     description_version: str,
     force: bool = False,
     limit: int | None = None,
     items_filter: list[str] | None = None,
     batch_size: int = _DEFAULT_BATCH_SIZE,
-    client: object | None = None,
+    client: VisionClient | None = None,
     on_progress: Callable[[], None] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> DescribeReport:
     """Describe every eligible photo across the store; return a structured report.
 
     Eligibility (without `--force`):
+
     - `MediaPhotoDownloaded` — always.
-    - `MediaPhotoDescribed` whose `description_version` ≠ `description_version`
-      (the per-call argument, sourced from `config.describe_version`).
+    - `MediaPhotoDescribed` whose `description_version` ≠ the configured
+      version, OR whose `description_lang` ≠ the configured language.
+      The language check guards against mixed-language vaults that
+      would otherwise leak Spanish prose into an English run (or
+      vice-versa) via the enrich prompt.
 
     With `--force`:
+
     - Every `MediaPhotoDownloaded` AND every `MediaPhotoDescribed` is
       re-described. The persisted description is overwritten.
 
     Out of scope (every run):
-    - `MediaPhotoPending` — describing only runs over photos with bytes
-      on disk; the operator must call `xbrain media` first.
-    - `MediaPhotoFailed` — same reason.
-    - `MediaVideoPending` — photos only; vision-API support for video
-      is a separate phase.
+
+    - `MediaPhotoPending`, `MediaPhotoFailed`, `MediaVideoPending` —
+      describing only runs over photos with bytes on disk.
 
     The function mutates `items` in place; the caller is expected to
     wrap each batch transition with a store write (the `on_progress`
-    callback fires after every batch, success or failure). The
-    Ctrl-C-coherent invariant lives there: the store is written
-    between batches, never mid-API-call.
-
-    `media_root` is the directory under which `<item_id>/<index>.<ext>`
-    photo files live (typically `data/media/`).
+    callback fires after every batch). The Ctrl-C-coherent invariant
+    lives there: the store is written between batches.
 
     Raises:
-        RuntimeError: when EVERY batch attempted in the run fails. A
-            total failure (a revoked API key, an exhausted quota, a
-            corrupted media tree) must surface as a non-zero exit. The
+        RuntimeError: when EVERY batch attempted in the run fails. The
             CLI's `_handle_cli_errors` converts this into a clean
             operator message + exit code 1.
     """
     if client is None:
         from anthropic import Anthropic  # lazy: tests inject FakeAnthropic
 
-        client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+        # reads ANTHROPIC_API_KEY from the environment; the real `Anthropic`
+        # class is structurally compatible with `VisionClient` so the cast
+        # is a documentation tool, not a runtime conversion.
+        active_client: VisionClient = Anthropic()  # type: ignore[assignment]
+    else:
+        active_client = client
     clock: Callable[[], datetime] = now if now is not None else _utcnow
 
     started = time.monotonic()
     report = DescribeReport()
     filter_set = set(items_filter) if items_filter else None
     candidates = list(
-        _iter_candidates(
+        _iter_eligible_candidates(
             items,
             force=force,
             limit=limit,
             items_filter=filter_set,
             current_version=description_version,
+            current_language=output_language,
             report=report,
         )
     )
@@ -571,10 +627,14 @@ def describe_all(
     system = _system_prompt(output_language)
     recoverable = _recoverable_errors()
 
-    for batch in _chunked(candidates, batch_size):
+    # `itertools.batched` requires Python 3.12 (declared in `pyproject.toml`).
+    # It returns tuples; the orchestrator works in lists so it can use `len`
+    # and slice freely.
+    for batch_tuple in itertools.batched(candidates, batch_size):
+        batch = list(batch_tuple)
         _run_one_batch(
             batch=batch,
-            client=client,
+            client=active_client,
             model=model,
             system=system,
             output_language=output_language,
@@ -592,13 +652,29 @@ def describe_all(
     return report
 
 
+def _user_directive_text(batch_size: int) -> dict:
+    """Build the trailing text block for the user turn — index-range directive.
+
+    Tells the model the index range so the JSON list it emits is
+    contractually one-to-one with the input order. Indices are
+    zero-based to match Python and the rubric's example.
+    """
+    return {
+        "type": "text",
+        "text": (
+            f"Describe images 0 through {batch_size - 1}. "
+            "Return a JSON list with one entry per image, in the order received."
+        ),
+    }
+
+
 def _run_one_batch(
     *,
     batch: list[_Candidate],
-    client: object,
+    client: VisionClient,
     model: str,
     system: str,
-    output_language: str,
+    output_language: SupportedLanguage,
     description_version: str,
     clock: Callable[[], datetime],
     media_root: Path,
@@ -609,6 +685,11 @@ def _run_one_batch(
 
     Pulled out of `describe_all` to keep the outer loop's complexity
     under grade C while preserving the per-batch isolation contract.
+    Refusal responses (`stop_reason="refusal"`) are converted to a
+    decorative-empty transition for each photo in the batch — that
+    satisfies the spec's "if undescribable, mark decorative" rule at
+    the SDK level so the run makes progress instead of churning.
+
     Programmer bugs (`AttributeError`, ...) and `KeyboardInterrupt`
     fall outside `recoverable` and propagate.
     """
@@ -616,14 +697,39 @@ def _run_one_batch(
     report.photos_attempted += len(batch)
     try:
         content_blocks = _build_user_blocks(batch, media_root)
-        response = _messages_create(
-            client=client,
+        response = client.messages.create(
             model=model,
             max_tokens=_MAX_TOKENS,
             system=system,
-            content_blocks=content_blocks,
+            messages=[{"role": "user", "content": content_blocks}],
         )
-        judgments = _parse_batch_response(response, batch_size=len(batch))
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason == "refusal":
+            logger.warning(
+                "describe: batch of %d photos refused by SDK; "
+                "marking each as decorative with empty description",
+                len(batch),
+            )
+            _apply_batch_as_decorative_empty(
+                batch=batch,
+                language=output_language,
+                version=description_version,
+                described_at=clock(),
+                report=report,
+            )
+            return
+        try:
+            judgments = _parse_batch_response(response, batch_size=len(batch))
+        except json.JSONDecodeError as exc:
+            # Surface stop_reason so a `max_tokens` truncation is
+            # diagnosable from the warning line alone — otherwise the
+            # operator gets a generic "Expecting value: line N column M".
+            logger.warning(
+                "describe: malformed JSON from vision response (stop_reason=%r): %s",
+                stop_reason,
+                exc,
+            )
+            raise
         _apply_batch_judgments(
             batch=batch,
             judgments=judgments,
@@ -667,60 +773,38 @@ def _build_user_blocks(batch: list[_Candidate], media_root: Path) -> list[dict]:
     for candidate in batch:
         data = _load_bytes(media_root, candidate.entry.local_path)
         blocks.append(_build_image_block(data, _media_type(candidate.entry.local_path)))
-    blocks.append({"type": "text", "text": _user_directive(len(batch))})
+    blocks.append(_user_directive_text(len(batch)))
     return blocks
-
-
-def _messages_create(
-    *,
-    client: object,
-    model: str,
-    max_tokens: int,
-    system: str,
-    content_blocks: list[dict],
-) -> object:
-    """Thin wrapper around the Anthropic SDK's `messages.create`.
-
-    Pulled out so the orchestrator stays readable and so tests can
-    inject a `FakeAnthropic` whose `messages.create` records kwargs.
-    Returns the raw response — the parser inspects `.content` blocks.
-    """
-    return client.messages.create(  # type: ignore[attr-defined]
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": content_blocks}],
-    )
 
 
 def _apply_batch_judgments(
     *,
     batch: list[_Candidate],
     judgments: list[dict],
-    language: str,
+    language: SupportedLanguage,
     version: str,
     described_at: datetime,
     report: DescribeReport,
 ) -> None:
     """Apply per-image judgments to the batch, transitioning each entry.
 
-    Pairs each judgment with the candidate at its `index`. A judgment
-    count that does not match the batch size is a contract violation
-    (parser already enforces the index range) — if the list is short,
-    the missing candidates are tallied as per-photo failures so they
-    re-enter the candidate pool on the next run; if it is long, the
-    excess is a programmer bug (parser-side dup check rules out
-    duplicate indices already).
+    Pairs each judgment with the candidate at its `index`. The parser
+    already enforces the index range and rejects duplicates, so the
+    `by_index` dict is built directly without a paranoid re-check.
+
+    A judgment list SHORTER than the batch is a partial-data contract
+    violation: the missing candidates are tallied as per-photo failures
+    (so they re-enter the candidate pool on the next run) AND the
+    batch counts as `batches_failed += 1` even though some judgments
+    landed — the batch did not return complete data, so the operator's
+    view of "did this API call do its job" is "no, partially".
     """
     by_index = {entry["index"]: entry for entry in judgments}
-    if len(by_index) != len(judgments):
-        # Defence in depth — `_parse_batch_response` already rejects
-        # duplicate indices, so reaching here means the parser was
-        # bypassed. Raise so the developer sees it.
-        raise ValueError("internal: duplicate judgment indices survived parser check")
+    batch_had_omission = False
     for position, candidate in enumerate(batch):
         judgment = by_index.get(position)
         if judgment is None:
+            batch_had_omission = True
             report.photos_failed += 1
             report.per_item_failures.setdefault(candidate.item_id, []).append(
                 (candidate.entry.url, f"vision response omitted index {position}")
@@ -735,6 +819,11 @@ def _apply_batch_judgments(
         )
         candidate.item.media[candidate.index] = new_entry
         report.photos_described += 1
+    if batch_had_omission:
+        # A batch with missing judgments did not return complete data
+        # for the API call we made — count it as a batch failure so
+        # the "did this run net positive?" check is honest.
+        report.batches_failed += 1
 
 
 def emit_summary_line(report: DescribeReport, *, out: "io.IOBase | None" = None) -> None:
