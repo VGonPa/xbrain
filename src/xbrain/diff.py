@@ -26,7 +26,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, assert_never
 
 from pydantic import BaseModel, Field
 
@@ -419,6 +419,8 @@ def _count_media_variants(items: dict[str, Item]) -> MediaStateCounts:
                 counts.failed += 1
             elif isinstance(entry, MediaVideoPending):
                 counts.video_pending += 1
+            else:
+                assert_never(entry)
     return counts
 
 

@@ -1,30 +1,18 @@
 """Download X-post photos referenced in `Item.media`.
 
-Phase A scope (issue #33): photos only. Videos are deliberately left in the
-`MediaVideoPending` variant for a later phase — HLS + ffmpeg is significantly
-different complexity and not on the critical path here.
+Photos only — videos remain in `MediaVideoPending`. The orchestrator
+`download_all` walks every photo entry, downloads from the X CDN with a
+cascading size fallback (`name=orig` → `large` → `medium`), validates with
+Pillow, and atomically replaces the entry with `MediaPhotoDownloaded` or
+`MediaPhotoFailed`. Failure categorisation mirrors `xbrain.fetch`: a
+transient bucket (`http_5xx`, `timeout`, `unknown_error`) is auto-retried
+on the next run; permanent failures (`http_4xx`, `format_error`) need
+`--force`.
 
-The orchestrator (`download_all`) walks every photo entry on every item,
-decides whether it is eligible (pending, transient-failure, or `--force`),
-downloads bytes from the X CDN with a cascading size fallback
-(``name=orig`` → ``name=large`` → ``name=medium``), validates the bytes with
-Pillow, and atomically replaces the entry on the item with the appropriate
-variant — `MediaPhotoDownloaded` on success, `MediaPhotoFailed` on a
-categorised failure.
-
-Failure categorisation mirrors `xbrain.fetch` (#19): the transient bucket
-(`http_5xx`, `timeout`, `unknown_error`) is re-attempted on the next run;
-the permanent bucket (`http_4xx`, `format_error`) is only retried with
-`--force`. Bare-except is bucketed under `unknown_error` so a future
-unhandled error path never silently swallows the URL.
-
-Persistence is the caller's responsibility — the orchestrator mutates
-items in place and calls a `save` callback after each photo, so a Ctrl-C
-mid-batch leaves `items.json` coherent. The default callback writes the
-store atomically via `xbrain.store.save_store`.
-
-I/O dependencies (HTTP session, sleep, Pillow) are dependency-injected via
-keyword arguments so tests run offline without monkeypatching.
+Persistence is the caller's responsibility — `download_all` mutates items
+in place and calls an `on_progress` hook after each photo, so a Ctrl-C
+mid-batch leaves `items.json` coherent. I/O dependencies (HTTP session,
+sleep) are keyword-injectable so tests run offline.
 """
 
 from __future__ import annotations
@@ -33,11 +21,11 @@ import io
 import logging
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import assert_never
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
@@ -57,12 +45,25 @@ logger = logging.getLogger(__name__)
 
 
 # Failure reasons that justify an automatic retry on the next `xbrain media`
-# run. Mirror of `_TRANSIENT_FAILURES` in `fetch.py` (#19) — kept as a separate
-# frozenset because the categories differ from content-fetch failures, but the
-# retry contract is the same.
+# run. Mirror of `_TRANSIENT_FAILURES` in `fetch.py` — kept as a separate
+# frozenset because the categories differ from content-fetch failures, but
+# the retry contract is the same.
 _TRANSIENT_MEDIA_FAILURES: frozenset[MediaFailureReason] = frozenset(
     {"http_5xx", "timeout", "unknown_error"}
 )
+
+# Severity ordering across the cascade — a 5xx beats a 4xx (we want the
+# transient retry signal), a network error beats both. Used by
+# `_download_one` to decide which failure category to record when several
+# sizes in the cascade fail with different reasons. `format_error` is not
+# listed: it's an early-return path inside the 2xx branch, never compared
+# across the cascade.
+_REASON_SEVERITY: dict[MediaFailureReason, int] = {
+    "http_4xx": 1,
+    "unknown_error": 2,
+    "timeout": 3,
+    "http_5xx": 4,
+}
 
 
 # Conservative defaults — pbs.twimg.com tolerates well-behaved scrapers, but
@@ -88,17 +89,11 @@ _SIZE_CASCADE: tuple[str, ...] = ("orig", "large", "medium")
 # extension just records what the CDN sent us.
 _FORMAT_EXTENSIONS: dict[str, str] = {"jpg": ".jpg", "jpeg": ".jpg", "png": ".png", "webp": ".webp"}
 
-
-class SessionProtocol(Protocol):
-    """The subset of `requests.Session` the downloader actually uses.
-
-    Declared as a Protocol so a test can inject a hand-rolled fake without
-    pulling in the full `responses` / `requests-mock` machinery.
-    """
-
-    def get(self, url: str, *, timeout: int) -> requests.Response:
-        """Issue a GET request and return the response."""
-        ...
+# Cap on the length of the `error` string stored on `MediaPhotoFailed`.
+# A hostile or chatty CDN can return a multi-KB HTML body in the response
+# reason field; persisting that bloats items.json and offers no
+# diagnostic value beyond the first few hundred chars.
+_MAX_ERROR_LEN = 500
 
 
 @dataclass
@@ -126,101 +121,6 @@ class MediaReport:
     per_item_failures: dict[str, list[tuple[str, MediaFailureReason]]] = field(default_factory=dict)
 
 
-def _build_session(session: SessionProtocol | None, user_agent: str) -> SessionProtocol:
-    """Return the caller-injected session, or a fresh one with a browser UA."""
-    if session is not None:
-        return session
-    fresh = requests.Session()
-    fresh.headers.update({"User-Agent": user_agent})
-    return fresh
-
-
-def _eligible_items(
-    items: dict[str, Item],
-    target_ids: set[str] | None,
-) -> Iterator[tuple[str, Item]]:
-    """Yield (id, item) pairs that survive the `--items` filter + have media.
-
-    Pulled out of `download_all` so the orchestrator reads as: "for each
-    eligible item, process it." The empty-media skip lives here because a
-    test patching `items_filter` to a value matching an item without media
-    should still produce a clean no-op, not a counter that says
-    `items_processed += 1` for nothing.
-    """
-    for item_id, item in items.items():
-        if target_ids is not None and item_id not in target_ids:
-            continue
-        if not item.media:
-            continue
-        yield item_id, item
-
-
-@dataclass(frozen=True)
-class _DownloadContext:
-    """Inner-loop dependencies bundled so per-item helpers stay short.
-
-    Pulled out of `download_all`'s long parameter list so the per-item
-    loop helper (`_process_item`) reads as a small finite-state machine
-    rather than passing eight kwargs through. Frozen because none of the
-    fields mutate during a run.
-    """
-
-    media_root: Path
-    session: SessionProtocol
-    timeout_seconds: int
-    throttle_seconds: float
-    sleep: Callable[[float], None]
-    on_progress: Callable[[], None] | None
-    force: bool
-
-
-def _process_item(
-    *,
-    item_id: str,
-    item: Item,
-    ctx: _DownloadContext,
-    report: MediaReport,
-    remaining: list[int] | None,
-) -> bool:
-    """Walk an item's media list and attempt every eligible entry.
-
-    Returns True when the `--limit` cap was hit and the caller must
-    abort the outer loop; False when the item finished naturally.
-
-    `remaining` is a single-element mutable list (a "box") so the helper
-    can decrement the global cap in place without returning it. `None`
-    means no limit was passed.
-    """
-    for index in range(len(item.media)):
-        if remaining is not None and remaining[0] <= 0:
-            return True
-        entry = item.media[index]
-        if not _is_eligible(entry, force=ctx.force):
-            if isinstance(entry, MediaPhotoDownloaded):
-                report.photos_skipped_already_downloaded += 1
-            continue
-        # `_is_eligible` already excluded `MediaVideoPending`; narrow for mypy.
-        assert isinstance(entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded))
-        report.photos_attempted += 1
-        if remaining is not None:
-            remaining[0] -= 1
-        result = _download_one(
-            entry,
-            item_id=item_id,
-            index=index,
-            media_root=ctx.media_root,
-            session=ctx.session,
-            timeout_seconds=ctx.timeout_seconds,
-        )
-        item.media[index] = result
-        _record_outcome(report, item_id=item_id, entry=result, original=entry)
-        if ctx.on_progress is not None:
-            ctx.on_progress()
-        if ctx.throttle_seconds > 0:
-            ctx.sleep(ctx.throttle_seconds)
-    return False
-
-
 def download_all(
     items: dict[str, Item],
     media_root: Path,
@@ -231,7 +131,7 @@ def download_all(
     throttle_seconds: float = _DEFAULT_THROTTLE_SECONDS,
     user_agent: str = _DEFAULT_UA,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
-    session: SessionProtocol | None = None,
+    session: requests.Session | None = None,
     sleep: Callable[[float], None] = time.sleep,
     on_progress: Callable[[], None] | None = None,
 ) -> MediaReport:
@@ -259,34 +159,56 @@ def download_all(
     equivalent). The directory is created on first use.
 
     Raises:
-        RuntimeError: when EVERY photo attempted in the run fails. Mirrors
-            `ApiExecutor.enrich_items` (#24): a total failure (e.g. a CDN
-            outage or a misconfigured network) must surface as non-zero exit,
-            not a silent empty run. The CLI's `_handle_cli_errors` converts
-            this into a clean operator message + exit code 1.
+        RuntimeError: when EVERY photo attempted in the run fails. A total
+            failure (e.g. a CDN outage or a misconfigured network) must
+            surface as non-zero exit, not a silent empty run. The CLI's
+            `_handle_cli_errors` converts this into a clean operator
+            message + exit code 1.
     """
-    ctx = _DownloadContext(
-        media_root=media_root,
-        session=_build_session(session, user_agent),
-        timeout_seconds=timeout_seconds,
-        throttle_seconds=throttle_seconds,
-        sleep=sleep,
-        on_progress=on_progress,
-        force=force,
-    )
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": user_agent})
     _sweep_part_orphans(media_root)
     started = time.monotonic()
     report = MediaReport()
     target_ids: set[str] | None = set(items_filter) if items_filter else None
-    remaining = [limit] if limit is not None else None
+    remaining: int | None = limit
 
-    for item_id, item in _eligible_items(items, target_ids):
+    for item_id, item in items.items():
+        if target_ids is not None and item_id not in target_ids:
+            continue
+        if not item.media:
+            continue
         report.items_processed += 1
-        if _process_item(item_id=item_id, item=item, ctx=ctx, report=report, remaining=remaining):
-            _finalise(report, started)
-            return report
+        for index, entry in enumerate(item.media):
+            if remaining is not None and remaining <= 0:
+                report.elapsed_seconds = time.monotonic() - started
+                return report
+            if not _is_eligible(entry, force=force):
+                if isinstance(entry, MediaPhotoDownloaded):
+                    report.photos_skipped_already_downloaded += 1
+                continue
+            # `_is_eligible` already excluded `MediaVideoPending`; narrow for mypy.
+            assert isinstance(entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded))
+            report.photos_attempted += 1
+            if remaining is not None:
+                remaining -= 1
+            result = _download_one(
+                entry,
+                item_id=item_id,
+                index=index,
+                media_root=media_root,
+                session=session,
+                timeout_seconds=timeout_seconds,
+            )
+            item.media[index] = result
+            _record_outcome(report, item_id=item_id, entry=result)
+            if on_progress is not None:
+                on_progress()
+            if throttle_seconds > 0:
+                sleep(throttle_seconds)
 
-    _finalise(report, started)
+    report.elapsed_seconds = time.monotonic() - started
     if report.photos_attempted > 0 and report.photos_downloaded == 0:
         # Total-failure short-circuit: no good bytes landed anywhere this
         # run. Tell the operator loudly. The CLI surfaces it via
@@ -311,50 +233,39 @@ def _is_eligible(entry: MediaEntry, *, force: bool) -> bool:
         if force:
             return True
         return entry.failure_reason in _TRANSIENT_MEDIA_FAILURES
-    return False
+    assert_never(entry)
 
 
 def _record_outcome(
     report: MediaReport,
     *,
     item_id: str,
-    entry: MediaEntry,
-    original: MediaEntry,
+    entry: MediaPhotoDownloaded | MediaPhotoFailed,
 ) -> None:
     """Bump the report counters based on the post-transition variant.
 
-    `original` is the pre-transition entry — used to keep a record of bytes
-    downloaded (a re-download of an already-downloaded photo subtracts the
-    old `bytes_size` from the count to avoid double-counting).
+    A successful download contributes to `photos_downloaded` and
+    `bytes_downloaded`; a failed one to the appropriate transient /
+    permanent bucket and to `per_item_failures` (keyed by item id). Every
+    failure also emits a structured `logger.warning` so the total-failure
+    RuntimeError's "see warnings above" message has actual breadcrumbs.
     """
     if isinstance(entry, MediaPhotoDownloaded):
         report.photos_downloaded += 1
         report.bytes_downloaded += entry.bytes_size
-    elif isinstance(entry, MediaPhotoFailed):
-        report.per_item_failures.setdefault(item_id, []).append((entry.url, entry.failure_reason))
-        if entry.failure_reason in _TRANSIENT_MEDIA_FAILURES:
-            report.photos_failed_transient += 1
-        else:
-            report.photos_failed_permanent += 1
-        # Visible breadcrumb for every failed photo — without this the
-        # total-failure RuntimeError says "see warnings above" but logger
-        # was never wired up. One line per failure, structured.
-        logger.warning(
-            "media: download failed item=%s url=%s reason=%s error=%s",
-            item_id,
-            entry.url,
-            entry.failure_reason,
-            entry.error,
-        )
-    # Any other variant (e.g. video pending) is not produced by _download_one,
-    # so we don't need a branch here. `original` is currently unused — kept
-    # in the signature for symmetry / future delta accounting.
-    _ = original
-
-
-def _finalise(report: MediaReport, started: float) -> None:
-    """Stamp the elapsed time on the report at end-of-run."""
-    report.elapsed_seconds = time.monotonic() - started
+        return
+    report.per_item_failures.setdefault(item_id, []).append((entry.url, entry.failure_reason))
+    if entry.failure_reason in _TRANSIENT_MEDIA_FAILURES:
+        report.photos_failed_transient += 1
+    else:
+        report.photos_failed_permanent += 1
+    logger.warning(
+        "media: download failed item=%s url=%s reason=%s error=%s",
+        item_id,
+        entry.url,
+        entry.failure_reason,
+        entry.error,
+    )
 
 
 def _download_one(
@@ -363,7 +274,7 @@ def _download_one(
     item_id: str,
     index: int,
     media_root: Path,
-    session: SessionProtocol,
+    session: requests.Session,
     timeout_seconds: int,
 ) -> MediaPhotoDownloaded | MediaPhotoFailed:
     """Download one photo with size cascade and Pillow validation.
@@ -404,7 +315,6 @@ def _download_one(
                 # Bytes arrived but Pillow couldn't read them. Permanent for
                 # this URL (the CDN sent us something we cannot use).
                 return _failed(
-                    entry=entry,
                     url=url,
                     reason="format_error",
                     error="Pillow could not decode the downloaded bytes.",
@@ -422,7 +332,6 @@ def _download_one(
                 # condition. Without this guard, the OSError escapes
                 # per-item bucketing and aborts the whole batch.
                 return _failed(
-                    entry=entry,
                     url=url,
                     reason="unknown_error",
                     error=f"local write failed: {exc}",
@@ -454,25 +363,11 @@ def _download_one(
 
     reason = cascade_reason or "unknown_error"
     return _failed(
-        entry=entry,
         url=url,
         reason=reason,
         error=_format_error(last_error, cascade_status),
         attempts=attempts,
     )
-
-
-# Severity ordering across the cascade — a 5xx beats a 4xx (we want the
-# transient retry signal), a network error beats both. Used by
-# `_download_one` to decide which failure category to record when several
-# sizes in the cascade fail with different reasons.
-_REASON_SEVERITY: dict[MediaFailureReason, int] = {
-    "http_4xx": 1,
-    "unknown_error": 2,
-    "timeout": 3,
-    "http_5xx": 4,
-    "format_error": 5,  # never used here but completes the table
-}
 
 
 def _worse(
@@ -489,20 +384,12 @@ def _worse(
 
 def _failed(
     *,
-    entry: MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded,
     url: str,
     reason: MediaFailureReason,
     error: str | None,
     attempts: int,
 ) -> MediaPhotoFailed:
-    """Build a `MediaPhotoFailed` variant for a download that did not land.
-
-    `entry` is the pre-transition variant — currently unused, kept in the
-    signature so future callers can carry forward state (e.g. preserving
-    the original `local_path` from a `MediaPhotoDownloaded` being
-    re-downloaded with `--force` that subsequently failed).
-    """
-    _ = entry
+    """Build a `MediaPhotoFailed` variant for a download that did not land."""
     return MediaPhotoFailed(
         url=url,
         failure_reason=reason,
@@ -599,14 +486,24 @@ def _local_path(item_id: str, index: int, extension: str) -> str:
 
 
 def _format_error(exc: Exception | None, status: int | None) -> str | None:
-    """Compose a human-readable error string from the last exception."""
+    """Compose a human-readable error string from the last exception.
+
+    Capped at `_MAX_ERROR_LEN` characters: a misbehaving CDN can return a
+    multi-KB HTML body in `RequestException.__str__`, and persisting that
+    on every `MediaPhotoFailed` bloats `items.json` for zero diagnostic
+    value beyond the first chunk.
+    """
     if exc is None and status is None:
         return None
     if exc is None:
-        return f"HTTP {status}"
-    if status is None:
-        return str(exc)
-    return f"HTTP {status}: {exc}"
+        text = f"HTTP {status}"
+    elif status is None:
+        text = str(exc)
+    else:
+        text = f"HTTP {status}: {exc}"
+    if len(text) > _MAX_ERROR_LEN:
+        return text[: _MAX_ERROR_LEN - 1] + "…"
+    return text
 
 
 def emit_summary_line(report: MediaReport, *, out: "io.IOBase | None" = None) -> None:

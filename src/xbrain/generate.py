@@ -6,6 +6,7 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import assert_never
 
 from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.i18n import Strings, strings_for
@@ -221,6 +222,8 @@ def _render_media_lines(item: Item) -> list[str]:
             continue
         elif isinstance(entry, MediaVideoPending):
             lines.append(f"> 🎥 Vídeo (no descargado): <{entry.url}>")
+        else:
+            assert_never(entry)
     return lines
 
 
