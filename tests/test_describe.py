@@ -1026,6 +1026,25 @@ def test_describe_all_sends_payload_with_expected_kwarg_shape(tmp_path: Path):
     assert "Describe images 0 through 1" in text_block["text"]
 
 
+def test_media_type_warns_on_unknown_extension(caplog):
+    """Unknown extensions fall back to image/jpeg AND emit a `logger.warning`.
+
+    The downloader only writes `.jpg`/`.jpeg`/`.png`/`.webp`, so an unknown
+    suffix means either a hand-edited `items.json` or a future format the
+    code does not register. The warning is the operator's only signal that
+    the wrong MIME type was sent to Anthropic — pin it so a silent fallback
+    cannot regress.
+    """
+    import logging
+
+    from xbrain.describe import _media_type
+
+    with caplog.at_level(logging.WARNING, logger="xbrain.describe"):
+        result = _media_type("123/0.gif")
+    assert result == "image/jpeg"
+    assert any("unknown extension" in rec.message.lower() for rec in caplog.records)
+
+
 # --------------------------------------------------------------------- refusal
 
 
