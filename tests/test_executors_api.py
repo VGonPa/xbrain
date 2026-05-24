@@ -197,7 +197,13 @@ def test_api_executor_emits_no_summary_when_all_succeed(capsys):
 
 
 def _described_photo(*, description: str, decorative: bool = False):
-    """Build a `MediaPhotoDescribed` for prompt-integration tests."""
+    """Build a `MediaPhotoDescribed` for prompt-integration tests.
+
+    `MediaPhotoDescribed` enforces `is_decorative => description == ""`
+    at the model layer; this helper honours that contract by forcing an
+    empty description when `decorative=True`, so the caller's `description`
+    argument is silently dropped in the decorative branch.
+    """
     from datetime import datetime, timezone
 
     from xbrain.models import MediaPhotoDescribed
@@ -210,7 +216,7 @@ def _described_photo(*, description: str, decorative: bool = False):
         bytes_size=512,
         downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
         is_decorative=decorative,
-        description=description,
+        description="" if decorative else description,
         description_lang="English",
         description_version="v1",
         described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),

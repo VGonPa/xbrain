@@ -516,8 +516,10 @@ def test_describe_all_isolates_a_batch_error(tmp_path: Path, capsys):
     assert report.photos_described == 1
     assert report.photos_failed == 1
     assert report.batches_failed == 1
+    # The orchestrator does not emit SUMMARY — the CLI does. Verify the
+    # orchestrator stays silent so the CLI is the single source of truth.
     err = capsys.readouterr().err
-    assert "SUMMARY: described: 1, failed: 1" in err
+    assert "SUMMARY:" not in err
 
 
 def test_describe_all_raises_when_every_batch_fails(tmp_path: Path):
@@ -719,8 +721,14 @@ def test_describe_all_handles_missing_file_as_per_batch_failure(tmp_path: Path):
     assert report.photos_failed == 1
 
 
-def test_describe_all_emits_summary_line_on_partial_failure(tmp_path: Path, capsys):
-    """Partial-failure runs emit a SUMMARY line; same convention as `media`."""
+def test_describe_all_does_not_emit_summary_on_partial_failure(tmp_path: Path, capsys):
+    """The orchestrator never emits SUMMARY — the CLI is the single source of truth.
+
+    Mirrors `media.download_all`: SUMMARY lives on `emit_summary_line`,
+    not on the orchestrator. Asserts the count is exactly zero on a
+    partial-failure run so a future regression that re-introduces a
+    second emitter (double-SUMMARY) fails this test.
+    """
     from anthropic import APIError
 
     media_root = tmp_path / "media"
@@ -745,7 +753,7 @@ def test_describe_all_emits_summary_line_on_partial_failure(tmp_path: Path, caps
         client=client,
     )
     err = capsys.readouterr().err
-    assert "SUMMARY: described: 1, failed: 1" in err
+    assert err.count("SUMMARY:") == 0
 
 
 def test_describe_all_emits_no_summary_when_all_succeed(tmp_path: Path, capsys):

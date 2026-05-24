@@ -6,7 +6,21 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
+
+from xbrain.i18n import SUPPORTED_LANGUAGES
+
+# Type alias mirroring `i18n.SUPPORTED_LANGUAGES` so the data layer rejects
+# unknown languages at construction time. `Literal[*tuple]` unpacking is
+# Python 3.11+ — we are on 3.12 — and keeps the source of truth in `i18n`.
+SupportedLanguage = Literal[*SUPPORTED_LANGUAGES]  # type: ignore[valid-type]
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +107,47 @@ class MediaPhotoPending(_MediaPhotoBase):
     kind: Literal["photo_pending"] = "photo_pending"
 
 
+def _reject_local_path_traversal(value: str) -> str:
+    """Reject absolute paths and `..` components on a `local_path`.
+
+    Shared by `MediaPhotoDownloaded` and `MediaPhotoDescribed` so the
+    on-disk path contract has one source of truth. `local_path` is
+    joined onto `data/media/` at render and download time. A persisted
+    record like ``"/etc/passwd"`` or ``"../../x"`` would let a poisoned
+    `items.json` exfiltrate bytes outside the media root. The downloader
+    never builds such a path, but the persisted store is on-disk plain
+    JSON the user can edit — defence in depth at the type boundary is
+    cheap.
+
+    The two variants share the validator via this free function rather
+    than via class inheritance: the rest of the codebase relies on
+    `isinstance(entry, MediaPhotoDownloaded)` meaning "exactly the
+    Downloaded state" in many call sites (the photo states form a
+    tagged union, not a Liskov hierarchy).
+    """
+    if value.startswith("/") or value.startswith("\\"):
+        raise ValueError(f"local_path must be relative, got {value!r}")
+    # Normalise separators before scanning components so a Windows-style
+    # path persisted on a foreign machine is still caught.
+    for part in value.replace("\\", "/").split("/"):
+        if part == "..":
+            raise ValueError(f"local_path must not contain '..' components: {value!r}")
+    return value
+
+
+def _require_utc_aware(field_name: str, value: datetime) -> datetime:
+    """Reject naive timestamps — every persisted instant must be UTC-aware.
+
+    Shared by every photo-variant timestamp (`downloaded_at`,
+    `described_at`, `last_attempt_at`) so a hand-edited naive record on
+    a foreign machine does not silently miscompare against
+    `now(timezone.utc)`. We do not coerce — that would mask the bug.
+    """
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be timezone-aware, got naive {value!r}")
+    return value
+
+
 class MediaPhotoDownloaded(_MediaPhotoBase):
     """A photo successfully downloaded; the bytes exist at `local_path`.
 
@@ -106,6 +161,9 @@ class MediaPhotoDownloaded(_MediaPhotoBase):
     "downloaded" photo is semantically illegal — Pillow validation in
     `xbrain.media._decode_image` rules out the dim=0 case at the seam,
     and the type constraint pins it at the data layer too.
+
+    `downloaded_at` MUST be timezone-aware (UTC) so a hand-edited naive
+    timestamp does not silently miscompare against `now(timezone.utc)`.
     """
 
     kind: Literal["photo_downloaded"] = "photo_downloaded"
@@ -117,25 +175,15 @@ class MediaPhotoDownloaded(_MediaPhotoBase):
 
     @field_validator("local_path")
     @classmethod
-    def _reject_path_traversal(cls, value: str) -> str:
-        """Reject absolute paths and `..` components.
-
-        `local_path` is joined onto `data/media/` at render and download
-        time. A persisted record like ``"/etc/passwd"`` or ``"../../x"``
-        would let a poisoned `items.json` exfiltrate bytes outside the
-        media root. The downloader code never builds such a path, but
-        the persisted store is on-disk plain JSON the user can edit —
-        defence in depth at the type boundary is cheap.
-        """
+    def _validate_local_path(cls, value: str) -> str:
         _ = cls  # required by @field_validator+@classmethod; placate vulture
-        if value.startswith("/") or value.startswith("\\"):
-            raise ValueError(f"local_path must be relative, got {value!r}")
-        # Normalise separators before scanning components so a Windows-style
-        # path persisted on a foreign machine is still caught.
-        for part in value.replace("\\", "/").split("/"):
-            if part == "..":
-                raise ValueError(f"local_path must not contain '..' components: {value!r}")
-        return value
+        return _reject_local_path_traversal(value)
+
+    @field_validator("downloaded_at")
+    @classmethod
+    def _validate_downloaded_at(cls, value: datetime) -> datetime:
+        _ = cls
+        return _require_utc_aware("downloaded_at", value)
 
 
 class MediaPhotoFailed(_MediaPhotoBase):
@@ -147,6 +195,9 @@ class MediaPhotoFailed(_MediaPhotoBase):
     each transient retry bumps it. `attempts` is `ge=1`: a "failed but
     never attempted" record is semantically nonsense, and the downloader
     increments before producing any `MediaPhotoFailed`.
+
+    `last_attempt_at` MUST be timezone-aware (UTC) — same contract as
+    every other persisted instant on the photo variants.
     """
 
     kind: Literal["photo_failed"] = "photo_failed"
@@ -155,29 +206,49 @@ class MediaPhotoFailed(_MediaPhotoBase):
     attempts: int = Field(ge=1)
     last_attempt_at: datetime
 
+    @field_validator("last_attempt_at")
+    @classmethod
+    def _validate_last_attempt_at(cls, value: datetime) -> datetime:
+        _ = cls
+        return _require_utc_aware("last_attempt_at", value)
+
 
 class MediaPhotoDescribed(_MediaPhotoBase):
     """A downloaded photo that has also been described by a vision LLM.
 
     The terminal state for a content-bearing photo: the bytes still live
-    at `local_path` (every `MediaPhotoDownloaded` invariant carries over)
-    AND a vision pass has classified the image and written a short prose
-    description. Decorative photos (avatars, reaction memes, abstract
-    backgrounds) reach this variant too — they carry `is_decorative=True`
-    and an empty `description`, so downstream callers can filter them out
+    at `local_path` (every `MediaPhotoDownloaded` invariant carries over
+    verbatim — `local_path` + dimensions + `bytes_size` + `downloaded_at`
+    are re-declared so the field shape is wire-identical) AND a vision
+    pass has classified the image and written a short prose description.
+    Decorative photos (avatars, reaction memes, abstract backgrounds)
+    reach this variant too — they carry `is_decorative=True` and an
+    empty `description`, so downstream callers can filter them out
     without re-classifying.
+
+    Why NOT inherit from `MediaPhotoDownloaded`? The photo states form a
+    pydantic tagged union, not a Liskov class hierarchy. 25+ call sites
+    use `isinstance(entry, MediaPhotoDownloaded)` to mean "exactly the
+    Downloaded state" (eligibility checks, diff counters, generator
+    routing). Inheritance would silently re-match every Described entry
+    against those checks. We dedupe the field-traversal validator and
+    the UTC-aware validator via free functions instead.
 
     `description_version` is the rubric/version tag the description was
     produced under. Bumping the configured version invalidates existing
     entries: the next `xbrain describe` run treats them as stale and
-    re-describes (no `--force` needed). `description_lang` records the
-    language the prose was written in so a vault that switches
-    `output_language` mid-corpus can be re-described selectively.
+    re-describes (no `--force` needed). `description_lang` is typed as
+    `SupportedLanguage` so an unknown language is rejected at
+    construction — the type alias is derived from `i18n.SUPPORTED_LANGUAGES`
+    (single source of truth).
 
-    `description` is empty for decorative photos by contract — the
-    vision rubric returns an empty string in that case and a refusal
-    (faces, NSFW) is also bucketed as decorative with empty description.
-    No `gt=0` constraint here for that reason.
+    `description` is empty for decorative photos by contract — enforced
+    by a model-level validator below so a hand-constructed variant
+    cannot violate the invariant. The vision rubric returns an empty
+    string in the decorative case and a refusal (faces, NSFW) is also
+    bucketed as decorative with empty description.
+
+    `described_at` and `downloaded_at` MUST be timezone-aware (UTC).
     """
 
     kind: Literal["photo_described"] = "photo_described"
@@ -188,28 +259,43 @@ class MediaPhotoDescribed(_MediaPhotoBase):
     downloaded_at: datetime
     is_decorative: bool
     description: str
-    description_lang: str
+    description_lang: SupportedLanguage
     description_version: str
     described_at: datetime
 
     @field_validator("local_path")
     @classmethod
-    def _reject_path_traversal(cls, value: str) -> str:
-        """Reject absolute paths and `..` components.
-
-        Mirrors `MediaPhotoDownloaded._reject_path_traversal` — the
-        described variant inherits the same on-disk path contract because
-        the bytes from the prior Downloaded state are still referenced
-        verbatim. Persisted `items.json` is on-disk plain JSON the user
-        can edit, so the defence in depth is reapplied here.
-        """
+    def _validate_local_path(cls, value: str) -> str:
         _ = cls
-        if value.startswith("/") or value.startswith("\\"):
-            raise ValueError(f"local_path must be relative, got {value!r}")
-        for part in value.replace("\\", "/").split("/"):
-            if part == "..":
-                raise ValueError(f"local_path must not contain '..' components: {value!r}")
-        return value
+        return _reject_local_path_traversal(value)
+
+    @field_validator("downloaded_at")
+    @classmethod
+    def _validate_downloaded_at(cls, value: datetime) -> datetime:
+        _ = cls
+        return _require_utc_aware("downloaded_at", value)
+
+    @field_validator("described_at")
+    @classmethod
+    def _validate_described_at(cls, value: datetime) -> datetime:
+        _ = cls
+        return _require_utc_aware("described_at", value)
+
+    @model_validator(mode="after")
+    def _decorative_implies_empty_description(self) -> "MediaPhotoDescribed":
+        """A decorative photo MUST have an empty description (rubric contract).
+
+        Enforced at the type boundary so downstream callers can rely on
+        `is_decorative => not description` without re-validating. The
+        producer (`describe._apply_judgment`) already overwrites the
+        description to "" on decorative judgments; this is the
+        defence-in-depth for hand-edited records.
+        """
+        if self.is_decorative and self.description != "":
+            raise ValueError(
+                f"is_decorative=True requires an empty description, got {self.description!r}"
+            )
+        return self
 
 
 class MediaVideoPending(BaseModel):

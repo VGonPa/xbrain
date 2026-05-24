@@ -10,15 +10,16 @@ filtered out at that consumption seam so they introduce no topic noise.
 
 The structure mirrors `xbrain.executors.api` and `xbrain.topic_synth`:
 a recoverable-errors tuple, per-batch failure isolation,
-`logger.warning` on every failure, `RuntimeError` on total failure, and
-a `SUMMARY: described: N, failed: M, skipped: K` stderr line for the
-CLI. Programmer bugs (`AttributeError`) and `KeyboardInterrupt`
-propagate — narrow `except` clauses only.
+`logger.warning` on every failure, and `RuntimeError` on total failure.
+Programmer bugs (`AttributeError`) and `KeyboardInterrupt` propagate
+— narrow `except` clauses only. The `SUMMARY: described: N, failed: M,
+skipped: K` stderr line is emitted exclusively by the CLI via
+`emit_summary_line` (single source of truth, same shape as `media`).
 
 I/O dependencies (the Anthropic client, the media root path) are
 keyword-injectable so tests run offline. The store mutation is in
-place; the caller is expected to wrap each transition with a
-store-write (the `on_progress` callback fires after every batch).
+place; the caller wraps each transition with a store-write
+(the `on_progress` callback fires after every batch).
 """
 
 from __future__ import annotations
@@ -588,7 +589,6 @@ def describe_all(
 
     report.elapsed_seconds = time.monotonic() - started
     _raise_on_total_failure(report)
-    _print_partial_failure_summary(report)
     return report
 
 
@@ -650,23 +650,6 @@ def _raise_on_total_failure(report: DescribeReport) -> None:
         raise RuntimeError(
             f"All {report.batches_attempted} describe batches failed "
             f"({report.photos_attempted} photos); see warnings above for details."
-        )
-
-
-def _print_partial_failure_summary(report: DescribeReport) -> None:
-    """Print the SUMMARY line on partial failure — mirrors `executors.api`.
-
-    Stays silent on a clean run (no failures = no noise) and on a
-    total-failure run (the raise above is the signal). The line shape
-    matches `xbrain.media.emit_summary_line` so log parsers can rely
-    on a single `SUMMARY:` prefix across all stages.
-    """
-    if report.photos_failed > 0:
-        print(
-            f"SUMMARY: described: {report.photos_described}, "
-            f"failed: {report.photos_failed}, "
-            f"skipped: {report.photos_skipped_already_described}",
-            file=sys.stderr,
         )
 
 
