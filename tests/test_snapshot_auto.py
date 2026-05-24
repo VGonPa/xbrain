@@ -124,6 +124,19 @@ def test_topics_without_resynth_creates_no_snapshot(tmp_path: Path, monkeypatch)
     assert snapshot_list(tmp_path / "data") == []
 
 
+def test_media_creates_pre_snapshot(tmp_path: Path, monkeypatch):
+    """`xbrain media` always snapshots before mutating items.json — every run
+    is potentially destructive (it rewrites media variants on items)."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["media"])
+
+    assert result.exit_code == 0, result.stdout
+    snapshots = snapshot_list(tmp_path / "data")
+    assert any(p.name.endswith("-pre-media") for p, _ in snapshots), snapshots
+
+
 def test_fetch_force_creates_pre_snapshot(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     # An item with no links → fetch_pending no-ops; the snapshot still fires

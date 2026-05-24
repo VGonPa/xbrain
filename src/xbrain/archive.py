@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xbrain.extract.graphql import _parse_x_date
-from xbrain.models import Author, Item, Link, Media
+from xbrain.models import Author, Item, Link, Media, MediaEntry
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def _archive_tweet_to_item(entry: dict[str, Any], author: Author) -> Item | None
     media_entries = tweet.get("extended_entities", {}).get("media") or tweet.get(
         "entities", {}
     ).get("media", [])
-    media = [
+    media: list[MediaEntry] = [
         Media(
             type="video" if media_entity.get("type") in ("video", "animated_gif") else "photo",
             url=media_entity.get("media_url_https") or media_entity["expanded_url"],

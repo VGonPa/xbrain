@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +53,191 @@ class Link(BaseModel):
     domain: str
 
 
-class Media(BaseModel):
-    """One photo or video attached to an item."""
+# Categorised reasons a photo download can fail — mirrors the design of
+# `FailureReason` for content fetches. The transient subset
+# (`_TRANSIENT_MEDIA_FAILURES` in `xbrain.media`) is retried on the next
+# `xbrain media` run; permanent reasons stay as-is unless `--force` is passed.
+MediaFailureReason = Literal[
+    "http_4xx",  # permanent: dead URL / cdn-removed media
+    "http_5xx",  # transient: server-side, may succeed on retry
+    "timeout",  # transient: network blip / cdn slow path
+    "format_error",  # permanent: bytes downloaded but Pillow rejected them
+    "unknown_error",  # bare-except bucket; transient by default (mirrors fetch.py)
+]
 
-    type: Literal["photo", "video"]
+
+class _MediaPhotoBase(BaseModel):
+    """Common fields for the three photo variants.
+
+    `type` is preserved for wire-compatibility with legacy records that
+    used the flat `{type, url}` shape — a re-dump after migration still
+    carries it. The discriminator is `kind` (see the variant subclasses)
+    — globally unique across photo + video variants because the
+    `state="pending"` shape would otherwise collide between
+    `MediaPhotoPending` and `MediaVideoPending`.
+    """
+
+    type: Literal["photo"] = "photo"
     url: str
+
+
+class MediaPhotoPending(_MediaPhotoBase):
+    """A photo URL captured at extract time, download not attempted yet.
+
+    This is the initial state for every photo entry the extractor or the
+    archive importer creates. `xbrain media` walks the store and tries to
+    advance each pending entry to either `MediaPhotoDownloaded` (bytes on
+    disk) or `MediaPhotoFailed` (categorised failure).
+    """
+
+    kind: Literal["photo_pending"] = "photo_pending"
+
+
+class MediaPhotoDownloaded(_MediaPhotoBase):
+    """A photo successfully downloaded; the bytes exist at `local_path`.
+
+    `local_path` is relative to `data/media/` so it can be moved across
+    machines without rewriting the store. Dimensions and byte size are
+    captured for completeness — they let `xbrain diff` answer "did the
+    download cascade pick a smaller size on a re-run?" without re-reading
+    every file.
+
+    Dimensions and byte size are `gt=0`: a zero-pixel or zero-byte
+    "downloaded" photo is semantically illegal — Pillow validation in
+    `xbrain.media._decode_image` rules out the dim=0 case at the seam,
+    and the type constraint pins it at the data layer too.
+    """
+
+    kind: Literal["photo_downloaded"] = "photo_downloaded"
+    local_path: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    bytes_size: int = Field(gt=0)
+    downloaded_at: datetime
+
+    @field_validator("local_path")
+    @classmethod
+    def _reject_path_traversal(cls, value: str) -> str:
+        """Reject absolute paths and `..` components.
+
+        `local_path` is joined onto `data/media/` at render and download
+        time. A persisted record like ``"/etc/passwd"`` or ``"../../x"``
+        would let a poisoned `items.json` exfiltrate bytes outside the
+        media root. The downloader code never builds such a path, but
+        the persisted store is on-disk plain JSON the user can edit —
+        defence in depth at the type boundary is cheap.
+        """
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
+        if value.startswith("/") or value.startswith("\\"):
+            raise ValueError(f"local_path must be relative, got {value!r}")
+        # Normalise separators before scanning components so a Windows-style
+        # path persisted on a foreign machine is still caught.
+        for part in value.replace("\\", "/").split("/"):
+            if part == "..":
+                raise ValueError(f"local_path must not contain '..' components: {value!r}")
+        return value
+
+
+class MediaPhotoFailed(_MediaPhotoBase):
+    """A photo download attempted and failed (categorised).
+
+    Mirrors `ContentSourceFailure`: `failure_reason` is required so a
+    failure is always demonstrable evidence (no Optional, no silent loss).
+    `attempts` counts how many `xbrain media` runs have tried this URL —
+    each transient retry bumps it. `attempts` is `ge=1`: a "failed but
+    never attempted" record is semantically nonsense, and the downloader
+    increments before producing any `MediaPhotoFailed`.
+    """
+
+    kind: Literal["photo_failed"] = "photo_failed"
+    failure_reason: MediaFailureReason
+    error: str | None = None
+    attempts: int = Field(ge=1)
+    last_attempt_at: datetime
+
+
+class MediaVideoPending(BaseModel):
+    """A video URL captured but not downloaded.
+
+    Videos are currently captured but not fetched — they remain in this
+    state until a future iteration adds HLS + ffmpeg support. The variant
+    is in the union from day one so the wire shape does not change when
+    video download lands.
+    """
+
+    type: Literal["video"] = "video"
+    kind: Literal["video_pending"] = "video_pending"
+    url: str
+
+
+def _normalise_legacy_media(value: Any) -> Any:
+    """Migrate the legacy ``{type, url}`` shape to the tagged union.
+
+    The legacy shape (the original `Media(type=..., url=...)` BaseModel)
+    is mapped one-to-one:
+
+    - ``{"type": "photo", "url": ...}`` → `MediaPhotoPending` payload.
+    - ``{"type": "video", "url": ...}`` → `MediaVideoPending` payload.
+
+    Records that already carry a ``kind`` field are passed through
+    unchanged — they are either fresh (extract-time) or already in the
+    tagged-union shape. A record with neither `kind` nor a recognised
+    `type` is passed through unchanged so pydantic raises a clean
+    discriminator error rather than this validator inventing a state.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "kind" in value:
+        return value
+    type_value = value.get("type")
+    if type_value == "photo":
+        return {**value, "kind": "photo_pending"}
+    if type_value == "video":
+        return {**value, "kind": "video_pending"}
+    return value
+
+
+# The persisted media type — a discriminated union over the four variants,
+# wrapped in an outer `BeforeValidator` that promotes the legacy
+# `{type, url}` shape on read. Same layering rationale as `ContentSource`
+# (see the long comment above): the discriminator check must run AFTER
+# the legacy normaliser, otherwise legacy records get rejected.
+_MediaTagged = Annotated[
+    Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending],
+    Field(discriminator="kind"),
+]
+MediaEntry = Annotated[
+    _MediaTagged,
+    BeforeValidator(_normalise_legacy_media),
+]
+
+
+# TypeAdapter for tests / ad-hoc validation of a single entry outside an
+# `Item` context (mirrors `ContentSourceAdapter`).
+MediaEntryAdapter: TypeAdapter[
+    Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending]
+] = TypeAdapter(MediaEntry)
+
+
+def Media(  # noqa: N802  -- factory keeps the legacy PascalCase call site
+    *, type: Literal["photo", "video"], url: str
+) -> MediaPhotoPending | MediaVideoPending:
+    """Backward-compatible factory matching the pre-tagged-union constructor.
+
+    The previous `Media` class was a flat `BaseModel(type, url)`. The
+    extractor (`extract/graphql.py`) and the archive importer
+    (`archive.py`) still call `Media(type="photo", url=...)` directly —
+    this factory keeps those call sites working by returning the
+    appropriate variant. Photo URLs become `MediaPhotoPending` (the
+    initial state); video URLs become `MediaVideoPending`.
+
+    TODO: when the LLM-description phase migrates `extract/graphql.py`
+    and `archive.py` to construct the variants directly, drop this
+    factory.
+    """
+    if type == "photo":
+        return MediaPhotoPending(url=url)
+    return MediaVideoPending(url=url)
 
 
 class ThreadInfo(BaseModel):
@@ -250,7 +430,7 @@ class Item(BaseModel):
     text: str
     created_at: datetime
     captured_at: datetime
-    media: list[Media] = Field(default_factory=list)
+    media: list[MediaEntry] = Field(default_factory=list)
     links: list[Link] = Field(default_factory=list)
     quoted_id: str | None = None
     thread: ThreadInfo | None = None

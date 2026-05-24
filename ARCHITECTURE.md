@@ -246,6 +246,26 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 **Caching.** `fetch` is cached per item id — it does not re-fetch items that already have a `ContentSource` (success or recorded failure). Use `--force` to re-fetch everything. (Selective retry of transient failures is a planned improvement — issue #19.)
 
+### media
+
+**What it does.** Downloads X-post photos referenced in `Item.media` and persists the bytes locally so the wiki can render them inline. Photos only; videos remain in `video_pending` for a future iteration. Walks every `MediaPhotoPending` entry, downloads from `pbs.twimg.com` with a cascading size fallback (`name=orig` → `name=large` → `name=medium`), validates the bytes with Pillow, and atomically writes the file under `data/media/<item-id>/<index>.<ext>`.
+
+**Reads.** `data/items.json` (the URLs to download).
+
+**Writes.** `data/items.json` (each photo entry transitions to `MediaPhotoDownloaded` or `MediaPhotoFailed`) and `data/media/<item-id>/<index>.<ext>` (the bytes).
+
+**State machine.** Each `xbrain media` run advances eligible photo entries:
+- `Pending` → `Downloaded` (bytes on disk, dimensions + size recorded).
+- `Pending` → `Failed(reason)` (no bytes; reason categorised).
+
+`Failed(transient)` is not a terminal state — the next run auto-retries it. A subsequent run re-attempts `Failed` entries whose reason is in `_TRANSIENT_MEDIA_FAILURES` (`http_5xx`, `timeout`, `unknown_error`) — same retry contract as `fetch`. Permanent failures (`http_4xx`, `format_error`) only retry with `--force`. Already-downloaded photos are skipped unless `--force`.
+
+**Storage layout.** Photo bytes live under `data/media/<item-id>/<index>.<ext>` (gitignored). The atomic write uses a sibling `<n>.<ext>.part` tmp file; orphan `.part` files left by SIGKILL/OOM are swept on the next `download_all` entry. The vault mirror at `<output_subdir>/_media/<item-id>/<index>.<ext>` is written by `generate`, not by `media`, so the vault stays in sync with whichever subset of items `--since`/`--until` is regenerating.
+
+**Ctrl-C safety.** The orchestrator calls a per-photo `on_progress` callback that writes `items.json` atomically between photos. A Ctrl-C mid-batch leaves a coherent store and the next run picks up where it left off.
+
+**Snapshot trigger.** `xbrain media` always snapshots `data/` first (label `pre-media`), mirroring the destructive-op recovery boundary. The snapshot covers `items.json` / `state.json` / `vocab.yaml` / `topics.json` only — the binary photo bytes under `data/media/` are NOT included; re-downloading via `xbrain media` is the recovery path.
+
 ### vocab
 
 **What it does.** Induces a closed taxonomy of ~30-45 topics from the whole corpus. Map step: chunks the corpus, asks an LLM to propose candidate topics per chunk. Reduce step: asks the LLM to consolidate the union of candidates down to `vocab.target_count` topics. Always includes a `misc` topic for posts with no thematic core.
@@ -309,14 +329,15 @@ You can annotate, link, and write below the marker — `generate` never touches 
 
 ## Artifacts: the data layer
 
-Everything XBrain knows lives in four files inside `data/` (gitignored). They are JSON or YAML, plain text, human-readable, and small enough that you can `jq` them.
+Everything XBrain knows lives in four files inside `data/` (gitignored). They are JSON or YAML, plain text, human-readable, and small enough that you can `jq` them. Binary assets (photo bytes from `xbrain media`) live alongside under `data/media/<id>/`.
 
 | File | Format | What it is | Mutated by |
 |------|--------|------------|------------|
-| `items.json` | JSON array of `Item` | The source of truth — every post XBrain has ever seen, with all fetched content and enrichment | `extract`, `fetch`, `enrich` |
+| `items.json` | JSON array of `Item` | The source of truth — every post XBrain has ever seen, with all fetched content and enrichment | `extract`, `fetch`, `enrich`, `media` |
 | `state.json` | JSON | Extractor cursors (`last_seen_id`, `last_run`) per source, archive-import marker | `extract`, `import-archive` |
 | `vocab.yaml` | YAML list of `Topic` | The controlled topic taxonomy — closed list of slugs + descriptions | `vocab` |
 | `topics.json` | JSON dict of `TopicPage` | The synthesized topic-page overviews and notes, keyed by slug | `topics` |
+| `media/<id>/<n>.<ext>` | binary (jpg/png/webp) | Downloaded photo bytes for each `MediaPhotoDownloaded` entry in `items.json` | `media` |
 
 The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain/models.py). Reading those is the fastest way to understand the data layer in full.
 
@@ -417,6 +438,7 @@ These are the rules the rest of the architecture rests on. Breaking any of them 
 7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break.
 8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact (`vocab --regenerate`, `topics --resynth`, `fetch --force`) snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op.
 9. **Fetch records are tagged unions.** A `ContentSource` on `items.json` is either a `Success` (with required `text`) or a `Failure` (with required `failure_reason`). Mixed shapes are not representable — pydantic rejects them at construction, and mypy rejects them statically (via the `pydantic.mypy` plugin). Legacy records with `ok: bool` (pre-#20) are normalised on read by a `BeforeValidator` on the union, so existing `data/items.json` files keep working without a manual migration. The static contract is pinned by `tests/type_probes/illegal_states.py`.
+10. **Media variants are mutually exclusive states.** A `MediaEntry` on `items.json` is one of `MediaPhotoPending` / `MediaPhotoDownloaded` / `MediaPhotoFailed` / `MediaVideoPending`, discriminated by `kind`. State transitions happen only via `xbrain media`. Legacy records with the flat `{type, url}` shape are normalised on read by a `BeforeValidator` on the union — no manual migration needed. (See the `### media` section above for the retry contract and storage layout.)
 
 ---
 
