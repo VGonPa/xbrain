@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator, Literal
 from urllib.parse import urlparse
 
-from xbrain.models import Author, Item, Link, Media, SourceName, ThreadInfo
+from xbrain.models import Author, Item, Link, Media, MediaEntry, SourceName, ThreadInfo
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +118,11 @@ def _extract_links(legacy: dict[str, Any]) -> list[Link]:
     return links
 
 
-def _extract_media(legacy: dict[str, Any]) -> list[Media]:
+def _extract_media(legacy: dict[str, Any]) -> list[MediaEntry]:
     entries = legacy.get("extended_entities", {}).get("media") or legacy.get("entities", {}).get(
         "media", []
     )
-    media: list[Media] = []
+    media: list[MediaEntry] = []
     for entry in entries:
         kind: Literal["photo", "video"] = (
             "video" if entry.get("type") in ("video", "animated_gif") else "photo"

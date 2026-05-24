@@ -10,6 +10,7 @@ dependencies = [
     "trafilatura>=1.9",
     "anthropic>=0.39",
     "pyyaml>=6.0",
+    "pillow>=12.2.0",
 ]
 
 [project.scripts]
@@ -121,3 +122,8 @@ docs       = "interrogate src/xbrain"
 deps       = "deptry ."
 test       = "pytest -q"
 check      = "bash scripts/check.sh"
+
+[dependency-groups]
+dev = [
+    "requests-mock>=1.12.1",
+]
