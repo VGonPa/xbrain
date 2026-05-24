@@ -134,7 +134,7 @@ def test_generate_skips_pending_photo_silently(tmp_path: Path):
 def test_generate_renders_video_pending_as_placeholder(tmp_path: Path):
     """A `MediaVideoPending` becomes a 🎥 placeholder carrying the URL.
 
-    Phase A does not download videos. The URL is the only evidence we
+    Video bytes are not downloaded yet. The URL is the only evidence we
     have — surface it so the reader can click through to X.
     """
     from xbrain.models import MediaVideoPending
@@ -150,11 +150,11 @@ def test_generate_renders_video_pending_as_placeholder(tmp_path: Path):
 
 
 def test_generate_media_only_item_gets_a_note(tmp_path: Path):
-    """Phase A: an item with only media (no link, no enrichment) is note-worthy.
+    """An item with only media (no link, no enrichment) is note-worthy.
 
-    Pre-#33, `_has_note(item)` only returned True for items with links or
-    enrichment. A photo-only tweet was invisible. This test pins the new
-    behaviour: a photo-only item gets its note rendered.
+    Previously `_has_note(item)` only returned True for items with links or
+    enrichment, so a photo-only tweet was invisible. This test pins the
+    current behaviour: a photo-only item gets its note rendered.
     """
     from xbrain.models import MediaPhotoDownloaded
 

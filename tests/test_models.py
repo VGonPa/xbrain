@@ -235,10 +235,10 @@ def test_content_source_legacy_failure_without_reason_buckets_as_transient():
 
 
 def test_media_legacy_photo_shape_migrates_to_pending():
-    """A pre-Phase-A ``{type: "photo", url}`` record reads as MediaPhotoPending.
+    """A legacy ``{type: "photo", url}`` record reads as MediaPhotoPending.
 
-    The on-disk shape before issue #33 was a flat ``Media(type, url)``. The
-    `_normalise_legacy_media` BeforeValidator promotes it to the new
+    The on-disk shape before the tagged union was a flat ``Media(type, url)``.
+    The `_normalise_legacy_media` BeforeValidator promotes it to the new
     tagged-union shape on read, so existing ``data/items.json`` files keep
     working without a manual migration step.
     """
@@ -254,7 +254,7 @@ def test_media_legacy_photo_shape_migrates_to_pending():
 
 
 def test_media_legacy_video_shape_migrates_to_video_pending():
-    """A pre-Phase-A ``{type: "video", url}`` record reads as MediaVideoPending."""
+    """A legacy ``{type: "video", url}`` record reads as MediaVideoPending."""
     from xbrain.models import MediaEntryAdapter, MediaVideoPending
 
     entry = MediaEntryAdapter.validate_python(
@@ -321,8 +321,8 @@ def test_media_failed_requires_failure_reason():
 
 def test_media_factory_returns_pending_variant_for_photo():
     """The backward-compat `Media(type=..., url=...)` factory must yield a
-    `MediaPhotoPending` so the extractor and archive callsites — which are
-    out of scope for #33 — keep building items the new union accepts.
+    `MediaPhotoPending` so the extractor and archive callsites keep
+    building items the tagged union accepts.
     """
     from xbrain.models import Media, MediaPhotoPending
 
@@ -332,8 +332,8 @@ def test_media_factory_returns_pending_variant_for_photo():
 
 
 def test_media_factory_returns_video_pending_for_video():
-    """The factory routes `type="video"` to `MediaVideoPending` — videos
-    are deliberately not downloaded in Phase A.
+    """The factory routes `type="video"` to `MediaVideoPending` — video
+    bytes are not downloaded yet.
     """
     from xbrain.models import Media, MediaVideoPending
 
@@ -347,7 +347,7 @@ def test_item_with_legacy_media_loads_into_pending_variant():
 
     Exercises the full path: the Item validator hits MediaEntry's
     BeforeValidator on each element of the `media` list. This is the
-    invariant the wire-shape compatibility rests on for #33.
+    invariant the wire-shape compatibility rests on.
     """
     from datetime import datetime, timezone
 

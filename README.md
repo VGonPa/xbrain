@@ -516,7 +516,7 @@ uv run xbrain <command> [options]
 | `extract` | Extract bookmarks and/or own tweets from X. `--source bookmarks\|tweets\|all`. |
 | `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
 | `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
-| `media` | Download X-post photos referenced in `Item.media` and persist the bytes under `data/media/<item-id>/<index>.<ext>`. Idempotent — already-downloaded photos are skipped unless `--force`. Transient failures (HTTP 5xx, timeout, unknown errors) are auto-retried on the next run; permanent failures (HTTP 4xx, format errors) only with `--force`. `--limit N` caps the download count for a single run; `--items <a,b,c>` restricts the run to specific item IDs. Videos remain in their `video_pending` state — Phase A is photos only. See [Local media storage](#local-media-storage). |
+| `media` | Download X-post photos referenced in `Item.media` and render them inline in the wiki. `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
@@ -534,8 +534,8 @@ Run `uv run xbrain <command> --help` for the full option list.
 
 ## Local media storage
 
-`xbrain media` (Phase A — issue #33) downloads X-post photos and persists
-the bytes locally so the generated wiki shows the images inline.
+`xbrain media` downloads X-post photos and persists the bytes locally so
+the generated wiki shows the images inline.
 
 **Layout**
 
@@ -560,13 +560,13 @@ matches the format the X CDN sent us (`.jpg`, `.png`, or `.webp`).
 and emits Obsidian wikilink embeds (`![[_media/<id>/<n>.<ext>]]`) so the
 vault is fully self-contained. No symlinks, no Obsidian config needed.
 
-**Disk budget**
+**Disk budget (approximate)**
 
-Empirically ~300 KB per photo (X serves `name=orig` JPEGs in the
-1-2 MP range). A corpus of ~2,000 items with an average of one photo
-per item lands at roughly 300-500 MB on disk — well within personal-machine
-scale. `--limit N` caps a single run if you want to throttle the first
-backfill.
+X serves `name=orig` JPEGs typically in the 1-2 MP range, averaging
+~300 KB per photo on our corpora. A library of ~2,000 items with roughly
+one photo per item lands in the ballpark of 300-500 MB on disk —
+comfortably within personal-machine scale. Use `--limit N` to throttle
+the first backfill.
 
 **Throttling**
 

@@ -146,7 +146,8 @@ def download_all(
       is re-downloaded. The previously-downloaded file on disk is overwritten.
 
     Out of scope (every run):
-    - `MediaVideoPending` — Phase A is photos only.
+    - `MediaVideoPending` — photos only; video download is a future
+      iteration.
 
     The function mutates `items` in place; the caller is expected to wrap
     each transition with a store-write (the `on_progress` callback fires
@@ -304,7 +305,7 @@ def _download_one(
             continue
         except requests.RequestException as exc:
             # Connection errors, SSL errors, etc — bucket as unknown_error
-            # (transient) per the #19 contract.
+            # (transient), matching `xbrain.fetch`'s retry contract.
             cascade_reason = _worse(cascade_reason, "unknown_error")
             last_error = exc
             continue

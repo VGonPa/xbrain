@@ -54,7 +54,7 @@ class Link(BaseModel):
 
 
 # Categorised reasons a photo download can fail — mirrors the design of
-# `FailureReason` for content fetches (#19/#20). The transient subset
+# `FailureReason` for content fetches. The transient subset
 # (`_TRANSIENT_MEDIA_FAILURES` in `xbrain.media`) is retried on the next
 # `xbrain media` run; permanent reasons stay as-is unless `--force` is passed.
 MediaFailureReason = Literal[
@@ -62,7 +62,7 @@ MediaFailureReason = Literal[
     "http_5xx",  # transient: server-side, may succeed on retry
     "timeout",  # transient: network blip / cdn slow path
     "format_error",  # permanent: bytes downloaded but Pillow rejected them
-    "unknown_error",  # bare-except bucket; transient by default (mirrors fetch.py #20)
+    "unknown_error",  # bare-except bucket; transient by default (mirrors fetch.py)
 ]
 
 
@@ -156,11 +156,12 @@ class MediaPhotoFailed(_MediaPhotoBase):
 
 
 class MediaVideoPending(BaseModel):
-    """A video URL captured but not downloaded in Phase A.
+    """A video URL captured but not downloaded.
 
-    Phase A is photos-only — videos remain in this state until Phase B
-    adds HLS + ffmpeg support. The variant is in the union from day one so
-    the wire shape does not change when Phase B lands.
+    Videos are currently captured but not fetched — they remain in this
+    state until a future iteration adds HLS + ffmpeg support. The variant
+    is in the union from day one so the wire shape does not change when
+    video download lands.
     """
 
     type: Literal["video"] = "video"
@@ -169,7 +170,7 @@ class MediaVideoPending(BaseModel):
 
 
 def _normalise_legacy_media(value: Any) -> Any:
-    """Migrate the pre-Phase-A ``{type, url}`` shape to the new tagged union.
+    """Migrate the legacy ``{type, url}`` shape to the tagged union.
 
     The legacy shape (the original `Media(type=..., url=...)` BaseModel)
     is mapped one-to-one:
@@ -178,8 +179,8 @@ def _normalise_legacy_media(value: Any) -> Any:
     - ``{"type": "video", "url": ...}`` → `MediaVideoPending` payload.
 
     Records that already carry a ``kind`` field are passed through
-    unchanged — they are either fresh (extract-time) or persisted
-    Phase A variants. A record with neither `kind` nor a recognised
+    unchanged — they are either fresh (extract-time) or already in the
+    tagged-union shape. A record with neither `kind` nor a recognised
     `type` is passed through unchanged so pydantic raises a clean
     discriminator error rather than this validator inventing a state.
     """
@@ -199,7 +200,7 @@ def _normalise_legacy_media(value: Any) -> Any:
 # wrapped in an outer `BeforeValidator` that promotes the legacy
 # `{type, url}` shape on read. Same layering rationale as `ContentSource`
 # (see the long comment above): the discriminator check must run AFTER
-# the legacy normaliser, otherwise pre-Phase-A records get rejected.
+# the legacy normaliser, otherwise legacy records get rejected.
 _MediaTagged = Annotated[
     Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending],
     Field(discriminator="kind"),

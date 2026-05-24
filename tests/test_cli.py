@@ -86,8 +86,8 @@ def test_media_command_runs_on_empty_store(tmp_path: Path, monkeypatch):
     save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["media"])
     assert result.exit_code == 0
-    # The pre-media snapshot must have been created (#17 contract for any
-    # destructive op — media downloads write the items.json store).
+    # The pre-media snapshot must have been created — the destructive-op
+    # contract: every command that writes items.json snapshots first.
     snapshots = list((tmp_path / "data" / "snapshots").iterdir())
     assert any("pre-media" in p.name for p in snapshots)
 

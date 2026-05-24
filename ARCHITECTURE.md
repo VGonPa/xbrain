@@ -248,21 +248,23 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 ### media
 
-**What it does.** Downloads X-post photos referenced in `Item.media` and persists the bytes locally so the wiki can render them inline. Phase A scope (issue #33) — photos only; videos remain in `video_pending` for a later phase. Walks every `MediaPhotoPending` entry, downloads from `pbs.twimg.com` with a cascading size fallback (`name=orig` → `name=large` → `name=medium`), validates the bytes with Pillow, and atomically writes the file under `data/media/<item-id>/<index>.<ext>`.
+**What it does.** Downloads X-post photos referenced in `Item.media` and persists the bytes locally so the wiki can render them inline. Photos only; videos remain in `video_pending` for a future iteration. Walks every `MediaPhotoPending` entry, downloads from `pbs.twimg.com` with a cascading size fallback (`name=orig` → `name=large` → `name=medium`), validates the bytes with Pillow, and atomically writes the file under `data/media/<item-id>/<index>.<ext>`.
 
 **Reads.** `data/items.json` (the URLs to download).
 
 **Writes.** `data/items.json` (each photo entry transitions to `MediaPhotoDownloaded` or `MediaPhotoFailed`) and `data/media/<item-id>/<index>.<ext>` (the bytes).
 
-**State machine.** Photos pass through one of two terminal-ish states per run:
+**State machine.** Each `xbrain media` run advances eligible photo entries:
 - `Pending` → `Downloaded` (bytes on disk, dimensions + size recorded).
 - `Pending` → `Failed(reason)` (no bytes; reason categorised).
 
-A subsequent run re-attempts `Failed` entries whose reason is in `_TRANSIENT_MEDIA_FAILURES` (`http_5xx`, `timeout`, `unknown_error`) — same retry contract as `fetch` (#19). Permanent failures (`http_4xx`, `format_error`) only retry with `--force`. Already-downloaded photos are skipped unless `--force`.
+`Failed(transient)` is not a terminal state — the next run auto-retries it. A subsequent run re-attempts `Failed` entries whose reason is in `_TRANSIENT_MEDIA_FAILURES` (`http_5xx`, `timeout`, `unknown_error`) — same retry contract as `fetch`. Permanent failures (`http_4xx`, `format_error`) only retry with `--force`. Already-downloaded photos are skipped unless `--force`.
+
+**Storage layout.** Photo bytes live under `data/media/<item-id>/<index>.<ext>` (gitignored). The atomic write uses a sibling `<n>.<ext>.part` tmp file; orphan `.part` files left by SIGKILL/OOM are swept on the next `download_all` entry. The vault mirror at `<output_subdir>/_media/<item-id>/<index>.<ext>` is written by `generate`, not by `media`, so the vault stays in sync with whichever subset of items `--since`/`--until` is regenerating.
 
 **Ctrl-C safety.** The orchestrator calls a per-photo `on_progress` callback that writes `items.json` atomically between photos. A Ctrl-C mid-batch leaves a coherent store and the next run picks up where it left off.
 
-**Snapshot trigger.** `xbrain media` always snapshots `data/` first (label `pre-media`), mirroring the #17 destructive-op recovery boundary.
+**Snapshot trigger.** `xbrain media` always snapshots `data/` first (label `pre-media`), mirroring the destructive-op recovery boundary. The snapshot covers `items.json` / `state.json` / `vocab.yaml` / `topics.json` only — the binary photo bytes under `data/media/` are NOT included; re-downloading via `xbrain media` is the recovery path.
 
 ### vocab
 
@@ -335,7 +337,7 @@ Everything XBrain knows lives in four files inside `data/` (gitignored). They ar
 | `state.json` | JSON | Extractor cursors (`last_seen_id`, `last_run`) per source, archive-import marker | `extract`, `import-archive` |
 | `vocab.yaml` | YAML list of `Topic` | The controlled topic taxonomy — closed list of slugs + descriptions | `vocab` |
 | `topics.json` | JSON dict of `TopicPage` | The synthesized topic-page overviews and notes, keyed by slug | `topics` |
-| `media/<id>/<n>.<ext>` | binary (jpg/png/webp) | Downloaded photo bytes for each `MediaPhotoDownloaded` entry in `items.json` (#33) | `media` |
+| `media/<id>/<n>.<ext>` | binary (jpg/png/webp) | Downloaded photo bytes for each `MediaPhotoDownloaded` entry in `items.json` | `media` |
 
 The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain/models.py). Reading those is the fastest way to understand the data layer in full.
 
@@ -436,7 +438,7 @@ These are the rules the rest of the architecture rests on. Breaking any of them 
 7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break.
 8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact (`vocab --regenerate`, `topics --resynth`, `fetch --force`) snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op.
 9. **Fetch records are tagged unions.** A `ContentSource` on `items.json` is either a `Success` (with required `text`) or a `Failure` (with required `failure_reason`). Mixed shapes are not representable — pydantic rejects them at construction, and mypy rejects them statically (via the `pydantic.mypy` plugin). Legacy records with `ok: bool` (pre-#20) are normalised on read by a `BeforeValidator` on the union, so existing `data/items.json` files keep working without a manual migration. The static contract is pinned by `tests/type_probes/illegal_states.py`.
-10. **Media variants are mutually exclusive states.** A `MediaEntry` on `items.json` is one of `MediaPhotoPending` / `MediaPhotoDownloaded` / `MediaPhotoFailed` / `MediaVideoPending`, discriminated by the `kind` field. A photo is in exactly one state at a time — never both "downloaded" and "failed". State transitions happen only via `xbrain media`: `Pending` → `Downloaded` (bytes on disk, dimensions + size recorded) or `Pending` → `Failed` (categorised reason recorded). Transient failures (`http_5xx`, `timeout`, `unknown_error`) are auto-retried on the next run, mirroring #19. Permanent failures (`http_4xx`, `format_error`) only retry with `--force`. Videos remain in `video_pending` for the whole of Phase A (#33). Legacy records with the flat `{type, url}` shape (pre-#33) are normalised on read by a `BeforeValidator` on the union — no manual migration needed. Photo bytes live under `data/media/<item-id>/<index>.<ext>` (gitignored) and are mirrored into `<vault>/<output_subdir>/_media/` at `xbrain generate` time so the vault is self-contained.
+10. **Media variants are mutually exclusive states.** A `MediaEntry` on `items.json` is one of `MediaPhotoPending` / `MediaPhotoDownloaded` / `MediaPhotoFailed` / `MediaVideoPending`, discriminated by `kind`. State transitions happen only via `xbrain media`. Legacy records with the flat `{type, url}` shape are normalised on read by a `BeforeValidator` on the union — no manual migration needed. (See the `### media` section above for the retry contract and storage layout.)
 
 ---
 

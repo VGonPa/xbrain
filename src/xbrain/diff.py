@@ -130,7 +130,7 @@ class VocabDiff(BaseModel):
 
 
 class MediaStateCounts(BaseModel):
-    """Counts of media variants on one side of a diff (#33 Phase A).
+    """Counts of media variants on one side of a diff.
 
     Mirrors the four-variant union: downloaded / pending / failed
     / video_pending. Counts are global across all items in the store —
@@ -145,7 +145,7 @@ class MediaStateCounts(BaseModel):
 
 
 class MediaDiff(BaseModel):
-    """Side-by-side media state counts + deltas (#33 Phase A).
+    """Side-by-side media state counts + deltas.
 
     `delta_downloaded = b.downloaded - a.downloaded` answers the
     operator's first question after `xbrain media`: "how many new photos
@@ -387,7 +387,7 @@ def _compute_media_diff(
     items_a: dict[str, Item],
     items_b: dict[str, Item],
 ) -> MediaDiff:
-    """Count media variants on each side and return the deltas (#33 Phase A).
+    """Count media variants on each side and return the deltas.
 
     Walks every media entry on every item — not just the ones in both
     sides, because the question "how many new photos landed?" applies
@@ -518,7 +518,7 @@ def format_text(report: DiffReport) -> str:
 
 
 def _format_media_block(media: MediaDiff) -> list[str]:
-    """Render the per-variant media state counts + deltas (#33 Phase A).
+    """Render the per-variant media state counts + deltas.
 
     The `+N` / `-N` deltas answer the most common operator question after
     `xbrain media`: "did this run move the needle?" Negative deltas show

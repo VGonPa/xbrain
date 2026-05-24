@@ -36,13 +36,15 @@ class Config:
 
     @property
     def media_dir(self) -> Path:
-        """Root directory for downloaded photo bytes (Phase A — issue #33).
+        """Root directory for downloaded photo bytes.
 
         Photos are stored at ``<media_dir>/<item-id>/<index>.<ext>``. Lives
         under `data/` so it shares the gitignore with the rest of the
-        artifact tree, and so `xbrain snapshot` would naturally bundle it
-        with a future copy step (out of scope for #33 — snapshots cover
-        the JSON store, not the media bytes).
+        artifact tree. The snapshot lifecycle in `xbrain.snapshot`
+        currently covers only the JSON store (`items.json`, `state.json`,
+        `vocab.yaml`, `topics.json`) — the binary photo bytes are NOT
+        snapshotted today. A re-download via `xbrain media` is the
+        recovery path if `data/media/` is lost.
         """
         return self.data_dir / "media"
 

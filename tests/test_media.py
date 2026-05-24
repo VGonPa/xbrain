@@ -124,7 +124,7 @@ def test_is_eligible_pending_always_true():
 
 
 def test_is_eligible_video_pending_never_attempted():
-    """Phase A is photos only; videos stay in their pending variant always."""
+    """Photos only; videos stay in their pending variant always."""
     video = MediaVideoPending(url="u")
     assert _is_eligible(video, force=False) is False
     assert _is_eligible(video, force=True) is False
