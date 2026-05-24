@@ -108,7 +108,10 @@ def test_generate_renders_failed_photo_as_warning(tmp_path: Path):
     body = note.read_text(encoding="utf-8")
     assert "⚠" in body
     assert "https://pbs.twimg.com/media/dead.png" in body
-    assert "URL no encontrada" in body or "HTTP 4xx" in body
+    # The `http_4xx` reason maps to "URL no encontrada (HTTP 4xx)" via
+    # `_FAILURE_ES_MEDIA`. The whole rendered phrase must be present —
+    # asserting one substring or the other is brittle.
+    assert "URL no encontrada (HTTP 4xx)" in body
 
 
 def test_generate_skips_pending_photo_silently(tmp_path: Path):

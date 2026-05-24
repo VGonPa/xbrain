@@ -85,6 +85,22 @@ def _png_bytes(width: int = 4, height: int = 3) -> bytes:
     return buffer.getvalue()
 
 
+def _jpeg_bytes(width: int = 4, height: int = 3) -> bytes:
+    """Return a valid JPEG with the requested dimensions for Pillow validation."""
+    image = Image.new("RGB", (width, height), color=(11, 22, 33))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def _webp_bytes(width: int = 4, height: int = 3) -> bytes:
+    """Return a valid WebP with the requested dimensions for Pillow validation."""
+    image = Image.new("RGB", (width, height), color=(44, 55, 66))
+    buffer = io.BytesIO()
+    image.save(buffer, format="WEBP")
+    return buffer.getvalue()
+
+
 def _item_with_media(media_entries: list) -> Item:
     """Build an Item populated with the given media entries (no real text)."""
     return Item(
@@ -227,8 +243,40 @@ def test_download_all_falls_back_to_large_when_orig_404s(tmp_path: Path):
     assert "name=large" in session.calls[1][0]
 
 
-def test_download_all_records_http_4xx_failure_when_cascade_exhausted(tmp_path: Path):
-    """Three 404s in a row → MediaPhotoFailed with `http_4xx` (permanent)."""
+def test_download_all_records_http_4xx_when_cascade_exhausts(tmp_path: Path):
+    """Three 404s in a row land the photo in the `http_4xx` (permanent) bucket.
+
+    Setup is partial-success (a second item downloads cleanly) so the
+    total-failure RuntimeError does NOT fire — the assertion is on the
+    bucket alone, not on the raise.
+    """
+    items_dict = {
+        "1": _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/C.png")]),
+        "2": _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/C2.png")]),
+    }
+    items_dict["1"].id = "1"
+    items_dict["2"].id = "2"
+    session = FakeSession(
+        responses={
+            "pbs.twimg.com/media/C.png": [
+                FakeResponse(404, b""),
+                FakeResponse(404, b""),
+                FakeResponse(404, b""),
+            ],
+            "pbs.twimg.com/media/C2.png": [FakeResponse(200, _png_bytes())],
+        }
+    )
+    report = download_all(items_dict, media_root=tmp_path, session=session, throttle_seconds=0)
+    entry = items_dict["1"].media[0]
+    assert isinstance(entry, MediaPhotoFailed)
+    assert entry.failure_reason == "http_4xx"
+    assert entry.attempts == 1
+    assert report.photos_failed_permanent == 1
+    assert report.photos_downloaded == 1
+
+
+def test_download_all_raises_runtime_error_when_lone_4xx_attempt_fails(tmp_path: Path):
+    """A single 4xx-only batch (no downloads at all) surfaces as RuntimeError."""
     item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/C.png")])
     session = FakeSession(
         responses={
@@ -240,12 +288,7 @@ def test_download_all_records_http_4xx_failure_when_cascade_exhausted(tmp_path: 
         }
     )
     with pytest.raises(RuntimeError):
-        # A single attempted photo + zero downloads triggers the total-failure raise.
         download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
-    entry = item.media[0]
-    assert isinstance(entry, MediaPhotoFailed)
-    assert entry.failure_reason == "http_4xx"
-    assert entry.attempts == 1
 
 
 def test_download_all_records_http_5xx_as_transient(tmp_path: Path):
@@ -567,6 +610,174 @@ def test_download_all_writes_bytes_atomically(tmp_path: Path):
     download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     # No leftover .part files; only the final file exists.
     assert sorted(p.name for p in (tmp_path / "123").iterdir()) == ["0.png"]
+
+
+def test_download_all_falls_back_through_full_cascade_to_medium(tmp_path: Path):
+    """orig 404 + large 404 + medium 200 — the cascade exhausts both higher
+    sizes before landing on `medium`. Three calls in cascade order."""
+    bytes_data = _png_bytes(width=8, height=6)
+    item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/CASC.png")])
+    session = FakeSession(
+        responses={
+            "pbs.twimg.com/media/CASC.png": [
+                FakeResponse(404, b""),  # orig
+                FakeResponse(404, b""),  # large
+                FakeResponse(200, bytes_data),  # medium
+            ]
+        }
+    )
+    report = download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    assert isinstance(item.media[0], MediaPhotoDownloaded)
+    assert report.photos_downloaded == 1
+    assert len(session.calls) == 3
+    assert "name=orig" in session.calls[0][0]
+    assert "name=large" in session.calls[1][0]
+    assert "name=medium" in session.calls[2][0]
+
+
+def test_download_all_records_webp_extension(tmp_path: Path):
+    """A `.webp` URL with WebP bytes is stored with `.webp` on disk."""
+    bytes_data = _webp_bytes(width=6, height=5)
+    item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/W.webp")])
+    session = FakeSession(responses={"pbs.twimg.com/media/W.webp": [FakeResponse(200, bytes_data)]})
+    download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    entry = item.media[0]
+    assert isinstance(entry, MediaPhotoDownloaded)
+    assert entry.local_path.endswith(".webp")
+    assert (tmp_path / entry.local_path).exists()
+
+
+def test_download_all_records_jpeg_extension(tmp_path: Path):
+    """A JPEG URL with JPEG bytes is stored with `.jpg` on disk."""
+    bytes_data = _jpeg_bytes(width=6, height=5)
+    item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/J.jpg")])
+    session = FakeSession(responses={"pbs.twimg.com/media/J.jpg": [FakeResponse(200, bytes_data)]})
+    download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    entry = item.media[0]
+    assert isinstance(entry, MediaPhotoDownloaded)
+    assert entry.local_path.endswith(".jpg")
+    assert (tmp_path / entry.local_path).exists()
+
+
+def test_download_all_buckets_3xx_status_as_unknown_error(tmp_path: Path):
+    """A 304 (or any non-2xx non-4xx non-5xx) lands in `unknown_error` (transient).
+
+    Three 304s in a row (full cascade exhausted) trigger the total-failure
+    path; the bucket assertion is what we care about.
+    """
+    item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/R.png")])
+    session = FakeSession(
+        responses={
+            "pbs.twimg.com/media/R.png": [
+                FakeResponse(304, b""),
+                FakeResponse(304, b""),
+                FakeResponse(304, b""),
+            ]
+        }
+    )
+    with pytest.raises(RuntimeError):
+        download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    entry = item.media[0]
+    assert isinstance(entry, MediaPhotoFailed)
+    assert entry.failure_reason == "unknown_error"
+
+
+def test_download_all_atomic_write_rollback_cleans_part_file(tmp_path: Path, monkeypatch):
+    """When `path.replace` raises, the `.part` file is removed and no final
+    file exists. Simulates a disk-full condition between write and rename.
+
+    Setup is partial-success (a second item downloads cleanly under a
+    different media_root path that does not collide with the monkeypatch)
+    so the total-failure RuntimeError does not fire and we can assert on
+    the bucket + filesystem state of the failed item.
+    """
+    bytes_data = _png_bytes(width=10, height=8)
+    fail_url = "https://pbs.twimg.com/media/ZFAIL.png"
+    ok_url = "https://pbs.twimg.com/media/ZOK.png"
+    items_dict = {
+        "1": _item_with_media([MediaPhotoPending(url=fail_url)]),
+        "2": _item_with_media([MediaPhotoPending(url=ok_url)]),
+    }
+    items_dict["1"].id = "1"
+    items_dict["2"].id = "2"
+    session = FakeSession(
+        responses={
+            fail_url.replace("https://", "").split("?")[0]: [FakeResponse(200, bytes_data)],
+            ok_url.replace("https://", "").split("?")[0]: [FakeResponse(200, bytes_data)],
+        }
+    )
+
+    original_replace = Path.replace
+
+    def _conditional_fail(self, target):
+        # Only fail the replace for the path containing item id "1".
+        if "/1/" in str(target) or str(target).endswith("/1/0.png"):
+            raise OSError("simulated disk full")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _conditional_fail)
+    report = download_all(items_dict, media_root=tmp_path, session=session, throttle_seconds=0)
+
+    # Item 1 bucketed as unknown_error (transient): disk full is retryable.
+    failed_entry = items_dict["1"].media[0]
+    assert isinstance(failed_entry, MediaPhotoFailed)
+    assert failed_entry.failure_reason == "unknown_error"
+    # Item 2 downloaded cleanly.
+    assert isinstance(items_dict["2"].media[0], MediaPhotoDownloaded)
+    # No `.part` orphan or half-written final file under item 1.
+    item_dir = tmp_path / "1"
+    if item_dir.exists():
+        names = sorted(p.name for p in item_dir.iterdir())
+        assert "0.png.part" not in names
+        assert "0.png" not in names
+    assert report.photos_downloaded == 1
+    assert report.photos_failed_transient == 1
+
+
+def test_download_all_sweeps_part_orphans_on_entry(tmp_path: Path):
+    """A stale `*.part` file left by a SIGKILL is removed before any download."""
+    orphan_dir = tmp_path / "orphan-item"
+    orphan_dir.mkdir(parents=True)
+    orphan = orphan_dir / "0.png.part"
+    orphan.write_bytes(b"stale junk from a previous run")
+    item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/S.png")])
+    session = FakeSession(
+        responses={"pbs.twimg.com/media/S.png": [FakeResponse(200, _png_bytes())]}
+    )
+    download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    assert not orphan.exists()
+
+
+def test_download_all_partial_failure_summary_emits_line(capsys):
+    """A run with zero downloads + N failures still emits the SUMMARY line.
+
+    The silence rule only applies to "zero attempts AND zero skips" —
+    a failed-only run is not silent: ops needs to see the failure count.
+    """
+    report = MediaReport(
+        photos_attempted=3,
+        photos_downloaded=0,
+        photos_failed_permanent=2,
+        photos_failed_transient=1,
+    )
+    emit_summary_line(report)
+    err = capsys.readouterr().err
+    assert "SUMMARY: " in err
+    assert "downloaded: 0" in err
+    assert "failed_permanent: 2" in err
+    assert "failed_transient: 1" in err
+
+
+def test_download_all_truncated_image_buckets_as_format_error(tmp_path: Path):
+    """Pillow rejecting partial PNG bytes → `format_error` (permanent)."""
+    truncated = _png_bytes()[:32]
+    item = _item_with_media([MediaPhotoPending(url="https://pbs.twimg.com/media/T.png")])
+    session = FakeSession(responses={"pbs.twimg.com/media/T.png": [FakeResponse(200, truncated)]})
+    with pytest.raises(RuntimeError):
+        download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    entry = item.media[0]
+    assert isinstance(entry, MediaPhotoFailed)
+    assert entry.failure_reason == "format_error"
 
 
 def test_emit_summary_line_silent_when_nothing_done(capsys):

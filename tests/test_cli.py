@@ -81,15 +81,22 @@ def test_cli_reports_missing_config_cleanly(tmp_path: Path, monkeypatch):
 
 
 def test_media_command_runs_on_empty_store(tmp_path: Path, monkeypatch):
-    """`xbrain media` with no media is a no-op (creates a snapshot, exits 0)."""
+    """`xbrain media` with no media is a no-op (exit 0, items.json unchanged)."""
     _setup_repo(tmp_path, monkeypatch)
-    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"1": _linked_item("1")}, items_path)
+    before_bytes = items_path.read_bytes()
+
     result = runner.invoke(app, ["media"])
+
     assert result.exit_code == 0
     # The pre-media snapshot must have been created — the destructive-op
     # contract: every command that writes items.json snapshots first.
     snapshots = list((tmp_path / "data" / "snapshots").iterdir())
     assert any("pre-media" in p.name for p in snapshots)
+    # items.json content is byte-identical: no media to advance, no
+    # transitions, no spurious rewrites that would dirty timestamps.
+    assert items_path.read_bytes() == before_bytes
 
 
 def test_media_command_creates_media_dir_and_downloads_pending_photos(tmp_path: Path, monkeypatch):
@@ -140,6 +147,89 @@ def test_media_command_creates_media_dir_and_downloads_pending_photos(tmp_path: 
     assert (tmp_path / "data" / "media" / "42" / "0.png").exists()
 
 
+def test_media_command_resume_after_interrupt_completes_remaining(tmp_path: Path, monkeypatch):
+    """Ctrl-C mid-batch leaves items.json valid; the next run completes the rest.
+
+    Setup: an item with 3 pending photos. Run 1 raises KeyboardInterrupt
+    after the 2nd photo's GET, so:
+      - photo 0 was downloaded and persisted by `on_progress`,
+      - photo 1's session.get raises, propagating out of `download_all`
+        (mid-photo: no transition persisted for it, stays Pending),
+      - photo 2 never starts.
+    Run 2 uses a fresh session that succeeds for every photo and verifies
+    that all three end up Downloaded.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    from xbrain.models import MediaPhotoDownloaded, MediaPhotoPending
+
+    _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("99")
+    item.media = [
+        MediaPhotoPending(url="https://pbs.twimg.com/media/R0.png"),
+        MediaPhotoPending(url="https://pbs.twimg.com/media/R1.png"),
+        MediaPhotoPending(url="https://pbs.twimg.com/media/R2.png"),
+    ]
+    save_store({"99": item}, tmp_path / "data" / "items.json")
+
+    buffer = _io.BytesIO()
+    Image.new("RGB", (4, 3), color=(50, 60, 70)).save(buffer, format="PNG")
+    png = buffer.getvalue()
+
+    class _InterruptingSession:
+        """Returns 200 for the 1st photo, raises KeyboardInterrupt on the 2nd."""
+
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+            self.call_count = 0
+
+        def get(self, _url, *, timeout):
+            self.call_count += 1
+            if self.call_count == 2:
+                raise KeyboardInterrupt
+            class _Resp:
+                status_code = 200
+                content = png
+            return _Resp()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _InterruptingSession)
+    result1 = runner.invoke(app, ["media"])
+    # Typer surfaces KeyboardInterrupt as a non-zero exit code.
+    assert result1.exit_code != 0
+
+    from xbrain.store import load_store
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    media = reloaded["99"].media
+    assert isinstance(media[0], MediaPhotoDownloaded)
+    # Photo 1 stays Pending because the KeyboardInterrupt fired BEFORE
+    # the transition was recorded (the seam: `on_progress` is what
+    # persists per-photo state; we never reached it).
+    assert isinstance(media[1], MediaPhotoPending)
+    assert isinstance(media[2], MediaPhotoPending)
+
+    # Run 2: fresh session that succeeds for every GET.
+    class _OkSession:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 200
+                content = png
+            return _Resp()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _OkSession)
+    result2 = runner.invoke(app, ["media"])
+    assert result2.exit_code == 0
+
+    final = load_store(tmp_path / "data" / "items.json")
+    for entry in final["99"].media:
+        assert isinstance(entry, MediaPhotoDownloaded)
+
+
 def test_media_command_propagates_total_failure_as_exit_1(tmp_path: Path, monkeypatch):
     """A run where every download fails surfaces as exit-1 (mirrors #24)."""
     from xbrain.models import MediaPhotoPending
@@ -171,6 +261,63 @@ def test_media_command_propagates_total_failure_as_exit_1(tmp_path: Path, monkey
 
     reloaded = load_store(tmp_path / "data" / "items.json")
     assert isinstance(reloaded["99"].media[0], _MPF)
+
+
+def test_media_command_warns_when_items_filter_matches_nothing(tmp_path: Path, monkeypatch):
+    """`--items` with IDs absent from the store prints an AVISO to stderr."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["media", "--items", "ghost-id-1,ghost-id-2"])
+    assert result.exit_code == 0
+    # The CLI mixes stdout and stderr in CliRunner output; the AVISO is on stderr
+    # — combined output is fine for the substring check.
+    assert "AVISO" in result.output
+    assert "ghost-id-1" in result.output
+
+
+def test_media_command_verbose_lists_failed_urls(tmp_path: Path, monkeypatch):
+    """`--verbose` prints `<item_id> <reason> <url>` per failure on stderr."""
+    from xbrain.models import MediaPhotoPending
+
+    _setup_repo(tmp_path, monkeypatch)
+    items = {
+        "1": _linked_item("1"),
+        "2": _linked_item("2"),
+    }
+    items["1"].media = [MediaPhotoPending(url="https://pbs.twimg.com/media/V1.png")]
+    items["2"].media = [MediaPhotoPending(url="https://pbs.twimg.com/media/V2.png")]
+    save_store(items, tmp_path / "data" / "items.json")
+
+    import io as _io
+    from PIL import Image
+
+    buffer = _io.BytesIO()
+    Image.new("RGB", (4, 3)).save(buffer, format="PNG")
+    png = buffer.getvalue()
+
+    class _MixedSession:
+        """Photo for item 1 succeeds; photo for item 2 returns 404 three times."""
+
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, url, *, timeout):
+            if "V1" in url:
+                class _Ok:
+                    status_code = 200
+                    content = png
+                return _Ok()
+            class _Fail:
+                status_code = 404
+                content = b""
+            return _Fail()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _MixedSession)
+    result = runner.invoke(app, ["media", "--verbose"])
+    assert result.exit_code == 0
+    assert "Failed photos" in result.output
+    assert "http_4xx" in result.output
+    assert "V2" in result.output
 
 
 def test_media_command_respects_items_filter(tmp_path: Path, monkeypatch):

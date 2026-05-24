@@ -512,6 +512,54 @@ def test_diff_media_zero_when_no_media(tmp_path: Path) -> None:
     assert report.media.delta_downloaded == 0
 
 
+def test_diff_media_reports_delta_failed(tmp_path: Path) -> None:
+    """The diff surfaces a `delta_failed` count between snapshots.
+
+    Setup: snapshot A has 1 failed photo, snapshot B has 3 failed photos
+    (e.g. a re-run hit more 4xx URLs). The delta is +2, surfaced both on
+    `report.media.delta_failed` and on `summary.media_delta_failed`.
+    """
+    from xbrain.models import MediaPhotoFailed
+
+    def _failed(url: str) -> MediaPhotoFailed:
+        return MediaPhotoFailed(
+            url=url,
+            failure_reason="http_4xx",
+            attempts=1,
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _seed(
+        a,
+        items={
+            "1": _item_with_media("1", [_failed("https://pbs.twimg.com/media/A1.png")]),
+        },
+        vocab_slugs=[],
+    )
+    _seed(
+        b,
+        items={
+            "1": _item_with_media(
+                "1",
+                [
+                    _failed("https://pbs.twimg.com/media/A1.png"),
+                    _failed("https://pbs.twimg.com/media/A2.png"),
+                ],
+            ),
+            "2": _item_with_media("2", [_failed("https://pbs.twimg.com/media/B1.png")]),
+        },
+        vocab_slugs=[],
+    )
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.failed == 1
+    assert report.media.b.failed == 3
+    assert report.media.delta_failed == 2
+    assert report.summary.media_delta_failed == 2
+
+
 def test_diff_media_counts_video_pending_separately(tmp_path: Path) -> None:
     """Video-pending entries don't bleed into the photo counters."""
     from xbrain.models import MediaVideoPending
