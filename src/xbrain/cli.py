@@ -24,6 +24,8 @@ from xbrain.extract.threads import expand_threads
 from xbrain.fetch import fetch_pending
 from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
+from xbrain.media import download_all as run_media_download
+from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.models import ArchiveImport, Author, SourceName
 from xbrain.rubrics import load_vocab, save_vocab
 from xbrain.store import (
@@ -238,6 +240,84 @@ def fetch(
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
     _run_fetch(_config(), _parse_date(since), _parse_date(until), force)
+
+
+def _run_media(
+    cfg: Config,
+    *,
+    force: bool,
+    limit: int | None,
+    items_filter: list[str] | None,
+) -> None:
+    """Run the photo downloader: snapshot, load, download, persist, summarise.
+
+    Always snapshots `data/` first (the same recovery boundary as
+    `vocab --regenerate` etc, #17): a botched run can be undone with
+    `xbrain snapshot restore`.
+
+    Persistence happens twice: once after every photo transition (the
+    `on_progress` callback writes the store atomically, so Ctrl-C mid-run
+    leaves `items.json` coherent), and once unconditionally at the end so
+    the elapsed timestamp on the last `MediaPhotoDownloaded` is captured
+    even if no transition fired (e.g. a `--limit 0` no-op).
+    """
+    _auto_snapshot(cfg, "media")
+    store = load_store(cfg.items_path)
+
+    def _persist() -> None:
+        save_store(store, cfg.items_path)
+
+    try:
+        report = run_media_download(
+            store,
+            cfg.media_dir,
+            force=force,
+            limit=limit,
+            items_filter=items_filter,
+            on_progress=_persist,
+        )
+    finally:
+        # Persist whatever changed, even if `download_all` raised. A
+        # RuntimeError on total failure must not discard the per-photo
+        # MediaPhotoFailed records that landed before the raise.
+        save_store(store, cfg.items_path)
+    media_emit_summary_line(report)
+    typer.echo(
+        f"Media: descargadas {report.photos_downloaded}, "
+        f"fallidas {report.photos_failed_permanent + report.photos_failed_transient}, "
+        f"saltadas {report.photos_skipped_already_downloaded}"
+    )
+
+
+@app.command()
+@_handle_cli_errors
+def media(
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-descargar todas las fotos, incluso las ya descargadas o permanentemente "
+        "fallidas (HTTP 4xx, format_error).",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Máximo número de descargas a intentar en esta ejecución.",
+    ),
+    items: str | None = typer.Option(
+        None,
+        "--items",
+        help="IDs de items separados por comas para limitar el alcance del run.",
+    ),
+) -> None:
+    """Descarga las fotos de los X-posts referenciadas en `items.json`.
+
+    Solo descarga fotos (`MediaPhotoPending` + reintentos transient). Los
+    vídeos quedan en su variante `MediaVideoPending` para una fase posterior
+    — la opción `--force` NO los descarga.
+    """
+    cfg = _config()
+    items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
+    _run_media(cfg, force=force, limit=limit, items_filter=items_filter)
 
 
 @app.command()

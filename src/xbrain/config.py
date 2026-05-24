@@ -35,6 +35,18 @@ class Config:
         return self.data_dir / "items.json"
 
     @property
+    def media_dir(self) -> Path:
+        """Root directory for downloaded photo bytes (Phase A — issue #33).
+
+        Photos are stored at ``<media_dir>/<item-id>/<index>.<ext>``. Lives
+        under `data/` so it shares the gitignore with the rest of the
+        artifact tree, and so `xbrain snapshot` would naturally bundle it
+        with a future copy step (out of scope for #33 — snapshots cover
+        the JSON store, not the media bytes).
+        """
+        return self.data_dir / "media"
+
+    @property
     def state_path(self) -> Path:
         return self.data_dir / "state.json"
 

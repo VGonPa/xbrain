@@ -80,6 +80,145 @@ def test_cli_reports_missing_config_cleanly(tmp_path: Path, monkeypatch):
     assert "Error:" in result.output
 
 
+def test_media_command_runs_on_empty_store(tmp_path: Path, monkeypatch):
+    """`xbrain media` with no media is a no-op (creates a snapshot, exits 0)."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["media"])
+    assert result.exit_code == 0
+    # The pre-media snapshot must have been created (#17 contract for any
+    # destructive op — media downloads write the items.json store).
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-media" in p.name for p in snapshots)
+
+
+def test_media_command_creates_media_dir_and_downloads_pending_photos(
+    tmp_path: Path, monkeypatch
+):
+    """End-to-end through the CLI with a fake session.
+
+    The test patches `xbrain.media.requests.Session` to inject canned
+    responses so the CLI hits the real `download_all` orchestrator
+    without any real network call.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    from xbrain.models import MediaPhotoDownloaded, MediaPhotoPending
+
+    _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("42")
+    item.media = [MediaPhotoPending(url="https://pbs.twimg.com/media/Z.png")]
+    save_store({"42": item}, tmp_path / "data" / "items.json")
+
+    # Build a valid PNG byte payload Pillow can decode.
+    buffer = _io.BytesIO()
+    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(buffer, format="PNG")
+    bytes_data = buffer.getvalue()
+
+    class _FakeSession:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 200
+                content = bytes_data
+
+            return _Resp()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _FakeSession)
+    result = runner.invoke(app, ["media"])
+    assert result.exit_code == 0, result.output
+
+    # The downloaded photo landed in the variant + the file is on disk.
+    from xbrain.store import load_store
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    entry = reloaded["42"].media[0]
+    assert isinstance(entry, MediaPhotoDownloaded)
+    assert entry.local_path == "42/0.png"
+    assert (tmp_path / "data" / "media" / "42" / "0.png").exists()
+
+
+def test_media_command_propagates_total_failure_as_exit_1(tmp_path: Path, monkeypatch):
+    """A run where every download fails surfaces as exit-1 (mirrors #24)."""
+    from xbrain.models import MediaPhotoPending
+
+    _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("99")
+    item.media = [MediaPhotoPending(url="https://pbs.twimg.com/media/X.png")]
+    save_store({"99": item}, tmp_path / "data" / "items.json")
+
+    class _FakeSession:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 404
+                content = b""
+
+            return _Resp()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _FakeSession)
+    result = runner.invoke(app, ["media"])
+    assert result.exit_code == 1
+    # Even on total failure, the failure record is persisted: the CLI's
+    # finally block writes the store before the RuntimeError propagates.
+    from xbrain.store import load_store
+
+    from xbrain.models import MediaPhotoFailed as _MPF
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(reloaded["99"].media[0], _MPF)
+
+
+def test_media_command_respects_items_filter(tmp_path: Path, monkeypatch):
+    """`--items` limits the run to specific item IDs."""
+    import io as _io
+
+    from PIL import Image
+
+    from xbrain.models import MediaPhotoPending
+
+    _setup_repo(tmp_path, monkeypatch)
+    item_a = _linked_item("a")
+    item_b = _linked_item("b")
+    item_a.media = [MediaPhotoPending(url="https://pbs.twimg.com/media/A.png")]
+    item_b.media = [MediaPhotoPending(url="https://pbs.twimg.com/media/B.png")]
+    save_store({"a": item_a, "b": item_b}, tmp_path / "data" / "items.json")
+
+    buffer = _io.BytesIO()
+    Image.new("RGB", (4, 3)).save(buffer, format="PNG")
+    bytes_data = buffer.getvalue()
+
+    class _FakeSession:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 200
+                content = bytes_data
+
+            return _Resp()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _FakeSession)
+    result = runner.invoke(app, ["media", "--items", "b"])
+    assert result.exit_code == 0
+
+    from xbrain.store import load_store
+
+    from xbrain.models import MediaPhotoDownloaded, MediaPhotoPending as _MPP
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    # `a` stayed pending; only `b` was downloaded.
+    assert isinstance(reloaded["a"].media[0], _MPP)
+    assert isinstance(reloaded["b"].media[0], MediaPhotoDownloaded)
+
+
 def test_parse_date_returns_utc_aware():
     from xbrain.cli import _parse_date
 
