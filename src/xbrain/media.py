@@ -274,6 +274,7 @@ def download_all(
         on_progress=on_progress,
         force=force,
     )
+    _sweep_part_orphans(media_root)
     started = time.monotonic()
     report = MediaReport()
     target_ids: set[str] | None = set(items_filter) if items_filter else None
@@ -335,6 +336,16 @@ def _record_outcome(
             report.photos_failed_transient += 1
         else:
             report.photos_failed_permanent += 1
+        # Visible breadcrumb for every failed photo — without this the
+        # total-failure RuntimeError says "see warnings above" but logger
+        # was never wired up. One line per failure, structured.
+        logger.warning(
+            "media: download failed item=%s url=%s reason=%s error=%s",
+            item_id,
+            entry.url,
+            entry.failure_reason,
+            entry.error,
+        )
     # Any other variant (e.g. video pending) is not produced by _download_one,
     # so we don't need a branch here. `original` is currently unused — kept
     # in the signature for symmetry / future delta accounting.
@@ -402,7 +413,21 @@ def _download_one(
             width, height, fmt = decoded
             extension = _FORMAT_EXTENSIONS.get(fmt.lower(), ".jpg")
             local_path = _local_path(item_id, index, extension)
-            _write_bytes(media_root / local_path, response.content)
+            try:
+                _write_bytes(media_root / local_path, response.content)
+            except OSError as exc:
+                # Disk full, permission denied, read-only filesystem —
+                # bucket as `unknown_error` (transient) so the next run
+                # picks it up once the operator clears the underlying
+                # condition. Without this guard, the OSError escapes
+                # per-item bucketing and aborts the whole batch.
+                return _failed(
+                    entry=entry,
+                    url=url,
+                    reason="unknown_error",
+                    error=f"local write failed: {exc}",
+                    attempts=attempts,
+                )
             return MediaPhotoDownloaded(
                 url=url,
                 local_path=local_path,
@@ -491,8 +516,12 @@ def _decode_image(data: bytes) -> tuple[int, int, str] | None:
     """Validate bytes with Pillow; return ``(width, height, format)`` or None.
 
     A successful decode means the CDN sent us something Obsidian will render.
-    A failure returns None so the caller can bucket as `format_error` —
-    Pillow's exception types are too noisy to propagate verbatim.
+    A failure returns None so the caller can bucket as `format_error`.
+
+    The exception set is narrow-by-design: Pillow-specific signals only.
+    Catching the parent `OSError` would swallow `FileNotFoundError`,
+    `PermissionError` and other real I/O bugs — we want those to propagate
+    as tracebacks, not be silently bucketed as `format_error`.
     """
     try:
         with Image.open(io.BytesIO(data)) as image:
@@ -500,7 +529,7 @@ def _decode_image(data: bytes) -> tuple[int, int, str] | None:
         # `verify()` invalidates the image — re-open to read size + format.
         with Image.open(io.BytesIO(data)) as image:
             return image.width, image.height, image.format or "jpg"
-    except (UnidentifiedImageError, OSError, ValueError):
+    except (UnidentifiedImageError, Image.DecompressionBombError, SyntaxError):
         return None
 
 
@@ -511,6 +540,10 @@ def _write_bytes(path: Path, data: bytes) -> None:
     `open` and `write_bytes` would leave a zero-byte partial file that the
     next run would consider downloaded. We avoid that by writing to a
     sibling tmp file and `os.replace`ing it into place.
+
+    Orphan `.part` files left behind by a hard interruption (SIGKILL, OOM)
+    that bypassed our `except BaseException` cleanup are swept on the next
+    `download_all` entry — see `_sweep_part_orphans`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".part")
@@ -520,6 +553,25 @@ def _write_bytes(path: Path, data: bytes) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _sweep_part_orphans(media_root: Path) -> None:
+    """Remove stale ``*.part`` files left by hard-killed previous runs.
+
+    A SIGKILL or OOM kill between `tmp.write_bytes` and `tmp.replace` would
+    leave a `<n>.<ext>.part` next to the final file location with no entry
+    in `items.json` referencing it. We do not block on the sweep — best
+    effort: any path we cannot unlink is logged and skipped, on the theory
+    that "the operator can clean up later" beats "the next photo refuses
+    to download because the tree has an unwritable file in it".
+    """
+    if not media_root.exists():
+        return
+    for orphan in media_root.rglob("*.part"):
+        try:
+            orphan.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("media: could not remove stale .part file %s: %s", orphan, exc)
 
 
 def _url_with_name(url: str, size: str) -> str:

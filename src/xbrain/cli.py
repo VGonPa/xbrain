@@ -256,11 +256,12 @@ def _run_media(
     force: bool,
     limit: int | None,
     items_filter: list[str] | None,
+    verbose: bool = False,
 ) -> None:
     """Run the photo downloader: snapshot, load, download, persist, summarise.
 
     Always snapshots `data/` first (the same recovery boundary as
-    `vocab --regenerate` etc, #17): a botched run can be undone with
+    `vocab --regenerate` etc): a botched run can be undone with
     `xbrain snapshot restore`.
 
     Persistence happens twice: once after every photo transition (the
@@ -268,7 +269,27 @@ def _run_media(
     leaves `items.json` coherent), and once unconditionally at the end so
     the elapsed timestamp on the last `MediaPhotoDownloaded` is captured
     even if no transition fired (e.g. a `--limit 0` no-op).
+
+    Persistence failure semantics: if `save_store` raises inside the
+    `on_progress` callback (e.g. disk full), the exception propagates and
+    aborts the run. The state of `items.json` for the photo currently
+    being processed is whatever the previous successful write captured;
+    later items remain in their pre-run variant. The `finally` block
+    below still attempts a final write, but on a disk-full condition that
+    too may fail — in which case the in-memory transitions for the
+    interrupted batch are lost. This is acceptable: a re-run after the
+    operator clears the disk picks up every still-pending photo cleanly.
     """
+    if items_filter:
+        target = set(items_filter)
+        store_ids = set(load_store(cfg.items_path))
+        missing = target - store_ids
+        if missing and not (target & store_ids):
+            typer.echo(
+                f"AVISO: --items {','.join(items_filter)} no coincide con ningún item "
+                f"del store ({len(store_ids)} items). El run será un no-op.",
+                err=True,
+            )
     _auto_snapshot(cfg, "media")
     store = load_store(cfg.items_path)
 
@@ -295,6 +316,11 @@ def _run_media(
         f"fallidas {report.photos_failed_permanent + report.photos_failed_transient}, "
         f"saltadas {report.photos_skipped_already_downloaded}"
     )
+    if verbose and report.per_item_failures:
+        typer.echo("Failed photos:", err=True)
+        for item_id, failures in sorted(report.per_item_failures.items()):
+            for url, reason in failures:
+                typer.echo(f"  {item_id}  {reason:<14}  {url}", err=True)
 
 
 @app.command()
@@ -316,6 +342,11 @@ def media(
         "--items",
         help="IDs de items separados por comas para limitar el alcance del run.",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Imprime cada foto fallida (item_id, motivo, URL) al final del run.",
+    ),
 ) -> None:
     """Descarga las fotos de los X-posts referenciadas en `items.json`.
 
@@ -325,7 +356,7 @@ def media(
     """
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
-    _run_media(cfg, force=force, limit=limit, items_filter=items_filter)
+    _run_media(cfg, force=force, limit=limit, items_filter=items_filter, verbose=verbose)
 
 
 @app.command()
