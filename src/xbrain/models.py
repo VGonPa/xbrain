@@ -53,11 +53,158 @@ class Link(BaseModel):
     domain: str
 
 
-class Media(BaseModel):
-    """One photo or video attached to an item."""
+# Categorised reasons a photo download can fail — mirrors the design of
+# `FailureReason` for content fetches (#19/#20). The transient subset
+# (`_TRANSIENT_MEDIA_FAILURES` in `xbrain.media`) is retried on the next
+# `xbrain media` run; permanent reasons stay as-is unless `--force` is passed.
+MediaFailureReason = Literal[
+    "http_4xx",       # permanent: dead URL / cdn-removed media
+    "http_5xx",       # transient: server-side, may succeed on retry
+    "timeout",        # transient: network blip / cdn slow path
+    "format_error",   # permanent: bytes downloaded but Pillow rejected them
+    "unknown_error",  # bare-except bucket; transient by default (mirrors fetch.py #20)
+]
 
-    type: Literal["photo", "video"]
+
+class _MediaPhotoBase(BaseModel):
+    """Common fields for the three photo variants.
+
+    `type` is kept as the legacy discriminator that pre-Phase-A records used
+    so a re-dump after migration still carries it. The Phase A discriminator
+    is `kind` (see the variant subclasses) — globally unique across photo +
+    video variants because `state="pending"` would collide between
+    `MediaPhotoPending` and `MediaVideoPending`.
+    """
+
+    type: Literal["photo"] = "photo"
     url: str
+
+
+class MediaPhotoPending(_MediaPhotoBase):
+    """A photo URL captured at extract time, download not attempted yet.
+
+    This is the initial state for every photo entry the extractor or the
+    archive importer creates. `xbrain media` walks the store and tries to
+    advance each pending entry to either `MediaPhotoDownloaded` (bytes on
+    disk) or `MediaPhotoFailed` (categorised failure).
+    """
+
+    kind: Literal["photo_pending"] = "photo_pending"
+
+
+class MediaPhotoDownloaded(_MediaPhotoBase):
+    """A photo successfully downloaded; the bytes exist at `local_path`.
+
+    `local_path` is relative to `data/media/` so it can be moved across
+    machines without rewriting the store. Dimensions and byte size are
+    captured for completeness — they let `xbrain diff` answer "did the
+    download cascade pick a smaller size on a re-run?" without re-reading
+    every file.
+    """
+
+    kind: Literal["photo_downloaded"] = "photo_downloaded"
+    local_path: str
+    width: int
+    height: int
+    bytes_size: int
+    downloaded_at: datetime
+
+
+class MediaPhotoFailed(_MediaPhotoBase):
+    """A photo download attempted and failed (categorised).
+
+    Mirrors `ContentSourceFailure`: `failure_reason` is required so a
+    failure is always demonstrable evidence (no Optional, no silent loss).
+    `attempts` counts how many `xbrain media` runs have tried this URL —
+    each transient retry bumps it.
+    """
+
+    kind: Literal["photo_failed"] = "photo_failed"
+    failure_reason: MediaFailureReason
+    error: str | None = None
+    attempts: int = 0
+    last_attempt_at: datetime
+
+
+class MediaVideoPending(BaseModel):
+    """A video URL captured but not downloaded in Phase A.
+
+    Phase A is photos-only — videos remain in this state until Phase B
+    adds HLS + ffmpeg support. The variant is in the union from day one so
+    the wire shape does not change when Phase B lands.
+    """
+
+    type: Literal["video"] = "video"
+    kind: Literal["video_pending"] = "video_pending"
+    url: str
+
+
+def _normalise_legacy_media(value: Any) -> Any:
+    """Migrate the pre-Phase-A ``{type, url}`` shape to the new tagged union.
+
+    The legacy shape (the original `Media(type=..., url=...)` BaseModel)
+    is mapped one-to-one:
+
+    - ``{"type": "photo", "url": ...}`` → `MediaPhotoPending` payload.
+    - ``{"type": "video", "url": ...}`` → `MediaVideoPending` payload.
+
+    Records that already carry a ``kind`` field are passed through
+    unchanged — they are either fresh (extract-time) or persisted
+    Phase A variants. A record with neither `kind` nor a recognised
+    `type` is passed through unchanged so pydantic raises a clean
+    discriminator error rather than this validator inventing a state.
+    """
+    if not isinstance(value, dict):
+        return value
+    if "kind" in value:
+        return value
+    type_value = value.get("type")
+    if type_value == "photo":
+        return {**value, "kind": "photo_pending"}
+    if type_value == "video":
+        return {**value, "kind": "video_pending"}
+    return value
+
+
+# The persisted media type — a discriminated union over the four variants,
+# wrapped in an outer `BeforeValidator` that promotes the legacy
+# `{type, url}` shape on read. Same layering rationale as `ContentSource`
+# (see the long comment above): the discriminator check must run AFTER
+# the legacy normaliser, otherwise pre-Phase-A records get rejected.
+_MediaTagged = Annotated[
+    Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending],
+    Field(discriminator="kind"),
+]
+MediaEntry = Annotated[
+    _MediaTagged,
+    BeforeValidator(_normalise_legacy_media),
+]
+
+
+# TypeAdapter for tests / ad-hoc validation of a single entry outside an
+# `Item` context (mirrors `ContentSourceAdapter`).
+MediaEntryAdapter: TypeAdapter[
+    Union[MediaPhotoPending, MediaPhotoDownloaded, MediaPhotoFailed, MediaVideoPending]
+] = TypeAdapter(MediaEntry)
+
+
+def Media(*, type: Literal["photo", "video"], url: str) -> MediaPhotoPending | MediaVideoPending:
+    """Backward-compatible factory matching the pre-Phase-A constructor.
+
+    The pre-Phase-A `Media` class was a flat `BaseModel(type, url)`. The
+    extractor (`extract/graphql.py`) and the archive importer
+    (`archive.py`) call `Media(type="photo", url=...)` directly — they
+    are deliberately out of scope for Phase A (issue #33), so this
+    factory keeps their call sites working without modification by
+    returning the appropriate variant.
+
+    Photo URLs become `MediaPhotoPending` (the initial state for
+    `xbrain media` to advance); video URLs become `MediaVideoPending`
+    (terminal in Phase A).
+    """
+    if type == "photo":
+        return MediaPhotoPending(url=url)
+    return MediaVideoPending(url=url)
 
 
 class ThreadInfo(BaseModel):
@@ -250,7 +397,7 @@ class Item(BaseModel):
     text: str
     created_at: datetime
     captured_at: datetime
-    media: list[Media] = Field(default_factory=list)
+    media: list[MediaEntry] = Field(default_factory=list)
     links: list[Link] = Field(default_factory=list)
     quoted_id: str | None = None
     thread: ThreadInfo | None = None

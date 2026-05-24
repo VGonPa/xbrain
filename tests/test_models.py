@@ -234,6 +234,145 @@ def test_content_source_legacy_failure_without_reason_buckets_as_transient():
     assert src.http_status == 429
 
 
+def test_media_legacy_photo_shape_migrates_to_pending():
+    """A pre-Phase-A ``{type: "photo", url}`` record reads as MediaPhotoPending.
+
+    The on-disk shape before issue #33 was a flat ``Media(type, url)``. The
+    `_normalise_legacy_media` BeforeValidator promotes it to the new
+    tagged-union shape on read, so existing ``data/items.json`` files keep
+    working without a manual migration step.
+    """
+    from xbrain.models import MediaEntryAdapter, MediaPhotoPending
+
+    entry = MediaEntryAdapter.validate_python(
+        {"type": "photo", "url": "https://pbs.twimg.com/media/X.jpg"}
+    )
+    assert isinstance(entry, MediaPhotoPending)
+    assert entry.url == "https://pbs.twimg.com/media/X.jpg"
+    assert entry.kind == "photo_pending"
+    assert entry.type == "photo"
+
+
+def test_media_legacy_video_shape_migrates_to_video_pending():
+    """A pre-Phase-A ``{type: "video", url}`` record reads as MediaVideoPending."""
+    from xbrain.models import MediaEntryAdapter, MediaVideoPending
+
+    entry = MediaEntryAdapter.validate_python(
+        {"type": "video", "url": "https://video.twimg.com/x.mp4"}
+    )
+    assert isinstance(entry, MediaVideoPending)
+    assert entry.url == "https://video.twimg.com/x.mp4"
+    assert entry.kind == "video_pending"
+
+
+def test_media_new_tagged_shape_passes_through():
+    """A record that already carries `kind` is preserved verbatim.
+
+    Round-trip dumps from the new variants must read back as the same
+    variant — a freshly-downloaded photo on the live store must NOT be
+    re-bucketed as pending.
+    """
+    from datetime import datetime, timezone
+
+    from xbrain.models import MediaEntryAdapter, MediaPhotoDownloaded
+
+    payload = {
+        "kind": "photo_downloaded",
+        "type": "photo",
+        "url": "https://pbs.twimg.com/media/X.jpg",
+        "local_path": "123/0.jpg",
+        "width": 1200,
+        "height": 800,
+        "bytes_size": 99000,
+        "downloaded_at": datetime(2026, 5, 24, tzinfo=timezone.utc).isoformat(),
+    }
+    entry = MediaEntryAdapter.validate_python(payload)
+    assert isinstance(entry, MediaPhotoDownloaded)
+    assert entry.local_path == "123/0.jpg"
+    assert entry.width == 1200
+
+
+def test_media_discriminator_rejects_unknown_kind():
+    """Silently inventing a variant would mask data corruption — reject loudly."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaEntryAdapter
+
+    with pytest.raises(ValidationError):
+        MediaEntryAdapter.validate_python(
+            {"kind": "photo_in_orbit", "type": "photo", "url": "https://pbs.twimg.com/X.jpg"}
+        )
+
+
+def test_media_failed_requires_failure_reason():
+    """Symmetric with ContentSourceFailure: a failure without a reason is a
+    type error. The validator constructs the variant via pydantic, which
+    flags the missing required field.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaPhotoFailed
+
+    with pytest.raises(ValidationError):
+        MediaPhotoFailed(url="u")  # missing failure_reason and last_attempt_at
+
+
+def test_media_factory_returns_pending_variant_for_photo():
+    """The backward-compat `Media(type=..., url=...)` factory must yield a
+    `MediaPhotoPending` so the extractor and archive callsites — which are
+    out of scope for #33 — keep building items the new union accepts.
+    """
+    from xbrain.models import Media, MediaPhotoPending
+
+    entry = Media(type="photo", url="https://pbs.twimg.com/media/X.jpg")
+    assert isinstance(entry, MediaPhotoPending)
+    assert entry.kind == "photo_pending"
+
+
+def test_media_factory_returns_video_pending_for_video():
+    """The factory routes `type="video"` to `MediaVideoPending` — videos
+    are deliberately not downloaded in Phase A.
+    """
+    from xbrain.models import Media, MediaVideoPending
+
+    entry = Media(type="video", url="https://video.twimg.com/x.mp4")
+    assert isinstance(entry, MediaVideoPending)
+    assert entry.kind == "video_pending"
+
+
+def test_item_with_legacy_media_loads_into_pending_variant():
+    """A persisted Item with the legacy media shape migrates on read.
+
+    Exercises the full path: the Item validator hits MediaEntry's
+    BeforeValidator on each element of the `media` list. This is the
+    invariant the wire-shape compatibility rests on for #33.
+    """
+    from datetime import datetime, timezone
+
+    from xbrain.models import Item, MediaPhotoPending, MediaVideoPending
+
+    payload = {
+        "id": "1",
+        "source": "bookmark",
+        "url": "https://x.com/a/status/1",
+        "author": {"handle": "a", "name": "A"},
+        "text": "t",
+        "created_at": datetime(2026, 5, 1, tzinfo=timezone.utc).isoformat(),
+        "captured_at": datetime(2026, 5, 16, tzinfo=timezone.utc).isoformat(),
+        "media": [
+            {"type": "photo", "url": "https://pbs.twimg.com/media/X.jpg"},
+            {"type": "video", "url": "https://video.twimg.com/x.mp4"},
+        ],
+        "links": [],
+    }
+    item = Item.model_validate(payload)
+    assert len(item.media) == 2
+    assert isinstance(item.media[0], MediaPhotoPending)
+    assert isinstance(item.media[1], MediaVideoPending)
+
+
 def test_topic_page_model_round_trips():
     from datetime import datetime, timezone
 
