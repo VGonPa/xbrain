@@ -54,6 +54,243 @@ def test_log_lists_every_item(tmp_path: Path):
     assert "Note 2" in log
 
 
+def test_generate_renders_downloaded_photo_as_obsidian_embed(tmp_path: Path):
+    """A `MediaPhotoDownloaded` becomes a `![[_media/<id>/<n>.<ext>]]` embed.
+
+    The bytes are copied from `media_root` into the vault's `_media/`
+    subdirectory at render time, so the resulting vault is self-contained
+    and the embed resolves without user configuration.
+    """
+    from xbrain.models import MediaPhotoDownloaded
+
+    media_root = tmp_path / "media"
+    photo_dir = media_root / "1"
+    photo_dir.mkdir(parents=True)
+    (photo_dir / "0.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/A.png",
+            local_path="1/0.png",
+            width=10,
+            height=8,
+            bytes_size=12,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    output_dir = tmp_path / "vault"
+    generate({"1": item}, output_dir, media_root=media_root)
+    note = next((output_dir / "items").glob("*.md"))
+    body = note.read_text(encoding="utf-8")
+    assert "![[_media/1/0.png]]" in body
+    # The file got mirrored into the vault.
+    assert (output_dir / "_media" / "1" / "0.png").exists()
+
+
+def test_generate_renders_failed_photo_as_warning(tmp_path: Path):
+    """A `MediaPhotoFailed` becomes a one-line ⚠ warning carrying URL + reason."""
+    from xbrain.models import MediaPhotoFailed
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoFailed(
+            url="https://pbs.twimg.com/media/dead.png",
+            failure_reason="http_4xx",
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    generate({"1": item}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md"))
+    body = note.read_text(encoding="utf-8")
+    assert "⚠" in body
+    assert "https://pbs.twimg.com/media/dead.png" in body
+    assert "URL no encontrada" in body or "HTTP 4xx" in body
+
+
+def test_generate_skips_pending_photo_silently(tmp_path: Path):
+    """A `MediaPhotoPending` produces NO output — `xbrain media` is the seam.
+
+    A pending photo is not an error; it just means the next `xbrain media`
+    run will pick it up. Surfacing it in the note as "still pending" would
+    be noise. The note is therefore identical to one without any media.
+    """
+    from xbrain.models import MediaPhotoPending
+
+    item = _item("1", with_link=True)
+    item.media = [MediaPhotoPending(url="https://pbs.twimg.com/media/pending.png")]
+
+    generate({"1": item}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md"))
+    body = note.read_text(encoding="utf-8")
+    assert "pending.png" not in body
+    assert "⚠" not in body
+    assert "🎥" not in body
+
+
+def test_generate_renders_video_pending_as_placeholder(tmp_path: Path):
+    """A `MediaVideoPending` becomes a 🎥 placeholder carrying the URL.
+
+    Phase A does not download videos. The URL is the only evidence we
+    have — surface it so the reader can click through to X.
+    """
+    from xbrain.models import MediaVideoPending
+
+    item = _item("1", with_link=True)
+    item.media = [MediaVideoPending(url="https://video.twimg.com/x.mp4")]
+
+    generate({"1": item}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md"))
+    body = note.read_text(encoding="utf-8")
+    assert "🎥" in body
+    assert "https://video.twimg.com/x.mp4" in body
+
+
+def test_generate_media_only_item_gets_a_note(tmp_path: Path):
+    """Phase A: an item with only media (no link, no enrichment) is note-worthy.
+
+    Pre-#33, `_has_note(item)` only returned True for items with links or
+    enrichment. A photo-only tweet was invisible. This test pins the new
+    behaviour: a photo-only item gets its note rendered.
+    """
+    from xbrain.models import MediaPhotoDownloaded
+
+    media_root = tmp_path / "media"
+    (media_root / "1").mkdir(parents=True)
+    (media_root / "1" / "0.png").write_bytes(b"PNGfake")
+
+    item = _item("1", with_link=False)
+    item.media = [
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/A.png",
+            local_path="1/0.png",
+            width=4,
+            height=3,
+            bytes_size=7,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+    generate({"1": item}, tmp_path, media_root=media_root)
+    notes = list((tmp_path / "items").glob("*.md"))
+    assert len(notes) == 1
+
+
+def test_generate_media_block_precedes_links_section(tmp_path: Path):
+    """Photos render in the Tweet section, ahead of `## Enlaces`.
+
+    The intended read order: tweet text → photos → links → external content.
+    """
+    from xbrain.models import MediaPhotoDownloaded
+
+    media_root = tmp_path / "media"
+    (media_root / "1").mkdir(parents=True)
+    (media_root / "1" / "0.png").write_bytes(b"PNGfake")
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoDownloaded(
+            url="u",
+            local_path="1/0.png",
+            width=4,
+            height=3,
+            bytes_size=7,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    generate({"1": item}, tmp_path, media_root=media_root)
+    body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    embed_idx = body.find("![[_media/1/0.png]]")
+    enlaces_idx = body.find("## Enlaces")
+    assert embed_idx != -1
+    assert enlaces_idx != -1
+    assert embed_idx < enlaces_idx
+
+
+def test_generate_renders_multiple_photos_inline(tmp_path: Path):
+    """All photos render — no cap (per spec decision: "ALL photos inline")."""
+    from xbrain.models import MediaPhotoDownloaded
+
+    media_root = tmp_path / "media"
+    (media_root / "1").mkdir(parents=True)
+    for n in range(4):
+        (media_root / "1" / f"{n}.png").write_bytes(b"PNGfake")
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoDownloaded(
+            url=f"u{n}",
+            local_path=f"1/{n}.png",
+            width=4,
+            height=3,
+            bytes_size=7,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+        for n in range(4)
+    ]
+
+    generate({"1": item}, tmp_path, media_root=media_root)
+    body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    for n in range(4):
+        assert f"![[_media/1/{n}.png]]" in body
+
+
+def test_generate_handles_missing_media_bytes_gracefully(tmp_path: Path):
+    """A `MediaPhotoDownloaded` whose file vanished still renders the embed.
+
+    Missing bytes on disk is a manual-cleanup edge case. We log a warning
+    and still emit the embed — Obsidian shows it as a broken image, which
+    is the right user signal that the bytes are gone.
+    """
+    from xbrain.models import MediaPhotoDownloaded
+
+    media_root = tmp_path / "media"
+    # No file on disk.
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoDownloaded(
+            url="u",
+            local_path="1/0.png",
+            width=4,
+            height=3,
+            bytes_size=7,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    # The generator must not raise — missing bytes is recoverable.
+    generate({"1": item}, tmp_path, media_root=media_root)
+    body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "![[_media/1/0.png]]" in body
+
+
+def test_generate_works_without_media_root_argument(tmp_path: Path):
+    """`media_root=None` is the legacy code path — pending photos stay silent.
+
+    Backward compat: callers that haven't been updated still work. Failed
+    and video-pending entries still render (URL is in the data), only the
+    mirror-to-vault step is skipped.
+    """
+    from xbrain.models import MediaPhotoFailed, MediaPhotoPending
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaPhotoPending(url="https://pbs.twimg.com/media/A.png"),
+        MediaPhotoFailed(
+            url="https://pbs.twimg.com/media/B.png",
+            failure_reason="http_4xx",
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        ),
+    ]
+    generate({"1": item}, tmp_path)  # no media_root
+    body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    # Pending: silent
+    assert "A.png" not in body
+    # Failed: still rendered (URL is in the data, no file needed)
+    assert "B.png" in body
+
+
 def test_slugify_handles_edge_cases():
     slug = slugify("Café del Día")
     assert slug == slug.lower()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from xbrain.models import (
     ContentSourceSuccess,
     FailureReason,
     Item,
+    MediaPhotoDownloaded,
+    MediaPhotoFailed,
+    MediaPhotoPending,
+    MediaVideoPending,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
@@ -29,6 +34,16 @@ _FAILURE_ES: dict[FailureReason, str] = {
     "empty_content": "sin contenido extraíble",
     "unknown_error": "error desconocido",
 }
+
+
+# Subdirectory under `output_dir` where downloaded photos are mirrored at
+# generate time, so an Obsidian vault is fully self-contained. Photos are
+# canonically stored under `data/media/<id>/<n>.<ext>` (Phase A scope) and
+# copied to `<output_dir>/_media/<id>/<n>.<ext>` whenever `generate` runs
+# with a `media_root` argument. The leading underscore keeps the directory
+# at the top of file listings and matches the convention used by static-
+# site generators (Hugo, Jekyll) for non-content assets.
+_VAULT_MEDIA_SUBDIR = "_media"
 
 
 def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
@@ -53,6 +68,7 @@ def generate(
     until: datetime | None = None,
     output_language: str = "English",
     topic_style: str = "wikilink",
+    media_root: Path | None = None,
 ) -> None:
     """Write _index.md, log.md and one note per noted item.
 
@@ -66,6 +82,15 @@ def generate(
     Obsidian ``#slug`` tags. The toggle does not affect frontmatter ``tags:``,
     the index ``## Topics`` section, or the topic-page post lists — those
     stay wikilinks by design.
+
+    `media_root` (Phase A — issue #33) is the directory under which
+    `xbrain media` downloads photos as `<item-id>/<index>.<ext>`. When
+    provided, photos for each item being rendered are copied to
+    `<output_dir>/_media/<item-id>/<index>.<ext>` and embedded in the note
+    body via Obsidian wikilink embeds. When `None`, photo entries render
+    as if no `xbrain media` run had taken place — pending photos are
+    silent, failed and video-pending photos still produce their warning
+    lines (the URL is in the data; only the file bytes are missing).
     """
     if topic_style not in SUPPORTED_TOPIC_STYLES:
         raise ValueError(
@@ -79,12 +104,20 @@ def generate(
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
+            if media_root is not None:
+                _mirror_item_media(item, media_root, output_dir / _VAULT_MEDIA_SUBDIR)
             _write_note(items_dir, item, strings, topic_style)
 
 
 def _has_note(item: Item) -> bool:
-    """An item gets its own note if it has links or has been enriched."""
-    return bool(item.links) or item.enriched is not None
+    """An item gets its own note if it has links, media, or has been enriched.
+
+    Phase A (#33) extends note-worthiness to media: a tweet whose only
+    payload is a photo (no link, no LLM enrichment yet) was previously
+    invisible in the wiki. Including it surfaces the photo as soon as
+    `xbrain media` populates the variant — the natural read flow.
+    """
+    return bool(item.links) or bool(item.media) or item.enriched is not None
 
 
 def _in_range(item: Item, since: datetime | None, until: datetime | None) -> bool:
@@ -157,6 +190,89 @@ def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[st
     return lines
 
 
+def _render_media_lines(item: Item) -> list[str]:
+    """One line per `Item.media` entry, ready to splice into the Tweet section.
+
+    Variant handling (issue #33):
+    - `MediaPhotoDownloaded` → Obsidian embed `![[_media/<id>/<n>.<ext>]]`.
+      The vault is self-contained: `generate()` mirrors the file from
+      `data/media/` into `<output_dir>/_media/` before rendering, so the
+      embed resolves with no user configuration.
+    - `MediaPhotoFailed`      → one-line ⚠ warning carrying the failure
+      reason and the original URL — visible evidence, not a silent drop.
+    - `MediaPhotoPending`     → silent. Not an error, just "the next
+      `xbrain media` run will pick it up".
+    - `MediaVideoPending`     → placeholder warning carrying the URL.
+      Phase A does not download videos, so the URL is the only evidence
+      we surface.
+
+    The output is intentionally plain markdown; the caller (`_render_note`)
+    wraps it in a blank line on either side for readability.
+    """
+    lines: list[str] = []
+    for entry in item.media:
+        if isinstance(entry, MediaPhotoDownloaded):
+            lines.append(f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]")
+        elif isinstance(entry, MediaPhotoFailed):
+            reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
+            lines.append(f"> ⚠ Foto no disponible ({reason}): <{entry.url}>")
+        elif isinstance(entry, MediaPhotoPending):
+            # Silent: a future `xbrain media` run will advance this entry.
+            continue
+        elif isinstance(entry, MediaVideoPending):
+            lines.append(f"> 🎥 Vídeo (no descargado): <{entry.url}>")
+    return lines
+
+
+# Translations for media failure reasons — symmetric with `_FAILURE_ES`
+# (content-source failures). Kept separate because the vocabularies differ:
+# media has `http_4xx` and `format_error`, content has `js_required` and
+# `paywall`, etc. A wrong translation here doesn't break anything (the slug
+# itself is a fallback), but the operator-facing line should read cleanly.
+_FAILURE_ES_MEDIA: dict[str, str] = {
+    "http_4xx": "URL no encontrada (HTTP 4xx)",
+    "http_5xx": "error del servidor (HTTP 5xx)",
+    "timeout": "tiempo de espera agotado",
+    "format_error": "formato no reconocido",
+    "unknown_error": "error desconocido",
+}
+
+
+def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> None:
+    """Copy every downloaded photo on `item` into the vault's `_media/` tree.
+
+    The canonical store is `data/media/<id>/<n>.<ext>` (under `media_root`);
+    the vault mirror is `<output_dir>/_media/<id>/<n>.<ext>`. Mirroring
+    happens at render time, not download time, so the vault stays in sync
+    with whichever subset of items `--since`/`--until` is regenerating.
+
+    Files are copied with `shutil.copy2` (preserves mtime) and silently
+    skipped when the source is missing — that should never happen on a
+    healthy `data/media/` tree, but a manual cleanup of the bytes must not
+    crash the generator. The variant on disk still drives the embed line,
+    so a missing-bytes-but-marked-downloaded record renders as a broken
+    embed Obsidian shows as an empty rectangle; that is loud enough.
+    """
+    vault_media_dir.mkdir(parents=True, exist_ok=True)
+    for entry in item.media:
+        if not isinstance(entry, MediaPhotoDownloaded):
+            continue
+        source = media_root / entry.local_path
+        destination = vault_media_dir / entry.local_path
+        if not source.exists():
+            # Marked downloaded in items.json but the file is gone — log
+            # and move on. The Obsidian embed will render as a broken
+            # image, which is the right user signal.
+            logger.warning(
+                "Photo bytes missing for item %s at %s — embed will render broken.",
+                item.id,
+                source,
+            )
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
 def _content_lines(content: Content, strings: Strings) -> list[str]:
     """Rendered article bodies + broken-link evidence for a fetched item.
 
@@ -177,9 +293,19 @@ def _content_lines(content: Content, strings: Strings) -> list[str]:
 
 
 def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
+    """Render the wiki-side note for one item.
+
+    The Phase A media block (#33) lives between the tweet text and the
+    `## Enlaces` section: photos appear immediately under the tweet body,
+    matching how X itself renders them — natural read order, no jumping.
+    """
     lines = [_frontmatter(item), "", f"# {title_of(item)}", ""]
     lines += _enrichment_lines(item, strings, topic_style)
     lines += ["## Tweet", "", item.text, ""]
+    media_lines = _render_media_lines(item)
+    if media_lines:
+        lines += media_lines
+        lines.append("")
     if item.links:
         lines.append("## Enlaces")
         lines += [f"- <{link.url}>" for link in item.links]
