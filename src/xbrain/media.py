@@ -33,7 +33,7 @@ import io
 import logging
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,6 +126,101 @@ class MediaReport:
     per_item_failures: dict[str, list[tuple[str, MediaFailureReason]]] = field(default_factory=dict)
 
 
+def _build_session(session: SessionProtocol | None, user_agent: str) -> SessionProtocol:
+    """Return the caller-injected session, or a fresh one with a browser UA."""
+    if session is not None:
+        return session
+    fresh = requests.Session()
+    fresh.headers.update({"User-Agent": user_agent})
+    return fresh
+
+
+def _eligible_items(
+    items: dict[str, Item],
+    target_ids: set[str] | None,
+) -> Iterator[tuple[str, Item]]:
+    """Yield (id, item) pairs that survive the `--items` filter + have media.
+
+    Pulled out of `download_all` so the orchestrator reads as: "for each
+    eligible item, process it." The empty-media skip lives here because a
+    test patching `items_filter` to a value matching an item without media
+    should still produce a clean no-op, not a counter that says
+    `items_processed += 1` for nothing.
+    """
+    for item_id, item in items.items():
+        if target_ids is not None and item_id not in target_ids:
+            continue
+        if not item.media:
+            continue
+        yield item_id, item
+
+
+@dataclass(frozen=True)
+class _DownloadContext:
+    """Inner-loop dependencies bundled so per-item helpers stay short.
+
+    Pulled out of `download_all`'s long parameter list so the per-item
+    loop helper (`_process_item`) reads as a small finite-state machine
+    rather than passing eight kwargs through. Frozen because none of the
+    fields mutate during a run.
+    """
+
+    media_root: Path
+    session: SessionProtocol
+    timeout_seconds: int
+    throttle_seconds: float
+    sleep: Callable[[float], None]
+    on_progress: Callable[[], None] | None
+    force: bool
+
+
+def _process_item(
+    *,
+    item_id: str,
+    item: Item,
+    ctx: _DownloadContext,
+    report: MediaReport,
+    remaining: list[int] | None,
+) -> bool:
+    """Walk an item's media list and attempt every eligible entry.
+
+    Returns True when the `--limit` cap was hit and the caller must
+    abort the outer loop; False when the item finished naturally.
+
+    `remaining` is a single-element mutable list (a "box") so the helper
+    can decrement the global cap in place without returning it. `None`
+    means no limit was passed.
+    """
+    for index in range(len(item.media)):
+        if remaining is not None and remaining[0] <= 0:
+            return True
+        entry = item.media[index]
+        if not _is_eligible(entry, force=ctx.force):
+            if isinstance(entry, MediaPhotoDownloaded):
+                report.photos_skipped_already_downloaded += 1
+            continue
+        # `_is_eligible` already excluded `MediaVideoPending`; narrow for mypy.
+        assert isinstance(entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded))
+        report.photos_attempted += 1
+        if remaining is not None:
+            remaining[0] -= 1
+        result = _download_one(
+            entry,
+            item_id=item_id,
+            index=index,
+            media_root=ctx.media_root,
+            session=ctx.session,
+            timeout_seconds=ctx.timeout_seconds,
+        )
+        item.media[index] = result
+        _record_outcome(report, item_id=item_id, entry=result, original=entry)
+        if ctx.on_progress is not None:
+            ctx.on_progress()
+        if ctx.throttle_seconds > 0:
+            ctx.sleep(ctx.throttle_seconds)
+    return False
+
+
 def download_all(
     items: dict[str, Item],
     media_root: Path,
@@ -170,54 +265,25 @@ def download_all(
             not a silent empty run. The CLI's `_handle_cli_errors` converts
             this into a clean operator message + exit code 1.
     """
-    if session is None:
-        session = requests.Session()
-        session.headers.update({"User-Agent": user_agent})
-
-    target_ids: set[str] | None = set(items_filter) if items_filter else None
+    ctx = _DownloadContext(
+        media_root=media_root,
+        session=_build_session(session, user_agent),
+        timeout_seconds=timeout_seconds,
+        throttle_seconds=throttle_seconds,
+        sleep=sleep,
+        on_progress=on_progress,
+        force=force,
+    )
     started = time.monotonic()
     report = MediaReport()
-    remaining = limit if limit is not None else None
+    target_ids: set[str] | None = set(items_filter) if items_filter else None
+    remaining = [limit] if limit is not None else None
 
-    for item_id, item in items.items():
-        if target_ids is not None and item_id not in target_ids:
-            continue
-        if not item.media:
-            continue
+    for item_id, item in _eligible_items(items, target_ids):
         report.items_processed += 1
-        # Walk a snapshot of indices: in-place replacement keeps `item.media`
-        # the same length, so range(len(...)) at start is safe.
-        for index in range(len(item.media)):
-            if remaining is not None and remaining <= 0:
-                # `--limit` cap reached. We stop attempting new downloads but
-                # do NOT mutate already-attempted entries (they keep whichever
-                # variant they had on entry).
-                _finalise(report, started)
-                return report
-            entry = item.media[index]
-            if not _is_eligible(entry, force=force):
-                if isinstance(entry, MediaPhotoDownloaded):
-                    report.photos_skipped_already_downloaded += 1
-                continue
-            # `_is_eligible` already excluded `MediaVideoPending`; narrow for mypy.
-            assert isinstance(entry, (MediaPhotoPending, MediaPhotoFailed, MediaPhotoDownloaded))
-            report.photos_attempted += 1
-            if remaining is not None:
-                remaining -= 1
-            result = _download_one(
-                entry,
-                item_id=item_id,
-                index=index,
-                media_root=media_root,
-                session=session,
-                timeout_seconds=timeout_seconds,
-            )
-            item.media[index] = result
-            _record_outcome(report, item_id=item_id, entry=result, original=entry)
-            if on_progress is not None:
-                on_progress()
-            if throttle_seconds > 0:
-                sleep(throttle_seconds)
+        if _process_item(item_id=item_id, item=item, ctx=ctx, report=report, remaining=remaining):
+            _finalise(report, started)
+            return report
 
     _finalise(report, started)
     if report.photos_attempted > 0 and report.photos_downloaded == 0:
