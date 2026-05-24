@@ -118,7 +118,6 @@ class MediaPhotoDownloaded(_MediaPhotoBase):
     @field_validator("local_path")
     @classmethod
     def _reject_path_traversal(cls, value: str) -> str:
-        _ = cls  # required by @field_validator+@classmethod; placate vulture
         """Reject absolute paths and `..` components.
 
         `local_path` is joined onto `data/media/` at render and download
@@ -128,6 +127,7 @@ class MediaPhotoDownloaded(_MediaPhotoBase):
         the persisted store is on-disk plain JSON the user can edit —
         defence in depth at the type boundary is cheap.
         """
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
         if value.startswith("/") or value.startswith("\\"):
             raise ValueError(f"local_path must be relative, got {value!r}")
         # Normalise separators before scanning components so a Windows-style
