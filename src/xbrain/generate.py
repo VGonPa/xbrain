@@ -353,16 +353,27 @@ def _frontmatter(item: Item) -> str:
     return "\n".join(lines)
 
 
-def _render_index(items: list[Item], strings: Strings) -> str:
-    bookmarks = sum(1 for i in items if i.source == "bookmark")
-    own = sum(1 for i in items if i.source == "own_tweet")
-    noted = sum(1 for i in items if _has_note(i))
-    enriched = sum(1 for i in items if i.enriched)
+def _count_topic_frequency(items: list[Item]) -> dict[str, int]:
+    """Tally how often each topic appears across the enriched items.
+
+    Items without enrichment contribute nothing. The result maps topic slug
+    to the number of enriched items that include it.
+    """
     topic_freq: dict[str, int] = {}
     for item in items:
         if item.enriched:
             for topic in item.enriched.topics:
                 topic_freq[topic] = topic_freq.get(topic, 0) + 1
+    return topic_freq
+
+
+def _render_index(items: list[Item], strings: Strings) -> str:
+    """Render the top-level index note: corpus stats and the topic list."""
+    bookmarks = sum(1 for i in items if i.source == "bookmark")
+    own = sum(1 for i in items if i.source == "own_tweet")
+    noted = sum(1 for i in items if _has_note(i))
+    enriched = sum(1 for i in items if i.enriched)
+    topic_freq = _count_topic_frequency(items)
     lines = [
         "# XBrain",
         "",
