@@ -30,6 +30,8 @@ from xbrain.models import (
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
+    MediaVideoDownloaded,
+    MediaVideoFailed,
     MediaVideoPending,
 )
 
@@ -144,6 +146,30 @@ def test_is_eligible_video_pending_never_attempted():
     video = MediaVideoPending(url="u")
     assert _is_eligible(video, force=False) is False
     assert _is_eligible(video, force=True) is False
+
+
+def test_is_eligible_video_downloaded_and_failed_never_attempted():
+    """The PHOTO downloader ignores every video state — even with `--force`.
+
+    Video download lives in `xbrain.video_media` (`xbrain download-videos`);
+    `xbrain media` must never touch a `MediaVideoDownloaded` / `MediaVideoFailed`.
+    """
+    downloaded = MediaVideoDownloaded(
+        url="https://video.twimg.com/x.mp4",
+        local_path="1/0.mp4",
+        bytes_size=10,
+        downloaded_at=datetime.now(timezone.utc),
+    )
+    failed = MediaVideoFailed(
+        url="https://video.twimg.com/x.mp4",
+        failure_reason="http_5xx",
+        attempts=1,
+        last_attempt_at=datetime.now(timezone.utc),
+    )
+    assert _is_eligible(downloaded, force=False) is False
+    assert _is_eligible(downloaded, force=True) is False
+    assert _is_eligible(failed, force=False) is False
+    assert _is_eligible(failed, force=True) is False
 
 
 def test_is_eligible_downloaded_only_with_force():

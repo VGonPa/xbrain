@@ -371,6 +371,173 @@ def test_media_command_respects_items_filter(tmp_path: Path, monkeypatch):
     assert isinstance(reloaded["b"].media[0], MediaPhotoDownloaded)
 
 
+# ------------------------------------------------------------ download-videos
+
+
+_MP4_URL = "https://video.twimg.com/ext_tw_video/1/vid/720/A.mp4?tag=12"
+_HLS_URL = "https://video.twimg.com/ext_tw_video/1/pl/B.m3u8?c=fmp4"
+_POSTER = "https://pbs.twimg.com/ext_tw_video_thumb/1/img/P.jpg"
+
+
+def _video_item(item_id: str, url: str = _MP4_URL, source: str = "bookmark"):
+    from xbrain.models import MediaVideoPending
+
+    item = Item(
+        id=item_id,
+        source=source,
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=f"Note {item_id}",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+    )
+    item.media = [
+        MediaVideoPending(url=url, thumbnail_url=_POSTER, bitrate=2_176_000, duration_millis=30_000)
+    ]
+    return item
+
+
+class _FakeVideoSession:
+    """Fake session that returns mp4 bytes for any GET (videos are not decoded)."""
+
+    payload = b"\x00\x00\x00\x18ftypmp42" + (b"\x00" * 1024)
+
+    def __init__(self):
+        self.headers: dict[str, str] = {}
+
+    def get(self, _url, *, timeout):
+        class _Resp:
+            status_code = 200
+            content = _FakeVideoSession.payload
+
+        return _Resp()
+
+
+def test_download_videos_command_noop_when_no_videos(tmp_path: Path, monkeypatch):
+    """A store with no downloadable mp4 is a no-op: exit 0, items.json unchanged,
+    no confirmation needed, no snapshot taken (nothing is written)."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"1": _linked_item("1")}, items_path)
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["download-videos"])
+
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before
+    snapshots = tmp_path / "data" / "snapshots"
+    assert not snapshots.exists() or not any(
+        "pre-download-videos" in p.name for p in snapshots.iterdir()
+    )
+
+
+def test_download_videos_command_downloads_mp4_with_yes(tmp_path: Path, monkeypatch):
+    """`--yes` bypasses the size gate; the mp4 lands as MediaVideoDownloaded with
+    the bytes on disk, and the destructive-op snapshot fires first."""
+    from xbrain.models import MediaVideoDownloaded
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "About to download" in result.output
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    entry = reloaded["42"].media[0]
+    assert isinstance(entry, MediaVideoDownloaded)
+    assert entry.local_path == "42/0.mp4"
+    assert (tmp_path / "data" / "media" / "42" / "0.mp4").exists()
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-download-videos" in p.name for p in snapshots)
+
+
+def test_download_videos_command_aborts_when_declined(tmp_path: Path, monkeypatch):
+    """Without `--yes`, declining the gate aborts: no download, no snapshot."""
+    from xbrain.models import MediaVideoPending
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos"], input="n\n")
+    assert result.exit_code != 0
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(reloaded["42"].media[0], MediaVideoPending)
+    assert not (tmp_path / "data" / "media" / "42" / "0.mp4").exists()
+
+
+def test_download_videos_command_proceeds_when_confirmed(tmp_path: Path, monkeypatch):
+    """Confirming the gate with `y` proceeds to download."""
+    from xbrain.models import MediaVideoDownloaded
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos"], input="y\n")
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(reloaded["42"].media[0], MediaVideoDownloaded)
+
+
+def test_download_videos_command_skips_hls(tmp_path: Path, monkeypatch):
+    """An HLS-only store is a no-op for download but reports the deferred count."""
+    from xbrain.models import MediaVideoPending
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["download-videos"])
+    assert result.exit_code == 0, result.output
+    assert "HLS" in result.output
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(reloaded["7"].media[0], MediaVideoPending)
+
+
+def test_download_videos_command_source_filter(tmp_path: Path, monkeypatch):
+    """`--source bookmarks` only touches bookmark items; own_tweets are left alone."""
+    from xbrain.models import MediaVideoDownloaded, MediaVideoPending
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {
+            "b": _video_item("b", source="bookmark"),
+            "t": _video_item("t", source="own_tweet"),
+        },
+        tmp_path / "data" / "items.json",
+    )
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos", "--source", "bookmarks", "--yes"])
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(reloaded["b"].media[0], MediaVideoDownloaded)
+    assert isinstance(reloaded["t"].media[0], MediaVideoPending)
+
+
+def test_download_videos_command_items_filter(tmp_path: Path, monkeypatch):
+    """`--items` restricts the run to specific ids."""
+    from xbrain.models import MediaVideoDownloaded, MediaVideoPending
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"a": _video_item("a"), "b": _video_item("b")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos", "--items", "b", "--yes"])
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(reloaded["a"].media[0], MediaVideoPending)
+    assert isinstance(reloaded["b"].media[0], MediaVideoDownloaded)
+
+
 def test_parse_date_returns_utc_aware():
     from xbrain.cli import _parse_date
 

@@ -581,6 +581,56 @@ def test_diff_media_counts_video_pending_separately(tmp_path: Path) -> None:
     assert report.media.delta_video_pending == 1
 
 
+def test_diff_media_counts_video_downloaded_and_failed(tmp_path: Path) -> None:
+    """`xbrain download-videos` advances video_pending → video_downloaded /
+    video_failed; the diff surfaces those as their own counters."""
+    from xbrain.models import MediaVideoDownloaded, MediaVideoFailed, MediaVideoPending
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    item_a = _item_with_media(
+        "1",
+        [
+            MediaVideoPending(url="https://video.twimg.com/x.mp4"),
+            MediaVideoPending(url="https://video.twimg.com/y.mp4"),
+        ],
+    )
+    item_b = _item_with_media(
+        "1",
+        [
+            MediaVideoDownloaded(
+                url="https://video.twimg.com/x.mp4",
+                local_path="1/0.mp4",
+                bytes_size=100,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            ),
+            MediaVideoFailed(
+                url="https://video.twimg.com/y.mp4",
+                failure_reason="http_4xx",
+                attempts=1,
+                last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            ),
+        ],
+    )
+    _seed(a, items={"1": item_a}, vocab_slugs=[])
+    _seed(b, items={"1": item_b}, vocab_slugs=[])
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.video_pending == 2
+    assert report.media.b.video_downloaded == 1
+    assert report.media.b.video_failed == 1
+    assert report.media.delta_video_pending == -2
+    assert report.media.delta_video_downloaded == 1
+    assert report.media.delta_video_failed == 1
+    # JSON round-trips with the new counters.
+    restored = type(report).model_validate(report.model_dump(mode="json"))
+    assert restored.media.b.video_downloaded == 1
+    # The text block renders the new rows.
+    text = format_text(report)
+    assert "video_downloaded:" in text
+    assert "video_failed:" in text
+
+
 def test_diff_media_reports_delta_described(tmp_path: Path) -> None:
     """`xbrain describe` advances downloaded → described; the diff surfaces +N described.
 

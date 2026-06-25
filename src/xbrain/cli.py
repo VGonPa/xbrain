@@ -30,6 +30,12 @@ from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.models import ArchiveImport, Author, Item, SourceName
 from xbrain.refresh import estimate_download_size, refresh_video_media
+from xbrain.video_media import download_videos as run_download_videos
+from xbrain.video_media import (
+    emit_video_summary_line,
+    format_size_gate,
+    plan_video_downloads,
+)
 from xbrain.rubrics import load_vocab, save_vocab
 from xbrain.store import (
     load_state,
@@ -609,6 +615,136 @@ def describe(
         model=chosen_model,
         batch_size=batch_size,
         verbose=verbose,
+    )
+
+
+def _warn_items_filter_no_match(cfg: Config, items_filter: list[str]) -> None:
+    """Echo a no-op warning when `--items` matches nothing (shared by media/video)."""
+    target = set(items_filter)
+    store_ids = set(load_store(cfg.items_path))
+    if (target - store_ids) and not (target & store_ids):
+        typer.echo(
+            f"AVISO: --items {','.join(items_filter)} no coincide con ningún item "
+            f"del store ({len(store_ids)} items). El run será un no-op.",
+            err=True,
+        )
+
+
+def _run_download_videos(
+    cfg: Config,
+    source: str,
+    *,
+    force: bool,
+    limit: int | None,
+    items_filter: list[str] | None,
+    yes: bool,
+) -> None:
+    """Download the mp4 bytes for `MediaVideoPending` entries; persist + summarise.
+
+    Flow: load → plan (no network, no write) → print the size gate → confirm
+    (unless `--yes`) → snapshot `data/` → download → persist. The snapshot is the
+    same recovery boundary as `xbrain media`, but taken AFTER the confirm so a
+    declined gate never leaves a stray snapshot; a snapshot failure still
+    propagates and aborts before any write (CONTRIBUTING §Safety). A run with no
+    downloadable mp4 (only HLS / poster-era / already-downloaded) writes nothing,
+    so it skips both the confirm and the snapshot and just reports.
+
+    `--source` scopes the run to bookmark / own-tweet items; `scoped` shares the
+    same `Item` objects as `store`, so the in-place transitions are persisted by
+    saving the full `store`. mp4 ONLY: HLS entries are reported as deferred to
+    the ffmpeg follow-up, never downloaded here.
+    """
+    if items_filter:
+        _warn_items_filter_no_match(cfg, items_filter)
+    store = load_store(cfg.items_path)
+    source_sets: dict[str, list[SourceName]] = {
+        "bookmarks": ["bookmark"],
+        "tweets": ["own_tweet"],
+        "all": ["bookmark", "own_tweet"],
+    }
+    chosen = set(source_sets[source])
+    scoped = {item_id: item for item_id, item in store.items() if item.source in chosen}
+
+    plan = plan_video_downloads(scoped, force=force, limit=limit, items_filter=items_filter)
+    if plan.n_to_download == 0:
+        typer.echo(
+            f"No hay vídeos mp4 que descargar "
+            f"({plan.n_hls_skipped} HLS pendientes de ffmpeg, "
+            f"{plan.n_poster_skipped} poster-era, "
+            f"{plan.n_already_downloaded} ya descargados)."
+        )
+        return
+    typer.echo(format_size_gate(plan))
+    if not yes:
+        typer.confirm("¿Continuar con la descarga?", abort=True)
+    _auto_snapshot(cfg, "download-videos")
+
+    def _persist() -> None:
+        save_store(store, cfg.items_path)
+
+    try:
+        report = run_download_videos(
+            scoped,
+            cfg.media_dir,
+            force=force,
+            limit=limit,
+            items_filter=items_filter,
+            on_progress=_persist,
+        )
+    finally:
+        # Persist whatever transitioned even if `download_videos` raised — a
+        # total-failure RuntimeError must not discard the MediaVideoFailed
+        # records that landed before the raise.
+        save_store(store, cfg.items_path)
+    emit_video_summary_line(report)
+    typer.echo(
+        f"Vídeos: descargados {report.videos_downloaded}, "
+        f"fallidos {report.videos_failed_permanent + report.videos_failed_transient}, "
+        f"HLS saltados {report.videos_skipped_hls}, "
+        f"poster-era saltados {report.videos_skipped_poster_era}, "
+        f"ya descargados {report.videos_skipped_already_downloaded}"
+    )
+
+
+@app.command(name="download-videos")
+@_handle_cli_errors
+def download_videos(
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help="Máximo número de vídeos a descargar en esta ejecución.",
+    ),
+    items: str | None = typer.Option(
+        None,
+        "--items",
+        help="IDs de items separados por comas para limitar el alcance del run.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-descargar vídeos ya descargados y reintentar los fallos permanentes.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="No pedir confirmación del tamaño de descarga (modo no interactivo).",
+    ),
+) -> None:
+    """Descarga los bytes mp4 de los vídeos referenciados en `items.json`.
+
+    Solo descarga streams mp4 reproducibles (entradas `MediaVideoPending` con
+    URL real, más reintentos transient). Antes de descargar imprime una
+    estimación del tamaño total (~X.X GB) y pide confirmación salvo `--yes`. Los
+    manifiestos HLS (`.m3u8`) necesitan ffmpeg y se posponen a un follow-up: se
+    cuentan y se saltan, no se descargan aquí. Las entradas poster-era (sin
+    backfill: usa antes `xbrain refresh-media`) también se saltan. Es destructivo
+    (reescribe `items.json`) → auto-snapshot antes de escribir.
+    """
+    cfg = _config()
+    items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
+    _run_download_videos(
+        cfg, source.value, force=force, limit=limit, items_filter=items_filter, yes=yes
     )
 
 

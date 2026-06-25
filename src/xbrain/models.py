@@ -327,6 +327,94 @@ class MediaVideoPending(BaseModel):
     duration_millis: int | None = None
 
 
+class MediaVideoDownloaded(BaseModel):
+    """A video successfully downloaded; the mp4 bytes exist at `local_path`.
+
+    The downloaded counterpart of `MediaVideoPending`, produced by
+    `xbrain download-videos` for a real progressive **mp4** stream (HLS
+    `.m3u8` manifests need ffmpeg and are deferred to a follow-up — they
+    stay `MediaVideoPending`). The playable `url`, the poster `thumbnail_url`
+    and the `bitrate` / `duration_millis` are carried over verbatim from the
+    pending entry so the record stays self-describing (and a `--force`
+    re-download has everything it needs without re-capturing from X). The
+    carried fields are optional for the same reason they are on
+    `MediaVideoPending`: a legacy or hand-built pending entry may lack them.
+
+    `local_path` is relative to `data/media/` (no absolute path, no `..`
+    traversal — the shared `_reject_local_path_traversal` validator) so the
+    store can move across machines. `bytes_size` is `gt=0`: a zero-byte
+    "downloaded" video is semantically illegal — the downloader records the
+    size only after a non-empty write. Unlike a photo there are no width /
+    height — a video is not decoded, only its bytes are written.
+
+    Why NOT inherit from `MediaVideoPending`? The media states form a
+    pydantic tagged union, not a Liskov hierarchy — call sites use
+    `isinstance(entry, MediaVideoPending)` to mean "exactly the pending
+    state" (the download eligibility walk, the diff counters, the generator
+    routing). Inheritance would silently re-match a downloaded entry against
+    those checks. The carried fields are re-declared (mirroring how the photo
+    Downloaded / Described variants re-declare their shared fields).
+
+    `downloaded_at` MUST be timezone-aware (UTC) — same contract as every
+    other persisted instant on the media variants.
+    """
+
+    type: Literal["video"] = "video"
+    kind: Literal["video_downloaded"] = "video_downloaded"
+    url: str
+    thumbnail_url: str | None = None
+    bitrate: int | None = None
+    duration_millis: int | None = None
+    local_path: str
+    bytes_size: int = Field(gt=0)
+    downloaded_at: datetime
+
+    @field_validator("local_path")
+    @classmethod
+    def _validate_local_path(cls, value: str) -> str:
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
+        return _reject_local_path_traversal(value)
+
+    @field_validator("downloaded_at")
+    @classmethod
+    def _validate_downloaded_at(cls, value: datetime) -> datetime:
+        _ = cls
+        return _require_utc_aware("downloaded_at", value)
+
+
+class MediaVideoFailed(BaseModel):
+    """A video download attempted and failed (categorised).
+
+    The failure off-ramp from `MediaVideoPending`, mirroring
+    `MediaPhotoFailed`: `failure_reason` (reusing `MediaFailureReason`) is
+    required so a failure is always demonstrable evidence, and `attempts`
+    (`ge=1`) counts how many `xbrain download-videos` runs have tried this
+    url — each transient retry bumps it. The source `url` plus the carried
+    `thumbnail_url` / `bitrate` / `duration_millis` ride along so a retry has
+    everything it needs without re-capturing from X.
+
+    `last_attempt_at` MUST be timezone-aware (UTC) — same contract as the
+    other persisted instants on the media variants.
+    """
+
+    type: Literal["video"] = "video"
+    kind: Literal["video_failed"] = "video_failed"
+    url: str
+    thumbnail_url: str | None = None
+    bitrate: int | None = None
+    duration_millis: int | None = None
+    failure_reason: MediaFailureReason
+    error: str | None = None
+    attempts: int = Field(ge=1)
+    last_attempt_at: datetime
+
+    @field_validator("last_attempt_at")
+    @classmethod
+    def _validate_last_attempt_at(cls, value: datetime) -> datetime:
+        _ = cls
+        return _require_utc_aware("last_attempt_at", value)
+
+
 def _normalise_legacy_media(value: Any) -> Any:
     """Migrate the legacy ``{type, url}`` shape to the tagged union.
 
@@ -369,6 +457,8 @@ _MediaTagged = Annotated[
         MediaPhotoFailed,
         MediaPhotoDescribed,
         MediaVideoPending,
+        MediaVideoDownloaded,
+        MediaVideoFailed,
     ],
     Field(discriminator="kind"),
 ]
@@ -387,6 +477,8 @@ MediaEntryAdapter: TypeAdapter[
         MediaPhotoFailed,
         MediaPhotoDescribed,
         MediaVideoPending,
+        MediaVideoDownloaded,
+        MediaVideoFailed,
     ]
 ] = TypeAdapter(MediaEntry)
 
