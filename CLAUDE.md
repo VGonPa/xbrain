@@ -10,6 +10,10 @@ generates an Obsidian wiki.
 
 ## Architecture
 - Pipeline: `extract → import-archive → fetch → [enrich] → generate`.
+- Media side-pipeline: `media` (download photos) → `describe` (vision LLM);
+  `refresh-media` re-captures X to backfill the playable video URL + bitrate +
+  duration onto already-stored items (video-only, preserves photos/enrichment;
+  destructive → auto-snapshot; no video download yet).
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

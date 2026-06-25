@@ -1180,3 +1180,141 @@ def test_describe_command_verbose_lists_failed_photos(tmp_path, monkeypatch):
     # The failed item id (1 or 2 — order is filesystem-dependent) and the URL
     # both appear on the verbose row.
     assert "pbs.twimg.com" in result.output
+
+
+# ------------------------------------------------------------------ refresh-media
+
+
+def _poster_era_item(item_id: str = "42"):
+    """A store item with a downloaded photo + a poster-era video (url = poster)."""
+    from xbrain.models import Author, Item, MediaPhotoDownloaded, MediaVideoPending
+
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="a", name="A"),
+        text="t",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        media=[
+            MediaPhotoDownloaded(
+                url="https://pbs.twimg.com/media/42-0.jpg",
+                local_path=f"{item_id}/0.jpg",
+                width=8,
+                height=6,
+                bytes_size=200,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            ),
+            MediaVideoPending(url="https://pbs.twimg.com/poster.jpg"),
+        ],
+    )
+
+
+def _playable_fresh_item(item_id: str = "42"):
+    """A fresh capture of the same id whose video carries the playable stream."""
+    from xbrain.models import Author, Item, MediaVideoPending
+
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="a", name="A"),
+        text="t",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        media=[
+            MediaVideoPending(
+                url="https://v/high.mp4",
+                thumbnail_url="https://pbs.twimg.com/poster.jpg",
+                bitrate=2_176_000,
+                duration_millis=30_000,
+            )
+        ],
+    )
+
+
+def _mock_browser(monkeypatch, extract_impl):
+    """Patch `cli.x_context` (a no-op CM) + `cli.extract_source` (the impl)."""
+    import contextlib
+
+    import xbrain.cli as cli
+
+    @contextlib.contextmanager
+    def _ctx(_path):
+        yield object()
+
+    monkeypatch.setattr(cli, "x_context", _ctx)
+    monkeypatch.setattr(cli, "extract_source", extract_impl)
+
+
+def test_refresh_media_backfills_video_and_preserves_photo(tmp_path: Path, monkeypatch):
+    """End-to-end: the poster-era video gains the playable URL; the photo survives."""
+    from xbrain.models import MediaPhotoDownloaded, MediaVideoPending
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _poster_era_item("42")}, tmp_path / "data" / "items.json")
+    _mock_browser(monkeypatch, lambda *a, **k: [_playable_fresh_item("42")])
+
+    result = runner.invoke(app, ["refresh-media"])
+    assert result.exit_code == 0, result.output
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    media = reloaded["42"].media
+    # The downloaded photo is untouched (still Downloaded, same local_path).
+    assert isinstance(media[0], MediaPhotoDownloaded)
+    assert media[0].local_path == "42/0.jpg"
+    # The video now carries the playable stream + bitrate + duration.
+    video = media[1]
+    assert isinstance(video, MediaVideoPending)
+    assert video.url == "https://v/high.mp4"
+    assert video.bitrate == 2_176_000
+    assert video.duration_millis == 30_000
+    # The END summary prints the report counts + a size estimate.
+    assert "1 refreshed" in result.output
+    assert "Estimated video download" in result.output
+
+
+def test_refresh_media_creates_pre_snapshot(tmp_path: Path, monkeypatch):
+    """The destructive op snapshots `data/` before writing (label pre-refresh-media)."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _poster_era_item("42")}, tmp_path / "data" / "items.json")
+    _mock_browser(monkeypatch, lambda *a, **k: [_playable_fresh_item("42")])
+
+    result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
+    assert result.exit_code == 0, result.output
+    snapshots = list((tmp_path / "data" / "snapshots").glob("*-pre-refresh-media"))
+    assert snapshots, "refresh-media must auto-snapshot data/ before writing"
+
+
+def test_refresh_media_disables_skip_known_with_empty_known_ids(tmp_path: Path, monkeypatch):
+    """Backfill must pass an EMPTY known_ids set so the FULL history is scrolled."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _poster_era_item("42")}, tmp_path / "data" / "items.json")
+    captured: dict[str, object] = {}
+
+    def _spy(context, src, url, known_ids, *a, **k):
+        captured["known_ids"] = known_ids
+        return []
+
+    _mock_browser(monkeypatch, _spy)
+
+    result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
+    assert result.exit_code == 0, result.output
+    assert captured["known_ids"] == set()
+
+
+def test_refresh_media_surfaces_logged_out_runtimeerror(tmp_path: Path, monkeypatch):
+    """A logged-out session (extract_source raises RuntimeError) exits 1 cleanly."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _poster_era_item("42")}, tmp_path / "data" / "items.json")
+
+    def _raise(*a, **k):
+        raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+
+    _mock_browser(monkeypatch, _raise)
+
+    result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
+    assert result.exit_code == 1
+    assert "Sesión de X caducada" in result.output

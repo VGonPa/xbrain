@@ -137,6 +137,37 @@ def test_media_creates_pre_snapshot(tmp_path: Path, monkeypatch):
     assert any(p.name.endswith("-pre-media") for p, _ in snapshots), snapshots
 
 
+def test_refresh_media_snapshots_before_capture_even_on_failure(tmp_path: Path, monkeypatch):
+    """`xbrain refresh-media` snapshots `data/` BEFORE the (slow) X capture.
+
+    Forces `extract_source` to raise (logged-out session). The snapshot must
+    already be on disk — proving the recovery boundary is taken before any
+    capture or write, not after.
+    """
+    import contextlib
+
+    from xbrain import cli
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+
+    @contextlib.contextmanager
+    def _ctx(_path):
+        yield object()
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("Sesión de X caducada. Ejecuta `xbrain login`.")
+
+    monkeypatch.setattr(cli, "x_context", _ctx)
+    monkeypatch.setattr(cli, "extract_source", _raise)
+
+    result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
+
+    assert result.exit_code != 0  # the logged-out capture aborted the command
+    snapshots = snapshot_list(tmp_path / "data")
+    assert any(p.name.endswith("-pre-refresh-media") for p, _ in snapshots), snapshots
+
+
 def test_fetch_force_creates_pre_snapshot(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     # An item with no links → fetch_pending no-ops; the snapshot still fires

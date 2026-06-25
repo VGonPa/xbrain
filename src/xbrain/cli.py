@@ -28,7 +28,8 @@ from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
-from xbrain.models import ArchiveImport, Author, SourceName
+from xbrain.models import ArchiveImport, Author, Item, SourceName
+from xbrain.refresh import estimate_download_size, refresh_video_media
 from xbrain.rubrics import load_vocab, save_vocab
 from xbrain.store import (
     load_state,
@@ -177,6 +178,58 @@ def _auto_snapshot(cfg: Config, command: str) -> None:
         dir_label=f"pre-{command}",
     )
     typer.echo(f"Snapshot created: {path.name} ({manifest.item_count} items)")
+
+
+def _run_refresh_media(cfg: Config, source: str) -> None:
+    """Re-capture the FULL X history and backfill playable video media in place.
+
+    Destructive — it overwrites the video entries on existing items — so it
+    auto-snapshots `data/` first (label `pre-refresh-media`); a snapshot failure
+    propagates and aborts before any capture or write (CONTRIBUTING §Safety).
+
+    Then it scrolls each chosen source with an EMPTY `known_ids` set, so
+    `extract_source` does NOT stop at the first known id and the whole timeline
+    is walked. The freshly-parsed items are merged onto the store by
+    `refresh_video_media` — video entries only; photos and every enrichment /
+    description / fetch field are preserved. The store is saved and a
+    download-size estimate is printed. Video DOWNLOAD is out of scope here.
+    """
+    _auto_snapshot(cfg, "refresh-media")
+    store = load_store(cfg.items_path)
+    # Mirrors `_run_extract` — the source → (target URL, GraphQL source) mapping.
+    targets = {
+        "bookmark": _BOOKMARKS_URL,
+        "own_tweet": f"https://x.com/{cfg.x_handle}",
+    }
+    source_sets: dict[str, list[SourceName]] = {
+        "bookmarks": ["bookmark"],
+        "tweets": ["own_tweet"],
+        "all": ["bookmark", "own_tweet"],
+    }
+    chosen = source_sets[source]
+    typer.echo(
+        "refresh-media scrolls the FULL X history with no skip-known — this is "
+        "slow and human-paced and can take many minutes. Leave it running."
+    )
+    fresh: list[Item] = []
+    with x_context(cfg.storage_state_path) as context:
+        for src in chosen:
+            # Empty known_ids disables the skip-known early-stop: the whole
+            # history is returned, not just the items newer than the cursor.
+            fresh.extend(extract_source(context, src, targets[src], set()))
+    report = refresh_video_media(store, fresh)
+    save_store(store, cfg.items_path)
+    estimated_bytes, n_estimable, n_unknown = estimate_download_size(store)
+    gigabytes = estimated_bytes / 1_000_000_000
+    typer.echo(
+        f"refresh-media: {report.items_seen} known items re-seen, "
+        f"{report.items_refreshed} refreshed, {report.videos_updated} videos updated; "
+        f"{report.items_with_video_not_seen} video items not re-seen (still poster-era)."
+    )
+    typer.echo(
+        f"Estimated video download: ~{gigabytes:.1f} GB across {n_estimable} videos; "
+        f"{n_unknown} with unknown size."
+    )
 
 
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
@@ -359,6 +412,25 @@ def media(
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
     _run_media(cfg, force=force, limit=limit, items_filter=items_filter, verbose=verbose)
+
+
+@app.command(name="refresh-media")
+@_handle_cli_errors
+def refresh_media(
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+) -> None:
+    """Re-captura X y refresca la URL/metadata de vídeo de items ya guardados.
+
+    Recorre el histórico COMPLETO (sin saltarse ids conocidos) y reescribe las
+    entradas de vídeo poster-era con el stream reproducible + bitrate +
+    duración. No toca fotos ni el estado de enriquecimiento/descripción.
+
+    Es destructivo (reescribe `items.json` in situ) → auto-snapshot antes de
+    escribir. NO descarga vídeo (eso es una fase posterior): solo imprime una
+    estimación del tamaño total de descarga. El scroll es lento y a ritmo
+    humano; puede tardar varios minutos.
+    """
+    _run_refresh_media(_config(), source.value)
 
 
 def _run_describe(

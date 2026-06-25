@@ -520,6 +520,7 @@ uv run xbrain <command> [options]
 | `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
 | `media` | Download X-post photos referenced in `Item.media` and render them inline in the wiki. `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
 | `describe` | Describe downloaded photos with a vision LLM (Claude Sonnet 4.6 by default) and feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described photos unless `[describe].version` is bumped in `config.toml`. |
+| `refresh-media` | Re-capture X and backfill the **playable video URL + bitrate + duration** onto items whose video is still poster-era (incremental `extract` + non-overwriting merge never refresh existing videos). Video-only — photos and enrichment/description state are preserved. Scrolls the full history (slow); destructive → auto-snapshot; prints a download-size estimate. Does **not** download video. `--source bookmarks\|tweets\|all`. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
@@ -611,6 +612,30 @@ Describing the full corpus costs about $3-5 with the default model
 `config.toml` to invalidate stored descriptions when you change the
 rubric — the next `xbrain describe` run re-describes stale entries
 automatically without `--force`.
+
+**Video media**
+
+Photos download today; **video does not yet** — a video entry stays in
+its `video_pending` state carrying the playable stream URL, the poster
+`thumbnail_url`, and the chosen `bitrate` + `duration_millis` (so a later
+download can estimate size without fetching a byte).
+
+Because `extract` is incremental and the store merge never overwrites,
+videos captured before the playable-stream capability landed are
+**poster-era**: their stored URL is the poster image and the bitrate /
+duration are blank. They are never refreshed by a normal `xbrain extract`.
+`xbrain refresh-media` is the backfill: it re-captures the full X history,
+swaps each poster-era video entry for the freshly-parsed one (playable URL
++ bitrate + duration) **in place**, and leaves photos and enrichment
+untouched. It auto-snapshots `data/` first (destructive) and prints a
+download-size estimate (`~X.X GB across N videos; M with unknown size`)
+so you can size the future video download. It does not download video
+itself.
+
+```bash
+xbrain refresh-media                      # backfill bookmarks + own tweets
+xbrain refresh-media --source bookmarks   # bookmarks only
+```
 
 ---
 
@@ -864,6 +889,7 @@ xbrain/
 │   ├── config.py         # config.toml loading
 │   ├── models.py         # pydantic data models (Item, Enrichment, Topic, ...)
 │   ├── store.py          # JSON load/save for items + topic pages
+│   ├── refresh.py        # refresh-media backfill: video media swap + size estimate
 │   ├── extract/          # X extraction (Playwright + GraphQL interception)
 │   │   ├── browser.py    #   session / browser context
 │   │   ├── graphql.py    #   parse X's internal GraphQL responses
