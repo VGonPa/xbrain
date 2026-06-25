@@ -299,17 +299,29 @@ class MediaPhotoDescribed(_MediaPhotoBase):
 
 
 class MediaVideoPending(BaseModel):
-    """A video URL captured but not downloaded.
+    """A video captured but not downloaded.
 
-    Videos are currently captured but not fetched — they remain in this
-    state until a future iteration adds HLS + ffmpeg support. The variant
-    is in the union from day one so the wire shape does not change when
-    video download lands.
+    `url` is the playable stream extracted from `video_info.variants` — the
+    highest-bitrate progressive mp4 when X offers one, else the HLS (`.m3u8`)
+    manifest. It is NOT the poster image; that is kept separately in
+    `thumbnail_url` so a note can still show a still while the bytes are
+    pending.
+
+    `bitrate` (of the chosen mp4) and `duration_millis` let a download
+    pre-flight estimate total size (bitrate × duration) without fetching a
+    byte. All three are optional: legacy records carry only `url`, and an
+    HLS-only variant has no bitrate. Videos stay in this state until a
+    future iteration adds the download (direct mp4 via httpx; HLS via
+    ffmpeg). The variant is in the union from day one so the wire shape does
+    not change when video download lands.
     """
 
     type: Literal["video"] = "video"
     kind: Literal["video_pending"] = "video_pending"
     url: str
+    thumbnail_url: str | None = None
+    bitrate: int | None = None
+    duration_millis: int | None = None
 
 
 def _normalise_legacy_media(value: Any) -> Any:

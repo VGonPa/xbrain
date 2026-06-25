@@ -194,3 +194,109 @@ def test_parse_tweets_unwraps_visibility_envelope():
     assert len(items) == 1
     assert items[0].id == "555"
     assert items[0].text == "limited visibility tweet"
+
+
+# --- media: video variant selection (#40 part 1) ---------------------------
+
+
+def _video_legacy(variants: list[dict], *, duration_millis: int = 30000) -> dict:
+    """A `legacy` block carrying one video media entry whose poster is a
+    fixed pbs.twimg.com image and whose playable URLs live in
+    `video_info.variants` (the real X shape)."""
+    return {
+        "extended_entities": {
+            "media": [
+                {
+                    "type": "video",
+                    "media_url_https": "https://pbs.twimg.com/poster.jpg",
+                    "video_info": {
+                        "duration_millis": duration_millis,
+                        "variants": variants,
+                    },
+                }
+            ]
+        }
+    }
+
+
+def test_extract_media_video_picks_highest_bitrate_mp4():
+    """A video entry stores the highest-bitrate mp4 from video_info.variants,
+    not the poster image (media_url_https)."""
+    from xbrain.extract.graphql import _extract_media
+    from xbrain.models import MediaVideoPending
+
+    legacy = _video_legacy(
+        [
+            {
+                "bitrate": 256000,
+                "content_type": "video/mp4",
+                "url": "https://video.twimg.com/low.mp4?tag=12",
+            },
+            {
+                "bitrate": 2176000,
+                "content_type": "video/mp4",
+                "url": "https://video.twimg.com/high.mp4?tag=12",
+            },
+            {
+                "bitrate": 832000,
+                "content_type": "video/mp4",
+                "url": "https://video.twimg.com/mid.mp4?tag=12",
+            },
+            {
+                "content_type": "application/x-mpegURL",
+                "url": "https://video.twimg.com/playlist.m3u8?tag=12",
+            },
+        ]
+    )
+
+    media = _extract_media(legacy)
+
+    assert len(media) == 1
+    entry = media[0]
+    assert isinstance(entry, MediaVideoPending)
+    assert entry.url == "https://video.twimg.com/high.mp4?tag=12"
+
+
+def test_extract_media_video_hls_only_falls_back_to_manifest():
+    """With no progressive mp4 (HLS-only), store the m3u8 manifest URL rather
+    than the poster, so the real stream is captured for a later ffmpeg pass."""
+    from xbrain.extract.graphql import _extract_media
+    from xbrain.models import MediaVideoPending
+
+    legacy = _video_legacy(
+        [
+            {
+                "content_type": "application/x-mpegURL",
+                "url": "https://video.twimg.com/playlist.m3u8?tag=12",
+            },
+        ]
+    )
+
+    media = _extract_media(legacy)
+
+    assert isinstance(media[0], MediaVideoPending)
+    assert media[0].url == "https://video.twimg.com/playlist.m3u8?tag=12"
+
+
+def test_extract_media_video_captures_poster_and_size_metadata():
+    """The poster is kept as thumbnail_url, and the chosen variant's bitrate
+    plus the clip duration are stored so size can be estimated without a
+    download."""
+    from xbrain.extract.graphql import _extract_media
+
+    legacy = _video_legacy(
+        [
+            {
+                "bitrate": 2176000,
+                "content_type": "video/mp4",
+                "url": "https://video.twimg.com/high.mp4?tag=12",
+            },
+        ],
+        duration_millis=30000,
+    )
+
+    entry = _extract_media(legacy)[0]
+
+    assert entry.thumbnail_url == "https://pbs.twimg.com/poster.jpg"
+    assert entry.bitrate == 2176000
+    assert entry.duration_millis == 30000

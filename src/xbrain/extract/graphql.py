@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
-from xbrain.models import Author, Item, Link, Media, MediaEntry, SourceName, ThreadInfo
+from xbrain.models import (
+    Author,
+    Item,
+    Link,
+    Media,
+    MediaEntry,
+    MediaVideoPending,
+    SourceName,
+    ThreadInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,18 +127,55 @@ def _extract_links(legacy: dict[str, Any]) -> list[Link]:
     return links
 
 
+def _select_variant(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the playable variant from `video_info.variants`.
+
+    X serves a video as several `variants`: progressive `video/mp4` files
+    (one per bitrate, each a complete downloadable file) plus an
+    `application/x-mpegURL` HLS manifest. Prefer the highest-bitrate mp4 (a
+    single downloadable file); fall back to the HLS manifest when no mp4 is
+    offered. Returns None when there are no usable variants.
+    """
+    variants = entry.get("video_info", {}).get("variants", [])
+    mp4s = [v for v in variants if v.get("content_type") == "video/mp4" and v.get("url")]
+    if mp4s:
+        return max(mp4s, key=lambda v: v.get("bitrate", 0))
+    return next((v for v in variants if v.get("url")), None)
+
+
+def _video_media(entry: dict[str, Any]) -> MediaVideoPending | None:
+    """Build a `MediaVideoPending` from a video/animated_gif media entry.
+
+    Stores the playable stream URL (never the poster), keeps the poster as
+    `thumbnail_url`, and records the chosen mp4's bitrate plus the clip
+    duration so a later download can estimate size without fetching bytes.
+    """
+    variant = _select_variant(entry)
+    url = (variant or {}).get("url") or entry.get("media_url_https") or entry.get("expanded_url")
+    if not url:
+        return None
+    return MediaVideoPending(
+        url=url,
+        thumbnail_url=entry.get("media_url_https"),
+        bitrate=(variant or {}).get("bitrate"),
+        duration_millis=entry.get("video_info", {}).get("duration_millis"),
+    )
+
+
 def _extract_media(legacy: dict[str, Any]) -> list[MediaEntry]:
     entries = legacy.get("extended_entities", {}).get("media") or legacy.get("entities", {}).get(
         "media", []
     )
     media: list[MediaEntry] = []
     for entry in entries:
-        kind: Literal["photo", "video"] = (
-            "video" if entry.get("type") in ("video", "animated_gif") else "photo"
-        )
+        if entry.get("type") in ("video", "animated_gif"):
+            video = _video_media(entry)
+            if video is not None:
+                media.append(video)
+            continue
         url = entry.get("media_url_https") or entry.get("expanded_url")
         if url:
-            media.append(Media(type=kind, url=url))
+            media.append(Media(type="photo", url=url))
     return media
 
 

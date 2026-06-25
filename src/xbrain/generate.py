@@ -211,9 +211,10 @@ def _render_media_lines(item: Item) -> list[str]:
       reason and the original URL — visible evidence, not a silent drop.
     - `MediaPhotoPending`     → silent. Not an error, just "the next
       `xbrain media` run will pick it up".
-    - `MediaVideoPending`     → placeholder warning carrying the URL.
-      Video bytes are not downloaded yet, so the URL is the only
-      evidence we surface.
+    - `MediaVideoPending`     → a clickable "Ver vídeo" link to the playable
+      stream (the mp4/HLS URL from `video_info.variants`, not the poster),
+      flagged as pending local download until the video-download phase
+      lands.
 
     The output is intentionally plain markdown; the caller (`_render_note`)
     wraps it in a blank line on either side for readability.
@@ -229,7 +230,9 @@ def _render_media_lines(item: Item) -> list[str]:
             # Silent: a future `xbrain media` run will advance this entry.
             continue
         elif isinstance(entry, MediaVideoPending):
-            lines.append(f"> 🎥 Vídeo (no descargado): <{entry.url}>")
+            # `entry.url` is the playable stream (mp4 or HLS), not the poster,
+            # so surface it as a clickable link; bytes are not saved yet.
+            lines.append(f"> 🎥 [Ver vídeo]({entry.url}) (pendiente de descarga)")
         else:
             assert_never(entry)
     return lines

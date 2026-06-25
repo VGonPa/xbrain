@@ -152,6 +152,21 @@ def test_generate_renders_video_pending_as_placeholder(tmp_path: Path):
     assert "https://video.twimg.com/x.mp4" in body
 
 
+def test_generate_renders_video_pending_as_clickable_play_link(tmp_path: Path):
+    """The video URL is now the playable mp4 (not the poster), so render it as a
+    labelled clickable link, flagged as pending local download."""
+    from xbrain.models import MediaVideoPending
+
+    item = _item("1", with_link=True)
+    item.media = [MediaVideoPending(url="https://video.twimg.com/high.mp4?tag=12")]
+
+    generate({"1": item}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md"))
+    body = note.read_text(encoding="utf-8")
+    assert "[Ver vídeo](https://video.twimg.com/high.mp4?tag=12)" in body
+    assert "pendiente de descarga" in body
+
+
 def test_generate_media_only_item_gets_a_note(tmp_path: Path):
     """An item with only media (no link, no enrichment) is note-worthy.
 

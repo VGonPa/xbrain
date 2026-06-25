@@ -708,3 +708,35 @@ def test_topic_page_model_round_trips():
     assert restored.slug == "ai-coding"
     assert restored.post_count_at_synth == 42
     assert restored.notes == ["Nota uno.", "Nota dos."]
+
+
+def test_media_video_pending_carries_thumbnail_and_size_metadata():
+    """MediaVideoPending can carry the poster thumbnail plus the bitrate and
+    duration used to estimate download size — without fetching anything."""
+    from xbrain.models import MediaVideoPending
+
+    entry = MediaVideoPending(
+        url="https://video.twimg.com/high.mp4?tag=12",
+        thumbnail_url="https://pbs.twimg.com/poster.jpg",
+        bitrate=2176000,
+        duration_millis=30000,
+    )
+
+    assert entry.thumbnail_url == "https://pbs.twimg.com/poster.jpg"
+    assert entry.bitrate == 2176000
+    assert entry.duration_millis == 30000
+
+
+def test_media_video_pending_metadata_optional_for_legacy_records():
+    """A bare video_pending (url only) still loads — the new fields default to
+    None so existing items.json records need no migration."""
+    from xbrain.models import MediaEntryAdapter, MediaVideoPending
+
+    entry = MediaEntryAdapter.validate_python(
+        {"kind": "video_pending", "type": "video", "url": "https://video.twimg.com/x.mp4"}
+    )
+
+    assert isinstance(entry, MediaVideoPending)
+    assert entry.thumbnail_url is None
+    assert entry.bitrate is None
+    assert entry.duration_millis is None
