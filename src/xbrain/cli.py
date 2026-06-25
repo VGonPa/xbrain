@@ -180,7 +180,29 @@ def _auto_snapshot(cfg: Config, command: str) -> None:
     typer.echo(f"Snapshot created: {path.name} ({manifest.item_count} items)")
 
 
-def _run_refresh_media(cfg: Config, source: str) -> None:
+def _format_size_estimate(estimated_bytes: int, n_estimable: int, n_unknown: int) -> str:
+    """The human download-size line; never prints '~0.0 GB' when nothing is estimable.
+
+    With at least one estimable video, reports the GB sum plus the unknown
+    count. With none estimable, says the size is unknown for the N videos that
+    carry no bitrate/duration (so a large unknown count never misreads as
+    "~0.0 GB, nothing to download"), and reports "no videos" when there are none.
+    """
+    if n_estimable == 0:
+        if n_unknown == 0:
+            return "Estimated video download: no videos in the store."
+        return (
+            f"Estimated video download: size unknown for {n_unknown} videos "
+            "(no bitrate/duration captured)."
+        )
+    gigabytes = estimated_bytes / 1_000_000_000
+    return (
+        f"Estimated video download: ~{gigabytes:.1f} GB across {n_estimable} videos; "
+        f"{n_unknown} with unknown size."
+    )
+
+
+def _run_refresh_media(cfg: Config, source: str, *, force: bool) -> None:
     """Re-capture the FULL X history and backfill playable video media in place.
 
     Destructive — it overwrites the video entries on existing items — so it
@@ -193,6 +215,15 @@ def _run_refresh_media(cfg: Config, source: str) -> None:
     `refresh_video_media` — video entries only; photos and every enrichment /
     description / fetch field are preserved. The store is saved and a
     download-size estimate is printed. Video DOWNLOAD is out of scope here.
+
+    Empty-capture guard: `extract_source` returns `[]` (it does NOT raise) when
+    the session is logged in but the GraphQL parser drifts or the scroll is
+    interrupted. Re-seeing 0 known items against a NON-EMPTY store is therefore
+    a likely-broken run, not success — it surfaces a loud warning and aborts
+    non-zero WITHOUT saving (the merge was a no-op, so the store on disk is
+    untouched and the pre-snapshot already fired). `--force` downgrades this to
+    a warning and proceeds. An empty store (fresh project) and any non-zero
+    capture (monotonic, re-runnable progress) are left to save normally.
     """
     _auto_snapshot(cfg, "refresh-media")
     store = load_store(cfg.items_path)
@@ -216,20 +247,33 @@ def _run_refresh_media(cfg: Config, source: str) -> None:
         for src in chosen:
             # Empty known_ids disables the skip-known early-stop: the whole
             # history is returned, not just the items newer than the cursor.
+            # Unlike `_run_extract`, the `state.json` cursors are intentionally
+            # left untouched — this is a backfill of existing records, not an
+            # incremental advance, so the next `extract` cursor must not move.
             fresh.extend(extract_source(context, src, targets[src], set()))
     report = refresh_video_media(store, fresh)
+
+    if store and report.items_seen == 0:
+        warning = (
+            f"refresh-media re-vio 0 de los {len(store)} items ya conocidos — "
+            "la sesión de X probablemente caducó o el parser GraphQL ha derivado "
+            "(spec §6); no se actualizó nada."
+        )
+        if not force:
+            # Nothing matched, so the store is unchanged — not saving is
+            # byte-identical and the pre-snapshot already fired. Abort non-zero
+            # so a broken capture never reports success.
+            raise RuntimeError(f"{warning} Usa --force para guardar igualmente.")
+        typer.echo(f"AVISO: {warning}", err=True)
+
     save_store(store, cfg.items_path)
     estimated_bytes, n_estimable, n_unknown = estimate_download_size(store)
-    gigabytes = estimated_bytes / 1_000_000_000
     typer.echo(
         f"refresh-media: {report.items_seen} known items re-seen, "
         f"{report.items_refreshed} refreshed, {report.videos_updated} videos updated; "
         f"{report.items_with_video_not_seen} video items not re-seen (still poster-era)."
     )
-    typer.echo(
-        f"Estimated video download: ~{gigabytes:.1f} GB across {n_estimable} videos; "
-        f"{n_unknown} with unknown size."
-    )
+    typer.echo(_format_size_estimate(estimated_bytes, n_estimable, n_unknown))
 
 
 def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
@@ -418,19 +462,28 @@ def media(
 @_handle_cli_errors
 def refresh_media(
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Guardar aunque se re-vean 0 items conocidos (sesión caducada / "
+        "drift de GraphQL). Por defecto ese caso aborta sin escribir.",
+    ),
 ) -> None:
     """Re-captura X y refresca la URL/metadata de vídeo de items ya guardados.
 
     Recorre el histórico COMPLETO (sin saltarse ids conocidos) y reescribe las
     entradas de vídeo poster-era con el stream reproducible + bitrate +
-    duración. No toca fotos ni el estado de enriquecimiento/descripción.
+    duración. No toca fotos ni el estado de enriquecimiento/descripción, y no
+    degrada un vídeo bueno a su póster si X deja de servir el stream.
 
     Es destructivo (reescribe `items.json` in situ) → auto-snapshot antes de
-    escribir. NO descarga vídeo (eso es una fase posterior): solo imprime una
-    estimación del tamaño total de descarga. El scroll es lento y a ritmo
-    humano; puede tardar varios minutos.
+    escribir. Si se re-ven 0 items conocidos sobre un store no vacío (probable
+    sesión caducada o drift del parser), aborta sin guardar salvo `--force`.
+    NO descarga vídeo (eso es una fase posterior): solo imprime una estimación
+    del tamaño total de descarga. El scroll es lento y a ritmo humano; puede
+    tardar varios minutos.
     """
-    _run_refresh_media(_config(), source.value)
+    _run_refresh_media(_config(), source.value, force=force)
 
 
 def _run_describe(

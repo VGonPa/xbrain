@@ -54,6 +54,15 @@ def _playable_video(url: str = "https://v/high.mp4") -> MediaVideoPending:
     )
 
 
+def _poster_fallback_video() -> MediaVideoPending:
+    """A fresh capture where X served NO usable variant: `build_video_media`
+    falls back to the poster, so url == thumbnail_url and there is no metadata.
+    Swapping this onto a stored record would DEGRADE it — it must be rejected.
+    """
+    poster = "https://pbs.twimg.com/poster.jpg"
+    return MediaVideoPending(url=poster, thumbnail_url=poster)
+
+
 def _downloaded_photo() -> MediaPhotoDownloaded:
     return MediaPhotoDownloaded(
         url="https://pbs.twimg.com/media/dl.jpg",
@@ -240,6 +249,43 @@ def test_refresh_first_fresh_entry_wins_on_duplicate_id():
     assert store["1"].media[0].url == "https://v/first.mp4"
     assert report.items_seen == 1
     assert report.videos_updated == 1
+
+
+def test_refresh_rejects_poster_fallback_keeping_existing_poster_era():
+    """A fresh poster-only capture (drift) does NOT overwrite a poster-era record."""
+    existing = _poster_video()
+    store = {"1": _item("1", [existing])}
+    fresh = [_item("1", [_poster_fallback_video()])]
+
+    report = refresh_video_media(store, fresh)
+
+    # The store entry is left as-is — no replacement with the poster fallback.
+    assert store["1"].media[0] is existing
+    assert report.items_seen == 1
+    assert report.items_refreshed == 0
+    assert report.videos_updated == 0
+
+
+def test_refresh_never_degrades_a_good_video_to_a_poster_fallback():
+    """Second-run regression guard: a good mp4 survives a poster-only re-capture.
+
+    `refresh_video_media` is the first overwriting path in the repo. If X drifts
+    and serves no usable variant on a later run, `build_video_media` yields a
+    poster fallback (url == thumbnail_url). That must NOT replace an already-good
+    playable record — otherwise a re-run would silently undo a prior refresh.
+    """
+    good = _playable_video("https://v/good.mp4")
+    store = {"1": _item("1", [good])}
+    fresh = [_item("1", [_poster_fallback_video()])]
+
+    report = refresh_video_media(store, fresh)
+
+    survivor = store["1"].media[0]
+    assert survivor is good
+    assert survivor.url == "https://v/good.mp4"
+    assert survivor.bitrate == 2_176_000
+    assert report.items_refreshed == 0
+    assert report.videos_updated == 0
 
 
 def test_refresh_report_defaults_to_zero():

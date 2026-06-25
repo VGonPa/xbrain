@@ -55,31 +55,47 @@ class RefreshReport:
     items_with_video_not_seen: int = 0
 
 
+def _is_real_stream(video: MediaVideoPending) -> bool:
+    """True when a fresh video is a real playable stream, not a poster fallback.
+
+    `build_video_media` falls back to the poster image (``url ==
+    media_url_https == thumbnail_url``) when X serves no usable
+    `video_info.variants` — a drift symptom. A real stream's ``url`` is the
+    mp4/HLS, which differs from the poster ``thumbnail_url``. Using this as the
+    upgrade discriminator stops a drifted re-capture from DEGRADING an
+    already-good record back to a poster (this is the repo's first overwriting
+    path, so the guard matters).
+    """
+    return video.url != video.thumbnail_url
+
+
 def _rebuild_media(
     existing: list[MediaEntry], fresh_videos: list[MediaVideoPending]
 ) -> tuple[list[MediaEntry], int]:
     """Replace each video entry positionally; keep every photo entry verbatim.
 
     Walks ``existing`` in order. The i-th `MediaVideoPending` is replaced by the
-    i-th entry of ``fresh_videos``; photo variants (Pending / Downloaded /
-    Failed / Described) pass through untouched, preserving their download and
-    description state. A store video with no fresh counterpart (fewer fresh
-    videos than store videos) is left as-is — never dropped. Returns the rebuilt
-    list and the number of replacements made.
+    i-th entry of ``fresh_videos`` **only when that fresh entry is a real stream**
+    (see `_is_real_stream`); a poster-fallback fresh entry, or no fresh
+    counterpart at all (fewer fresh videos than store videos), leaves the
+    existing record untouched — never degraded, never dropped. Photo variants
+    (Pending / Downloaded / Failed / Described) always pass through unchanged,
+    preserving their download and description state. Returns the rebuilt list
+    and the number of real replacements made.
     """
     rebuilt: list[MediaEntry] = []
     replaced = 0
     fresh_iter = iter(fresh_videos)
     for entry in existing:
-        if isinstance(entry, MediaVideoPending):
-            fresh = next(fresh_iter, None)
-            if fresh is None:
-                rebuilt.append(entry)
-            else:
-                rebuilt.append(fresh)
-                replaced += 1
-        else:
+        if not isinstance(entry, MediaVideoPending):
             rebuilt.append(entry)
+            continue
+        fresh = next(fresh_iter, None)
+        if fresh is not None and _is_real_stream(fresh):
+            rebuilt.append(fresh)
+            replaced += 1
+        else:
+            rebuilt.append(entry)  # no upgrade available → keep the existing record
     return rebuilt, replaced
 
 
