@@ -671,8 +671,12 @@ under-cap set you're about to fetch.
 
 Because a 200 status isn't trust — a CDN/captcha/auth-wall page can come back as
 200 with an HTML or JSON body — the downloaded bytes are validated (a `video/*`
-content-type or an mp4 `ftyp` signature) before being written; a non-video
-response is recorded as a permanent failure instead of saving a corrupt `.mp4`.
+content-type or an mp4 `ftyp` signature; a body that starts with HTML/JSON markup
+is rejected even under a `video/*` header) before being written. A non-video
+response is recorded as a **transient** failure (no corrupt `.mp4` is written) so
+the next run retries automatically once the rate-limit or session clears. A
+mid-download connection drop or an out-of-memory body is likewise recorded and
+the batch continues — one bad video never aborts the whole run.
 
 The run is idempotent (already-downloaded videos are skipped unless `--force`),
 auto-snapshots `data/` first (destructive), and a Ctrl-C between videos leaves

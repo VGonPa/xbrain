@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -221,13 +222,18 @@ def parse_size_to_bytes(value: str) -> int:
 
 
 def _scale_size(number: str, multiplier: int, original: str) -> int:
-    """Parse `number` × `multiplier` into a positive byte count, or raise."""
+    """Parse `number` × `multiplier` into a positive byte count, or raise.
+
+    `float()` accepts `inf` / `nan` (and `int(inf)` would raise an uncaught
+    `OverflowError`), so reject any non-finite or non-positive magnitude up front
+    — it routes to the friendly `ValueError` → clean exit-1.
+    """
     try:
         magnitude = float(number)
     except ValueError:
         raise ValueError(f"invalid --max-size {original!r}; use e.g. 500MB or 2GB") from None
-    if magnitude <= 0:
-        raise ValueError(f"--max-size must be positive, got {original!r}")
+    if not math.isfinite(magnitude) or magnitude <= 0:
+        raise ValueError(f"--max-size must be a positive finite size, got {original!r}")
     return int(magnitude * multiplier)
 
 
@@ -534,28 +540,10 @@ def _download_one_video(
             attempts=attempts,
         )
 
-    # NOTE: the whole body is buffered here (`response.content`). Streaming the
-    # download is deferred to the large-file / ffmpeg follow-up; for now the
-    # `--max-size` gate caps the risk and `MemoryError` exits cleanly via the CLI.
-    content = response.content
-    if not content:
-        # 2xx but empty body — not a real download. Transient so we retry.
-        return _failed(
-            entry, reason="unknown_error", error="empty response body", attempts=attempts
-        )
-    content_type = _content_type_of(response)
-    if not _is_video_response(content_type, content):
-        # 2xx with a NON-video body — a CDN/captcha/auth-wall interstitial or an
-        # edge-cache HTML/JSON error page served as 200. Writing it would
-        # persist a corrupt `.mp4` that idempotency then hides forever. Reject
-        # as `format_error` (permanent, mirroring the photo Pillow guard) WITHOUT
-        # writing the file.
-        return _failed(
-            entry,
-            reason="format_error",
-            error=f"non-video response: content-type={content_type!r}, {len(content)} bytes",
-            attempts=attempts,
-        )
+    body = _read_validated_body(entry, response, attempts=attempts)
+    if isinstance(body, MediaVideoFailed):
+        return body
+    content = body
     local_path = _local_path(item_id, index, ".mp4")
     try:
         _write_bytes(media_root / local_path, content)
@@ -575,6 +563,55 @@ def _download_one_video(
         bytes_size=len(content),
         downloaded_at=datetime.now(timezone.utc),
     )
+
+
+def _read_validated_body(
+    entry: _VideoEntry,
+    response: requests.Response,
+    *,
+    attempts: int,
+) -> bytes | MediaVideoFailed:
+    """Buffer + validate a 2xx body — return the bytes, or a `MediaVideoFailed`.
+
+    The body is read INSIDE the network-error guard (not just `session.get`):
+    over a ~140 GB batch a mid-download connection drop (`ChunkedEncodingError` /
+    `ConnectionError`) is the COMMON failure and it surfaces here, at the body
+    read — bucketing it transient is what lets the batch continue instead of
+    aborting on a raw traceback. `MemoryError` (a body too large to buffer) is
+    caught locally too. An empty body, or a non-video body (a CDN/captcha/
+    auth-wall interstitial or an X rate-limit JSON served as 200), is rejected
+    WITHOUT writing — all bucketed TRANSIENT (`unknown_error`) so the next run
+    auto-retries once the underlying condition clears (no `--force` needed).
+    """
+    try:
+        content = response.content
+    except requests.Timeout as exc:
+        return _failed(entry, reason="timeout", error=_format_error(exc, None), attempts=attempts)
+    except requests.RequestException as exc:
+        return _failed(
+            entry, reason="unknown_error", error=_format_error(exc, None), attempts=attempts
+        )
+    except MemoryError:
+        return _failed(
+            entry,
+            reason="unknown_error",
+            error="video too large to buffer in memory; streaming download is the deferred follow-up",
+            attempts=attempts,
+        )
+    if not content:
+        return _failed(
+            entry, reason="unknown_error", error="empty response body", attempts=attempts
+        )
+    content_type = _content_type_of(response)
+    if not _is_video_response(content_type, content):
+        return _failed(
+            entry,
+            reason="unknown_error",
+            error=f"non-video response (interstitial?): "
+            f"content-type={content_type!r}, {len(content)} bytes",
+            attempts=attempts,
+        )
+    return content
 
 
 def _failed(
@@ -603,6 +640,11 @@ def _failed(
 # auth-wall may return in place of the bytes.
 _MP4_MAGIC = b"ftyp"
 
+# A body that begins with one of these (after leading whitespace) is markup, not
+# a video container: `<`/`<!DOCTYPE` = HTML/XML, `{`/`[` = JSON. A real mp4 opens
+# with a binary box-size byte, never one of these.
+_TEXT_BODY_PREFIXES = (b"<", b"{", b"[")
+
 
 def _content_type_of(response: object) -> str:
     """Best-effort Content-Type from a response (`""` when absent)."""
@@ -612,13 +654,24 @@ def _content_type_of(response: object) -> str:
     return headers.get("Content-Type", "") or ""
 
 
+def _looks_like_text_body(content: bytes) -> bool:
+    """True when the body clearly begins with HTML/XML or JSON markup."""
+    head = content.lstrip()[:1]
+    return head in _TEXT_BODY_PREFIXES
+
+
 def _is_video_response(content_type: str, content: bytes) -> bool:
     """True when the 2xx body looks like an actual video, not an error page.
 
-    Accepts a `video/*` Content-Type OR an mp4 container signature (`ftyp` box
-    at offset 4). Anything else — `text/html` captcha, `application/json` error
-    — is rejected so it is never written as a `.mp4`.
+    Belt-and-suspenders: a body that begins with HTML/JSON markup is rejected
+    FIRST — a misconfigured CDN can return an interstitial under a `video/*`
+    Content-Type, and the header alone must not be trusted over the bytes.
+    Otherwise accepts a `video/*` Content-Type OR an mp4 container signature
+    (`ftyp` box at offset 4). Anything else — `text/html` captcha,
+    `application/json` error — is rejected so it is never written as a `.mp4`.
     """
+    if _looks_like_text_body(content):
+        return False
     if content_type.lower().startswith("video/"):
         return True
     return len(content) >= 12 and content[4:8] == _MP4_MAGIC

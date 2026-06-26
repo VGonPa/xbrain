@@ -112,10 +112,10 @@ _OPERATOR_ERRORS = (
     # The snapshot module hits these on permission or disk issues — they should
     # surface as a clean exit-1, not a raw traceback.
     OSError,
-    # `download-videos` buffers each mp4 fully in memory (streaming is the
-    # large-file follow-up); a too-large body should exit cleanly, not dump a
-    # raw traceback. Prior transitions are already persisted, so no data is lost.
-    MemoryError,
+    # NOTE: MemoryError is deliberately NOT here — a global catch would swallow
+    # OOM stacks for every command and print an empty "Error: ". `download-videos`
+    # handles a too-large body LOCALLY in `_download_one_video` (records the cause
+    # + continues the batch); see `xbrain.video_media`.
 )
 
 

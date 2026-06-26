@@ -578,24 +578,6 @@ def test_download_videos_command_persists_failed_on_total_failure(tmp_path: Path
     assert entry.failure_reason == "http_4xx"
 
 
-def test_download_videos_command_memory_error_exits_cleanly(tmp_path: Path, monkeypatch):
-    """Item 2: an OOM while buffering a body exits 1 cleanly (no raw traceback)."""
-    _setup_repo(tmp_path, monkeypatch)
-    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
-
-    class _OOMSession:
-        def __init__(self):
-            self.headers: dict[str, str] = {}
-
-        def get(self, _url, *, timeout):
-            raise MemoryError("body too large to buffer")
-
-    monkeypatch.setattr("xbrain.video_media.requests.Session", _OOMSession)
-    result = runner.invoke(app, ["download-videos", "--yes"])
-    assert result.exit_code == 1
-    assert "Error:" in result.output  # clean operator message, not a traceback
-
-
 def test_download_videos_command_max_size_skips_big_video(tmp_path: Path, monkeypatch):
     """Item 7 (CLI): `--max-size` skips an over-cap video; nothing is downloaded."""
     from xbrain.models import MediaVideoPending

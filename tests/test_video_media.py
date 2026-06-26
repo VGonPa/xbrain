@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import requests
 
 from xbrain.models import (
     Author,
@@ -465,7 +466,7 @@ def test_download_videos_empty_body_is_transient_unknown(tmp_path: Path):
     assert report.videos_failed_transient == 1
 
 
-# --------------------------------------------------------- content validation (item 1)
+# --------------------------------------------------------- content validation (items 1-4)
 
 
 def test_is_video_response_accepts_magic_or_content_type():
@@ -476,9 +477,18 @@ def test_is_video_response_accepts_magic_or_content_type():
     assert _is_video_response("application/json", b'{"errors":[]}') is False
 
 
-def test_download_videos_rejects_html_interstitial_as_format_error(tmp_path: Path):
-    """A 200 with an HTML captcha/auth-wall body is rejected as format_error
-    (permanent) and NO file is written — mirrors the photo Pillow guard.
+def test_is_video_response_rejects_markup_even_with_video_content_type():
+    """Item 4 (belt-and-suspenders): a `video/*` header over an HTML/JSON body
+    is still rejected — the bytes win over a misconfigured CDN header."""
+    assert _is_video_response("video/mp4", b"  <!DOCTYPE html><html></html>") is False
+    assert _is_video_response("video/mp4", b'{"errors":[{"code":88}]}') is False
+    assert _is_video_response("video/mp4", b"[1,2,3]") is False
+
+
+def test_download_videos_rejects_html_interstitial_as_transient(tmp_path: Path):
+    """Item 2: a 200 with an HTML auth-wall body is rejected and NO file written,
+    but bucketed TRANSIENT (unknown_error) so it auto-retries once the session
+    clears — NOT permanent format_error (which would need --force).
 
     Partial-success setup (item 2 downloads) so the total-failure RuntimeError
     does not fire and we can assert on the bucket + filesystem.
@@ -497,18 +507,16 @@ def test_download_videos_rejects_html_interstitial_as_format_error(tmp_path: Pat
     report = download_videos(items, media_root=tmp_path, session=session, throttle_seconds=0)
     failed = items["1"].media[0]
     assert isinstance(failed, MediaVideoFailed)
-    assert failed.failure_reason == "format_error"
-    assert (
-        failed.failure_reason not in _TRANSIENT_MEDIA_FAILURES
-    )  # permanent: not endlessly retried
+    assert failed.failure_reason == "unknown_error"
+    assert failed.failure_reason in _TRANSIENT_MEDIA_FAILURES  # auto-retries next run
     assert "text/html" in (failed.error or "")
-    assert not (tmp_path / "1" / "0.mp4").exists()  # corrupt body never written
-    assert report.videos_failed_permanent == 1
+    assert not (tmp_path / "1" / "0.mp4").exists()  # interstitial never written
+    assert report.videos_failed_transient == 1
     assert isinstance(items["2"].media[0], MediaVideoDownloaded)
 
 
-def test_download_videos_rejects_json_error_page_as_format_error(tmp_path: Path):
-    """A 200 JSON error page (rate-limit/auth) is rejected, not written as .mp4."""
+def test_download_videos_rejects_json_error_page_as_transient(tmp_path: Path):
+    """Item 2: a 200 X rate-limit JSON (code 88) is rejected as transient."""
     body = b'{"errors":[{"code":88,"message":"Rate limit exceeded"}]}'
     items = {
         "1": _item_with_media([_video_pending(url="https://video.twimg.com/d/j.mp4")], "1"),
@@ -523,8 +531,144 @@ def test_download_videos_rejects_json_error_page_as_format_error(tmp_path: Path)
     download_videos(items, media_root=tmp_path, session=session, throttle_seconds=0)
     failed = items["1"].media[0]
     assert isinstance(failed, MediaVideoFailed)
-    assert failed.failure_reason == "format_error"
+    assert failed.failure_reason == "unknown_error"
+    assert failed.failure_reason in _TRANSIENT_MEDIA_FAILURES
     assert not (tmp_path / "1" / "0.mp4").exists()
+
+
+def test_download_videos_rejects_markup_under_video_content_type(tmp_path: Path):
+    """Item 4: HTML body served under a `video/mp4` header is rejected (no file)."""
+    html = b"<!DOCTYPE html><html><body>login</body></html>"
+    items = {
+        "1": _item_with_media([_video_pending(url="https://video.twimg.com/d/spoof.mp4")], "1"),
+        "2": _item_with_media([_video_pending(url="https://video.twimg.com/d/ok.mp4")], "2"),
+    }
+    session = FakeSession(
+        responses={
+            "spoof.mp4": [FakeResponse(200, html, {"Content-Type": "video/mp4"})],
+            "ok.mp4": [FakeResponse(200, _mp4_bytes())],
+        }
+    )
+    download_videos(items, media_root=tmp_path, session=session, throttle_seconds=0)
+    failed = items["1"].media[0]
+    assert isinstance(failed, MediaVideoFailed)
+    assert failed.failure_reason == "unknown_error"
+    assert not (tmp_path / "1" / "0.mp4").exists()
+
+
+def test_download_videos_connection_drop_on_body_read_continues_batch(tmp_path: Path):
+    """Item 1 (batch-abort bug): a connection drop AT THE BODY READ (not the GET)
+    becomes a transient MediaVideoFailed and the batch continues to the next
+    video — no raw traceback, no whole-run abort."""
+
+    class _DropOnRead:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        @property
+        def content(self):
+            raise requests.ConnectionError("connection reset during body transfer")
+
+    class _Session:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def get(self, url, *, timeout):
+            self.calls.append(url)
+            if "drop.mp4" in url:
+                return _DropOnRead()
+
+            class _Ok:
+                status_code = 200
+                headers: dict[str, str] = {}
+                content = _mp4_bytes()
+
+            return _Ok()
+
+    items = {
+        "1": _item_with_media([_video_pending(url="https://video.twimg.com/d/drop.mp4")], "1"),
+        "2": _item_with_media([_video_pending(url="https://video.twimg.com/d/ok.mp4")], "2"),
+    }
+    report = download_videos(items, media_root=tmp_path, session=_Session(), throttle_seconds=0)
+    failed = items["1"].media[0]
+    assert isinstance(failed, MediaVideoFailed)
+    assert failed.failure_reason == "unknown_error"
+    assert failed.failure_reason in _TRANSIENT_MEDIA_FAILURES  # retried next run
+    # The batch continued past the drop and downloaded item 2.
+    assert isinstance(items["2"].media[0], MediaVideoDownloaded)
+    assert report.videos_failed_transient == 1
+    assert report.videos_downloaded == 1
+
+
+def test_download_videos_read_timeout_on_body_is_bucketed_timeout(tmp_path: Path):
+    """A ReadTimeout raised at the body read buckets as `timeout` (transient)."""
+    import requests as _requests
+
+    class _TimeoutOnRead:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        @property
+        def content(self):
+            raise _requests.Timeout("read timed out")
+
+    class _Session:
+        def get(self, url, *, timeout):
+            if "to.mp4" in url:
+                return _TimeoutOnRead()
+
+            class _Ok:
+                status_code = 200
+                headers: dict[str, str] = {}
+                content = _mp4_bytes()
+
+            return _Ok()
+
+    items = {
+        "1": _item_with_media([_video_pending(url="https://video.twimg.com/d/to.mp4")], "1"),
+        "2": _item_with_media([_video_pending(url="https://video.twimg.com/d/ok.mp4")], "2"),
+    }
+    download_videos(items, media_root=tmp_path, session=_Session(), throttle_seconds=0)
+    failed = items["1"].media[0]
+    assert isinstance(failed, MediaVideoFailed)
+    assert failed.failure_reason == "timeout"
+
+
+def test_download_videos_memory_error_on_body_read_continues_batch(tmp_path: Path):
+    """Item 3: an OOM buffering a too-large body is caught LOCALLY → transient
+    MediaVideoFailed with a clear message, and the batch carries on."""
+
+    class _OOMOnRead:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        @property
+        def content(self):
+            raise MemoryError("cannot allocate body")
+
+    class _Session:
+        def get(self, url, *, timeout):
+            if "huge.mp4" in url:
+                return _OOMOnRead()
+
+            class _Ok:
+                status_code = 200
+                headers: dict[str, str] = {}
+                content = _mp4_bytes()
+
+            return _Ok()
+
+    items = {
+        "1": _item_with_media([_video_pending(url="https://video.twimg.com/d/huge.mp4")], "1"),
+        "2": _item_with_media([_video_pending(url="https://video.twimg.com/d/ok.mp4")], "2"),
+    }
+    report = download_videos(items, media_root=tmp_path, session=_Session(), throttle_seconds=0)
+    failed = items["1"].media[0]
+    assert isinstance(failed, MediaVideoFailed)
+    assert failed.failure_reason == "unknown_error"
+    assert "too large to buffer" in (failed.error or "")
+    assert isinstance(items["2"].media[0], MediaVideoDownloaded)  # batch continued
+    assert report.videos_downloaded == 1
 
 
 def test_download_videos_accepts_mp4_magic_without_content_type(tmp_path: Path):
@@ -537,8 +681,8 @@ def test_download_videos_accepts_mp4_magic_without_content_type(tmp_path: Path):
 
 def test_download_videos_accepts_video_content_type_without_magic(tmp_path: Path):
     """A `video/mp4` Content-Type without the ftyp magic (fragment/CDN quirk)
-    still succeeds — the Content-Type is sufficient evidence."""
-    body = b"\xde\xad\xbe\xef" * 16  # no ftyp box
+    still succeeds — the Content-Type is sufficient evidence (binary body)."""
+    body = b"\xde\xad\xbe\xef" * 16  # no ftyp box, not markup
     item = _item_with_media([_video_pending(url=_MP4_URL)])
     session = FakeSession(
         responses={".mp4": [FakeResponse(200, body, {"Content-Type": "video/mp4"})]}
@@ -562,6 +706,14 @@ def test_parse_size_to_bytes_accepts_human_units():
 
 def test_parse_size_to_bytes_rejects_garbage_and_nonpositive():
     for bad in ("banana", "-5MB", "0GB", "", "MB"):
+        with pytest.raises(ValueError):
+            parse_size_to_bytes(bad)
+
+
+def test_parse_size_to_bytes_rejects_non_finite():
+    """Item 5: `inf` / `infinity` / `nan` parse as floats but `int(inf)` would
+    raise OverflowError — guard routes them to the friendly ValueError."""
+    for bad in ("inf", "infinity", "INF", "nan", "infGB", "1e400"):  # 1e400 → inf
         with pytest.raises(ValueError):
             parse_size_to_bytes(bad)
 
