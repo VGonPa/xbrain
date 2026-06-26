@@ -20,6 +20,8 @@ from xbrain.models import (
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
+    MediaVideoDownloaded,
+    MediaVideoFailed,
     MediaVideoPending,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
@@ -197,35 +199,40 @@ def _render_media_lines(item: Item) -> list[str]:
     """One line per `Item.media` entry, ready to splice into the Tweet section.
 
     Variant handling:
-    - `MediaPhotoDownloaded` / `MediaPhotoDescribed` → Obsidian embed
-      `![[_media/<id>/<n>.<ext>]]`. The vault is self-contained:
-      `generate()` mirrors the file from `data/media/` into
+    - `MediaPhotoDownloaded` / `MediaPhotoDescribed` / `MediaVideoDownloaded`
+      → Obsidian embed `![[_media/<id>/<n>.<ext>]]`. The vault is
+      self-contained: `generate()` mirrors the file from `data/media/` into
       `<output_dir>/_media/` before rendering, so the embed resolves
-      with no user configuration. The described variant inherits the
-      same on-disk file — the description is consumed by the LLM
-      prompts in `executors/api.py` / `topic_synth.py`, NOT shown as
-      alt-text in this phase. Decorative photos are still embedded;
-      the `is_decorative` flag only filters them out of the LLM prompts,
-      never out of the visual rendering.
-    - `MediaPhotoFailed`      → one-line ⚠ warning carrying the failure
-      reason and the original URL — visible evidence, not a silent drop.
+      with no user configuration. A downloaded video embeds its local
+      mp4 exactly like a photo (Obsidian renders an inline player). The
+      described variant inherits the same on-disk file — the description
+      is consumed by the LLM prompts in `executors/api.py` /
+      `topic_synth.py`, NOT shown as alt-text in this phase. Decorative
+      photos are still embedded; the `is_decorative` flag only filters
+      them out of the LLM prompts, never out of the visual rendering.
+    - `MediaPhotoFailed` / `MediaVideoFailed` → one-line ⚠ warning carrying
+      the failure reason and the original URL — visible evidence, not a
+      silent drop.
     - `MediaPhotoPending`     → silent. Not an error, just "the next
       `xbrain media` run will pick it up".
     - `MediaVideoPending`     → a clickable "Ver vídeo" link to the playable
       stream (the mp4/HLS URL from `video_info.variants`, not the poster),
-      flagged as pending local download until the video-download phase
-      lands.
+      flagged as pending local download until `xbrain download-videos`
+      fetches the bytes (mp4) — HLS stays a link pending the ffmpeg follow-up.
 
     The output is intentionally plain markdown; the caller (`_render_note`)
     wraps it in a blank line on either side for readability.
     """
     lines: list[str] = []
     for entry in item.media:
-        if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
+        if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed, MediaVideoDownloaded)):
             lines.append(f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]")
         elif isinstance(entry, MediaPhotoFailed):
             reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
             lines.append(f"> ⚠ Foto no disponible ({reason}): <{entry.url}>")
+        elif isinstance(entry, MediaVideoFailed):
+            reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
+            lines.append(f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>")
         elif isinstance(entry, MediaPhotoPending):
             # Silent: a future `xbrain media` run will advance this entry.
             continue
@@ -253,7 +260,7 @@ _FAILURE_ES_MEDIA: dict[str, str] = {
 
 
 def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> None:
-    """Copy every downloaded photo on `item` into the vault's `_media/` tree.
+    """Copy every downloaded photo/video on `item` into the vault's `_media/` tree.
 
     The canonical store is `data/media/<id>/<n>.<ext>` (under `media_root`);
     the vault mirror is `<output_dir>/_media/<id>/<n>.<ext>`. Mirroring
@@ -269,9 +276,10 @@ def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> N
     """
     vault_media_dir.mkdir(parents=True, exist_ok=True)
     for entry in item.media:
-        # The described variant inherits the on-disk bytes from the
-        # prior downloaded state — both shapes hit the same mirror path.
-        if not isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
+        # The described variant inherits the on-disk bytes from the prior
+        # downloaded state; a downloaded video carries its mp4 the same way —
+        # all three shapes hit the same mirror path.
+        if not isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed, MediaVideoDownloaded)):
             continue
         source = media_root / entry.local_path
         destination = vault_media_dir / entry.local_path

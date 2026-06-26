@@ -149,6 +149,58 @@ def test_generate_renders_video_pending_as_clickable_play_link(tmp_path: Path):
     assert "pendiente de descarga" in body
 
 
+def test_generate_renders_downloaded_video_as_obsidian_embed(tmp_path: Path):
+    """A `MediaVideoDownloaded` becomes a `![[_media/<id>/<n>.mp4]]` embed and the
+    mp4 bytes are mirrored into the vault's `_media/` tree (self-contained vault),
+    exactly like a downloaded photo."""
+    from xbrain.models import MediaVideoDownloaded
+
+    media_root = tmp_path / "media"
+    video_dir = media_root / "1"
+    video_dir.mkdir(parents=True)
+    (video_dir / "0.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42fake")
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaVideoDownloaded(
+            url="https://video.twimg.com/x.mp4",
+            thumbnail_url="https://pbs.twimg.com/poster.jpg",
+            bitrate=2176000,
+            duration_millis=30000,
+            local_path="1/0.mp4",
+            bytes_size=20,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    output_dir = tmp_path / "vault"
+    generate({"1": item}, output_dir, media_root=media_root)
+    body = next((output_dir / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "![[_media/1/0.mp4]]" in body
+    assert (output_dir / "_media" / "1" / "0.mp4").exists()
+
+
+def test_generate_renders_failed_video_as_warning(tmp_path: Path):
+    """A `MediaVideoFailed` becomes a one-line ⚠ warning carrying URL + reason."""
+    from xbrain.models import MediaVideoFailed
+
+    item = _item("1", with_link=True)
+    item.media = [
+        MediaVideoFailed(
+            url="https://video.twimg.com/dead.mp4",
+            failure_reason="http_5xx",
+            attempts=1,
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+    ]
+
+    generate({"1": item}, tmp_path)
+    body = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "⚠" in body
+    assert "https://video.twimg.com/dead.mp4" in body
+    assert "error del servidor (HTTP 5xx)" in body
+
+
 def test_generate_media_only_item_gets_a_note(tmp_path: Path):
     """An item with only media (no link, no enrichment) is note-worthy.
 

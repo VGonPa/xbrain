@@ -13,7 +13,10 @@ generates an Obsidian wiki.
 - Media side-pipeline: `media` (download photos) → `describe` (vision LLM);
   `refresh-media` re-captures X to backfill the playable video URL + bitrate +
   duration onto already-stored items (video-only, preserves photos/enrichment;
-  destructive → auto-snapshot; no video download yet).
+  destructive → auto-snapshot); `download-videos` then downloads the mp4 bytes
+  for backfilled videos (mp4 only — HLS `.m3u8` needs ffmpeg and is a deferred
+  follow-up; prints a ~GB size-gate, confirm unless `--yes`; destructive →
+  auto-snapshot).
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

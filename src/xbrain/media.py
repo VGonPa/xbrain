@@ -39,6 +39,8 @@ from xbrain.models import (
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
+    MediaVideoDownloaded,
+    MediaVideoFailed,
     MediaVideoPending,
 )
 
@@ -221,7 +223,9 @@ def _is_eligible(entry: MediaEntry, *, force: bool) -> bool:
     asset); the operator is expected to follow with `xbrain describe
     --force` if the new bytes warrant it.
     """
-    if isinstance(entry, MediaVideoPending):
+    if isinstance(entry, (MediaVideoPending, MediaVideoDownloaded, MediaVideoFailed)):
+        # Every video state is out of scope for the PHOTO downloader. Videos
+        # are advanced by `xbrain download-videos` (see `xbrain.video_media`).
         return False
     if isinstance(entry, MediaPhotoPending):
         return True

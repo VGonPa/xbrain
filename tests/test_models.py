@@ -740,3 +740,197 @@ def test_media_video_pending_metadata_optional_for_legacy_records():
     assert entry.thumbnail_url is None
     assert entry.bitrate is None
     assert entry.duration_millis is None
+
+
+# ------------------------------------------------ video download/failed variants
+
+
+def test_media_video_downloaded_round_trips_through_json():
+    """A `MediaVideoDownloaded` payload reads back as the same variant.
+
+    Exercises the discriminator: the new `video_downloaded` kind must match
+    exactly one variant and survive a dump → re-parse round-trip verbatim
+    (the live store re-dumps every record on each save).
+    """
+    from datetime import datetime, timezone
+
+    from xbrain.models import MediaEntryAdapter, MediaVideoDownloaded
+
+    payload = {
+        "kind": "video_downloaded",
+        "type": "video",
+        "url": "https://video.twimg.com/ext_tw_video/1/vid/1280x720/A.mp4?tag=12",
+        "thumbnail_url": "https://pbs.twimg.com/poster.jpg",
+        "bitrate": 2176000,
+        "duration_millis": 30000,
+        "local_path": "123/0.mp4",
+        "bytes_size": 8160000,
+        "downloaded_at": datetime(2026, 5, 24, tzinfo=timezone.utc).isoformat(),
+    }
+    entry = MediaEntryAdapter.validate_python(payload)
+    assert isinstance(entry, MediaVideoDownloaded)
+    assert entry.local_path == "123/0.mp4"
+    assert entry.bytes_size == 8160000
+    assert entry.bitrate == 2176000
+    assert entry.thumbnail_url == "https://pbs.twimg.com/poster.jpg"
+    restored = MediaEntryAdapter.validate_python(entry.model_dump(mode="json"))
+    assert isinstance(restored, MediaVideoDownloaded)
+    assert restored == entry
+
+
+def test_media_video_downloaded_carried_fields_optional():
+    """thumbnail_url / bitrate / duration_millis default to None so an mp4
+    downloaded from a legacy (thumbnail-less) pending entry still validates."""
+    from datetime import datetime, timezone
+
+    from xbrain.models import MediaVideoDownloaded
+
+    entry = MediaVideoDownloaded(
+        url="https://video.twimg.com/x.mp4",
+        local_path="9/0.mp4",
+        bytes_size=12,
+        downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+    )
+    assert entry.thumbnail_url is None
+    assert entry.bitrate is None
+    assert entry.duration_millis is None
+    assert entry.type == "video"
+
+
+def test_media_video_downloaded_rejects_absolute_local_path():
+    """An absolute `local_path` would let a poisoned items.json write bytes
+    outside `data/media/` — reuse of the shared no-traversal validator."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaVideoDownloaded(
+            url="https://video.twimg.com/x.mp4",
+            local_path="/etc/passwd",
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_video_downloaded_rejects_parent_traversal_local_path():
+    """A `local_path` containing `..` must be rejected at construction."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaVideoDownloaded(
+            url="https://video.twimg.com/x.mp4",
+            local_path="../x/y.mp4",
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_video_downloaded_rejects_zero_bytes_size():
+    """A zero-byte download is nonsense — bytes_size is gt=0."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaVideoDownloaded(
+            url="https://video.twimg.com/x.mp4",
+            local_path="123/0.mp4",
+            bytes_size=0,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_video_downloaded_rejects_naive_downloaded_at():
+    """A naive timestamp would miscompare against now(timezone.utc) — reject."""
+    import pytest
+    from datetime import datetime
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoDownloaded
+
+    with pytest.raises(ValidationError):
+        MediaVideoDownloaded(
+            url="https://video.twimg.com/x.mp4",
+            local_path="123/0.mp4",
+            bytes_size=1,
+            downloaded_at=datetime(2026, 5, 24),  # naive
+        )
+
+
+def test_media_video_failed_round_trips_and_carries_fields():
+    """A `MediaVideoFailed` round-trips and carries the source url + metadata
+    so a retry has everything it needs without re-capturing."""
+    from datetime import datetime, timezone
+
+    from xbrain.models import MediaEntryAdapter, MediaVideoFailed
+
+    payload = {
+        "kind": "video_failed",
+        "type": "video",
+        "url": "https://video.twimg.com/x.mp4",
+        "thumbnail_url": "https://pbs.twimg.com/poster.jpg",
+        "bitrate": 1000000,
+        "duration_millis": 5000,
+        "failure_reason": "http_5xx",
+        "error": "HTTP 503",
+        "attempts": 2,
+        "last_attempt_at": datetime(2026, 5, 24, tzinfo=timezone.utc).isoformat(),
+    }
+    entry = MediaEntryAdapter.validate_python(payload)
+    assert isinstance(entry, MediaVideoFailed)
+    assert entry.failure_reason == "http_5xx"
+    assert entry.attempts == 2
+    assert entry.thumbnail_url == "https://pbs.twimg.com/poster.jpg"
+    restored = MediaEntryAdapter.validate_python(entry.model_dump(mode="json"))
+    assert isinstance(restored, MediaVideoFailed)
+    assert restored == entry
+
+
+def test_media_video_failed_rejects_zero_attempts():
+    """`attempts=0` is nonsense — the downloader increments before failing."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoFailed
+
+    with pytest.raises(ValidationError):
+        MediaVideoFailed(
+            url="https://video.twimg.com/x.mp4",
+            failure_reason="http_4xx",
+            attempts=0,
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+
+def test_media_video_failed_requires_failure_reason():
+    """A failure without a reason is a type error — symmetric with photos."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoFailed
+
+    with pytest.raises(ValidationError):
+        MediaVideoFailed(url="https://video.twimg.com/x.mp4")  # missing required fields
+
+
+def test_media_video_failed_rejects_naive_last_attempt_at():
+    """A naive last_attempt_at must be rejected (utc-aware contract)."""
+    import pytest
+    from datetime import datetime
+    from pydantic import ValidationError
+
+    from xbrain.models import MediaVideoFailed
+
+    with pytest.raises(ValidationError):
+        MediaVideoFailed(
+            url="https://video.twimg.com/x.mp4",
+            failure_reason="timeout",
+            attempts=1,
+            last_attempt_at=datetime(2026, 5, 24),  # naive
+        )

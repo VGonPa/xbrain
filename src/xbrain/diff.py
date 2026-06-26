@@ -36,6 +36,8 @@ from xbrain.models import (
     MediaPhotoDownloaded,
     MediaPhotoFailed,
     MediaPhotoPending,
+    MediaVideoDownloaded,
+    MediaVideoFailed,
     MediaVideoPending,
     Topic,
     TopicPage,
@@ -133,11 +135,14 @@ class VocabDiff(BaseModel):
 class MediaStateCounts(BaseModel):
     """Counts of media variants on one side of a diff.
 
-    Mirrors the five-variant union: downloaded / described / pending /
-    failed / video_pending. Counts are global across all items in the
+    Mirrors the seven-variant union: the four photo states (downloaded /
+    described / pending / failed) plus the three video states (video_pending /
+    video_downloaded / video_failed). Counts are global across all items in the
     store — per-item resolution lives on the items themselves (already
     diff-able via the items round-trip). `described` is the terminal
-    state for content-bearing photos after a vision-describe pass.
+    state for content-bearing photos after a vision-describe pass;
+    `video_downloaded` / `video_failed` are the outcomes of `xbrain
+    download-videos` on a `video_pending` mp4.
     """
 
     downloaded: int = 0
@@ -145,6 +150,8 @@ class MediaStateCounts(BaseModel):
     pending: int = 0
     failed: int = 0
     video_pending: int = 0
+    video_downloaded: int = 0
+    video_failed: int = 0
 
 
 class MediaDiff(BaseModel):
@@ -167,6 +174,8 @@ class MediaDiff(BaseModel):
     delta_pending: int = 0
     delta_failed: int = 0
     delta_video_pending: int = 0
+    delta_video_downloaded: int = 0
+    delta_video_failed: int = 0
 
 
 class DiffSummary(BaseModel):
@@ -413,6 +422,8 @@ def _compute_media_diff(
         delta_pending=counts_b.pending - counts_a.pending,
         delta_failed=counts_b.failed - counts_a.failed,
         delta_video_pending=counts_b.video_pending - counts_a.video_pending,
+        delta_video_downloaded=counts_b.video_downloaded - counts_a.video_downloaded,
+        delta_video_failed=counts_b.video_failed - counts_a.video_failed,
     )
 
 
@@ -431,6 +442,10 @@ def _count_media_variants(items: dict[str, Item]) -> MediaStateCounts:
                 counts.failed += 1
             elif isinstance(entry, MediaVideoPending):
                 counts.video_pending += 1
+            elif isinstance(entry, MediaVideoDownloaded):
+                counts.video_downloaded += 1
+            elif isinstance(entry, MediaVideoFailed):
+                counts.video_failed += 1
             else:
                 assert_never(entry)
     return counts
@@ -548,6 +563,10 @@ def _format_media_block(media: MediaDiff) -> list[str]:
         f"({_format_delta(media.delta_failed)})",
         f"  video_pending: A={media.a.video_pending:>5}  B={media.b.video_pending:>5}  "
         f"({_format_delta(media.delta_video_pending)})",
+        f"  video_downloaded: A={media.a.video_downloaded:>5}  B={media.b.video_downloaded:>5}  "
+        f"({_format_delta(media.delta_video_downloaded)})",
+        f"  video_failed:  A={media.a.video_failed:>5}  B={media.b.video_failed:>5}  "
+        f"({_format_delta(media.delta_video_failed)})",
     ]
 
 

@@ -32,8 +32,11 @@ file is not tracked by git.
 ## Safety: destructive operations auto-snapshot
 
 Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`,
-`refresh-media`) copy the full `data/` directory to
-`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. If your change introduces or modifies a destructive
+`refresh-media`, `media`, `describe`, `download-videos`) copy the full `data/`
+directory to
+`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`download-videos`
+takes its snapshot *after* the interactive size-gate confirmation, so a declined
+run leaves no stray snapshot — but always before the first byte is written.) If your change introduces or modifies a destructive
 operation, **wire the auto-snapshot** — see `_auto_snapshot` in `src/xbrain/cli.py`
 and the unit + integration tests under `tests/test_snapshot*.py`. A snapshot
 failure must propagate and abort the destructive op; never `try/except`-swallow
