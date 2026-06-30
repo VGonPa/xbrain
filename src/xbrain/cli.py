@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import logging
 import os
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -21,7 +22,7 @@ from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
 from xbrain.extract.browser import x_context
-from xbrain.extract.extractor import extract_source
+from xbrain.extract.extractor import RateLimitTruncated, extract_source
 from xbrain.extract.threads import expand_threads
 from xbrain.fetch import fetch_pending
 from xbrain.fetch_x import fetch_x_articles
@@ -73,6 +74,22 @@ from xbrain.worksheet import export_worksheet, import_worksheet
 app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
 
 _BOOKMARKS_URL = "https://x.com/i/bookmarks"
+
+_HEADLESS_HELP = (
+    "Navegador oculto. Por defecto headful (visible) — más difícil de "
+    "fingerprintear como bot. Usa --headless en runs desatendidos sin display."
+)
+
+
+@app.callback()
+def _configure_logging() -> None:
+    """Surface library `logging` warnings (e.g. the 429 backoff notice) cleanly.
+
+    Without a configured handler these fall to Python's last-resort handler with
+    an ugly `WARNING:logger:` prefix; route warnings through a plain stderr stream
+    so the user sees the backoff message during a long pause.
+    """
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
 
 class Source(str, enum.Enum):
@@ -161,11 +178,21 @@ def _run_extract(
     }
     chosen = source_sets[source]
     known_ids = set(store)
+    truncated: list[str] = []
     with x_context(cfg.storage_state_path, headless=headless) as context:
         for src in chosen:
             cursor = state.bookmarks if src == "bookmark" else state.own_tweets
             first_run = cursor.last_seen_id is None
-            items = extract_source(context, src, targets[src], known_ids, since, until)
+            try:
+                items = extract_source(context, src, targets[src], known_ids, since, until)
+            except RateLimitTruncated as exc:
+                # A truncated run is a partial, non-contiguous batch. Merging it
+                # (and advancing the cursor) would seal a permanent gap in the
+                # incremental store, so persist NOTHING for this source and fail
+                # loud; the next run re-scrolls the window cleanly.
+                typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
+                truncated.append(src)
+                continue
             if not items and first_run:
                 typer.echo(
                     f"AVISO: {src} devolvió 0 items en una extracción inicial — "
@@ -179,6 +206,11 @@ def _run_extract(
             typer.echo(f"{src}: {added} nuevos items")
     save_store(store, cfg.items_path)
     save_state(state, cfg.state_path)
+    if truncated:
+        raise RuntimeError(
+            f"Extracción truncada por rate-limit/bloqueo de X en: {', '.join(truncated)}. "
+            "Las fuentes completadas se guardaron; reanuda más tarde para el resto."
+        )
 
 
 def _auto_snapshot(cfg: Config, command: str) -> None:
@@ -296,14 +328,23 @@ def _run_refresh_media(cfg: Config, source: str, *, force: bool, headless: bool 
     typer.echo(_format_size_estimate(estimated_bytes, n_estimable, n_unknown))
 
 
-def _run_fetch(cfg: Config, since: datetime | None, until: datetime | None, force: bool) -> None:
+def _run_fetch(
+    cfg: Config,
+    since: datetime | None,
+    until: datetime | None,
+    force: bool,
+    *,
+    headless: bool = False,
+) -> None:
     if force:
         _auto_snapshot(cfg, "fetch-force")
     store = load_store(cfg.items_path)
     try:
         articles = fetch_pending(store, since, until, force)
-        x_articles = fetch_x_articles(store, cfg.storage_state_path, force, since, until)
-        threads = expand_threads(store, cfg.storage_state_path, force)
+        x_articles = fetch_x_articles(
+            store, cfg.storage_state_path, force, since, until, headless=headless
+        )
+        threads = expand_threads(store, cfg.storage_state_path, force, headless=headless)
     finally:
         # Persist whatever was fetched even if a later stage raised — a stage
         # error (e.g. an expired X session) must not discard in-memory work.
@@ -338,12 +379,7 @@ def extract(
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
-    headless: bool = typer.Option(
-        False,
-        "--headless/--no-headless",
-        help="Navegador oculto. Por defecto headful (visible) — más difícil de "
-        "fingerprintear como bot. Usa --headless en runs desatendidos sin display.",
-    ),
+    headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
     """Extrae bookmarks y/o tweets propios desde X."""
     _run_extract(_config(), source.value, _parse_date(since), _parse_date(until), headless=headless)
@@ -370,9 +406,10 @@ def fetch(
     since: str = typer.Option(None),
     until: str = typer.Option(None),
     force: bool = typer.Option(False, help="Volver a descargar lo ya descargado"),
+    headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
-    _run_fetch(_config(), _parse_date(since), _parse_date(until), force)
+    _run_fetch(_config(), _parse_date(since), _parse_date(until), force, headless=headless)
 
 
 def _run_media(
@@ -494,12 +531,7 @@ def refresh_media(
         help="Guardar aunque se re-vean 0 items conocidos (sesión caducada / "
         "drift de GraphQL). Por defecto ese caso aborta sin escribir.",
     ),
-    headless: bool = typer.Option(
-        False,
-        "--headless/--no-headless",
-        help="Navegador oculto. Por defecto headful (visible) — más difícil de "
-        "fingerprintear como bot. Usa --headless en runs desatendidos sin display.",
-    ),
+    headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
     """Re-captura X y refresca la URL/metadata de vídeo de items ya guardados.
 
@@ -1024,11 +1056,13 @@ def generate(
 
 @app.command()
 @_handle_cli_errors
-def sync() -> None:
+def sync(
+    headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
+) -> None:
     """extract + fetch + generate en orden."""
     cfg = _config()
-    _run_extract(cfg, "all", None, None)
-    _run_fetch(cfg, None, None, False)
+    _run_extract(cfg, "all", None, None, headless=headless)
+    _run_fetch(cfg, None, None, False, headless=headless)
     _run_generate(cfg, None, None)
 
 

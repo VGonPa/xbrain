@@ -189,6 +189,7 @@ def fetch_x_articles(
     since: datetime | None = None,
     until: datetime | None = None,
     *,
+    headless: bool = False,
     link_fetcher: LinkFetcher | None = None,
 ) -> int:
     """Fetch x.com link content for every item that has one and needs it.
@@ -213,6 +214,6 @@ def fetch_x_articles(
     else:
         if storage_state_path is None:
             raise ValueError("storage_state_path is required without an injected link_fetcher")
-        with x_context(storage_state_path) as context:
+        with x_context(storage_state_path, headless=headless) as context:
             _process(lambda url: _fetch_x_link(context, url))
     return len(pending)

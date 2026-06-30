@@ -66,3 +66,19 @@ def test_filter_in_range_keeps_item_within_both_bounds_and_dedups_by_id():
     since = datetime(2026, 1, 1, tzinfo=timezone.utc)
     until = datetime(2026, 12, 31, tzinfo=timezone.utc)
     assert _filter_in_range([item, item], since, until) == [item]
+
+
+def test_filter_in_range_bounds_are_inclusive():
+    # An item sitting exactly on `since` or `until` is kept ([since, until]).
+    item = _sample_item()
+    assert _filter_in_range([item], item.created_at, None) == [item]
+    assert _filter_in_range([item], None, item.created_at) == [item]
+
+
+def test_filter_in_range_dedup_keeps_first_seen():
+    # Two distinct objects sharing an id → the FIRST survives (setdefault).
+    first = _sample_item()
+    second = first.model_copy(update={"text": "variante distinta, mismo id"})
+    out = _filter_in_range([first, second], None, None)
+    assert len(out) == 1
+    assert out[0].text == first.text

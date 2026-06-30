@@ -152,7 +152,7 @@ def test_refresh_media_snapshots_before_capture_even_on_failure(tmp_path: Path, 
     save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
 
     @contextlib.contextmanager
-    def _ctx(_path):
+    def _ctx(_path, *, headless=False):
         yield object()
 
     def _raise(*_args, **_kwargs):
