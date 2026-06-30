@@ -1475,7 +1475,7 @@ def _mock_browser(monkeypatch, extract_impl):
     import xbrain.cli as cli
 
     @contextlib.contextmanager
-    def _ctx(_path):
+    def _ctx(_path, *, headless=False):
         yield object()
 
     monkeypatch.setattr(cli, "x_context", _ctx)
@@ -1641,3 +1641,36 @@ def test_refresh_media_surfaces_logged_out_runtimeerror(tmp_path: Path, monkeypa
     result = runner.invoke(app, ["refresh-media", "--source", "bookmarks"])
     assert result.exit_code == 1
     assert "Sesión de X caducada" in result.output
+
+
+def test_extract_advances_cursor_to_integer_max_id(tmp_path: Path, monkeypatch):
+    """The cursor must track the integer-max id, not list order or string compare."""
+    from xbrain.store import load_state
+
+    _setup_repo(tmp_path, monkeypatch)
+    # Out-of-order, and "98" > "100" lexicographically — only an int max gives 100.
+    _mock_browser(monkeypatch, lambda *a, **k: [_linked_item("98"), _linked_item("100")])
+
+    result = runner.invoke(app, ["extract", "--source", "bookmarks"])
+
+    assert result.exit_code == 0
+    assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id == "100"
+
+
+def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, monkeypatch):
+    """A RateLimitTruncated source must not merge items nor advance the cursor."""
+    from xbrain.extract.extractor import RateLimitTruncated
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _truncate(*_a, **_k):
+        raise RateLimitTruncated("bookmark: truncado a media timeline")
+
+    _mock_browser(monkeypatch, _truncate)
+
+    result = runner.invoke(app, ["extract", "--source", "bookmarks"])
+
+    assert result.exit_code == 1
+    assert load_store(tmp_path / "data" / "items.json") == {}
+    assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id is None

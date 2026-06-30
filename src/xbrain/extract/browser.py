@@ -34,8 +34,14 @@ def login(storage_state_path: Path) -> None:
 
 
 @contextmanager
-def x_context(storage_state_path: Path, headless: bool = True) -> Iterator[BrowserContext]:
-    """Yield a Playwright context authenticated with the saved X session."""
+def x_context(storage_state_path: Path, headless: bool = False) -> Iterator[BrowserContext]:
+    """Yield a Playwright context authenticated with the saved X session.
+
+    Defaults to a *visible* (headful) browser: headless Chromium is the most
+    easily fingerprinted automation mode, so headful lowers the detection
+    surface when scraping your own account. Pass `headless=True` (CLI:
+    `--headless`) for unattended runs where no display is available.
+    """
     if not storage_state_path.exists():
         raise FileNotFoundError(
             f"No hay sesión guardada en {storage_state_path}. Ejecuta `xbrain login`."
