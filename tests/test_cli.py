@@ -1475,7 +1475,7 @@ def _mock_browser(monkeypatch, extract_impl):
     import xbrain.cli as cli
 
     @contextlib.contextmanager
-    def _ctx(_path):
+    def _ctx(_path, *, headless=False):
         yield object()
 
     monkeypatch.setattr(cli, "x_context", _ctx)

@@ -140,7 +140,14 @@ def _report_invalid(invalid: list[tuple[str, list[str]]]) -> None:
             typer.echo(f"  {item_id}: {'; '.join(errors)}", err=True)
 
 
-def _run_extract(cfg: Config, source: str, since: datetime | None, until: datetime | None) -> None:
+def _run_extract(
+    cfg: Config,
+    source: str,
+    since: datetime | None,
+    until: datetime | None,
+    *,
+    headless: bool = False,
+) -> None:
     store = load_store(cfg.items_path)
     state = load_state(cfg.state_path)
     targets = {
@@ -154,7 +161,7 @@ def _run_extract(cfg: Config, source: str, since: datetime | None, until: dateti
     }
     chosen = source_sets[source]
     known_ids = set(store)
-    with x_context(cfg.storage_state_path) as context:
+    with x_context(cfg.storage_state_path, headless=headless) as context:
         for src in chosen:
             cursor = state.bookmarks if src == "bookmark" else state.own_tweets
             first_run = cursor.last_seen_id is None
@@ -215,7 +222,7 @@ def _format_size_estimate(estimated_bytes: int, n_estimable: int, n_unknown: int
     )
 
 
-def _run_refresh_media(cfg: Config, source: str, *, force: bool) -> None:
+def _run_refresh_media(cfg: Config, source: str, *, force: bool, headless: bool = False) -> None:
     """Re-capture the FULL X history and backfill playable video media in place.
 
     Destructive — it overwrites the video entries on existing items — so it
@@ -256,7 +263,7 @@ def _run_refresh_media(cfg: Config, source: str, *, force: bool) -> None:
         "slow and human-paced and can take many minutes. Leave it running."
     )
     fresh: list[Item] = []
-    with x_context(cfg.storage_state_path) as context:
+    with x_context(cfg.storage_state_path, headless=headless) as context:
         for src in chosen:
             # Empty known_ids disables the skip-known early-stop: the whole
             # history is returned, not just the items newer than the cursor.
@@ -331,9 +338,15 @@ def extract(
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
     until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
+    headless: bool = typer.Option(
+        False,
+        "--headless/--no-headless",
+        help="Navegador oculto. Por defecto headful (visible) — más difícil de "
+        "fingerprintear como bot. Usa --headless en runs desatendidos sin display.",
+    ),
 ) -> None:
     """Extrae bookmarks y/o tweets propios desde X."""
-    _run_extract(_config(), source.value, _parse_date(since), _parse_date(until))
+    _run_extract(_config(), source.value, _parse_date(since), _parse_date(until), headless=headless)
 
 
 @app.command(name="import-archive")
@@ -481,6 +494,12 @@ def refresh_media(
         help="Guardar aunque se re-vean 0 items conocidos (sesión caducada / "
         "drift de GraphQL). Por defecto ese caso aborta sin escribir.",
     ),
+    headless: bool = typer.Option(
+        False,
+        "--headless/--no-headless",
+        help="Navegador oculto. Por defecto headful (visible) — más difícil de "
+        "fingerprintear como bot. Usa --headless en runs desatendidos sin display.",
+    ),
 ) -> None:
     """Re-captura X y refresca la URL/metadata de vídeo de items ya guardados.
 
@@ -496,7 +515,7 @@ def refresh_media(
     del tamaño total de descarga. El scroll es lento y a ritmo humano; puede
     tardar varios minutos.
     """
-    _run_refresh_media(_config(), source.value, force=force)
+    _run_refresh_media(_config(), source.value, force=force, headless=headless)
 
 
 def _run_describe(
