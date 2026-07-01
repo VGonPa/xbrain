@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -54,6 +55,12 @@ from xbrain.topics import (
     topics_needing_synth,
     write_topic_pages,
 )
+from xbrain.video_fetch import (
+    FetchReport,
+    fetch_result_to_json,
+    fetch_videos,
+    format_fetch_summary,
+)
 from xbrain.video_media import download_videos as run_download_videos
 from xbrain.video_media import (
     VideoDownloadPlan,
@@ -63,6 +70,7 @@ from xbrain.video_media import (
     parse_size_to_bytes,
     plan_video_downloads,
 )
+from xbrain.video_select import format_video_table, list_video_entries, row_to_json
 from xbrain.vocab import (
     apply_vocab_worksheet,
     export_vocab_worksheet,
@@ -96,6 +104,15 @@ class Source(str, enum.Enum):
     bookmarks = "bookmarks"
     tweets = "tweets"
     all = "all"
+
+
+class VideoStatus(str, enum.Enum):
+    """The `list-videos --status` filter values (mirrors the four `VideoState`s)."""
+
+    downloaded = "downloaded"
+    failed = "failed"
+    pending = "pending"
+    poster_era = "poster-era"
 
 
 def _repo_root() -> Path:
@@ -845,6 +862,143 @@ def download_videos(
         yes=yes,
         max_size_bytes=max_size_bytes,
     )
+
+
+@app.command(name="list-videos")
+@_handle_cli_errors
+def list_videos(
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
+    status: VideoStatus | None = typer.Option(
+        None,
+        "--status",
+        help="Filtra por estado: downloaded | failed | pending | poster-era.",
+    ),
+    max_size: str | None = typer.Option(
+        None,
+        "--max-size",
+        help="Solo vídeos con tamaño conocido <= cap (500MB / 2GB; sin unidad = MB).",
+    ),
+    limit: int | None = typer.Option(None, "--limit", help="Máximo número de filas."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Salida como array JSON estable en vez de tabla humana."
+    ),
+) -> None:
+    """Cataloga (solo lectura) los vídeos referenciados en `items.json`.
+
+    Una fila por entrada de vídeo, con estado (downloaded / failed / pending /
+    poster-era), tamaño estimado (exacto si ya está descargado, "unknown" si no
+    hay bitrate/duración), el `primary_topic` del item y un snippet del texto.
+    NO escribe nada ni toma snapshot. Con `--json` emite un array estable con los
+    campos `id, url, state, topic, size_bytes|null, mp4_url, text` que un agente
+    puede parsear para elegir qué vídeos pasar a `fetch-video`.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    max_size_bytes = parse_size_to_bytes(max_size) if max_size else None
+    rows = list_video_entries(
+        store,
+        topic=topic,
+        status=status.value if status is not None else None,
+        max_size_bytes=max_size_bytes,
+        source=source.value,
+        limit=limit,
+    )
+    if json_out:
+        typer.echo(json.dumps([row_to_json(row) for row in rows], ensure_ascii=False, indent=2))
+    else:
+        typer.echo(format_video_table(rows))
+
+
+def _resolve_fetch_ids(
+    store: dict[str, Item], ids: str | None, topic: str | None, source: str
+) -> list[str]:
+    """Resolve `--ids` and/or `--topic` into a de-duplicated, ordered id list.
+
+    Explicit `--ids` are taken verbatim; `--topic` is expanded via the read-only
+    catalog (scoped by `--source`). At least one selector is required — an empty
+    selection is an operator error, not a silent no-op.
+    """
+    id_list: list[str] = []
+    if ids:
+        id_list.extend(part.strip() for part in ids.split(",") if part.strip())
+    if topic:
+        id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
+    if not id_list:
+        raise ValueError("fetch-video: indica --ids y/o --topic para seleccionar vídeos.")
+    return list(dict.fromkeys(id_list))
+
+
+def _emit_fetch_report(report: FetchReport, *, json_out: bool) -> None:
+    """Print the fetch outcomes: JSON array, or human lines + a SUMMARY."""
+    if json_out:
+        typer.echo(
+            json.dumps(
+                [fetch_result_to_json(result) for result in report.results],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    for result in report.results:
+        if result.outcome == "fetched":
+            typer.echo(f"{result.id}: {result.path}")
+        elif result.outcome == "skipped":
+            typer.echo(f"{result.id}: saltado ({result.reason})")
+        else:
+            typer.echo(
+                f"{result.id}: fallo ({result.reason}) {result.error or ''}".rstrip(), err=True
+            )
+    typer.echo(format_fetch_summary(report))
+
+
+@app.command(name="fetch-video")
+@_handle_cli_errors
+def fetch_video(
+    to: Path = typer.Option(
+        ..., "--to", help="Directorio destino (REQUERIDO). Escribe <dir>/<id>.mp4."
+    ),
+    ids: str | None = typer.Option(None, "--ids", help="IDs de items separados por comas."),
+    topic: str | None = typer.Option(
+        None, "--topic", help="Selecciona vídeos por el primary_topic del item."
+    ),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    max_size: str | None = typer.Option(
+        None,
+        "--max-size",
+        help="Salta vídeos cuyo tamaño estimado supere el cap (500MB / 2GB; sin unidad = MB).",
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Máximo número de descargas en esta ejecución."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Salida como array JSON estable en vez de líneas humanas."
+    ),
+) -> None:
+    """Descarga (efímera) el mp4 real de los vídeos elegidos a `--to`/<id>.mp4.
+
+    Selecciona por `--ids` y/o `--topic` (+ `--max-size`, `--limit`). Reutiliza
+    las primitivas de `download-videos` (validación de contenido, clasificación
+    de fallos, escritura atómica, discriminador mp4/HLS/poster). Los HLS y
+    poster-era se saltan y se cuentan. Es DELIBERADAMENTE no persistente: NO muta
+    `items.json`, NO toma snapshot y NO escribe en `data/media/` — solo escribe
+    bajo `--to`. Pensado para que un agente transcriba/analice el vídeo y luego
+    descarte los bytes.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    id_list = _resolve_fetch_ids(store, ids, topic, source.value)
+    max_size_bytes = parse_size_to_bytes(max_size) if max_size else None
+    report = fetch_videos(store, id_list, to, max_size_bytes=max_size_bytes, limit=limit)
+    _emit_fetch_report(report, json_out=json_out)
+    if report.fetched == 0 and report.failed > 0:
+        # Parity with download-videos: a run where every attempted download
+        # failed must surface as a non-zero exit, not a silent empty run. A pure
+        # all-skips run (nothing attempted) stays exit 0.
+        raise RuntimeError(
+            f"fetch-video: all {report.failed} download attempt(s) failed; "
+            "check network / video.twimg.com availability and the warnings above."
+        )
 
 
 @app.command()

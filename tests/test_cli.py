@@ -413,6 +413,20 @@ class _FakeVideoSession:
         return _Resp()
 
 
+class _FailVideoSession:
+    """Fake session that returns a 500 for any GET (every download fails)."""
+
+    def __init__(self):
+        self.headers: dict[str, str] = {}
+
+    def get(self, _url, *, timeout):
+        class _Resp:
+            status_code = 500
+            content = b"err"
+
+        return _Resp()
+
+
 def test_download_videos_command_noop_when_no_videos(tmp_path: Path, monkeypatch):
     """A store with no downloadable mp4 is a no-op: exit 0, items.json unchanged,
     no confirmation needed, no snapshot taken (nothing is written)."""
@@ -1674,3 +1688,264 @@ def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, m
     assert result.exit_code == 1
     assert load_store(tmp_path / "data" / "items.json") == {}
     assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id is None
+
+
+# ------------------------------------------------------ list-videos / fetch-video
+
+
+def _enriched_video_item(item_id: str, topic: str, url: str = _MP4_URL, source: str = "bookmark"):
+    from xbrain.models import Enrichment
+
+    item = _video_item(item_id, url=url, source=source)
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        executor="manual",
+        primary_topic=topic,
+    )
+    return item
+
+
+def test_list_videos_json_is_parseable_array(tmp_path: Path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _enriched_video_item("42", "ai")}, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["list-videos", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, list) and len(payload) == 1
+    row = payload[0]
+    assert set(row) == {"id", "url", "state", "topic", "size_bytes", "mp4_url", "text"}
+    assert row["id"] == "42"
+    assert row["state"] == "pending"
+    assert row["topic"] == "ai"
+    assert row["mp4_url"] == _MP4_URL
+
+
+def test_list_videos_human_table(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _enriched_video_item("42", "ai")}, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["list-videos"])
+    assert result.exit_code == 0, result.output
+    assert "STATE" in result.stdout
+    assert "pending" in result.stdout
+    assert "ai" in result.stdout
+
+
+def test_list_videos_is_read_only(tmp_path: Path, monkeypatch):
+    """list-videos performs zero writes and takes no snapshot."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _enriched_video_item("42", "ai")}, items_path)
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["list-videos", "--json"])
+    assert result.exit_code == 0
+    assert items_path.read_bytes() == before
+    snapshots = tmp_path / "data" / "snapshots"
+    assert not snapshots.exists()
+
+
+def test_list_videos_topic_filter(tmp_path: Path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {
+            "1": _enriched_video_item("1", "ai"),
+            "2": _enriched_video_item("2", "climate"),
+        },
+        tmp_path / "data" / "items.json",
+    )
+
+    result = runner.invoke(app, ["list-videos", "--topic", "climate", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert [row["id"] for row in payload] == ["2"]
+
+
+def test_list_videos_empty_store(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["list-videos"])
+    assert result.exit_code == 0
+    assert "No hay" in result.stdout
+
+
+def test_list_videos_rejects_bad_status(tmp_path: Path, monkeypatch):
+    """`--status` is a typer Enum: a bad value is a usage error (exit 2), like
+    `--source`."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["list-videos", "--status", "bogus"])
+    assert result.exit_code == 2
+
+
+def test_list_videos_json_null_topic(tmp_path: Path, monkeypatch):
+    """An un-enriched video's topic is JSON null in --json (human table shows —)."""
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["list-videos", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["topic"] is None
+
+
+def test_list_videos_status_poster_era_enum(tmp_path: Path, monkeypatch):
+    """The `poster-era` status value (hyphenated enum) is accepted and filters."""
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"9": _video_item("9", url=_POSTER)}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["list-videos", "--status", "poster-era", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [row["id"] for row in payload] == ["9"]
+
+
+def test_resolve_fetch_ids_union_dedup_and_source_asymmetry(tmp_path: Path, monkeypatch):
+    """--ids are verbatim (NOT source-scoped); --topic expansion IS source-scoped;
+    the union is order-preserving and de-duplicated."""
+    from xbrain.cli import _resolve_fetch_ids
+
+    store = {
+        "b": _enriched_video_item("b", "ai", source="bookmark"),
+        "t": _enriched_video_item("t", "ai", source="own_tweet"),
+    }
+    # "t" is kept verbatim though it is an own_tweet and source=bookmarks;
+    # the topic expansion under bookmarks yields only "b".
+    assert _resolve_fetch_ids(store, "t", "ai", "bookmarks") == ["t", "b"]
+    # order-preserving dedup across --ids + --topic.
+    assert _resolve_fetch_ids(store, "b,b", "ai", "all") == ["b", "t"]
+
+
+def test_resolve_fetch_ids_requires_selection():
+    import pytest
+
+    from xbrain.cli import _resolve_fetch_ids
+
+    with pytest.raises(ValueError, match="ids"):
+        _resolve_fetch_ids({}, None, None, "all")
+
+
+def test_fetch_video_total_failure_exits_nonzero(tmp_path: Path, monkeypatch):
+    """A run where every attempted download failed exits 1 (parity with
+    download-videos); a pure all-skips run stays exit 0."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FailVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
+    assert result.exit_code == 1
+    assert not (dest / "42.mp4").exists()
+
+
+def test_fetch_video_all_skips_exits_zero(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "7", "--to", str(dest)])
+    assert result.exit_code == 0, result.output
+
+
+def test_fetch_video_downloads_to_dir(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
+    assert result.exit_code == 0, result.output
+    assert (dest / "42.mp4").exists()
+    assert str(dest / "42.mp4") in result.stdout
+
+
+def test_fetch_video_does_not_mutate_store(tmp_path: Path, monkeypatch):
+    """fetch-video writes only under --to: items.json byte-identical, no snapshot,
+    no data/media/ writes."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42")}, items_path)
+    before = items_path.read_bytes()
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before
+    assert not (tmp_path / "data" / "media").exists()
+    snapshots = tmp_path / "data" / "snapshots"
+    assert not snapshots.exists() or not any("fetch-video" in p.name for p in snapshots.iterdir())
+
+
+def test_fetch_video_json_output(tmp_path: Path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest), "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["id"] == "42"
+    assert payload[0]["outcome"] == "fetched"
+    assert payload[0]["path"].endswith("42.mp4")
+
+
+def test_fetch_video_topic_selection(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {
+            "1": _enriched_video_item("1", "ai"),
+            "2": _enriched_video_item("2", "climate"),
+        },
+        tmp_path / "data" / "items.json",
+    )
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--topic", "ai", "--to", str(dest)])
+    assert result.exit_code == 0, result.output
+    assert (dest / "1.mp4").exists()
+    assert not (dest / "2.mp4").exists()
+
+
+def test_fetch_video_requires_ids_or_topic(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--to", str(dest)])
+    assert result.exit_code == 1
+    assert "ids" in result.output or "topic" in result.output
+
+
+def test_fetch_video_requires_to(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["fetch-video", "--ids", "42"])
+    assert result.exit_code != 0
+
+
+def test_fetch_video_skips_hls(tmp_path: Path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "7", "--to", str(dest), "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["outcome"] == "skipped"
+    assert payload[0]["reason"] == "hls"
+    assert not (dest / "7.mp4").exists()
