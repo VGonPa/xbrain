@@ -17,6 +17,13 @@ generates an Obsidian wiki.
   for backfilled videos (mp4 only — HLS `.m3u8` needs ffmpeg and is a deferred
   follow-up; prints a ~GB size-gate, confirm unless `--yes`; destructive →
   auto-snapshot).
+- Agent-driven video surface (read/fetch only, ML is external): `list-videos`
+  is a **read-only** catalog of video media (`--json` → stable `{id, url, state,
+  topic, size_bytes, mp4_url, text}` array; filters `--topic/--status/--max-size/
+  --source/--limit`; no writes, no snapshot); `fetch-video --to <dir>` does an
+  **ephemeral** mp4 fetch to `<dir>/<id>.mp4` (select by `--ids`/`--topic`),
+  reusing `video_media` primitives — deliberately non-persisting: it does NOT
+  mutate `items.json`, does NOT snapshot, and does NOT touch `data/media/`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

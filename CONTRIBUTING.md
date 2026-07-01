@@ -43,6 +43,14 @@ failure must propagate and abort the destructive op; never `try/except`-swallow
 it. Manual snapshots are available via `xbrain snapshot create`; restore via
 `xbrain snapshot restore <name>`.
 
+Not every command that writes bytes is destructive. `xbrain list-videos` is
+read-only, and `xbrain fetch-video` is **intentionally NOT** in the
+auto-snapshot set: it fetches a video ephemerally to the caller-supplied `--to`
+directory and never mutates `items.json`, never writes `data/media/`, and takes
+no snapshot — there is nothing in `data/` to protect, so a snapshot would be
+noise. Keep it that way: `fetch-video` must stay store-non-mutating (a test
+asserts `items.json` is byte-identical before/after a fetch).
+
 ## Pull requests written with AI agents
 
 XBrain is built with AI coding agents, and PRs written that way are welcome — under
