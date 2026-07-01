@@ -46,12 +46,17 @@ class TopicInput:
     reflects visual evidence that the per-post enrichment may have
     only partially captured. Decorative photos are excluded at the
     seam (mirrors `xbrain.executors.api._content_image_descriptions`).
+    `video_transcripts` is the bounded per-video transcript excerpt for
+    every with-speech `x_video` source in the topic's posts (#44) — richer
+    evidence than the one-line summary alone, trimmed per video so a topic
+    full of long talks stays within the prompt's token budget.
     """
 
     slug: str
     description: str
     summaries: list[str]
     image_descriptions: list[str] = field(default_factory=list)
+    video_transcripts: list[str] = field(default_factory=list)
 
 
 def _system_prompt(language: str) -> str:
@@ -84,6 +89,16 @@ def _user_prompt(topic: TopicInput) -> str:
             f"Images across the {len(topic.image_descriptions)} content-bearing photos in this topic:",
         ]
         lines += [f"- {description}" for description in topic.image_descriptions]
+    if topic.video_transcripts:
+        # Transcript evidence supplements the summaries the same way images
+        # do: a talk's transcript carries detail a one-line summary drops.
+        # Each excerpt is already bounded by the caller (`build_topic_inputs`)
+        # so a topic full of long talks stays within the token budget (#44).
+        lines += [
+            "",
+            f"Video transcripts across the {len(topic.video_transcripts)} videos in this topic (truncated):",
+        ]
+        lines += [f"- {transcript}" for transcript in topic.video_transcripts]
     return "\n".join(lines)
 
 

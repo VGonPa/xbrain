@@ -257,6 +257,47 @@ def test_build_topic_inputs_empty_when_no_described_photos():
     assert inputs[0].image_descriptions == []
 
 
+def _video_item_in_topic(item_id: str, primary: str, *, text: str, has_speech: bool = True) -> Item:
+    """An enriched item that also carries an `x_video` transcript source (#44)."""
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _enriched(item_id, primary, [primary])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_video", url="https://x.com/v", text=text, has_speech=has_speech
+            )
+        ],
+    )
+    return item
+
+
+def test_build_topic_inputs_collects_bounded_video_transcripts():
+    """With-speech video transcripts are collected per member and truncated to the
+    topic-synth cap; no-speech videos contribute nothing."""
+    from xbrain.rubrics import TOPIC_TRANSCRIPT_CHAR_LIMIT
+    from xbrain.topics import build_topic_inputs
+
+    talker = _video_item_in_topic("1", "ai-coding", text="w " * (TOPIC_TRANSCRIPT_CHAR_LIMIT))
+    silent = _video_item_in_topic("2", "ai-coding", text="", has_speech=False)
+    posts = {"ai-coding": TopicPosts()}
+    posts["ai-coding"].primary.extend([talker, silent])
+    inputs = build_topic_inputs(["ai-coding"], _VOCAB, posts)
+    assert len(inputs[0].video_transcripts) == 1  # only the with-speech one
+    assert "transcript truncated" in inputs[0].video_transcripts[0]
+
+
+def test_build_topic_inputs_empty_video_list_without_transcripts():
+    """A topic with no video items has an empty `video_transcripts` — regression guard."""
+    from xbrain.topics import build_topic_inputs
+
+    posts = {"ai-coding": TopicPosts()}
+    posts["ai-coding"].primary.append(_enriched("1", "ai-coding", ["ai-coding"]))
+    inputs = build_topic_inputs(["ai-coding"], _VOCAB, posts)
+    assert inputs[0].video_transcripts == []
+
+
 def test_compute_topic_posts_dedups_duplicate_slugs_in_topics():
     # A store record with a duplicate slug in `enriched.topics` (pre-validation
     # data) must place the item once, not twice, in the also-relevant list.

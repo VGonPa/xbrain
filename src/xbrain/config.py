@@ -40,6 +40,23 @@ class Config:
     # automatically (no `--force` needed). The string is exact-match —
     # there is no ordering relation, only equality.
     describe_version: str
+    # `transcribe_command` is the EXTERNAL transcriber `xbrain digest-video`
+    # shells out to (#44) — the heavy ASR lives outside xbrain core, invoked as
+    # a subprocess located via PATH/config. Defaults to `parakeet-mlx`; may be a
+    # multi-token wrapper command (split with shlex, no shell). `transcribe_model`
+    # is the optional model id passed through (`None` → the transcriber's own
+    # default).
+    transcribe_command: str
+    transcribe_model: str | None
+    # `vision_command` is the EXTERNAL vision model `xbrain digest-video --frames`
+    # shells out to (#44 PR4) to describe key-frame slides — the heavy vision lives
+    # outside xbrain core, invoked as a subprocess located via PATH/config. There
+    # is NO bundled default: it defaults to `""` (unset), and `--frames` errors
+    # clearly until it is configured. May be a multi-token wrapper (split with
+    # shlex, no shell). `vision_model` is the optional model id passed through
+    # (`None` → the vision tool's own default).
+    vision_command: str
+    vision_model: str | None
 
     @property
     def items_path(self) -> Path:
@@ -107,6 +124,8 @@ def load_config(repo_root: Path) -> Config:
             f"{list(SUPPORTED_TOPIC_STYLES)}, got {topic_style!r}"
         )
     describe = settings.get("describe", {})
+    transcribe = settings.get("transcribe", {})
+    vision = settings.get("vision", {})
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -121,4 +140,8 @@ def load_config(repo_root: Path) -> Config:
         topic_style=topic_style,
         describe_model=describe.get("model", "claude-sonnet-4-6"),
         describe_version=describe.get("version", "v1"),
+        transcribe_command=transcribe.get("command", "parakeet-mlx"),
+        transcribe_model=transcribe.get("model"),
+        vision_command=vision.get("command", ""),
+        vision_model=vision.get("model"),
     )

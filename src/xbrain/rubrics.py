@@ -26,6 +26,35 @@ _GUARDRAILS = _PKG / "guardrails.yaml"
 # `api` executor prompt and the worksheet export so both truncate identically.
 ARTICLE_CHAR_LIMIT = 4000
 
+# Max characters of an `x_video` transcript passed to the per-item ENRICH prompt
+# (#44). A 72-min talk transcribes to ~68k chars, but the LLM saturates on
+# topic + gist far sooner, so we cap at 12000 chars (~3k tokens, ~3× the article
+# limit): the first ~13 minutes of speech, enough to assign a real
+# `primary_topic` + summary without a single long talk blowing the prompt.
+# Shared by the `api` executor prompt and the worksheet export so both truncate
+# identically.
+TRANSCRIPT_CHAR_LIMIT = 12000
+
+# Tighter per-video cap for the TOPIC-page synthesis prompt (#44). A single topic
+# can gather many video items, so each member's transcript is trimmed to 2000
+# chars (~500 tokens): the total token cost stays bounded even for a topic with a
+# dozen talks, while every video still contributes more evidence than its
+# one-line summary alone.
+TOPIC_TRANSCRIPT_CHAR_LIMIT = 2000
+
+
+def truncate_transcript(text: str, limit: int) -> str:
+    """Trim a transcript to `limit` chars, signposting when it was cut.
+
+    Unlike the silent article slice (`text[:ARTICLE_CHAR_LIMIT]`), a truncated
+    transcript carries an explicit ``[… transcript truncated …]`` marker so the
+    LLM does not read the cut point as the end of the talk. Returns `text`
+    unchanged when it already fits within `limit`.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n[… transcript truncated …]"
+
 
 def load_rubric(name: str, *, language: str | None = None) -> str:
     """Return the text of `rubrics/rubric-<name>.md`.

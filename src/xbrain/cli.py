@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from xbrain.describe import apply_describe_worksheet, export_describe_worksheet
 from xbrain.describe import describe_all as run_describe_all
 from xbrain.describe import emit_summary_line as describe_emit_summary_line
 from xbrain.diff import diff_snapshots, format_json, format_text
+from xbrain.digest import VisualConfig, digest_videos, format_digest_summary
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
@@ -55,7 +57,19 @@ from xbrain.topics import (
     topics_needing_synth,
     write_topic_pages,
 )
-from xbrain.video_media import download_videos as run_download_videos
+from xbrain.transcribe import Transcript, transcribe_media
+from xbrain.video_fetch import (
+    FetchReport,
+    fetch_result_to_json,
+    fetch_videos,
+    format_fetch_summary,
+)
+from xbrain.video_frames import (
+    DEFAULT_MAX_FRAMES,
+    DEFAULT_SCENE_THRESHOLD,
+    KeyFrame,
+    extract_key_frames,
+)
 from xbrain.video_media import (
     VideoDownloadPlan,
     VideoReport,
@@ -64,6 +78,9 @@ from xbrain.video_media import (
     parse_size_to_bytes,
     plan_video_downloads,
 )
+from xbrain.video_media import download_videos as run_download_videos
+from xbrain.video_select import format_video_table, list_video_entries, row_to_json
+from xbrain.vision import describe_image
 from xbrain.vocab import (
     apply_vocab_worksheet,
     export_vocab_worksheet,
@@ -97,6 +114,15 @@ class Source(str, enum.Enum):
     bookmarks = "bookmarks"
     tweets = "tweets"
     all = "all"
+
+
+class VideoStatus(str, enum.Enum):
+    """The `list-videos --status` filter values (mirrors the four `VideoState`s)."""
+
+    downloaded = "downloaded"
+    failed = "failed"
+    pending = "pending"
+    poster_era = "poster-era"
 
 
 def _repo_root() -> Path:
@@ -887,6 +913,307 @@ def download_videos(
         items_filter=items_filter,
         yes=yes,
         max_size_bytes=max_size_bytes,
+    )
+
+
+@app.command(name="list-videos")
+@_handle_cli_errors
+def list_videos(
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
+    status: VideoStatus | None = typer.Option(
+        None,
+        "--status",
+        help="Filtra por estado: downloaded | failed | pending | poster-era.",
+    ),
+    max_size: str | None = typer.Option(
+        None,
+        "--max-size",
+        help="Solo vídeos con tamaño conocido <= cap (500MB / 2GB; sin unidad = MB).",
+    ),
+    limit: int | None = typer.Option(None, "--limit", help="Máximo número de filas."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Salida como array JSON estable en vez de tabla humana."
+    ),
+) -> None:
+    """Cataloga (solo lectura) los vídeos referenciados en `items.json`.
+
+    Una fila por entrada de vídeo, con estado (downloaded / failed / pending /
+    poster-era), tamaño estimado (exacto si ya está descargado, "unknown" si no
+    hay bitrate/duración), el `primary_topic` del item y un snippet del texto.
+    NO escribe nada ni toma snapshot. Con `--json` emite un array estable con los
+    campos `id, url, state, topic, size_bytes|null, mp4_url, text` que un agente
+    puede parsear para elegir qué vídeos pasar a `fetch-video`.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    max_size_bytes = parse_size_to_bytes(max_size) if max_size else None
+    rows = list_video_entries(
+        store,
+        topic=topic,
+        status=status.value if status is not None else None,
+        max_size_bytes=max_size_bytes,
+        source=source.value,
+        limit=limit,
+    )
+    if json_out:
+        typer.echo(json.dumps([row_to_json(row) for row in rows], ensure_ascii=False, indent=2))
+    else:
+        typer.echo(format_video_table(rows))
+
+
+def _resolve_fetch_ids(
+    store: dict[str, Item], ids: str | None, topic: str | None, source: str
+) -> list[str]:
+    """Resolve `--ids` and/or `--topic` into a de-duplicated, ordered id list.
+
+    Explicit `--ids` are taken verbatim; `--topic` is expanded via the read-only
+    catalog (scoped by `--source`). At least one selector is required — an empty
+    selection is an operator error, not a silent no-op.
+    """
+    id_list: list[str] = []
+    if ids:
+        id_list.extend(part.strip() for part in ids.split(",") if part.strip())
+    if topic:
+        id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
+    if not id_list:
+        raise ValueError("fetch-video: indica --ids y/o --topic para seleccionar vídeos.")
+    return list(dict.fromkeys(id_list))
+
+
+def _emit_fetch_report(report: FetchReport, *, json_out: bool) -> None:
+    """Print the fetch outcomes: JSON array, or human lines + a SUMMARY."""
+    if json_out:
+        typer.echo(
+            json.dumps(
+                [fetch_result_to_json(result) for result in report.results],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    for result in report.results:
+        if result.outcome == "fetched":
+            typer.echo(f"{result.id}: {result.path}")
+        elif result.outcome == "skipped":
+            typer.echo(f"{result.id}: saltado ({result.reason})")
+        else:
+            typer.echo(
+                f"{result.id}: fallo ({result.reason}) {result.error or ''}".rstrip(), err=True
+            )
+    typer.echo(format_fetch_summary(report))
+
+
+@app.command(name="fetch-video")
+@_handle_cli_errors
+def fetch_video(
+    to: Path = typer.Option(
+        ..., "--to", help="Directorio destino (REQUERIDO). Escribe <dir>/<id>.mp4."
+    ),
+    ids: str | None = typer.Option(None, "--ids", help="IDs de items separados por comas."),
+    topic: str | None = typer.Option(
+        None, "--topic", help="Selecciona vídeos por el primary_topic del item."
+    ),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    max_size: str | None = typer.Option(
+        None,
+        "--max-size",
+        help="Salta vídeos cuyo tamaño estimado supere el cap (500MB / 2GB; sin unidad = MB).",
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Máximo número de descargas en esta ejecución."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Salida como array JSON estable en vez de líneas humanas."
+    ),
+) -> None:
+    """Descarga (efímera) el mp4 real de los vídeos elegidos a `--to`/<id>.mp4.
+
+    Selecciona por `--ids` y/o `--topic` (+ `--max-size`, `--limit`). Reutiliza
+    las primitivas de `download-videos` (validación de contenido, clasificación
+    de fallos, escritura atómica, discriminador mp4/HLS/poster). Los HLS y
+    poster-era se saltan y se cuentan. Es DELIBERADAMENTE no persistente: NO muta
+    `items.json`, NO toma snapshot y NO escribe en `data/media/` — solo escribe
+    bajo `--to`. Pensado para que un agente transcriba/analice el vídeo y luego
+    descarte los bytes.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    id_list = _resolve_fetch_ids(store, ids, topic, source.value)
+    max_size_bytes = parse_size_to_bytes(max_size) if max_size else None
+    report = fetch_videos(store, id_list, to, max_size_bytes=max_size_bytes, limit=limit)
+    _emit_fetch_report(report, json_out=json_out)
+    if report.fetched == 0 and report.failed > 0:
+        # Parity with download-videos: a run where every attempted download
+        # failed must surface as a non-zero exit, not a silent empty run. A pure
+        # all-skips run (nothing attempted) stays exit 0.
+        raise RuntimeError(
+            f"fetch-video: all {report.failed} download attempt(s) failed; "
+            "check network / video.twimg.com availability and the warnings above."
+        )
+
+
+def _resolve_digest_ids(
+    store: dict[str, Item],
+    ids: str | None,
+    topic: str | None,
+    all_pending: bool,
+    source: str,
+    limit: int | None,
+) -> list[str]:
+    """Resolve the digest selection into a de-duplicated, ordered id list.
+
+    `--all-pending` expands to every fetchable (`pending`) video via the
+    read-only catalog; `--ids` are taken verbatim; `--topic` is expanded via the
+    catalog (scoped by `--source`). At least one selector is required — an empty
+    selection is an operator error, not a silent no-op. `--limit` caps the number
+    of items after de-duplication.
+    """
+    id_list: list[str] = []
+    if all_pending:
+        id_list.extend(row.id for row in list_video_entries(store, status="pending", source=source))
+    if ids:
+        id_list.extend(part.strip() for part in ids.split(",") if part.strip())
+    if topic:
+        id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
+    if not id_list:
+        raise ValueError(
+            "digest-video: indica --ids, --topic o --all-pending para seleccionar vídeos."
+        )
+    unique = list(dict.fromkeys(id_list))
+    return unique[:limit] if limit is not None else unique
+
+
+def _build_visual_config(cfg: Config) -> VisualConfig:
+    """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
+
+    Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and
+    `describe_image` (the EXTERNAL `[vision].command` / model) so `digest_videos`
+    calls them with just a path. An unconfigured `[vision].command` is a clear
+    operator error BEFORE any work — there is no bundled default vision model.
+    """
+    if not cfg.vision_command.strip():
+        raise ValueError(
+            "digest-video --frames requires an external vision model: set "
+            "[vision].command in config.toml (there is no bundled default)."
+        )
+
+    def _extract(path: Path) -> list[KeyFrame]:
+        return extract_key_frames(
+            path, threshold=DEFAULT_SCENE_THRESHOLD, max_frames=DEFAULT_MAX_FRAMES
+        )
+
+    def _describe(path: Path) -> str:
+        return describe_image(path, command=cfg.vision_command, model=cfg.vision_model)
+
+    return VisualConfig(media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe)
+
+
+def _run_digest_video(
+    cfg: Config,
+    *,
+    ids: str | None,
+    topic: str | None,
+    all_pending: bool,
+    source: str,
+    limit: int | None,
+    force: bool,
+    language: str | None,
+    frames: bool,
+) -> None:
+    """Digest selected videos into `x_video` transcript sources; persist + summarise.
+
+    Flow: load → resolve selection → ephemeral fetch + EXTERNAL transcribe +
+    attach (dedup by video identity, in memory) → snapshot → persist. The
+    transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
+    config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
+    extracts slide key frames and describes them via the EXTERNAL `[vision]`
+    command, attaching them to slide-heavy videos. It is destructive (rewrites
+    `items.json`), so it auto-snapshots BEFORE the save — but only when something
+    was attached (a pure already-digested / no-video run writes nothing, so it
+    takes no snapshot). A snapshot failure propagates and aborts before any write.
+    """
+    store = load_store(cfg.items_path)
+    id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
+    visual = _build_visual_config(cfg) if frames else None
+
+    def _transcribe(path: Path) -> Transcript:
+        return transcribe_media(
+            path,
+            command=cfg.transcribe_command,
+            model=cfg.transcribe_model,
+            language=language,
+        )
+
+    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe, visual=visual)
+    if report.changed > 0:
+        _auto_snapshot(cfg, "digest-video")
+        save_store(store, cfg.items_path)
+    typer.echo(format_digest_summary(report))
+
+
+@app.command(name="digest-video")
+@_handle_cli_errors
+def digest_video(
+    ids: str | None = typer.Option(None, "--ids", help="IDs de items separados por comas."),
+    topic: str | None = typer.Option(
+        None, "--topic", help="Selecciona vídeos por el primary_topic del item."
+    ),
+    all_pending: bool = typer.Option(
+        False, "--all-pending", help="Selecciona todos los vídeos en estado pending (fetchables)."
+    ),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Máximo número de items a procesar en esta ejecución."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-transcribir items que ya tienen un source x_video."
+    ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        help="Idioma a registrar en el transcript si el transcriptor no lo reporta "
+        "(p.ej. en, es). El transcriptor autodetecta; no se le pasa como flag.",
+    ),
+    frames: bool = typer.Option(
+        False,
+        "--frames",
+        help="Capa visual (opt-in): extrae key-frames de slides, los describe con "
+        "el modelo de visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
+        "Solo para vídeos slide-heavy; los talking-head se saltan (se registra).",
+    ),
+) -> None:
+    """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
+
+    Para cada vídeo seleccionado: descarga efímera (reutiliza `fetch-video`) →
+    transcribe con un transcriptor EXTERNO local (config `transcribe.command`,
+    por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
+    item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
+    vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
+    URL firmada): N bookmarks del mismo vídeo se descargan y transcriben UNA vez y
+    todos reciben el mismo transcript. Un vídeo sin voz/audio se adjunta con texto
+    vacío + `has_speech=False` (nunca es un fallo duro). Idempotente: salta items
+    que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
+    `items.json`) → auto-snapshot antes de escribir. Nunca hay más de un vídeo en
+    disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
+
+    `--frames` (opt-in, capa visual PR4): para vídeos slide-heavy extrae
+    key-frames con ffmpeg (EXTERNO), los describe con el modelo de visión EXTERNO
+    (`\\[vision].command`), adjunta las descripciones al source `x_video` y embebe
+    las slides en la nota como fotos. Los vídeos talking-head se saltan y se
+    registra el motivo. Sin `--frames` el flujo es idéntico al de PR2/PR3.
+    """
+    cfg = _config()
+    _run_digest_video(
+        cfg,
+        ids=ids,
+        topic=topic,
+        all_pending=all_pending,
+        source=source.value,
+        limit=limit,
+        force=force,
+        language=language,
+        frames=frames,
     )
 
 

@@ -1,6 +1,9 @@
 # tests/test_models.py
 from datetime import datetime, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from xbrain.models import Author, Item, Link, State
 
 
@@ -232,6 +235,132 @@ def test_content_source_legacy_failure_without_reason_buckets_as_transient():
     assert src.failure_reason == "unknown_error"
     assert src.error == "HTTP 429: Too Many Requests"
     assert src.http_status == 429
+
+
+# ------------------------------------------------------------ x_video content source
+
+
+def test_x_video_content_source_round_trips():
+    """An `x_video` `ContentSourceSuccess` (transcript as `text`) round-trips.
+
+    PR2 (#44) attaches a video transcript to the item as a content source with
+    the new `kind="x_video"` discriminator plus the optional `has_speech` /
+    `language` markers, so `generate`/`enrich` can consume it via the existing
+    `ContentSource` union. A dump → re-parse must preserve every field.
+    """
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess
+
+    src = ContentSourceSuccess(
+        kind="x_video",
+        url="https://video.twimg.com/amplify_video/123/vid/720/A.mp4?tag=16",
+        title="A great talk",
+        text="hello, this is the transcript",
+        has_speech=True,
+        language="en",
+    )
+    restored = ContentSourceAdapter.validate_python(src.model_dump(mode="json"))
+    assert isinstance(restored, ContentSourceSuccess)
+    assert restored.kind == "x_video"
+    assert restored.text == "hello, this is the transcript"
+    assert restored.has_speech is True
+    assert restored.language == "en"
+    assert restored.title == "A great talk"
+
+
+def test_x_video_no_speech_source_carries_empty_text_and_marker():
+    """A silent / no-speech video is a SUCCESS source with empty text +
+    `has_speech=False` — never a failure. The marker lets `generate` render a
+    "silent video" line and `enrich` skip it, without inferring from empty text."""
+    from xbrain.models import ContentSourceSuccess
+
+    src = ContentSourceSuccess(kind="x_video", url="https://v/x.mp4", text="", has_speech=False)
+    assert src.text == ""
+    assert src.has_speech is False
+
+
+def test_content_source_success_defaults_speech_fields_to_none():
+    """The new fields are optional + default to None so an EXISTING (article)
+    record loads unchanged — back-compat: no `has_speech`/`language` in the
+    legacy shape means `None`, and `has_speech is None` distinguishes a
+    non-video source from a transcribed one."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess
+
+    legacy = ContentSourceAdapter.validate_python(
+        {"kind": "external_article", "url": "u", "ok": True, "title": "T", "text": "body"}
+    )
+    assert isinstance(legacy, ContentSourceSuccess)
+    assert legacy.has_speech is None
+    assert legacy.language is None
+
+
+def test_content_kind_includes_x_video():
+    """`x_video` is a member of the `ContentKind` literal (one source of truth)."""
+    from typing import get_args
+
+    from xbrain.models import ContentKind
+
+    assert "x_video" in get_args(ContentKind)
+
+
+# ------------------------------------------------------------ x_video frames (#44 PR4)
+
+
+def test_x_video_source_round_trips_with_frames():
+    """A slide-heavy `x_video` source carries a `frames` list of key-frame slides
+    (#44 PR4). Each `VideoFrame` (timestamp + relative `local_path` + vision
+    `description`) survives a dump → re-parse so the visual layer persists."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess, VideoFrame
+
+    src = ContentSourceSuccess(
+        kind="x_video",
+        url="https://video.twimg.com/amplify_video/900/vid/720/A.mp4?tag=16",
+        title="A slide talk",
+        text="the transcript",
+        has_speech=True,
+        language="en",
+        frames=[
+            VideoFrame(timestamp=12.5, local_path="900/frames/0.png", description="a title slide"),
+            VideoFrame(timestamp=88.0, local_path="900/frames/1.png", description="a code slide"),
+        ],
+    )
+    restored = ContentSourceAdapter.validate_python(src.model_dump(mode="json"))
+    assert isinstance(restored, ContentSourceSuccess)
+    assert len(restored.frames) == 2
+    assert restored.frames[0].timestamp == 12.5
+    assert restored.frames[0].local_path == "900/frames/0.png"
+    assert restored.frames[0].description == "a title slide"
+    assert restored.frames[1].local_path == "900/frames/1.png"
+
+
+def test_content_source_success_defaults_frames_to_empty_list():
+    """`frames` is optional + additive: a legacy (pre-PR4) record with no `frames`
+    key loads with an empty list — existing `items.json` is unchanged."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess
+
+    legacy = ContentSourceAdapter.validate_python(
+        {"kind": "external_article", "url": "u", "ok": True, "title": "T", "text": "body"}
+    )
+    assert isinstance(legacy, ContentSourceSuccess)
+    assert legacy.frames == []
+
+
+def test_video_frame_rejects_absolute_and_traversal_local_path():
+    """`VideoFrame.local_path` reuses the media traversal guard so a hand-edited
+    store cannot point a slide embed at bytes outside `data/media/`."""
+    from xbrain.models import VideoFrame
+
+    with pytest.raises(ValidationError):
+        VideoFrame(timestamp=0.0, local_path="/etc/passwd", description="x")
+    with pytest.raises(ValidationError):
+        VideoFrame(timestamp=0.0, local_path="../../escape.png", description="x")
+
+
+def test_video_frame_rejects_negative_timestamp():
+    """A frame timestamp is seconds into the video — never negative."""
+    from xbrain.models import VideoFrame
+
+    with pytest.raises(ValidationError):
+        VideoFrame(timestamp=-1.0, local_path="1/frames/0.png", description="x")
 
 
 def test_media_legacy_photo_shape_migrates_to_pending():

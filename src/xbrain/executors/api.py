@@ -14,7 +14,12 @@ import sys
 from xbrain.executors.base import EnrichmentJudgment
 from xbrain.llm_json import json_from_response
 from xbrain.models import ContentSourceSuccess, Item, MediaPhotoDescribed, Topic
-from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
+from xbrain.rubrics import (
+    ARTICLE_CHAR_LIMIT,
+    TRANSCRIPT_CHAR_LIMIT,
+    load_rubric,
+    truncate_transcript,
+)
 
 _MAX_TOKENS = 600
 
@@ -105,18 +110,46 @@ def _links_section(item: Item) -> list[str]:
 
 
 def _article_sections(item: Item) -> list[str]:
-    """Build one block per successfully-fetched article. Empty if no content."""
+    """Build one block per successfully-fetched article. Empty if no content.
+
+    `x_video` sources are excluded here — a video transcript is manufactured
+    text, not a linked article, and gets its own labelled `Video transcript:`
+    block (`_video_transcript_section`). Rendering it as a "Linked article"
+    would mislabel the content type to the LLM.
+    """
     if item.content is None or not item.content.sources:
         return []
     lines: list[str] = []
     for src in item.content.sources:
         # Narrow to the success variant — only those carry `title`/`text`.
-        if isinstance(src, ContentSourceSuccess) and src.text:
+        if isinstance(src, ContentSourceSuccess) and src.kind != "x_video" and src.text:
             lines += [
                 "",
                 f"Linked article ({src.title or src.url}):",
                 src.text[:ARTICLE_CHAR_LIMIT],
             ]
+    return lines
+
+
+def _video_transcript_section(item: Item) -> list[str]:
+    """Build the `Video transcript:` block(s) for `x_video` sources with speech.
+
+    A no-speech source (`has_speech=False`, empty text) contributes nothing —
+    it carries no topic signal and would only add noise. Long transcripts are
+    truncated to `TRANSCRIPT_CHAR_LIMIT` so one 72-min talk can't blow the
+    per-item prompt (#44).
+    """
+    if item.content is None:
+        return []
+    lines: list[str] = []
+    for src in item.content.sources:
+        if (
+            isinstance(src, ContentSourceSuccess)
+            and src.kind == "x_video"
+            and src.has_speech
+            and src.text
+        ):
+            lines += ["", "Video transcript:", truncate_transcript(src.text, TRANSCRIPT_CHAR_LIMIT)]
     return lines
 
 
@@ -131,6 +164,7 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
     if item.bookmark_folder:
         parts += ["", f"Saved by the user in the bookmark folder: {item.bookmark_folder}"]
     parts += _images_section(item)
+    parts += _video_transcript_section(item)
     parts += _links_section(item)
     parts += _article_sections(item)
     return "\n".join(parts)

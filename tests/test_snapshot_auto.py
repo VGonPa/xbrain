@@ -182,6 +182,144 @@ def test_fetch_force_creates_pre_snapshot(tmp_path: Path, monkeypatch):
     assert any(p.name.endswith("-pre-fetch-force") for p, _ in snapshots), snapshots
 
 
+def _video_item_for_digest(item_id: str = "42") -> Item:
+    from xbrain.models import MediaVideoPending
+
+    item = Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=f"note {item_id}",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+    )
+    item.media = [
+        MediaVideoPending(
+            url="https://video.twimg.com/amplify_video/900/vid/720/a.mp4?tag=16",
+            thumbnail_url="https://pbs.twimg.com/poster.jpg",
+        )
+    ]
+    return item
+
+
+def _wire_digest_mocks(monkeypatch, *, has_speech: bool = True) -> None:
+    """Fake the fetch (network) + transcribe (subprocess) so digest-video runs
+    offline: bytes for the download, a canned transcript for the transcriber."""
+
+    class _Session:
+        payload = b"\x00\x00\x00\x18ftypmp42" + (b"\x00" * 512)
+
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 200
+                content = _Session.payload
+
+            return _Resp()
+
+    from xbrain.transcribe import Transcript
+
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _Session)
+    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "xbrain.cli.transcribe_media",
+        lambda _p, **_k: Transcript(text="t" if has_speech else "", has_speech=has_speech),
+    )
+
+
+def test_digest_video_creates_pre_snapshot(tmp_path: Path, monkeypatch):
+    """`xbrain digest-video` rewrites items.json (attaches the transcript) → it
+    snapshots `data/` first (label `pre-digest-video`)."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item_for_digest("42")}, tmp_path / "data" / "items.json")
+    _wire_digest_mocks(monkeypatch)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+
+    assert result.exit_code == 0, result.stdout
+    snapshots = snapshot_list(tmp_path / "data")
+    assert any(p.name.endswith("-pre-digest-video") for p, _ in snapshots), snapshots
+
+
+def test_digest_video_no_change_creates_no_snapshot(tmp_path: Path, monkeypatch):
+    """A run that attaches nothing (no fetchable video → nothing written) takes no
+    snapshot — digest-video only snapshots when it is about to rewrite the store."""
+    _setup_repo(tmp_path, monkeypatch)
+    # A poster-era item has no fetchable mp4 → skipped_no_video, nothing attached.
+    item = _video_item_for_digest("42")
+    from xbrain.models import MediaVideoPending
+
+    poster = "https://pbs.twimg.com/poster.jpg"
+    item.media = [MediaVideoPending(url=poster, thumbnail_url=poster)]
+    save_store({"42": item}, tmp_path / "data" / "items.json")
+    _wire_digest_mocks(monkeypatch)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+
+    assert result.exit_code == 0, result.stdout
+    assert snapshot_list(tmp_path / "data") == []
+
+
+def test_digest_video_all_failure_no_snapshot(tmp_path: Path, monkeypatch):
+    """A run where every video's fetch fails attaches nothing (changed==0) → no
+    snapshot and items.json byte-identical (parity with the no-change path)."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item_for_digest("42")}, items_path)
+    before = items_path.read_bytes()
+
+    class _FailSession:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 500
+                content = b"err"
+
+            return _Resp()
+
+    from xbrain.transcribe import Transcript
+
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FailSession)
+    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
+    # Transcriber would succeed, but the fetch fails first so it is never reached.
+    monkeypatch.setattr(
+        "xbrain.cli.transcribe_media", lambda _p, **_k: Transcript(text="t", has_speech=True)
+    )
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "fallidos 1" in result.stdout
+    assert items_path.read_bytes() == before  # nothing written
+    assert snapshot_list(tmp_path / "data") == []
+
+
+def test_digest_video_snapshot_failure_aborts_before_write(tmp_path: Path, monkeypatch):
+    """A failed snapshot aborts digest-video BEFORE the store is rewritten: exit
+    non-zero and items.json unchanged (the transcript is never persisted)."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item_for_digest("42")}, items_path)
+    before = items_path.read_bytes()
+    _wire_digest_mocks(monkeypatch)
+
+    def _broken(*_args, **_kwargs):
+        raise OSError("simulated snapshot failure (disk full)")
+
+    monkeypatch.setattr(snapshot_mod, "snapshot_create", _broken)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+
+    assert result.exit_code != 0
+    assert items_path.read_bytes() == before  # no write happened
+    assert snapshot_list(tmp_path / "data") == []
+
+
 def test_fetch_without_force_creates_no_snapshot(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     item = _linked_item("1")

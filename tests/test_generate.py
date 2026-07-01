@@ -566,6 +566,202 @@ def test_generate_rejects_unsupported_language(tmp_path: Path):
         generate({"9": _enriched_item()}, tmp_path, output_language="Klingon")
 
 
+# ----------------------------------------------------------- x_video digest (#44)
+
+
+def _video_item(
+    item_id: str = "7",
+    *,
+    text: str,
+    has_speech: bool = True,
+    title: str | None = "The Talk",
+    frames: list | None = None,
+) -> Item:
+    """An enriched video bookmark carrying an `x_video` transcript source (#44)."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="watch this talk",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="api",
+            summary="A crisp summary of the talk.",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/v",
+                    title=title,
+                    text=text,
+                    has_speech=has_speech,
+                    frames=frames or [],
+                )
+            ],
+        ),
+    )
+
+
+def test_generate_renders_video_digest_section(tmp_path: Path):
+    """A with-speech `x_video` source renders a `## Video digest` section carrying
+    the title + the transcript-derived text — the #44 payoff."""
+    generate({"7": _video_item(text="The transcript body of the talk.")}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest: The Talk" in note
+    assert "The transcript body of the talk." in note
+    # NOT rendered under the generic article `## Content:` heading
+    assert "## Content: The Talk" not in note
+
+
+def test_generate_renders_silent_video_line_for_no_speech(tmp_path: Path):
+    """A no-speech `x_video` source renders a one-line silent-video note, not an
+    empty `## Video digest` block."""
+    generate({"7": _video_item(text="", has_speech=False)}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "silent video" in note.lower() or "sin voz" in note.lower()
+    assert "## Video digest" not in note
+
+
+def test_generate_video_digest_is_stable_on_regen(tmp_path: Path):
+    """Regenerating a video note is deterministic and preserves the user tail."""
+    store = {"7": _video_item(text="Stable transcript body.")}
+    generate(store, tmp_path)
+    note_path = next((tmp_path / "items").glob("*.md"))
+    note_path.write_text(note_path.read_text(encoding="utf-8") + "MI NOTA", encoding="utf-8")
+    first = note_path.read_text(encoding="utf-8")
+    generate(store, tmp_path)
+    second = note_path.read_text(encoding="utf-8")
+    assert first == second
+    assert "MI NOTA" in second
+
+
+def test_generate_video_digest_spanish_header(tmp_path: Path):
+    """The digest heading is localised alongside the other wiki headers."""
+    generate(
+        {"7": _video_item(text="Cuerpo de la transcripción.")}, tmp_path, output_language="Spanish"
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest:" not in note
+    assert "## Resumen del vídeo: The Talk" in note  # the localised heading IS rendered
+    assert "Cuerpo de la transcripción." in note
+
+
+# ----------------------------------------------------------- x_video slide frames (#44 PR4)
+
+
+def _frames():
+    from xbrain.models import VideoFrame
+
+    return [
+        VideoFrame(timestamp=12.0, local_path="7/frames/0.png", description="A title slide."),
+        VideoFrame(timestamp=95.0, local_path="7/frames/1.png", description="A code slide."),
+    ]
+
+
+def test_generate_embeds_and_mirrors_slide_frames(tmp_path: Path):
+    """A slide-heavy `x_video` source (#44 PR4) embeds each kept slide into the
+    digest section the SAME way downloaded photos are embedded — `![[_media/...]]`
+    — with its vision description as a caption, and the image is mirrored from
+    `media_root` into the vault's `_media/` tree so the embed resolves."""
+    media_root = tmp_path / "media"
+    (media_root / "7" / "frames").mkdir(parents=True)
+    (media_root / "7" / "frames" / "0.png").write_bytes(b"\x89PNG slide0")
+    (media_root / "7" / "frames" / "1.png").write_bytes(b"\x89PNG slide1")
+
+    store = {"7": _video_item(text="The talk transcript.", frames=_frames())}
+    generate(store, tmp_path, media_root=media_root)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+
+    assert "## Video digest: The Talk" in note
+    assert "The talk transcript." in note
+    assert "![[_media/7/frames/0.png]]" in note  # embedded like a photo
+    assert "![[_media/7/frames/1.png]]" in note
+    assert "A title slide." in note  # the vision description as caption
+    # mirrored into the self-contained vault _media/ tree
+    assert (tmp_path / "_media" / "7" / "frames" / "0.png").exists()
+    assert (tmp_path / "_media" / "7" / "frames" / "1.png").exists()
+
+
+def test_generate_no_frames_note_is_unchanged(tmp_path: Path):
+    """The visual layer is inert without frames: a with-speech `x_video` source with
+    an EMPTY `frames` list renders byte-identically to the pre-PR4 digest section —
+    no stray embed lines appear on the default (non-`--frames`) path."""
+    without = _video_item(text="Same transcript body.")
+    with_empty = _video_item(text="Same transcript body.", frames=[])
+    generate({"7": without}, tmp_path / "a")
+    generate({"7": with_empty}, tmp_path / "b")
+    note_a = next((tmp_path / "a" / "items").glob("*.md")).read_text(encoding="utf-8")
+    note_b = next((tmp_path / "b" / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert note_a == note_b
+    assert "_media" not in note_a  # no embed lines when there are no frames
+
+
+def test_generate_silent_slide_deck_embeds_frames(tmp_path: Path):
+    """A SILENT slide deck (no speech but with frames) renders the digest heading +
+    the slide embeds — the visual layer is where a screen-only video's content
+    lives — instead of the bare silent-video line."""
+    media_root = tmp_path / "media"
+    (media_root / "7" / "frames").mkdir(parents=True)
+    (media_root / "7" / "frames" / "0.png").write_bytes(b"\x89PNG s0")
+    (media_root / "7" / "frames" / "1.png").write_bytes(b"\x89PNG s1")
+
+    store = {"7": _video_item(text="", has_speech=False, frames=_frames())}
+    generate(store, tmp_path, media_root=media_root)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest: The Talk" in note
+    assert "![[_media/7/frames/0.png]]" in note
+    assert "silent video" not in note.lower()
+
+
+def test_generate_frames_embed_without_media_root(tmp_path: Path):
+    """Like photos, the frame embed lines render even without `media_root` (the URL
+    is in the data; only the mirrored bytes are missing) — a missing mirror renders
+    a broken embed, not a crash."""
+    store = {"7": _video_item(text="body", frames=_frames())}
+    generate(store, tmp_path)  # no media_root
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "![[_media/7/frames/0.png]]" in note
+
+
+def test_slide_caption_collapses_internal_newlines(tmp_path: Path):
+    """A multi-line vision description must render as ONE valid `> ...` blockquote
+    caption: internal newlines are collapsed to spaces so the second line can't
+    spill OUT of the blockquote (an Obsidian caption is a single line)."""
+    from xbrain.generate import _slide_embed_lines
+    from xbrain.models import VideoFrame
+
+    frames = [
+        VideoFrame(
+            timestamp=1.0,
+            local_path="7/frames/0.png",
+            description="First line of the slide.\nSecond line of the slide.",
+        )
+    ]
+    lines = _slide_embed_lines(frames)
+    # Every emitted line is truly a single line — none carries an internal newline
+    # that would break the blockquote when the note is joined with "\n".
+    assert all("\n" not in line for line in lines)
+    assert "> First line of the slide. Second line of the slide." in lines
+
+
+def test_generate_silent_line_wins_over_stale_text_when_no_speech(tmp_path: Path):
+    """Defensive: a malformed third-party transcriber that reports `has_speech=False`
+    yet leaves non-empty `text` must still render the SILENT line — the tweet-signal
+    truth — not the stale/contradictory transcript text (and no digest heading)."""
+    generate({"7": _video_item(text="stale", has_speech=False, frames=[])}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "silent video" in note.lower() or "sin voz" in note.lower()
+    assert "stale" not in note
+    assert "## Video digest" not in note
+
+
 # --------------------------------------------------------------- topic_style
 
 

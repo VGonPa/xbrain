@@ -49,8 +49,11 @@ FailureReason = Literal[
 ]
 
 # The set of content-source kinds — one source of truth shared by the data
-# model, the fetch stage and the wiki renderer.
-ContentKind = Literal["external_article", "x_article", "thread", "quoted_tweet"]
+# model, the fetch stage and the wiki renderer. `x_video` is manufactured by the
+# `digest-video` stage (#44): a bookmarked video's transcript is attached as a
+# `ContentSourceSuccess(kind="x_video")` so the existing enrich → topics →
+# generate pipeline consumes it exactly like an article body.
+ContentKind = Literal["external_article", "x_article", "thread", "quoted_tweet", "x_video"]
 
 
 class Author(BaseModel):
@@ -512,6 +515,33 @@ class ThreadInfo(BaseModel):
     position: int | None = None
 
 
+class VideoFrame(BaseModel):
+    """One key-frame slide extracted from a video by `digest-video --frames` (#44 PR4).
+
+    The visual layer of a slide-heavy talk: a scene-change key frame's
+    `timestamp` (seconds into the video, `ge=0`), the relative `local_path` of
+    its downscaled image under `data/media/` (`<item-id>/frames/<n>.<ext>`), and
+    the `description` produced by the EXTERNAL vision step. `generate` mirrors the
+    image into the vault's `_media/` tree and embeds it exactly like a downloaded
+    photo, with the description as a caption. It is carried on the `x_video`
+    `ContentSourceSuccess.frames` list (additive — see there).
+
+    `local_path` reuses the shared `_reject_local_path_traversal` validator (no
+    absolute path, no `..`) so a hand-edited store cannot aim a slide embed at
+    bytes outside the media root — the same defence the photo variants carry.
+    """
+
+    timestamp: float = Field(ge=0)
+    local_path: str
+    description: str = ""
+
+    @field_validator("local_path")
+    @classmethod
+    def _validate_local_path(cls, value: str) -> str:
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
+        return _reject_local_path_traversal(value)
+
+
 class ContentSourceSuccess(BaseModel):
     """A fetched article whose body was successfully extracted.
 
@@ -529,6 +559,22 @@ class ContentSourceSuccess(BaseModel):
     # extraction attempts: 1 = single pass, 2 = + Firecrawl fallback;
     # 0 only on pre-Fase-2 records.
     attempts: int = 0
+    # Video-transcript metadata for `kind="x_video"` sources (#44). Both are
+    # optional + default to None so every EXISTING (article) record LOADS
+    # unchanged — `has_speech is None` marks a non-video source. (A re-dump does
+    # add `has_speech: null` / `language: null` to legacy sources — a one-time,
+    # backward-compatible additive churn, not a load-breaking change.) For an
+    # `x_video` source `has_speech=False` is the no-speech marker (empty `text`,
+    # never a failure), and `language` is the detected transcript language.
+    has_speech: bool | None = None
+    language: str | None = None
+    # Key-frame slides for `kind="x_video"` sources when `digest-video --frames`
+    # ran (#44 PR4). Optional + additive (defaults to `[]`), so every EXISTING
+    # record LOADS unchanged — a pre-PR4 `x_video` source (and every article
+    # source) simply carries no frames. A re-dump adds `frames: []`, the same
+    # one-time backward-compatible additive churn as `has_speech`/`language`. Each
+    # `VideoFrame` embeds into the note like a downloaded photo (see `VideoFrame`).
+    frames: list[VideoFrame] = Field(default_factory=list)
 
 
 class ContentSourceFailure(BaseModel):

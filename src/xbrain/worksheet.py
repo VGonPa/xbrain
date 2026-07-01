@@ -13,7 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.models import ContentSourceSuccess, Item, Topic
-from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
+from xbrain.rubrics import (
+    ARTICLE_CHAR_LIMIT,
+    TRANSCRIPT_CHAR_LIMIT,
+    load_rubric,
+    truncate_transcript,
+)
 
 
 def _article_text(item: Item) -> str | None:
@@ -22,12 +27,35 @@ def _article_text(item: Item) -> str | None:
     Only the success variant of `ContentSource` carries `text`. The
     isinstance narrowing satisfies mypy and silently skips broken-link
     sources, matching the pre-#20 ``src.ok and src.text`` behaviour.
+    `x_video` sources are skipped — the transcript rides in its own
+    `video_transcript` field so the enrich track sees it as a transcript,
+    not an article (#44).
     """
     if not item.content:
         return None
     for src in item.content.sources:
-        if isinstance(src, ContentSourceSuccess) and src.text:
+        if isinstance(src, ContentSourceSuccess) and src.kind != "x_video" and src.text:
             return src.text[:ARTICLE_CHAR_LIMIT]
+    return None
+
+
+def _video_transcript(item: Item) -> str | None:
+    """First with-speech `x_video` transcript body, truncated, or None (#44).
+
+    A no-speech source (`has_speech=False`, empty text) yields None — no
+    transcript to enrich from. Truncated to `TRANSCRIPT_CHAR_LIMIT`, matching
+    the `api` executor prompt so both tracks see identical input.
+    """
+    if not item.content:
+        return None
+    for src in item.content.sources:
+        if (
+            isinstance(src, ContentSourceSuccess)
+            and src.kind == "x_video"
+            and src.has_speech
+            and src.text
+        ):
+            return truncate_transcript(src.text, TRANSCRIPT_CHAR_LIMIT)
     return None
 
 
@@ -64,6 +92,7 @@ def export_worksheet(
                 "bookmark_folder": it.bookmark_folder,
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
+                "video_transcript": _video_transcript(it),
             }
             for it in items
         ],
