@@ -267,19 +267,29 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _source_signature(source: ContentSource) -> tuple[object, ...]:
-    """A *material-content* fingerprint of one source, ignoring fetch bookkeeping.
+# Fields that are fetch *bookkeeping*, not material content: they can churn across
+# a re-fetch that produced no real change (a trafilatura→Firecrawl retry bumps
+# `attempts`; the free-form `error` string can be reworded). Everything else on a
+# `ContentSource` is treated as material. This is a DENY-list on purpose — it is
+# derived from the model, so a NEW content field (e.g. a future `summary`) is
+# fingerprinted automatically instead of being silently dropped by a stale
+# allow-list. It fails safe: forgetting to exclude a bookkeeping field costs at
+# most one redundant re-enrichment, never a lost (stale-content) one.
+_BOOKKEEPING_FIELDS = {"attempts", "error"}
 
-    Two sources with equal signatures carry the same content even if a re-fetch
-    produced a different `attempts` counter or `error` string. A success is
-    fingerprinted on its extracted `text`; a failure on its categorised evidence
-    (`failure_reason` + `http_status`). `attempts` and the free-form `error` are
-    deliberately excluded — a trafilatura→Firecrawl retry that lands on the same
-    failure is *not* a material change, so it must not re-trigger enrichment.
+
+def _source_signature(source: ContentSource) -> str:
+    """A *material-content* fingerprint of one source: the whole model minus
+    fetch bookkeeping (`attempts`/`error`).
+
+    Two sources with equal signatures carry the same material content even if a
+    re-fetch churned their bookkeeping. Deriving the fingerprint from the model
+    (rather than a hand-picked field list) means every content-bearing field —
+    `title`, `text`, `failure_reason`, `http_status`, the `x_video`
+    transcript/`frames`, … — is compared automatically and safely. `exclude`ing a
+    field absent on a given variant is a harmless no-op.
     """
-    if isinstance(source, ContentSourceSuccess):
-        return (source.kind, source.url, "success", source.text)
-    return (source.kind, source.url, "failure", source.failure_reason, source.http_status)
+    return source.model_dump_json(exclude=_BOOKKEEPING_FIELDS)
 
 
 def _sources_materially_equal(old: list[ContentSource], new: list[ContentSource]) -> bool:
@@ -335,10 +345,11 @@ def fetch_item(
     identical re-fetch bumped `fetched_at`, `enrich._needs_reenrichment` would
     re-flag the item forever — one wasted, identical LLM call per stuck item per
     cycle. So when the re-fetched source set is *materially equivalent* to the
-    existing one (same kinds/urls, same success `text` / failure
-    `reason`+`http_status`), we keep the prior `fetched_at`; it advances only when
-    the content actually changed (a failure that becomes a success, new text, a
-    changed failure reason). `now` is injectable for deterministic tests.
+    existing one — the whole source model minus fetch bookkeeping
+    (`attempts`/`error`); see `_source_signature` — we keep the prior
+    `fetched_at`; it advances only when the content actually changed (a failure
+    that becomes a success, new/edited text, a changed title, a changed failure
+    reason/status). `now` is injectable for deterministic tests.
     """
     new_sources = _build_external_sources(item, extractor)
     kept = [s for s in item.content.sources if s.kind != "external_article"] if item.content else []

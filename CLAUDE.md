@@ -44,10 +44,12 @@ generates an Obsidian wiki.
   whose `content.fetched_at > enriched.enriched_at`, so a transcript attached AFTER
   a tweet-only enrich is not treated as already-processed. **Re-enrich fires only on
   a *material* content change:** `fetch.fetch_item` preserves the prior `fetched_at`
-  when a re-fetch reproduces the same source set (same success `text` / failure
-  `reason`+`http_status`; `attempts`/`error` ignored), so a persistently-failing
-  transient link — re-fetched every run by `fetch_pending` (which keys on source
-  state, not time) — does not burn one identical LLM call per cycle.
+  when a re-fetch reproduces the same source set — fingerprinted (`_source_signature`)
+  as the whole source model minus fetch bookkeeping (`attempts`/`error`), a
+  model-derived deny-list that captures every content field (incl. `title`) and fails
+  safe — so a persistently-failing transient link, re-fetched every run by
+  `fetch_pending` (which keys on source state, not time), does not burn one identical
+  LLM call per cycle.
 - Video digest — visual layer (PR4, `--frames`, opt-in): for slide-heavy talks,
   `digest-video --frames` extracts key slides via **external** `ffmpeg`
   (`video_frames.py`, scene detection + interval sampling so a static tail is still

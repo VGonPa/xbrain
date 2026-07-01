@@ -710,6 +710,57 @@ def test_materially_equal_detects_text_change():
     assert _sources_materially_equal([a], [b]) is False
 
 
+def test_materially_equal_detects_title_change():
+    """`title` is rendered into the enrich prompt (`Linked article ({title})`), so a
+    changed title with identical body IS a material change — must re-enrich."""
+    a = ContentSourceSuccess(kind="external_article", url="u", title="Old", text="body")
+    b = ContentSourceSuccess(kind="external_article", url="u", title="New", text="body")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_title_appearing():
+    """A title going from absent (None) to a real value is a material change too."""
+    a = ContentSourceSuccess(kind="external_article", url="u", title=None, text="body")
+    b = ContentSourceSuccess(kind="external_article", url="u", title="Now titled", text="body")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_http_status_change():
+    """Two failures with the same `failure_reason` but different `http_status`
+    (404 vs 410) are NOT equal — the broken-link render surfaces the status, so it
+    is material evidence."""
+    a = ContentSourceFailure(
+        kind="external_article", url="u", failure_reason="not_found", http_status=404
+    )
+    b = ContentSourceFailure(
+        kind="external_article", url="u", failure_reason="not_found", http_status=410
+    )
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_xvideo_frames_deterministic_and_material():
+    """`fetch_item` passes an `x_video` source through by identity (never rebuilds
+    it), so the model-derived signature must NOT spuriously flag it. Two distinct
+    `x_video` instances with identical field values — transcript, `has_speech`,
+    `language`, and `frames` — self-match (the JSON dump is deterministic, which is
+    what makes the pass-through case safe); a changed frame description IS a real
+    change."""
+    from xbrain.models import VideoFrame
+
+    def _video(desc: str) -> ContentSourceSuccess:
+        return ContentSourceSuccess(
+            kind="x_video",
+            url="u",
+            text="transcript",
+            has_speech=True,
+            language="en",
+            frames=[VideoFrame(timestamp=1.5, local_path="1/frames/0.jpg", description=desc)],
+        )
+
+    assert _sources_materially_equal([_video("slide")], [_video("slide")]) is True
+    assert _sources_materially_equal([_video("slide")], [_video("different")]) is False
+
+
 def test_fetch_item_preserves_fetched_at_on_unchanged_failure_refetch():
     """A re-fetch that reproduces the same transient failure must NOT advance
     `fetched_at` — nothing about the content changed."""
