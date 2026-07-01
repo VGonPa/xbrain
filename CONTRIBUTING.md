@@ -47,11 +47,21 @@ it. Manual snapshots are available via `xbrain snapshot create`; restore via
 item as an `x_video` content source and rewrites `items.json`. It snapshots *only
 when it is about to write* (a pure already-digested / no-fetchable-video run
 attaches nothing, so it takes no snapshot), but always before the first store
-write; a snapshot failure propagates and aborts before any change lands. With the
-opt-in `--frames` visual layer it also persists the kept slide images under
-`data/media/<id>/frames/` — like the photo/video bytes those are **not** part of
-the snapshot (the snapshot covers the JSON store; a re-run re-extracts the slides),
-consistent with how `media` / `download-videos` treat downloaded bytes.
+write; a snapshot failure propagates and aborts before any change lands **in the
+store** (`items.json` — the source of truth, and the only thing the snapshot
+covers).
+
+The opt-in `--frames` visual layer persists the kept slide images under
+`data/media/<id>/frames/`. Its ordering is the **opposite** of `media` /
+`download-videos` (which snapshot *before* writing any bytes): here the slide PNGs
+are written *inside* `digest_videos()`, **before** the `items.json` snapshot. The
+snapshot only ever covers the JSON/YAML store, never `data/media/`, so this is
+safe — but scope the "aborts before any change lands" guarantee to the store: if
+the snapshot then fails and the run aborts, `items.json` is untouched while the
+freshly-written slide PNGs remain on disk as **inert, re-extractable orphans** —
+nothing in `items.json` references them, and a subsequent (re-)digest clears
+`data/media/<id>/frames/` and rewrites the current set, so they are harmless and
+self-healing (verified benign in review), not corruption.
 
 Not every command that writes bytes is destructive. `xbrain list-videos` is
 read-only, and `xbrain fetch-video` is **intentionally NOT** in the

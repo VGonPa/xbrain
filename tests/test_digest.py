@@ -30,6 +30,7 @@ from xbrain.digest import (
     _video_key,
     attach_transcript,
     digest_videos,
+    format_digest_summary,
     group_items_by_video,
 )
 from xbrain.models import (
@@ -469,7 +470,10 @@ def test_per_video_transcriber_failure_is_recorded_not_fatal(tmp_path: Path):
     store = {"a1": _item("a1", _VIDEO_A_URL_1), "b1": _item("b1", _VIDEO_B_URL)}
 
     def _transcribe(path: Path) -> Transcript:
-        if "a1" in str(path):
+        # Key on the EXACT fetched filename (`<id>.mp4`), never a substring of the
+        # full path — the random `xbrain-digest-XXXXXX` temp dir can itself contain
+        # "a1"/"b1", which would misfire the failure onto both videos (a flake).
+        if path.stem == "a1":
             raise TranscriberFailed("garbage output")
         return _speech()
 
@@ -690,6 +694,7 @@ def test_vision_failure_drops_visual_layer_but_keeps_transcript(tmp_path: Path, 
     assert store["a1"].content.sources[0].text == "kept"  # transcript survives
     assert report.transcribed == 1
     assert report.visual_slides == 0
+    assert report.visual_skipped == 0  # a per-video failure is NOT a talking-head skip
 
 
 def test_frame_extraction_failure_is_per_video_not_fatal(tmp_path: Path):
@@ -716,6 +721,7 @@ def test_frame_extraction_failure_is_per_video_not_fatal(tmp_path: Path):
     )
     assert store["a1"].content.sources[0].frames == []
     assert report.transcribed == 1  # transcript still landed
+    assert report.visual_skipped == 0  # a per-video failure is NOT a talking-head skip
 
 
 def test_missing_ffmpeg_aborts_the_run(tmp_path: Path):
@@ -781,10 +787,12 @@ def test_frame_temp_files_discarded_after_run(tmp_path: Path):
     assert (tmp_path / "media" / "a1" / "frames" / "0.png").exists()
 
 
-def test_empty_extraction_classifies_talking_head(tmp_path: Path):
-    """When ffmpeg selects NO frames (an empty extraction), the video classifies as
-    talking-head — the visual layer is skipped (no classifier or vision call) and
-    the transcript still attaches. Guards the empty-frames branch."""
+def test_empty_extraction_skips_and_logs_not_talking_head(tmp_path: Path, caplog):
+    """When ffmpeg selects NO frames, the visual layer is a NON-content `skipped`
+    (logged), NOT bucketed as a talking-head content decision — so an operator can
+    tell "no frames found" from "genuine interview". No classifier/vision call is
+    made and the transcript still attaches. `visual_skipped` (the talking-head
+    tally) stays 0."""
     store = {"a1": _item("a1", _VIDEO_A_URL_1)}
     describe_calls: list = []
     classify_calls: list = []
@@ -795,20 +803,47 @@ def test_empty_extraction_classifies_talking_head(tmp_path: Path):
         describe_fn=lambda p: describe_calls.append(p) or "x",
         classify_fn=lambda f: classify_calls.append(f) or "slides",
     )
-    report = digest_videos(
-        store,
-        ["a1"],
-        fetch_fn=_FakeFetch(),
-        transcribe_fn=lambda _p: _speech("kept"),
-        temp_root=tmp_path,
-        visual=visual,
-    )
+    with caplog.at_level(logging.INFO):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech("kept"),
+            temp_root=tmp_path,
+            visual=visual,
+        )
     assert store["a1"].content.sources[0].frames == []
     assert store["a1"].content.sources[0].text == "kept"  # transcript survives
     assert describe_calls == []  # no vision call on an empty extraction
     assert classify_calls == []  # classifier not even consulted
     assert report.visual_slides == 0
-    assert report.visual_skipped == 1  # counted as a (talking-head) skip
+    assert report.visual_skipped == 0  # NOT a talking-head decision
+    assert "no key frames extracted" in caplog.text
+
+
+def test_all_unreadable_frames_skips_and_logs_not_talking_head(tmp_path: Path, caplog):
+    """Every extracted frame unreadable → classify returns 'unreadable' → a
+    non-content `skipped` (logged with the count), NOT a talking-head. No vision
+    call is wasted; `visual_skipped` stays 0; the transcript still attaches."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    describe_calls: list = []
+    visual = _FakeVisual(classification="unreadable", n_frames=3)
+    visual._describe = lambda p: describe_calls.append(p) or "x"
+
+    with caplog.at_level(logging.WARNING):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech("kept"),
+            temp_root=tmp_path,
+            visual=visual.config(tmp_path / "media"),
+        )
+    assert store["a1"].content.sources[0].frames == []
+    assert describe_calls == []  # vision NOT wasted on unreadable frames
+    assert report.visual_slides == 0
+    assert report.visual_skipped == 0  # NOT a talking-head decision
+    assert "unreadable" in caplog.text
 
 
 def test_silent_slide_deck_keeps_frames(tmp_path: Path):
@@ -829,3 +864,80 @@ def test_silent_slide_deck_keeps_frames(tmp_path: Path):
     assert len(src.frames) == 1  # slides kept despite no speech
     assert report.no_speech == 1
     assert report.visual_slides == 1
+
+
+def test_redigest_with_fewer_slides_clears_stale_frame_files(tmp_path: Path):
+    """A `--force` re-digest that yields FEWER slides must not leave stale
+    higher-index PNGs orphaned on disk: `<id>/frames/` is cleared before the new
+    (smaller) set is written, so the persisted files match the current result."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    media_root = tmp_path / "media"
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=3).config(media_root),
+    )
+    assert (media_root / "a1" / "frames" / "2.png").exists()  # 3 slides persisted
+
+    digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=1).config(media_root),
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == ["a1/frames/0.png"]
+    assert (media_root / "a1" / "frames" / "0.png").exists()
+    assert not (media_root / "a1" / "frames" / "1.png").exists()  # stale cleared
+    assert not (media_root / "a1" / "frames" / "2.png").exists()  # stale cleared
+
+
+def test_force_without_frames_logs_dropped_visual_layer(tmp_path: Path, caplog):
+    """A `--force` re-digest WITHOUT `--frames` strips a prior kept visual layer —
+    that is an operator-visible change, so it is LOGGED, never a silent drop."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=_FakeVisual(classification="slides", n_frames=2).config(tmp_path / "media"),
+    )
+    assert len(store["a1"].content.sources[0].frames) == 2  # precondition: framed
+
+    with caplog.at_level(logging.INFO):
+        digest_videos(
+            store,
+            ["a1"],
+            force=True,
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech(),
+            temp_root=tmp_path,
+            visual=None,  # no --frames on the re-run
+        )
+    assert store["a1"].content.sources[0].frames == []  # visual layer stripped
+    assert "dropped 2 prior slide(s)" in caplog.text
+
+
+def test_format_digest_summary_renders_both_visual_segments():
+    """The summary's Visual segment reports BOTH kept-slide and talking-head counts
+    when `--frames` did something — so the operator sees the split at a glance."""
+    report = DigestReport(
+        transcribed=2, visual_slides=1, visual_skipped=1, groups={"amplify_video/1": ["a", "b"]}
+    )
+    summary = format_digest_summary(report)
+    assert "1 con slides" in summary
+    assert "1 talking-head (saltados)" in summary
+
+
+def test_format_digest_summary_omits_visual_on_non_frames_run():
+    """A run where the visual layer did nothing (a non-`--frames` run) appends no
+    Visual segment — the summary is byte-unchanged from the PR2/PR3 shape."""
+    report = DigestReport(transcribed=1, groups={"amplify_video/1": ["a"]})
+    assert "Visual:" not in format_digest_summary(report)

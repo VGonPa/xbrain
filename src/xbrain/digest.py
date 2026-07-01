@@ -35,6 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from xbrain.models import Content, ContentSource, ContentSourceSuccess, Item, VideoFrame
@@ -69,6 +70,14 @@ ExtractFn = Callable[[Path], list[KeyFrame]]
 DescribeFn = Callable[[Path], str]
 ClassifyFn = Callable[[list[KeyFrame]], str]
 
+# The per-video visual-layer outcome. `disabled` = no `--frames`; `slides` = kept
+# + described + embedded (counts as a "with slides" video); `talking_head` = a
+# genuine content decision on READABLE frames (counts as a skipped talking-head);
+# `skipped` = a non-content drop (extraction/vision failed, zero frames selected,
+# or every frame unreadable) — logged with its reason, counted as NEITHER, so the
+# talking-head tally never conflates failures with real content decisions.
+Classification = Literal["disabled", "slides", "talking_head", "skipped"]
+
 
 @dataclass(frozen=True)
 class VisualConfig:
@@ -95,21 +104,23 @@ class _DescribedSlide:
     description: str
 
 
-@dataclass
+@dataclass(frozen=True)
 class _VisualResult:
-    """The per-video outcome of the visual layer.
+    """The per-video outcome of the visual layer (constructed once, never mutated).
 
     `classification` is one of `disabled` (no `--frames`), `slides` (kept +
-    described), `talking_head` (skipped + logged), or `skipped` (extraction /
-    vision failed, per-video — logged, layer dropped). `slides` is non-empty only
-    for `classification == "slides"`.
+    described + embedded), `talking_head` (a genuine content decision on readable
+    frames — skipped + logged), or `skipped` (a non-content drop: extraction /
+    vision failed, ZERO frames selected, or every frame unreadable — logged with
+    its reason, counted as neither slides nor talking-head). `slides` is non-empty
+    only for `classification == "slides"`.
     """
 
     slides: list[_DescribedSlide] = field(default_factory=list)
-    classification: str = "disabled"
+    classification: Classification = "disabled"
 
 
-@dataclass
+@dataclass(frozen=True)
 class _MediaAnalysis:
     """The transcript + visual result for one fetched video, before attach."""
 
@@ -280,11 +291,33 @@ def attach_transcript(
         if item.content is None:
             item.content = Content(fetched_at=now, sources=[source])
         else:
+            prior = next((s for s in item.content.sources if _is_x_video_source(s)), None)
             kept = [s for s in item.content.sources if not _is_x_video_source(s)]
             item.content.sources = [*kept, source]
             item.content.fetched_at = now
+            _log_dropped_visual_layer(item_id, prior, source)
         attached += 1
     return attached
+
+
+def _log_dropped_visual_layer(
+    item_id: str, prior: ContentSource | None, new_source: ContentSourceSuccess
+) -> None:
+    """Log when a re-digest strips a prior kept visual layer, so it is never silent.
+
+    A `--force` re-digest replaces the `x_video` source: if the old one carried
+    slides and the new one carries none (a `--force` run WITHOUT `--frames`, or one
+    where the video flipped to talking-head / skipped), the kept slides are dropped
+    — an operator-visible change that must be logged, not swallowed.
+    """
+    prior_frames = len(prior.frames) if isinstance(prior, ContentSourceSuccess) else 0
+    if prior_frames and not new_source.frames:
+        logger.info(
+            "digest-video: re-digest dropped %d prior slide(s) from item %s "
+            "(rebuilt without a kept visual layer)",
+            prior_frames,
+            item_id,
+        )
 
 
 def _fetched_path(report: FetchReport, item_id: str) -> Path | None:
@@ -298,13 +331,21 @@ def _fetched_path(report: FetchReport, item_id: str) -> Path | None:
 def _extract_described_slides(path: Path, visual: VisualConfig, *, item_id: str) -> _VisualResult:
     """Extract → classify → describe the video's key frames (`--frames`, #44 PR4).
 
-    A talking-head classification SKIPS the visual layer and LOGS the reason (never
-    a silent drop); a slide classification describes every kept frame via the
-    EXTERNAL vision step. A per-video `FrameExtractionFailed` (bad mp4) or
-    `VisionFailed` (a describe failure) drops the layer for THIS video (logged) and
-    the batch continues — the tool-not-found variants (`FrameExtractionToolNotFound`
-    / `VisionNotFound`) are NOT caught here: they are global config errors that
-    abort the run, exactly like a missing transcriber.
+    Distinguishes a genuine content decision from a failure so an operator
+    debugging "why was my slide deck skipped?" is never misled:
+
+    - `talking_head` (a real classification on readable frames) → SKIP + `info`
+      log; counted as a talking-head skip.
+    - `skipped` (a NON-content drop) → logged with its specific reason, counted as
+      neither: a per-video `FrameExtractionFailed` (bad mp4), ZERO frames selected
+      (ffmpeg found nothing — logged, not silently bucketed as talking-head), every
+      frame `unreadable` (a systemic decode problem — surfaced, not degraded), or a
+      `VisionFailed` describe failure.
+    - `slides` → describe every kept frame via the EXTERNAL vision step.
+
+    The tool-not-found variants (`FrameExtractionToolNotFound` / `VisionNotFound`)
+    are NOT caught here — they are global config errors that abort the run, exactly
+    like a missing transcriber.
     """
     try:
         frames = visual.extract_fn(path)
@@ -312,10 +353,21 @@ def _extract_described_slides(path: Path, visual: VisualConfig, *, item_id: str)
         logger.warning("digest-video: frame extraction failed for item %s: %s", item_id, exc)
         return _VisualResult(classification="skipped")
     if not frames:
-        return _VisualResult(classification="talking_head")
-    if visual.classify_fn(frames) == "talking_head":
+        logger.info(
+            "digest-video: no key frames extracted for item %s — visual layer skipped", item_id
+        )
+        return _VisualResult(classification="skipped")
+    classification = visual.classify_fn(frames)
+    if classification == "talking_head":
         logger.info("digest-video: visual layer skipped (talking-head) for item %s", item_id)
         return _VisualResult(classification="talking_head")
+    if classification == "unreadable":
+        logger.warning(
+            "digest-video: all %d extracted frame(s) unreadable for item %s — visual layer skipped",
+            len(frames),
+            item_id,
+        )
+        return _VisualResult(classification="skipped")
     try:
         slides = [
             _DescribedSlide(frame.timestamp, frame.path, visual.describe_fn(frame.path))
@@ -351,6 +403,22 @@ def _analyze_media(
         return _MediaAnalysis(transcript=transcript, visual=result)
     finally:
         path.unlink(missing_ok=True)
+
+
+def _reset_item_frames(media_root: Path, item_ids: list[str]) -> None:
+    """Clear each item's persisted slide dir before a (re-)digest writes the current set.
+
+    A re-digest that yields FEWER slides — or flips to talking-head / skipped —
+    must not leave stale higher-index PNGs (`<id>/frames/5.png`) orphaned on disk:
+    `generate` would keep mirroring them into the vault though nothing references
+    them. Clearing `<media_root>/<id>/frames/` first makes the on-disk set match the
+    current result exactly. Called only on the `--frames` path, for the items about
+    to be (re)written.
+    """
+    for item_id in item_ids:
+        frames_dir = media_root / item_id / "frames"
+        if frames_dir.exists():
+            shutil.rmtree(frames_dir)
 
 
 def _persist_slides_for_item(
@@ -441,11 +509,14 @@ def _process_group(
     analysis = _analyze_media(fetched, transcribe_fn, visual, item_id=representative)
     if analysis is None:
         return _GroupOutcome(already=already, failed=len(needing))
-    frames_by_item = (
-        _frames_by_item(analysis.visual.slides, visual.media_root, needing)
-        if visual is not None and analysis.visual.slides
-        else None
-    )
+    frames_by_item = None
+    if visual is not None:
+        # Clear stale slide dirs for every needing item BEFORE persisting the
+        # current result — a re-digest with fewer slides (or none) must not leave
+        # orphaned higher-index PNGs behind.
+        _reset_item_frames(visual.media_root, needing)
+        if analysis.visual.slides:
+            frames_by_item = _frames_by_item(analysis.visual.slides, visual.media_root, needing)
     attach_transcript(store, needing, analysis.transcript, frames_by_item=frames_by_item)
     return _group_outcome(analysis, needing, already)
 

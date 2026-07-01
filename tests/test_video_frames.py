@@ -141,19 +141,64 @@ def test_extract_caps_to_single_front_frame(tmp_path: Path):
     assert [f.timestamp for f in frames] == [0.0]
 
 
-def test_extract_pairs_up_to_shorter_on_count_mismatch(tmp_path: Path):
-    """If ffmpeg emits more image files than showinfo timestamps (defensive — a
-    corrupt stderr), pairing stops at the shorter list and never crashes."""
+def test_extract_pairs_timestamps_to_indexed_files_not_glob_order(tmp_path: Path):
+    """Pairing is by the frame INDEX (`frame-<i>.png` ↔ the i-th `pts_time`), never
+    by a directory listing — so it is deterministic even if a cold/loaded FS would
+    return the glob in a different or truncated order. Each timestamp lands on its
+    OWN indexed image, never misaligned onto a neighbour's file."""
+    runner = _ffmpeg_runner([2.0, 5.0, 9.0])
+    frames = extract_key_frames(tmp_path / "vid.mp4", runner=runner)
+    assert [(f.timestamp, f.path.name) for f in frames] == [
+        (2.0, "frame-00001.png"),
+        (5.0, "frame-00002.png"),
+        (9.0, "frame-00003.png"),
+    ]
+
+
+def test_extract_missing_frame_file_is_loud_failure(tmp_path: Path):
+    """ffmpeg logs 3 selected frames but only 2 files materialise → the third's
+    expected file is missing → a LOUD `FrameExtractionFailed`, never a silent
+    warn-and-truncate that would drop a slide from the reported set."""
 
     def _run(argv, **_kwargs):
         out_dir = Path(argv[-1]).parent
-        for index in range(1, 4):  # 3 files
+        for index in range(1, 3):  # only 2 of the 3 logged frames written
             (out_dir / f"frame-{index:05d}.png").write_bytes(b"\x89PNG fake")
-        # but only ONE timestamp reported
-        return _completed("[Parsed_showinfo @ 0x0] n:0 pts:0 pts_time:2.0 duration:1")
+        lines = [f"[Parsed_showinfo @ 0x0] pts_time:{ts}" for ts in (1.0, 2.0, 3.0)]
+        return _completed("\n".join(lines))
 
-    frames = extract_key_frames(tmp_path / "vid.mp4", runner=_run)
-    assert [f.timestamp for f in frames] == [2.0]  # paired up to the shorter list
+    with pytest.raises(FrameExtractionFailed) as excinfo:
+        extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+    assert "frame-00003.png" in str(excinfo.value)
+
+
+def test_extract_surplus_frame_file_is_loud_failure(tmp_path: Path):
+    """ffmpeg writes MORE image files than the frames it logged → a surplus file
+    beyond the logged count → a LOUD `FrameExtractionFailed`, never silently
+    dropping the surplus (which would understate the slide set)."""
+
+    def _run(argv, **_kwargs):
+        out_dir = Path(argv[-1]).parent
+        for index in range(1, 4):  # 3 files written
+            (out_dir / f"frame-{index:05d}.png").write_bytes(b"\x89PNG fake")
+        return _completed("[Parsed_showinfo @ 0x0] pts_time:2.0")  # only 1 logged
+
+    with pytest.raises(FrameExtractionFailed):
+        extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+
+
+def test_extract_non_utf8_ffmpeg_stderr_raises_failed(tmp_path: Path):
+    """`subprocess.run(text=True)` raises `UnicodeDecodeError` decoding a non-UTF-8
+    ffmpeg banner (Latin-1 / Shift-JIS container tags); it is a per-video
+    `FrameExtractionFailed` (the batch continues), never an uncaught abort — the
+    same contract `vision.py` / `transcribe.py` already honour."""
+
+    def _run(_argv, **_kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    with pytest.raises(FrameExtractionFailed) as excinfo:
+        extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+    assert "non-UTF-8" in str(excinfo.value)
 
 
 def test_extract_missing_ffmpeg_raises_tool_not_found(tmp_path: Path):
@@ -238,13 +283,27 @@ def test_classify_empty_is_talking_head(tmp_path: Path):
     assert classify_visual([]) == "talking_head"
 
 
-def test_classify_unreadable_frame_degrades_to_talking_head(tmp_path: Path):
-    """A corrupt/unreadable frame reads as edge-density 0.0 (the safe direction —
-    skip the visual layer) with a warning, never a crash mid-classification."""
+def test_classify_all_unreadable_returns_unreadable(tmp_path: Path):
+    """A frame set where EVERY frame fails to decode classifies as 'unreadable' — a
+    DISTINCT signal (a systemic extraction problem), never silently degraded to
+    'talking_head' (which would look like a content decision to the operator)."""
     bad = tmp_path / "corrupt.png"
     bad.write_bytes(b"not a real image")
     frames = [KeyFrame(timestamp=float(i), path=bad) for i in range(3)]
-    assert classify_visual(frames) == "talking_head"
+    assert classify_visual(frames) == "unreadable"
+
+
+def test_classify_ignores_unreadable_frames_among_readable_slides(tmp_path: Path):
+    """An unreadable frame is NOT counted as a low-edge (talking-head) vote — it is
+    excluded, so a mostly-slide set with one corrupt frame still classifies
+    'slides' rather than being dragged toward talking_head."""
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not a real image")
+    frames = [
+        KeyFrame(timestamp=float(i), path=_slide_png(tmp_path / f"s{i}.png")) for i in range(3)
+    ]
+    frames.append(KeyFrame(timestamp=9.0, path=corrupt))
+    assert classify_visual(frames) == "slides"
 
 
 def test_video_frames_imports_no_ml_or_vision_library():

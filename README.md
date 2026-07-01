@@ -734,7 +734,9 @@ discarded after the text is extracted.
 
 xbrain stays **mechanical**: it *lists* and *fetches*. The heavy ML — ASR
 (transcription) and any vision — is **external / agent-side tooling**, not baked
-into the CLI (no MLX/CoreML/ffmpeg dependency in xbrain core). The agent loop is
+into the CLI (no bundled MLX/CoreML/ML *library* in xbrain core — ffmpeg and the
+vision model are shelled out as external subprocesses, used only by `--frames`).
+The agent loop is
 **list → fetch → analyze → discard**:
 
 ```bash

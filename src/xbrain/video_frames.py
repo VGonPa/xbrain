@@ -21,8 +21,19 @@ noise. This module makes the choice **content-aware** and keeps xbrain core
   fraction of frames whose **edge density** is high (text / sharp lines →
   high FIND_EDGES energy; smooth faces / bokeh → low). It uses Pillow — classic
   image processing, NOT a vision/ML library — so the digest can skip vision calls
-  on interviews (skip + log, never a silent drop). A test asserts this module
-  imports no ML/vision lib.
+  on interviews (skip + log, never a silent drop). Each frame's bytes are read
+  fully into memory before decoding (no lazy-FS decode race), and a frame that
+  cannot be decoded is EXCLUDED from the vote rather than silently counted as a
+  low-edge vote; an all-unreadable set returns the distinct `"unreadable"` so the
+  caller surfaces it instead of masquerading it as talking-head. A test asserts
+  this module imports no ML/vision lib.
+
+Key-frame pairing is DETERMINISTIC: `_pair_frames` maps the i-th `showinfo`
+timestamp onto `frame-{i:05d}.png` by parsed index (ffmpeg writes + logs frames
+in the same order), never by globbing the directory back — so a cold/loaded
+filesystem can't truncate or reorder the readback. A real count mismatch (a
+logged frame with no file, or a surplus file with no showinfo line) is a LOUD
+`FrameExtractionFailed`, never a silent truncation.
 
 `ffmpeg` failures surface as clear operator errors: a **missing binary**
 (`FrameExtractionToolNotFound`) aborts the run (a global config error, like
@@ -38,6 +49,7 @@ the store.
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import shlex
@@ -94,7 +106,7 @@ _PTS_TIME_RE = re.compile(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
-VisualKind = Literal["slides", "talking_head"]
+VisualKind = Literal["slides", "talking_head", "unreadable"]
 
 
 class FrameExtractionError(RuntimeError):
@@ -172,6 +184,10 @@ def _run_ffmpeg(argv: list[str], runner: Runner, timeout_seconds: int) -> str:
         raise FrameExtractionFailed(
             f"frame extractor {argv[0]!r} timed out after {timeout_seconds}s"
         ) from exc
+    except UnicodeDecodeError as exc:  # subprocess.run(text=True) on non-UTF-8 stderr
+        raise FrameExtractionFailed(
+            f"frame extractor {argv[0]!r} produced non-UTF-8 output: {exc}"
+        ) from exc
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
         raise FrameExtractionFailed(
@@ -186,21 +202,37 @@ def _parse_timestamps(stderr: str) -> list[float]:
 
 
 def _pair_frames(out_dir: Path, timestamps: list[float]) -> list[KeyFrame]:
-    """Pair the produced image files (sorted) with their showinfo timestamps.
+    """Pair each showinfo timestamp with its INDEXED frame file — deterministically.
 
-    ffmpeg emits frames and their showinfo lines in the same temporal order, so a
-    positional zip is correct. A count mismatch (defensive — should not happen)
-    pairs up to the shorter and logs, never crashes.
+    ffmpeg writes one image per SELECTED frame and logs one `showinfo` line per
+    selected frame in the SAME order, so the i-th `pts_time` belongs to
+    `frame-{i:05d}.png` **by construction**. Pairing by that parsed index — never
+    by `glob`-ing the directory back and zipping positionally — is deterministic:
+    a cold/loaded filesystem that returns the listing truncated or reordered can no
+    longer drop a slide or misalign a timestamp onto the wrong image.
+
+    A genuine count mismatch is a LOUD `FrameExtractionFailed`, never a silent
+    warn-and-truncate: an expected frame file MISSING (ffmpeg logged it but no
+    image landed) or a SURPLUS file beyond the logged count (an image with no
+    showinfo line) both raise, so the slide count the run reports always matches
+    what ffmpeg actually produced.
     """
-    files = sorted(out_dir.glob("frame-*.png"))
-    if len(files) != len(timestamps):
-        logger.warning(
-            "digest-video: ffmpeg produced %d frame(s) but %d timestamp(s); pairing %d.",
-            len(files),
-            len(timestamps),
-            min(len(files), len(timestamps)),
+    frames: list[KeyFrame] = []
+    for index, ts in enumerate(timestamps, start=1):
+        path = out_dir / f"frame-{index:05d}.png"
+        if not path.exists():
+            raise FrameExtractionFailed(
+                f"ffmpeg logged {len(timestamps)} selected frame(s) but {path.name} "
+                "is missing — frame/timestamp pairing broke"
+            )
+        frames.append(KeyFrame(timestamp=ts, path=path))
+    surplus = out_dir / f"frame-{len(timestamps) + 1:05d}.png"
+    if surplus.exists():
+        raise FrameExtractionFailed(
+            f"ffmpeg wrote more frame files than the {len(timestamps)} it logged "
+            f"({surplus.name} present with no showinfo line) — frame/timestamp pairing broke"
         )
-    return [KeyFrame(timestamp=ts, path=path) for ts, path in zip(timestamps, files)]
+    return frames
 
 
 def _cap_evenly(frames: list[KeyFrame], max_frames: int) -> list[KeyFrame]:
@@ -254,35 +286,49 @@ def extract_key_frames(
     return _cap_evenly(frames, max_frames)
 
 
-def _edge_density(path: Path) -> float:
-    """Mean FIND_EDGES magnitude of the frame (0..1) — high for text/line slides.
+def _edge_density(path: Path) -> float | None:
+    """Mean FIND_EDGES magnitude of the frame (0..1), or `None` if unreadable.
 
-    A corrupt/unreadable frame reads as 0.0 (biases toward talking_head → skip,
-    the safe direction) with a warning, never a crash mid-classification.
+    High for text/line slides, low for smooth faces / bokeh. The image bytes are
+    read FULLY into memory first and decoded from an in-memory buffer, so the
+    decode never races a lazy filesystem read of a just-written frame (a cold-FS
+    flake source) — the whole file is materialised before PIL touches it.
+
+    A genuinely corrupt / unreadable frame returns `None` — DISTINCT from a real
+    low-edge `0.0` — with a warning, so `classify_visual` can tell "no readable
+    visual signal" from "smooth video" and never silently miscount a decode
+    failure as a talking-head vote.
     """
     try:
-        with Image.open(path) as img:
+        with Image.open(io.BytesIO(path.read_bytes())) as img:
             edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
             return ImageStat.Stat(edges).mean[0] / 255.0
     except (OSError, ValueError) as exc:
         logger.warning("digest-video: could not read frame %s for classification: %s", path, exc)
-        return 0.0
+        return None
 
 
 def classify_visual(frames: list[KeyFrame]) -> VisualKind:
-    """Classify a frame set as `"slides"` or `"talking_head"`.
+    """Classify a frame set as `"slides"`, `"talking_head"`, or `"unreadable"`.
 
-    Returns `"slides"` when at least `_SLIDE_FRACTION_THRESHOLD` of the frames read
-    as slide-like (edge density ≥ `_SLIDE_EDGE_DENSITY_THRESHOLD`) — the visual
-    layer is worth describing + embedding. Otherwise `"talking_head"`: the scene
-    frames are camera cuts (noise), so the caller skips the visual layer (and
-    logs the reason). An empty set has no visual signal → `"talking_head"`.
+    Returns `"slides"` when at least `_SLIDE_FRACTION_THRESHOLD` of the READABLE
+    frames read as slide-like (edge density ≥ `_SLIDE_EDGE_DENSITY_THRESHOLD`) —
+    the visual layer is worth describing + embedding. Otherwise `"talking_head"`:
+    the scene frames are camera cuts (noise), so the caller skips the visual layer
+    (and logs the reason).
+
+    Unreadable frames are EXCLUDED from the vote (never counted as low-edge), so a
+    couple of corrupt frames can't drag a real slide deck to talking_head. When
+    EVERY frame is unreadable the result is `"unreadable"` — a distinct, systemic
+    signal the caller surfaces + logs rather than silently treating as a content
+    decision. An empty set has no visual signal → `"talking_head"`.
     """
     if not frames:
         return "talking_head"
-    slide_like = sum(
-        1 for frame in frames if _edge_density(frame.path) >= _SLIDE_EDGE_DENSITY_THRESHOLD
-    )
-    if slide_like / len(frames) >= _SLIDE_FRACTION_THRESHOLD:
+    densities = [d for d in (_edge_density(frame.path) for frame in frames) if d is not None]
+    if not densities:
+        return "unreadable"
+    slide_like = sum(1 for density in densities if density >= _SLIDE_EDGE_DENSITY_THRESHOLD)
+    if slide_like / len(densities) >= _SLIDE_FRACTION_THRESHOLD:
         return "slides"
     return "talking_head"

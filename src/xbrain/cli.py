@@ -57,15 +57,18 @@ from xbrain.topics import (
     write_topic_pages,
 )
 from xbrain.transcribe import Transcript, transcribe_media
-from xbrain.video_frames import DEFAULT_MAX_FRAMES, DEFAULT_SCENE_THRESHOLD, extract_key_frames
-from xbrain.vision import describe_image
 from xbrain.video_fetch import (
     FetchReport,
     fetch_result_to_json,
     fetch_videos,
     format_fetch_summary,
 )
-from xbrain.video_media import download_videos as run_download_videos
+from xbrain.video_frames import (
+    DEFAULT_MAX_FRAMES,
+    DEFAULT_SCENE_THRESHOLD,
+    KeyFrame,
+    extract_key_frames,
+)
 from xbrain.video_media import (
     VideoDownloadPlan,
     VideoReport,
@@ -74,7 +77,9 @@ from xbrain.video_media import (
     parse_size_to_bytes,
     plan_video_downloads,
 )
+from xbrain.video_media import download_videos as run_download_videos
 from xbrain.video_select import format_video_table, list_video_entries, row_to_json
+from xbrain.vision import describe_image
 from xbrain.vocab import (
     apply_vocab_worksheet,
     export_vocab_worksheet,
@@ -1050,7 +1055,7 @@ def _build_visual_config(cfg: Config) -> VisualConfig:
             "[vision].command in config.toml (there is no bundled default)."
         )
 
-    def _extract(path: Path) -> list:
+    def _extract(path: Path) -> list[KeyFrame]:
         return extract_key_frames(
             path, threshold=DEFAULT_SCENE_THRESHOLD, max_frames=DEFAULT_MAX_FRAMES
         )
