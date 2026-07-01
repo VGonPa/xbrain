@@ -18,6 +18,7 @@ subprocess, no real downloads):
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ import pytest
 
 from xbrain.digest import (
     DigestReport,
+    VisualConfig,
     _video_key,
     attach_transcript,
     digest_videos,
@@ -38,6 +40,12 @@ from xbrain.models import (
 )
 from xbrain.transcribe import Segment, Transcript, TranscriberFailed, TranscriberNotFound
 from xbrain.video_fetch import FetchReport, FetchResult
+from xbrain.video_frames import (
+    FrameExtractionFailed,
+    FrameExtractionToolNotFound,
+    KeyFrame,
+)
+from xbrain.vision import VisionFailed, VisionNotFound
 
 # Two DISTINCT signed URLs for the SAME underlying video (rotating `?tag=` +
 # filename) — the whole point of keying on the stable path id, not the URL.
@@ -505,3 +513,319 @@ def test_no_video_items_reported(tmp_path: Path):
     )
     assert report.skipped_no_video == 1
     assert report.transcribed == 0
+
+
+# ------------------------------------------------------------ visual layer (--frames, PR4)
+
+
+def _make_frame(directory: Path, index: int, timestamp: float) -> KeyFrame:
+    """A KeyFrame whose image file really exists (so persistence can copy it).
+
+    The bytes are dummy — the digest tests inject a fake classifier/describer, so
+    no real image decode or vision runs here."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"frame-{index:05d}.png"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n slide bytes")
+    return KeyFrame(timestamp=timestamp, path=path)
+
+
+class _FakeVisual:
+    """Injected `extract_fn` + `describe_fn` + `classify_fn` for the visual layer.
+
+    `extract_fn` writes its frame files INTO the fetched video's parent (the
+    ephemeral temp dir) — mirroring the real ffmpeg path — so the outer cleanup
+    reclaims them. Records the calls so tests can assert extract/describe ran (or
+    did NOT, on the non-frames / talking-head paths)."""
+
+    def __init__(self, *, classification: str = "slides", n_frames: int = 2, describe=None):
+        self.classification = classification
+        self.n_frames = n_frames
+        self._describe = describe or (lambda path: f"description of {Path(path).name}")
+        self.extract_calls: list[Path] = []
+        self.describe_calls: list[Path] = []
+        self.classify_calls = 0
+
+    def extract(self, path: Path) -> list[KeyFrame]:
+        self.extract_calls.append(Path(path))
+        frames_dir = Path(path).parent / "xbrain-frames-fake"
+        return [_make_frame(frames_dir, i, float(i * 10)) for i in range(self.n_frames)]
+
+    def classify(self, frames):
+        self.classify_calls += 1
+        return self.classification
+
+    def describe(self, path: Path) -> str:
+        self.describe_calls.append(Path(path))
+        return self._describe(path)
+
+    def config(self, media_root: Path) -> VisualConfig:
+        return VisualConfig(
+            media_root=media_root,
+            extract_fn=self.extract,
+            describe_fn=self.describe,
+            classify_fn=self.classify,
+        )
+
+
+def test_slide_video_describes_and_attaches_frames(tmp_path: Path):
+    """A slide-classified video: its key frames are described and recorded as
+    `VideoFrame`s on the item's `x_video` source, and the slide images are
+    persisted under `media_root/<id>/frames/<n>.png` for the generator to embed."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    media_root = tmp_path / "media"
+    visual = _FakeVisual(classification="slides", n_frames=2)
+
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech("the talk"),
+        temp_root=tmp_path,
+        visual=visual.config(media_root),
+    )
+    frames = store["a1"].content.sources[0].frames
+    assert [f.description for f in frames] == [
+        "description of frame-00000.png",
+        "description of frame-00001.png",
+    ]
+    assert [f.local_path for f in frames] == ["a1/frames/0.png", "a1/frames/1.png"]
+    # the slide bytes are persisted where generate mirrors from
+    assert (media_root / "a1" / "frames" / "0.png").exists()
+    assert (media_root / "a1" / "frames" / "1.png").exists()
+    assert report.visual_slides == 1
+    assert report.visual_skipped == 0
+    assert visual.describe_calls  # vision ran on the slides
+
+
+def test_talking_head_video_skips_visual_and_logs(tmp_path: Path, caplog):
+    """A talking-head-classified video: the visual layer is SKIPPED and the reason
+    logged — never a silent drop — and no vision call is wasted."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="talking_head", n_frames=3)
+
+    with caplog.at_level(logging.INFO):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech(),
+            temp_root=tmp_path,
+            visual=visual.config(tmp_path / "media"),
+        )
+    assert store["a1"].content.sources[0].frames == []  # no slides embedded
+    assert visual.describe_calls == []  # vision NOT wasted on an interview
+    assert report.visual_skipped == 1
+    assert report.visual_slides == 0
+    assert "visual layer skipped (talking-head)" in caplog.text
+    assert store["a1"].content.sources[0].text  # the transcript is still attached
+
+
+def test_non_frames_run_never_touches_ffmpeg_or_vision(tmp_path: Path):
+    """The visual layer is fully opt-in: with no `visual` config, ffmpeg/vision are
+    never invoked and the source carries no frames (the default path is inert)."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual()
+
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert visual.extract_calls == []
+    assert visual.describe_calls == []
+    assert store["a1"].content.sources[0].frames == []
+
+
+def test_dedup_describes_slides_once_persists_per_item(tmp_path: Path):
+    """Two items bookmarking the same slide video: the frames are extracted +
+    described ONCE, but persisted + attached PER item (each with its own
+    `<id>/frames/` path so the per-item embed resolves)."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    media_root = tmp_path / "media"
+    visual = _FakeVisual(classification="slides", n_frames=2)
+
+    digest_videos(
+        store,
+        ["a1", "a2"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=visual.config(media_root),
+    )
+    assert len(visual.describe_calls) == 2  # 2 frames described ONCE (not per item)
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == [
+        "a1/frames/0.png",
+        "a1/frames/1.png",
+    ]
+    assert [f.local_path for f in store["a2"].content.sources[0].frames] == [
+        "a2/frames/0.png",
+        "a2/frames/1.png",
+    ]
+    assert (media_root / "a2" / "frames" / "1.png").exists()
+
+
+def test_vision_failure_drops_visual_layer_but_keeps_transcript(tmp_path: Path, caplog):
+    """A per-image `VisionFailed` is recorded and the visual layer dropped for that
+    video — never a silent partial — while the transcript still attaches (the audio
+    digest is independent of the visual layer)."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+
+    def _boom(_path):
+        raise VisionFailed("model crashed")
+
+    visual = _FakeVisual(classification="slides", describe=_boom)
+    with caplog.at_level(logging.WARNING):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech("kept"),
+            temp_root=tmp_path,
+            visual=visual.config(tmp_path / "media"),
+        )
+    assert store["a1"].content.sources[0].frames == []  # visual dropped
+    assert store["a1"].content.sources[0].text == "kept"  # transcript survives
+    assert report.transcribed == 1
+    assert report.visual_slides == 0
+
+
+def test_frame_extraction_failure_is_per_video_not_fatal(tmp_path: Path):
+    """A per-video `FrameExtractionFailed` (a bad mp4 ffmpeg rejects) drops that
+    video's visual layer and continues — the transcript still attaches."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+
+    def _boom(_path):
+        raise FrameExtractionFailed("Invalid data")
+
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=_boom,
+        describe_fn=lambda _p: "x",
+        classify_fn=lambda _f: "slides",
+    )
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=visual,
+    )
+    assert store["a1"].content.sources[0].frames == []
+    assert report.transcribed == 1  # transcript still landed
+
+
+def test_missing_ffmpeg_aborts_the_run(tmp_path: Path):
+    """A missing ffmpeg (`FrameExtractionToolNotFound`) is a global config error —
+    it ABORTS the whole run, like a missing transcriber, not a per-video skip."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+
+    def _boom(_path):
+        raise FrameExtractionToolNotFound("ffmpeg not found")
+
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=_boom,
+        describe_fn=lambda _p: "x",
+        classify_fn=lambda _f: "slides",
+    )
+    with pytest.raises(FrameExtractionToolNotFound):
+        digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech(),
+            temp_root=tmp_path,
+            visual=visual,
+        )
+
+
+def test_missing_vision_binary_aborts_the_run(tmp_path: Path):
+    """A missing/unconfigured vision binary (`VisionNotFound`) aborts the run — a
+    global config error, not a per-video skip."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+
+    def _boom(_path):
+        raise VisionNotFound("no [vision].command configured")
+
+    visual = _FakeVisual(classification="slides", describe=_boom)
+    with pytest.raises(VisionNotFound):
+        digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _speech(),
+            temp_root=tmp_path,
+            visual=visual.config(tmp_path / "media"),
+        )
+
+
+def test_frame_temp_files_discarded_after_run(tmp_path: Path):
+    """The extracted frame images are ephemeral: only the KEPT slides persist under
+    media_root; nothing lingers in the digest temp tree."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="slides", n_frames=2)
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    # the ephemeral frame files are gone; the persisted slides live under media/
+    assert list((tmp_path).glob("xbrain-digest-*")) == []
+    assert (tmp_path / "media" / "a1" / "frames" / "0.png").exists()
+
+
+def test_empty_extraction_classifies_talking_head(tmp_path: Path):
+    """When ffmpeg selects NO frames (an empty extraction), the video classifies as
+    talking-head — the visual layer is skipped (no classifier or vision call) and
+    the transcript still attaches. Guards the empty-frames branch."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    describe_calls: list = []
+    classify_calls: list = []
+
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=lambda _p: [],  # ffmpeg found nothing to select
+        describe_fn=lambda p: describe_calls.append(p) or "x",
+        classify_fn=lambda f: classify_calls.append(f) or "slides",
+    )
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech("kept"),
+        temp_root=tmp_path,
+        visual=visual,
+    )
+    assert store["a1"].content.sources[0].frames == []
+    assert store["a1"].content.sources[0].text == "kept"  # transcript survives
+    assert describe_calls == []  # no vision call on an empty extraction
+    assert classify_calls == []  # classifier not even consulted
+    assert report.visual_slides == 0
+    assert report.visual_skipped == 1  # counted as a (talking-head) skip
+
+
+def test_silent_slide_deck_keeps_frames(tmp_path: Path):
+    """A SILENT slide deck (no speech) still gets its slides described + embedded —
+    the visual layer is exactly where a screen-only video carries its content."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="slides", n_frames=1)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    src = store["a1"].content.sources[0]
+    assert src.has_speech is False
+    assert len(src.frames) == 1  # slides kept despite no speech
+    assert report.no_speech == 1
+    assert report.visual_slides == 1

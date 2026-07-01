@@ -176,6 +176,13 @@ section with the talk's title and transcript — a 72-minute talk you never watc
 becomes a readable, searchable, topic-linked note. A silent/no-speech clip
 degrades gracefully to a one-line "silent video" note instead of an empty digest.
 
+For **slide/screen/demo-heavy** talks, add the opt-in `--frames` flag: xbrain
+extracts the key slides, describes each with an **external** vision model, and
+embeds them into the digest section next to the transcript — so the visual
+content is captured too, not just the audio. It is content-aware: an interview /
+talking-head video is detected and its (camera-cut) frames are skipped, so you
+never waste vision calls where the slides are noise.
+
 *Example:*
 
 ```markdown
@@ -396,6 +403,10 @@ topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: 
 [transcribe]
 command = "parakeet-mlx"                  # external transcriber for `digest-video`
 # model = "parakeet-tdt-0.6b-v2"          # optional; omit for the tool default
+
+[vision]
+# command = "vlm-describe"                # external vision model for `digest-video --frames`
+# model = "qwen2-vl-7b"                   # optional; omit for the tool default
 ```
 
 | Section | Key | Default | Purpose |
@@ -414,6 +425,8 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[describe]` | `version` | `v1` | Tag persisted on every described photo. Bumping invalidates existing descriptions so the next `xbrain describe` re-describes stale entries. |
 | `[transcribe]` | `command` | `parakeet-mlx` | External transcriber `xbrain digest-video` shells out to (the ASR lives outside xbrain core). May be a multi-token wrapper; whisper / faster-whisper is the portable fallback. |
 | `[transcribe]` | `model` | — | Optional model id passed to the transcriber (`--model`). Omit for the tool default. |
+| `[vision]` | `command` | — (unset) | External vision model `xbrain digest-video --frames` shells out to (describes key-frame slides; lives outside xbrain core). No bundled default — `--frames` errors until it is set. May be a multi-token wrapper. |
+| `[vision]` | `model` | — | Optional model id passed to the vision command (`--model`). Omit for the tool default. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
@@ -539,7 +552,7 @@ uv run xbrain <command> [options]
 | `download-videos` | Download the actual **mp4 bytes** for backfilled videos and embed them inline in the wiki — the video counterpart to `media`. mp4 only: HLS (`.m3u8`) needs ffmpeg and is a deferred follow-up (skipped + counted); poster-era entries (run `refresh-media` first) are skipped too. Prints a `~X.X GB` size estimate and asks for confirmation **unless `--yes`**. `--max-size 500MB\|2GB` skips videos whose estimated size exceeds the cap. Validates the response is really a video (rejects HTML/JSON interstitials served as 200). Destructive → auto-snapshot; idempotent (re-runs skip downloaded videos unless `--force`). `--source bookmarks\|tweets\|all`, `--limit N`, `--items <a,b,c>`, `--max-size <size>`, `--force`, `--yes`. See [Local media storage](#local-media-storage). |
 | `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
 | `fetch-video` | **Ephemeral** download of the real mp4 for selected videos to `--to <dir>/<id>.mp4`, for agent-side processing (transcription/analysis is external — see below). Select with `--ids a,b` and/or `--topic <t>` (+ `--max-size`, `--limit`, `--source`). Reuses `download-videos`' content-validation, failure classification, atomic write and mp4/HLS/poster discriminator; HLS and poster-era are skipped + counted. **Deliberately non-persisting:** never mutates `items.json`, never snapshots, never touches `data/media/` — it writes only under `--to`. `--json` for machine output. |
-| `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). The transcript then flows through the normal `enrich → topics → generate` pipeline. |
+| `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). **`--frames`** (opt-in visual layer, needs `[vision].command`): for slide-heavy videos it extracts key slides (ffmpeg scene detection + interval sampling so the whole video is covered), describes each via the **external** vision model, records the descriptions on the `x_video` source, and embeds the slide images into the note like downloaded photos; talking-head videos are detected and skipped (logged). The transcript then flows through the normal `enrich → topics → generate` pipeline. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
@@ -770,6 +783,22 @@ and destructive (it rewrites `items.json`), so it **auto-snapshots** first. From
 there the transcript flows through the normal `enrich → topics → generate`
 pipeline, turning the once-unwatchable bookmark into a topic-linked note — see the
 [digest module](https://github.com/VGonPa/xbrain/issues/44).
+
+```bash
+# Opt-in visual layer for slide-heavy talks (needs [vision].command configured):
+xbrain digest-video --topic ai --frames    # describe + embed key slides where they carry content
+```
+
+**When `--frames` pays off.** For a slide/screen/demo talk the visual carries as
+much as the audio, so `--frames` extracts the key slides (ffmpeg scene detection,
+with interval sampling so a long static tail is still covered), describes each via
+the **external** vision model you configure in `[vision].command` (like the
+transcriber, *not* bundled — no vision/ML dependency in core), records the
+descriptions on the `x_video` source, and embeds the slide images into the note
+exactly like downloaded photos. It is **content-aware**: a talking-head / interview
+video is detected and its visual layer is skipped (logged, never silently), so you
+don't spend vision calls on camera-cut noise. `--frames` is fully opt-in — a normal
+`digest-video` run never touches ffmpeg or the vision model.
 
 ---
 
@@ -1028,7 +1057,9 @@ xbrain/
 │   ├── video_select.py   # list-videos: read-only video catalog (VideoRow)
 │   ├── video_fetch.py    # fetch-video: ephemeral mp4 fetch, non-persisting
 │   ├── transcribe.py     # digest-video: external transcriber subprocess (no ML in core)
-│   ├── digest.py         # digest-video: fetch → transcribe → attach x_video source (+ dedup)
+│   ├── video_frames.py   # digest-video --frames: ffmpeg key-frame extraction + classify (no ML)
+│   ├── vision.py         # digest-video --frames: external vision subprocess (no ML in core)
+│   ├── digest.py         # digest-video: fetch → transcribe (+ optional frames) → attach x_video
 │   ├── extract/          # X extraction (Playwright + GraphQL interception)
 │   │   ├── browser.py    #   session / browser context
 │   │   ├── graphql.py    #   parse X's internal GraphQL responses

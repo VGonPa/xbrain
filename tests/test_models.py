@@ -1,6 +1,9 @@
 # tests/test_models.py
 from datetime import datetime, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from xbrain.models import Author, Item, Link, State
 
 
@@ -297,6 +300,67 @@ def test_content_kind_includes_x_video():
     from xbrain.models import ContentKind
 
     assert "x_video" in get_args(ContentKind)
+
+
+# ------------------------------------------------------------ x_video frames (#44 PR4)
+
+
+def test_x_video_source_round_trips_with_frames():
+    """A slide-heavy `x_video` source carries a `frames` list of key-frame slides
+    (#44 PR4). Each `VideoFrame` (timestamp + relative `local_path` + vision
+    `description`) survives a dump → re-parse so the visual layer persists."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess, VideoFrame
+
+    src = ContentSourceSuccess(
+        kind="x_video",
+        url="https://video.twimg.com/amplify_video/900/vid/720/A.mp4?tag=16",
+        title="A slide talk",
+        text="the transcript",
+        has_speech=True,
+        language="en",
+        frames=[
+            VideoFrame(timestamp=12.5, local_path="900/frames/0.png", description="a title slide"),
+            VideoFrame(timestamp=88.0, local_path="900/frames/1.png", description="a code slide"),
+        ],
+    )
+    restored = ContentSourceAdapter.validate_python(src.model_dump(mode="json"))
+    assert isinstance(restored, ContentSourceSuccess)
+    assert len(restored.frames) == 2
+    assert restored.frames[0].timestamp == 12.5
+    assert restored.frames[0].local_path == "900/frames/0.png"
+    assert restored.frames[0].description == "a title slide"
+    assert restored.frames[1].local_path == "900/frames/1.png"
+
+
+def test_content_source_success_defaults_frames_to_empty_list():
+    """`frames` is optional + additive: a legacy (pre-PR4) record with no `frames`
+    key loads with an empty list — existing `items.json` is unchanged."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess
+
+    legacy = ContentSourceAdapter.validate_python(
+        {"kind": "external_article", "url": "u", "ok": True, "title": "T", "text": "body"}
+    )
+    assert isinstance(legacy, ContentSourceSuccess)
+    assert legacy.frames == []
+
+
+def test_video_frame_rejects_absolute_and_traversal_local_path():
+    """`VideoFrame.local_path` reuses the media traversal guard so a hand-edited
+    store cannot point a slide embed at bytes outside `data/media/`."""
+    from xbrain.models import VideoFrame
+
+    with pytest.raises(ValidationError):
+        VideoFrame(timestamp=0.0, local_path="/etc/passwd", description="x")
+    with pytest.raises(ValidationError):
+        VideoFrame(timestamp=0.0, local_path="../../escape.png", description="x")
+
+
+def test_video_frame_rejects_negative_timestamp():
+    """A frame timestamp is seconds into the video — never negative."""
+    from xbrain.models import VideoFrame
+
+    with pytest.raises(ValidationError):
+        VideoFrame(timestamp=-1.0, local_path="1/frames/0.png", description="x")
 
 
 def test_media_legacy_photo_shape_migrates_to_pending():

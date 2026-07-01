@@ -570,7 +570,12 @@ def test_generate_rejects_unsupported_language(tmp_path: Path):
 
 
 def _video_item(
-    item_id: str = "7", *, text: str, has_speech: bool = True, title: str | None = "The Talk"
+    item_id: str = "7",
+    *,
+    text: str,
+    has_speech: bool = True,
+    title: str | None = "The Talk",
+    frames: list | None = None,
 ) -> Item:
     """An enriched video bookmark carrying an `x_video` transcript source (#44)."""
     return Item(
@@ -597,6 +602,7 @@ def _video_item(
                     title=title,
                     text=text,
                     has_speech=has_speech,
+                    frames=frames or [],
                 )
             ],
         ),
@@ -645,6 +651,83 @@ def test_generate_video_digest_spanish_header(tmp_path: Path):
     assert "## Video digest:" not in note
     assert "## Resumen del vídeo: The Talk" in note  # the localised heading IS rendered
     assert "Cuerpo de la transcripción." in note
+
+
+# ----------------------------------------------------------- x_video slide frames (#44 PR4)
+
+
+def _frames():
+    from xbrain.models import VideoFrame
+
+    return [
+        VideoFrame(timestamp=12.0, local_path="7/frames/0.png", description="A title slide."),
+        VideoFrame(timestamp=95.0, local_path="7/frames/1.png", description="A code slide."),
+    ]
+
+
+def test_generate_embeds_and_mirrors_slide_frames(tmp_path: Path):
+    """A slide-heavy `x_video` source (#44 PR4) embeds each kept slide into the
+    digest section the SAME way downloaded photos are embedded — `![[_media/...]]`
+    — with its vision description as a caption, and the image is mirrored from
+    `media_root` into the vault's `_media/` tree so the embed resolves."""
+    media_root = tmp_path / "media"
+    (media_root / "7" / "frames").mkdir(parents=True)
+    (media_root / "7" / "frames" / "0.png").write_bytes(b"\x89PNG slide0")
+    (media_root / "7" / "frames" / "1.png").write_bytes(b"\x89PNG slide1")
+
+    store = {"7": _video_item(text="The talk transcript.", frames=_frames())}
+    generate(store, tmp_path, media_root=media_root)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+
+    assert "## Video digest: The Talk" in note
+    assert "The talk transcript." in note
+    assert "![[_media/7/frames/0.png]]" in note  # embedded like a photo
+    assert "![[_media/7/frames/1.png]]" in note
+    assert "A title slide." in note  # the vision description as caption
+    # mirrored into the self-contained vault _media/ tree
+    assert (tmp_path / "_media" / "7" / "frames" / "0.png").exists()
+    assert (tmp_path / "_media" / "7" / "frames" / "1.png").exists()
+
+
+def test_generate_no_frames_note_is_unchanged(tmp_path: Path):
+    """The visual layer is inert without frames: a with-speech `x_video` source with
+    an EMPTY `frames` list renders byte-identically to the pre-PR4 digest section —
+    no stray embed lines appear on the default (non-`--frames`) path."""
+    without = _video_item(text="Same transcript body.")
+    with_empty = _video_item(text="Same transcript body.", frames=[])
+    generate({"7": without}, tmp_path / "a")
+    generate({"7": with_empty}, tmp_path / "b")
+    note_a = next((tmp_path / "a" / "items").glob("*.md")).read_text(encoding="utf-8")
+    note_b = next((tmp_path / "b" / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert note_a == note_b
+    assert "_media" not in note_a  # no embed lines when there are no frames
+
+
+def test_generate_silent_slide_deck_embeds_frames(tmp_path: Path):
+    """A SILENT slide deck (no speech but with frames) renders the digest heading +
+    the slide embeds — the visual layer is where a screen-only video's content
+    lives — instead of the bare silent-video line."""
+    media_root = tmp_path / "media"
+    (media_root / "7" / "frames").mkdir(parents=True)
+    (media_root / "7" / "frames" / "0.png").write_bytes(b"\x89PNG s0")
+    (media_root / "7" / "frames" / "1.png").write_bytes(b"\x89PNG s1")
+
+    store = {"7": _video_item(text="", has_speech=False, frames=_frames())}
+    generate(store, tmp_path, media_root=media_root)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest: The Talk" in note
+    assert "![[_media/7/frames/0.png]]" in note
+    assert "silent video" not in note.lower()
+
+
+def test_generate_frames_embed_without_media_root(tmp_path: Path):
+    """Like photos, the frame embed lines render even without `media_root` (the URL
+    is in the data; only the mirrored bytes are missing) — a missing mirror renders
+    a broken embed, not a crash."""
+    store = {"7": _video_item(text="body", frames=_frames())}
+    generate(store, tmp_path)  # no media_root
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "![[_media/7/frames/0.png]]" in note
 
 
 # --------------------------------------------------------------- topic_style

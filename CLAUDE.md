@@ -43,6 +43,16 @@ generates an Obsidian wiki.
   `attach_transcript` bumps `content.fetched_at`, and `enrich` re-enriches any item
   whose `content.fetched_at > enriched.enriched_at`, so a transcript attached AFTER
   a tweet-only enrich is not treated as already-processed.
+- Video digest — visual layer (PR4, `--frames`, opt-in): for slide-heavy talks,
+  `digest-video --frames` extracts key slides via **external** `ffmpeg`
+  (`video_frames.py`, scene detection + interval sampling so a static tail is still
+  covered; NO ML/vision lib, Pillow only for edge-density classify), describes each
+  via the **external** vision model (`vision.py`, `[vision].command`; mirrors
+  `transcribe.py`, no bundled default), records the descriptions on the `x_video`
+  source's optional `frames` list, and embeds the slide images into the note like
+  downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
+  videos are detected and the visual layer is skipped + logged (never a silent
+  drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

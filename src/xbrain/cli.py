@@ -19,7 +19,7 @@ from xbrain.config import Config, load_config
 from xbrain.describe import describe_all as run_describe_all
 from xbrain.describe import emit_summary_line as describe_emit_summary_line
 from xbrain.diff import diff_snapshots, format_json, format_text
-from xbrain.digest import digest_videos, format_digest_summary
+from xbrain.digest import VisualConfig, digest_videos, format_digest_summary
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
@@ -57,6 +57,8 @@ from xbrain.topics import (
     write_topic_pages,
 )
 from xbrain.transcribe import Transcript, transcribe_media
+from xbrain.video_frames import DEFAULT_MAX_FRAMES, DEFAULT_SCENE_THRESHOLD, extract_key_frames
+from xbrain.vision import describe_image
 from xbrain.video_fetch import (
     FetchReport,
     fetch_result_to_json,
@@ -1034,6 +1036,31 @@ def _resolve_digest_ids(
     return unique[:limit] if limit is not None else unique
 
 
+def _build_visual_config(cfg: Config) -> VisualConfig:
+    """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
+
+    Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and
+    `describe_image` (the EXTERNAL `[vision].command` / model) so `digest_videos`
+    calls them with just a path. An unconfigured `[vision].command` is a clear
+    operator error BEFORE any work — there is no bundled default vision model.
+    """
+    if not cfg.vision_command.strip():
+        raise ValueError(
+            "digest-video --frames requires an external vision model: set "
+            "[vision].command in config.toml (there is no bundled default)."
+        )
+
+    def _extract(path: Path) -> list:
+        return extract_key_frames(
+            path, threshold=DEFAULT_SCENE_THRESHOLD, max_frames=DEFAULT_MAX_FRAMES
+        )
+
+    def _describe(path: Path) -> str:
+        return describe_image(path, command=cfg.vision_command, model=cfg.vision_model)
+
+    return VisualConfig(media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe)
+
+
 def _run_digest_video(
     cfg: Config,
     *,
@@ -1044,19 +1071,23 @@ def _run_digest_video(
     limit: int | None,
     force: bool,
     language: str | None,
+    frames: bool,
 ) -> None:
     """Digest selected videos into `x_video` transcript sources; persist + summarise.
 
     Flow: load → resolve selection → ephemeral fetch + EXTERNAL transcribe +
     attach (dedup by video identity, in memory) → snapshot → persist. The
     transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
-    config (command / model) + `--language`. It is destructive (rewrites
+    config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
+    extracts slide key frames and describes them via the EXTERNAL `[vision]`
+    command, attaching them to slide-heavy videos. It is destructive (rewrites
     `items.json`), so it auto-snapshots BEFORE the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
     takes no snapshot). A snapshot failure propagates and aborts before any write.
     """
     store = load_store(cfg.items_path)
     id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
+    visual = _build_visual_config(cfg) if frames else None
 
     def _transcribe(path: Path) -> Transcript:
         return transcribe_media(
@@ -1066,7 +1097,7 @@ def _run_digest_video(
             language=language,
         )
 
-    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe)
+    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe, visual=visual)
     if report.changed > 0:
         _auto_snapshot(cfg, "digest-video")
         save_store(store, cfg.items_path)
@@ -1096,6 +1127,13 @@ def digest_video(
         help="Idioma a registrar en el transcript si el transcriptor no lo reporta "
         "(p.ej. en, es). El transcriptor autodetecta; no se le pasa como flag.",
     ),
+    frames: bool = typer.Option(
+        False,
+        "--frames",
+        help="Capa visual (opt-in): extrae key-frames de slides, los describe con "
+        "el modelo de visión EXTERNO ([vision].command) y los embebe en la nota. "
+        "Solo para vídeos slide-heavy; los talking-head se saltan (se registra).",
+    ),
 ) -> None:
     """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
@@ -1110,6 +1148,12 @@ def digest_video(
     que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
     `items.json`) → auto-snapshot antes de escribir. Nunca hay más de un vídeo en
     disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
+
+    `--frames` (opt-in, capa visual PR4): para vídeos slide-heavy extrae
+    key-frames con ffmpeg (EXTERNO), los describe con el modelo de visión EXTERNO
+    (`[vision].command`), adjunta las descripciones al source `x_video` y embebe
+    las slides en la nota como fotos. Los vídeos talking-head se saltan y se
+    registra el motivo. Sin `--frames` el flujo es idéntico al de PR2/PR3.
     """
     cfg = _config()
     _run_digest_video(
@@ -1121,6 +1165,7 @@ def digest_video(
         limit=limit,
         force=force,
         language=language,
+        frames=frames,
     )
 
 

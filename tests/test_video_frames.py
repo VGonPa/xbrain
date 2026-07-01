@@ -1,0 +1,263 @@
+"""Tests for `xbrain.video_frames` — ffmpeg key-frame extraction + classification.
+
+`extract_key_frames` shells out to the EXTERNAL `ffmpeg` CLI (subprocess, argv
+`shlex`-split, no shell — the `transcribe.py` shape) for scene-change key frames,
+combining the scene filter with a periodic interval term in ONE filter expression
+so a long static tail can never go uncovered (the "scene detection stops
+mid-video" gap). `classify_visual` decides slides vs talking_head from the
+fraction of frames whose edge density is high (Pillow FIND_EDGES — classic image
+processing, NOT a vision/ML library; a test asserts the module imports none).
+
+Every test injects a fake ffmpeg `runner` (a `subprocess.run` stand-in) so NO
+real ffmpeg runs; the fake writes frame files + emits `showinfo` `pts_time:` lines
+exactly as the real tool does.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+from PIL import Image, ImageDraw
+
+from xbrain.video_frames import (
+    FrameExtractionFailed,
+    FrameExtractionToolNotFound,
+    KeyFrame,
+    classify_visual,
+    extract_key_frames,
+)
+
+
+def _completed(stderr: str, *, returncode: int = 0) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["ffmpeg"], returncode=returncode, stdout="", stderr=stderr
+    )
+
+
+def _ffmpeg_runner(timestamps: list[float], *, returncode: int = 0, stderr: str = ""):
+    """A fake `subprocess.run` mirroring real ffmpeg: writes one PNG per timestamp
+    to the output pattern's dir and emits a `showinfo` `pts_time:` line per frame.
+
+    The output pattern is ffmpeg's last argv token (`<dir>/frame-%05d.png`)."""
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append(list(argv))
+        pattern = Path(argv[-1])
+        out_dir = pattern.parent
+        lines = []
+        for index, ts in enumerate(timestamps, start=1):
+            (out_dir / f"frame-{index:05d}.png").write_bytes(b"\x89PNG\r\n\x1a\n fake")
+            lines.append(f"[Parsed_showinfo @ 0x0] n:{index - 1} pts:0 pts_time:{ts} duration:1")
+        emitted = stderr or "\n".join(lines)
+        return _completed(emitted, returncode=returncode)
+
+    _run.calls = calls  # type: ignore[attr-defined]
+    return _run
+
+
+def _slide_png(path: Path) -> Path:
+    """A high-edge, text/line-heavy image — what a slide/screen frame looks like."""
+    img = Image.new("RGB", (640, 360), "white")
+    draw = ImageDraw.Draw(img)
+    for y in range(40, 320, 24):
+        draw.line([(40, y), (600, y)], fill="black", width=3)
+    draw.rectangle([300, 200, 560, 330], outline="black", width=4)
+    img.save(path)
+    return path
+
+
+def _photo_png(path: Path) -> Path:
+    """A low-edge, smooth image — what a talking-head / bokeh frame looks like."""
+    img = Image.new("L", (640, 360))
+    for x in range(640):
+        for y in range(360):
+            img.putpixel((x, y), int((x / 640) * 200 + (y / 360) * 40))
+    img.convert("RGB").save(path)
+    return path
+
+
+# ------------------------------------------------------------ extract_key_frames
+
+
+def test_extract_returns_timestamped_frames(tmp_path: Path):
+    """Each produced frame becomes a `KeyFrame` with its `pts_time` timestamp and
+    an on-disk image path."""
+    runner = _ffmpeg_runner([2.0, 5.0, 9.0])
+    frames = extract_key_frames(tmp_path / "vid.mp4", runner=runner)
+    assert [f.timestamp for f in frames] == [2.0, 5.0, 9.0]
+    assert all(isinstance(f, KeyFrame) and f.path.exists() for f in frames)
+
+
+def test_extract_wires_scene_and_interval_for_whole_video_coverage(tmp_path: Path):
+    """The select filter carries BOTH the scene-change term AND a periodic
+    interval term keyed on `prev_selected_t` — so a long STATIC TAIL is still
+    sampled (the 'scene detection stops mid-video' guard), plus a downscale."""
+    runner = _ffmpeg_runner([1.0])
+    extract_key_frames(tmp_path / "vid.mp4", threshold=0.4, runner=runner)
+    argv = runner.calls[0]  # type: ignore[attr-defined]
+    joined = " ".join(argv)
+    assert argv[0] == "ffmpeg"
+    assert "-i" in argv
+    assert "gt(scene,0.4)" in joined  # scene-change detection
+    assert "prev_selected_t" in joined  # interval-sampling fallback for static tails
+    assert "scale=" in joined  # downscaled
+    assert "showinfo" in joined  # timestamps
+
+
+def test_extract_multi_token_ffmpeg_command_is_split(tmp_path: Path):
+    """A multi-token `command` (a wrapper) is `shlex`-split into argv, not shelled."""
+    runner = _ffmpeg_runner([1.0])
+    extract_key_frames(tmp_path / "vid.mp4", command="nice ffmpeg", runner=runner)
+    argv = runner.calls[0]  # type: ignore[attr-defined]
+    assert argv[:2] == ["nice", "ffmpeg"]
+
+
+def test_extract_covers_the_static_tail_not_just_the_front(tmp_path: Path):
+    """A video whose only later frame is a far static-tail sample keeps that
+    tail frame — extraction covers the WHOLE video, not just the front."""
+    runner = _ffmpeg_runner([1.0, 3.0, 3600.0])
+    frames = extract_key_frames(tmp_path / "vid.mp4", runner=runner)
+    assert max(f.timestamp for f in frames) == 3600.0  # the tail is represented
+
+
+def test_extract_caps_evenly_and_keeps_the_tail(tmp_path: Path):
+    """Over-`max_frames` extraction subsamples ACROSS the timeline (front + tail),
+    never just the first N — else the cap would re-open the tail-coverage gap."""
+    runner = _ffmpeg_runner([float(t) for t in range(10)])  # t = 0..9
+    frames = extract_key_frames(tmp_path / "vid.mp4", max_frames=3, runner=runner)
+    times = [f.timestamp for f in frames]
+    assert len(frames) == 3
+    assert times[0] == 0.0  # front kept
+    assert times[-1] == 9.0  # tail kept
+
+
+def test_extract_caps_to_single_front_frame(tmp_path: Path):
+    """`max_frames=1` keeps exactly the first frame (the degenerate cap branch)."""
+    runner = _ffmpeg_runner([float(t) for t in range(5)])
+    frames = extract_key_frames(tmp_path / "vid.mp4", max_frames=1, runner=runner)
+    assert [f.timestamp for f in frames] == [0.0]
+
+
+def test_extract_pairs_up_to_shorter_on_count_mismatch(tmp_path: Path):
+    """If ffmpeg emits more image files than showinfo timestamps (defensive — a
+    corrupt stderr), pairing stops at the shorter list and never crashes."""
+
+    def _run(argv, **_kwargs):
+        out_dir = Path(argv[-1]).parent
+        for index in range(1, 4):  # 3 files
+            (out_dir / f"frame-{index:05d}.png").write_bytes(b"\x89PNG fake")
+        # but only ONE timestamp reported
+        return _completed("[Parsed_showinfo @ 0x0] n:0 pts:0 pts_time:2.0 duration:1")
+
+    frames = extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+    assert [f.timestamp for f in frames] == [2.0]  # paired up to the shorter list
+
+
+def test_extract_missing_ffmpeg_raises_tool_not_found(tmp_path: Path):
+    def _run(_argv, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "ffmpeg")
+
+    with pytest.raises(FrameExtractionToolNotFound) as excinfo:
+        extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+    assert "ffmpeg" in str(excinfo.value)
+
+
+def test_extract_non_executable_ffmpeg_raises_tool_not_found(tmp_path: Path):
+    """A present-but-non-executable ffmpeg (a `PermissionError`/`OSError`, not a
+    `FileNotFoundError`) is still a global config error that aborts the run —
+    `FrameExtractionToolNotFound`, mirroring the vision wrapper."""
+
+    def _run(_argv, **_kwargs):
+        raise PermissionError(13, "Permission denied", "ffmpeg")
+
+    with pytest.raises(FrameExtractionToolNotFound) as excinfo:
+        extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+    assert "ffmpeg" in str(excinfo.value)
+
+
+def test_extract_timeout_raises_failed(tmp_path: Path):
+    """A wedged ffmpeg (`TimeoutExpired`) is a per-video `FrameExtractionFailed`
+    (the batch continues), not a global abort."""
+
+    def _run(_argv, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1)
+
+    with pytest.raises(FrameExtractionFailed):
+        extract_key_frames(tmp_path / "vid.mp4", runner=_run)
+
+
+def test_extract_nonzero_exit_raises_failed(tmp_path: Path):
+    runner = _ffmpeg_runner([], returncode=1, stderr="Invalid data found")
+    with pytest.raises(FrameExtractionFailed) as excinfo:
+        extract_key_frames(tmp_path / "vid.mp4", runner=runner)
+    assert "Invalid data found" in str(excinfo.value)
+
+
+def test_extract_no_frames_returns_empty(tmp_path: Path):
+    """A video with no selected frames (exit 0, no files) yields an empty list —
+    the caller (classify) then treats it as no visual signal, not a crash."""
+    runner = _ffmpeg_runner([])
+    assert extract_key_frames(tmp_path / "vid.mp4", runner=runner) == []
+
+
+# ------------------------------------------------------------ classify_visual
+
+
+def test_classify_slides_for_high_edge_set(tmp_path: Path):
+    """A set dominated by text/line-heavy frames classifies as 'slides' — the
+    visual layer is worth keeping."""
+    frames = [
+        KeyFrame(timestamp=float(i), path=_slide_png(tmp_path / f"s{i}.png")) for i in range(4)
+    ]
+    assert classify_visual(frames) == "slides"
+
+
+def test_classify_talking_head_for_low_edge_set(tmp_path: Path):
+    """A set of smooth (bokeh / face) frames classifies as 'talking_head' — the
+    scene frames are camera cuts = noise, so the visual layer is skipped."""
+    frames = [
+        KeyFrame(timestamp=float(i), path=_photo_png(tmp_path / f"p{i}.png")) for i in range(4)
+    ]
+    assert classify_visual(frames) == "talking_head"
+
+
+def test_classify_mostly_slides_still_slides(tmp_path: Path):
+    """A talk that is mostly slides with one camera cut is still 'slides'."""
+    frames = [
+        KeyFrame(timestamp=float(i), path=_slide_png(tmp_path / f"s{i}.png")) for i in range(3)
+    ]
+    frames.append(KeyFrame(timestamp=9.0, path=_photo_png(tmp_path / "p.png")))
+    assert classify_visual(frames) == "slides"
+
+
+def test_classify_empty_is_talking_head(tmp_path: Path):
+    """No frames → no visual signal → 'talking_head' (skip the visual layer)."""
+    assert classify_visual([]) == "talking_head"
+
+
+def test_classify_unreadable_frame_degrades_to_talking_head(tmp_path: Path):
+    """A corrupt/unreadable frame reads as edge-density 0.0 (the safe direction —
+    skip the visual layer) with a warning, never a crash mid-classification."""
+    bad = tmp_path / "corrupt.png"
+    bad.write_bytes(b"not a real image")
+    frames = [KeyFrame(timestamp=float(i), path=bad) for i in range(3)]
+    assert classify_visual(frames) == "talking_head"
+
+
+def test_video_frames_imports_no_ml_or_vision_library():
+    """xbrain core stays ML-free: the vision step is EXTERNAL. `video_frames.py`
+    may use Pillow (classic image processing) but must import no vision/ML lib."""
+    import xbrain.video_frames as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    for forbidden in (
+        "import torch",
+        "import mlx",
+        "import cv2",
+        "import tensorflow",
+        "transformers",
+    ):
+        assert forbidden not in source
