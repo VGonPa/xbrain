@@ -133,14 +133,12 @@ def collect_thumbnails(
                 logger.debug("Skipping unreadable thumbnail %s", path, exc_info=True)
                 continue
             # Surface the vision caption on the thumbnail so the photo drawer says
-            # what each image actually is. Decorative photos carry `description=""`
-            # by contract; a still-undescribed `MediaPhotoDownloaded` has no
-            # description attribute at all — `getattr` keeps both cases empty.
-            desc = (
-                getattr(entry, "description", "")
-                if not getattr(entry, "is_decorative", False)
-                else ""
-            )
+            # what each image actually is. Only `MediaPhotoDescribed` carries a
+            # caption, and the model validator forces a decorative one to "" —
+            # so a single typed isinstance suffices (a plain `MediaPhotoDownloaded`
+            # yields ""). Typed access, not a `getattr` sniff, per the `_VIDEO_TYPES`
+            # note above.
+            desc = entry.description if isinstance(entry, MediaPhotoDescribed) else ""
             thumbs.append(
                 {
                     "thumb": "data:image/jpeg;base64,"

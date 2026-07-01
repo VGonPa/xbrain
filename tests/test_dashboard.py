@@ -314,6 +314,7 @@ def test_collect_thumbnails_none_missing_corrupt_and_real(tmp_path):
     assert len(thumbs) == 1
     assert thumbs[0]["thumb"].startswith("data:image/jpeg;base64,")
     assert thumbs[0]["handle"] == "alice" and thumbs[0]["note"] == "/v/1.md"
+    assert thumbs[0]["desc"] == ""  # undescribed downloaded photo → present but empty caption
 
 
 def test_described_photos_count_as_downloaded_and_populate_photo_posts():
