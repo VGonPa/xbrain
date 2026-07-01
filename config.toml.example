@@ -65,3 +65,17 @@ version = "v1"
 command = "parakeet-mlx"
 # Optional model id passed through to the transcriber. Omit for the tool default.
 # model = "parakeet-tdt-0.6b-v2"
+
+[vision]
+# External vision model that `xbrain digest-video --frames` shells out to (#44
+# PR4) to describe key-frame slides. Like the transcriber, the heavy vision lives
+# OUTSIDE xbrain core — the CLI carries no vision/ML dependency and only invokes
+# this command as a subprocess. There is NO bundled default: leave it unset and
+# `--frames` errors clearly until you configure a local VLM. xbrain invokes:
+#   <command> [--model M] <image-path>
+# and reads the frame's text description from stdout. May be a multi-token wrapper
+# (split with shlex, run without a shell). `--frames` is fully opt-in: a normal
+# `digest-video` run never touches ffmpeg or this command.
+# command = "vlm-describe"
+# Optional model id passed through to the vision command. Omit for its default.
+# model = "qwen2-vl-7b"

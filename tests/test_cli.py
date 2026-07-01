@@ -2172,3 +2172,174 @@ def test_digest_video_topic_selects_only_matching(tmp_path: Path, monkeypatch):
     store = load_store(items_path)
     assert store["1"].content is not None  # ai video digested
     assert store["2"].content is None  # climate video untouched
+
+
+# ------------------------------------------------------ digest-video --frames (PR4)
+
+
+def _setup_repo_with_vision(tmp_path: Path, monkeypatch, command: str = "vlm-describe") -> Path:
+    """`_setup_repo` + a configured external `[vision].command` so `--frames` runs."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8") + f'[vision]\ncommand = "{command}"\n', encoding="utf-8"
+    )
+    return vault
+
+
+def _write_slide_png(path: Path) -> None:
+    """A high-edge (text/line) image so the REAL `classify_visual` reads 'slides'."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (640, 360), "white")
+    draw = ImageDraw.Draw(img)
+    for y in range(40, 320, 24):
+        draw.line([(40, y), (600, y)], fill="black", width=3)
+    draw.rectangle([300, 200, 560, 330], outline="black", width=4)
+    img.save(path)
+
+
+def _write_photo_png(path: Path) -> None:
+    """A low-edge (smooth gradient) image so the REAL `classify_visual` reads
+    'talking_head' — a camera frame / bokeh, not a slide."""
+    from PIL import Image
+
+    img = Image.new("L", (640, 360))
+    for x in range(640):
+        for y in range(360):
+            img.putpixel((x, y), int((x / 640) * 200 + (y / 360) * 40))
+    img.convert("RGB").save(path)
+
+
+def _wire_frames(monkeypatch, *, describe_calls: list | None = None, writer=_write_slide_png):
+    """Mock ffmpeg extraction (real PNGs) + the external vision subprocess.
+
+    `writer` paints each fake frame — `_write_slide_png` (default, high-edge →
+    'slides') or `_write_photo_png` (low-edge → 'talking_head'). The REAL
+    `classify_visual` runs on the produced images, so the CLI's slide-vs-
+    talking-head decision is exercised end-to-end."""
+    from xbrain.video_frames import KeyFrame
+
+    def _fake_extract(path, **_kwargs):
+        frames_dir = Path(path).parent / "xbrain-frames-fake"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frames = []
+        for index in range(2):
+            frame_path = frames_dir / f"frame-{index:05d}.png"
+            writer(frame_path)
+            frames.append(KeyFrame(timestamp=float(index * 10), path=frame_path))
+        return frames
+
+    def _fake_describe(path, **_kwargs):
+        if describe_calls is not None:
+            describe_calls.append(str(path))
+        return f"slide {Path(path).stem}"
+
+    monkeypatch.setattr("xbrain.cli.extract_key_frames", _fake_extract)
+    monkeypatch.setattr("xbrain.cli.describe_image", _fake_describe)
+
+
+def test_digest_video_frames_requires_vision_command(tmp_path: Path, monkeypatch):
+    """`--frames` with no `[vision].command` configured is a clear operator error
+    (exit 1) — there is no bundled default — and nothing is persisted."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)  # no [vision] section
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript())
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    assert result.exit_code == 1
+    assert "vision" in result.output.lower()
+    assert load_store(items_path)["42"].content is None  # nothing persisted
+
+
+def test_digest_video_frames_describes_and_persists_slides(tmp_path: Path, monkeypatch):
+    """`--frames` on a slide video: the frames are described (external vision) and
+    recorded on the `x_video` source, and the slide images are persisted under
+    `data/media/<id>/frames/` for the generator — the summary reports the layer."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript("the talk"))
+    describe_calls: list = []
+    _wire_frames(monkeypatch, describe_calls=describe_calls)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    assert result.exit_code == 0, result.output
+    store = load_store(items_path)
+    frames = store["42"].content.sources[0].frames
+    assert len(frames) == 2
+    assert frames[0].local_path == "42/frames/0.png"
+    assert frames[0].description == "slide frame-00000"
+    assert len(describe_calls) == 2  # vision ran on both slides
+    assert (tmp_path / "data" / "media" / "42" / "frames" / "0.png").exists()
+    assert "con slides" in result.stdout  # the visual segment of the summary
+
+
+def test_digest_video_frames_then_generate_embeds_slides(tmp_path: Path, monkeypatch):
+    """End-to-end #44 PR4 success criterion: a slide talk digested with `--frames`
+    then generated embeds its key slides into the note (mirrored into `_media/`)."""
+    vault = _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _enriched_video_item("42", "ai", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript("the talk body"))
+    _wire_frames(monkeypatch)
+
+    assert runner.invoke(app, ["digest-video", "--ids", "42", "--frames"]).exit_code == 0
+    assert runner.invoke(app, ["generate"]).exit_code == 0
+
+    note = next((vault / "x-knowledge" / "items").glob("*42*.md")).read_text(encoding="utf-8")
+    assert "## Video digest" in note
+    assert "![[_media/42/frames/0.png]]" in note
+    assert "slide frame-00000" in note  # the vision caption
+    assert (vault / "x-knowledge" / "_media" / "42" / "frames" / "0.png").exists()
+
+
+def test_digest_video_without_frames_attaches_no_slides(tmp_path: Path, monkeypatch):
+    """Opt-in: a normal `digest-video` (no `--frames`) never invokes ffmpeg/vision
+    and attaches no frames — even with a `[vision].command` configured."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript())
+    describe_calls: list = []
+    _wire_frames(monkeypatch, describe_calls=describe_calls)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])  # no --frames
+    assert result.exit_code == 0, result.output
+    assert describe_calls == []  # vision NOT invoked
+    assert load_store(items_path)["42"].content.sources[0].frames == []
+    assert "Visual:" not in result.stdout  # summary unchanged
+
+
+def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Path, monkeypatch):
+    """End-to-end #44 PR4 success criterion (the Ng-interview direction): a
+    talking-head video digested with `--frames` embeds NO slides, wastes NO vision
+    call, and the summary reports the talking-head skip — the mirror image of the
+    slide-talk test. The REAL `classify_visual` runs on genuine low-edge frames."""
+    from xbrain.store import load_store
+
+    vault = _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _enriched_video_item("42", "ai", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript("interview body"))
+    describe_calls: list = []
+    _wire_frames(monkeypatch, describe_calls=describe_calls, writer=_write_photo_png)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    assert result.exit_code == 0, result.output
+    assert describe_calls == []  # NO vision call wasted on a talking-head
+    assert load_store(items_path)["42"].content.sources[0].frames == []  # nothing attached
+    assert "talking-head (saltados)" in result.stdout  # the skip is surfaced
+
+    assert runner.invoke(app, ["generate"]).exit_code == 0
+    note = next((vault / "x-knowledge" / "items").glob("*42*.md")).read_text(encoding="utf-8")
+    assert "## Video digest" in note  # the transcript digest still renders
+    assert "_media/42/frames" not in note  # but NO slide embed
+    assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()

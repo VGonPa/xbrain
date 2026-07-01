@@ -23,6 +23,7 @@ from xbrain.models import (
     MediaVideoDownloaded,
     MediaVideoFailed,
     MediaVideoPending,
+    VideoFrame,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
@@ -110,7 +111,9 @@ def generate(
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
             if media_root is not None:
-                _mirror_item_media(item, media_root, output_dir / _VAULT_MEDIA_SUBDIR)
+                vault_media_dir = output_dir / _VAULT_MEDIA_SUBDIR
+                _mirror_item_media(item, media_root, vault_media_dir)
+                _mirror_item_frames(item, media_root, vault_media_dir)
             _write_note(items_dir, item, strings, topic_style)
 
 
@@ -259,6 +262,26 @@ _FAILURE_ES_MEDIA: dict[str, str] = {
 }
 
 
+def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
+    """Copy one media file from the store into the vault's `_media/` tree.
+
+    Uses `shutil.copy2` (preserves mtime) and skips (with a warning) when the
+    source bytes are missing — a manual cleanup of `data/media/` must not crash the
+    generator; the Obsidian embed then renders as a broken image, the right signal.
+    Shared by the photo/video block and the `x_video` slide-frame embeds so the
+    self-contained-vault mirroring has ONE implementation.
+    """
+    if not source.exists():
+        logger.warning(
+            "Media bytes missing for item %s at %s — embed will render broken.",
+            item_id,
+            source,
+        )
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+
+
 def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> None:
     """Copy every downloaded photo/video on `item` into the vault's `_media/` tree.
 
@@ -266,51 +289,72 @@ def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> N
     the vault mirror is `<output_dir>/_media/<id>/<n>.<ext>`. Mirroring
     happens at render time, not download time, so the vault stays in sync
     with whichever subset of items `--since`/`--until` is regenerating.
-
-    Files are copied with `shutil.copy2` (preserves mtime) and silently
-    skipped when the source is missing — that should never happen on a
-    healthy `data/media/` tree, but a manual cleanup of the bytes must not
-    crash the generator. The variant on disk still drives the embed line,
-    so a missing-bytes-but-marked-downloaded record renders as a broken
-    embed Obsidian shows as an empty rectangle; that is loud enough.
     """
-    vault_media_dir.mkdir(parents=True, exist_ok=True)
     for entry in item.media:
         # The described variant inherits the on-disk bytes from the prior
         # downloaded state; a downloaded video carries its mp4 the same way —
         # all three shapes hit the same mirror path.
         if not isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed, MediaVideoDownloaded)):
             continue
-        source = media_root / entry.local_path
-        destination = vault_media_dir / entry.local_path
-        if not source.exists():
-            # Marked downloaded in items.json but the file is gone — log
-            # and move on. The Obsidian embed will render as a broken
-            # image, which is the right user signal.
-            logger.warning(
-                "Photo bytes missing for item %s at %s — embed will render broken.",
-                item.id,
-                source,
-            )
+        _mirror_file(item.id, media_root / entry.local_path, vault_media_dir / entry.local_path)
+
+
+def _mirror_item_frames(item: Item, media_root: Path, vault_media_dir: Path) -> None:
+    """Mirror every `x_video` key-frame slide on `item` into the vault (#44 PR4).
+
+    Slides are stored at `data/media/<id>/frames/<n>.<ext>` (persisted by
+    `digest-video --frames`) and mirrored to `<output_dir>/_media/<id>/frames/…`
+    exactly like a downloaded photo, so the `![[_media/…]]` embed in the Video
+    digest section resolves in a self-contained vault. A missing byte renders a
+    broken embed (via `_mirror_file`), never a crash.
+    """
+    if item.content is None:
+        return
+    for source in item.content.sources:
+        if not isinstance(source, ContentSourceSuccess):
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        for frame in source.frames:
+            _mirror_file(item.id, media_root / frame.local_path, vault_media_dir / frame.local_path)
+
+
+def _slide_embed_lines(frames: list[VideoFrame]) -> list[str]:
+    """Embed each kept key-frame slide + its vision description caption (#44 PR4).
+
+    A slide embeds exactly like a downloaded photo — an Obsidian
+    ``![[_media/<id>/frames/<n>.ext]]`` wikilink resolved by the `_media/` mirror
+    (`_mirror_item_frames`) — with the description on the following blockquote
+    line as a caption. Same self-contained-vault convention as the photo block.
+    """
+    lines: list[str] = []
+    for frame in frames:
+        lines.append(f"![[{_VAULT_MEDIA_SUBDIR}/{frame.local_path}]]")
+        if frame.description:
+            lines.append(f"> {frame.description}")
+        lines.append("")
+    return lines
 
 
 def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[str]:
-    """Render an `x_video` transcript source as a `Video digest` section (#44).
+    """Render an `x_video` source as a `Video digest` section (#44 PR3 + PR4).
 
-    A with-speech transcript renders under a ``## Video digest: <title>``
-    heading carrying the transcript text — the manufactured content that turns
-    a never-watched video into a readable, searchable note. A no-speech source
-    (`has_speech=False` or empty text) renders a single silent-video line
-    instead of an empty digest block. (Timestamped highlights + slide embeds
-    are PR 4; PR 3 renders the transcript so the note is already useful.)
+    A with-speech transcript renders under a ``## Video digest: <title>`` heading
+    carrying the transcript text — the manufactured content that turns a
+    never-watched video into a readable, searchable note. Key-frame slides
+    (`--frames`, PR4) are embedded beneath it, each with its vision description as
+    a caption. A source with NEITHER speech NOR frames (a plain silent video)
+    renders a single silent-video line instead of an empty digest block; a SILENT
+    slide deck (no speech, but with frames) still renders the heading + the slides,
+    since that is exactly where a screen-only video carries its content.
     """
-    if source.has_speech is False or not source.text:
+    has_text = source.has_speech is not False and bool(source.text)
+    if not has_text and not source.frames:
         return [f"> {strings.silent_video}", ""]
     heading = source.title or source.url
-    return [f"## {strings.video_digest_header}: {heading}", "", source.text, ""]
+    lines = [f"## {strings.video_digest_header}: {heading}", ""]
+    if has_text:
+        lines += [source.text, ""]
+    lines += _slide_embed_lines(source.frames)
+    return lines
 
 
 def _content_lines(content: Content, strings: Strings) -> list[str]:

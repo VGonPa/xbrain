@@ -53,6 +53,34 @@ def test_load_config_round_trips_transcribe_command_and_model(tmp_path: Path):
     assert cfg.transcribe_model == "parakeet-tdt-0.6b-v2"
 
 
+def test_load_config_defaults_vision_command_to_unset(tmp_path: Path):
+    """No [vision] section → the external vision command is unset (`""`) and the
+    model is None. `digest-video --frames` errors clearly until it is configured —
+    there is NO bundled default vision model (#44 PR4)."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.vision_command == ""
+    assert cfg.vision_model is None
+
+
+def test_load_config_round_trips_vision_command_and_model(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[vision]\n"
+        'command = "vlm-describe --fast"\n'
+        'model = "qwen2-vl-7b"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.vision_command == "vlm-describe --fast"
+    assert cfg.vision_model == "qwen2-vl-7b"
+
+
 def test_load_config_defaults_output_language_to_english(tmp_path: Path):
     """No [output] section → English default."""
     _write_repo(tmp_path)
