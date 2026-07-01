@@ -32,8 +32,8 @@ file is not tracked by git.
 ## Safety: destructive operations auto-snapshot
 
 Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`,
-`refresh-media`, `media`, `describe`, `download-videos`) copy the full `data/`
-directory to
+`refresh-media`, `media`, `describe`, `download-videos`, `digest-video`) copy the
+full `data/` directory to
 `data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`download-videos`
 takes its snapshot *after* the interactive size-gate confirmation, so a declined
 run leaves no stray snapshot — but always before the first byte is written.) If your change introduces or modifies a destructive
@@ -43,6 +43,12 @@ failure must propagate and abort the destructive op; never `try/except`-swallow
 it. Manual snapshots are available via `xbrain snapshot create`; restore via
 `xbrain snapshot restore <name>`.
 
+`digest-video` is destructive because it attaches each video's transcript to the
+item as an `x_video` content source and rewrites `items.json`. It snapshots *only
+when it is about to write* (a pure already-digested / no-fetchable-video run
+attaches nothing, so it takes no snapshot), but always before the first store
+write; a snapshot failure propagates and aborts before any change lands.
+
 Not every command that writes bytes is destructive. `xbrain list-videos` is
 read-only, and `xbrain fetch-video` is **intentionally NOT** in the
 auto-snapshot set: it fetches a video ephemerally to the caller-supplied `--to`
@@ -50,6 +56,37 @@ directory and never mutates `items.json`, never writes `data/media/`, and takes
 no snapshot — there is nothing in `data/` to protect, so a snapshot would be
 noise. Keep it that way: `fetch-video` must stay store-non-mutating (a test
 asserts `items.json` is byte-identical before/after a fetch).
+
+## The external transcriber (`digest-video`)
+
+`xbrain digest-video` keeps xbrain **mechanical**: it fetches a video ephemerally
+and shells out to an **external local transcriber** (ASR), then attaches the
+transcript and discards the bytes. The heavy ML lives **outside** xbrain core —
+there is no MLX/CoreML/torch dependency in the CLI; a test asserts
+`transcribe.py` imports no ML library.
+
+Configure the transcriber in `config.toml`:
+
+```toml
+[transcribe]
+command = "parakeet-mlx"          # default; whisper / faster-whisper is a portable fallback
+# model  = "parakeet-tdt-0.6b-v2" # optional; omit for the tool default
+```
+
+xbrain invokes `<command> [--model M] [--language L] --output-format json
+<mediapath>` (the `command` is shlex-split, so a multi-token wrapper works, and
+it runs **without** a shell) and reads a single JSON document from **stdout**:
+
+```json
+{"text": "…", "language": "en", "segments": [{"start": 0.0, "end": 3.2, "text": "…"}]}
+```
+
+The **no-audio / no-speech** case is graceful, not an error: an empty JSON
+(`{"text": ""}`) or empty stdout on a zero exit yields `has_speech=False` + empty
+text (attached as a "silent video" marker). A **missing binary** surfaces a clear
+operator error (install it or fix `[transcribe].command`), never a crash. If your
+transcriber's native CLI differs, point `command` at a thin wrapper script that
+adapts it to this contract.
 
 ## Pull requests written with AI agents
 

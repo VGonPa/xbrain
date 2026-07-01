@@ -50,3 +50,15 @@ model = "claude-sonnet-4-6"
 # describe` run re-describes stale entries automatically. Use it when
 # you change the describe-image rubric or expectations.
 version = "v1"
+
+[transcribe]
+# External transcriber that `xbrain digest-video` shells out to. The heavy ASR
+# (Parakeet TDT 0.6b via `parakeet-mlx` on Apple Silicon; `whisper` /
+# `faster-whisper` is the portable fallback) lives OUTSIDE xbrain core — the CLI
+# carries no MLX/CoreML dependency and only invokes this command as a subprocess.
+# May be a multi-token wrapper (split with shlex, run without a shell); xbrain
+# appends `--model M --language L --output-format json <mediapath>` and reads a
+# JSON document ({"text", "language", "segments":[{start,end,text}]}) from stdout.
+command = "parakeet-mlx"
+# Optional model id passed through to the transcriber. Omit for the tool default.
+# model = "parakeet-tdt-0.6b-v2"
