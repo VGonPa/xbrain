@@ -19,6 +19,7 @@ from xbrain.models import (
     Enrichment,
     Item,
     Link,
+    MediaPhotoDescribed,
     MediaPhotoDownloaded,
     MediaPhotoPending,
     MediaVideoDownloaded,
@@ -26,6 +27,25 @@ from xbrain.models import (
 )
 
 DT = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def _described_photo(
+    local_path="1/0.png", *, description="Un gráfico de barras.", decorative=False
+):
+    """A `MediaPhotoDescribed` — the variant `xbrain describe` produces in place."""
+    return MediaPhotoDescribed(
+        url="https://p/" + local_path,
+        local_path=local_path,
+        width=3,
+        height=3,
+        bytes_size=9,
+        downloaded_at=DT,
+        is_decorative=decorative,
+        description="" if decorative else description,
+        description_lang="Spanish",
+        description_version="v1",
+        described_at=DT,
+    )
 
 
 def _item(
@@ -294,6 +314,39 @@ def test_collect_thumbnails_none_missing_corrupt_and_real(tmp_path):
     assert len(thumbs) == 1
     assert thumbs[0]["thumb"].startswith("data:image/jpeg;base64,")
     assert thumbs[0]["handle"] == "alice" and thumbs[0]["note"] == "/v/1.md"
+    assert thumbs[0]["desc"] == ""  # undescribed downloaded photo → present but empty caption
+
+
+def test_described_photos_count_as_downloaded_and_populate_photo_posts():
+    # Regression: `xbrain describe` transitions Downloaded -> Described in place.
+    # The dashboard must keep counting described photos as downloaded photos and
+    # keep their posts in the photo samples, or the whole described corpus vanishes.
+    items = [
+        _item("1", media=[_described_photo("1/0.png")]),
+        _item("2", media=[_described_photo("2/0.png", decorative=True)]),
+        _item("3", media=[MediaPhotoPending(url="https://p")]),
+    ]
+    data = compute_dashboard_data(items, {}, {}, [], "JUN 1, 2026")
+    md = data["meta"]["media"]
+    assert (md["photos_downloaded"], md["photos_pending"]) == (2, 1)  # both described counted
+    assert data["photos"]["downloaded"] == 2
+    # Posts 1 and 2 (described photos) appear as photo posts; post 3 (pending) does not.
+    sample_notes = {s["url"] for s in data["photos"]["samples"]}
+    assert "https://x.com/alice/status/1" in sample_notes
+    assert "https://x.com/alice/status/2" in sample_notes
+
+
+def test_collect_thumbnails_includes_described_and_carries_description(tmp_path):
+    described = _item("1", media=[_described_photo("1/0.png", description="Diagrama de flujo.")])
+    decorative = _item("2", media=[_described_photo("2/0.png", decorative=True)])
+    for sub in ("1", "2"):
+        (tmp_path / sub).mkdir()
+        Image.new("RGB", (3, 3), "blue").save(tmp_path / sub / "0.png")
+    thumbs = collect_thumbnails([described, decorative], tmp_path, {})
+    assert len(thumbs) == 2  # described photos ARE thumbnailed (previously excluded)
+    by_handle = {t["url"]: t for t in thumbs}
+    assert by_handle["https://x.com/alice/status/1"]["desc"] == "Diagrama de flujo."
+    assert by_handle["https://x.com/alice/status/2"]["desc"] == ""  # decorative → no caption
 
 
 def test_generate_writes_dashboard_with_valid_blob_and_links_it(tmp_path):

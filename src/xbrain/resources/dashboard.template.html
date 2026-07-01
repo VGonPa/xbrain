@@ -417,7 +417,7 @@ function openLongform(){const L=DATA.longform_full;
  openDrawer('Long-form','Captured articles',nf(L.saved)+' SAVED · '+L.ext_saved+' external · '+L.x_saved+' X',
   `<p class="ov">Full article text fetched and stored. Showing the ${L.items.length} most recent. Title → article; post → the X post; note → the vault.</p><div class="dwsec">Articles</div><div class="lf">${rows}</div>`);}
 function openPhotos(){const p=DATA.photos;
- const th=p.thumbs.map(t=>`<div class="thumb"><a href="${esc(t.url)}" target="_blank" title="@${esc(t.handle)} · ${esc(t.date)} — ${esc((t.summary||'').slice(0,150))}"><img src="${t.thumb}"><span class="cap">@${esc(t.handle)}</span></a>${t.note?`<a class="nl" href="obsidian://open?path=${encodeURIComponent(t.note)}" title="Open vault note">◆</a>`:''}</div>`).join('');
+ const th=p.thumbs.map(t=>`<div class="thumb"><a href="${esc(t.url)}" target="_blank" title="@${esc(t.handle)} · ${esc(t.date)} — ${esc((t.desc||t.summary||'').slice(0,240))}"><img src="${t.thumb}"><span class="cap">@${esc(t.handle)}</span></a>${t.note?`<a class="nl" href="obsidian://open?path=${encodeURIComponent(t.note)}" title="Open vault note">◆</a>`:''}</div>`).join('');
  openDrawer('Media · Photos','Captured photos',nf(p.downloaded)+' DOWNLOADED · '+p.pending+' PENDING',
   `<div class="dwsec">Sample thumbnails — click → the post · ◆ → the note</div><div class="thumbs">${th}</div>`+sampleSec(p.samples,'Posts with photos'));}
 function openVideos(){const v=DATA.videos;

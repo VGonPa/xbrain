@@ -23,6 +23,7 @@ from PIL import Image
 from xbrain.models import (
     ContentSourceSuccess,
     Item,
+    MediaPhotoDescribed,
     MediaPhotoDownloaded,
     MediaPhotoPending,
     MediaVideoDownloaded,
@@ -40,6 +41,13 @@ _THUMB_LIMIT = 18
 # `duration_millis`; discriminating on the union (not a `getattr("type")`
 # sniff) keeps the typed access mypy-checked, matching `generate._render_media_lines`.
 _VIDEO_TYPES = (MediaVideoPending, MediaVideoDownloaded, MediaVideoFailed)
+# A described photo (`MediaPhotoDescribed`) IS a downloaded photo — it carries
+# the same `local_path`/bytes and only adds a vision caption. `xbrain describe`
+# transitions Downloaded -> Described in place, so every downloaded-photo count,
+# thumbnail source, and photo-post filter must accept BOTH variants or the whole
+# corpus of described photos vanishes from the dashboard. Mirrors the isinstance
+# grouping in `generate._render_media_lines`.
+_DOWNLOADED_PHOTO_TYPES = (MediaPhotoDownloaded, MediaPhotoDescribed)
 
 
 def humanize_topic(slug: str) -> str:
@@ -110,7 +118,7 @@ def collect_thumbnails(
         for entry in item.media:
             if len(thumbs) >= limit:
                 return thumbs
-            if not isinstance(entry, MediaPhotoDownloaded):
+            if not isinstance(entry, _DOWNLOADED_PHOTO_TYPES):
                 continue
             path = media_root / entry.local_path
             if not path.exists():
@@ -124,6 +132,13 @@ def collect_thumbnails(
             except Exception:  # noqa: BLE001 - a bad image file must not break the dashboard
                 logger.debug("Skipping unreadable thumbnail %s", path, exc_info=True)
                 continue
+            # Surface the vision caption on the thumbnail so the photo drawer says
+            # what each image actually is. Only `MediaPhotoDescribed` carries a
+            # caption, and the model validator forces a decorative one to "" —
+            # so a single typed isinstance suffices (a plain `MediaPhotoDownloaded`
+            # yields ""). Typed access, not a `getattr` sniff, per the `_VIDEO_TYPES`
+            # note above.
+            desc = entry.description if isinstance(entry, MediaPhotoDescribed) else ""
             thumbs.append(
                 {
                     "thumb": "data:image/jpeg;base64,"
@@ -133,6 +148,7 @@ def collect_thumbnails(
                     "handle": item.author.handle,
                     "date": _date(item),
                     "summary": _summary(item),
+                    "desc": desc,
                 }
             )
     return thumbs
@@ -208,7 +224,7 @@ def _media_counts(items: list[Item]) -> dict[str, int]:
     downloaded = pending = videos = 0
     for item in items:
         for entry in item.media:
-            if isinstance(entry, MediaPhotoDownloaded):
+            if isinstance(entry, _DOWNLOADED_PHOTO_TYPES):
                 downloaded += 1
             elif isinstance(entry, MediaPhotoPending):
                 pending += 1
@@ -381,7 +397,7 @@ def compute_dashboard_data(
     media = _media_counts(items)
     bookmark_items = [i for i in items if i.source == "bookmark"]
     own_items = [i for i in items if i.source == "own_tweet"]
-    photo_posts = [i for i in items if any(isinstance(m, MediaPhotoDownloaded) for m in i.media)]
+    photo_posts = [i for i in items if any(isinstance(m, _DOWNLOADED_PHOTO_TYPES) for m in i.media)]
 
     return {
         "meta": _meta(
