@@ -16,6 +16,7 @@ import typer
 from xbrain import snapshot
 from xbrain.archive import parse_archive
 from xbrain.config import Config, load_config
+from xbrain.describe import apply_describe_worksheet, export_describe_worksheet
 from xbrain.describe import describe_all as run_describe_all
 from xbrain.describe import emit_summary_line as describe_emit_summary_line
 from xbrain.diff import diff_snapshots, format_json, format_text
@@ -380,6 +381,7 @@ def _run_fetch(
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
+    topic_pages = load_topic_pages(cfg.topics_path) if cfg.topics_path.exists() else {}
     run_generate(
         store,
         cfg.output_dir,
@@ -388,6 +390,7 @@ def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -
         cfg.output_language,
         cfg.topic_style,
         media_root=cfg.media_dir,
+        topic_pages=topic_pages,
     )
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 
@@ -673,6 +676,17 @@ def describe(
         min=1,
         help="Número de imágenes por llamada a la API. 5 es el sweet spot (12-15%% ahorro de tokens).",
     ),
+    executor: str | None = typer.Option(
+        None,
+        "--executor",
+        help="api | manual | claude-code (default: api). manual/claude-code exportan un "
+        "worksheet para describir sin API key (como enrich/topics).",
+    ),
+    apply: Path | None = typer.Option(
+        None,
+        "--apply",
+        help="Importa un worksheet de descripciones relleno y lo aplica (sin API key).",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -690,6 +704,35 @@ def describe(
     """
     cfg = _config()
     items_filter = [s.strip() for s in items.split(",") if s.strip()] if items else None
+    worksheet_path = cfg.data_dir / "describe-worksheet.json"
+    if apply is not None:
+        _auto_snapshot(cfg, "describe-apply")
+        store = load_store(cfg.items_path)
+        applied, invalid = apply_describe_worksheet(store, apply)
+        save_store(store, cfg.items_path)
+        typer.echo(f"Describe worksheet aplicada: {applied} fotos descritas")
+        _report_invalid(invalid)
+        return
+    if executor is not None and executor not in ("api", "manual", "claude-code"):
+        raise ValueError(f"Ejecutor desconocido: {executor!r}")
+    if executor in ("manual", "claude-code"):
+        store = load_store(cfg.items_path)
+        n = export_describe_worksheet(
+            store,
+            cfg.media_dir,
+            worksheet_path,
+            version=cfg.describe_version,
+            output_language=cfg.output_language,
+            force=force,
+            limit=limit,
+            items_filter=items_filter,
+        )
+        typer.echo(
+            f"{n} fotos exportadas a {worksheet_path}\n"
+            "Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
+            f"  xbrain describe --apply {worksheet_path}"
+        )
+        return
     chosen_model = model or cfg.describe_model
     _run_describe(
         cfg,
