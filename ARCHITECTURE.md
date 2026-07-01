@@ -176,7 +176,7 @@ the vocab.
 - **Reads:** `items.json` + `vocab.yaml`
 - **Writes:** `items.json` — each item's `enriched` field (`Enrichment` record)
 - **Only LLM judgment** — no identifiers, no wikilinks (validator rejects them).
-- **Skips already-enriched** — use `--regenerate` after vocab or rubric changes.
+- **Skips already-enriched** — run `vocab --regenerate` (it clears enrichments) after vocab or rubric changes.
 
 </td></tr>
 <tr><td>
@@ -387,7 +387,9 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 **Writes.** `data/items.json` — each `Item.enriched` is populated with an `Enrichment` record (summary + primary_topic + topics[] + executor + enriched_at).
 
-**Skips items it has already enriched.** Use `--regenerate` to re-enrich everything (e.g. after the vocab changes, or after you edit a rubric).
+**Video transcripts feed the prompt (#44).** When an item carries an `x_video` content source (attached by [`digest-video`](#digest-video)), the enrich prompt splices the transcript in under a clearly-labelled `Video transcript:` block — the same reuse pattern as the `Images in this post:` block for described photos. A no-speech source (`has_speech=False`, empty text) is skipped: it carries no topic signal and would only add noise. Long transcripts are truncated to `TRANSCRIPT_CHAR_LIMIT` (**12000 chars ≈ the first ~13 min of a talk**, in `rubrics.py` next to `ARTICLE_CHAR_LIMIT`) so a single 72-min talk (~68k chars) can't blow the per-item prompt. Both enrich tracks apply it: the `api` executor (`executors/api.py:_video_transcript_section`) and the worksheet export (`worksheet.py:_video_transcript`, a dedicated `video_transcript` field, never mislabelled as an `article`). **This is why video items used to show topic `"—"`:** before the transcript was attached, enrich only saw the ~2-line tweet and had nothing to topic; the transcript gives it real content, so the video gets a real `primary_topic`.
+
+**Skips items it has already enriched — except when their content is newer.** Normally an item with an `Enrichment` is skipped; `vocab --regenerate` clears every enrichment so the next `enrich` re-processes everything (e.g. after the vocab changes, or after you edit a rubric). But an item whose content was **(re)fetched after** its last enrichment is treated as pending again (`enrich._needs_reenrichment`: `content.fetched_at > enriched.enriched_at`). This is the **re-enrichment trigger** for a video enriched from its tweet *before* the transcript landed: `digest-video`'s `attach_transcript` bumps `content.fetched_at` to attach time, so the freshly-attached transcript is not mistaken for already-processed and the video finally leaves topic `"—"`. The normal order (fetch → enrich) leaves `fetched_at` before `enriched_at`, so nothing re-enriches spuriously; a `fetch --force` refresh benefits from the same trigger.
 
 ### topics
 
@@ -396,6 +398,8 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 - **Mechanical post lists** (code-generated): "Primary" (items where this is `primary_topic`) and "Also relevant" (items where this is a secondary topic). These are exact wiki-linked lists.
 - **Synthesized overview** (LLM-generated): 1-3 paragraphs of plain prose describing what this topic looks like across the items filed under it. Zero wikilinks, zero identifiers — the LLM does not see post ids, only summaries.
 - **Notes**: up to 15 short prose strings, each one important pattern or claim in the topic.
+
+**Video transcripts feed the synthesis prompt (#44).** `build_topic_inputs` collects, alongside the per-post summaries and the described-photo prose, a **bounded** transcript excerpt for every with-speech `x_video` source in the topic's posts (`topics._collect_video_transcripts`). Each excerpt is trimmed to `TOPIC_TRANSCRIPT_CHAR_LIMIT` (**2000 chars/video**, tighter than the enrich cap because a topic can gather many talks) so the total token cost stays bounded even for a video-heavy topic; `topic_synth._user_prompt` renders them under a `Video transcripts across the N videos …` block. No-speech sources contribute nothing — the same skip enrich applies.
 
 **Reads.** `data/items.json`, `data/vocab.yaml`, `data/topics.json` (to know which overviews are stale).
 
@@ -413,6 +417,8 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 - `items/<id>-<slug>.md` — one note per item, with frontmatter (`id`, `source`, `author`, `tags`), the post text, the fetched article(s), the summary, and `**Temas:** [[topic-a]] · [[topic-b]]` wiki-links to the topic pages.
 - `topics/<slug>.md` — one note per topic, with frontmatter (`tags: [x-knowledge-topic, <slug>]`), the synthesized overview and notes, then the mechanical "Primary" and "Also relevant" wiki-linked lists.
+
+**Video digest section (#44).** An `x_video` content source renders as a `## Video digest: <title>` section (`generate._video_digest_lines`) carrying the transcript text — the manufactured content that turns a never-watched video into a readable, searchable note, rather than a generic `## Content:` block. A no-speech source (`has_speech=False`) renders a single localised silent-video line (`i18n.Strings.silent_video`) instead of an empty digest. The heading and silent-video strings are localised in `i18n.py` alongside the other wiki headers. (Timestamped highlights + slide embeds are PR 4; PR 3 renders the transcript so the note is already useful.) Rendering is deterministic — a regen produces the byte-identical note and the user tail below the marker is untouched.
 - `_index.md` — the map.
 - `log.md` — what happened in this run.
 

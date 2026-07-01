@@ -566,6 +566,87 @@ def test_generate_rejects_unsupported_language(tmp_path: Path):
         generate({"9": _enriched_item()}, tmp_path, output_language="Klingon")
 
 
+# ----------------------------------------------------------- x_video digest (#44)
+
+
+def _video_item(
+    item_id: str = "7", *, text: str, has_speech: bool = True, title: str | None = "The Talk"
+) -> Item:
+    """An enriched video bookmark carrying an `x_video` transcript source (#44)."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="watch this talk",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="api",
+            summary="A crisp summary of the talk.",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/v",
+                    title=title,
+                    text=text,
+                    has_speech=has_speech,
+                )
+            ],
+        ),
+    )
+
+
+def test_generate_renders_video_digest_section(tmp_path: Path):
+    """A with-speech `x_video` source renders a `## Video digest` section carrying
+    the title + the transcript-derived text — the #44 payoff."""
+    generate({"7": _video_item(text="The transcript body of the talk.")}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest: The Talk" in note
+    assert "The transcript body of the talk." in note
+    # NOT rendered under the generic article `## Content:` heading
+    assert "## Content: The Talk" not in note
+
+
+def test_generate_renders_silent_video_line_for_no_speech(tmp_path: Path):
+    """A no-speech `x_video` source renders a one-line silent-video note, not an
+    empty `## Video digest` block."""
+    generate({"7": _video_item(text="", has_speech=False)}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "silent video" in note.lower() or "sin voz" in note.lower()
+    assert "## Video digest" not in note
+
+
+def test_generate_video_digest_is_stable_on_regen(tmp_path: Path):
+    """Regenerating a video note is deterministic and preserves the user tail."""
+    store = {"7": _video_item(text="Stable transcript body.")}
+    generate(store, tmp_path)
+    note_path = next((tmp_path / "items").glob("*.md"))
+    note_path.write_text(note_path.read_text(encoding="utf-8") + "MI NOTA", encoding="utf-8")
+    first = note_path.read_text(encoding="utf-8")
+    generate(store, tmp_path)
+    second = note_path.read_text(encoding="utf-8")
+    assert first == second
+    assert "MI NOTA" in second
+
+
+def test_generate_video_digest_spanish_header(tmp_path: Path):
+    """The digest heading is localised alongside the other wiki headers."""
+    generate(
+        {"7": _video_item(text="Cuerpo de la transcripción.")}, tmp_path, output_language="Spanish"
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest:" not in note
+    assert "## Resumen del vídeo: The Talk" in note  # the localised heading IS rendered
+    assert "Cuerpo de la transcripción." in note
+
+
 # --------------------------------------------------------------- topic_style
 
 

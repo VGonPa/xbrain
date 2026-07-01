@@ -13,7 +13,8 @@ from pathlib import Path
 
 from xbrain import notes_io
 from xbrain.i18n import Strings, strings_for
-from xbrain.models import Item, MediaPhotoDescribed, Topic, TopicPage
+from xbrain.models import ContentSourceSuccess, Item, MediaPhotoDescribed, Topic, TopicPage
+from xbrain.rubrics import TOPIC_TRANSCRIPT_CHAR_LIMIT, truncate_transcript
 from xbrain.topic_synth import OverviewJudgment, TopicInput
 
 
@@ -192,10 +193,34 @@ def _collect_image_descriptions(item_pool: list[Item]) -> list[str]:
     ]
 
 
+def _collect_video_transcripts(item_pool: list[Item]) -> list[str]:
+    """Bounded per-video transcript excerpts across a pool of items (#44).
+
+    Each with-speech `x_video` source contributes its transcript trimmed to
+    `TOPIC_TRANSCRIPT_CHAR_LIMIT`, so a topic with many long talks stays within
+    the synthesis prompt's token budget. No-speech sources (`has_speech=False`,
+    empty text) contribute nothing — same skip the enrich prompt applies.
+    """
+    transcripts: list[str] = []
+    for item in item_pool:
+        if item.content is None:
+            continue
+        for src in item.content.sources:
+            if (
+                isinstance(src, ContentSourceSuccess)
+                and src.kind == "x_video"
+                and src.has_speech
+                and src.text
+            ):
+                transcripts.append(truncate_transcript(src.text, TOPIC_TRANSCRIPT_CHAR_LIMIT))
+    return transcripts
+
+
 def build_topic_inputs(
     slugs: list[str], vocab: list[Topic], all_posts: dict[str, TopicPosts]
 ) -> list[TopicInput]:
-    """Build the synthesis input for each slug — description + summaries + image descriptions."""
+    """Build the synthesis input for each slug — description + summaries + image
+    descriptions + bounded video transcripts (#44)."""
     by_slug = {topic.slug: topic for topic in vocab}
     inputs: list[TopicInput] = []
     for slug in slugs:
@@ -210,6 +235,7 @@ def build_topic_inputs(
                 description=topic.description,
                 summaries=_collect_summaries(item_pool),
                 image_descriptions=_collect_image_descriptions(item_pool),
+                video_transcripts=_collect_video_transcripts(item_pool),
             )
         )
     return inputs

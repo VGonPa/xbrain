@@ -176,6 +176,13 @@ def attach_transcript(store: dict[str, Item], item_ids: list[str], transcript: T
     (article body, thread) is preserved. A no-speech transcript is attached with
     empty text + `has_speech=False` — the marker `generate` renders as a silent
     video and `enrich` skips.
+
+    `content.fetched_at` is bumped to attach time in every case — including when
+    appending to an existing `Content`. This is load-bearing for PR3's
+    re-enrichment trigger (`enrich._needs_reenrichment`): a video enriched from
+    its tweet BEFORE the transcript landed must re-enrich, and that hinges on
+    `fetched_at` moving past the earlier `enriched_at`. Without the bump the new
+    transcript would look already-processed and the video would keep topic "—".
     """
     now = datetime.now(timezone.utc)
     attached = 0
@@ -196,6 +203,7 @@ def attach_transcript(store: dict[str, Item], item_ids: list[str], transcript: T
         else:
             kept = [s for s in item.content.sources if not _is_x_video_source(s)]
             item.content.sources = [*kept, source]
+            item.content.fetched_at = now
         attached += 1
     return attached
 

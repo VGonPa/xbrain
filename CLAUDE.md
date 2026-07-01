@@ -32,8 +32,17 @@ generates an Obsidian wiki.
   from the mp4 URL path, not the signed URL): N bookmarks of one video → one
   fetch+transcribe, all get the source. No-speech videos attach with empty text +
   `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
-  `x_video` source unless `--force`); destructive → auto-snapshot. The transcript
-  then flows through the existing `enrich → topics → generate` pipeline (PR3).
+  `x_video` source unless `--force`); destructive → auto-snapshot.
+- Video digest — pipeline integration (PR3): the attached `x_video` transcript
+  flows through the **existing** `enrich → topics → generate` steps, no new stage.
+  `enrich` splices a `Video transcript:` block into the item prompt (skips
+  no-speech; caps at `TRANSCRIPT_CHAR_LIMIT`=12000 chars); `topics` folds a tighter
+  per-video excerpt (`TOPIC_TRANSCRIPT_CHAR_LIMIT`=2000) into the synthesis prompt;
+  `generate` renders a `## Video digest` section (or a one-line silent-video note).
+  This is what fixes video items showing topic `—`. Re-enrichment trigger:
+  `attach_transcript` bumps `content.fetched_at`, and `enrich` re-enriches any item
+  whose `content.fetched_at > enriched.enriched_at`, so a transcript attached AFTER
+  a tweet-only enrich is not treated as already-processed.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

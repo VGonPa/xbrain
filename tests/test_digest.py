@@ -219,6 +219,37 @@ def test_attach_transcript_replaces_prior_x_video_source():
     assert sources[0].text == "v2"
 
 
+def test_attach_transcript_bumps_fetched_at_on_existing_content():
+    """Appending a transcript to already-fetched content bumps `content.fetched_at`
+    so `enrich` treats the new transcript as unprocessed and RE-ENRICHES the item
+    (PR3 re-enrichment trigger). Without the bump the transcript looks already
+    processed and the video keeps topic "—"."""
+    from xbrain.models import Content, ContentSourceSuccess
+
+    old = datetime(2026, 5, 16, tzinfo=timezone.utc)
+    item = _item("a1", _VIDEO_A_URL_1)
+    item.content = Content(
+        fetched_at=old,
+        sources=[ContentSourceSuccess(kind="external_article", url="u", text="body")],
+    )
+    store = {"a1": item}
+    attach_transcript(store, ["a1"], _speech())
+    assert store["a1"].content.fetched_at > old
+
+
+def test_attach_transcript_sets_fetched_at_when_no_prior_content():
+    """A first-ever attach (content was None) records a fresh, UTC-aware fetch time.
+
+    `Content.fetched_at` is a required field, so `is not None` is vacuous — assert
+    it is timezone-aware (the enrich re-enrichment comparison needs aware datetimes)
+    and stamped at attach time (recent)."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    attach_transcript(store, ["a1"], _speech())
+    fetched_at = store["a1"].content.fetched_at
+    assert fetched_at.tzinfo is not None  # UTC-aware, not a naive datetime
+    assert abs((datetime.now(timezone.utc) - fetched_at).total_seconds()) < 5  # stamped now
+
+
 # ------------------------------------------------------------ digest_videos (orchestration)
 
 

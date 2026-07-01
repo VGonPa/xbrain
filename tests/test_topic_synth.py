@@ -254,3 +254,27 @@ def test_user_prompt_omits_image_section_when_empty():
     topic_input = TopicInput(slug="x", description="d", summaries=["s"])
     prompt = _user_prompt(topic_input)
     assert "Images across" not in prompt
+
+
+def test_user_prompt_includes_video_transcripts_when_provided():
+    """When `video_transcripts` is non-empty, the topic prompt carries a video block."""
+    from xbrain.topic_synth import _user_prompt
+
+    topic_input = TopicInput(
+        slug="ai-coding",
+        description="LLMs writing software",
+        summaries=["s1"],
+        video_transcripts=["A talk on retrieval-augmented agents.", "A live coding demo."],
+    )
+    prompt = _user_prompt(topic_input)
+    assert "Video transcripts across the 2 videos" in prompt
+    assert "A talk on retrieval-augmented agents." in prompt
+    assert "A live coding demo." in prompt
+
+
+def test_user_prompt_omits_video_section_when_empty():
+    """Default empty `video_transcripts` produces no video section — regression guard."""
+    from xbrain.topic_synth import _user_prompt
+
+    prompt = _user_prompt(TopicInput(slug="x", description="d", summaries=["s"]))
+    assert "Video transcripts across" not in prompt

@@ -30,6 +30,8 @@ class Strings:
     summary_header: str  # "Resumen" / "Summary"
     primary_posts: str  # "Posts primarios" / "Primary posts"
     also_relevant: str  # "También relevante" / "Also relevant"
+    video_digest_header: str  # "Resumen del vídeo" / "Video digest" (#44)
+    silent_video: str  # the one-line no-speech marker (#44)
 
 
 _STRINGS: dict[str, Strings] = {
@@ -39,6 +41,8 @@ _STRINGS: dict[str, Strings] = {
         summary_header="Summary",
         primary_posts="Primary posts",
         also_relevant="Also relevant",
+        video_digest_header="Video digest",
+        silent_video="🔇 Silent video (no speech detected).",
     ),
     "Spanish": Strings(
         topics_label="Temas",
@@ -46,6 +50,8 @@ _STRINGS: dict[str, Strings] = {
         summary_header="Resumen",
         primary_posts="Posts primarios",
         also_relevant="También relevante",
+        video_digest_header="Resumen del vídeo",
+        silent_video="🔇 Vídeo sin voz (sin transcripción).",
     ),
 }
 

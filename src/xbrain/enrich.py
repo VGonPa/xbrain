@@ -10,15 +10,41 @@ from xbrain.models import Enrichment, ExecutorName, Item, Topic
 from xbrain.validate import validate_judgment
 
 
+def _needs_reenrichment(item: Item) -> bool:
+    """True when an already-enriched item's content was (re)fetched since (#44).
+
+    A video bookmark is often enriched from its ~2-line tweet first, then gains
+    an `x_video` transcript when `digest-video` runs — which bumps
+    `content.fetched_at` to attach time. Keying re-enrichment on
+    ``content.fetched_at > enriched.enriched_at`` means the richer transcript is
+    NOT treated as already-processed: the item flows back through enrich and
+    finally gets a real `primary_topic` instead of "—". The normal order
+    (fetch → enrich) leaves `fetched_at` *before* `enriched_at`, so nothing
+    re-enriches spuriously. A `fetch --force` refresh benefits from the same
+    trigger. Both timestamps are UTC-aware by construction, so the comparison is
+    well-defined.
+    """
+    return (
+        item.enriched is not None
+        and item.content is not None
+        and item.content.fetched_at > item.enriched.enriched_at
+    )
+
+
 def items_pending_enrichment(
     store: dict[str, Item],
     since: datetime | None = None,
     until: datetime | None = None,
 ) -> list[Item]:
-    """Return items with no enrichment yet, optionally within a date range."""
+    """Return items needing enrichment, optionally within a date range.
+
+    An item is pending when it has no enrichment yet, OR when its content was
+    (re)fetched after its last enrichment (`_needs_reenrichment` — the #44
+    re-enrichment trigger for a transcript attached post-enrich).
+    """
     pending: list[Item] = []
     for item in store.values():
-        if item.enriched is not None:
+        if item.enriched is not None and not _needs_reenrichment(item):
             continue
         if since and item.created_at < since:
             continue

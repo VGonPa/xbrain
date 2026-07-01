@@ -297,6 +297,22 @@ def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> N
         shutil.copy2(source, destination)
 
 
+def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[str]:
+    """Render an `x_video` transcript source as a `Video digest` section (#44).
+
+    A with-speech transcript renders under a ``## Video digest: <title>``
+    heading carrying the transcript text — the manufactured content that turns
+    a never-watched video into a readable, searchable note. A no-speech source
+    (`has_speech=False` or empty text) renders a single silent-video line
+    instead of an empty digest block. (Timestamped highlights + slide embeds
+    are PR 4; PR 3 renders the transcript so the note is already useful.)
+    """
+    if source.has_speech is False or not source.text:
+        return [f"> {strings.silent_video}", ""]
+    heading = source.title or source.url
+    return [f"## {strings.video_digest_header}: {heading}", "", source.text, ""]
+
+
 def _content_lines(content: Content, strings: Strings) -> list[str]:
     """Rendered article bodies + broken-link evidence for a fetched item.
 
@@ -304,13 +320,18 @@ def _content_lines(content: Content, strings: Strings) -> list[str]:
     rendered as a content block; the failure variant is rendered as a
     broken-link line *only* for external articles and X articles (a
     failed thread fetch is silently elided, matching the pre-refactor
-    behaviour — `source.kind` is what guarded that path before).
+    behaviour — `source.kind` is what guarded that path before). An
+    `x_video` success is rendered as a `Video digest` section rather than
+    a generic content block (#44).
     """
     lines: list[str] = []
     for source in content.sources:
         if isinstance(source, ContentSourceSuccess):
-            heading = source.title or source.url
-            lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
+            if source.kind == "x_video":
+                lines += _video_digest_lines(source, strings)
+            else:
+                heading = source.title or source.url
+                lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
         elif source.kind in ("external_article", "x_article"):
             lines += [_broken_link_line(source, content.fetched_at), ""]
     return lines
