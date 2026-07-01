@@ -741,6 +741,83 @@ def test_enrich_rejects_unknown_executor(tmp_path, monkeypatch):
     assert "desconocido" in result.output
 
 
+def _photo_item(item_id: str = "1") -> Item:
+    from xbrain.models import MediaPhotoDownloaded
+
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=f"Note {item_id}",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        media=[
+            MediaPhotoDownloaded(
+                url="https://p/0.png",
+                local_path=f"{item_id}/0.png",
+                width=4,
+                height=4,
+                bytes_size=9,
+                downloaded_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+
+def test_describe_rejects_unknown_executor(tmp_path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["describe", "--executor", "bogus"])
+    assert result.exit_code == 1
+    assert "bogus" in result.output
+    assert "desconocido" in result.output
+
+
+def test_describe_claude_code_exports_a_worksheet(tmp_path, monkeypatch):
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _photo_item("1")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["describe", "--executor", "claude-code"])
+    assert result.exit_code == 0
+    ws = tmp_path / "data" / "describe-worksheet.json"
+    assert ws.exists()
+    payload = json.loads(ws.read_text(encoding="utf-8"))
+    assert len(payload["photos"]) == 1
+    assert payload["judgments"] == []
+
+
+def test_describe_apply_dispatches_and_reports_unmatched(tmp_path, monkeypatch):
+    import json
+
+    from xbrain.models import MediaPhotoDescribed
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _photo_item("1")}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "version": "v1",
+                "language": "English",
+                "judgments": [
+                    {"item_id": "1", "index": 0, "is_decorative": False, "description": "A chart."},
+                    {"item_id": "ghost", "index": 0, "is_decorative": False, "description": "x"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["describe", "--apply", str(ws)])
+    assert result.exit_code == 0
+    assert "1 fotos descritas" in result.output
+    assert "ghost#0" in result.output  # unmatched judgment surfaced, not dropped silently
+    store = load_store(tmp_path / "data" / "items.json")
+    assert isinstance(store["1"].media[0], MediaPhotoDescribed)
+
+
 def test_enrich_manual_without_vocab_fails(tmp_path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     from xbrain.store import save_store

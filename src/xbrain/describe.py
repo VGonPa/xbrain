@@ -898,33 +898,112 @@ def export_describe_worksheet(
     return len(photos)
 
 
-def apply_describe_worksheet(store: dict[str, Item], path: Path) -> int:
+def _validate_worksheet_judgment(raw: object) -> tuple[str, int, dict] | str:
+    """Validate one worksheet judgment; return ``(item_id, index, judgment)`` or an error string.
+
+    The worksheet is authored by a human or a Claude Code session, NOT by
+    the model-validated API path, so it must police the same wire contract
+    `_validate_judgment_entry` enforces on vision responses: the entry is a
+    JSON object with the four required keys, `index` is an int (bool
+    excluded — `True`/`False` would silently coerce to a wrong media slot),
+    and the flags/description are the right primitive types. Range and
+    id/index matching are the caller's job (unknown addresses are reported
+    as unmatched, not as a shape violation). Returning the error as a `str`
+    (rather than raising) lets the caller isolate one bad judgment without
+    aborting the whole apply or leaking a raw `TypeError` traceback.
+    """
+    if not isinstance(raw, dict):
+        return f"judgment is not a JSON object: {raw!r}"
+    if not {"item_id", "index", "is_decorative", "description"} <= raw.keys():
+        return (
+            f"judgment missing required keys (got {sorted(raw)!r}, "
+            "need item_id/index/is_decorative/description)"
+        )
+    index = raw["index"]
+    if not isinstance(index, int) or isinstance(index, bool):
+        return f"judgment `index` must be int, got {index!r}"
+    if not isinstance(raw["is_decorative"], bool):
+        return f"judgment `is_decorative` must be bool, got {raw['is_decorative']!r}"
+    if not isinstance(raw["description"], str):
+        return f"judgment `description` must be str, got {raw['description']!r}"
+    return (str(raw["item_id"]), index, raw)
+
+
+def _parse_worksheet_judgments(
+    raw_judgments: list,
+) -> tuple[dict[tuple[str, int], dict], list[tuple[str, list[str]]]]:
+    """Validate + dedup worksheet judgments into a ``(item_id, index) -> judgment`` map.
+
+    Split out of `apply_describe_worksheet` so the apply body stays a single
+    store walk (keeps the complexity grade off C). Returns the keyed map plus
+    the `invalid` list of ``(label, [reasons])`` for malformed entries and
+    duplicate ``(item_id, index)`` keys (first-wins, like the API path's
+    duplicate-index rejection).
+    """
+    invalid: list[tuple[str, list[str]]] = []
+    by_key: dict[tuple[str, int], dict] = {}
+    for position, raw in enumerate(raw_judgments):
+        validated = _validate_worksheet_judgment(raw)
+        if isinstance(validated, str):
+            invalid.append((f"judgment[{position}]", [validated]))
+            continue
+        item_id, index, judgment = validated
+        key = (item_id, index)
+        if key in by_key:
+            invalid.append((f"{item_id}#{index}", ["duplicate judgment for this (item_id, index)"]))
+            continue
+        by_key[key] = judgment
+    return by_key, invalid
+
+
+def apply_describe_worksheet(
+    store: dict[str, Item], path: Path
+) -> tuple[int, list[tuple[str, list[str]]]]:
     """Apply a filled describe worksheet, transitioning photos to Described.
 
     Reads `judgments` keyed by ``(item_id, index)`` and swaps each addressed
     `MediaPhotoDownloaded` / `MediaPhotoDescribed` entry for the described
     variant via `_apply_judgment`, using the worksheet's own version/language.
-    Unknown ids/indices and non-photo entries are skipped. Returns the count
-    of photos transitioned. No API key.
+
+    Each judgment is validated in isolation (`_validate_worksheet_judgment`),
+    so one malformed entry is skipped and reported rather than aborting the
+    run or escaping as a raw traceback. Returns ``(applied, invalid)`` where
+    `invalid` is a list of ``(label, [reasons])`` for the CLI's
+    `_report_invalid` — covering malformed judgments, duplicate
+    ``(item_id, index)`` keys, and well-formed judgments that never matched a
+    downloaded photo (unknown id/index, or an index landing on a non-photo
+    entry). No API key.
     """
     if not path.exists():
         raise FileNotFoundError(f"Worksheet not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Worksheet is not a JSON object (got {type(data).__name__})")
+    raw_judgments = data.get("judgments", [])
+    if not isinstance(raw_judgments, list):
+        raise ValueError(
+            f"Worksheet `judgments` must be a list (got {type(raw_judgments).__name__})"
+        )
     version = str(data.get("version", "v1"))
     language = cast(SupportedLanguage, data.get("language", "English"))
-    by_key = {(str(j["item_id"]), int(j["index"])): j for j in data.get("judgments", [])}
+
+    by_key, invalid = _parse_worksheet_judgments(raw_judgments)
+
     now = _utcnow()
     applied = 0
+    matched: set[tuple[str, int]] = set()
     for item in store.values():
         for index, entry in enumerate(item.media):
-            judgment = by_key.get((item.id, index))
-            if judgment is None or not isinstance(
-                entry, (MediaPhotoDownloaded, MediaPhotoDescribed)
-            ):
+            hit = by_key.get((item.id, index))
+            if hit is None or not isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
                 continue
             candidate = _Candidate(item_id=item.id, item=item, index=index, entry=entry)
             item.media[index] = _apply_judgment(
-                candidate, judgment, language=language, version=version, described_at=now
+                candidate, hit, language=language, version=version, described_at=now
             )
+            matched.add((item.id, index))
             applied += 1
-    return applied
+
+    for item_id, index in by_key.keys() - matched:
+        invalid.append((f"{item_id}#{index}", ["no downloaded photo at this (item_id, index)"]))
+    return applied, invalid

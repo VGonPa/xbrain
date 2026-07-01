@@ -682,10 +682,13 @@ def describe(
     if apply is not None:
         _auto_snapshot(cfg, "describe-apply")
         store = load_store(cfg.items_path)
-        applied = apply_describe_worksheet(store, apply)
+        applied, invalid = apply_describe_worksheet(store, apply)
         save_store(store, cfg.items_path)
         typer.echo(f"Describe worksheet aplicada: {applied} fotos descritas")
+        _report_invalid(invalid)
         return
+    if executor is not None and executor not in ("api", "manual", "claude-code"):
+        raise ValueError(f"Ejecutor desconocido: {executor!r}")
     if executor in ("manual", "claude-code"):
         store = load_store(cfg.items_path)
         n = export_describe_worksheet(

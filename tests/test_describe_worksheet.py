@@ -72,7 +72,9 @@ def test_apply_transitions_to_described_and_enforces_decorative_empty(tmp_path):
     ]
     ws_path.write_text(json.dumps(ws), encoding="utf-8")
 
-    assert apply_describe_worksheet(store, ws_path) == 2
+    applied, invalid = apply_describe_worksheet(store, ws_path)
+    assert applied == 2
+    assert invalid == []
     d1, d2 = store["1"].media[0], store["2"].media[0]
     assert isinstance(d1, MediaPhotoDescribed) and d1.description == "Un gráfico de barras."
     assert not d1.is_decorative
@@ -95,8 +97,101 @@ def test_apply_skips_unknown_id_and_index(tmp_path):
         ),
         encoding="utf-8",
     )
-    assert apply_describe_worksheet(store, ws_path) == 0
+    applied, invalid = apply_describe_worksheet(store, ws_path)
+    assert applied == 0
     assert isinstance(store["1"].media[0], MediaPhotoDownloaded)  # unchanged
+    # Both judgments are well-formed but address no downloaded photo → reported,
+    # not silently dropped.
+    assert {label for label, _ in invalid} == {"1#9", "nope#0"}
+
+
+def test_apply_reports_malformed_judgments_but_applies_valid(tmp_path):
+    # A hand/agent-authored worksheet mixes one good judgment with malformed
+    # ones. The good one must apply; each bad one is isolated + reported —
+    # never a whole-run abort or a raw TypeError traceback.
+    store = {"1": _item("1", [_photo("1/0.png")]), "2": _item("2", [_photo("2/0.png")])}
+    ws_path = tmp_path / "ws.json"
+    ws_path.write_text(
+        json.dumps(
+            {
+                "version": "v1",
+                "language": "Spanish",
+                "judgments": [
+                    {"item_id": "1", "index": 0, "is_decorative": False, "description": "Bien."},
+                    {"item_id": "2", "index": None, "is_decorative": False, "description": "x"},
+                    {"item_id": "2", "is_decorative": False, "description": "sin index"},
+                    {"item_id": "2", "index": True, "is_decorative": False, "description": "bool"},
+                    "no soy un objeto",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    applied, invalid = apply_describe_worksheet(store, ws_path)
+    assert applied == 1
+    assert isinstance(store["1"].media[0], MediaPhotoDescribed)
+    assert isinstance(store["2"].media[0], MediaPhotoDownloaded)  # untouched
+    # Four malformed judgments, each reported with its position label.
+    assert len(invalid) == 4
+    assert {label for label, _ in invalid} == {
+        "judgment[1]",
+        "judgment[2]",
+        "judgment[3]",
+        "judgment[4]",
+    }
+
+
+def test_apply_reports_duplicate_keys(tmp_path):
+    store = {"1": _item("1", [_photo("1/0.png")])}
+    ws_path = tmp_path / "ws.json"
+    ws_path.write_text(
+        json.dumps(
+            {
+                "judgments": [
+                    {"item_id": "1", "index": 0, "is_decorative": False, "description": "first"},
+                    {"item_id": "1", "index": 0, "is_decorative": False, "description": "second"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    applied, invalid = apply_describe_worksheet(store, ws_path)
+    assert applied == 1  # first-wins; duplicate is rejected, not last-wins
+    assert store["1"].media[0].description == "first"
+    assert [label for label, _ in invalid] == ["1#0"]
+
+
+def test_apply_raises_on_non_object_worksheet(tmp_path):
+    import pytest
+
+    ws_path = tmp_path / "ws.json"
+    ws_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        apply_describe_worksheet({}, ws_path)
+
+
+def test_apply_raises_on_non_list_judgments(tmp_path):
+    import pytest
+
+    ws_path = tmp_path / "ws.json"
+    ws_path.write_text(json.dumps({"judgments": {"item_id": "1"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a list"):
+        apply_describe_worksheet({}, ws_path)
+
+
+def test_generate_multiline_description_quotes_every_line(tmp_path):
+    # A multi-line vision description must be quoted line-by-line: an unquoted
+    # trailing line starting with `##`/`-` would inject structure into the note.
+    desc = "Primera línea.\n## No es un heading\n- tampoco un bullet"
+    store = {"1": _item("1", [_described("1/0.png", desc)])}
+    generate(store, tmp_path, output_language="Spanish")
+    note = next((tmp_path / "items").glob("*-1.md")).read_text(encoding="utf-8")
+    assert "> Primera línea." in note
+    assert "> ## No es un heading" in note
+    assert "> - tampoco un bullet" in note
+    # No description line escaped the blockquote into raw note body.
+    assert "\n## No es un heading" not in note
+    assert "\n- tampoco un bullet" not in note
 
 
 def _described(local_path, description, *, decorative=False):
