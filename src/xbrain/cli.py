@@ -106,6 +106,15 @@ class Source(str, enum.Enum):
     all = "all"
 
 
+class VideoStatus(str, enum.Enum):
+    """The `list-videos --status` filter values (mirrors the four `VideoState`s)."""
+
+    downloaded = "downloaded"
+    failed = "failed"
+    pending = "pending"
+    poster_era = "poster-era"
+
+
 def _repo_root() -> Path:
     """Repo root — overridable via XBRAIN_REPO_ROOT for tests."""
     override = os.environ.get("XBRAIN_REPO_ROOT")
@@ -860,7 +869,7 @@ def download_videos(
 def list_videos(
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
-    status: str | None = typer.Option(
+    status: VideoStatus | None = typer.Option(
         None,
         "--status",
         help="Filtra por estado: downloaded | failed | pending | poster-era.",
@@ -890,7 +899,7 @@ def list_videos(
     rows = list_video_entries(
         store,
         topic=topic,
-        status=status,
+        status=status.value if status is not None else None,
         max_size_bytes=max_size_bytes,
         source=source.value,
         limit=limit,
@@ -982,6 +991,14 @@ def fetch_video(
     max_size_bytes = parse_size_to_bytes(max_size) if max_size else None
     report = fetch_videos(store, id_list, to, max_size_bytes=max_size_bytes, limit=limit)
     _emit_fetch_report(report, json_out=json_out)
+    if report.fetched == 0 and report.failed > 0:
+        # Parity with download-videos: a run where every attempted download
+        # failed must surface as a non-zero exit, not a silent empty run. A pure
+        # all-skips run (nothing attempted) stays exit 0.
+        raise RuntimeError(
+            f"fetch-video: all {report.failed} download attempt(s) failed; "
+            "check network / video.twimg.com availability and the warnings above."
+        )
 
 
 @app.command()

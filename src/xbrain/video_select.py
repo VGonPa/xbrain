@@ -16,7 +16,7 @@ of "what is a real mp4" and "how big is it" matches the downloader exactly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeGuard
 
 from xbrain.models import (
     Item,
@@ -71,8 +71,9 @@ class VideoRow:
     text: str
 
 
-def _is_video_entry(entry: MediaEntry) -> bool:
-    """True when `entry` is one of the three video variants (photos elided)."""
+def _is_video_entry(entry: MediaEntry) -> TypeGuard[_VideoEntry]:
+    """Narrow `entry` to a video variant (photos elided) — a `TypeGuard` so the
+    narrowing propagates to callers and no `# type: ignore` is needed."""
     return isinstance(entry, _VIDEO_VARIANTS)
 
 
@@ -146,8 +147,12 @@ def _passes_size_cap(size_bytes: int | None, max_size_bytes: int | None) -> bool
     """True when the row is within the `--max-size` cap.
 
     No cap → always True. With a cap, an UNKNOWN size (no bitrate/duration) is
-    excluded — the same conservative rule `download-videos` applies, so the
-    catalog and the fetch select the same under-cap set.
+    excluded — the same conservative rule `download-videos` applies. For pending
+    and failed entries the catalog and `fetch-video` select the SAME under-cap
+    set (both use the `bitrate × duration` estimate). They can differ for an
+    already-downloaded entry: `list-videos` compares its EXACT on-disk size here,
+    whereas `fetch-video` re-resolves and re-estimates the stream — so a
+    downloaded entry near the cap may be admitted by one and skipped by the other.
     """
     if max_size_bytes is None:
         return True
@@ -193,7 +198,7 @@ def list_video_entries(
         for entry in item.media:
             if not _is_video_entry(entry):
                 continue
-            row = _build_row(item_id, item, entry)  # type: ignore[arg-type]
+            row = _build_row(item_id, item, entry)
             if not _row_matches(row, topic=topic, status=status, max_size_bytes=max_size_bytes):
                 continue
             rows.append(row)
@@ -205,15 +210,16 @@ def list_video_entries(
 def row_to_json(row: VideoRow) -> dict[str, object]:
     """Serialise a `VideoRow` to the stable machine schema for `--json`.
 
-    Fields: `id, url, state, topic, size_bytes, mp4_url, text`. `size_bytes`
-    and `mp4_url` are `null` when unknown / poster-era; `topic` renders as `—`
-    when the item carries no `primary_topic` (matching the human column).
+    Fields: `id, url, state, topic, size_bytes, mp4_url, text`. `topic`,
+    `size_bytes` and `mp4_url` are JSON `null` when absent (no `primary_topic`,
+    unknown size, poster-era). The human `—` sentinel lives only in
+    `format_video_table` — the machine array PR2/PR3 lock onto stays null.
     """
     return {
         "id": row.id,
         "url": row.url,
         "state": row.state,
-        "topic": row.topic if row.topic is not None else "—",
+        "topic": row.topic,
         "size_bytes": row.size_bytes,
         "mp4_url": row.mp4_url,
         "text": row.text,

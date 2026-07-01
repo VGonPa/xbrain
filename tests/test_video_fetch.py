@@ -304,6 +304,68 @@ def test_downloaded_entry_is_refetched_ephemerally(tmp_path: Path):
     assert (tmp_path / "42.mp4").exists()
 
 
+def test_foreign_part_files_are_not_swept(tmp_path: Path):
+    """fetch-video must NOT sweep the operator's --to dir: a foreign in-progress
+    `.part` from another program survives a fetch run (and a skip-only run)."""
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "other.part").write_bytes(b"someone-elses-download")
+    nested = dest / "sub"
+    nested.mkdir()
+    (nested / "deep.part").write_bytes(b"nested-download")
+
+    store = {"42": _item("42", media=[_pending()])}
+    fetch_videos(store, ["42"], dest, session=_ok_session(), sleep=_no_throttle, throttle_seconds=0)
+    assert (dest / "other.part").read_bytes() == b"someone-elses-download"
+    assert (nested / "deep.part").exists()
+
+    # A skip-only run (HLS) must also leave the foreign .part untouched.
+    fetch_videos(
+        {"9": _item("9", media=[_pending(url=_HLS_URL)])},
+        ["9"],
+        dest,
+        session=_ok_session(),
+        sleep=_no_throttle,
+        throttle_seconds=0,
+    )
+    assert (dest / "other.part").exists()
+    assert (nested / "deep.part").exists()
+
+
+def test_limit_not_consumed_by_leading_skip(tmp_path: Path):
+    """A leading skip (HLS) must NOT eat the --limit budget; the fetchable item
+    after it still downloads under limit=1."""
+    store = {
+        "skip": _item("skip", media=[_pending(url=_HLS_URL)]),
+        "good": _item("good", media=[_pending()]),
+    }
+    report = fetch_videos(
+        store,
+        ["skip", "good"],
+        tmp_path,
+        limit=1,
+        session=_ok_session(),
+        sleep=_no_throttle,
+        throttle_seconds=0,
+    )
+    assert report.fetched == 1
+    assert (tmp_path / "good.mp4").exists()
+
+
+def test_unsafe_item_id_is_rejected(tmp_path: Path):
+    """A poisoned item id with path components must be rejected, never written
+    outside --to (a hand-edited items.json is untrusted input)."""
+    dest = tmp_path / "out"
+    store = {"../escaped": _item("../escaped", media=[_pending()])}
+    report = fetch_videos(
+        store, ["../escaped"], dest, session=_ok_session(), sleep=_no_throttle, throttle_seconds=0
+    )
+    assert report.results[0].outcome == "skipped"
+    assert report.results[0].reason == "invalid_id"
+    assert not (tmp_path / "escaped.mp4").exists()
+    assert list(dest.glob("*.mp4")) == []
+
+
 def test_failed_entry_is_refetched(tmp_path: Path):
     entry = MediaVideoFailed(
         url=_MP4_URL,

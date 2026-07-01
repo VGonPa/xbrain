@@ -37,7 +37,6 @@ from xbrain.media import (
     _DEFAULT_UA,
     _classify_status,
     _format_error,
-    _sweep_part_orphans,
     _write_bytes,
 )
 from xbrain.models import (
@@ -47,8 +46,8 @@ from xbrain.models import (
     MediaVideoPending,
 )
 from xbrain.video_media import _estimated_bytes, _read_validated_body, _video_class
+from xbrain.video_select import _is_video_entry
 
-_VIDEO_VARIANTS = (MediaVideoPending, MediaVideoDownloaded, MediaVideoFailed)
 _VideoEntry = MediaVideoPending | MediaVideoDownloaded | MediaVideoFailed
 
 FetchOutcome = Literal["fetched", "skipped", "failed"]
@@ -60,8 +59,8 @@ class FetchResult:
 
     `outcome="fetched"` carries the local `path` + `size_bytes`; `"skipped"`
     carries a `reason` (`unknown_item` / `no_video` / `hls` / `poster_era` /
-    `too_large` / `size_unknown`); `"failed"` carries a `reason` (the reused
-    `MediaFailureReason` classification) + a human `error` detail.
+    `too_large` / `size_unknown` / `invalid_id`); `"failed"` carries a `reason`
+    (the reused `MediaFailureReason` classification) + a human `error` detail.
     """
 
     id: str
@@ -91,6 +90,19 @@ class FetchReport:
         return sum(1 for r in self.results if r.outcome == "failed")
 
 
+def _is_unsafe_id(item_id: str) -> bool:
+    """True when using `item_id` as a filename would escape the dest dir.
+
+    A hand-edited `items.json` is untrusted input: an id like `../escaped`, one
+    carrying a path separator, or a bare `.`/`..` would make `dest/<id>.mp4`
+    write outside `--to`. Real X ids are opaque digit strings, so any separator
+    or dot-component is rejected outright (recorded as an `invalid_id` skip).
+    """
+    if not item_id or item_id in (".", ".."):
+        return True
+    return any(sep in item_id for sep in ("/", "\\", "\x00"))
+
+
 def _select_entry(item: Item) -> tuple[_VideoEntry | None, str | None]:
     """Pick the item's first real-mp4 video entry, or a skip reason.
 
@@ -100,13 +112,13 @@ def _select_entry(item: Item) -> tuple[_VideoEntry | None, str | None]:
     `no_video` (no video entry at all), else `hls` / `poster_era` for the
     non-mp4 stream that is present.
     """
-    video_entries = [entry for entry in item.media if isinstance(entry, _VIDEO_VARIANTS)]
+    video_entries = [entry for entry in item.media if _is_video_entry(entry)]
     if not video_entries:
         return None, "no_video"
     for entry in video_entries:
-        if _video_class(entry) == "mp4":  # type: ignore[arg-type]
-            return entry, None  # type: ignore[return-value]
-    classes = {_video_class(entry) for entry in video_entries}  # type: ignore[arg-type]
+        if _video_class(entry) == "mp4":
+            return entry, None
+    classes = {_video_class(entry) for entry in video_entries}
     return None, ("hls" if "hls" in classes else "poster_era")
 
 
@@ -173,6 +185,31 @@ def _fetch_one(
     return FetchResult(item_id, "fetched", path=str(path), size_bytes=len(body))
 
 
+def _classify_id(
+    store: dict[str, Item], item_id: str, max_size_bytes: int | None
+) -> FetchResult | _VideoEntry:
+    """Decide one id: a skip `FetchResult`, or the `_VideoEntry` to fetch.
+
+    Rejects (each as a skip) an unsafe id (path traversal), an unknown id, an
+    item with no downloadable mp4 (`no_video` / `hls` / `poster_era`), and an
+    over-`--max-size` / unknown-size entry. Otherwise returns the mp4 entry.
+    Pulled out of `fetch_videos` so the per-id branching does not inflate the
+    orchestration loop's complexity.
+    """
+    if _is_unsafe_id(item_id):
+        return FetchResult(item_id, "skipped", reason="invalid_id")
+    item = store.get(item_id)
+    if item is None:
+        return FetchResult(item_id, "skipped", reason="unknown_item")
+    entry, skip_reason = _select_entry(item)
+    if entry is None:
+        return FetchResult(item_id, "skipped", reason=skip_reason)
+    cap_reason = _cap_skip_reason(entry, max_size_bytes)
+    if cap_reason is not None:
+        return FetchResult(item_id, "skipped", reason=cap_reason)
+    return entry
+
+
 def fetch_videos(
     store: dict[str, Item],
     ids: list[str],
@@ -202,7 +239,11 @@ def fetch_videos(
         session.headers.update({"User-Agent": user_agent})
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    _sweep_part_orphans(dest)
+    # Deliberately NO `.part`-orphan sweep here: `dest` is the operator's own
+    # `--to` directory (possibly ~/Downloads), and recursively unlinking every
+    # `*.part` would silently destroy OTHER programs' in-progress downloads. The
+    # atomic `_write_bytes` already cleans up its own `.part` on failure, so an
+    # ephemeral fetch leaves no orphan of ours to sweep.
 
     report = FetchReport()
     attempted = 0
@@ -211,24 +252,16 @@ def fetch_videos(
         if item_id in seen:
             continue
         seen.add(item_id)
-        item = store.get(item_id)
-        if item is None:
-            report.results.append(FetchResult(item_id, "skipped", reason="unknown_item"))
-            continue
-        entry, skip_reason = _select_entry(item)
-        if entry is None:
-            report.results.append(FetchResult(item_id, "skipped", reason=skip_reason))
-            continue
-        cap_reason = _cap_skip_reason(entry, max_size_bytes)
-        if cap_reason is not None:
-            report.results.append(FetchResult(item_id, "skipped", reason=cap_reason))
+        decision = _classify_id(store, item_id, max_size_bytes)
+        if isinstance(decision, FetchResult):
+            report.results.append(decision)
             continue
         if limit is not None and attempted >= limit:
             break
         attempted += 1
         report.results.append(
             _fetch_one(
-                entry,
+                decision,
                 item_id=item_id,
                 dest_dir=dest,
                 session=session,

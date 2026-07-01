@@ -25,13 +25,13 @@ from xbrain.models import (
 )
 from xbrain.video_select import (
     VideoRow,
+    _format_size,
     format_video_table,
     list_video_entries,
     row_to_json,
 )
 
 _MP4_URL = "https://video.twimg.com/ext_tw_video/1/vid/720/A.mp4?tag=12"
-_HLS_URL = "https://video.twimg.com/ext_tw_video/1/pl/B.m3u8?c=fmp4"
 _POSTER = "https://pbs.twimg.com/ext_tw_video_thumb/1/img/P.jpg"
 
 
@@ -240,10 +240,12 @@ def test_row_to_json_schema_is_stable():
     assert payload["topic"] == "ai"
 
 
-def test_row_to_json_missing_topic_renders_dash():
+def test_row_to_json_missing_topic_is_null():
+    """The machine schema emits JSON null for an absent topic (the human table
+    renders "—"; the array PR2/PR3 lock onto must stay null, not a sentinel)."""
     store = {"1": _item("1", media=[_pending()])}
     payload = row_to_json(list_video_entries(store)[0])
-    assert payload["topic"] == "—"
+    assert payload["topic"] is None
 
 
 def test_row_to_json_poster_era_mp4_url_is_null():
@@ -261,5 +263,19 @@ def test_format_video_table_has_headers_and_rows():
     assert "ai" in table
 
 
+def test_format_video_table_missing_topic_shows_dash():
+    """The human table keeps the "—" sentinel even though --json emits null."""
+    store = {"1": _item("1", media=[_pending()])}
+    assert "—" in format_video_table(list_video_entries(store))
+
+
 def test_format_video_table_empty():
     assert "No" in format_video_table([])
+
+
+def test_format_size_rendering():
+    assert _format_size(None) == "unknown"
+    assert _format_size(2_000_000_000) == "2.0 GB"
+    assert _format_size(1_500_000) == "1.5 MB"
+    assert _format_size(2_048) == "2.0 KB"
+    assert _format_size(500) == "500 B"

@@ -413,6 +413,20 @@ class _FakeVideoSession:
         return _Resp()
 
 
+class _FailVideoSession:
+    """Fake session that returns a 500 for any GET (every download fails)."""
+
+    def __init__(self):
+        self.headers: dict[str, str] = {}
+
+    def get(self, _url, *, timeout):
+        class _Resp:
+            status_code = 500
+            content = b"err"
+
+        return _Resp()
+
+
 def test_download_videos_command_noop_when_no_videos(tmp_path: Path, monkeypatch):
     """A store with no downloadable mp4 is a no-op: exit 0, items.json unchanged,
     no confirmation needed, no snapshot taken (nothing is written)."""
@@ -1760,11 +1774,84 @@ def test_list_videos_empty_store(tmp_path: Path, monkeypatch):
 
 
 def test_list_videos_rejects_bad_status(tmp_path: Path, monkeypatch):
+    """`--status` is a typer Enum: a bad value is a usage error (exit 2), like
+    `--source`."""
     _setup_repo(tmp_path, monkeypatch)
     save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["list-videos", "--status", "bogus"])
+    assert result.exit_code == 2
+
+
+def test_list_videos_json_null_topic(tmp_path: Path, monkeypatch):
+    """An un-enriched video's topic is JSON null in --json (human table shows —)."""
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["list-videos", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload[0]["topic"] is None
+
+
+def test_list_videos_status_poster_era_enum(tmp_path: Path, monkeypatch):
+    """The `poster-era` status value (hyphenated enum) is accepted and filters."""
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"9": _video_item("9", url=_POSTER)}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["list-videos", "--status", "poster-era", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert [row["id"] for row in payload] == ["9"]
+
+
+def test_resolve_fetch_ids_union_dedup_and_source_asymmetry(tmp_path: Path, monkeypatch):
+    """--ids are verbatim (NOT source-scoped); --topic expansion IS source-scoped;
+    the union is order-preserving and de-duplicated."""
+    from xbrain.cli import _resolve_fetch_ids
+
+    store = {
+        "b": _enriched_video_item("b", "ai", source="bookmark"),
+        "t": _enriched_video_item("t", "ai", source="own_tweet"),
+    }
+    # "t" is kept verbatim though it is an own_tweet and source=bookmarks;
+    # the topic expansion under bookmarks yields only "b".
+    assert _resolve_fetch_ids(store, "t", "ai", "bookmarks") == ["t", "b"]
+    # order-preserving dedup across --ids + --topic.
+    assert _resolve_fetch_ids(store, "b,b", "ai", "all") == ["b", "t"]
+
+
+def test_resolve_fetch_ids_requires_selection():
+    import pytest
+
+    from xbrain.cli import _resolve_fetch_ids
+
+    with pytest.raises(ValueError, match="ids"):
+        _resolve_fetch_ids({}, None, None, "all")
+
+
+def test_fetch_video_total_failure_exits_nonzero(tmp_path: Path, monkeypatch):
+    """A run where every attempted download failed exits 1 (parity with
+    download-videos); a pure all-skips run stays exit 0."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FailVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "42", "--to", str(dest)])
     assert result.exit_code == 1
-    assert "status" in result.output
+    assert not (dest / "42.mp4").exists()
+
+
+def test_fetch_video_all_skips_exits_zero(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _video_item("7", url=_HLS_URL)}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    dest = tmp_path / "out"
+
+    result = runner.invoke(app, ["fetch-video", "--ids", "7", "--to", str(dest)])
+    assert result.exit_code == 0, result.output
 
 
 def test_fetch_video_downloads_to_dir(tmp_path: Path, monkeypatch):

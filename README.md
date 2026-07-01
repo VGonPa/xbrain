@@ -988,6 +988,8 @@ xbrain/
 │   ├── store.py          # JSON load/save for items + topic pages
 │   ├── refresh.py        # refresh-media backfill: video media swap + size estimate
 │   ├── video_media.py    # download-videos: mp4 byte download (reuses media.py)
+│   ├── video_select.py   # list-videos: read-only video catalog (VideoRow)
+│   ├── video_fetch.py    # fetch-video: ephemeral mp4 fetch, non-persisting
 │   ├── extract/          # X extraction (Playwright + GraphQL interception)
 │   │   ├── browser.py    #   session / browser context
 │   │   ├── graphql.py    #   parse X's internal GraphQL responses
