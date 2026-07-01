@@ -11,7 +11,7 @@ from xbrain.validate import validate_judgment
 
 
 def _needs_reenrichment(item: Item) -> bool:
-    """True when an already-enriched item's content was (re)fetched since (#44).
+    """True when an already-enriched item's content materially changed since (#44).
 
     A video bookmark is often enriched from its ~2-line tweet first, then gains
     an `x_video` transcript when `digest-video` runs — which bumps
@@ -20,9 +20,15 @@ def _needs_reenrichment(item: Item) -> bool:
     NOT treated as already-processed: the item flows back through enrich and
     finally gets a real `primary_topic` instead of "—". The normal order
     (fetch → enrich) leaves `fetched_at` *before* `enriched_at`, so nothing
-    re-enriches spuriously. A `fetch --force` refresh benefits from the same
-    trigger. Both timestamps are UTC-aware by construction, so the comparison is
-    well-defined.
+    re-enriches spuriously.
+
+    `content.fetched_at` is the timestamp of the last *material* content change,
+    not of the last fetch attempt: `fetch.fetch_item` preserves it when a
+    re-fetch reproduces the same content (see its docstring). So a persistently
+    failing transient link — re-fetched every run by `fetch_pending` — does NOT
+    re-trigger enrichment on each cycle (no per-item LLM churn), and a `fetch
+    --force` refresh re-enriches only when it actually changed the content. Both
+    timestamps are UTC-aware by construction, so the comparison is well-defined.
     """
     return (
         item.enriched is not None

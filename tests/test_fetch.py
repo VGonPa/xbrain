@@ -3,6 +3,7 @@ import socket
 import urllib.error
 from datetime import datetime, timezone
 
+from xbrain.enrich import items_pending_enrichment
 from xbrain.fetch import (
     FetchFailure,
     FetchResult,
@@ -11,6 +12,7 @@ from xbrain.fetch import (
     _probe_status,
     _reason_for_status,
     _should_refetch,
+    _sources_materially_equal,
     fetch_item,
     fetch_pending,
     trafilatura_extract,
@@ -20,6 +22,7 @@ from xbrain.models import (
     Content,
     ContentSourceFailure,
     ContentSourceSuccess,
+    Enrichment,
     Item,
     Link,
 )
@@ -647,3 +650,183 @@ def test_content_source_from_uncategorised_failure_is_transient():
     src = _content_source_from("https://example.com/p", failure_result)
     assert isinstance(src, ContentSourceFailure)
     assert src.failure_reason == "unknown_error"
+
+
+# --- Re-enrich hygiene: `fetched_at` advances only on a MATERIAL change (#44) ---
+#
+# `fetch_pending` re-fetches a persistently-failing transient link on EVERY run
+# (its refetch decision keys on source STATE, not on `fetched_at`). If each
+# identical re-fetch bumped `content.fetched_at`, the item would re-trip
+# `enrich._needs_reenrichment` forever — one wasted, identical LLM call per stuck
+# item per cycle. The fix: `fetch_item` keeps the prior `fetched_at` when the
+# re-fetched source set is materially unchanged, and advances it only on a real
+# content change (a failure that becomes a success, changed text, a changed
+# failure reason). `attempts`/`error` churn is NOT a material change.
+
+_T0 = datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc)
+_T1 = datetime(2026, 5, 10, 13, 0, tzinfo=timezone.utc)  # enrich, AFTER first fetch
+_T2 = datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc)  # a later cycle's clock
+
+
+def _failing_extractor(url: str) -> FetchResult:
+    return FetchFailure(failure_reason="timeout", error="timed out")
+
+
+def _enriched(item: Item, when: datetime) -> None:
+    item.enriched = Enrichment(
+        enriched_at=when, executor="api", summary="s", primary_topic="misc", topics=["misc"]
+    )
+
+
+def test_materially_equal_ignores_attempts_and_error_churn():
+    a = ContentSourceFailure(
+        kind="external_article", url="u", failure_reason="timeout", error="x", attempts=1
+    )
+    b = ContentSourceFailure(
+        kind="external_article",
+        url="u",
+        failure_reason="timeout",
+        error="totally other",
+        attempts=2,
+    )
+    assert _sources_materially_equal([a], [b]) is True
+
+
+def test_materially_equal_detects_failure_reason_change():
+    a = ContentSourceFailure(kind="external_article", url="u", failure_reason="timeout")
+    b = ContentSourceFailure(kind="external_article", url="u", failure_reason="dns_error")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_failure_to_success():
+    a = ContentSourceFailure(kind="external_article", url="u", failure_reason="timeout")
+    b = ContentSourceSuccess(kind="external_article", url="u", text="body")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_text_change():
+    a = ContentSourceSuccess(kind="external_article", url="u", text="old body")
+    b = ContentSourceSuccess(kind="external_article", url="u", text="new body")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_title_change():
+    """`title` is rendered into the enrich prompt (`Linked article ({title})`), so a
+    changed title with identical body IS a material change — must re-enrich."""
+    a = ContentSourceSuccess(kind="external_article", url="u", title="Old", text="body")
+    b = ContentSourceSuccess(kind="external_article", url="u", title="New", text="body")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_title_appearing():
+    """A title going from absent (None) to a real value is a material change too."""
+    a = ContentSourceSuccess(kind="external_article", url="u", title=None, text="body")
+    b = ContentSourceSuccess(kind="external_article", url="u", title="Now titled", text="body")
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_detects_http_status_change():
+    """Two failures with the same `failure_reason` but different `http_status`
+    (404 vs 410) are NOT equal — the broken-link render surfaces the status, so it
+    is material evidence."""
+    a = ContentSourceFailure(
+        kind="external_article", url="u", failure_reason="not_found", http_status=404
+    )
+    b = ContentSourceFailure(
+        kind="external_article", url="u", failure_reason="not_found", http_status=410
+    )
+    assert _sources_materially_equal([a], [b]) is False
+
+
+def test_materially_equal_xvideo_frames_deterministic_and_material():
+    """`fetch_item` passes an `x_video` source through by identity (never rebuilds
+    it), so the model-derived signature must NOT spuriously flag it. Two distinct
+    `x_video` instances with identical field values — transcript, `has_speech`,
+    `language`, and `frames` — self-match (the JSON dump is deterministic, which is
+    what makes the pass-through case safe); a changed frame description IS a real
+    change."""
+    from xbrain.models import VideoFrame
+
+    def _video(desc: str) -> ContentSourceSuccess:
+        return ContentSourceSuccess(
+            kind="x_video",
+            url="u",
+            text="transcript",
+            has_speech=True,
+            language="en",
+            frames=[VideoFrame(timestamp=1.5, local_path="1/frames/0.jpg", description=desc)],
+        )
+
+    assert _sources_materially_equal([_video("slide")], [_video("slide")]) is True
+    assert _sources_materially_equal([_video("slide")], [_video("different")]) is False
+
+
+def test_fetch_item_preserves_fetched_at_on_unchanged_failure_refetch():
+    """A re-fetch that reproduces the same transient failure must NOT advance
+    `fetched_at` — nothing about the content changed."""
+    item = _item("1", ["https://example.com/p"])
+    item.content = fetch_item(item, _failing_extractor, now=lambda: _T0)
+    assert item.content.fetched_at == _T0
+    refetched = fetch_item(item, _failing_extractor, now=lambda: _T1)
+    assert refetched.fetched_at == _T0  # preserved, not bumped to _T1
+
+
+def test_fetch_item_advances_fetched_at_when_failure_becomes_success():
+    """A re-fetch that turns a failure into real text IS a material change."""
+    item = _item("1", ["https://example.com/p"])
+    item.content = fetch_item(item, _failing_extractor, now=lambda: _T0)
+    refetched = fetch_item(item, _fake_extractor, now=lambda: _T1)
+    assert refetched.fetched_at == _T1  # advanced
+
+
+def test_dead_link_persistent_failure_not_reenriched_on_next_cycle():
+    """Contract #1: fetch+enrich once, then re-fetch to the SAME transient
+    failure → the item is NOT pending-for-enrichment again, and `fetched_at`
+    is preserved (no per-cycle LLM churn on a stuck dead link)."""
+    store = {"1": _item("1", ["https://slow.example/x"])}
+    assert fetch_pending(store, extractor=_failing_extractor, now=lambda: _T0) == 1
+    item = store["1"]
+    _enriched(item, _T1)  # normal fetch→enrich order: enriched_at after fetched_at
+    assert items_pending_enrichment(store) == []  # settled after the first enrich
+
+    # Next cycle: the transient link still fails identically. It IS re-fetched
+    # (pre-existing network retry — left alone), but nothing changed.
+    assert fetch_pending(store, extractor=_failing_extractor, now=lambda: _T2) == 1
+    assert item.content is not None
+    assert item.content.fetched_at == _T0  # NOT advanced to _T2
+    assert items_pending_enrichment(store) == []  # NOT re-flagged pending
+
+
+def test_transient_failure_then_success_is_reenriched():
+    """Contract #2: a transient failure that later succeeds with new text must
+    re-enrich (real new content)."""
+    store = {"1": _item("1", ["https://flaky.example/x"])}
+    assert fetch_pending(store, extractor=_failing_extractor, now=lambda: _T0) == 1
+    item = store["1"]
+    _enriched(item, _T1)
+    assert items_pending_enrichment(store) == []  # settled
+
+    # The link finally works: real text = material change → `fetched_at` advances
+    # past `enriched_at`, re-flagging the item.
+    assert fetch_pending(store, extractor=_fake_extractor, now=lambda: _T2) == 1
+    assert item.content is not None
+    assert item.content.fetched_at == _T2  # advanced
+    assert [i.id for i in items_pending_enrichment(store)] == ["1"]  # re-enriched
+
+
+def test_force_refetch_unchanged_success_does_not_reenrich():
+    """Contract (option a): a `--force` re-fetch of an already-successful item
+    whose content is unchanged is NOT a material change — `fetched_at` is
+    preserved and the item is not re-enriched."""
+    store = {"1": _item("1", ["https://example.com/p"])}
+    assert fetch_pending(store, extractor=_fake_extractor, now=lambda: _T0) == 1
+    item = store["1"]
+    _enriched(item, _T1)
+    assert items_pending_enrichment(store) == []  # settled
+
+    # `--force` re-fetches (state says skip, force overrides), but identical text
+    # is not new content.
+    assert fetch_pending(store, force=True, extractor=_fake_extractor, now=lambda: _T2) == 1
+    assert item.content is not None
+    assert item.content.fetched_at == _T0  # preserved despite --force
+    assert items_pending_enrichment(store) == []  # not re-enriched
