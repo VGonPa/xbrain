@@ -19,6 +19,7 @@ from xbrain.config import Config, load_config
 from xbrain.describe import describe_all as run_describe_all
 from xbrain.describe import emit_summary_line as describe_emit_summary_line
 from xbrain.diff import diff_snapshots, format_json, format_text
+from xbrain.digest import digest_videos, format_digest_summary
 from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items_pending_enrichment
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
@@ -55,6 +56,7 @@ from xbrain.topics import (
     topics_needing_synth,
     write_topic_pages,
 )
+from xbrain.transcribe import Transcript, transcribe_media
 from xbrain.video_fetch import (
     FetchReport,
     fetch_result_to_json,
@@ -999,6 +1001,127 @@ def fetch_video(
             f"fetch-video: all {report.failed} download attempt(s) failed; "
             "check network / video.twimg.com availability and the warnings above."
         )
+
+
+def _resolve_digest_ids(
+    store: dict[str, Item],
+    ids: str | None,
+    topic: str | None,
+    all_pending: bool,
+    source: str,
+    limit: int | None,
+) -> list[str]:
+    """Resolve the digest selection into a de-duplicated, ordered id list.
+
+    `--all-pending` expands to every fetchable (`pending`) video via the
+    read-only catalog; `--ids` are taken verbatim; `--topic` is expanded via the
+    catalog (scoped by `--source`). At least one selector is required — an empty
+    selection is an operator error, not a silent no-op. `--limit` caps the number
+    of items after de-duplication.
+    """
+    id_list: list[str] = []
+    if all_pending:
+        id_list.extend(row.id for row in list_video_entries(store, status="pending", source=source))
+    if ids:
+        id_list.extend(part.strip() for part in ids.split(",") if part.strip())
+    if topic:
+        id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
+    if not id_list:
+        raise ValueError(
+            "digest-video: indica --ids, --topic o --all-pending para seleccionar vídeos."
+        )
+    unique = list(dict.fromkeys(id_list))
+    return unique[:limit] if limit is not None else unique
+
+
+def _run_digest_video(
+    cfg: Config,
+    *,
+    ids: str | None,
+    topic: str | None,
+    all_pending: bool,
+    source: str,
+    limit: int | None,
+    force: bool,
+    language: str | None,
+) -> None:
+    """Digest selected videos into `x_video` transcript sources; persist + summarise.
+
+    Flow: load → resolve selection → ephemeral fetch + EXTERNAL transcribe +
+    attach (dedup by video identity, in memory) → snapshot → persist. The
+    transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
+    config (command / model) + `--language`. It is destructive (rewrites
+    `items.json`), so it auto-snapshots BEFORE the save — but only when something
+    was attached (a pure already-digested / no-video run writes nothing, so it
+    takes no snapshot). A snapshot failure propagates and aborts before any write.
+    """
+    store = load_store(cfg.items_path)
+    id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
+
+    def _transcribe(path: Path) -> Transcript:
+        return transcribe_media(
+            path,
+            command=cfg.transcribe_command,
+            model=cfg.transcribe_model,
+            language=language,
+        )
+
+    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe)
+    if report.changed > 0:
+        _auto_snapshot(cfg, "digest-video")
+        save_store(store, cfg.items_path)
+    typer.echo(format_digest_summary(report))
+
+
+@app.command(name="digest-video")
+@_handle_cli_errors
+def digest_video(
+    ids: str | None = typer.Option(None, "--ids", help="IDs de items separados por comas."),
+    topic: str | None = typer.Option(
+        None, "--topic", help="Selecciona vídeos por el primary_topic del item."
+    ),
+    all_pending: bool = typer.Option(
+        False, "--all-pending", help="Selecciona todos los vídeos en estado pending (fetchables)."
+    ),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Máximo número de items a procesar en esta ejecución."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-transcribir items que ya tienen un source x_video."
+    ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        help="Idioma a registrar en el transcript si el transcriptor no lo reporta "
+        "(p.ej. en, es). El transcriptor autodetecta; no se le pasa como flag.",
+    ),
+) -> None:
+    """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
+
+    Para cada vídeo seleccionado: descarga efímera (reutiliza `fetch-video`) →
+    transcribe con un transcriptor EXTERNO local (config `transcribe.command`,
+    por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
+    item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
+    vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
+    URL firmada): N bookmarks del mismo vídeo se descargan y transcriben UNA vez y
+    todos reciben el mismo transcript. Un vídeo sin voz/audio se adjunta con texto
+    vacío + `has_speech=False` (nunca es un fallo duro). Idempotente: salta items
+    que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
+    `items.json`) → auto-snapshot antes de escribir. Nunca hay más de un vídeo en
+    disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
+    """
+    cfg = _config()
+    _run_digest_video(
+        cfg,
+        ids=ids,
+        topic=topic,
+        all_pending=all_pending,
+        source=source.value,
+        limit=limit,
+        force=force,
+        language=language,
+    )
 
 
 @app.command()

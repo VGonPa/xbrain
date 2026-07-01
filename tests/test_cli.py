@@ -1949,3 +1949,226 @@ def test_fetch_video_skips_hls(tmp_path: Path, monkeypatch):
     assert payload[0]["outcome"] == "skipped"
     assert payload[0]["reason"] == "hls"
     assert not (dest / "7.mp4").exists()
+
+
+# ------------------------------------------------------ digest-video
+
+# A distinct signed URL for the SAME amplify_video id as _AMPLIFY_URL_1 — proves
+# dedup keys on the stable path id, not the rotating URL.
+_AMPLIFY_URL_1 = "https://video.twimg.com/amplify_video/900/vid/720/a.mp4?tag=16"
+_AMPLIFY_URL_2 = "https://video.twimg.com/amplify_video/900/vid/1080/b.mp4?tag=21"
+
+
+def _wire_digest(monkeypatch, transcript, *, calls: list | None = None):
+    """Mock the network (fetch) + subprocess (transcribe) + throttle for digest-video.
+
+    `fetch` returns mp4 bytes (via the shared `_FakeVideoSession`); the external
+    transcriber is replaced with a fake returning `transcript` (or, if callable,
+    `transcript(path)`). No real network, subprocess, or download runs.
+    """
+    from xbrain.transcribe import Transcript
+
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
+
+    def _fake_transcribe(path, **_kwargs):
+        if calls is not None:
+            calls.append(str(path))
+        return transcript(path) if callable(transcript) else transcript
+
+    monkeypatch.setattr("xbrain.cli.transcribe_media", _fake_transcribe)
+    return Transcript
+
+
+def _speech_transcript(text="a talk transcript"):
+    from xbrain.transcribe import Segment, Transcript
+
+    return Transcript(text=text, segments=[Segment(0.0, 1.0, text)], language="en", has_speech=True)
+
+
+def _silent_transcript():
+    from xbrain.transcribe import Transcript
+
+    return Transcript(text="", segments=[], language=None, has_speech=False)
+
+
+def test_digest_video_transcribes_and_attaches(tmp_path: Path, monkeypatch):
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript("hello from the talk"))
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+    assert result.exit_code == 0, result.output
+    store = load_store(items_path)
+    sources = store["42"].content.sources
+    assert sources[0].kind == "x_video"
+    assert sources[0].text == "hello from the talk"
+    assert sources[0].has_speech is True
+
+
+def test_digest_video_dedups_same_video(tmp_path: Path, monkeypatch):
+    """Two items bookmarking the same video → transcribed ONCE, both carry it."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {
+            "a": _video_item("a", url=_AMPLIFY_URL_1),
+            "b": _video_item("b", url=_AMPLIFY_URL_2),
+        },
+        items_path,
+    )
+    calls: list = []
+    _wire_digest(monkeypatch, _speech_transcript("shared"), calls=calls)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "a,b"])
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1  # transcribed once
+    store = load_store(items_path)
+    assert store["a"].content.sources[0].text == "shared"
+    assert store["b"].content.sources[0].text == "shared"
+    assert "1 items ← 1 vídeos" not in result.stdout  # 2 items, 1 video
+    assert "2 items ← 1 vídeos" in result.stdout
+
+
+def test_digest_video_no_speech_summary(tmp_path: Path, monkeypatch):
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _silent_transcript())
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+    assert result.exit_code == 0, result.output
+    assert "sin voz 1" in result.stdout
+    store = load_store(items_path)
+    assert store["42"].content.sources[0].has_speech is False
+
+
+def test_digest_video_idempotent(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    calls: list = []
+    _wire_digest(monkeypatch, _speech_transcript(), calls=calls)
+
+    first = runner.invoke(app, ["digest-video", "--ids", "42"])
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(app, ["digest-video", "--ids", "42"])
+    assert second.exit_code == 0, second.output
+    assert "ya digeridos 1" in second.stdout
+    assert len(calls) == 1  # the idempotent re-run did NOT re-transcribe
+
+
+def test_digest_video_force_redigests(tmp_path: Path, monkeypatch):
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+
+    _wire_digest(monkeypatch, _speech_transcript("v1"))
+    runner.invoke(app, ["digest-video", "--ids", "42"])
+    _wire_digest(monkeypatch, _speech_transcript("v2"))
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--force"])
+    assert result.exit_code == 0, result.output
+    store = load_store(items_path)
+    assert store["42"].content.sources[0].text == "v2"
+
+
+def test_digest_video_all_pending_selects_pending(tmp_path: Path, monkeypatch):
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, _speech_transcript())
+
+    result = runner.invoke(app, ["digest-video", "--all-pending"])
+    assert result.exit_code == 0, result.output
+    store = load_store(items_path)
+    assert store["42"].content.sources[0].kind == "x_video"
+
+
+def test_digest_video_requires_selection(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["digest-video"])
+    assert result.exit_code == 1
+    assert "ids" in result.output or "all-pending" in result.output
+
+
+def test_digest_video_missing_transcriber_exits_nonzero(tmp_path: Path, monkeypatch):
+    """A missing external transcriber is a clean operator error (exit 1), not a
+    crash — and nothing is written to items.json."""
+    from xbrain.store import load_store
+    from xbrain.transcribe import TranscriberNotFound
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    monkeypatch.setattr("xbrain.video_fetch.requests.Session", _FakeVideoSession)
+    monkeypatch.setattr("xbrain.video_fetch.time.sleep", lambda *_a, **_k: None)
+
+    def _boom(_path, **_kwargs):
+        raise TranscriberNotFound("parakeet-mlx not found — set [transcribe].command")
+
+    monkeypatch.setattr("xbrain.cli.transcribe_media", _boom)
+    result = runner.invoke(app, ["digest-video", "--ids", "42"])
+    assert result.exit_code == 1
+    assert "parakeet-mlx" in result.output
+    assert load_store(items_path)["42"].content is None  # nothing persisted
+
+
+# A SECOND, DISTINCT video (different ext_tw_video id) for limit/selection tests.
+_DISTINCT_VIDEO_URL = "https://video.twimg.com/ext_tw_video/7700/vid/720/z.mp4?tag=3"
+
+
+def test_digest_video_limit_caps_items(tmp_path: Path, monkeypatch):
+    """`--limit 1` over a 2-distinct-video store transcribes exactly one item."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {
+            "a": _video_item("a", url=_AMPLIFY_URL_1),
+            "b": _video_item("b", url=_DISTINCT_VIDEO_URL),
+        },
+        items_path,
+    )
+    _wire_digest(monkeypatch, _speech_transcript())
+
+    result = runner.invoke(app, ["digest-video", "--ids", "a,b", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    assert "transcritos 1" in result.stdout
+    store = load_store(items_path)
+    digested = [i for i in ("a", "b") if store[i].content is not None]
+    assert len(digested) == 1  # exactly one, not both
+
+
+def test_digest_video_topic_selects_only_matching(tmp_path: Path, monkeypatch):
+    """`--topic ai` digests only the ai-topic video, honoring the catalog filter."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {
+            "1": _enriched_video_item("1", "ai", url=_AMPLIFY_URL_1),
+            "2": _enriched_video_item("2", "climate", url=_DISTINCT_VIDEO_URL),
+        },
+        items_path,
+    )
+    _wire_digest(monkeypatch, _speech_transcript())
+
+    result = runner.invoke(app, ["digest-video", "--topic", "ai"])
+    assert result.exit_code == 0, result.output
+    store = load_store(items_path)
+    assert store["1"].content is not None  # ai video digested
+    assert store["2"].content is None  # climate video untouched

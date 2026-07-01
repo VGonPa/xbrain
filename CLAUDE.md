@@ -17,13 +17,23 @@ generates an Obsidian wiki.
   for backfilled videos (mp4 only — HLS `.m3u8` needs ffmpeg and is a deferred
   follow-up; prints a ~GB size-gate, confirm unless `--yes`; destructive →
   auto-snapshot).
-- Agent-driven video surface (read/fetch only, ML is external): `list-videos`
+- Agent-driven video surface (fetch is mechanical, ML is external): `list-videos`
   is a **read-only** catalog of video media (`--json` → stable `{id, url, state,
   topic, size_bytes, mp4_url, text}` array; filters `--topic/--status/--max-size/
   --source/--limit`; no writes, no snapshot); `fetch-video --to <dir>` does an
   **ephemeral** mp4 fetch to `<dir>/<id>.mp4` (select by `--ids`/`--topic`),
   reusing `video_media` primitives — deliberately non-persisting: it does NOT
   mutate `items.json`, does NOT snapshot, and does NOT touch `data/media/`.
+- Video digest: `digest-video` turns bookmarked videos into text — ephemeral
+  fetch → **external** transcriber subprocess (`[transcribe].command`, default
+  `parakeet-mlx`; NO MLX/ML in xbrain core) → attach the transcript to the item
+  as a `ContentSourceSuccess(kind="x_video")` → discard the bytes. **Dedup by
+  video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id
+  from the mp4 URL path, not the signed URL): N bookmarks of one video → one
+  fetch+transcribe, all get the source. No-speech videos attach with empty text +
+  `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
+  `x_video` source unless `--force`); destructive → auto-snapshot. The transcript
+  then flows through the existing `enrich → topics → generate` pipeline (PR3).
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).
