@@ -354,6 +354,7 @@ def _run_fetch(
 
 def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -> None:
     store = load_store(cfg.items_path)
+    topic_pages = load_topic_pages(cfg.topics_path) if cfg.topics_path.exists() else {}
     run_generate(
         store,
         cfg.output_dir,
@@ -362,6 +363,7 @@ def _run_generate(cfg: Config, since: datetime | None, until: datetime | None) -
         cfg.output_language,
         cfg.topic_style,
         media_root=cfg.media_dir,
+        topic_pages=topic_pages,
     )
     typer.echo(f"Markdown generado en {cfg.output_dir}")
 

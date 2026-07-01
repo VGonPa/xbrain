@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import assert_never
 
 from xbrain.config import SUPPORTED_TOPIC_STYLES
+from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
 from xbrain.i18n import Strings, strings_for
 from xbrain.models import (
     Content,
@@ -23,6 +24,7 @@ from xbrain.models import (
     MediaVideoDownloaded,
     MediaVideoFailed,
     MediaVideoPending,
+    TopicPage,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
 
@@ -73,6 +75,7 @@ def generate(
     output_language: str = "English",
     topic_style: str = "wikilink",
     media_root: Path | None = None,
+    topic_pages: dict[str, TopicPage] | None = None,
 ) -> None:
     """Write _index.md, log.md and one note per noted item.
 
@@ -112,6 +115,38 @@ def generate(
             if media_root is not None:
                 _mirror_item_media(item, media_root, output_dir / _VAULT_MEDIA_SUBDIR)
             _write_note(items_dir, item, strings, topic_style)
+    try:
+        _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+    except Exception:  # noqa: BLE001 - the dashboard is a best-effort secondary artifact
+        logger.warning("Dashboard generation failed; item notes were written.", exc_info=True)
+
+
+def _write_dashboard(
+    items: list[Item],
+    output_dir: Path,
+    items_dir: Path,
+    topic_pages: dict[str, TopicPage],
+    media_root: Path | None,
+) -> None:
+    """Write the self-contained interactive `dashboard.html` from the store.
+
+    The id→note map uses the same `note_filename` the item notes are written
+    under, so the dashboard's ``note ↗`` deep links point at real vault files.
+    Photo thumbnails come from `media_root`; topic overviews from `topic_pages`.
+    No browser is involved — the HTML is template + injected JSON.
+    """
+    # Absolute paths: `obsidian://open?path=` requires them, and `output_dir`
+    # can be relative when the configured vault is relative.
+    id2note = {
+        item.id: str((items_dir / note_filename(item)).resolve())
+        for item in items
+        if _has_note(item)
+    }
+    thumbs = collect_thumbnails(items, media_root, id2note)
+    now = datetime.now(timezone.utc)
+    updated = f"{now:%b} {now.day}, {now.year}".upper()
+    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated)
+    (output_dir / "dashboard.html").write_text(render_dashboard_html(data), encoding="utf-8")
 
 
 def _has_note(item: Item) -> bool:
@@ -400,6 +435,7 @@ def _render_index(items: list[Item], strings: Strings) -> str:
         "## Índices",
         "",
         "- [[log|Log cronológico completo]]",
+        "- [📊 Dashboard interactivo](dashboard.html) — métricas, drill-down y enlaces (ábrelo en el navegador)",
         "",
         f"## {strings.topics_label}",
         "",
