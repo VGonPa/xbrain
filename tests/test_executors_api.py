@@ -313,3 +313,42 @@ def test_user_prompt_truncates_a_long_video_transcript():
     prompt = _user_prompt(_video_item("1", text=long_text), VOCAB)
     assert "transcript truncated" in prompt
     assert len(prompt) < len(long_text)
+
+
+def test_user_prompt_video_transcript_sits_between_images_and_links_and_article():
+    """The `Video transcript:` block is spliced AFTER the image descriptions and
+    BEFORE the links/article — mirroring the image-ordering guard so an accidental
+    reorder in `_user_prompt` is caught (the transcript is post content, read in the
+    same natural order as images: post body → images → transcript → links → article)."""
+    from xbrain.models import Content, ContentSourceSuccess, Link
+
+    item = _item(
+        "1",
+        media=[_described_photo(description="A diagram of the training loop.")],
+        links=[Link(url="https://example.com/x", domain="example.com")],
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/a/status/1/video/1",
+                    title="A great talk",
+                    text="a talk about scaling laws",
+                    has_speech=True,
+                ),
+                ContentSourceSuccess(
+                    kind="external_article",
+                    url="https://example.com/x",
+                    title="An article",
+                    text="the article body",
+                ),
+            ],
+        ),
+    )
+    prompt = _user_prompt(item, VOCAB)
+    image_idx = prompt.index("Images in this post:")
+    transcript_idx = prompt.index("Video transcript:")
+    links_idx = prompt.index("Links in the post")
+    article_idx = prompt.index("Linked article")
+    assert image_idx < transcript_idx < links_idx
+    assert transcript_idx < article_idx

@@ -643,6 +643,7 @@ def test_generate_video_digest_spanish_header(tmp_path: Path):
     )
     note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
     assert "## Video digest:" not in note
+    assert "## Resumen del vídeo: The Talk" in note  # the localised heading IS rendered
     assert "Cuerpo de la transcripción." in note
 
 

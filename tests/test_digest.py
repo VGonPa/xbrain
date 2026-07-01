@@ -238,10 +238,16 @@ def test_attach_transcript_bumps_fetched_at_on_existing_content():
 
 
 def test_attach_transcript_sets_fetched_at_when_no_prior_content():
-    """A first-ever attach (content was None) still records a fetch time."""
+    """A first-ever attach (content was None) records a fresh, UTC-aware fetch time.
+
+    `Content.fetched_at` is a required field, so `is not None` is vacuous — assert
+    it is timezone-aware (the enrich re-enrichment comparison needs aware datetimes)
+    and stamped at attach time (recent)."""
     store = {"a1": _item("a1", _VIDEO_A_URL_1)}
     attach_transcript(store, ["a1"], _speech())
-    assert store["a1"].content.fetched_at is not None
+    fetched_at = store["a1"].content.fetched_at
+    assert fetched_at.tzinfo is not None  # UTC-aware, not a naive datetime
+    assert abs((datetime.now(timezone.utc) - fetched_at).total_seconds()) < 5  # stamped now
 
 
 # ------------------------------------------------------------ digest_videos (orchestration)

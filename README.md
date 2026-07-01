@@ -167,7 +167,7 @@ One note per bookmark or own-tweet: the original text, the link, the **linked
 article fetched and stored inline**, an LLM summary and its topics. A saved link
 stops being a URL that will quietly rot and becomes a saved *article*.
 
-A **bookmarked video** gets the same treatment: run [`digest-video`](#the-commands)
+A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
 and its transcript is attached to the item, so the video flows through the *same*
 `enrich → topics → generate` pipeline as an article. The note gains a real
 `primary_topic` (video items used to show `—`, because enrich only ever saw the

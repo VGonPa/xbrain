@@ -185,3 +185,43 @@ def test_item_not_reenriched_when_content_predates_enrichment():
     )
     _enriched_at(item, datetime(2026, 5, 16, tzinfo=timezone.utc))
     assert items_pending_enrichment({"1": item}) == []
+
+
+def test_reenriched_item_settles_and_is_not_pending_again():
+    """After re-enrichment, `enriched_at` is bumped past `content.fetched_at` so the
+    item is NOT flagged pending forever (no infinite re-enrichment / cost churn).
+
+    Mutation-sanity guard for the #44 merge gate: `_validate_and_attach` must stamp
+    a fresh `enriched_at` on EVERY enrich. A mutation that preserves the prior
+    `enriched_at` on re-enrichment would leave `content.fetched_at > enriched_at`
+    permanently true, re-enriching the item on every run. This test fails RED
+    against that mutation and GREEN against the correct code."""
+    from xbrain.enrich import enrich_with_executor
+    from xbrain.executors.base import EnrichmentJudgment
+    from xbrain.models import Content, ContentSourceSuccess, Topic
+
+    item = _item("1")
+    _enriched_at(item, datetime(2026, 5, 16, tzinfo=timezone.utc))
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),  # AFTER first enrich
+        sources=[ContentSourceSuccess(kind="x_video", url="u", text="talk", has_speech=True)],
+    )
+    store = {"1": item}
+    assert [i.id for i in items_pending_enrichment(store)] == ["1"]  # trigger fired
+
+    class _Fake:
+        def enrich_items(self, items, vocab):
+            return [
+                EnrichmentJudgment(
+                    item_id=i.id, summary="s", primary_topic="ai-coding", topics=["ai-coding"]
+                )
+                for i in items
+            ]
+
+    enrich_with_executor(store, _Fake(), [Topic(slug="ai-coding", description="d")])
+    settled = store["1"]
+    assert items_pending_enrichment(store) == []  # settled — the load-bearing assertion
+    # Convergence: the fresh enrichment timestamp is stamped strictly PAST the
+    # fetch timestamp, which is *why* the item settles (not an incidental equality).
+    assert settled.enriched is not None and settled.content is not None
+    assert settled.enriched.enriched_at > settled.content.fetched_at

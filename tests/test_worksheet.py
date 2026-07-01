@@ -133,3 +133,18 @@ def test_export_worksheet_omits_no_speech_video_transcript(tmp_path):
     )
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["items"][0]["video_transcript"] is None
+
+
+def test_export_worksheet_truncates_an_over_cap_video_transcript(tmp_path):
+    """A 72-min-talk-scale transcript is capped in the worksheet's `video_transcript`
+    field (same `TRANSCRIPT_CHAR_LIMIT` as the `api` prompt) so the manual/claude-code
+    track sees identical, bounded input and one long talk can't bloat the worksheet."""
+    from xbrain.rubrics import TRANSCRIPT_CHAR_LIMIT
+
+    long_text = "word " * TRANSCRIPT_CHAR_LIMIT  # >> the cap
+    path = tmp_path / "ws.json"
+    export_worksheet([_video_item("1", text=long_text)], VOCAB, path, "manual", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    transcript = data["items"][0]["video_transcript"]
+    assert "transcript truncated" in transcript
+    assert len(transcript) < len(long_text)

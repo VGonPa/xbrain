@@ -176,7 +176,7 @@ the vocab.
 - **Reads:** `items.json` + `vocab.yaml`
 - **Writes:** `items.json` — each item's `enriched` field (`Enrichment` record)
 - **Only LLM judgment** — no identifiers, no wikilinks (validator rejects them).
-- **Skips already-enriched** — use `--regenerate` after vocab or rubric changes.
+- **Skips already-enriched** — run `vocab --regenerate` (it clears enrichments) after vocab or rubric changes.
 
 </td></tr>
 <tr><td>
@@ -389,7 +389,7 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 **Video transcripts feed the prompt (#44).** When an item carries an `x_video` content source (attached by [`digest-video`](#digest-video)), the enrich prompt splices the transcript in under a clearly-labelled `Video transcript:` block — the same reuse pattern as the `Images in this post:` block for described photos. A no-speech source (`has_speech=False`, empty text) is skipped: it carries no topic signal and would only add noise. Long transcripts are truncated to `TRANSCRIPT_CHAR_LIMIT` (**12000 chars ≈ the first ~13 min of a talk**, in `rubrics.py` next to `ARTICLE_CHAR_LIMIT`) so a single 72-min talk (~68k chars) can't blow the per-item prompt. Both enrich tracks apply it: the `api` executor (`executors/api.py:_video_transcript_section`) and the worksheet export (`worksheet.py:_video_transcript`, a dedicated `video_transcript` field, never mislabelled as an `article`). **This is why video items used to show topic `"—"`:** before the transcript was attached, enrich only saw the ~2-line tweet and had nothing to topic; the transcript gives it real content, so the video gets a real `primary_topic`.
 
-**Skips items it has already enriched — except when their content is newer.** Normally an item with an `Enrichment` is skipped; `--regenerate` re-enriches everything (e.g. after the vocab changes, or after you edit a rubric). But an item whose content was **(re)fetched after** its last enrichment is treated as pending again (`enrich._needs_reenrichment`: `content.fetched_at > enriched.enriched_at`). This is the **re-enrichment trigger** for a video enriched from its tweet *before* the transcript landed: `digest-video`'s `attach_transcript` bumps `content.fetched_at` to attach time, so the freshly-attached transcript is not mistaken for already-processed and the video finally leaves topic `"—"`. The normal order (fetch → enrich) leaves `fetched_at` before `enriched_at`, so nothing re-enriches spuriously; a `fetch --force` refresh benefits from the same trigger.
+**Skips items it has already enriched — except when their content is newer.** Normally an item with an `Enrichment` is skipped; `vocab --regenerate` clears every enrichment so the next `enrich` re-processes everything (e.g. after the vocab changes, or after you edit a rubric). But an item whose content was **(re)fetched after** its last enrichment is treated as pending again (`enrich._needs_reenrichment`: `content.fetched_at > enriched.enriched_at`). This is the **re-enrichment trigger** for a video enriched from its tweet *before* the transcript landed: `digest-video`'s `attach_transcript` bumps `content.fetched_at` to attach time, so the freshly-attached transcript is not mistaken for already-processed and the video finally leaves topic `"—"`. The normal order (fetch → enrich) leaves `fetched_at` before `enriched_at`, so nothing re-enriches spuriously; a `fetch --force` refresh benefits from the same trigger.
 
 ### topics
 
