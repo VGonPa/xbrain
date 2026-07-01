@@ -18,6 +18,7 @@ import os
 import socket
 import urllib.error
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Callable, Union
 from urllib.parse import urlparse
@@ -261,21 +262,44 @@ def _content_source_from(url: str, result: FetchResult) -> ContentSource:
     )
 
 
-def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Content:
-    """Build/refresh the `external_article` sources of an item.
+def _utcnow() -> datetime:
+    """The default `fetch_item` / `fetch_pending` clock (UTC-aware, injectable)."""
+    return datetime.now(timezone.utc)
 
-    x.com links are skipped (see `xbrain.fetch_x`). Only `external_article`
-    sources are rebuilt; every other source kind already on the item is
-    preserved across a re-fetch.
+
+def _source_signature(source: ContentSource) -> tuple[object, ...]:
+    """A *material-content* fingerprint of one source, ignoring fetch bookkeeping.
+
+    Two sources with equal signatures carry the same content even if a re-fetch
+    produced a different `attempts` counter or `error` string. A success is
+    fingerprinted on its extracted `text`; a failure on its categorised evidence
+    (`failure_reason` + `http_status`). `attempts` and the free-form `error` are
+    deliberately excluded — a trafilatura→Firecrawl retry that lands on the same
+    failure is *not* a material change, so it must not re-trigger enrichment.
     """
-    new_sources: list[ContentSource] = []
-    # Dedup: an item whose links repeat a URL must not yield duplicate sources.
+    if isinstance(source, ContentSourceSuccess):
+        return (source.kind, source.url, "success", source.text)
+    return (source.kind, source.url, "failure", source.failure_reason, source.http_status)
+
+
+def _sources_materially_equal(old: list[ContentSource], new: list[ContentSource]) -> bool:
+    """True when two source sets carry the same material content (order-insensitive)."""
+    return Counter(map(_source_signature, old)) == Counter(map(_source_signature, new))
+
+
+def _build_external_sources(item: Item, extractor: ArticleExtractor) -> list[ContentSource]:
+    """Extract the `external_article` sources for an item's non-x links.
+
+    Dedups repeated URLs and isolates a per-URL extractor exception as a
+    transient (`unknown_error`) failure so one bad link cannot abort the batch.
+    """
+    sources: list[ContentSource] = []
     non_x_urls = dict.fromkeys(link.url for link in item.links if not is_x_url(link.url))
     for url in non_x_urls:
         try:
             result = extractor(url)
         except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
-            new_sources.append(
+            sources.append(
                 ContentSourceFailure(
                     kind="external_article",
                     url=url,
@@ -289,9 +313,41 @@ def fetch_item(item: Item, extractor: ArticleExtractor = extract_article) -> Con
                 )
             )
             continue
-        new_sources.append(_content_source_from(url, result))
+        sources.append(_content_source_from(url, result))
+    return sources
+
+
+def fetch_item(
+    item: Item,
+    extractor: ArticleExtractor = extract_article,
+    *,
+    now: Callable[[], datetime] = _utcnow,
+) -> Content:
+    """Build/refresh the `external_article` sources of an item.
+
+    x.com links are skipped (see `xbrain.fetch_x`). Only `external_article`
+    sources are rebuilt; every other source kind already on the item is
+    preserved across a re-fetch.
+
+    **`fetched_at` advances only on a material content change (#44 data-safety).**
+    `fetch_pending` re-fetches a persistently-failing *transient* link on every
+    run (its refetch decision keys on source STATE, not on `fetched_at`). If each
+    identical re-fetch bumped `fetched_at`, `enrich._needs_reenrichment` would
+    re-flag the item forever — one wasted, identical LLM call per stuck item per
+    cycle. So when the re-fetched source set is *materially equivalent* to the
+    existing one (same kinds/urls, same success `text` / failure
+    `reason`+`http_status`), we keep the prior `fetched_at`; it advances only when
+    the content actually changed (a failure that becomes a success, new text, a
+    changed failure reason). `now` is injectable for deterministic tests.
+    """
+    new_sources = _build_external_sources(item, extractor)
     kept = [s for s in item.content.sources if s.kind != "external_article"] if item.content else []
-    return Content(fetched_at=datetime.now(timezone.utc), sources=kept + new_sources)
+    sources = kept + new_sources
+    # Preserve the prior timestamp on a no-material-change re-fetch (see docstring);
+    # only stamp a fresh `now()` when the content set actually changed.
+    if item.content is not None and _sources_materially_equal(item.content.sources, sources):
+        return Content(fetched_at=item.content.fetched_at, sources=sources)
+    return Content(fetched_at=now(), sources=sources)
 
 
 # Failure reasons that justify an automatic retry on the next run. Everything
@@ -347,12 +403,17 @@ def fetch_pending(
     until: datetime | None = None,
     force: bool = False,
     extractor: ArticleExtractor = extract_article,
+    *,
+    now: Callable[[], datetime] = _utcnow,
 ) -> int:
     """Fetch external content for items that have non-x links and no content yet.
 
     A previous fetch whose only failures were transient (timeout, dns_error)
     is automatically retried — `--force` is only needed to retry terminal
-    failures (404, paywall, …) or to re-hit already-successful items.
+    failures (404, paywall, …) or to re-hit already-successful items. A retry
+    that reproduces the same content does NOT advance `content.fetched_at` (see
+    `fetch_item`), so it cannot spuriously re-trigger enrichment. `now` is
+    injectable for deterministic tests.
     """
     fetched = 0
     for item in store.values():
@@ -365,6 +426,6 @@ def fetch_pending(
             continue
         if until and item.created_at > until:
             continue
-        item.content = fetch_item(item, extractor)
+        item.content = fetch_item(item, extractor, now=now)
         fetched += 1
     return fetched
