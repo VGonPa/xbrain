@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 from collections import Counter, defaultdict
 from importlib import resources
 from pathlib import Path
@@ -24,12 +25,21 @@ from xbrain.models import (
     Item,
     MediaPhotoDownloaded,
     MediaPhotoPending,
+    MediaVideoDownloaded,
+    MediaVideoFailed,
+    MediaVideoPending,
     TopicPage,
 )
+
+logger = logging.getLogger(__name__)
 
 # Slug words rendered upper-case (acronyms) or as an ampersand in topic labels.
 _ACRONYMS = frozenset({"ai", "ml", "llm", "mcp", "api", "ux", "ui", "gpu", "seo", "vc", "3d", "x"})
 _THUMB_LIMIT = 18
+# The three video media variants share `type="video"`, `thumbnail_url` and
+# `duration_millis`; discriminating on the union (not a `getattr("type")`
+# sniff) keeps the typed access mypy-checked, matching `generate._render_media_lines`.
+_VIDEO_TYPES = (MediaVideoPending, MediaVideoDownloaded, MediaVideoFailed)
 
 
 def humanize_topic(slug: str) -> str:
@@ -112,6 +122,7 @@ def collect_thumbnails(
                 buffer = io.BytesIO()
                 rgb.save(buffer, "JPEG", quality=78)
             except Exception:  # noqa: BLE001 - a bad image file must not break the dashboard
+                logger.debug("Skipping unreadable thumbnail %s", path, exc_info=True)
                 continue
             thumbs.append(
                 {
@@ -201,7 +212,7 @@ def _media_counts(items: list[Item]) -> dict[str, int]:
                 downloaded += 1
             elif isinstance(entry, MediaPhotoPending):
                 pending += 1
-            if getattr(entry, "type", None) == "video":
+            elif isinstance(entry, _VIDEO_TYPES):
                 videos += 1
     return {"photos_downloaded": downloaded, "photos_pending": pending, "videos": videos}
 
@@ -211,16 +222,16 @@ def _videos(items: list[Item], id2note: dict[str, str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in items:
         for entry in item.media:
-            if getattr(entry, "type", None) != "video":
+            if not isinstance(entry, _VIDEO_TYPES):
                 continue
-            dur = getattr(entry, "duration_millis", None)
+            dur = entry.duration_millis
             rows.append(
                 {
                     "handle": item.author.handle,
                     "date": _date(item),
                     "summary": _summary(item),
                     "dur": round(dur / 1000) if dur else None,
-                    "poster": getattr(entry, "thumbnail_url", None),
+                    "poster": entry.thumbnail_url,
                     "url": item.url,
                     "note": id2note.get(item.id),
                 }
@@ -403,6 +414,28 @@ def _resource(name: str) -> str:
     return (resources.files("xbrain") / "resources" / name).read_text(encoding="utf-8")
 
 
+def _escape_for_script(payload: str) -> str:
+    """Make a JSON payload safe to inline inside a ``<script>`` block.
+
+    ``json.dumps(ensure_ascii=False)`` leaves ``<``/``>``/``&`` raw and lets the
+    JS line terminators U+2028/U+2029 and lone UTF-16 surrogates (from mangled
+    emoji in scraped X text) through. Un-escaped, a ``</script>`` in any post
+    summary/title/handle would close the tag at HTML-parse time — a stored-XSS
+    break-out — and a lone surrogate would crash the UTF-8 write. The escaped
+    forms ``JSON.parse`` back to the originals, so displayed content is identical.
+    """
+    escaped = (
+        payload.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace(chr(0x2028), "\\u2028")
+        .replace(chr(0x2029), "\\u2029")
+    )
+    # Round-trip through UTF-8 to drop lone surrogates (illegal in UTF-8) so
+    # writing the dashboard can never abort the whole `generate` run.
+    return escaped.encode("utf-8", "replace").decode("utf-8")
+
+
 def render_dashboard_html(
     data: dict[str, Any], template: str | None = None, echarts: str | None = None
 ) -> str:
@@ -414,5 +447,8 @@ def render_dashboard_html(
     """
     template = template if template is not None else _resource("dashboard.template.html")
     echarts = echarts if echarts is not None else _resource("echarts.min.js")
-    payload = json.dumps(data, ensure_ascii=False)
-    return template.replace("/*__DATA__*/", payload).replace("/*__ECHARTS__*/", echarts)
+    payload = _escape_for_script(json.dumps(data, ensure_ascii=False))
+    # Inject the trusted (fixed) library first and the user-derived payload LAST,
+    # so a summary/title containing the literal `/*__ECHARTS__*/` sentinel can
+    # never splice the library into the JSON on a re-scan.
+    return template.replace("/*__ECHARTS__*/", echarts).replace("/*__DATA__*/", payload)

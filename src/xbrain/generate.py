@@ -115,7 +115,10 @@ def generate(
             if media_root is not None:
                 _mirror_item_media(item, media_root, output_dir / _VAULT_MEDIA_SUBDIR)
             _write_note(items_dir, item, strings, topic_style)
-    _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+    try:
+        _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+    except Exception:  # noqa: BLE001 - the dashboard is a best-effort secondary artifact
+        logger.warning("Dashboard generation failed; item notes were written.", exc_info=True)
 
 
 def _write_dashboard(
@@ -132,7 +135,13 @@ def _write_dashboard(
     Photo thumbnails come from `media_root`; topic overviews from `topic_pages`.
     No browser is involved — the HTML is template + injected JSON.
     """
-    id2note = {item.id: str(items_dir / note_filename(item)) for item in items if _has_note(item)}
+    # Absolute paths: `obsidian://open?path=` requires them, and `output_dir`
+    # can be relative when the configured vault is relative.
+    id2note = {
+        item.id: str((items_dir / note_filename(item)).resolve())
+        for item in items
+        if _has_note(item)
+    }
     thumbs = collect_thumbnails(items, media_root, id2note)
     now = datetime.now(timezone.utc)
     updated = f"{now:%b} {now.day}, {now.year}".upper()
