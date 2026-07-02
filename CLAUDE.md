@@ -83,7 +83,8 @@ generates an Obsidian wiki.
   plumbing. `text` stays the flattened body (= concatenation of the text blocks) so
   `enrich`/`topics`/`generate`'s fallback consume it unchanged. Optional + additive
   (defaults to `[]`) → existing `items.json` loads unchanged, same as `frames`. The
-  download walk (`media`) and blogpost renderer (`generate`) land in the later #39 PRs.
+  download walk (`media`, PR4) and the blogpost renderer (`generate`, PR5) complete
+  the chain — a bookmarked Article renders end-to-end as an ordered blogpost note.
 - X Articles — extract link synthesis (#39 PR2): `graphql._extract_article_link`
   detects a directly-bookmarked long-form Article (the `article` entity on the tweet
   result: `article.article_results.result.rest_id`, anchored via `_dig`) and
@@ -118,7 +119,18 @@ generates an Obsidian wiki.
   **`--force` decision (documented):** `fetch --force` rebuilds `x_article` with fresh
   `MediaPhotoPending`, so a forced re-fetch resets image state and the next `media` run
   re-downloads — the conscious "redo from scratch" choice (not carry-forward), consistent
-  with `fetch --force`/photo `--force`. Render (embed into the note) is PR5, not PR4.
+  with `fetch --force`/photo `--force`.
+- X Articles — blogpost render (#39 PR5): `generate._article_blocks_lines` renders an
+  `x_article` source with non-empty `blocks` as an ordered blogpost under `## Content:
+  <title>` — walking `source.blocks` IN AUTHORED ORDER: `ArticleTextBlock` → a body
+  paragraph (the baked `\n\n` separator stripped via `removeprefix` so it never leaks
+  as a stray blank line), `ArticleImageBlock` → an inline `![[_media/<id>/article/<n>]]`
+  embed (alt + a described image's caption as `> …` lines; failed → `⚠ Imagen no
+  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`.
+  `_mirror_item_article_images` copies the bytes into the vault via the shared
+  `_mirror_file`, keyed by the STORED `local_path` (no per-source index recompute). An
+  `x_article` with empty `blocks` (trafilatura fallback / pre-#39) renders the plain
+  `source.text` — byte-unchanged, no regression. Deterministic + regen-stable.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

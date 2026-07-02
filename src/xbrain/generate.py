@@ -12,6 +12,8 @@ from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
 from xbrain.i18n import Strings, strings_for
 from xbrain.models import (
+    ArticleImageBlock,
+    ArticleTextBlock,
     Content,
     ContentSourceFailure,
     ContentSourceSuccess,
@@ -51,6 +53,15 @@ _FAILURE_ES: dict[FailureReason, str] = {
 # the top of file listings and matches the convention used by static-
 # site generators (Hugo, Jekyll) for non-content assets.
 _VAULT_MEDIA_SUBDIR = "_media"
+
+# The inter-paragraph separator the PR3 article parser bakes into the `text` of
+# every NON-first `ArticleTextBlock`, so the flattened `text` equals the ordered
+# concatenation of the block texts (the PR1 `text`-is-flattened-body invariant).
+# When rendering the blocks interleaved (block-by-block), the renderer strips
+# this leading separator off each text block — it re-supplies paragraph spacing
+# with its own blank lines — so the baked separator never leaks as a stray blank
+# line. Kept in sync with `xbrain.extract.article._PARAGRAPH_SEP`.
+_ARTICLE_PARAGRAPH_SEP = "\n\n"
 
 
 def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
@@ -126,6 +137,7 @@ def generate(
                 vault_media_dir = output_dir / _VAULT_MEDIA_SUBDIR
                 _mirror_item_media(item, media_root, vault_media_dir)
                 _mirror_item_frames(item, media_root, vault_media_dir)
+                _mirror_item_article_images(item, media_root, vault_media_dir)
             _write_note(items_dir, item, strings, topic_style)
     try:
         _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
@@ -369,6 +381,36 @@ def _mirror_item_frames(item: Item, media_root: Path, vault_media_dir: Path) -> 
             _mirror_file(item.id, media_root / frame.local_path, vault_media_dir / frame.local_path)
 
 
+def _mirror_item_article_images(item: Item, media_root: Path, vault_media_dir: Path) -> None:
+    """Mirror every downloaded inline Article image on `item` into the vault (#39 PR5).
+
+    An X long-form Article's inline images live OUTSIDE `item.media` — on the
+    `x_article` `ContentSourceSuccess.blocks` as `ArticleImageBlock`s. PR4
+    downloads each into the namespaced `data/media/<id>/article/<n>.<ext>` path
+    (the STORED `MediaPhotoDownloaded.local_path`); this mirrors those bytes to
+    `<output_dir>/_media/<id>/article/<n>.<ext>` so the `![[_media/…]]` blogpost
+    embed resolves in a self-contained vault — the SAME `_mirror_file` the photo
+    and slide-frame blocks use. The stored `local_path` is copied verbatim (no
+    per-source index recompute — the index is global across the item's Articles).
+    A missing byte renders a broken embed (via `_mirror_file`), never a crash.
+    """
+    if item.content is None:
+        return
+    for source in item.content.sources:
+        if not (isinstance(source, ContentSourceSuccess) and source.kind == "x_article"):
+            continue
+        for block in source.blocks:
+            if not isinstance(block, ArticleImageBlock):
+                continue
+            entry = block.media
+            # Only the on-disk states (downloaded / described) carry a
+            # `local_path` to mirror; pending/failed/video variants have no bytes.
+            if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
+                _mirror_file(
+                    item.id, media_root / entry.local_path, vault_media_dir / entry.local_path
+                )
+
+
 def _slide_embed_lines(frames: list[VideoFrame]) -> list[str]:
     """Embed each kept key-frame slide + its vision description caption (#44 PR4).
 
@@ -412,6 +454,86 @@ def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[
     return lines
 
 
+def _article_image_lines(block: ArticleImageBlock) -> list[str]:
+    """Render one inline Article image block (#39 PR5) — embed, warning, or silent.
+
+    Mirrors the photo convention in `_render_media_lines`:
+    - `MediaPhotoDownloaded` / `MediaPhotoDescribed` → the `![[_media/<id>/article/<n>.<ext>]]`
+      embed (the STORED `local_path` carries the `article/` namespace), followed
+      by any caption lines: the author's `alt` text and — for a described image —
+      the vision description, each as `> …` blockquote lines (one `>` per physical
+      line so a multi-line caption can't spill out of the blockquote).
+    - `MediaPhotoFailed` → a one-line `⚠ Imagen no disponible (<reason>): <url>`
+      note (reason via `_FAILURE_ES_MEDIA`) — visible evidence, never a silent drop.
+    - `MediaPhotoPending` → silent (a future `xbrain media` run advances it).
+
+    A video variant never appears on an article image (the PR3 producer only ever
+    emits photo states); if a malformed record carries one, it is logged and
+    skipped rather than crashing generation.
+    """
+    entry = block.media
+    if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
+        lines = [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]"]
+        lines += _article_caption_lines(block, entry)
+        return lines
+    if isinstance(entry, MediaPhotoFailed):
+        reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
+        return [f"> ⚠ Imagen no disponible ({reason}): <{entry.url}>"]
+    if isinstance(entry, MediaPhotoPending):
+        return []  # Silent: a future `xbrain media` run will advance this image.
+    logger.warning(
+        "Article image carries an unexpected %s media variant; skipping its embed.",
+        type(entry).__name__,
+    )
+    return []
+
+
+def _article_caption_lines(
+    block: ArticleImageBlock, entry: MediaPhotoDownloaded | MediaPhotoDescribed
+) -> list[str]:
+    """Caption lines under an inline Article image: the author's `alt` then, for a
+    described image, its vision description — each `> …`, one line per physical line."""
+    lines: list[str] = []
+    if block.alt:
+        lines += [f"> {line}" for line in block.alt.splitlines()]
+    if isinstance(entry, MediaPhotoDescribed) and entry.description:
+        lines += [f"> {line}" for line in entry.description.splitlines()]
+    return lines
+
+
+def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> list[str]:
+    """Render an `x_article` source with structured `blocks` as a blogpost (#39 PR5).
+
+    Walks `source.blocks` IN ORDER under a `## <content_header>: <title>` heading:
+    each `ArticleTextBlock` becomes a body paragraph (with the baked `\\n\\n`
+    separator stripped — see `_ARTICLE_PARAGRAPH_SEP`), each `ArticleImageBlock`
+    an inline `![[_media/…]]` embed (or a warning / silence) via `_article_image_lines`.
+    The result reads as authored — text and images interleaved where the author
+    placed them. Only called for a NON-empty `blocks`; the empty-`blocks`
+    (trafilatura fallback) path renders `source.text` in `_content_lines`.
+
+    The body is computed first: if every block renders to nothing (e.g. an
+    image-only Article whose sole image is still `MediaPhotoPending` — the normal
+    post-`fetch`/pre-`media` state), the bare `## <content_header>:` heading is
+    NOT emitted, mirroring how `_video_digest_lines` avoids an empty digest block.
+    """
+    body: list[str] = []
+    for block in source.blocks:
+        if isinstance(block, ArticleTextBlock):
+            text = block.text.removeprefix(_ARTICLE_PARAGRAPH_SEP)
+            if text:
+                body += [text, ""]
+        else:
+            image_lines = _article_image_lines(block)
+            if image_lines:
+                body += image_lines
+                body.append("")
+    if not body:
+        return []
+    heading = source.title or source.url
+    return [f"## {strings.content_header}: {heading}", "", *body]
+
+
 def _content_lines(content: Content, strings: Strings) -> list[str]:
     """Rendered article bodies + broken-link evidence for a fetched item.
 
@@ -421,13 +543,23 @@ def _content_lines(content: Content, strings: Strings) -> list[str]:
     failed thread fetch is silently elided, matching the pre-refactor
     behaviour — `source.kind` is what guarded that path before). An
     `x_video` success is rendered as a `Video digest` section rather than
-    a generic content block (#44).
+    a generic content block (#44); an `x_article` success with structured
+    `blocks` renders as an ordered blogpost (text + inline image embeds)
+    rather than a plain text block (#39 PR5), while an `x_article` with
+    empty `blocks` (trafilatura fallback) keeps the plain `source.text`
+    block — byte-unchanged.
     """
     lines: list[str] = []
     for source in content.sources:
         if isinstance(source, ContentSourceSuccess):
             if source.kind == "x_video":
                 lines += _video_digest_lines(source, strings)
+            elif source.kind == "x_article" and source.blocks:
+                # Structured Article (#39): render the ordered text+image blocks
+                # as a blogpost. An `x_article` with EMPTY blocks (trafilatura
+                # fallback, or a pre-#39 record) falls through to the plain
+                # `source.text` path below — byte-unchanged, no regression.
+                lines += _article_blocks_lines(source, strings)
             else:
                 heading = source.title or source.url
                 lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
