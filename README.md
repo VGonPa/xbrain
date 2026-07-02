@@ -165,7 +165,10 @@ posts → fewer topics → one index.
 
 One note per bookmark or own-tweet: the original text, the link, the **linked
 article fetched and stored inline**, an LLM summary and its topics. A saved link
-stops being a URL that will quietly rot and becomes a saved *article*.
+stops being a URL that will quietly rot and becomes a saved *article*. This now
+includes an X long-form **Article you bookmarked directly** (not just one linked
+inside a tweet): `extract` detects the Article and threads it into the same fetch
+pipeline as any other x.com link.
 
 A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
 and its transcript is attached to the item, so the video flows through the *same*

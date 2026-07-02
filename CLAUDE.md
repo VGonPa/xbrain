@@ -85,6 +85,14 @@ generates an Obsidian wiki.
   (defaults to `[]`) → existing `items.json` loads unchanged, same as `frames`. The
   producer (`fetch`), download walk (`media`) and blogpost renderer (`generate`)
   land in the later #39 PRs; PR1 is model-only (no behaviour change).
+- X Articles — extract link synthesis (#39 PR2): `graphql._extract_article_link`
+  detects a directly-bookmarked long-form Article (the `article` entity on the tweet
+  result: `article.article_results.result.rest_id`, anchored via `_dig`) and
+  synthesizes its canonical `https://x.com/i/article/<id>` `Link` (deduped against
+  `entities.urls`) so the existing `fetch` x.com path fires for it — no routing/model
+  change. A missing/malformed Article node degrades to no link (never a wrong one).
+  Model-independent (uses the existing `Link`). Fixture is **constructed**, not a
+  recorded live payload — validate the key path against a real capture before prod.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).
