@@ -84,6 +84,4 @@ command = "parakeet-mlx"
 #   local (Apple Silicon, free/offline): qwen-3b | qwen-7b | qwen-32b | <hf/repo>
 #   cloud (needs ANTHROPIC_API_KEY):      opus | sonnet | haiku | claude-<id>
 # command = "/absolute/path/to/scripts/xbrain-vision"
-# model = "qwen-3b"
-# Optional model id passed through to the vision command. Omit for its default.
-# model = "qwen2-vl-7b"
+# model = "qwen-3b"                       # omit → the wrapper's default (qwen-3b)

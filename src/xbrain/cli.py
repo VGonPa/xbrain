@@ -1217,6 +1217,8 @@ def digest_video(
     registra el motivo. Sin `--frames` el flujo es idéntico al de PR2/PR3.
     """
     cfg = _config()
+    if vision_model and not frames:
+        raise typer.BadParameter("--vision-model requires --frames (the visual layer is off)")
     _run_digest_video(
         cfg,
         ids=ids,

@@ -2379,6 +2379,15 @@ def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
     assert seen and set(seen) == {"opus"}  # override reached the vision command
 
 
+def test_digest_video_vision_model_without_frames_errors(tmp_path: Path, monkeypatch):
+    """`--vision-model` without `--frames` is a hard error, not a silent no-op."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--vision-model", "opus"])
+    assert result.exit_code != 0
+    assert "--frames" in result.output
+
+
 def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatch):
     """With no `--vision-model`, the run uses `[vision].model` from config."""
     _setup_repo(tmp_path, monkeypatch)

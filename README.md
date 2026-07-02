@@ -475,9 +475,12 @@ xbrain digest-video --ids <slide-heavy-id> --frames --vision-model opus   # clou
 xbrain digest-video --topic ai-coding --frames --vision-model qwen-7b     # better local
 ```
 
-`--vision-model` overrides `[vision].model` for that run only. Local mlx models
-download once and cache; the cloud backend needs `XBRAIN_VISION_MLX_PYTHON` only
-if mlx-vlm is not at the uv-tool default (`~/.local/share/uv/tools/mlx-vlm`).
+`--vision-model` overrides `[vision].model` for that run only (and requires
+`--frames`). Local mlx models download once and cache; the **local** backend
+reads `XBRAIN_VISION_MLX_PYTHON` only if mlx-vlm is not at the uv-tool default
+(`~/.local/share/uv/tools/mlx-vlm`). Pre-pull a **large** local model once before
+a `--frames` run — a cold `qwen-32b` (~18 GB) download can exceed the 300 s
+per-frame vision timeout and fail the first run (a re-run uses the cache).
 
 ---
 
