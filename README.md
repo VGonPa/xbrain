@@ -172,8 +172,9 @@ pipeline as any other x.com link. `fetch` then captures the Article as a
 **structured, ordered body** — its paragraphs and inline images in the order the
 author wrote them — so it can later render as a blogpost with inline images; if
 that structured capture can't be read, it **falls back to text-only** extraction
-(no images), exactly as before. (Downloading those inline images and embedding
-them into the rendered note land in later steps of the same feature.)
+(no images), exactly as before. [`media`](#commands) then **downloads those inline
+images** locally alongside the item's own photos (under `data/media/<id>/article/`);
+embedding them into the rendered note is the last step of the same feature.
 
 A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
 and its transcript is attached to the item, so the video flows through the *same*
@@ -555,7 +556,7 @@ uv run xbrain <command> [options]
 | `extract` | Extract bookmarks and/or own tweets from X. `--source bookmarks\|tweets\|all`. |
 | `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
 | `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
-| `media` | Download X-post photos referenced in `Item.media` and render them inline in the wiki. `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
+| `media` | Download X-post photos referenced in `Item.media` **and the inline images of a bookmarked X Article** (stored under `data/media/<id>/article/<n>`, separate from the item's own photos), reusing the one photo-download engine for both. `--limit` is a combined budget; the SUMMARY reports article images separately. Item photos render inline in the wiki; embedding the downloaded Article images into the note lands with the PR5 renderer. `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
 | `describe` | Describe downloaded photos with a vision LLM (Claude Sonnet 4.6 by default) and feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described photos unless `[describe].version` is bumped in `config.toml`. |
 | `refresh-media` | Re-capture X and backfill the **playable video URL + bitrate + duration** onto items whose video is still poster-era (incremental `extract` + non-overwriting merge never refresh existing videos). Video-only — photos and enrichment/description state are preserved, and a good video is never degraded back to its poster if X drifts. Scrolls the full history (slow); destructive → auto-snapshot; prints a download-size estimate. Does **not** download video (that is `download-videos`). Re-seeing 0 known items on a non-empty store (likely expired session / GraphQL drift) aborts without saving unless `--force`. `--source bookmarks\|tweets\|all`, `--force`. |
 | `download-videos` | Download the actual **mp4 bytes** for backfilled videos and embed them inline in the wiki — the video counterpart to `media`. mp4 only: HLS (`.m3u8`) needs ffmpeg and is a deferred follow-up (skipped + counted); poster-era entries (run `refresh-media` first) are skipped too. Prints a `~X.X GB` size estimate and asks for confirmation **unless `--yes`**. `--max-size 500MB\|2GB` skips videos whose estimated size exceeds the cap. Validates the response is really a video (rejects HTML/JSON interstitials served as 200). Destructive → auto-snapshot; idempotent (re-runs skip downloaded videos unless `--force`). `--source bookmarks\|tweets\|all`, `--limit N`, `--items <a,b,c>`, `--max-size <size>`, `--force`, `--yes`. See [Local media storage](#local-media-storage). |
@@ -582,24 +583,31 @@ Run `uv run xbrain <command> --help` for the full option list.
 
 ## Local media storage
 
-`xbrain media` downloads X-post photos and persists the bytes locally so
-the generated wiki shows the images inline.
+`xbrain media` downloads X-post photos **and the inline images of a
+bookmarked X Article** and persists the bytes locally. Item photos are then
+shown inline in the generated wiki; embedding the downloaded Article images
+into the note lands with the PR5 renderer.
 
 **Layout**
 
 ```
 data/
 └── media/
-    ├── 1234567890/    # one directory per item id
-    │   ├── 0.jpg      # one file per photo, indexed by media position
+    ├── 1234567890/        # one directory per item id
+    │   ├── 0.jpg          # one file per photo, indexed by media position
     │   ├── 1.jpg
-    │   └── 2.png
+    │   ├── 2.png
+    │   └── article/       # inline images of an X Article (#39), namespaced
+    │       ├── 0.jpg      #   so they never collide with the item's photos
+    │       └── 1.png
     └── ...
 ```
 
-Files are stored under `data/media/<item-id>/<index>.<ext>`; the extension
-matches the format the X CDN sent us (`.jpg`, `.png`, or `.webp`).
-`data/` is gitignored — the bytes never enter the repo.
+Item photos are stored under `data/media/<item-id>/<index>.<ext>` and Article
+inline images under `data/media/<item-id>/article/<n>.<ext>` (both via the
+same download engine); the extension matches the format the X CDN sent us
+(`.jpg`, `.png`, or `.webp`). `data/` is gitignored — the bytes never enter
+the repo.
 
 **Vault rendering**
 

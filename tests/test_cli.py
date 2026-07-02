@@ -266,6 +266,104 @@ def test_media_command_propagates_total_failure_as_exit_1(tmp_path: Path, monkey
     assert isinstance(reloaded["99"].media[0], _MPF)
 
 
+def _article_item_with_pending_image(item_id: str, image_url: str) -> Item:
+    """An item whose `x_article` source carries one pending inline image (#39 PR4)."""
+    from xbrain.models import (
+        ArticleImageBlock,
+        ArticleTextBlock,
+        Content,
+        ContentSourceSuccess,
+        MediaPhotoPending,
+    )
+
+    source = ContentSourceSuccess(
+        kind="x_article",
+        url=f"https://x.com/i/article/{item_id}",
+        title="An Article",
+        text="Body text.",
+        blocks=[
+            ArticleTextBlock(text="Body text."),
+            ArticleImageBlock(media=MediaPhotoPending(url=image_url)),
+        ],
+        http_status=200,
+        attempts=1,
+    )
+    item = _linked_item(item_id)
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        sources=[source],
+    )
+    return item
+
+
+def test_media_command_downloads_article_inline_images(tmp_path: Path, monkeypatch):
+    """End-to-end: `xbrain media` downloads an Article's inline image to `<id>/article/`."""
+    import io as _io
+
+    from PIL import Image
+
+    from xbrain.models import MediaPhotoDownloaded
+
+    _setup_repo(tmp_path, monkeypatch)
+    item = _article_item_with_pending_image("77", "https://pbs.twimg.com/media/ART.png")
+    save_store({"77": item}, tmp_path / "data" / "items.json")
+
+    buffer = _io.BytesIO()
+    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(buffer, format="PNG")
+    bytes_data = buffer.getvalue()
+
+    class _FakeSession:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+
+        def get(self, _url, *, timeout):
+            class _Resp:
+                status_code = 200
+                content = bytes_data
+
+            return _Resp()
+
+    monkeypatch.setattr("xbrain.media.requests.Session", _FakeSession)
+    result = runner.invoke(app, ["media"])
+    assert result.exit_code == 0, result.output
+
+    from xbrain.store import load_store
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    block = reloaded["77"].content.sources[0].blocks[1]
+    assert isinstance(block.media, MediaPhotoDownloaded)
+    assert block.media.local_path == "77/article/0.png"
+    assert (tmp_path / "data" / "media" / "77" / "article" / "0.png").exists()
+    # The pre-media snapshot fired (article images ride the SAME snapshot boundary).
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-media" in p.name for p in snapshots)
+
+
+def test_media_command_snapshot_failure_aborts_before_any_write(tmp_path: Path, monkeypatch):
+    """A snapshot failure propagates and aborts — the Article image stays pending."""
+    from xbrain.models import MediaPhotoPending
+
+    _setup_repo(tmp_path, monkeypatch)
+    item = _article_item_with_pending_image("88", "https://pbs.twimg.com/media/ARTX.png")
+    save_store({"88": item}, tmp_path / "data" / "items.json")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("snapshot disk full")
+
+    # The download session must never be reached: if the snapshot aborts first,
+    # no HTTP call and no store write happen.
+    monkeypatch.setattr("xbrain.cli.snapshot.snapshot_create", _boom)
+    result = runner.invoke(app, ["media"])
+    assert result.exit_code != 0
+
+    from xbrain.store import load_store
+
+    reloaded = load_store(tmp_path / "data" / "items.json")
+    block = reloaded["88"].content.sources[0].blocks[1]
+    assert isinstance(block.media, MediaPhotoPending)  # untouched
+    assert not (tmp_path / "data" / "media" / "88").exists()
+
+
 def test_media_command_warns_when_items_filter_matches_nothing(tmp_path: Path, monkeypatch):
     """`--items` with IDs absent from the store prints an AVISO to stderr."""
     _setup_repo(tmp_path, monkeypatch)
@@ -322,7 +420,7 @@ def test_media_command_verbose_lists_failed_urls(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("xbrain.media.requests.Session", _MixedSession)
     result = runner.invoke(app, ["media", "--verbose"])
     assert result.exit_code == 0
-    assert "Failed photos" in result.output
+    assert "Failed media" in result.output
     assert "http_4xx" in result.output
     assert "V2" in result.output
 
