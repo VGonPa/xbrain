@@ -536,13 +536,16 @@ def _run_media(
         # MediaPhotoFailed records that landed before the raise.
         save_store(store, cfg.items_path)
     media_emit_summary_line(report)
+    article_failed = report.article_images_failed_permanent + report.article_images_failed_transient
     typer.echo(
         f"Media: descargadas {report.photos_downloaded}, "
         f"fallidas {report.photos_failed_permanent + report.photos_failed_transient}, "
-        f"saltadas {report.photos_skipped_already_downloaded}"
+        f"saltadas {report.photos_skipped_already_downloaded} "
+        f"(imágenes de artículo: descargadas {report.article_images_downloaded}, "
+        f"fallidas {article_failed})"
     )
     if verbose and report.per_item_failures:
-        typer.echo("Failed photos:", err=True)
+        typer.echo("Failed media:", err=True)
         for item_id, failures in sorted(report.per_item_failures.items()):
             for url, reason in failures:
                 typer.echo(f"  {item_id}  {reason:<14}  {url}", err=True)

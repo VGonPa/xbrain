@@ -103,6 +103,20 @@ generates an Obsidian wiki.
   `_attach_x_sources` bumps `fetched_at` only on a material `x_article` change (reusing
   `fetch._sources_materially_equal`) so a richer body re-triggers enrich. Fixture +
   op-name are **constructed/unconfirmed** — validate against a real capture (open-Q #4).
+- X Articles — inline-image download (#39 PR4): `media.download_all` extends the photo
+  walk to advance each `ArticleImageBlock.media` on an `x_article` source
+  (`_iter_eligible_article_images` mirrors `_iter_eligible_attempts`), reusing the SAME
+  `_download_one` engine/size-cascade/throttle/failure-classification — no new download
+  loop. Bytes land at a **namespaced** `data/media/<id>/article/<n>.<ext>` (via
+  `_local_path(..., subdir="article")`) so they never collide with the item's own
+  `<id>/<n>` photos; the result is swapped **in place** onto `block.media` (safe —
+  no `validate_assignment`, images don't affect `text`). Dedicated `MediaReport.article_images_*`
+  counters + SUMMARY fields (skips share `photos_skipped_already_downloaded`); the
+  total-failure `RuntimeError` and `--limit` key on the **combined** photos+article totals.
+  **`--force` decision (documented):** `fetch --force` rebuilds `x_article` with fresh
+  `MediaPhotoPending`, so a forced re-fetch resets image state and the next `media` run
+  re-downloads — the conscious "redo from scratch" choice (not carry-forward), consistent
+  with `fetch --force`/photo `--force`. Render (embed into the note) is PR5, not PR4.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

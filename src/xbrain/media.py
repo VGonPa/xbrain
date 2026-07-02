@@ -1,4 +1,4 @@
-"""Download X-post photos referenced in `Item.media`.
+"""Download X-post photos referenced in `Item.media` (and inline Article images).
 
 Photos only — videos remain in `MediaVideoPending`. The orchestrator
 `download_all` walks every photo entry, downloads from the X CDN with a
@@ -9,8 +9,18 @@ transient bucket (`http_5xx`, `timeout`, `unknown_error`) is auto-retried
 on the next run; permanent failures (`http_4xx`, `format_error`) need
 `--force`.
 
+Beyond `Item.media`, the same walk advances the **inline images of an X
+long-form Article** (#39 PR4): each `ArticleImageBlock.media` on an
+`x_article` `ContentSourceSuccess.blocks` starts as a `MediaPhotoPending`
+(emitted by `fetch`) and is downloaded through the SAME `_download_one`
+engine, only written to a namespaced `data/media/<id>/article/<n>.<ext>`
+path so it never collides with the item's own `<id>/<n>` photos. The
+in-place swap sets `block.media`; article-image counts are reported
+separately (`MediaReport.article_images_*`) and the total-failure guard
+keys on the COMBINED (photos + article images) totals.
+
 Persistence is the caller's responsibility — `download_all` mutates items
-in place and calls an `on_progress` hook after each photo, so a Ctrl-C
+in place and calls an `on_progress` hook after each photo/image, so a Ctrl-C
 mid-batch leaves `items.json` coherent. I/O dependencies (HTTP session,
 sleep) are keyword-injectable so tests run offline.
 """
@@ -32,6 +42,8 @@ import requests
 from PIL import Image, UnidentifiedImageError
 
 from xbrain.models import (
+    ArticleImageBlock,
+    ContentSourceSuccess,
     Item,
     MediaEntry,
     MediaFailureReason,
@@ -116,6 +128,15 @@ class MediaReport:
     photos_failed_permanent: int = 0
     photos_failed_transient: int = 0
     photos_skipped_already_downloaded: int = 0
+    # Inline X-Article images (#39 PR4) — counted SEPARATELY from photos so
+    # article-image downloads stay visible in the SUMMARY, never folded into
+    # the photo totals. Already-downloaded article images bump the SHARED
+    # `photos_skipped_already_downloaded` (same "bytes already on disk"
+    # semantics). `bytes_downloaded` is the combined byte total.
+    article_images_attempted: int = 0
+    article_images_downloaded: int = 0
+    article_images_failed_permanent: int = 0
+    article_images_failed_transient: int = 0
     bytes_downloaded: int = 0
     elapsed_seconds: float = 0.0
     # Per-item failures keyed by item id → list of (url, reason) tuples.
@@ -199,17 +220,91 @@ def download_all(
         if throttle_seconds > 0:
             sleep(throttle_seconds)
 
+    # Article inline images (#39 PR4) share the SAME per-run download budget:
+    # whatever `--limit` slots the photo loop left over. `None` = unbounded.
+    remaining_limit = None if limit is None else max(limit - report.photos_attempted, 0)
+    _download_article_images(
+        candidate_items,
+        media_root,
+        force=force,
+        remaining_limit=remaining_limit,
+        session=session,
+        timeout_seconds=timeout_seconds,
+        throttle_seconds=throttle_seconds,
+        sleep=sleep,
+        on_progress=on_progress,
+        report=report,
+    )
+
     report.elapsed_seconds = time.monotonic() - started
-    if report.photos_attempted > 0 and report.photos_downloaded == 0:
-        # Total-failure short-circuit: no good bytes landed anywhere this
-        # run. Tell the operator loudly. The CLI surfaces it via
-        # `_handle_cli_errors`.
+    # Total-failure short-circuit keys on the COMBINED (photos + article images)
+    # totals: a run that downloads 0 photos but N article images (or vice-versa)
+    # is a partial success, not a total failure. Only when NOTHING landed do we
+    # raise. Tell the operator loudly — the CLI surfaces it via
+    # `_handle_cli_errors`.
+    total_attempted = report.photos_attempted + report.article_images_attempted
+    total_downloaded = report.photos_downloaded + report.article_images_downloaded
+    if total_attempted > 0 and total_downloaded == 0:
         raise RuntimeError(
-            f"All {report.photos_attempted} photo download attempts failed; "
-            "check network / pbs.twimg.com availability and the per-photo "
+            f"All {total_attempted} media download attempts failed; "
+            "check network / pbs.twimg.com availability and the per-item "
             "warnings above."
         )
     return report
+
+
+def _download_article_images(
+    items: dict[str, Item],
+    media_root: Path,
+    *,
+    force: bool,
+    remaining_limit: int | None,
+    session: requests.Session,
+    timeout_seconds: int,
+    throttle_seconds: float,
+    sleep: Callable[[float], None],
+    on_progress: Callable[[], None] | None,
+    report: MediaReport,
+) -> None:
+    """Download every eligible inline Article image, swapping `block.media` in place.
+
+    Mirrors the photo loop in `download_all` — the SAME `_download_one` engine,
+    size cascade, throttle and `on_progress` (Ctrl-C-coherent) seam — but writes
+    to the namespaced `<id>/article/<n>.<ext>` path (via `subdir="article"`) so
+    an article image never collides with the item's own `<id>/<n>` photos, and
+    updates the dedicated `article_images_*` counters.
+
+    `remaining_limit` is the COMBINED per-run download budget left after the
+    photo loop (`None` = unbounded); the walk stops once it is exhausted, so
+    `--limit` bounds photos + article images together. A budget already at zero
+    skips the article walk entirely (no skip-counting churn), matching the photo
+    loop's top-of-iteration limit check.
+    """
+    if remaining_limit is not None and remaining_limit <= 0:
+        return
+    for item_id, block, index, entry in _iter_eligible_article_images(
+        items, force=force, report=report
+    ):
+        if remaining_limit is not None and remaining_limit <= 0:
+            return
+        report.article_images_attempted += 1
+        result = _download_one(
+            entry,
+            item_id=item_id,
+            index=index,
+            media_root=media_root,
+            session=session,
+            timeout_seconds=timeout_seconds,
+            subdir="article",
+        )
+        block.media = result
+        _record_outcome(report, item_id=item_id, entry=result, article=True)
+        if on_progress is not None:
+            on_progress()
+        if remaining_limit is not None:
+            remaining_limit -= 1
+        if throttle_seconds > 0:
+            sleep(throttle_seconds)
 
 
 def _is_eligible(entry: MediaEntry, *, force: bool) -> bool:
@@ -303,26 +398,112 @@ def _iter_eligible_attempts(
             yield item_id, item, index, entry
 
 
+def _article_image_blocks(item: Item) -> Iterator[tuple[int, ArticleImageBlock]]:
+    """Yield `(image_index, block)` for every inline image of an item's Articles.
+
+    Walks each `x_article` `ContentSourceSuccess` on `item.content` in order and
+    yields its `ArticleImageBlock`s with a per-item running `image_index`. The
+    index counts EVERY image block (text blocks and non-image content excluded),
+    so it is stable regardless of a block's download state — the guarantee the
+    `<id>/article/<n>` namespace relies on (an already-downloaded block 0 must
+    not shift a pending block 1 down to `article/0`). An item with no content or
+    no article source yields nothing.
+    """
+    if item.content is None:
+        return
+    image_index = 0
+    for source in item.content.sources:
+        if not (isinstance(source, ContentSourceSuccess) and source.kind == "x_article"):
+            continue
+        for block in source.blocks:
+            if isinstance(block, ArticleImageBlock):
+                yield image_index, block
+                image_index += 1
+
+
+def _iter_eligible_article_images(
+    items: dict[str, Item],
+    *,
+    force: bool,
+    report: MediaReport,
+) -> Iterator[
+    tuple[
+        str,
+        ArticleImageBlock,
+        int,
+        MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded | MediaPhotoDescribed,
+    ]
+]:
+    """Yield each (item_id, block, image_index, entry) article image to download.
+
+    Mirrors `_iter_eligible_attempts` for the inline images living OUTSIDE
+    `item.media` — on the `x_article` `ContentSourceSuccess.blocks`. Applies the
+    SAME `_is_eligible` cascade (pending always; transient-failed on retry;
+    downloaded/described only under `--force`). Side effects on `report`: bumps
+    `items_processed` once per article-only item (an item with `item.media` was
+    already counted by the photo walk), and the SHARED
+    `photos_skipped_already_downloaded` once per already-downloaded/described
+    image passed over without `--force` (same "bytes already on disk" semantics
+    the plan mandates). The caller swaps the yielded `entry` back onto
+    `block.media`.
+    """
+    for item_id, item in items.items():
+        # Items with `item.media` were already counted by the photo walk; count
+        # an article-only item the first time we touch one of its images.
+        counted = bool(item.media)
+        for image_index, block in _article_image_blocks(item):
+            if not counted:
+                report.items_processed += 1
+                counted = True
+            entry = block.media
+            if not _is_eligible(entry, force=force):
+                if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
+                    report.photos_skipped_already_downloaded += 1
+                continue
+            # `_is_eligible` already excluded every video variant; narrow for mypy.
+            assert isinstance(
+                entry,
+                (
+                    MediaPhotoPending,
+                    MediaPhotoFailed,
+                    MediaPhotoDownloaded,
+                    MediaPhotoDescribed,
+                ),
+            )
+            yield item_id, block, image_index, entry
+
+
 def _record_outcome(
     report: MediaReport,
     *,
     item_id: str,
     entry: MediaPhotoDownloaded | MediaPhotoFailed,
+    article: bool = False,
 ) -> None:
     """Bump the report counters based on the post-transition variant.
 
-    A successful download contributes to `photos_downloaded` and
-    `bytes_downloaded`; a failed one to the appropriate transient /
-    permanent bucket and to `per_item_failures` (keyed by item id). Every
+    A successful download contributes to `photos_downloaded` /
+    `article_images_downloaded` and the shared `bytes_downloaded`; a failed
+    one to the appropriate transient / permanent bucket and to
+    `per_item_failures` (keyed by item id). `article=True` routes the
+    counters to the `article_images_*` fields so inline-Article-image
+    downloads stay visible, never folded into the photo counts (the failure
+    list and byte total stay shared — an item's failures are one list). Every
     failure also emits a structured `logger.warning` so the total-failure
     RuntimeError's "see warnings above" message has actual breadcrumbs.
     """
     if isinstance(entry, MediaPhotoDownloaded):
-        report.photos_downloaded += 1
+        if article:
+            report.article_images_downloaded += 1
+        else:
+            report.photos_downloaded += 1
         report.bytes_downloaded += entry.bytes_size
         return
     report.per_item_failures.setdefault(item_id, []).append((entry.url, entry.failure_reason))
-    if entry.failure_reason in _TRANSIENT_MEDIA_FAILURES:
+    transient = entry.failure_reason in _TRANSIENT_MEDIA_FAILURES
+    if article:
+        _bump_article_failure(report, transient=transient)
+    elif transient:
         report.photos_failed_transient += 1
     else:
         report.photos_failed_permanent += 1
@@ -335,6 +516,14 @@ def _record_outcome(
     )
 
 
+def _bump_article_failure(report: MediaReport, *, transient: bool) -> None:
+    """Route an article-image failure to the transient/permanent article bucket."""
+    if transient:
+        report.article_images_failed_transient += 1
+    else:
+        report.article_images_failed_permanent += 1
+
+
 def _download_one(
     entry: MediaPhotoPending | MediaPhotoFailed | MediaPhotoDownloaded | MediaPhotoDescribed,
     *,
@@ -343,15 +532,19 @@ def _download_one(
     media_root: Path,
     session: requests.Session,
     timeout_seconds: int,
+    subdir: str | None = None,
 ) -> MediaPhotoDownloaded | MediaPhotoFailed:
     """Download one photo with size cascade and Pillow validation.
 
     Returns the post-transition variant — the caller swaps it into
-    `item.media[index]`. Never raises on a recoverable failure: the
-    `failure_reason` field carries the categorisation. The only uncaught
-    exceptions are programmer bugs (e.g. `AttributeError`) and
-    `KeyboardInterrupt` — both must propagate so the developer sees the
-    traceback / Ctrl-C still works.
+    `item.media[index]` (or, for an inline Article image, onto
+    `block.media`). `subdir` namespaces the on-disk + `local_path`
+    location: photos pass `None` → `<id>/<n>.<ext>`; an inline Article image
+    passes `subdir="article"` → `<id>/article/<n>.<ext>` (#39 PR4). Never
+    raises on a recoverable failure: the `failure_reason` field carries the
+    categorisation. The only uncaught exceptions are programmer bugs (e.g.
+    `AttributeError`) and `KeyboardInterrupt` — both must propagate so the
+    developer sees the traceback / Ctrl-C still works.
     """
     url = entry.url
     attempts = (entry.attempts if isinstance(entry, MediaPhotoFailed) else 0) + 1
@@ -389,7 +582,7 @@ def _download_one(
                 )
             width, height, fmt = decoded
             extension = _FORMAT_EXTENSIONS.get(fmt.lower(), ".jpg")
-            local_path = _local_path(item_id, index, extension)
+            local_path = _local_path(item_id, index, extension, subdir=subdir)
             try:
                 _write_bytes(media_root / local_path, response.content)
             except OSError as exc:
@@ -546,13 +739,21 @@ def _url_with_name(url: str, size: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-def _local_path(item_id: str, index: int, extension: str) -> str:
-    """Deterministic relative path: ``<item_id>/<index><extension>``.
+def _local_path(item_id: str, index: int, extension: str, *, subdir: str | None = None) -> str:
+    """Deterministic relative path: ``<item_id>[/<subdir>]/<index><extension>``.
 
     Returned as a forward-slash string (the storage convention for an
     Obsidian embed) rather than a `Path` so it can be persisted on
     `MediaPhotoDownloaded.local_path` without OS-dependent reformatting.
+
+    `subdir` namespaces a distinct media class under the item so it never
+    collides with the item's own photos: an inline Article image (#39 PR4)
+    passes ``subdir="article"`` → ``<id>/article/<n>.<ext>``, disjoint from
+    the ``<id>/<n>.<ext>`` photo path. The result stays relative (no leading
+    slash, no ``..``), so `_reject_local_path_traversal` still passes.
     """
+    if subdir:
+        return f"{item_id}/{subdir}/{index}{extension}"
     return f"{item_id}/{index}{extension}"
 
 
@@ -580,11 +781,18 @@ def _format_error(exc: Exception | None, status: int | None) -> str | None:
 def emit_summary_line(report: MediaReport, *, out: "io.IOBase | None" = None) -> None:
     """Print the SUMMARY line on stderr (mirrors `ApiExecutor.enrich_items`).
 
-    The line is emitted only if at least one photo was attempted or skipped —
-    a fully no-op run (e.g. an `--items` filter that matched nothing) stays
-    silent. `out` is injectable for tests; defaults to `sys.stderr`.
+    The line is emitted only if at least one photo OR article image was
+    attempted, or something was skipped — a fully no-op run (e.g. an `--items`
+    filter that matched nothing) stays silent. The `article_*` counters keep
+    inline-Article-image downloads (#39 PR4) visible instead of folding them
+    silently into the photo counts. `out` is injectable for tests; defaults to
+    `sys.stderr`.
     """
-    if report.photos_attempted == 0 and report.photos_skipped_already_downloaded == 0:
+    if (
+        report.photos_attempted == 0
+        and report.article_images_attempted == 0
+        and report.photos_skipped_already_downloaded == 0
+    ):
         return
     target = out if out is not None else sys.stderr
     print(
@@ -592,6 +800,9 @@ def emit_summary_line(report: MediaReport, *, out: "io.IOBase | None" = None) ->
         f"failed_permanent: {report.photos_failed_permanent}, "
         f"failed_transient: {report.photos_failed_transient}, "
         f"skipped: {report.photos_skipped_already_downloaded}, "
+        f"article_downloaded: {report.article_images_downloaded}, "
+        f"article_failed_permanent: {report.article_images_failed_permanent}, "
+        f"article_failed_transient: {report.article_images_failed_transient}, "
         f"bytes: {report.bytes_downloaded:_}",
         file=target,
     )
