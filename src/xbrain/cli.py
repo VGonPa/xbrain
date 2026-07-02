@@ -1084,19 +1084,24 @@ def _resolve_digest_ids(
     return unique[:limit] if limit is not None else unique
 
 
-def _build_visual_config(cfg: Config) -> VisualConfig:
+def _build_visual_config(cfg: Config, vision_model: str | None = None) -> VisualConfig:
     """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
 
     Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and
     `describe_image` (the EXTERNAL `[vision].command` / model) so `digest_videos`
     calls them with just a path. An unconfigured `[vision].command` is a clear
     operator error BEFORE any work — there is no bundled default vision model.
+
+    `vision_model` overrides `[vision].model` for this run (the `--vision-model`
+    flag): the model name is passed to `[vision].command` as `--model`, so a
+    multi-backend wrapper can route it (e.g. `opus` → cloud, `qwen-7b` → local).
     """
     if not cfg.vision_command.strip():
         raise ValueError(
             "digest-video --frames requires an external vision model: set "
             "[vision].command in config.toml (there is no bundled default)."
         )
+    model = vision_model or cfg.vision_model
 
     def _extract(path: Path) -> list[KeyFrame]:
         return extract_key_frames(
@@ -1104,7 +1109,7 @@ def _build_visual_config(cfg: Config) -> VisualConfig:
         )
 
     def _describe(path: Path) -> str:
-        return describe_image(path, command=cfg.vision_command, model=cfg.vision_model)
+        return describe_image(path, command=cfg.vision_command, model=model)
 
     return VisualConfig(media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe)
 
@@ -1120,6 +1125,7 @@ def _run_digest_video(
     force: bool,
     language: str | None,
     frames: bool,
+    vision_model: str | None = None,
 ) -> None:
     """Digest selected videos into `x_video` transcript sources; persist + summarise.
 
@@ -1135,7 +1141,7 @@ def _run_digest_video(
     """
     store = load_store(cfg.items_path)
     id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
-    visual = _build_visual_config(cfg) if frames else None
+    visual = _build_visual_config(cfg, vision_model) if frames else None
 
     def _transcribe(path: Path) -> Transcript:
         return transcribe_media(
@@ -1182,6 +1188,13 @@ def digest_video(
         "el modelo de visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
         "Solo para vídeos slide-heavy; los talking-head se saltan (se registra).",
     ),
+    vision_model: str | None = typer.Option(
+        None,
+        "--vision-model",
+        help="Sobrescribe `[vision].model` para este run: el nombre se pasa como "
+        "--model al comando de visión. Con un wrapper multi-backend permite elegir "
+        "modelo por run (p.ej. opus → nube, qwen-7b → local). Requiere --frames.",
+    ),
 ) -> None:
     """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
@@ -1214,6 +1227,7 @@ def digest_video(
         force=force,
         language=language,
         frames=frames,
+        vision_model=vision_model,
     )
 
 

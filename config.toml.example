@@ -76,6 +76,14 @@ command = "parakeet-mlx"
 # and reads the frame's text description from stdout. May be a multi-token wrapper
 # (split with shlex, run without a shell). `--frames` is fully opt-in: a normal
 # `digest-video` run never touches ffmpeg or this command.
-# command = "vlm-describe"
+#
+# The bundled `scripts/xbrain-vision` wrapper is a MULTI-BACKEND SELECTOR: the
+# `--model` name routes to a local mlx-vlm model OR a cloud Claude model, so one
+# command serves both. Pick per run with `digest-video --vision-model NAME`, or
+# set the default here:
+#   local (Apple Silicon, free/offline): qwen-3b | qwen-7b | qwen-32b | <hf/repo>
+#   cloud (needs ANTHROPIC_API_KEY):      opus | sonnet | haiku | claude-<id>
+# command = "/absolute/path/to/scripts/xbrain-vision"
+# model = "qwen-3b"
 # Optional model id passed through to the vision command. Omit for its default.
 # model = "qwen2-vl-7b"
