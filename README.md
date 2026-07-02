@@ -449,6 +449,57 @@ language while old summaries stay as they were.
 Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
 only** — never in `config.toml`, never in the repo.
 
+### Local models for `digest-video` (Apple Silicon)
+
+`digest-video` shells out to external ML tools — xbrain core carries no ML
+dependency. On an Apple-Silicon Mac:
+
+```bash
+# 1. ASR (always needed) — Parakeet TDT via mlx, installed as an isolated tool:
+uv tool install parakeet-mlx           # gives `parakeet-mlx` on your PATH
+
+# 2. Vision (only for --frames) — mlx-vlm powers the local backend of the selector:
+uv tool install mlx-vlm
+
+# 3. Point config.toml at them (absolute paths survive any PATH):
+#    [transcribe]
+#    command = "/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
+#    [vision]
+#    command = "/path/to/xbrain/scripts/xbrain-vision"
+#    model   = "qwen-3b"
+```
+
+**Transcriber wrapper — `scripts/xbrain-transcribe`.** Points `[transcribe]` at a
+thin parakeet-mlx wrapper: parakeet writes no file for a video with **no audio
+track** (silent clips, GIFs, muted screencasts), which xbrain would otherwise
+count as a failure. The wrapper checks with `ffprobe` and emits the empty-speech
+JSON so such videos attach as `has_speech=false` ("silent video"), while a real
+parakeet failure on an audio-bearing file still surfaces. You can point
+`[transcribe].command` straight at `parakeet-mlx` if you don't need this.
+
+**Vision model selector — `scripts/xbrain-vision`.** One `[vision].command`
+serves both local and cloud models; the `--model` name is routed by a registry:
+
+| Name | Backend | Runs on | Cost / privacy |
+|------|---------|---------|----------------|
+| `qwen-3b` (default), `qwen-7b`, `qwen-32b`, or any `hf/repo` | local (mlx-vlm) | your Mac's Neural Engine/GPU | free, fully offline |
+| `opus`, `sonnet`, `haiku`, or any `claude-<id>` | cloud (Anthropic REST, stdlib — no SDK) | Anthropic API | needs `ANTHROPIC_API_KEY`; frames leave the machine |
+
+Pick per run without editing config:
+
+```bash
+xbrain digest-video --all-pending --frames                       # default (qwen-3b, local)
+xbrain digest-video --ids <slide-heavy-id> --frames --vision-model opus   # cloud, top quality
+xbrain digest-video --topic ai-coding --frames --vision-model qwen-7b     # better local
+```
+
+`--vision-model` overrides `[vision].model` for that run only (and requires
+`--frames`). Local mlx models download once and cache; the **local** backend
+reads `XBRAIN_VISION_MLX_PYTHON` only if mlx-vlm is not at the uv-tool default
+(`~/.local/share/uv/tools/mlx-vlm`). Pre-pull a **large** local model once before
+a `--frames` run — a cold `qwen-32b` (~18 GB) download can exceed the 300 s
+per-frame vision timeout and fail the first run (a re-run uses the cache).
+
 ---
 
 ## The pipeline

@@ -2566,6 +2566,64 @@ def test_digest_video_frames_describes_and_persists_slides(tmp_path: Path, monke
     assert "con slides" in result.stdout  # the visual segment of the summary
 
 
+def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
+    """`--vision-model NAME` overrides `[vision].model` for the run — NAME is what
+    reaches the vision command as `--model`, so a multi-backend wrapper can route
+    it (e.g. `opus` → cloud, `qwen-7b` → local)."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)  # [vision].command set, model unset
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+    _wire_digest(monkeypatch, _speech_transcript("the talk"))
+    _wire_frames(monkeypatch)  # extract → slide frames; real classify_visual runs
+    seen: list = []
+
+    def _capture(path, *, command, model):
+        seen.append(model)
+        return "slide"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "42", "--frames", "--vision-model", "opus"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen and set(seen) == {"opus"}  # override reached the vision command
+
+
+def test_digest_video_vision_model_without_frames_errors(tmp_path: Path, monkeypatch):
+    """`--vision-model` without `--frames` is a hard error, not a silent no-op."""
+    import re
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--vision-model", "opus"])
+    assert result.exit_code == 2  # click usage error (BadParameter), robust across widths
+    # Strip ANSI + collapse Rich's width-dependent wrapping before matching the message.
+    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
+    assert "--frames" in plain
+
+
+def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatch):
+    """With no `--vision-model`, the run uses `[vision].model` from config."""
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8") + '[vision]\ncommand = "vlm"\nmodel = "qwen-7b"\n',
+        encoding="utf-8",
+    )
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+    _wire_digest(monkeypatch, _speech_transcript("the talk"))
+    _wire_frames(monkeypatch)
+    seen: list = []
+
+    def _capture(path, *, command, model):
+        seen.append(model)
+        return "slide"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
+    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    assert result.exit_code == 0, result.output
+    assert seen and set(seen) == {"qwen-7b"}  # config model, no override
+
+
 def test_digest_video_frames_then_generate_embeds_slides(tmp_path: Path, monkeypatch):
     """End-to-end #44 PR4 success criterion: a slide talk digested with `--frames`
     then generated embeds its key slides into the note (mirrored into `_media/`)."""
