@@ -357,7 +357,11 @@ def test_generate_writes_dashboard_with_valid_blob_and_links_it(tmp_path):
 
     dashboard = tmp_path / "dashboard.html"
     assert dashboard.exists()
-    assert "dashboard.html" in (tmp_path / "_index.md").read_text(encoding="utf-8")
+    # The index links the dashboard by absolute file:// URI so Obsidian opens it
+    # in the browser (a relative .html link is unreliable there).
+    index_text = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert f"]({dashboard.resolve().as_uri()})" in index_text
+    assert "file://" in index_text and index_text.count("dashboard.html") >= 1
     # The full store→compute→render→file path emits parseable JSON with right KPIs.
     text = dashboard.read_text(encoding="utf-8")
     blob = text.split("const DATA = ", 1)[1].split(";\n", 1)[0]

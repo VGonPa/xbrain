@@ -109,7 +109,16 @@ def generate(
     items = sorted(store.values(), key=lambda i: i.created_at, reverse=True)
     items_dir = output_dir / "items"
     items_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "_index.md").write_text(_render_index(items, strings), encoding="utf-8")
+    # Absolute file:// URI so Obsidian opens the dashboard in the external browser
+    # on click — a relative `dashboard.html` link is unreliable for non-markdown
+    # files (Obsidian hides .html from the explorer and won't render its JS inline).
+    # This pins the link to the machine that ran `generate` (the URI is absolute
+    # and `_index.md` syncs via iCloud), which is the unavoidable cost of opening a
+    # local file from Obsidian; it self-heals on the next `generate` per machine.
+    dashboard_href = (output_dir / "dashboard.html").resolve().as_uri()
+    (output_dir / "_index.md").write_text(
+        _render_index(items, strings, dashboard_href), encoding="utf-8"
+    )
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
@@ -489,8 +498,13 @@ def _count_topic_frequency(items: list[Item]) -> dict[str, int]:
     return topic_freq
 
 
-def _render_index(items: list[Item], strings: Strings) -> str:
-    """Render the top-level index note: corpus stats and the topic list."""
+def _render_index(items: list[Item], strings: Strings, dashboard_href: str) -> str:
+    """Render the top-level index note: corpus stats and the topic list.
+
+    `dashboard_href` is the absolute ``file://`` URI of ``dashboard.html`` so the
+    index link opens the self-contained dashboard in the external browser (see
+    `generate`); Obsidian neither lists nor renders the raw ``.html`` itself.
+    """
     bookmarks = sum(1 for i in items if i.source == "bookmark")
     own = sum(1 for i in items if i.source == "own_tweet")
     noted = sum(1 for i in items if _has_note(i))
@@ -511,7 +525,7 @@ def _render_index(items: list[Item], strings: Strings) -> str:
         "## Índices",
         "",
         "- [[log|Log cronológico completo]]",
-        "- [📊 Dashboard interactivo](dashboard.html) — métricas, drill-down y enlaces (ábrelo en el navegador)",
+        f"- [📊 Dashboard interactivo]({dashboard_href}) — métricas, drill-down y enlaces (se abre en el navegador)",
         "",
         f"## {strings.topics_label}",
         "",
