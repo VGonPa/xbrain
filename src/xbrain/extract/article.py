@@ -74,27 +74,36 @@ def _coerce_content_state(value: Any) -> dict[str, Any] | None:
 
     Accepts either a dict or a JSON-encoded string (X commonly serialises
     content_state as a string on the wire). A dict qualifies only when it
-    carries a non-empty `blocks` list whose first entry looks like a Draft.js
-    block (`type`/`text`) — a strong, drift-tolerant signal that avoids
-    mistaking an unrelated nested `blocks` key for the article body.
+    carries a `blocks` list with at least one Draft.js-looking entry — a strong,
+    drift-tolerant signal that avoids mistaking an unrelated nested `blocks` key
+    for the article body.
     """
     if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except (ValueError, TypeError):
-            return None
+        value = _load_json(value)
     if not isinstance(value, dict):
         return None
-    blocks = value.get("blocks")
-    if not isinstance(blocks, list) or not blocks:
+    return value if _looks_like_draftjs_blocks(value.get("blocks")) else None
+
+
+def _load_json(value: str) -> Any:
+    """Parse a JSON string, or None on failure (never raises)."""
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
         return None
-    # At least one entry must look like a Draft.js block (a `type`/`text` dict).
-    # We do NOT require the FIRST entry — a stray garbage entry up front must not
-    # reject an otherwise-valid body — but at least one real block gates against
-    # mistaking an unrelated `blocks` key for the article content_state.
-    if any(isinstance(b, dict) and ("type" in b or "text" in b) for b in blocks):
-        return value
-    return None
+
+
+def _looks_like_draftjs_blocks(blocks: Any) -> bool:
+    """True when `blocks` is a non-empty list with ≥1 Draft.js-looking block.
+
+    We do NOT require the FIRST entry to be valid — a stray garbage entry up
+    front must not reject an otherwise-valid body — but at least one real block
+    (`type`/`text` dict) must be present to gate against an unrelated `blocks`
+    key masquerading as the article content_state.
+    """
+    if not isinstance(blocks, list) or not blocks:
+        return False
+    return any(isinstance(b, dict) and ("type" in b or "text" in b) for b in blocks)
 
 
 def _find_content_state(node: Any) -> dict[str, Any] | None:
@@ -146,7 +155,32 @@ def _build_blocks(raw_blocks: list[Any], entity_map: dict[str, Any]) -> list[Art
             separator = _PARAGRAPH_SEP if have_text else ""
             blocks.append(ArticleTextBlock(text=separator + text))
             have_text = True
+            continue
+        # Neither an image nor a text run: if it referenced an entity, it is a
+        # DROPPED media/atomic block (an embed/divider, or an image whose URL did
+        # not resolve). Log it so a real-payload key drift is visible rather than
+        # silently losing content (data-safety observability, #39 PR3 review).
+        _log_dropped_block(raw, entity_map)
     return blocks
+
+
+def _log_dropped_block(raw: dict[str, Any], entity_map: dict[str, Any]) -> None:
+    """WARN when a non-text block references an entity we could not render.
+
+    A genuinely empty spacer block (no entity) is silent — only an entity-bearing
+    block that produced no image is a real content drop worth surfacing.
+    """
+    entity = _first_entity(raw, entity_map)
+    if entity is None:
+        return
+    data = entity.get("data")
+    data_keys = sorted(data) if isinstance(data, dict) else type(data).__name__
+    logger.warning(
+        "article: dropped a non-text block (entity type=%r, data keys=%s) — no "
+        "image URL resolved; a content_state key drift may be hiding an image.",
+        entity.get("type"),
+        data_keys,
+    )
 
 
 def _image_block(raw: dict[str, Any], entity_map: dict[str, Any]) -> ArticleImageBlock | None:
@@ -178,19 +212,33 @@ def _first_entity(raw: dict[str, Any], entity_map: dict[str, Any]) -> dict[str, 
 
 
 def _find_url_by_key(node: Any) -> str | None:
-    """First http(s) string under an image-URL key, searched at any depth."""
+    """The image CDN URL, preferring the canonical key GLOBALLY.
+
+    Searches the whole entity `data` tree once per key in `_IMAGE_URL_KEYS`
+    priority order, so a deep `media_url_https` beats a shallow bare `url`
+    (a bare `url` may be a link/thumbnail; `media_url_https` is the canonical
+    full-size CDN photo PR4's size-cascade wants).
+    """
+    for key in _IMAGE_URL_KEYS:
+        url = _first_http_value_for_key(node, key)
+        if url:
+            return url
+    return None
+
+
+def _first_http_value_for_key(node: Any, key: str) -> str | None:
+    """First http(s) string stored under `key` anywhere in `node` (any depth)."""
     if isinstance(node, dict):
-        for key in _IMAGE_URL_KEYS:
-            value = node.get(key)
-            if isinstance(value, str) and value.startswith("http"):
-                return value
+        value = node.get(key)
+        if isinstance(value, str) and value.startswith("http"):
+            return value
         for value in node.values():
-            found = _find_url_by_key(value)
+            found = _first_http_value_for_key(value, key)
             if found:
                 return found
     elif isinstance(node, list):
         for value in node:
-            found = _find_url_by_key(value)
+            found = _first_http_value_for_key(value, key)
             if found:
                 return found
     return None

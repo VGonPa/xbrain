@@ -275,7 +275,11 @@ class _FakeContext:
         return self._page
 
 
-def test_fetch_rendered_structured_path_builds_ordered_blocks():
+def test_fetch_rendered_structured_path_builds_ordered_blocks(monkeypatch):
+    # Mock trafilatura so the parser test never imports/runs the real extractor
+    # (the truncation tripwire calls trafilatura.extract even on the structured
+    # path); returning None means no tripwire warning fires.
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: None)
     page = _FakePage(
         url=_ARTICLE_URL,
         html="<html>ignored on the structured path</html>",
@@ -371,6 +375,67 @@ def test_fetch_rendered_timeout_on_navigation_failure():
     assert source.failure_reason == "timeout"
 
 
+# --- observability + tripwire + degrade-not-crash (#39 PR3 review) ---
+
+
+def test_fetch_rendered_warns_when_response_captured_but_zero_blocks(monkeypatch, caplog):
+    # The "feature silently went dead" signal: an article-GraphQL response WAS
+    # captured but parsed to no blocks -> WARNING (op-name/shape drift), fallback.
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: "fallback body")
+    page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>body</html>",
+        responses=[
+            _FakeResponse("https://x.com/i/api/graphql/z/TweetArticleContent", {"data": {}})
+        ],
+    )
+    with caplog.at_level("WARNING", logger="xbrain.fetch_x"):
+        source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.blocks == []
+    assert any("captured" in r.message and "0 blocks" in r.message for r in caplog.records)
+
+
+def test_fetch_rendered_warns_when_structured_body_is_truncated(monkeypatch, caplog):
+    # Structured body far shorter than the trafilatura text -> truncation warning
+    # (but the structured body still wins as the source of truth).
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: "x" * 1000)
+    page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>body</html>",
+        responses=[
+            _FakeResponse("https://x.com/i/api/graphql/z/TweetArticleContent", _article_payload())
+        ],
+    )
+    with caplog.at_level("WARNING", logger="xbrain.fetch_x"):
+        source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+    assert source.blocks  # structured body preserved
+    assert any("truncated" in r.message or "<50%" in r.message for r in caplog.records)
+
+
+def test_fetch_rendered_parser_exception_degrades_to_fallback(monkeypatch, caplog):
+    # Any parser exception (incl. RecursionError) must degrade to trafilatura,
+    # never crash the fetch.
+    def _boom(_payload):
+        raise RecursionError("deep payload")
+
+    monkeypatch.setattr(fx, "parse_article_content_state", _boom)
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: "fallback body")
+    page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>body</html>",
+        responses=[
+            _FakeResponse("https://x.com/i/api/graphql/z/TweetArticleContent", _article_payload())
+        ],
+    )
+    with caplog.at_level("WARNING", logger="xbrain.fetch_x"):
+        source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == "fallback body"
+    assert source.blocks == []
+    assert any("parser raised" in r.message for r in caplog.records)
+
+
 # --- _attach_x_sources: fetched_at bumps only on a MATERIAL change (#39 PR3) ---
 
 
@@ -422,3 +487,12 @@ def test_attach_x_sources_bumps_fetched_at_when_first_article_added():
     assert item.content.fetched_at > old_time
     kinds = {s.kind for s in item.content.sources}
     assert kinds == {"external_article", "x_article"}
+
+
+def test_attach_x_sources_uses_injected_clock():
+    # Mirrors fetch_item's injectable `now` (deterministic, testable).
+    fixed = datetime(2027, 3, 3, tzinfo=timezone.utc)
+    item = _item("1", [_ARTICLE_URL])
+    _attach_x_sources(item, [_blocks_source()], now=lambda: fixed)
+    assert item.content is not None
+    assert item.content.fetched_at == fixed

@@ -16,6 +16,14 @@
 
 set -euo pipefail
 
+# Pin the Python hash seed so test collection/execution and any hash-ordered
+# data structure are byte-reproducible run-to-run (determinism). The suite has
+# no intentional hash dependence and there is no pytest-randomly plugin, so
+# order is already fixed — pinning the seed guards against a latent hash
+# dependence and makes a green/red result reproducible everywhere (CI does not
+# pin it otherwise). Respect an operator override if one is already exported.
+export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+
 # Detect CI environment (used to guard the GITHUB_STEP_SUMMARY output)
 IS_CI="${GITHUB_ACTIONS:-false}"
 

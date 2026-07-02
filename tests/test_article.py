@@ -265,3 +265,72 @@ def test_title_nested_inside_a_list_is_found():
     title, blocks = parse_article_content_state(payload)
     assert title == "Deep Title"
     assert len(blocks) == 3
+
+
+def test_decoy_blocks_key_does_not_shadow_the_real_content_state():
+    # A shallow, unrelated `blocks` key (NOT Draft.js-shaped) must not be
+    # mistaken for the body — the real content_state (deeper) is still extracted.
+    payload = {
+        "data": {
+            "blocks": ["just", "strings", 42],  # decoy: shallower, non-Draft.js
+            "article": {
+                "article_results": {"result": {"title": "Real", "content_state": _content_state()}}
+            },
+        }
+    }
+    title, blocks = parse_article_content_state(payload)
+    assert title == "Real"
+    assert [type(b).__name__ for b in blocks] == [
+        "ArticleTextBlock",
+        "ArticleImageBlock",
+        "ArticleTextBlock",
+    ]
+
+
+def test_image_url_prefers_canonical_key_over_bare_url():
+    # A canonical `media_url_https` anywhere in the entity data beats a shallow
+    # bare `url` (which may be a link/thumbnail), so PR4's size cascade applies.
+    canonical = "https://pbs.twimg.com/media/CANON.jpg"
+    content_state = {
+        "blocks": [
+            {
+                "key": "b",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            }
+        ],
+        "entityMap": {
+            "0": {
+                "type": "IMAGE",
+                "data": {
+                    "url": "https://pbs.twimg.com/media/BARE.jpg",
+                    "original": {"media_url_https": canonical},
+                },
+            }
+        },
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert len(blocks) == 1
+    assert isinstance(blocks[0], ArticleImageBlock)
+    assert blocks[0].media.url == canonical
+
+
+def test_dropped_media_block_is_logged(caplog):
+    # An entity-bearing atomic block that resolves to no image is a real content
+    # drop -> WARNING (a genuinely empty spacer stays silent).
+    content_state = {
+        "blocks": [
+            {
+                "key": "b",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            }
+        ],
+        "entityMap": {"0": {"type": "IMAGE", "data": {"no_url_here": True}}},
+    }
+    with caplog.at_level("WARNING", logger="xbrain.extract.article"):
+        _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == []
+    assert any("dropped a non-text block" in r.message for r in caplog.records)

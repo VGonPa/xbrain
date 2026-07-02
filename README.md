@@ -170,10 +170,10 @@ includes an X long-form **Article you bookmarked directly** (not just one linked
 inside a tweet): `extract` detects the Article and threads it into the same fetch
 pipeline as any other x.com link. `fetch` then captures the Article as a
 **structured, ordered body** — its paragraphs and inline images in the order the
-author wrote them — so it reads like a blogpost; if that structured capture
-can't be read, it **falls back to text-only** extraction (no images), exactly as
-before. (Downloading and embedding those inline images lands in a later step of
-the same feature.)
+author wrote them — so it can later render as a blogpost with inline images; if
+that structured capture can't be read, it **falls back to text-only** extraction
+(no images), exactly as before. (Downloading those inline images and embedding
+them into the rendered note land in later steps of the same feature.)
 
 A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
 and its transcript is attached to the item, so the video flows through the *same*

@@ -664,6 +664,11 @@ class ContentSourceSuccess(BaseModel):
         constraint, so every legacy record (trafilatura `x_article`, `x_video`
         transcript, `external_article`) loads unchanged. Mirrors the
         `MediaPhotoDescribed._decorative_implies_empty_description` style.
+
+        NOTE (by design, not an oversight): an **image-only** article — blocks
+        present but no `ArticleTextBlock` — legitimately has `text == ""` (the
+        content lives in the image blocks). The concatenation of zero text runs
+        is `""`, so the invariant holds and such a body validates.
         """
         if not self.blocks:
             return self

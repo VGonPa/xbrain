@@ -1,15 +1,19 @@
 """Fetch X (x.com) content linked from items.
 
 `/status/` links are fetched by reusing the `TweetDetail` GraphQL interception
-proven in `xbrain.extract.threads`; `/i/article/` and other x.com links are
-fetched as Playwright-rendered HTML and run through trafilatura. A fetch failure
-records the same structured evidence as `xbrain.fetch` (design §4, §15.2).
+proven in `xbrain.extract.threads`. An `/i/article/` link is fetched by
+intercepting the article-content GraphQL response and parsing its Draft.js
+`content_state` into an ordered `blocks` body (`extract.article`); on any
+interception/parse miss it degrades to `trafilatura.extract(html)` (text-only).
+Other x.com links use the trafilatura path directly. A fetch failure records the
+same structured evidence as `xbrain.fetch` (design §4, §15.2).
 """
 
 from __future__ import annotations
 
+import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urlparse
@@ -20,9 +24,10 @@ from playwright.sync_api import BrowserContext, Response
 from xbrain.extract.article import parse_article_content_state
 from xbrain.extract.browser import is_logged_out, x_context
 from xbrain.extract.graphql import parse_tweets
-from xbrain.fetch import _sources_materially_equal, is_x_url
+from xbrain.fetch import _sources_materially_equal, _utcnow, is_x_url
 from xbrain.models import (
     ArticleBlock,
+    ArticleImageBlock,
     ArticleTextBlock,
     Content,
     ContentSource,
@@ -30,6 +35,13 @@ from xbrain.models import (
     ContentSourceSuccess,
     Item,
 )
+
+logger = logging.getLogger(__name__)
+
+# Below this ratio of structured-body length to trafilatura-text length, warn:
+# a dramatically shorter structured body hints at a truncated/partial
+# content_state capture masquerading as a complete article (#39 PR3 review).
+_TRUNCATION_RATIO = 0.5
 
 _SETTLE_MS = 4000
 _STATUS_RE = re.compile(r"/[^/]+/status/(\d+)")
@@ -144,11 +156,29 @@ def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess 
 
     Returns None when nothing parsed to blocks — the caller then falls back to
     trafilatura. A captured-but-empty parse is a fallback, never a crash and
-    never a silent empty success.
+    never a silent empty success. The parse is wrapped so ANY parser exception
+    (incl. a `RecursionError` on a pathological payload) degrades to the
+    fallback instead of aborting the fetch — the "degrade, not crash" guarantee.
     """
     for payload in captured:
-        title, blocks = parse_article_content_state(payload)
+        try:
+            title, blocks = parse_article_content_state(payload)
+        except Exception:  # noqa: BLE001 - a parser failure must degrade, not crash
+            logger.warning(
+                "article: parser raised on a captured GraphQL payload for %s; "
+                "skipping it (degrading to trafilatura fallback)",
+                url,
+                exc_info=True,
+            )
+            continue
         if blocks:
+            n_images = sum(1 for b in blocks if isinstance(b, ArticleImageBlock))
+            logger.info(
+                "article: built structured body (%d blocks, %d images) for %s",
+                len(blocks),
+                n_images,
+                url,
+            )
             return ContentSourceSuccess(
                 kind="x_article",
                 url=url,
@@ -159,6 +189,47 @@ def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess 
                 attempts=1,
             )
     return None
+
+
+def _log_article_fallback(captured: list[dict], url: str) -> None:
+    """Record WHY the article fell back to the text-only trafilatura path.
+
+    A captured-but-unparsed response is the "feature silently went dead/lossy"
+    signal (op-name/shape drift) and is a WARNING; a no-capture run is the
+    ordinary non-structured case and is INFO.
+    """
+    if captured:
+        logger.warning(
+            "article: captured %d article-GraphQL response(s) but parsed 0 blocks — "
+            "falling back to trafilatura (text-only); the article op-name/shape may "
+            "have drifted for %s",
+            len(captured),
+            url,
+        )
+    else:
+        logger.info(
+            "article: no structured blocks captured, fell back to trafilatura (text-only) for %s",
+            url,
+        )
+
+
+def _warn_if_structured_truncated(structured_text: str, html: str, url: str) -> None:
+    """WARN if the structured body is dramatically shorter than the plain text.
+
+    A cheap tripwire against a truncated/wrong `content_state` capture that would
+    otherwise masquerade as a complete article. The structured body stays the
+    source of truth — we only log the discrepancy.
+    """
+    fallback_text = trafilatura.extract(html)
+    if fallback_text and len(structured_text) < _TRUNCATION_RATIO * len(fallback_text):
+        logger.warning(
+            "article: structured body (%d chars) is <%d%% of the trafilatura text "
+            "(%d chars) for %s — possible truncated/partial content_state capture",
+            len(structured_text),
+            int(_TRUNCATION_RATIO * 100),
+            len(fallback_text),
+            url,
+        )
 
 
 def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
@@ -180,7 +251,10 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
                 try:
                     captured.append(response.json())
                 except Exception:  # noqa: BLE001 - ignore non-JSON / partial bodies
-                    pass
+                    logger.debug(
+                        "article: could not decode a GraphQL response as JSON: %s",
+                        response.url,
+                    )
 
         page.on("response", on_response)
 
@@ -205,7 +279,9 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
     if is_article:
         structured = _structured_article(captured, url)
         if structured is not None:
+            _warn_if_structured_truncated(structured.text, html, url)
             return structured
+        _log_article_fallback(captured, url)
 
     text = trafilatura.extract(html)
     if text:
@@ -245,25 +321,27 @@ def _needs_x_fetch(
     return not any(s.kind == "x_article" for s in item.content.sources)
 
 
-def _attach_x_sources(item: Item, sources: list[ContentSource]) -> None:
+def _attach_x_sources(
+    item: Item, sources: list[ContentSource], *, now: Callable[[], datetime] = _utcnow
+) -> None:
     """Replace the item's `x_article` sources, keeping every other kind.
 
     Advances `content.fetched_at` only on a MATERIAL change to the `x_article`
     source set (a first structured body, or a text change) — so the
     `enrich._needs_reenrichment` trigger fires when the body actually changed,
     while an idempotent re-fetch produces no LLM churn. This mirrors
-    `fetch.fetch_item` and reuses its material fingerprint (`_sources_materially_equal`,
-    a model-derived deny-list) rather than reimplementing it (#39 PR3).
+    `fetch.fetch_item` and reuses both its material fingerprint
+    (`_sources_materially_equal`, a model-derived deny-list) and its injectable
+    `now` clock (`_utcnow`) rather than reimplementing them (#39 PR3).
     """
-    now = datetime.now(timezone.utc)
     if item.content is None:
-        item.content = Content(fetched_at=now, sources=list(sources))
+        item.content = Content(fetched_at=now(), sources=list(sources))
         return
     old_x_sources = [s for s in item.content.sources if s.kind == "x_article"]
     kept = [s for s in item.content.sources if s.kind != "x_article"]
     item.content.sources = kept + list(sources)
     if not _sources_materially_equal(old_x_sources, list(sources)):
-        item.content.fetched_at = now
+        item.content.fetched_at = now()
 
 
 def fetch_x_articles(
