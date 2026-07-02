@@ -413,6 +413,27 @@ def test_fetch_rendered_warns_when_structured_body_is_truncated(monkeypatch, cap
     assert any("truncated" in r.message or "<50%" in r.message for r in caplog.records)
 
 
+def test_truncation_tripwire_does_not_crash_when_trafilatura_raises(monkeypatch):
+    # The truncation diagnostic runs on the structured SUCCESS path; if
+    # trafilatura raises there it must NOT discard the already-built good body
+    # nor crash — the tripwire is best-effort ("degrade, not crash").
+    def _boom(_html):
+        raise RuntimeError("trafilatura exploded")
+
+    monkeypatch.setattr(fx.trafilatura, "extract", _boom)
+    page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>body</html>",
+        responses=[
+            _FakeResponse("https://x.com/i/api/graphql/z/TweetArticleContent", _article_payload())
+        ],
+    )
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.blocks  # structured body intact, not discarded
+    assert source.text == "Para one.\n\nPara two."
+
+
 def test_fetch_rendered_parser_exception_degrades_to_fallback(monkeypatch, caplog):
     # Any parser exception (incl. RecursionError) must degrade to trafilatura,
     # never crash the fetch.

@@ -219,8 +219,16 @@ def _warn_if_structured_truncated(structured_text: str, html: str, url: str) -> 
     A cheap tripwire against a truncated/wrong `content_state` capture that would
     otherwise masquerade as a complete article. The structured body stays the
     source of truth — we only log the discrepancy.
+
+    Best-effort: this runs on the structured SUCCESS path, so a `trafilatura`
+    failure here must NOT discard the already-built good body — swallow it (DEBUG)
+    and skip the check ("degrade, not crash").
     """
-    fallback_text = trafilatura.extract(html)
+    try:
+        fallback_text = trafilatura.extract(html)
+    except Exception:  # noqa: BLE001 - a diagnostic must never sink a good body
+        logger.debug("article: truncation tripwire skipped (trafilatura raised) for %s", url)
+        return
     if fallback_text and len(structured_text) < _TRUNCATION_RATIO * len(fallback_text):
         logger.warning(
             "article: structured body (%d chars) is <%d%% of the trafilatura text "
