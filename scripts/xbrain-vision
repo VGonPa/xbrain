@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""xbrain `[vision].command` — multi-backend vision model selector for `digest-video --frames`.
+
+Fulfils the xbrain vision contract (`xbrain.vision`): invoked as
+`xbrain-vision [--model NAME] <image-path>`, prints ONE description on stdout,
+exit 0 (an exit-0 run with empty output is a failure, per the contract). Routes
+by model NAME so a single `[vision].command` can serve local AND cloud models —
+pick per run with `digest-video --vision-model NAME` or set `[vision].model`:
+
+    local (mlx-vlm, Apple Silicon, free/offline):
+        qwen-3b   -> mlx-community/Qwen2.5-VL-3B-Instruct-4bit   (default)
+        qwen-7b   -> mlx-community/Qwen2.5-VL-7B-Instruct-4bit
+        qwen-32b  -> mlx-community/Qwen2.5-VL-32B-Instruct-4bit
+        <hf/repo> -> any Hugging Face repo id (contains '/')
+    cloud (Claude vision, needs ANTHROPIC_API_KEY; frames leave the machine):
+        opus      -> claude-opus-4-8
+        sonnet    -> claude-sonnet-4-6
+        haiku     -> claude-haiku-4-5-20251001
+        claude-*  -> that exact model id
+
+Cloud uses the Anthropic REST API via stdlib urllib (no SDK dependency). Local
+shells out to the mlx-vlm tool's python (env `XBRAIN_VISION_MLX_PYTHON`, else the
+uv-tool default `~/.local/share/uv/tools/mlx-vlm/bin/python`).
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PROMPT = (
+    "Describe this video key-frame for a personal knowledge wiki in one or two "
+    "dense, factual Spanish sentences. If it is a slide, chart, code, diagram or "
+    "screenshot, state its content faithfully; never invent text or numbers. "
+    "No preamble, no markdown — reply with only the description."
+)
+
+LOCAL_ALIASES = {
+    "qwen-3b": "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+    "qwen-7b": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    "qwen-32b": "mlx-community/Qwen2.5-VL-32B-Instruct-4bit",
+}
+CLOUD_ALIASES = {
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5",
+}
+# The embedded local-describe script wraps its real output in this sentinel so
+# any stdout noise from mlx-vlm / transformers (progress, notices) can't leak
+# into the caption — `_describe_local` keeps only what follows the marker.
+_LOCAL_MARKER = "<<<XBRAIN_VISION>>>"
+# Inner mlx subprocess bound, kept under xbrain.vision's 300s runner cap so a
+# wedged model is reaped here (not left orphaned when the outer runner SIGKILLs us).
+_LOCAL_TIMEOUT = 240
+DEFAULT_MODEL = "qwen-3b"
+_MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+
+
+def _resolve(name: str) -> tuple[str, str]:
+    """Return (backend, real_id) for a model NAME. backend is 'local' or 'cloud'."""
+    if name in LOCAL_ALIASES:
+        return "local", LOCAL_ALIASES[name]
+    if name in CLOUD_ALIASES:
+        return "cloud", CLOUD_ALIASES[name]
+    if name.startswith("claude-"):
+        return "cloud", name
+    if "/" in name:  # a raw Hugging Face repo id
+        return "local", name
+    raise SystemExit(f"xbrain-vision: unknown model {name!r} (see --help for the registry)")
+
+
+def _describe_cloud(model: str, image: Path) -> str:
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise SystemExit("xbrain-vision: cloud model needs ANTHROPIC_API_KEY in the environment")
+    media_type = _MEDIA_TYPES.get(image.suffix.lower(), "image/jpeg")
+    try:
+        data = base64.b64encode(image.read_bytes()).decode()
+    except OSError as exc:  # missing/unreadable frame → clean error, not a raw traceback
+        raise SystemExit(f"xbrain-vision: cannot read image {image}: {exc}")
+    body = json.dumps(
+        {
+            "model": model,
+            "max_tokens": 512,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+                        {"type": "text", "text": PROMPT},
+                    ],
+                }
+            ],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:  # surface the API error message, not a bare stack
+        raise SystemExit(f"xbrain-vision: Anthropic API error {exc.code}: {exc.read().decode()[:300]}")
+    except urllib.error.URLError as exc:  # DNS / connection / TLS / timeout — also clean, no stack
+        raise SystemExit(f"xbrain-vision: network error reaching Anthropic API: {exc.reason}")
+    blocks = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
+    return "".join(blocks).strip()
+
+
+def _describe_local(model: str, image: Path) -> str:
+    mlx_python = os.environ.get("XBRAIN_VISION_MLX_PYTHON") or str(
+        Path.home() / ".local/share/uv/tools/mlx-vlm/bin/python"
+    )
+    if not Path(mlx_python).exists():
+        raise SystemExit(
+            f"xbrain-vision: mlx-vlm python not found at {mlx_python}. Install it "
+            "(`uv tool install mlx-vlm`) or set XBRAIN_VISION_MLX_PYTHON."
+        )
+    # `res` may be a GenerationResult (.text), a bare str, or a (text, usage) tuple
+    # across mlx-vlm versions — unpack defensively. Wrap the real output in a
+    # sentinel so any library stdout noise never becomes the caption.
+    script = (
+        "import sys\n"
+        "from mlx_vlm import load, generate\n"
+        "from mlx_vlm.prompt_utils import apply_chat_template\n"
+        "model, processor = load(sys.argv[1])\n"
+        "prompt = apply_chat_template(processor, getattr(model, 'config', None), sys.argv[3], num_images=1)\n"
+        "res = generate(model, processor, prompt, image=[sys.argv[2]], verbose=False, max_tokens=256)\n"
+        "res = res[0] if isinstance(res, (tuple, list)) and res else res\n"
+        "text = getattr(res, 'text', res if isinstance(res, str) else str(res))\n"
+        f"sys.stdout.write({_LOCAL_MARKER!r} + text.strip())\n"
+    )
+    try:
+        out = subprocess.run(
+            [mlx_python, "-c", script, model, str(image), PROMPT],
+            capture_output=True,
+            text=True,
+            timeout=_LOCAL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            f"xbrain-vision: local mlx-vlm timed out after {_LOCAL_TIMEOUT}s "
+            f"(pre-download large models once before a --frames run)"
+        )
+    if out.returncode != 0:
+        raise SystemExit(f"xbrain-vision: local mlx-vlm failed: {out.stderr.strip()[:300]}")
+    # Keep only what follows the sentinel (drops any preceding stdout noise).
+    return out.stdout.rsplit(_LOCAL_MARKER, 1)[-1].strip() if _LOCAL_MARKER in out.stdout else ""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Multi-backend vision describe for xbrain digest-video.")
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="model NAME (alias, claude-* id, or hf/repo)")
+    ap.add_argument("image", help="path to the image to describe")
+    args = ap.parse_args()
+
+    backend, real_id = _resolve(args.model)
+    image = Path(args.image)
+    text = _describe_cloud(real_id, image) if backend == "cloud" else _describe_local(real_id, image)
+    if not text:
+        print("xbrain-vision: empty description", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
