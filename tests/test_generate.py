@@ -985,6 +985,46 @@ def test_generate_article_pending_image_is_silent(tmp_path: Path):
     assert "Body." in body
     assert "_media/99/article" not in body
     assert "⚠" not in body
+    # No embed of any kind and no dead URL-filename slips through for a pending
+    # image (matching the stronger tweet-photo sibling).
+    assert "![[" not in body
+    assert "p.png" not in body
+
+
+def test_generate_image_only_all_pending_article_emits_no_bare_heading(tmp_path: Path):
+    """An image-only Article whose sole block is a PENDING image (the normal
+    post-`fetch`/pre-`media` state) renders NOTHING for the source — no bare
+    `## Content:` heading over an empty body, no embed, no crash — mirroring how
+    `_video_digest_lines` avoids an empty digest block."""
+    from xbrain.models import ArticleImageBlock, MediaPhotoPending
+
+    blocks = [ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/p.png"))]
+    generate({"99": _article_item(blocks=blocks)}, tmp_path)  # no media_root
+    body = next((tmp_path / "items").glob("*-99.md")).read_text(encoding="utf-8")
+    assert "## Content:" not in body  # no bare heading when the body is empty
+    assert "![[" not in body
+    assert "p.png" not in body
+
+
+def test_generate_article_video_variant_image_is_skipped_not_crash(tmp_path: Path, caplog):
+    """An `ArticleImageBlock` wrapping a video variant (nominally admitted by the
+    `MediaEntry` union, never emitted by the PR3 producer) is logged and skipped —
+    no embed, no crash — pinning the graceful defensive branch."""
+    import logging as _logging
+
+    from xbrain.models import ArticleImageBlock, ArticleTextBlock, MediaVideoPending
+
+    blocks = [
+        ArticleTextBlock(text="Body."),
+        ArticleImageBlock(media=MediaVideoPending(url="https://video.twimg.com/v.mp4")),
+    ]
+    with caplog.at_level(_logging.WARNING, logger="xbrain.generate"):
+        generate({"99": _article_item(blocks=blocks)}, tmp_path)
+    body = next((tmp_path / "items").glob("*-99.md")).read_text(encoding="utf-8")
+    assert "Body." in body  # the surrounding text still renders
+    assert "![[" not in body  # no embed emitted for the video variant
+    assert "v.mp4" not in body
+    assert "unexpected MediaVideoPending media variant" in caplog.text
 
 
 def test_generate_article_failed_image_renders_warning(tmp_path: Path):

@@ -489,7 +489,7 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
 
 
 def _article_caption_lines(
-    block: ArticleImageBlock, entry: MediaPhotoDescribed | object
+    block: ArticleImageBlock, entry: MediaPhotoDownloaded | MediaPhotoDescribed
 ) -> list[str]:
     """Caption lines under an inline Article image: the author's `alt` then, for a
     described image, its vision description — each `> …`, one line per physical line."""
@@ -511,20 +511,27 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
     The result reads as authored — text and images interleaved where the author
     placed them. Only called for a NON-empty `blocks`; the empty-`blocks`
     (trafilatura fallback) path renders `source.text` in `_content_lines`.
+
+    The body is computed first: if every block renders to nothing (e.g. an
+    image-only Article whose sole image is still `MediaPhotoPending` — the normal
+    post-`fetch`/pre-`media` state), the bare `## <content_header>:` heading is
+    NOT emitted, mirroring how `_video_digest_lines` avoids an empty digest block.
     """
-    heading = source.title or source.url
-    lines = [f"## {strings.content_header}: {heading}", ""]
+    body: list[str] = []
     for block in source.blocks:
         if isinstance(block, ArticleTextBlock):
             text = block.text.removeprefix(_ARTICLE_PARAGRAPH_SEP)
             if text:
-                lines += [text, ""]
+                body += [text, ""]
         else:
             image_lines = _article_image_lines(block)
             if image_lines:
-                lines += image_lines
-                lines.append("")
-    return lines
+                body += image_lines
+                body.append("")
+    if not body:
+        return []
+    heading = source.title or source.url
+    return [f"## {strings.content_header}: {heading}", "", *body]
 
 
 def _content_lines(content: Content, strings: Strings) -> list[str]:
