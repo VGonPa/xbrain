@@ -53,6 +53,12 @@ _STATUS_RE = re.compile(r"/[^/]+/status/(\d+)")
 # parser yields no blocks and we degrade to the trafilatura text fallback.
 _ARTICLE_GRAPHQL_HINT = "article"
 
+# Cap a persisted navigation-failure `error` string. A page (or Playwright's
+# own call log) can surface a multi-KB body in an exception's `__str__`, and
+# persisting all of it on every failure bloats `items.json` for no diagnostic
+# value beyond the first chunk. Mirrors `media._MAX_ERROR_LEN`.
+_MAX_ERROR_LEN = 500
+
 LinkFetcher = Callable[[str], ContentSource]
 
 
@@ -72,6 +78,22 @@ def _classify_x_url(url: str) -> Literal["status", "article", "other"]:
     if _STATUS_RE.search(path):
         return "status"
     return "other"
+
+
+def _nav_error(message: str, exc: Exception) -> str:
+    """Compose a capped `ContentSourceFailure.error` for a navigation failure.
+
+    Keeps the localized `message` AND appends the captured `str(exc)` — which the
+    navigation `except` blocks used to discard — so a real nav failure (article
+    fetch is the still-unvalidated path, RFC #39 open-Q #4) is diagnosable from
+    the persisted record rather than opaque. Capped at `_MAX_ERROR_LEN`,
+    mirroring `media._format_error`.
+    """
+    detail = str(exc).strip()
+    text = f"{message} {detail}" if detail else message
+    if len(text) > _MAX_ERROR_LEN:
+        return text[: _MAX_ERROR_LEN - 1] + "…"
+    return text
 
 
 def assemble_linked_thread(responses: list, anchor_id: str) -> tuple[str | None, str]:
@@ -106,19 +128,23 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
             try:
                 captured.append(response.json())
             except Exception:  # noqa: BLE001 - ignore non-JSON / partial bodies
-                pass
+                logger.debug(
+                    "tweet: could not decode a GraphQL response as JSON: %s",
+                    response.url,
+                )
 
     page.on("response", on_response)
     try:
         try:
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(_SETTLE_MS)
-        except Exception:  # noqa: BLE001 - navigation failure -> empty result
+        except Exception as exc:  # noqa: BLE001 - navigation failure -> empty result
+            logger.warning("tweet: navigation failed for %s", url, exc_info=True)
             return ContentSourceFailure(
                 kind="x_article",
                 url=url,
                 failure_reason="timeout",
-                error="No se pudo cargar el tweet.",
+                error=_nav_error("No se pudo cargar el tweet.", exc),
                 attempts=1,
             )
         if is_logged_out(page.url):
@@ -270,12 +296,13 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
         try:
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(_SETTLE_MS)
-        except Exception:  # noqa: BLE001 - navigation failure -> empty result
+        except Exception as exc:  # noqa: BLE001 - navigation failure -> empty result
+            logger.warning("article: navigation failed for %s", url, exc_info=True)
             return ContentSourceFailure(
                 kind="x_article",
                 url=url,
                 failure_reason="timeout",
-                error="No se pudo cargar el artículo de X.",
+                error=_nav_error("No se pudo cargar el artículo de X.", exc),
                 attempts=1,
             )
         if is_logged_out(page.url):

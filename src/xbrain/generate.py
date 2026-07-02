@@ -12,6 +12,7 @@ from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
 from xbrain.i18n import Strings, strings_for
 from xbrain.models import (
+    ARTICLE_PARAGRAPH_SEP,
     ArticleImageBlock,
     ArticleTextBlock,
     Content,
@@ -53,15 +54,6 @@ _FAILURE_ES: dict[FailureReason, str] = {
 # the top of file listings and matches the convention used by static-
 # site generators (Hugo, Jekyll) for non-content assets.
 _VAULT_MEDIA_SUBDIR = "_media"
-
-# The inter-paragraph separator the PR3 article parser bakes into the `text` of
-# every NON-first `ArticleTextBlock`, so the flattened `text` equals the ordered
-# concatenation of the block texts (the PR1 `text`-is-flattened-body invariant).
-# When rendering the blocks interleaved (block-by-block), the renderer strips
-# this leading separator off each text block — it re-supplies paragraph spacing
-# with its own blank lines — so the baked separator never leaks as a stray blank
-# line. Kept in sync with `xbrain.extract.article._PARAGRAPH_SEP`.
-_ARTICLE_PARAGRAPH_SEP = "\n\n"
 
 
 def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
@@ -506,7 +498,7 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
 
     Walks `source.blocks` IN ORDER under a `## <content_header>: <title>` heading:
     each `ArticleTextBlock` becomes a body paragraph (with the baked `\\n\\n`
-    separator stripped — see `_ARTICLE_PARAGRAPH_SEP`), each `ArticleImageBlock`
+    separator stripped — see `ARTICLE_PARAGRAPH_SEP`), each `ArticleImageBlock`
     an inline `![[_media/…]]` embed (or a warning / silence) via `_article_image_lines`.
     The result reads as authored — text and images interleaved where the author
     placed them. Only called for a NON-empty `blocks`; the empty-`blocks`
@@ -520,7 +512,7 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
     body: list[str] = []
     for block in source.blocks:
         if isinstance(block, ArticleTextBlock):
-            text = block.text.removeprefix(_ARTICLE_PARAGRAPH_SEP)
+            text = block.text.removeprefix(ARTICLE_PARAGRAPH_SEP)
             if text:
                 body += [text, ""]
         else:

@@ -154,6 +154,22 @@ def test_fetch_x_articles_respects_since_until():
     assert store["2"].content is not None
 
 
+def test_needs_x_fetch_skips_item_created_after_until():
+    # The `until` UPPER bound: an item created strictly after `until` is out of
+    # window and must not be fetched, even with an x.com link and no content yet.
+    item = _item("1", ["https://x.com/jack/status/9"])
+    item.created_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert (
+        fx._needs_x_fetch(item, force=False, until=datetime(2026, 7, 1, tzinfo=timezone.utc))
+        is False
+    )
+    # Sanity: within the window (created_at <= until) it IS fetched.
+    assert (
+        fx._needs_x_fetch(item, force=False, until=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        is True
+    )
+
+
 def test_fetch_x_articles_dedups_repeated_x_urls():
     store = {"1": _item("1", ["https://x.com/jack/status/9", "https://x.com/jack/status/9"])}
     fetch_x_articles(
@@ -190,6 +206,7 @@ def test_fetch_x_articles_preserves_external_sources():
 # so the test stays fully offline.
 
 _ARTICLE_URL = "https://x.com/i/article/1900000000000000000"
+_STATUS_URL = "https://x.com/jack/status/1900000000000000001"
 _IMG = "https://pbs.twimg.com/media/ABC123.jpg"
 
 
@@ -364,15 +381,43 @@ def test_fetch_rendered_non_article_page_uses_fallback(monkeypatch):
     assert source.blocks == []
 
 
-def test_fetch_rendered_timeout_on_navigation_failure():
+def test_fetch_rendered_timeout_on_navigation_failure(caplog):
     class _BoomPage(_FakePage):
         def goto(self, url: str, wait_until: str | None = None) -> None:
             raise RuntimeError("nav failed")
 
     page = _BoomPage(url=_ARTICLE_URL, html="", responses=[])
-    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+    with caplog.at_level("WARNING", logger="xbrain.fetch_x"):
+        source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
     assert isinstance(source, ContentSourceFailure)
     assert source.failure_reason == "timeout"
+    # data-safety #1: the exception detail is captured (not discarded), and a
+    # WARNING is logged for debuggability of the still-unvalidated article path.
+    assert "nav failed" in source.error
+    assert any("navigation failed" in r.message for r in caplog.records)
+
+
+def test_fetch_tweet_timeout_on_navigation_failure_captures_detail(caplog):
+    class _BoomPage(_FakePage):
+        def goto(self, url: str, wait_until: str | None = None) -> None:
+            raise RuntimeError("boom tweet nav")
+
+    page = _BoomPage(url=_STATUS_URL, html="", responses=[])
+    with caplog.at_level("WARNING", logger="xbrain.fetch_x"):
+        source = fx._fetch_tweet(_FakeContext(page), _STATUS_URL)
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "timeout"
+    assert "boom tweet nav" in source.error
+    assert any("navigation failed" in r.message for r in caplog.records)
+
+
+def test_nav_error_caps_long_exception_detail():
+    # A misbehaving page can surface a huge exception body; the persisted error
+    # is capped (mirrors media._MAX_ERROR_LEN) so items.json never bloats.
+    huge = RuntimeError("x" * 5000)
+    error = fx._nav_error("No se pudo cargar.", huge)
+    assert len(error) == fx._MAX_ERROR_LEN
+    assert error.endswith("…")
 
 
 # --- observability + tripwire + degrade-not-crash (#39 PR3 review) ---

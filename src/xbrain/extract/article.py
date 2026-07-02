@@ -29,6 +29,7 @@ import logging
 from typing import Any
 
 from xbrain.models import (
+    ARTICLE_PARAGRAPH_SEP,
     ArticleBlock,
     ArticleImageBlock,
     ArticleTextBlock,
@@ -47,7 +48,6 @@ _IMAGE_ENTITY_TYPES = frozenset({"IMAGE", "MEDIA"})
 _IMAGE_URL_KEYS = ("media_url_https", "mediaUrl", "media_url", "mediaURL", "url")
 # Ordered key names that may carry an image's alt text (top-level of `data`).
 _ALT_KEYS = ("altText", "alt_text", "alt", "description")
-_PARAGRAPH_SEP = "\n\n"
 
 
 def parse_article_content_state(payload: Any) -> tuple[str | None, list[ArticleBlock]]:
@@ -152,7 +152,7 @@ def _build_blocks(raw_blocks: list[Any], entity_map: dict[str, Any]) -> list[Art
             continue
         text = raw.get("text")
         if isinstance(text, str) and text.strip():
-            separator = _PARAGRAPH_SEP if have_text else ""
+            separator = ARTICLE_PARAGRAPH_SEP if have_text else ""
             blocks.append(ArticleTextBlock(text=separator + text))
             have_text = True
             continue

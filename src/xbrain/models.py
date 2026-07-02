@@ -561,6 +561,16 @@ class ArticleTextBlock(BaseModel):
     text: str
 
 
+# The inter-paragraph separator baked into the `text` of every NON-first
+# `ArticleTextBlock`, so the ordered concatenation of the block texts reproduces
+# the source's flattened `text` (the `ArticleTextBlock` contract documented
+# above). This is the single source of truth shared by the PRODUCER
+# (`xbrain.extract.article`, which bakes it in) and the CONSUMER
+# (`xbrain.generate`, which strips it back off when rendering blocks
+# interleaved) — both import it here so the two can never drift.
+ARTICLE_PARAGRAPH_SEP = "\n\n"
+
+
 class ArticleImageBlock(BaseModel):
     """One inline image of an X long-form Article body (#39 PR1).
 
