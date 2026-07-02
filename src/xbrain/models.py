@@ -652,6 +652,32 @@ class ContentSourceSuccess(BaseModel):
     # machinery applies with no new plumbing (see `ArticleImageBlock`).
     blocks: list[ArticleBlock] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _text_matches_blocks(self) -> "ContentSourceSuccess":
+        """Enforce the `text`-is-flattened-body invariant (#39 PR3).
+
+        When `blocks` is non-empty, `text` MUST equal the ordered concatenation
+        of the `ArticleTextBlock` texts (images contribute nothing). This is
+        defence-in-depth — the PR3 producer already guarantees it — so a
+        producer bug or a hand-edited `items.json` cannot silently ship a `text`
+        that disagrees with the rendered blocks. Empty `blocks` imposes NO
+        constraint, so every legacy record (trafilatura `x_article`, `x_video`
+        transcript, `external_article`) loads unchanged. Mirrors the
+        `MediaPhotoDescribed._decorative_implies_empty_description` style.
+        """
+        if not self.blocks:
+            return self
+        flattened = "".join(
+            block.text for block in self.blocks if isinstance(block, ArticleTextBlock)
+        )
+        if self.text != flattened:
+            raise ValueError(
+                "text must equal the concatenation of the ArticleTextBlock texts "
+                f"when blocks is non-empty (got text={self.text!r}, "
+                f"concatenation={flattened!r})"
+            )
+        return self
+
 
 class ContentSourceFailure(BaseModel):
     """A fetched article whose body could not be extracted.

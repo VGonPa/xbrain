@@ -17,10 +17,13 @@ from urllib.parse import urlparse
 import trafilatura
 from playwright.sync_api import BrowserContext, Response
 
+from xbrain.extract.article import parse_article_content_state
 from xbrain.extract.browser import is_logged_out, x_context
 from xbrain.extract.graphql import parse_tweets
-from xbrain.fetch import is_x_url
+from xbrain.fetch import _sources_materially_equal, is_x_url
 from xbrain.models import (
+    ArticleBlock,
+    ArticleTextBlock,
     Content,
     ContentSource,
     ContentSourceFailure,
@@ -30,6 +33,13 @@ from xbrain.models import (
 
 _SETTLE_MS = 4000
 _STATUS_RE = re.compile(r"/[^/]+/status/(\d+)")
+# The article body rides an X GraphQL operation whose name contains "article"
+# (e.g. `TweetArticleContent`). We match on that stable URL substring — the same
+# op-name-substring anchor `_fetch_tweet` uses for `TweetDetail` — rather than a
+# pinned op name, so a minor op rename still captures the response. The exact op
+# name is UNCONFIRMED against a live payload (RFC #39 open-Q #4); on any miss the
+# parser yields no blocks and we degrade to the trafilatura text fallback.
+_ARTICLE_GRAPHQL_HINT = "article"
 
 LinkFetcher = Callable[[str], ContentSource]
 
@@ -115,9 +125,65 @@ def _fetch_tweet(context: BrowserContext, url: str) -> ContentSource:
     )
 
 
+def _is_article_graphql(response_url: str) -> bool:
+    """True for a GraphQL response that may carry the article content_state."""
+    return "/graphql/" in response_url and _ARTICLE_GRAPHQL_HINT in response_url.lower()
+
+
+def _flatten_blocks(blocks: list[ArticleBlock]) -> str:
+    """The flattened body: the concatenation of the text-run texts, in order.
+
+    This is the PR1 `text`-is-flattened-body invariant — the separators live
+    inside the text runs, so `enrich`/`topics` consume `text` unchanged.
+    """
+    return "".join(b.text for b in blocks if isinstance(b, ArticleTextBlock))
+
+
+def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess | None:
+    """Build a structured `x_article` success from captured GraphQL responses.
+
+    Returns None when nothing parsed to blocks — the caller then falls back to
+    trafilatura. A captured-but-empty parse is a fallback, never a crash and
+    never a silent empty success.
+    """
+    for payload in captured:
+        title, blocks = parse_article_content_state(payload)
+        if blocks:
+            return ContentSourceSuccess(
+                kind="x_article",
+                url=url,
+                title=title,
+                text=_flatten_blocks(blocks),
+                blocks=blocks,
+                http_status=200,
+                attempts=1,
+            )
+    return None
+
+
 def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
-    """Fetch an X article (or other x.com page) as rendered HTML."""
+    """Fetch an X article (or other x.com page).
+
+    For an article URL, intercept the article-content GraphQL response (the same
+    `page.on("response", …)` pattern `_fetch_tweet` uses for `TweetDetail`) and
+    build an ordered `blocks` body. On any interception/parse miss, fall back to
+    `trafilatura.extract(html)` — the text-only behaviour retained from before.
+    """
+    is_article = _classify_x_url(url) == "article"
+    captured: list[dict] = []
     page = context.new_page()
+
+    if is_article:
+
+        def on_response(response: Response) -> None:
+            if _is_article_graphql(response.url):
+                try:
+                    captured.append(response.json())
+                except Exception:  # noqa: BLE001 - ignore non-JSON / partial bodies
+                    pass
+
+        page.on("response", on_response)
+
     try:
         try:
             page.goto(url, wait_until="domcontentloaded")
@@ -135,6 +201,12 @@ def _fetch_rendered(context: BrowserContext, url: str) -> ContentSource:
         html = page.content()
     finally:
         page.close()
+
+    if is_article:
+        structured = _structured_article(captured, url)
+        if structured is not None:
+            return structured
+
     text = trafilatura.extract(html)
     if text:
         return ContentSourceSuccess(
@@ -174,12 +246,24 @@ def _needs_x_fetch(
 
 
 def _attach_x_sources(item: Item, sources: list[ContentSource]) -> None:
-    """Replace the item's `x_article` sources, keeping every other kind."""
+    """Replace the item's `x_article` sources, keeping every other kind.
+
+    Advances `content.fetched_at` only on a MATERIAL change to the `x_article`
+    source set (a first structured body, or a text change) — so the
+    `enrich._needs_reenrichment` trigger fires when the body actually changed,
+    while an idempotent re-fetch produces no LLM churn. This mirrors
+    `fetch.fetch_item` and reuses its material fingerprint (`_sources_materially_equal`,
+    a model-derived deny-list) rather than reimplementing it (#39 PR3).
+    """
+    now = datetime.now(timezone.utc)
     if item.content is None:
-        item.content = Content(fetched_at=datetime.now(timezone.utc), sources=list(sources))
-    else:
-        kept = [s for s in item.content.sources if s.kind != "x_article"]
-        item.content.sources = kept + list(sources)
+        item.content = Content(fetched_at=now, sources=list(sources))
+        return
+    old_x_sources = [s for s in item.content.sources if s.kind == "x_article"]
+    kept = [s for s in item.content.sources if s.kind != "x_article"]
+    item.content.sources = kept + list(sources)
+    if not _sources_materially_equal(old_x_sources, list(sources)):
+        item.content.fetched_at = now
 
 
 def fetch_x_articles(

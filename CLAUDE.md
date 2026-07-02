@@ -83,8 +83,7 @@ generates an Obsidian wiki.
   plumbing. `text` stays the flattened body (= concatenation of the text blocks) so
   `enrich`/`topics`/`generate`'s fallback consume it unchanged. Optional + additive
   (defaults to `[]`) → existing `items.json` loads unchanged, same as `frames`. The
-  producer (`fetch`), download walk (`media`) and blogpost renderer (`generate`)
-  land in the later #39 PRs; PR1 is model-only (no behaviour change).
+  download walk (`media`) and blogpost renderer (`generate`) land in the later #39 PRs.
 - X Articles — extract link synthesis (#39 PR2): `graphql._extract_article_link`
   detects a directly-bookmarked long-form Article (the `article` entity on the tweet
   result: `article.article_results.result.rest_id`, anchored via `_dig`) and
@@ -93,6 +92,17 @@ generates an Obsidian wiki.
   change. A missing/malformed Article node degrades to no link (never a wrong one).
   Model-independent (uses the existing `Link`). Fixture is **constructed**, not a
   recorded live payload — validate the key path against a real capture before prod.
+- X Articles — structured fetch (#39 PR3): `fetch_x._fetch_rendered` intercepts the
+  article-content GraphQL (URL op-name contains `article`; same `page.on("response")`
+  pattern as `_fetch_tweet`/`TweetDetail`) and `extract/article.parse_article_content_state`
+  maps the Draft.js `content_state` into ordered `ArticleBlock`s (text runs +
+  `MediaPhotoPending` inline images, in document order). `text` is set to the exact
+  `"".join` of the text runs (enforced by a `ContentSourceSuccess` `model_validator`).
+  On any interception/parse miss it degrades to the retained `trafilatura.extract`
+  text-only path (`blocks=[]`); a truly empty article still records `empty_content`.
+  `_attach_x_sources` bumps `fetched_at` only on a material `x_article` change (reusing
+  `fetch._sources_materially_equal`) so a richer body re-triggers enrich. Fixture +
+  op-name are **constructed/unconfirmed** — validate against a real capture (open-Q #4).
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

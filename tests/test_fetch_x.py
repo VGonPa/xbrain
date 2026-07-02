@@ -1,13 +1,25 @@
 # tests/test_fetch_x.py
 from datetime import datetime, timezone
 
-from xbrain.fetch_x import _classify_x_url, _x_status_id, assemble_linked_thread, fetch_x_articles
+import xbrain.fetch_x as fx
+from xbrain.fetch_x import (
+    _attach_x_sources,
+    _classify_x_url,
+    _fetch_rendered,
+    _x_status_id,
+    assemble_linked_thread,
+    fetch_x_articles,
+)
 from xbrain.models import (
+    ArticleImageBlock,
+    ArticleTextBlock,
     Author,
     Content,
+    ContentSourceFailure,
     ContentSourceSuccess,
     Item,
     Link,
+    MediaPhotoPending,
 )
 
 
@@ -166,4 +178,247 @@ def test_fetch_x_articles_preserves_external_sources():
         link_fetcher=lambda url: ContentSourceSuccess(kind="x_article", url=url, text="x"),
     )
     kinds = {s.kind for s in store["1"].content.sources}
+    assert kinds == {"external_article", "x_article"}
+
+
+# --- fetch: structured article body via GraphQL interception (#39 PR3) ---
+#
+# FIXTURE PROVENANCE: the captured GraphQL payload below is CONSTRUCTED from the
+# documented Draft.js content_state shape (see tests/test_article.py), not a
+# recorded live X response — validate against a real payload before production
+# reliance (RFC #39 open-Q #4). The Playwright page/context/response are faked
+# so the test stays fully offline.
+
+_ARTICLE_URL = "https://x.com/i/article/1900000000000000000"
+_IMG = "https://pbs.twimg.com/media/ABC123.jpg"
+
+
+def _content_state() -> dict:
+    return {
+        "blocks": [
+            {"key": "a", "text": "Para one.", "type": "unstyled", "entityRanges": []},
+            {
+                "key": "b",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            },
+            {"key": "c", "text": "Para two.", "type": "unstyled", "entityRanges": []},
+        ],
+        "entityMap": {"0": {"type": "IMAGE", "data": {"url": _IMG, "altText": "alt"}}},
+    }
+
+
+def _article_payload() -> dict:
+    return {
+        "data": {
+            "article": {
+                "article_results": {
+                    "result": {
+                        "__typename": "Article",
+                        "rest_id": "1900000000000000000",
+                        "title": "Structured Read",
+                        "content_state": _content_state(),
+                    }
+                }
+            }
+        }
+    }
+
+
+class _FakeResponse:
+    def __init__(self, url: str, payload=None, *, raise_json: bool = False):
+        self.url = url
+        self._payload = payload
+        self._raise = raise_json
+
+    def json(self):
+        if self._raise:
+            raise ValueError("not JSON")
+        return self._payload
+
+
+class _FakePage:
+    """A minimal stand-in for a Playwright page: fires captured responses to the
+    registered `response` handler during `wait_for_timeout`."""
+
+    def __init__(self, *, url: str, html: str, responses: list[_FakeResponse]):
+        self.url = url
+        self._html = html
+        self._responses = responses
+        self._handlers: list = []
+
+    def on(self, event: str, handler) -> None:
+        if event == "response":
+            self._handlers.append(handler)
+
+    def goto(self, url: str, wait_until: str | None = None) -> None:
+        self.url = url
+
+    def wait_for_timeout(self, _ms: int) -> None:
+        for response in self._responses:
+            for handler in self._handlers:
+                handler(response)
+
+    def content(self) -> str:
+        return self._html
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeContext:
+    def __init__(self, page: _FakePage):
+        self._page = page
+
+    def new_page(self) -> _FakePage:
+        return self._page
+
+
+def test_fetch_rendered_structured_path_builds_ordered_blocks():
+    page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>ignored on the structured path</html>",
+        responses=[
+            _FakeResponse("https://x.com/i/api/graphql/xyz/TweetArticleContent", _article_payload())
+        ],
+    )
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.kind == "x_article"
+    assert source.title == "Structured Read"
+    assert source.http_status == 200
+    assert [type(b).__name__ for b in source.blocks] == [
+        "ArticleTextBlock",
+        "ArticleImageBlock",
+        "ArticleTextBlock",
+    ]
+    image = source.blocks[1]
+    assert isinstance(image, ArticleImageBlock)
+    assert isinstance(image.media, MediaPhotoPending)
+    assert image.media.url == _IMG
+    # text == concat of the ArticleTextBlock texts (the PR1 invariant).
+    assert source.text == "".join(b.text for b in source.blocks if isinstance(b, ArticleTextBlock))
+    assert source.text == "Para one.\n\nPara two."
+
+
+def test_fetch_rendered_falls_back_to_trafilatura_when_no_graphql(monkeypatch):
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: "fallback body")
+    page = _FakePage(url=_ARTICLE_URL, html="<html>body</html>", responses=[])
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.kind == "x_article"
+    assert source.text == "fallback body"
+    assert source.blocks == []
+    assert source.title is None
+
+
+def test_fetch_rendered_falls_back_when_captured_payload_is_malformed(monkeypatch):
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: "fallback body")
+    page = _FakePage(
+        url=_ARTICLE_URL,
+        html="<html>body</html>",
+        responses=[
+            # graphql response present but not parseable to blocks + one that
+            # raises on .json() — neither must crash; both degrade to fallback.
+            _FakeResponse("https://x.com/i/api/graphql/z/TweetArticleContent", {"data": {}}),
+            _FakeResponse("https://x.com/i/api/graphql/z/ArticleFoo", raise_json=True),
+        ],
+    )
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == "fallback body"
+    assert source.blocks == []
+
+
+def test_fetch_rendered_empty_article_records_empty_content_failure(monkeypatch):
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: None)
+    page = _FakePage(url=_ARTICLE_URL, html="<html></html>", responses=[])
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+
+
+def test_fetch_rendered_non_article_page_uses_fallback(monkeypatch):
+    # An x.com page that is not an article never runs the structured parser.
+    monkeypatch.setattr(fx.trafilatura, "extract", lambda html: "profile bio")
+    url = "https://x.com/some_profile"
+    page = _FakePage(
+        url=url,
+        html="<html>bio</html>",
+        # even if a graphql response leaks in, a non-article URL ignores it.
+        responses=[_FakeResponse("https://x.com/i/api/graphql/q/ArticleFoo", _article_payload())],
+    )
+    source = _fetch_rendered(_FakeContext(page), url)
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == "profile bio"
+    assert source.blocks == []
+
+
+def test_fetch_rendered_timeout_on_navigation_failure():
+    class _BoomPage(_FakePage):
+        def goto(self, url: str, wait_until: str | None = None) -> None:
+            raise RuntimeError("nav failed")
+
+    page = _BoomPage(url=_ARTICLE_URL, html="", responses=[])
+    source = _fetch_rendered(_FakeContext(page), _ARTICLE_URL)
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "timeout"
+
+
+# --- _attach_x_sources: fetched_at bumps only on a MATERIAL change (#39 PR3) ---
+
+
+def _blocks_source() -> ContentSourceSuccess:
+    return ContentSourceSuccess(
+        kind="x_article",
+        url=_ARTICLE_URL,
+        title="t",
+        text="Para one.\n\nPara two.",
+        blocks=[
+            ArticleTextBlock(text="Para one."),
+            ArticleImageBlock(media=MediaPhotoPending(url=_IMG), alt="alt"),
+            ArticleTextBlock(text="\n\nPara two."),
+        ],
+        http_status=200,
+        attempts=1,
+    )
+
+
+def test_attach_x_sources_bumps_fetched_at_when_content_materially_changes():
+    item = _item("1", [_ARTICLE_URL])
+    old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    item.content = Content(
+        fetched_at=old_time,
+        sources=[ContentSourceSuccess(kind="x_article", url=_ARTICLE_URL, text="old text")],
+    )
+    _attach_x_sources(item, [_blocks_source()])
+    # structured body replaced the text-only source -> material change -> re-enrich.
+    assert item.content.fetched_at > old_time
+
+
+def test_attach_x_sources_preserves_fetched_at_on_idempotent_refetch():
+    item = _item("1", [_ARTICLE_URL])
+    old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    item.content = Content(fetched_at=old_time, sources=[_blocks_source()])
+    # Re-fetch reproduces the same material content (attempts is bookkeeping).
+    _attach_x_sources(item, [_blocks_source()])
+    assert item.content.fetched_at == old_time
+
+
+def test_attach_x_sources_bumps_fetched_at_when_first_article_added():
+    item = _item("1", [_ARTICLE_URL])
+    old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    item.content = Content(
+        fetched_at=old_time,
+        sources=[ContentSourceSuccess(kind="external_article", url="https://e.com", text="art")],
+    )
+    _attach_x_sources(item, [_blocks_source()])
+    assert item.content.fetched_at > old_time
+    kinds = {s.kind for s in item.content.sources}
     assert kinds == {"external_article", "x_article"}
