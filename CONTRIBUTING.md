@@ -51,6 +51,14 @@ write; a snapshot failure propagates and aborts before any change lands **in the
 store** (`items.json` — the source of truth, and the only thing the snapshot
 covers).
 
+Downloading a bookmarked X Article's **inline images** (#39 PR4) adds **no new
+destructive command**: it rides `xbrain media`'s existing `pre-media` snapshot
+boundary, exactly like the item's own photos. Article-image bytes land under
+`data/media/<id>/article/<n>.<ext>` (outside the JSON snapshot, like all
+`data/media/` bytes — re-download is the recovery path), and the `MediaPhotoPending
+→ Downloaded/Failed` swap on `block.media` is persisted by the same per-image
+`on_progress` store-write, so Ctrl-C mid-batch stays coherent.
+
 The opt-in `--frames` visual layer persists the kept slide images under
 `data/media/<id>/frames/`. Its ordering is the **opposite** of `media` /
 `download-videos` (which snapshot *before* writing any bytes): here the slide PNGs

@@ -1063,3 +1063,288 @@ def test_media_video_failed_rejects_naive_last_attempt_at():
             attempts=1,
             last_attempt_at=datetime(2026, 5, 24),  # naive
         )
+
+
+# ------------------------------------------------------------ x_article blocks (#39 PR1)
+
+
+def test_x_article_source_round_trips_with_mixed_blocks():
+    """An `x_article` `ContentSourceSuccess` carries an ordered `blocks` list
+    (text, image-pending, text) that survives a dump → re-parse with its ORDER
+    preserved — the load-bearing #39 contract so the note reads as a blogpost."""
+    from xbrain.models import (
+        ArticleImageBlock,
+        ArticleTextBlock,
+        ContentSourceAdapter,
+        ContentSourceSuccess,
+        MediaPhotoPending,
+    )
+
+    src = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/123",
+        title="A long-form article",
+        text="Intro paragraph.Closing paragraph.",
+        blocks=[
+            ArticleTextBlock(text="Intro paragraph."),
+            ArticleImageBlock(
+                media=MediaPhotoPending(url="https://pbs.twimg.com/media/A.jpg"),
+                alt="a diagram",
+            ),
+            ArticleTextBlock(text="Closing paragraph."),
+        ],
+    )
+    restored = ContentSourceAdapter.validate_python(src.model_dump(mode="json"))
+    assert isinstance(restored, ContentSourceSuccess)
+    assert restored.kind == "x_article"
+    assert len(restored.blocks) == 3
+    # Order preserved and discriminated back to the right variant.
+    assert isinstance(restored.blocks[0], ArticleTextBlock)
+    assert restored.blocks[0].text == "Intro paragraph."
+    assert isinstance(restored.blocks[1], ArticleImageBlock)
+    assert isinstance(restored.blocks[1].media, MediaPhotoPending)
+    assert restored.blocks[1].media.url == "https://pbs.twimg.com/media/A.jpg"
+    assert restored.blocks[1].alt == "a diagram"
+    assert isinstance(restored.blocks[2], ArticleTextBlock)
+    assert restored.blocks[2].text == "Closing paragraph."
+
+
+def test_article_image_block_alt_defaults_to_none():
+    """`alt` is optional — an article image without alt text validates with
+    `alt is None` (matches the RFC signature)."""
+    from xbrain.models import ArticleImageBlock, MediaPhotoPending
+
+    block = ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/B.jpg"))
+    assert block.kind == "image"
+    assert block.alt is None
+
+
+def test_article_image_block_round_trips_through_each_media_state():
+    """`ArticleImageBlock.media` reuses the `MediaEntry` photo-state union: a
+    pending / downloaded / failed image all round-trip nested inside the block,
+    proving the download engine + validators apply with no new plumbing."""
+    from xbrain.models import (
+        ArticleBlockAdapter,
+        ArticleImageBlock,
+        MediaPhotoDownloaded,
+        MediaPhotoFailed,
+        MediaPhotoPending,
+    )
+
+    states = [
+        MediaPhotoPending(url="https://pbs.twimg.com/media/P.jpg"),
+        MediaPhotoDownloaded(
+            url="https://pbs.twimg.com/media/D.jpg",
+            local_path="123/article/0.jpg",
+            width=800,
+            height=600,
+            bytes_size=1234,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        ),
+        MediaPhotoFailed(
+            url="https://pbs.twimg.com/media/F.jpg",
+            failure_reason="http_4xx",
+            attempts=1,
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        ),
+    ]
+    for media in states:
+        block = ArticleImageBlock(media=media)
+        restored = ArticleBlockAdapter.validate_python(block.model_dump(mode="json"))
+        assert isinstance(restored, ArticleImageBlock)
+        assert type(restored.media) is type(media)
+        assert restored.media.url == media.url
+
+
+def test_content_source_success_defaults_blocks_to_empty_list():
+    """`blocks` is optional + additive: a legacy record with no `blocks` key
+    loads with an empty list — existing `items.json` is unchanged (back-compat,
+    same one-time additive churn as `frames`/`has_speech`)."""
+    from xbrain.models import ContentSourceAdapter, ContentSourceSuccess
+
+    legacy = ContentSourceAdapter.validate_python(
+        {"kind": "external_article", "url": "u", "ok": True, "title": "T", "text": "body"}
+    )
+    assert isinstance(legacy, ContentSourceSuccess)
+    assert legacy.blocks == []
+
+
+def test_article_block_adapter_discriminates_on_kind():
+    """The `ArticleBlock` union deserializes text vs image by `kind`, mirroring
+    the `_MediaTagged` / `_ContentSourceTagged` discriminated-union style."""
+    from xbrain.models import ArticleBlockAdapter, ArticleImageBlock, ArticleTextBlock
+
+    text = ArticleBlockAdapter.validate_python({"kind": "text", "text": "hello"})
+    assert isinstance(text, ArticleTextBlock)
+    assert text.text == "hello"
+
+    image = ArticleBlockAdapter.validate_python(
+        {"kind": "image", "media": {"kind": "photo_pending", "url": "https://x/i.jpg"}}
+    )
+    assert isinstance(image, ArticleImageBlock)
+    assert isinstance(image.alt, type(None))
+
+
+# --------------------------------------------- text==concat invariant (#39 PR3)
+
+
+def test_content_source_text_equals_concat_of_text_blocks_validates():
+    """When `blocks` is non-empty, `text` == the `"".join` of the text runs
+    (images contribute nothing) — a matching pair validates."""
+    from xbrain.models import (
+        ArticleImageBlock,
+        ArticleTextBlock,
+        ContentSourceSuccess,
+        MediaPhotoPending,
+    )
+
+    src = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/1",
+        text="First.\n\nSecond.",
+        blocks=[
+            ArticleTextBlock(text="First."),
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/A.jpg")),
+            ArticleTextBlock(text="\n\nSecond."),
+        ],
+    )
+    assert src.text == "First.\n\nSecond."
+
+
+def test_content_source_text_mismatching_blocks_raises():
+    """Defence-in-depth: a `text` that disagrees with the rendered text blocks
+    is rejected at construction (a producer bug or hand-edited store can't ship
+    an inconsistent body)."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ArticleTextBlock, ContentSourceSuccess
+
+    with pytest.raises(ValidationError, match="text must equal"):
+        ContentSourceSuccess(
+            kind="x_article",
+            url="https://x.com/i/article/1",
+            text="a totally different flattened body",
+            blocks=[ArticleTextBlock(text="First."), ArticleTextBlock(text="Second.")],
+        )
+
+
+def test_content_source_text_mismatch_rejected_on_load():
+    """The invariant is enforced on load too (not just direct construction), so
+    a poisoned `items.json` is caught."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ContentSourceAdapter
+
+    with pytest.raises(ValidationError, match="text must equal"):
+        ContentSourceAdapter.validate_python(
+            {
+                "outcome": "success",
+                "kind": "x_article",
+                "url": "u",
+                "text": "wrong",
+                "blocks": [{"kind": "text", "text": "right"}],
+            }
+        )
+
+
+def test_content_source_empty_blocks_imposes_no_text_constraint():
+    """Back-compat: with empty `blocks`, `text` is unconstrained — every legacy
+    x_article/x_video/external_article record (trafilatura text, transcript, …)
+    loads unchanged."""
+    from xbrain.models import ContentSourceSuccess
+
+    # A trafilatura-fallback x_article: arbitrary text, no blocks -> fine.
+    src = ContentSourceSuccess(kind="x_article", url="u", text="free-form body")
+    assert src.blocks == []
+    # An image-only structured body: no text runs -> text must be "" and is.
+    from xbrain.models import ArticleImageBlock, MediaPhotoPending
+
+    image_only = ContentSourceSuccess(
+        kind="x_article",
+        url="u",
+        text="",
+        blocks=[
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/C.jpg"))
+        ],
+    )
+    assert image_only.text == ""
+
+
+def test_article_block_adapter_rejects_unknown_kind():
+    """An unknown `kind` is rejected cleanly by the discriminator (no silent
+    coercion to a default variant)."""
+    from xbrain.models import ArticleBlockAdapter
+
+    with pytest.raises(ValidationError):
+        ArticleBlockAdapter.validate_python({"kind": "video", "text": "x"})
+
+
+def test_article_image_block_rejects_traversal_local_path():
+    """The wrapped `MediaEntry` still enforces the path-traversal guard: a
+    downloaded article image with an absolute / `..` `local_path` is rejected —
+    the reused validator, not a reimplemented one."""
+    from xbrain.models import ArticleImageBlock
+
+    for bad_path in ("/etc/passwd", "../../escape.jpg"):
+        with pytest.raises(ValidationError):
+            ArticleImageBlock(
+                media={
+                    "kind": "photo_downloaded",
+                    "url": "https://pbs.twimg.com/media/X.jpg",
+                    "local_path": bad_path,
+                    "width": 10,
+                    "height": 10,
+                    "bytes_size": 100,
+                    "downloaded_at": "2026-05-24T00:00:00Z",
+                }
+            )
+
+
+def test_item_with_article_blocks_round_trips_through_json():
+    """A full `Item` carrying an `x_article` source with blocks round-trips
+    through the whole store (Item → Content → ContentSource → blocks), so the
+    field is persisted end-to-end, not just in isolation."""
+    from xbrain.models import (
+        ArticleImageBlock,
+        ArticleTextBlock,
+        Content,
+        ContentSourceSuccess,
+        Item,
+        MediaPhotoPending,
+    )
+
+    item = Item(
+        id="900",
+        source="bookmark",
+        url="https://x.com/u/status/900",
+        author=Author(handle="u", name="U"),
+        text="tweet text",
+        created_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        content=Content(
+            fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_article",
+                    url="https://x.com/i/article/900",
+                    title="T",
+                    text="Body.",
+                    blocks=[
+                        ArticleTextBlock(text="Body."),
+                        ArticleImageBlock(
+                            media=MediaPhotoPending(url="https://pbs.twimg.com/media/A.jpg")
+                        ),
+                    ],
+                )
+            ],
+        ),
+    )
+    restored = Item.model_validate(item.model_dump(mode="json"))
+    assert restored.content is not None
+    source = restored.content.sources[0]
+    assert isinstance(source, ContentSourceSuccess)
+    assert len(source.blocks) == 2
+    assert isinstance(source.blocks[0], ArticleTextBlock)
+    assert isinstance(source.blocks[1], ArticleImageBlock)

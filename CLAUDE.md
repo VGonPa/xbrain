@@ -74,6 +74,63 @@ generates an Obsidian wiki.
   downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
   videos are detected and the visual layer is skipped + logged (never a silent
   drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
+- X Articles as blogposts — model seam (#39 PR1): an `x_article`
+  `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
+  body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
+  optional `alt`, `media` **wrapping the existing `MediaEntry` photo-state union**),
+  discriminated on `kind`. Reusing `MediaEntry` means the photo download engine +
+  path/timestamp validators + `_media/` mirror apply to article images with no new
+  plumbing. `text` stays the flattened body (= concatenation of the text blocks) so
+  `enrich`/`topics`/`generate`'s fallback consume it unchanged. Optional + additive
+  (defaults to `[]`) → existing `items.json` loads unchanged, same as `frames`. The
+  download walk (`media`, PR4) and the blogpost renderer (`generate`, PR5) complete
+  the chain — a bookmarked Article renders end-to-end as an ordered blogpost note.
+- X Articles — extract link synthesis (#39 PR2): `graphql._extract_article_link`
+  detects a directly-bookmarked long-form Article (the `article` entity on the tweet
+  result: `article.article_results.result.rest_id`, anchored via `_dig`) and
+  synthesizes its canonical `https://x.com/i/article/<id>` `Link` (deduped against
+  `entities.urls`) so the existing `fetch` x.com path fires for it — no routing/model
+  change. A missing/malformed Article node degrades to no link (never a wrong one).
+  Model-independent (uses the existing `Link`). Fixture is **constructed**, not a
+  recorded live payload — validate the key path against a real capture before prod.
+- X Articles — structured fetch (#39 PR3): `fetch_x._fetch_rendered` intercepts the
+  article-content GraphQL (URL op-name contains `article`; same `page.on("response")`
+  pattern as `_fetch_tweet`/`TweetDetail`) and `extract/article.parse_article_content_state`
+  maps the Draft.js `content_state` into ordered `ArticleBlock`s (text runs +
+  `MediaPhotoPending` inline images, in document order). `text` is set to the exact
+  `"".join` of the text runs (enforced by a `ContentSourceSuccess` `model_validator`).
+  On any interception/parse miss it degrades to the retained `trafilatura.extract`
+  text-only path (`blocks=[]`); a truly empty article still records `empty_content`.
+  `_attach_x_sources` bumps `fetched_at` only on a material `x_article` change (reusing
+  `fetch._sources_materially_equal`) so a richer body re-triggers enrich. Fixture +
+  op-name are **constructed/unconfirmed** — validate against a real capture (open-Q #4).
+- X Articles — inline-image download (#39 PR4): `media.download_all` extends the photo
+  walk to advance each `ArticleImageBlock.media` on an `x_article` source
+  (`_iter_eligible_article_images` mirrors `_iter_eligible_attempts`), reusing the SAME
+  `_download_one` engine/size-cascade/throttle/failure-classification — no new download
+  loop. Bytes land at a **namespaced** `data/media/<id>/article/<n>.<ext>` (via
+  `_local_path(..., subdir="article")`) so they never collide with the item's own
+  `<id>/<n>` photos; the result is swapped **in place** onto `block.media` (safe —
+  no `validate_assignment`, images don't affect `text`). Dedicated `MediaReport.article_images_*`
+  counters + SUMMARY fields, incl. a dedicated `article_images_skipped` (distinct from the
+  photo skip counter, never contaminated); the total-failure `RuntimeError` and `--limit`
+  key on the **combined** photos+article totals (`--limit` threaded into the generator's
+  top-of-iteration check, like the photo path, so a spent budget never miscounts skips).
+  **`--force` decision (documented):** `fetch --force` rebuilds `x_article` with fresh
+  `MediaPhotoPending`, so a forced re-fetch resets image state and the next `media` run
+  re-downloads — the conscious "redo from scratch" choice (not carry-forward), consistent
+  with `fetch --force`/photo `--force`.
+- X Articles — blogpost render (#39 PR5): `generate._article_blocks_lines` renders an
+  `x_article` source with non-empty `blocks` as an ordered blogpost under `## Content:
+  <title>` — walking `source.blocks` IN AUTHORED ORDER: `ArticleTextBlock` → a body
+  paragraph (the baked `\n\n` separator stripped via `removeprefix` so it never leaks
+  as a stray blank line), `ArticleImageBlock` → an inline `![[_media/<id>/article/<n>]]`
+  embed (alt + a described image's caption as `> …` lines; failed → `⚠ Imagen no
+  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`.
+  `_mirror_item_article_images` copies the bytes into the vault via the shared
+  `_mirror_file`, keyed by the STORED `local_path` (no per-source index recompute). An
+  `x_article` with empty `blocks` (trafilatura fallback / pre-#39) renders the plain
+  `source.text` — byte-unchanged, no regression. Deterministic + regen-stable.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).
