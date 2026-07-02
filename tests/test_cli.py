@@ -628,6 +628,69 @@ def test_parse_date_returns_utc_aware():
     assert _parse_date(None) is None
 
 
+def test_parse_date_since_keeps_midnight():
+    """A date-only `since` stays at the day's start (00:00:00) — no snapping."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31")
+    assert parsed == datetime(2025, 12, 31, 0, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_date_until_snaps_date_only_to_end_of_day():
+    """A date-only `until` snaps to the last microsecond so the whole day is included."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31", end_of_day=True)
+    assert parsed == datetime(2025, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+
+def test_parse_date_until_respects_explicit_time():
+    """An explicit time on `until` is respected as-is — never snapped to end of day."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31T09:00:00", end_of_day=True)
+    assert parsed == datetime(2025, 12, 31, 9, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_cli_generate_until_date_only_includes_whole_final_day(tmp_path: Path, monkeypatch):
+    """`--until <date>` (date-only) must include an item created that same day at 15:00."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("1")
+    item.created_at = datetime(2026, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--until", "2026-01-15"])
+    assert result.exit_code == 0
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    assert len(notes) == 1
+
+
+def test_cli_generate_until_explicit_time_is_respected(tmp_path: Path, monkeypatch):
+    """`--until <date>T09:00:00` excludes an item at 10:00 and includes one at 08:00."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    after = _linked_item("1")
+    after.created_at = datetime(2026, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+    before = _linked_item("2")
+    before.created_at = datetime(2026, 1, 15, 8, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": after, "2": before}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--until", "2026-01-15T09:00:00"])
+    assert result.exit_code == 0
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    assert len(notes) == 1
+    assert notes[0].name.endswith("-2.md")
+
+
+def test_cli_generate_since_date_only_includes_midnight_item(tmp_path: Path, monkeypatch):
+    """`--since <date>` (date-only) still includes an item created at that day's midnight."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("1")
+    item.created_at = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--since", "2026-01-15"])
+    assert result.exit_code == 0
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    assert len(notes) == 1
+
+
 def test_cli_fetch_with_since_does_not_crash(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     old_item = _linked_item("1")

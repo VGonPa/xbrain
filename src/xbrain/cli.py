@@ -137,13 +137,30 @@ def _config() -> Config:
     return load_config(_repo_root())
 
 
-def _parse_date(value: str | None) -> datetime | None:
+def _parse_date(value: str | None, *, end_of_day: bool = False) -> datetime | None:
+    """Parse an ISO date/datetime into a UTC-aware datetime.
+
+    A *date-only* ``value`` (e.g. ``2025-12-31``) carries no time component,
+    so it parses to that day's midnight. For a ``since`` bound that is the
+    correct day start. For an ``until`` bound (``end_of_day=True``) midnight
+    would exclude the whole final day, so we snap it to the last microsecond
+    (``23:59:59.999999`` UTC) — the ``item.created_at > until`` filters then
+    include every item created on that day. An explicit time
+    (e.g. ``2025-12-31T09:00``) is respected as-is and never snapped.
+    """
     if not value:
         return None
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
+    if end_of_day and _is_date_only(value):
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
     return parsed
+
+
+def _is_date_only(value: str) -> bool:
+    """True when an ISO string has no time component (e.g. ``2025-12-31``)."""
+    return "T" not in value and ":" not in value
 
 
 _OPERATOR_ERRORS = (
@@ -407,11 +424,17 @@ def login() -> None:
 def extract(
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
-    until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
+    until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
     """Extrae bookmarks y/o tweets propios desde X."""
-    _run_extract(_config(), source.value, _parse_date(since), _parse_date(until), headless=headless)
+    _run_extract(
+        _config(),
+        source.value,
+        _parse_date(since),
+        _parse_date(until, end_of_day=True),
+        headless=headless,
+    )
 
 
 @app.command(name="import-archive")
@@ -433,12 +456,14 @@ def import_archive(zip_path: Path) -> None:
 @_handle_cli_errors
 def fetch(
     since: str = typer.Option(None),
-    until: str = typer.Option(None),
+    until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
     force: bool = typer.Option(False, help="Volver a descargar lo ya descargado"),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
-    _run_fetch(_config(), _parse_date(since), _parse_date(until), force, headless=headless)
+    _run_fetch(
+        _config(), _parse_date(since), _parse_date(until, end_of_day=True), force, headless=headless
+    )
 
 
 def _run_media(
@@ -1227,7 +1252,7 @@ def enrich(
         None, "--apply", help="Import a filled worksheet and apply it"
     ),
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
-    until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
+    until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
 ) -> None:
     """Enriquece los items con resumen + topics."""
     cfg = _config()
@@ -1247,7 +1272,9 @@ def enrich(
     chosen = executor or cfg.enrich_executor
 
     if chosen in ("manual", "claude-code"):
-        pending = items_pending_enrichment(store, _parse_date(since), _parse_date(until))
+        pending = items_pending_enrichment(
+            store, _parse_date(since), _parse_date(until, end_of_day=True)
+        )
         if not pending:
             typer.echo("No hay items pendientes de enriquecer.")
             return
@@ -1268,7 +1295,7 @@ def enrich(
         ApiExecutor(model=cfg.enrich_model, output_language=cfg.output_language),
         vocab_topics,
         _parse_date(since),
-        _parse_date(until),
+        _parse_date(until, end_of_day=True),
     )
     save_store(store, cfg.items_path)
     typer.echo(f"Enriquecidos: {enriched} items")
@@ -1418,10 +1445,10 @@ def topics(
 @_handle_cli_errors
 def generate(
     since: str = typer.Option(None, help="ISO date, e.g. 2025-01-01"),
-    until: str = typer.Option(None, help="ISO date, e.g. 2025-12-31"),
+    until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
 ) -> None:
     """Genera las notas markdown en el vault."""
-    _run_generate(_config(), _parse_date(since), _parse_date(until))
+    _run_generate(_config(), _parse_date(since), _parse_date(until, end_of_day=True))
 
 
 @app.command()
