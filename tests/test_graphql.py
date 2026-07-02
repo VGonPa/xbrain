@@ -501,3 +501,72 @@ def test_extract_article_link_malformed_returns_none(article_block):
     tweet["article"] = article_block
 
     assert _extract_article_link(tweet) is None
+
+
+# --- PR2 hardening round -----------------------------------------------------
+
+
+def test_extract_article_link_dedups_noncanonical_url_variant():
+    """A non-canonical variant of the article URL in `entities.urls`
+    (twitter.com host / http scheme / trailing slash) suppresses the
+    synthesized canonical link — no redundant re-fetch of the same Article."""
+    variant = "http://twitter.com/i/article/555/"
+    tweet = _article_tweet(
+        "333", "555", urls=[{"expanded_url": variant, "url": "https://t.co/abc"}]
+    )
+
+    items = parse_tweets({"tweet_results": {"result": tweet}}, "bookmark")
+    urls = [link.url for link in items[0].links]
+
+    # the synthesized canonical link is NOT added (the variant already covers it)
+    assert "https://x.com/i/article/555" not in urls
+    # and the variant from entities.urls is still present
+    assert variant in urls
+
+
+def test_extract_article_link_rejects_non_article_typename():
+    """A `result` with a non-Article `__typename` (e.g. a Card that happens to
+    carry a `rest_id`) is not synthesized into an article link."""
+    from xbrain.extract.graphql import _extract_article_link
+
+    tweet = _tweet_result("111", "alice", "text")
+    tweet["article"] = {"article_results": {"result": {"__typename": "Card", "rest_id": "999"}}}
+
+    assert _extract_article_link(tweet) is None
+
+
+@pytest.mark.parametrize(
+    "rest_id",
+    [
+        {"x": "y"},  # dict — garbage-URL vector
+        ["1", "2"],  # list — garbage-URL vector
+        "abc",  # non-numeric text
+        "12a3",  # mostly-numeric but not a clean id
+        12345,  # int, not a string
+        3.14,  # float
+    ],
+)
+def test_extract_article_link_rejects_nonnumeric_rest_id(rest_id):
+    """Only a numeric-string `rest_id` yields a link; a non-scalar or
+    non-numeric id degrades to None (no crash, no garbage URL)."""
+    from xbrain.extract.graphql import _extract_article_link
+
+    tweet = _tweet_result("111", "alice", "text")
+    tweet["article"] = {
+        "article_results": {"result": {"__typename": "Article", "rest_id": rest_id}}
+    }
+
+    assert _extract_article_link(tweet) is None
+
+
+def test_synthesized_article_link_routes_as_article():
+    """Belt-and-suspenders: feeding the synthesizer's output into the fetch
+    classifier yields `"article"`, so a future `/i/article/` rename can't
+    silently break the extract→fetch routing contract."""
+    from xbrain.extract.graphql import _extract_article_link
+    from xbrain.fetch_x import _classify_x_url
+
+    link = _extract_article_link(_article_tweet("777", "1900000000000000000"))
+
+    assert link is not None
+    assert _classify_x_url(link.url) == "article"

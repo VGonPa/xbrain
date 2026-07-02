@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 X_DATE_FORMAT = "%a %b %d %H:%M:%S %z %Y"
 _NESTED_TWEET_KEYS = ("quoted_status_result", "retweeted_status_result")
+# x.com ⇄ twitter.com host aliases, folded to `x.com` when deduping links so a
+# non-canonical variant of an article URL matches the synthesized one.
+_X_HOST_ALIASES = frozenset(
+    {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
+)
 
 
 def parse_tweets(response: dict[str, Any], source: SourceName) -> list[Item]:
@@ -131,10 +136,37 @@ def _extract_links(legacy: dict[str, Any], tweet: dict[str, Any]) -> list[Link]:
         expanded = entry.get("expanded_url")
         if expanded:
             links.append(Link(url=expanded, domain=urlparse(expanded).netloc))
-    article = _extract_article_link(tweet)
-    if article is not None and article.url not in {link.url for link in links}:
-        links.append(article)
+    _append_article_link(links, tweet)
     return links
+
+
+def _canonical_url_key(url: str) -> str:
+    """A scheme/host/trailing-slash-insensitive key for deduping links.
+
+    Folds the x.com ⇄ twitter.com host aliases to `x.com` and drops the scheme
+    and a trailing slash, so a non-canonical variant of an article URL already
+    in `entities.urls` (e.g. `http://twitter.com/i/article/<id>/`) compares
+    equal to the synthesized `https://x.com/i/article/<id>` link — avoiding a
+    redundant re-fetch of the same Article.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host in _X_HOST_ALIASES:
+        host = "x.com"
+    return f"{host}{parsed.path.rstrip('/')}"
+
+
+def _append_article_link(links: list[Link], tweet: dict[str, Any]) -> None:
+    """Append the synthesized Article link unless a canonical-equivalent URL is
+    already present (dedup against `entities.urls`), so a tweet that merely
+    *links* an Article — in any host/scheme/slash variant — never double-adds it.
+    """
+    article = _extract_article_link(tweet)
+    if article is None:
+        return
+    seen = {_canonical_url_key(link.url) for link in links}
+    if _canonical_url_key(article.url) not in seen:
+        links.append(article)
 
 
 def _extract_article_link(tweet: dict[str, Any]) -> Link | None:
@@ -153,11 +185,22 @@ def _extract_article_link(tweet: dict[str, Any]) -> Link | None:
     NOTE: the `article.article_results.result.rest_id` key path is pinned
     against a CONSTRUCTED fixture (see `tests/test_graphql.py`), not a recorded
     live payload; validate it against a real bookmarked-Article GraphQL
-    response before production reliance (RFC #39 open-Q #4).
+    response before production reliance (RFC #39 open-Q #4). X may ALSO surface
+    an Article via a `card`/`unified_card` variant — not handled here (it
+    degrades safely to no link); fold that path into the same open-Q #4
+    real-payload validation before building it.
     """
     result = _dig(tweet, "article", "article_results", "result")
+    # Only synthesize for an actual Article result — reject e.g. a Card that
+    # happens to carry a rest_id. Allow a missing __typename for real-payload
+    # flexibility (the parser still gates on the rest_id shape below).
+    if result.get("__typename") not in (None, "Article"):
+        return None
     rest_id = result.get("rest_id")
-    if not rest_id:
+    # A valid X article id is a numeric string; anything else (missing, empty,
+    # None, a dict/list, or non-numeric text) degrades to no link — this also
+    # kills the garbage-URL vector of interpolating a non-scalar rest_id.
+    if not (isinstance(rest_id, str) and rest_id.isdigit()):
         return None
     return Link(url=f"https://x.com/i/article/{rest_id}", domain="x.com")
 
