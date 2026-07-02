@@ -911,13 +911,17 @@ def test_iter_eligible_article_images_index_is_stable_across_ineligible_blocks()
         text="intro",
     )
     report = MediaReport()
-    yielded = list(_iter_eligible_article_images({"1": item}, force=False, report=report))
+    yielded = list(
+        _iter_eligible_article_images({"1": item}, limit=None, force=False, report=report)
+    )
     assert len(yielded) == 1
     item_id, block, index, entry = yielded[0]
     assert item_id == "1"
     assert index == 1  # the pending image is the 2nd image block → index 1
     assert entry is pending
-    assert report.photos_skipped_already_downloaded == 1  # downloaded block skipped
+    # Article skips go to the DEDICATED counter, never folded into the photo count.
+    assert report.article_images_skipped == 1
+    assert report.photos_skipped_already_downloaded == 0
 
 
 def test_download_all_downloads_article_images(tmp_path: Path):
@@ -976,7 +980,8 @@ def test_download_all_article_images_idempotent(tmp_path: Path):
     report = download_all({"501": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert report.article_images_attempted == 0
     assert report.article_images_downloaded == 0
-    assert report.photos_skipped_already_downloaded == 1
+    assert report.article_images_skipped == 1  # dedicated counter, not the photo one
+    assert report.photos_skipped_already_downloaded == 0
     assert session.calls == []  # no HTTP call
     assert isinstance(item.content.sources[0].blocks[1].media, MediaPhotoDownloaded)
 
@@ -1216,14 +1221,121 @@ def test_iter_eligible_article_images_skips_non_article_sources(tmp_path: Path):
         ),
     )
     report = MediaReport()
-    yielded = list(_iter_eligible_article_images({"514": item}, force=False, report=report))
+    yielded = list(
+        _iter_eligible_article_images({"514": item}, limit=None, force=False, report=report)
+    )
     assert len(yielded) == 1  # only the x_article image; the external source is skipped
-    assert yielded[0][2] == 0  # image index restarts at 0 within the article source
+    # Index 0 = the first image block in the item; the external source contributes
+    # none, so it does not advance the per-item global image index.
+    assert yielded[0][2] == 0
     session = FakeSession(
         responses={"pbs.twimg.com/media/BC.png": [FakeResponse(200, _png_bytes())]}
     )
     download_all({"514": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert isinstance(item.content.sources[1].blocks[0].media, MediaPhotoDownloaded)
+
+
+def test_iter_eligible_article_images_global_index_continues_across_sources():
+    """Two `x_article` sources on one item share ONE per-item image index.
+
+    The index MUST be global across sources (not reset per source), else the
+    second source's first image would map to `<id>/article/0` and overwrite the
+    first source's image 0. Pins the collision-free global-index invariant.
+    """
+    src1 = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/600a",
+        text="",
+        blocks=[
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/G0.png")),
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/G1.png")),
+        ],
+        http_status=200,
+        attempts=1,
+    )
+    src2 = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/600b",
+        text="",
+        blocks=[
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/G2.png")),
+        ],
+        http_status=200,
+        attempts=1,
+    )
+    item = Item(
+        id="600",
+        source="bookmark",
+        url="https://x.com/a/status/600",
+        author=Author(handle="a", name="A"),
+        text="t",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        content=Content(
+            fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            sources=[src1, src2],
+        ),
+    )
+    report = MediaReport()
+    yielded = list(
+        _iter_eligible_article_images({"600": item}, limit=None, force=False, report=report)
+    )
+    indices = [index for _id, _block, index, _entry in yielded]
+    assert indices == [0, 1, 2]  # the 2nd source's first image continues at 2, not 0
+
+
+def test_download_all_article_only_total_failure_raises(tmp_path: Path):
+    """An item with ONLY article images, all failing → the combined guard raises.
+
+    Pins the article-only path of the total-failure short-circuit (0 photos):
+    every attempt failed, so nothing landed and the run must raise.
+    """
+    item = _article_item(
+        "601",
+        [ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/GF.png"))],
+        text="",
+    )
+    session = FakeSession(responses={"pbs.twimg.com/media/GF.png": [FakeResponse(404, b"")] * 3})
+    with pytest.raises(RuntimeError, match="All 1 media download attempts failed"):
+        download_all({"601": item}, media_root=tmp_path, session=session, throttle_seconds=0)
+    assert isinstance(item.content.sources[0].blocks[0].media, MediaPhotoFailed)
+
+
+def test_download_all_article_skip_counter_respects_limit_exhaustion(tmp_path: Path):
+    """Once `--limit` is exhausted, the article walk stops counting skips.
+
+    Mirrors the photo generator's top-of-iteration budget check: an
+    already-downloaded article image PAST the budget cutoff must NOT be scanned
+    and counted as skipped. Here `--limit 1` is fully consumed by the pending
+    image; the trailing downloaded image is never reached, so no skip is counted.
+    """
+    downloaded = MediaPhotoDownloaded(
+        url="https://pbs.twimg.com/media/GD.png",
+        local_path="602/article/1.png",
+        width=4,
+        height=3,
+        bytes_size=10,
+        downloaded_at=datetime.now(timezone.utc),
+    )
+    item = _article_item(
+        "602",
+        [
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/GP.png")),
+            ArticleImageBlock(media=downloaded),
+        ],
+        text="",
+    )
+    session = FakeSession(
+        responses={"pbs.twimg.com/media/GP.png": [FakeResponse(200, _png_bytes())]}
+    )
+    report = download_all(
+        {"602": item}, media_root=tmp_path, session=session, throttle_seconds=0, limit=1
+    )
+    assert report.article_images_attempted == 1
+    assert report.article_images_downloaded == 1
+    # The trailing downloaded image was never reached — budget was spent, so it
+    # is NOT counted as a skip (consistent with the photo path's limit check).
+    assert report.article_images_skipped == 0
 
 
 def test_download_all_article_image_progress_callback_fires(tmp_path: Path):
@@ -1302,6 +1414,7 @@ def test_emit_summary_line_includes_article_counters(capsys):
         article_images_attempted=3,
         article_images_downloaded=2,
         article_images_failed_permanent=1,
+        article_images_skipped=4,
     )
     emit_summary_line(report)
     err = capsys.readouterr().err
@@ -1309,10 +1422,18 @@ def test_emit_summary_line_includes_article_counters(capsys):
     assert "article_downloaded: 2" in err
     assert "article_failed_permanent: 1" in err
     assert "article_failed_transient: 0" in err
+    assert "article_skipped: 4" in err
 
 
 def test_emit_summary_line_non_silent_when_only_article_attempts(capsys):
     """A run with only article-image attempts still emits the SUMMARY line."""
     report = MediaReport(article_images_attempted=1, article_images_downloaded=1)
+    emit_summary_line(report)
+    assert "SUMMARY: " in capsys.readouterr().err
+
+
+def test_emit_summary_line_non_silent_when_only_article_skips(capsys):
+    """A run that only skips already-downloaded article images still emits SUMMARY."""
+    report = MediaReport(article_images_skipped=2)
     emit_summary_line(report)
     assert "SUMMARY: " in capsys.readouterr().err

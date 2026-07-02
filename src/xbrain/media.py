@@ -130,13 +130,16 @@ class MediaReport:
     photos_skipped_already_downloaded: int = 0
     # Inline X-Article images (#39 PR4) — counted SEPARATELY from photos so
     # article-image downloads stay visible in the SUMMARY, never folded into
-    # the photo totals. Already-downloaded article images bump the SHARED
-    # `photos_skipped_already_downloaded` (same "bytes already on disk"
-    # semantics). `bytes_downloaded` is the combined byte total.
+    # the photo totals. `article_images_skipped` is the article analogue of
+    # `photos_skipped_already_downloaded` (already-downloaded/described images
+    # passed over without `--force`), kept distinct so photo and article skip
+    # counts never contaminate each other. `bytes_downloaded` is the combined
+    # byte total.
     article_images_attempted: int = 0
     article_images_downloaded: int = 0
     article_images_failed_permanent: int = 0
     article_images_failed_transient: int = 0
+    article_images_skipped: int = 0
     bytes_downloaded: int = 0
     elapsed_seconds: float = 0.0
     # Per-item failures keyed by item id → list of (url, reason) tuples.
@@ -227,7 +230,7 @@ def download_all(
         candidate_items,
         media_root,
         force=force,
-        remaining_limit=remaining_limit,
+        limit=remaining_limit,
         session=session,
         timeout_seconds=timeout_seconds,
         throttle_seconds=throttle_seconds,
@@ -258,7 +261,7 @@ def _download_article_images(
     media_root: Path,
     *,
     force: bool,
-    remaining_limit: int | None,
+    limit: int | None,
     session: requests.Session,
     timeout_seconds: int,
     throttle_seconds: float,
@@ -274,19 +277,17 @@ def _download_article_images(
     an article image never collides with the item's own `<id>/<n>` photos, and
     updates the dedicated `article_images_*` counters.
 
-    `remaining_limit` is the COMBINED per-run download budget left after the
-    photo loop (`None` = unbounded); the walk stops once it is exhausted, so
-    `--limit` bounds photos + article images together. A budget already at zero
-    skips the article walk entirely (no skip-counting churn), matching the photo
-    loop's top-of-iteration limit check.
+    `limit` is the COMBINED per-run download budget left after the photo loop
+    (`None` = unbounded). It is threaded INTO `_iter_eligible_article_images`,
+    which — exactly like the photo generator `_iter_eligible_attempts` — checks
+    the budget at the top of each iteration and stops yielding (and stops
+    counting skips) once it is exhausted. So `--limit` bounds photos + article
+    images together, and an exhausted budget never miscounts a skip for an image
+    it never reached.
     """
-    if remaining_limit is not None and remaining_limit <= 0:
-        return
     for item_id, block, index, entry in _iter_eligible_article_images(
-        items, force=force, report=report
+        items, limit=limit, force=force, report=report
     ):
-        if remaining_limit is not None and remaining_limit <= 0:
-            return
         report.article_images_attempted += 1
         result = _download_one(
             entry,
@@ -301,8 +302,6 @@ def _download_article_images(
         _record_outcome(report, item_id=item_id, entry=result, article=True)
         if on_progress is not None:
             on_progress()
-        if remaining_limit is not None:
-            remaining_limit -= 1
         if throttle_seconds > 0:
             sleep(throttle_seconds)
 
@@ -424,6 +423,7 @@ def _article_image_blocks(item: Item) -> Iterator[tuple[int, ArticleImageBlock]]
 def _iter_eligible_article_images(
     items: dict[str, Item],
     *,
+    limit: int | None,
     force: bool,
     report: MediaReport,
 ) -> Iterator[
@@ -439,26 +439,34 @@ def _iter_eligible_article_images(
     Mirrors `_iter_eligible_attempts` for the inline images living OUTSIDE
     `item.media` — on the `x_article` `ContentSourceSuccess.blocks`. Applies the
     SAME `_is_eligible` cascade (pending always; transient-failed on retry;
-    downloaded/described only under `--force`). Side effects on `report`: bumps
-    `items_processed` once per article-only item (an item with `item.media` was
-    already counted by the photo walk), and the SHARED
-    `photos_skipped_already_downloaded` once per already-downloaded/described
-    image passed over without `--force` (same "bytes already on disk" semantics
-    the plan mandates). The caller swaps the yielded `entry` back onto
-    `block.media`.
+    downloaded/described only under `--force`) and the SAME `limit` discipline:
+    the budget is checked at the TOP of each image iteration and decremented only
+    for an actually-yielded attempt, so once it hits zero the walk stops — and
+    stops counting skips — exactly like the photo generator (no scanning-past a
+    spent budget and miscounting the images it never reached).
+
+    Side effects on `report`: bumps `items_processed` once per article-only item
+    (an item with `item.media` was already counted by the photo walk), and the
+    DEDICATED `article_images_skipped` once per already-downloaded/described image
+    passed over without `--force` (kept distinct from the photo skip counter so
+    the two never contaminate each other). The caller swaps the yielded `entry`
+    back onto `block.media`.
     """
+    remaining = limit
     for item_id, item in items.items():
         # Items with `item.media` were already counted by the photo walk; count
         # an article-only item the first time we touch one of its images.
         counted = bool(item.media)
         for image_index, block in _article_image_blocks(item):
+            if remaining is not None and remaining <= 0:
+                return
             if not counted:
                 report.items_processed += 1
                 counted = True
             entry = block.media
             if not _is_eligible(entry, force=force):
                 if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
-                    report.photos_skipped_already_downloaded += 1
+                    report.article_images_skipped += 1
                 continue
             # `_is_eligible` already excluded every video variant; narrow for mypy.
             assert isinstance(
@@ -470,6 +478,8 @@ def _iter_eligible_article_images(
                     MediaPhotoDescribed,
                 ),
             )
+            if remaining is not None:
+                remaining -= 1
             yield item_id, block, image_index, entry
 
 
@@ -792,6 +802,7 @@ def emit_summary_line(report: MediaReport, *, out: "io.IOBase | None" = None) ->
         report.photos_attempted == 0
         and report.article_images_attempted == 0
         and report.photos_skipped_already_downloaded == 0
+        and report.article_images_skipped == 0
     ):
         return
     target = out if out is not None else sys.stderr
@@ -803,6 +814,7 @@ def emit_summary_line(report: MediaReport, *, out: "io.IOBase | None" = None) ->
         f"article_downloaded: {report.article_images_downloaded}, "
         f"article_failed_permanent: {report.article_images_failed_permanent}, "
         f"article_failed_transient: {report.article_images_failed_transient}, "
+        f"article_skipped: {report.article_images_skipped}, "
         f"bytes: {report.bytes_downloaded:_}",
         file=target,
     )

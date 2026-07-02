@@ -542,7 +542,7 @@ def _run_media(
         f"fallidas {report.photos_failed_permanent + report.photos_failed_transient}, "
         f"saltadas {report.photos_skipped_already_downloaded} "
         f"(imágenes de artículo: descargadas {report.article_images_downloaded}, "
-        f"fallidas {article_failed})"
+        f"fallidas {article_failed}, saltadas {report.article_images_skipped})"
     )
     if verbose and report.per_item_failures:
         typer.echo("Failed media:", err=True)

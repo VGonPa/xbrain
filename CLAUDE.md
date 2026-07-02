@@ -111,8 +111,10 @@ generates an Obsidian wiki.
   `_local_path(..., subdir="article")`) so they never collide with the item's own
   `<id>/<n>` photos; the result is swapped **in place** onto `block.media` (safe —
   no `validate_assignment`, images don't affect `text`). Dedicated `MediaReport.article_images_*`
-  counters + SUMMARY fields (skips share `photos_skipped_already_downloaded`); the
-  total-failure `RuntimeError` and `--limit` key on the **combined** photos+article totals.
+  counters + SUMMARY fields, incl. a dedicated `article_images_skipped` (distinct from the
+  photo skip counter, never contaminated); the total-failure `RuntimeError` and `--limit`
+  key on the **combined** photos+article totals (`--limit` threaded into the generator's
+  top-of-iteration check, like the photo path, so a spent budget never miscounts skips).
   **`--force` decision (documented):** `fetch --force` rebuilds `x_article` with fresh
   `MediaPhotoPending`, so a forced re-fetch resets image state and the next `media` run
   re-downloads — the conscious "redo from scratch" choice (not carry-forward), consistent
