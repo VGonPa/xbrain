@@ -74,6 +74,17 @@ generates an Obsidian wiki.
   downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
   videos are detected and the visual layer is skipped + logged (never a silent
   drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
+- X Articles as blogposts — model seam (#39 PR1): an `x_article`
+  `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
+  body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
+  optional `alt`, `media` **wrapping the existing `MediaEntry` photo-state union**),
+  discriminated on `kind`. Reusing `MediaEntry` means the photo download engine +
+  path/timestamp validators + `_media/` mirror apply to article images with no new
+  plumbing. `text` stays the flattened body (= concatenation of the text blocks) so
+  `enrich`/`topics`/`generate`'s fallback consume it unchanged. Optional + additive
+  (defaults to `[]`) → existing `items.json` loads unchanged, same as `frames`. The
+  producer (`fetch`), download walk (`media`) and blogpost renderer (`generate`)
+  land in the later #39 PRs; PR1 is model-only (no behaviour change).
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

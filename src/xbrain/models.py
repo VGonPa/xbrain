@@ -542,6 +542,67 @@ class VideoFrame(BaseModel):
         return _reject_local_path_traversal(value)
 
 
+class ArticleTextBlock(BaseModel):
+    """One text run of an X long-form Article body (#39 PR1).
+
+    The textual layer of the ordered article body: a paragraph (or other
+    text run) with X's rich-text markup already flattened to plain text by
+    the producer (`fetch_x`, PR 3). It is one variant of the `ArticleBlock`
+    tagged union carried on `ContentSourceSuccess.blocks`.
+
+    The discriminator is `kind` (`"text"`) — the same tagged-union style as
+    `_MediaTagged` / `_ContentSourceTagged`. The concatenation of every
+    `ArticleTextBlock.text` (in `blocks` order) equals the source's flattened
+    `text` (the PR 1 contract), so `enrich`/`topics`/`generate`'s fallback
+    consume `text` unchanged.
+    """
+
+    kind: Literal["text"] = "text"
+    text: str
+
+
+class ArticleImageBlock(BaseModel):
+    """One inline image of an X long-form Article body (#39 PR1).
+
+    The visual layer of the ordered article body: an inline image positioned
+    where the author placed it, wrapping the EXISTING `MediaEntry` photo-state
+    union (`MediaPhotoPending` → `MediaPhotoDownloaded` / `MediaPhotoFailed` /
+    `MediaPhotoDescribed`). Wrapping the union — rather than inventing a new
+    image type — means the proven download engine, the `_reject_local_path_traversal`
+    / `_require_utc_aware` validators, the `_media/` mirroring and a future
+    `describe` path ALL apply with zero new plumbing. The producer (PR 3) only
+    ever constructs `MediaPhotoPending`; the pending → downloaded/failed
+    transition is driven by the existing `xbrain media` engine (PR 4).
+
+    `MediaEntry` nominally also admits the video variants; an article image
+    never uses them — harmless, and it buys full reuse of the validators +
+    download engine. `alt` is the optional alt-text captured from the article
+    markup (`None` when absent). The discriminator is `kind` (`"image"`).
+    """
+
+    kind: Literal["image"] = "image"
+    media: MediaEntry
+    alt: str | None = None
+
+
+# The ordered-block type — a discriminated union over the text and image
+# variants, tagged on `kind`. Same style as `_MediaTagged` /
+# `_ContentSourceTagged`. No `BeforeValidator` legacy shim is needed: `blocks`
+# is a brand-new field (#39), so there is no pre-existing on-wire shape to
+# migrate — a legacy record simply has no `blocks` key and defaults to `[]`.
+ArticleBlock = Annotated[
+    Union[ArticleTextBlock, ArticleImageBlock],
+    Field(discriminator="kind"),
+]
+
+
+# TypeAdapter for tests / ad-hoc validation of a single block outside an
+# `Item` context (mirrors `MediaEntryAdapter` / `ContentSourceAdapter`).
+ArticleBlockAdapter: TypeAdapter[Union[ArticleTextBlock, ArticleImageBlock]] = TypeAdapter(
+    ArticleBlock
+)
+
+
 class ContentSourceSuccess(BaseModel):
     """A fetched article whose body was successfully extracted.
 
@@ -575,6 +636,21 @@ class ContentSourceSuccess(BaseModel):
     # one-time backward-compatible additive churn as `has_speech`/`language`. Each
     # `VideoFrame` embeds into the note like a downloaded photo (see `VideoFrame`).
     frames: list[VideoFrame] = Field(default_factory=list)
+    # Ordered body blocks (text + inline images) for `kind="x_article"` sources
+    # captured as a structured Article (#39). Optional + additive (defaults to
+    # `[]`), so every EXISTING record LOADS unchanged — a pre-#39 `x_article`
+    # source (trafilatura text-only) and every non-article source simply carries
+    # no blocks. A re-dump adds `blocks: []`, the same one-time backward-compatible
+    # additive churn as `frames`/`has_speech`/`language`.
+    #
+    # INVARIANT (guaranteed by the PR 3 producer): when `blocks` is non-empty,
+    # `text` MUST equal the concatenation of the `ArticleTextBlock` texts, in
+    # order. `text` therefore stays the source of truth for the flattened body,
+    # so `enrich`/`topics`/`generate`'s fallback consume it UNCHANGED — #39 adds
+    # no enrich/topics change. Each `ArticleImageBlock` wraps the existing
+    # `MediaEntry` photo-state union, so the download/mirror/(future-)describe
+    # machinery applies with no new plumbing (see `ArticleImageBlock`).
+    blocks: list[ArticleBlock] = Field(default_factory=list)
 
 
 class ContentSourceFailure(BaseModel):
