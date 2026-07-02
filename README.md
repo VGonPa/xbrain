@@ -565,6 +565,9 @@ uv run xbrain <command> [options]
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
 
 Every stage accepts `--since` / `--until` (ISO dates) to narrow the date window.
+The window is inclusive at both ends: a date-only `--until 2025-12-31` covers the
+whole of Dec 31 (up to `23:59:59.999999` UTC). Pass an explicit time
+(`--until 2025-12-31T09:00:00`) to cut off mid-day instead.
 Run `uv run xbrain <command> --help` for the full option list.
 
 ---

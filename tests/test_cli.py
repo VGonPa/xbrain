@@ -628,6 +628,117 @@ def test_parse_date_returns_utc_aware():
     assert _parse_date(None) is None
 
 
+def test_parse_date_since_keeps_midnight():
+    """A date-only `since` stays at the day's start (00:00:00) — no snapping."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31")
+    assert parsed == datetime(2025, 12, 31, 0, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_date_until_snaps_date_only_to_end_of_day():
+    """A date-only `until` snaps to the last microsecond so the whole day is included."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31", end_of_day=True)
+    assert parsed == datetime(2025, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+
+def test_parse_date_until_respects_explicit_time():
+    """An explicit time on `until` is respected as-is — never snapped to end of day."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31T09:00:00", end_of_day=True)
+    assert parsed == datetime(2025, 12, 31, 9, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_date_until_space_basic_time_is_respected():
+    """A space-separated basic-format time (no colon) is a time — must NOT snap."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31 120000", end_of_day=True)
+    assert parsed == datetime(2025, 12, 31, 12, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_date_until_bare_date_with_offset_snaps():
+    """A bare date carrying only a tz offset (no time-of-day) still snaps to end of day."""
+    from xbrain.cli import _parse_date
+
+    parsed = _parse_date("2025-12-31+00:00", end_of_day=True)
+    assert parsed == datetime(2025, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+
+def test_cli_generate_until_date_only_includes_whole_final_day(tmp_path: Path, monkeypatch):
+    """`--until <date>` (date-only) includes items up to 23:59:59.999999 of that day.
+
+    Pins the microsecond boundary: an item at the last microsecond of the day is
+    INCLUDED, the next-day midnight item is EXCLUDED. Catches a `>`→`>=` flip or any
+    coarsening of the snap value.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    midday = _linked_item("1")
+    midday.created_at = datetime(2026, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    last_us = _linked_item("2")
+    last_us.created_at = datetime(2026, 1, 15, 23, 59, 59, 999999, tzinfo=timezone.utc)
+    next_day = _linked_item("3")
+    next_day.created_at = datetime(2026, 1, 16, 0, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": midday, "2": last_us, "3": next_day}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--until", "2026-01-15"])
+    assert result.exit_code == 0
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    names = sorted(n.name for n in notes)
+    assert len(names) == 2
+    assert names[0].endswith("-1.md") and names[1].endswith("-2.md")
+    assert not any(n.endswith("-3.md") for n in names)
+
+
+def test_cli_generate_until_explicit_time_is_respected(tmp_path: Path, monkeypatch):
+    """`--until <date>T09:00:00` excludes an item at 10:00 and includes one at 08:00."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    after = _linked_item("1")
+    after.created_at = datetime(2026, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+    before = _linked_item("2")
+    before.created_at = datetime(2026, 1, 15, 8, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": after, "2": before}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--until", "2026-01-15T09:00:00"])
+    assert result.exit_code == 0
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    assert len(notes) == 1
+    assert notes[0].name.endswith("-2.md")
+
+
+def test_cli_generate_since_date_only_includes_midnight_item(tmp_path: Path, monkeypatch):
+    """`--since <date>` (date-only) still includes an item created at that day's midnight."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    item = _linked_item("1")
+    item.created_at = datetime(2026, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["generate", "--since", "2026-01-15"])
+    assert result.exit_code == 0
+    notes = list((vault / "x-knowledge" / "items").glob("*.md"))
+    assert len(notes) == 1
+
+
+def test_cli_enrich_until_date_only_includes_whole_final_day(tmp_path, monkeypatch):
+    """Pins the `end_of_day=True` wiring on a SECOND command (`enrich`), not just `generate`.
+
+    An item created on the `--until` day at 15:00 must count as pending — a mutation
+    dropping `end_of_day=True` from the enrich site would exclude it (0 pending).
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    from xbrain.models import Topic
+    from xbrain.rubrics import save_vocab
+
+    item = _linked_item("1")
+    item.created_at = datetime(2026, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    save_store({"1": item}, tmp_path / "data" / "items.json")
+    save_vocab([Topic(slug="misc", description="d")], tmp_path / "data" / "vocab.yaml")
+    result = runner.invoke(app, ["enrich", "--executor", "manual", "--until", "2026-01-15"])
+    assert result.exit_code == 0
+    assert "1 items exportados" in result.output
+    assert (tmp_path / "data" / "enrich-worksheet.json").exists()
+
+
 def test_cli_fetch_with_since_does_not_crash(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     old_item = _linked_item("1")
