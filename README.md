@@ -646,6 +646,12 @@ either track. This is how a tweet that is mostly a screenshot of a
 paper becomes searchable by what the screenshot was actually about —
 even when the pipeline runs entirely on the Claude Code subscription.
 
+These descriptions flow whenever `enrich` / `topics` next run for an
+item. To back-fill items that were already enriched *before* the
+describe pass (a one-time LLM cost), force the re-run: `xbrain vocab
+--regenerate` (clears enrichments) then `xbrain enrich`, and `xbrain
+topics --resynth`.
+
 Describing the full corpus costs about $3-5 with the default model
 (Sonnet 4.6, 5 images per call). Bump `[describe].version` in
 `config.toml` to invalidate stored descriptions when you change the

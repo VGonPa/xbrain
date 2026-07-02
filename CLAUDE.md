@@ -25,8 +25,12 @@ generates an Obsidian wiki.
   the same non-decorative seam — shared, not duplicated). `topics`: the api track appends
   the flat content-image list; the topic worksheet carries `image_descriptions` per topic
   from the `TopicInput` that `build_topic_inputs` already computes. Decoratives are
-  filtered at the seam so avatars/memes add no topic noise. (The 817 already-described
-  photos only reach already-enriched items on a forced `enrich`/`topics` re-run.)
+  filtered at the seam so avatars/memes add no topic noise. Wiring only: the
+  descriptions flow whenever enrich/topics next run for an item. To propagate them
+  onto ALREADY-enriched items (a one-time LLM cost, run separately): `xbrain vocab
+  --regenerate` (clears enrichments) → `xbrain enrich` re-runs every item with its
+  image descriptions; `xbrain topics --resynth` re-synthesizes overviews with the
+  image + transcript evidence.
 - Agent-driven video surface (fetch is mechanical, ML is external): `list-videos`
   is a **read-only** catalog of video media (`--json` → stable `{id, url, state,
   topic, size_bytes, mp4_url, text}` array; filters `--topic/--status/--max-size/

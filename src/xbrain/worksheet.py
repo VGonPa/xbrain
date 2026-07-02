@@ -78,7 +78,9 @@ def export_worksheet(
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with "
             "keys {item_id, summary, primary_topic, topics}. Use only slugs from "
-            "`vocab`. Then run: xbrain enrich --apply <this file>."
+            "`vocab`. An item may also carry `links`, `article`, `video_transcript` "
+            "and `image_descriptions` (content-bearing photos) — weigh them all as "
+            "topic signal, not just `text`. Then run: xbrain enrich --apply <this file>."
         ),
         "rubrics": {
             "summary": load_rubric("summary", language=output_language),

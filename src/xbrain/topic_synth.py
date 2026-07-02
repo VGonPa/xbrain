@@ -195,7 +195,10 @@ def export_topic_worksheet(inputs: list[TopicInput], path: Path, output_language
             f"For each entry in `topics`, append one object to `judgments` with "
             f"keys {{slug, overview, notes}}. `overview` is plain prose in "
             f"{output_language}; `notes` is a list of plain-prose strings in "
-            f"{output_language}. No wikilinks, no filenames. Then run: "
+            f"{output_language}. A topic may also carry `image_descriptions` "
+            f"(content-bearing photos) and `video_transcripts` (bounded excerpts) "
+            f"— weigh them as visual/transcript evidence alongside the summaries. "
+            f"No wikilinks, no filenames. Then run: "
             f"xbrain topics --apply <this file>."
         ),
         "rubric": load_rubric("topic-page", language=output_language),
@@ -210,6 +213,12 @@ def export_topic_worksheet(inputs: list[TopicInput], path: Path, output_language
                 # into `TopicInput.image_descriptions`; empty list when the topic has
                 # none. No truncation — the api path doesn't bound these either.
                 "image_descriptions": t.image_descriptions,
+                # Bounded video-transcript excerpts (#56 transcript-to-topics half):
+                # mirrors the `api` track's topic block ("Video transcripts across
+                # the N videos in this topic"). Already collected + per-video bounded
+                # (`TOPIC_TRANSCRIPT_CHAR_LIMIT`) by `build_topic_inputs` into
+                # `TopicInput.video_transcripts`; empty list when the topic has none.
+                "video_transcripts": t.video_transcripts,
             }
             for t in inputs
         ],

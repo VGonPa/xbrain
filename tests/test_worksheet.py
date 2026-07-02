@@ -142,7 +142,15 @@ def test_export_worksheet_includes_image_descriptions(tmp_path):
 
 def test_export_worksheet_omits_decorative_image_descriptions(tmp_path):
     """A decorative-only item carries no image descriptions — avatars / reaction
-    memes are filtered at the same seam the api path uses, so no topic noise."""
+    memes are filtered at the same seam the api path uses, so no topic noise.
+
+    Note: this exercises the filter's decorative exclusion only *indirectly*. The
+    model invariant `is_decorative => description == ""` (enforced by
+    `MediaPhotoDescribed`) makes a decorative-photo-with-nonempty-description
+    unconstructable, so the filter's `not is_decorative` clause and its
+    empty-description backstop can't be told apart by a test — either one alone
+    excludes this photo. Both clauses are kept for defence in depth.
+    """
     path = tmp_path / "ws.json"
     export_worksheet(
         [_photo_item("1", _described_photo(description="ignored", decorative=True))],
