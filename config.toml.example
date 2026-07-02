@@ -62,7 +62,13 @@ version = "v1"
 # <TMPDIR>/<stem>.json ({"text", "language", "segments":[{start,end,text}]}).
 # Note: --language is NOT passed (parakeet auto-detects and rejects it). A wrapper
 # that emits JSON on stdout instead of a file is also supported.
+#
+# The bundled `scripts/xbrain-transcribe` wraps parakeet-mlx so videos with NO
+# audio track (silent clips, GIFs) attach as has_speech=false instead of failing
+# (parakeet writes no file for them). Point at the wrapper, or straight at
+# `parakeet-mlx` if you don't need silent-video handling.
 command = "parakeet-mlx"
+# command = "/absolute/path/to/scripts/xbrain-transcribe"
 # Optional model id passed through to the transcriber. Omit for the tool default.
 # model = "parakeet-tdt-0.6b-v2"
 
