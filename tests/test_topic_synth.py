@@ -134,6 +134,86 @@ def test_export_and_import_topic_worksheet_round_trip(tmp_path):
     assert import_topic_worksheet(path) == []
 
 
+def test_export_topic_worksheet_includes_image_descriptions(tmp_path):
+    """The topic worksheet carries `image_descriptions` so the claude-code topics
+    track synthesizes overviews from the same visual evidence as the api track —
+    closing the #34 gap. The descriptions ride the `TopicInput` already computed
+    by `build_topic_inputs`."""
+    import json
+
+    from xbrain.topic_synth import export_topic_worksheet
+
+    inputs = [
+        TopicInput(
+            slug="ai-coding",
+            description="LLMs writing software",
+            summaries=["s1"],
+            image_descriptions=["A flowchart of a feedback loop.", "Code in a terminal."],
+        )
+    ]
+    path = tmp_path / "topic-worksheet.json"
+    export_topic_worksheet(inputs, path, output_language="English")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["topics"][0]["image_descriptions"] == [
+        "A flowchart of a feedback loop.",
+        "Code in a terminal.",
+    ]
+
+
+def test_export_topic_worksheet_omits_image_descriptions_when_none(tmp_path):
+    """A topic with no content-bearing photos exports an empty `image_descriptions`
+    list — regression guard so the key is always present and clean."""
+    import json
+
+    from xbrain.topic_synth import export_topic_worksheet
+
+    inputs = [TopicInput(slug="x", description="d", summaries=["s1"])]
+    path = tmp_path / "topic-worksheet.json"
+    export_topic_worksheet(inputs, path, output_language="English")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["topics"][0]["image_descriptions"] == []
+
+
+def test_export_topic_worksheet_includes_video_transcripts(tmp_path):
+    """The topic worksheet carries `video_transcripts` so the claude-code topics
+    track synthesizes overviews from the same transcript evidence as the api track
+    — closes #56's transcript-to-topics half. The excerpts ride the `TopicInput`
+    already computed (and bounded) by `build_topic_inputs`."""
+    import json
+
+    from xbrain.topic_synth import export_topic_worksheet
+
+    inputs = [
+        TopicInput(
+            slug="ai-coding",
+            description="LLMs writing software",
+            summaries=["s1"],
+            video_transcripts=["A talk on retrieval-augmented agents.", "A live coding demo."],
+        )
+    ]
+    path = tmp_path / "topic-worksheet.json"
+    export_topic_worksheet(inputs, path, output_language="English")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["topics"][0]["video_transcripts"] == [
+        "A talk on retrieval-augmented agents.",
+        "A live coding demo.",
+    ]
+
+
+def test_export_topic_worksheet_omits_video_transcripts_when_none(tmp_path):
+    """A topic with no with-speech videos exports an empty `video_transcripts`
+    list — regression guard so the key is always present and clean."""
+    import json
+
+    from xbrain.topic_synth import export_topic_worksheet
+
+    inputs = [TopicInput(slug="x", description="d", summaries=["s1"])]
+    path = tmp_path / "topic-worksheet.json"
+    export_topic_worksheet(inputs, path, output_language="English")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["topics"][0]["video_transcripts"] == []
+
+
 def test_import_topic_worksheet_rejects_non_list_judgments(tmp_path):
     import json
 

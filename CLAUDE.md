@@ -17,6 +17,20 @@ generates an Obsidian wiki.
   for backfilled videos (mp4 only — HLS `.m3u8` needs ffmpeg and is a deferred
   follow-up; prints a ~GB size-gate, confirm unless `--yes`; destructive →
   auto-snapshot).
+- Vision descriptions — pipeline integration (#34): content-bearing described-photo
+  prose feeds **both** the `enrich` and `topics` LLM inputs, on **both** the API and
+  the worksheet (`claude-code`/`manual`) tracks. `enrich`: the api executor splices an
+  `Images in this post:` block (`executors/api.py:_user_prompt`); the enrich worksheet
+  carries an `image_descriptions` field per item (reusing `_content_image_descriptions`,
+  the same non-decorative seam — shared, not duplicated). `topics`: the api track appends
+  the flat content-image list; the topic worksheet carries `image_descriptions` per topic
+  from the `TopicInput` that `build_topic_inputs` already computes. Decoratives are
+  filtered at the seam so avatars/memes add no topic noise. Wiring only: the
+  descriptions flow whenever enrich/topics next run for an item. To propagate them
+  onto ALREADY-enriched items (a one-time LLM cost, run separately): `xbrain vocab
+  --regenerate` (clears enrichments) → `xbrain enrich` re-runs every item with its
+  image descriptions; `xbrain topics --resynth` re-synthesizes overviews with the
+  image + transcript evidence.
 - Agent-driven video surface (fetch is mechanical, ML is external): `list-videos`
   is a **read-only** catalog of video media (`--json` → stable `{id, url, state,
   topic, size_bytes, mp4_url, text}` array; filters `--topic/--status/--max-size/

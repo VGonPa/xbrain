@@ -87,12 +87,15 @@ const results = await parallel(
       `Eres un sintetizador experto de una base de conocimiento personal (xbrain de Víctor). Tu única tarea: escribir el OVERVIEW del topic "${slug}", leyendo SOLO los posts de ESE topic.
 
 PASO 1 — Extrae tu topic y la rúbrica ejecutando exactamente:
-  cd /Users/vgonpa/devel/xbrain && .venv/bin/python -c "import json; d=json.load(open('${WORKSHEET}')); t=[x for x in d['topics'] if x['slug']=='${slug}'][0]; print('=== RUBRICA ==='); print(d['rubric']); print('=== DESCRIPTION ==='); print(t['description']); print('=== SUMMARIES ('+str(len(t['summaries']))+') ==='); [print('- '+s) for s in t['summaries']]"
+  cd /Users/vgonpa/devel/xbrain && .venv/bin/python -c "import json; d=json.load(open('${WORKSHEET}')); t=[x for x in d['topics'] if x['slug']=='${slug}'][0]; print('=== RUBRICA ==='); print(d['rubric']); print('=== DESCRIPTION ==='); print(t['description']); print('=== SUMMARIES ('+str(len(t['summaries']))+') ==='); [print('- '+s) for s in t['summaries']]; img=t.get('image_descriptions') or []; print('=== IMAGES ('+str(len(img))+') ==='); [print('- '+s) for s in img]; vid=t.get('video_transcripts') or []; print('=== VIDEO TRANSCRIPTS ('+str(len(vid))+') ==='); [print('- '+s) for s in vid]"
 
-PASO 2 — Lee la RÚBRICA entera y respétala al pie de la letra. Lee la DESCRIPTION y TODOS los SUMMARIES: cada summary es el resumen de un post del topic — ESOS son "los posts" que debes leer y sintetizar. No leas otros ficheros; trabaja solo con lo que imprime ese comando.
+PASO 2 — Lee la RÚBRICA entera y respétala al pie de la letra. Lee la DESCRIPTION y TODOS los SUMMARIES: cada summary es el resumen de un post del topic — ESOS son "los posts" que debes leer y sintetizar. El comando también imprime dos bloques de evidencia visual/audiovisual cuando existen — trátalos como parte de "los posts", con el mismo peso que los summaries:
+  - IMAGES — "Images across the content-bearing photos in this topic": descripciones en prosa de las fotos con contenido (gráficas, capturas, diagramas) de los posts del topic. Aportan señal temática que el summary a veces solo insinúa.
+  - VIDEO TRANSCRIPTS — "Video transcripts across the videos in this topic": extractos (truncados) de las transcripciones de los vídeos del topic.
+No leas otros ficheros; trabaja solo con lo que imprime ese comando.
 
 PASO 3 — Sintetiza para el topic "${slug}":
-  - overview: 1 a 3 párrafos en español. Qué es este topic EN ESTE CORPUS: las ideas recurrentes, el arco temporal, las tensiones o debates. Escrito para alguien que decide si leer los posts. FIEL a los summaries — nunca inventes nombres, números ni hechos que no estén en ellos. Prosa plana: sin wikilinks [[...]], sin nombres de fichero, sin identificadores, sin headings markdown. Si el topic es "misc" o de verdad no tiene núcleo temático, dilo con naturalidad en un párrafo y deja notes corto o vacío — no fabriques temas.
+  - overview: 1 a 3 párrafos en español. Qué es este topic EN ESTE CORPUS: las ideas recurrentes, el arco temporal, las tensiones o debates. Escrito para alguien que decide si leer los posts. Integra la evidencia de IMAGES y VIDEO TRANSCRIPTS junto con los summaries. FIEL a los summaries y a esa evidencia — nunca inventes nombres, números ni hechos que no estén en ellos. Prosa plana: sin wikilinks [[...]], sin nombres de fichero, sin identificadores, sin headings markdown. Si el topic es "misc" o de verdad no tiene núcleo temático, dilo con naturalidad en un párrafo y deja notes corto o vacío — no fabriques temas.
   - notes: lista de 0 a 15 frases cortas en español, una idea/hilo/patrón importante por nota, frase plana sin bullets ni wikilinks.
 
 Devuelve SOLO el objeto {overview, notes}.`,

@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from xbrain.executors.api import _content_image_descriptions
 from xbrain.models import ContentSourceSuccess, Item, Topic
 from xbrain.rubrics import (
     ARTICLE_CHAR_LIMIT,
@@ -77,7 +78,9 @@ def export_worksheet(
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with "
             "keys {item_id, summary, primary_topic, topics}. Use only slugs from "
-            "`vocab`. Then run: xbrain enrich --apply <this file>."
+            "`vocab`. An item may also carry `links`, `article`, `video_transcript` "
+            "and `image_descriptions` (content-bearing photos) — weigh them all as "
+            "topic signal, not just `text`. Then run: xbrain enrich --apply <this file>."
         ),
         "rubrics": {
             "summary": load_rubric("summary", language=output_language),
@@ -93,6 +96,12 @@ def export_worksheet(
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
                 "video_transcript": _video_transcript(it),
+                # Content-bearing photo descriptions (#34): the same non-decorative
+                # selection the `api` executor injects as its `Images in this post:`
+                # section (`_content_image_descriptions`), so the manual/claude-code
+                # enrich track sees the identical visual signal. Empty list when the
+                # item has no described photos or only decorative ones.
+                "image_descriptions": _content_image_descriptions(it),
             }
             for it in items
         ],

@@ -295,11 +295,13 @@ Eligibility ignores `Pending` / `Failed` / `VideoPending`: describe only runs on
 
 **Snapshot trigger.** `xbrain describe` always snapshots `data/` first (label `pre-describe`), mirroring `media`'s recovery boundary. A botched run — wrong model, runaway prompt — can be undone with `xbrain snapshot restore`.
 
-**Feeds the LLM stages.** Once described, the prose is consumed automatically:
-- `xbrain enrich` (in `executors/api.py:_user_prompt`) splices an `Images in this post:` section between the post body and the links/article block when the item has content-bearing described photos. Decoratives are filtered.
-- `xbrain topics` (in `topic_synth.py:_user_prompt`) appends the flat list of content-bearing image descriptions across every post in a topic, after the per-post summaries.
+**Feeds the LLM stages.** Once described, the prose is consumed automatically — through **both** the API and the worksheet (`claude-code` / `manual`) tracks, so the descriptions reach the LLM input regardless of which executor runs the stage ([#34](https://github.com/VGonPa/xbrain/issues/34)):
+- `xbrain enrich`: the `api` executor (`executors/api.py:_user_prompt`) splices an `Images in this post:` section between the post body and the links/article block when the item has content-bearing described photos; the worksheet export (`worksheet.py`, an `image_descriptions` field per item) carries the same non-decorative selection (reusing `executors/api._content_image_descriptions`, the same seam) so the claude-code enrich track sees identical visual signal. Decoratives are filtered.
+- `xbrain topics`: the `api` track (`topic_synth.py:_user_prompt`) appends the flat list of content-bearing image descriptions across every post in a topic, after the per-post summaries; the worksheet export (`topic_synth.py:export_topic_worksheet`, an `image_descriptions` field per topic) carries the same list from the `TopicInput` already computed by `build_topic_inputs`, and the claude-code consumers surface it — the `resynth-topic-overviews` workflow prints an `Images across …` block in each per-topic extraction and the `enriching-x-knowledge` skill lists the field for a hand-run session.
 
-This is how a tweet that is mostly a screenshot of a paper becomes searchable by what the screenshot was actually about.
+This is how a tweet that is mostly a screenshot of a paper becomes searchable by what the screenshot was actually about — on either track.
+
+**Propagating onto already-enriched items.** This is *wiring*: the descriptions flow whenever `enrich` / `topics` next run for an item. Items already enriched before the describe pass are skipped by the normal idempotency guard, so a one-time forced re-run (real LLM cost, run deliberately) is what back-fills them: `xbrain vocab --regenerate` (clears enrichments) then `xbrain enrich` re-enriches every item with its image descriptions, and `xbrain topics --resynth` re-synthesizes the overviews with the image (and video-transcript) evidence.
 
 ### refresh-media
 

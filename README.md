@@ -637,11 +637,20 @@ abstract backgrounds) are classified as such and persisted with an
 empty description so they introduce no topic noise downstream.
 
 `xbrain enrich` and `xbrain topics` consume the descriptions
-automatically: an item with content-bearing photos gets an
-`Images in this post:` block in the enrichment prompt; topic-page
-synthesis sees the flat list of content image descriptions across the
-topic's posts. This is how a tweet that is mostly a screenshot of a
-paper becomes searchable by what the screenshot was actually about.
+automatically, on **both** the API and the worksheet (`claude-code` /
+`manual`) tracks: an item with content-bearing photos gets an
+`Images in this post:` block in the API enrichment prompt and an
+`image_descriptions` field in the worksheet; topic-page synthesis sees
+the flat list of content image descriptions across the topic's posts on
+either track. This is how a tweet that is mostly a screenshot of a
+paper becomes searchable by what the screenshot was actually about —
+even when the pipeline runs entirely on the Claude Code subscription.
+
+These descriptions flow whenever `enrich` / `topics` next run for an
+item. To back-fill items that were already enriched *before* the
+describe pass (a one-time LLM cost), force the re-run: `xbrain vocab
+--regenerate` (clears enrichments) then `xbrain enrich`, and `xbrain
+topics --resynth`.
 
 Describing the full corpus costs about $3-5 with the default model
 (Sonnet 4.6, 5 images per call). Bump `[describe].version` in
