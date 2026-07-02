@@ -453,11 +453,19 @@ uv tool install mlx-vlm
 
 # 3. Point config.toml at them (absolute paths survive any PATH):
 #    [transcribe]
-#    command = "/Users/<you>/.local/bin/parakeet-mlx"
+#    command = "/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
 #    [vision]
 #    command = "/path/to/xbrain/scripts/xbrain-vision"
 #    model   = "qwen-3b"
 ```
+
+**Transcriber wrapper — `scripts/xbrain-transcribe`.** Points `[transcribe]` at a
+thin parakeet-mlx wrapper: parakeet writes no file for a video with **no audio
+track** (silent clips, GIFs, muted screencasts), which xbrain would otherwise
+count as a failure. The wrapper checks with `ffprobe` and emits the empty-speech
+JSON so such videos attach as `has_speech=false` ("silent video"), while a real
+parakeet failure on an audio-bearing file still surfaces. You can point
+`[transcribe].command` straight at `parakeet-mlx` if you don't need this.
 
 **Vision model selector — `scripts/xbrain-vision`.** One `[vision].command`
 serves both local and cloud models; the `--model` name is routed by a registry:
