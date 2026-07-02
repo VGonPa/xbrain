@@ -13,56 +13,117 @@ xt = importlib.util.module_from_spec(_SPEC)
 _LOADER.exec_module(xt)
 
 
-def _run(monkeypatch, tmp_path, *, parakeet_rc, writes_file, has_audio):
-    """Drive main() with parakeet + ffprobe mocked; return (rc, expected_json_path)."""
+def _run(monkeypatch, tmp_path, *, parakeet_rc, writes, confirmed_no_audio):
+    """Drive main() with parakeet + ffprobe mocked.
+
+    `writes` is what parakeet "produces": None (nothing), or a (filename, content)
+    tuple written to `tmp_path` (content "" simulates an empty stub file).
+    """
     media = tmp_path / "clip.mp4"
     media.write_bytes(b"x")
-    expected = tmp_path / "clip.json"
 
     def fake_run(cmd, *a, **k):
-        if writes_file and parakeet_rc == 0:  # parakeet "wrote" a real transcript
-            expected.write_text(
-                '{"text": "hola", "segments": [{"start": 0, "end": 1, "text": "hola"}]}'
-            )
+        if writes is not None and parakeet_rc == 0:
+            name, content = writes
+            (tmp_path / name).write_text(content)
         return types.SimpleNamespace(returncode=parakeet_rc, stdout="", stderr="")
 
     monkeypatch.setattr(xt.subprocess, "run", fake_run)
-    monkeypatch.setattr(xt, "_has_audio_stream", lambda m: has_audio)
+    monkeypatch.setattr(xt, "_confirmed_no_audio", lambda m: confirmed_no_audio)
     monkeypatch.setattr(
         sys,
         "argv",
         ["xbrain-transcribe", "--output-format", "json", "--output-dir", str(tmp_path), str(media)],
     )
-    return xt.main(), expected
+    return xt.main(), tmp_path
 
 
-def test_speech_passes_parakeet_output_through(monkeypatch, tmp_path):
-    rc, expected = _run(monkeypatch, tmp_path, parakeet_rc=0, writes_file=True, has_audio=True)
+def _only_json(d: Path) -> dict:
+    return json.loads(
+        next(p for p in sorted(d.glob("*.json")) if p.read_text().strip()).read_text()
+    )
+
+
+def test_speech_passes_parakeet_transcript_through(monkeypatch, tmp_path):
+    rc, d = _run(
+        monkeypatch,
+        tmp_path,
+        parakeet_rc=0,
+        writes=("clip.json", '{"text": "hola", "segments": []}'),
+        confirmed_no_audio=False,
+    )
     assert rc == 0
-    assert json.loads(expected.read_text())["text"] == "hola"  # not overwritten
+    assert _only_json(d)["text"] == "hola"  # not overwritten
 
 
-def test_silent_video_gets_empty_speech_json(monkeypatch, tmp_path):
-    rc, expected = _run(monkeypatch, tmp_path, parakeet_rc=0, writes_file=False, has_audio=False)
+def test_transcript_detected_regardless_of_output_filename(monkeypatch, tmp_path):
+    # xbrain globs *.json by content, not <stem>.json — a differently-named non-empty
+    # file must still count as "parakeet produced a transcript" (no false failure).
+    rc, d = _run(
+        monkeypatch,
+        tmp_path,
+        parakeet_rc=0,
+        writes=("weird-name.json", '{"text": "hi"}'),
+        confirmed_no_audio=False,
+    )
     assert rc == 0
-    data = json.loads(expected.read_text())
+
+
+def test_confirmed_silent_gets_empty_speech_json(monkeypatch, tmp_path):
+    rc, d = _run(monkeypatch, tmp_path, parakeet_rc=0, writes=None, confirmed_no_audio=True)
+    assert rc == 0
+    data = _only_json(d)
     assert data["has_speech"] is False and data["text"] == ""
 
 
-def test_audio_but_no_output_is_a_real_failure(monkeypatch, tmp_path):
-    # exit 0, no file, but the media HAS audio → parakeet choked → surface as failure.
-    rc, expected = _run(monkeypatch, tmp_path, parakeet_rc=0, writes_file=False, has_audio=True)
+def test_empty_stub_json_is_not_treated_as_output(monkeypatch, tmp_path):
+    # parakeet writes a 0-content stub → must NOT count as a transcript; the silent
+    # path runs and replaces it with the empty-speech JSON (finding #1).
+    rc, d = _run(
+        monkeypatch, tmp_path, parakeet_rc=0, writes=("clip.json", "   "), confirmed_no_audio=True
+    )
+    assert rc == 0
+    assert _only_json(d)["has_speech"] is False
+
+
+def test_audio_or_unverifiable_is_a_real_failure(monkeypatch, tmp_path):
+    # exit 0, no transcript, ffprobe did NOT confirm silence → real failure, not masked.
+    rc, d = _run(monkeypatch, tmp_path, parakeet_rc=0, writes=None, confirmed_no_audio=False)
     assert rc == 1
-    assert not expected.exists()  # never masked as silent
+    assert not any(p.read_text().strip() for p in d.glob("*.json"))  # nothing written
 
 
 def test_parakeet_nonzero_exit_propagates(monkeypatch, tmp_path):
-    rc, expected = _run(monkeypatch, tmp_path, parakeet_rc=2, writes_file=False, has_audio=False)
+    rc, d = _run(monkeypatch, tmp_path, parakeet_rc=2, writes=None, confirmed_no_audio=True)
     assert rc == 2
-    assert not expected.exists()
+    assert not list(d.glob("*.json"))
 
 
-def test_has_audio_stream_false_without_ffprobe(monkeypatch):
-    monkeypatch.setattr(xt.shutil, "which", lambda _: None)  # ffprobe unavailable
-    assert xt._has_audio_stream("/some/clip.mp4") is False
-    assert xt._has_audio_stream("") is False
+def _fake_ffprobe(monkeypatch, *, returncode, stdout, has_ffprobe=True):
+    monkeypatch.setattr(xt.shutil, "which", lambda _: "/usr/bin/ffprobe" if has_ffprobe else None)
+    monkeypatch.setattr(
+        xt.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=""),
+    )
+
+
+def test_confirmed_no_audio_true_when_ffprobe_finds_no_audio(monkeypatch):
+    _fake_ffprobe(monkeypatch, returncode=0, stdout="")
+    assert xt._confirmed_no_audio("/x/clip.mp4") is True
+
+
+def test_confirmed_no_audio_false_when_audio_present(monkeypatch):
+    _fake_ffprobe(monkeypatch, returncode=0, stdout="audio\n")
+    assert xt._confirmed_no_audio("/x/clip.mp4") is False
+
+
+def test_confirmed_no_audio_false_when_ffprobe_errors(monkeypatch):
+    _fake_ffprobe(monkeypatch, returncode=1, stdout="")  # can't trust → not silent
+    assert xt._confirmed_no_audio("/x/clip.mp4") is False
+
+
+def test_confirmed_no_audio_false_without_ffprobe_or_path(monkeypatch):
+    _fake_ffprobe(monkeypatch, returncode=0, stdout="", has_ffprobe=False)
+    assert xt._confirmed_no_audio("/x/clip.mp4") is False
+    assert xt._confirmed_no_audio("") is False

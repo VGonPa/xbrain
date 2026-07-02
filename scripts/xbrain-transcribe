@@ -2,47 +2,83 @@
 """xbrain `[transcribe].command` wrapper — parakeet-mlx + graceful no-audio handling.
 
 xbrain invokes `<cmd> [--model M] --output-format json --output-dir <DIR> <media>`
-and reads `<DIR>/<stem>.json`. parakeet-mlx writes that file when there is speech,
-but writes NOTHING for a video with no audio track (silent clips, GIFs, muted
-screencasts) — which xbrain then treats as a hard transcribe failure. This wrapper
-runs parakeet and, when it exits 0 but produced no file, uses `ffprobe` to check
-whether the media actually has an audio stream:
+and reads the transcript from the first NON-EMPTY `*.json` in `<DIR>`. parakeet-mlx
+writes that file when there is speech, but writes no usable output for a video with
+no audio track (silent clips, GIFs, muted screencasts) — which xbrain then treats
+as a hard transcribe failure. This wrapper runs parakeet and, when it produced no
+non-empty JSON, decides:
 
-  - no audio stream  → write the empty-speech JSON xbrain's contract expects, so
-    the video attaches as `has_speech=false` (a "silent video" note), not a failure.
-  - HAS an audio stream but parakeet still produced nothing → a REAL failure
-    (parakeet choked on audio); surface it (exit 1) rather than masking it as silent.
+  - `ffprobe` POSITIVELY confirms the media has no audio stream → write the
+    empty-speech JSON so the video attaches as `has_speech=false` (a "silent
+    video" note), not a failure.
+  - otherwise (audio present, OR ffprobe can't confirm) → a REAL failure; surface
+    it (exit 1) rather than masking it as silent.
 
-A non-zero parakeet exit always propagates unchanged. `parakeet-mlx` is looked up
-on PATH; override with the `XBRAIN_PARAKEET` env var. Local, no API.
+"Produced output" is judged the same way xbrain judges it — a non-empty `*.json`,
+by content, not by filename — so an empty stub file or an unexpected output name
+never fools the wrapper. A non-zero parakeet exit always propagates unchanged.
+`parakeet-mlx` is looked up on PATH (multi-token override via `XBRAIN_PARAKEET`,
+split with shlex). Local, no API.
 """
+
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-PARAKEET = os.environ.get("XBRAIN_PARAKEET", "parakeet-mlx")  # PATH lookup; override with the env var
+# Multi-token so a wrapper command ("python -m my_asr") works like xbrain's own
+# shlex-split transcriber command; default is a bare PATH lookup of parakeet-mlx.
+PARAKEET_ARGV = shlex.split(os.environ.get("XBRAIN_PARAKEET", "parakeet-mlx"))
 
 
-def _has_audio_stream(media: str) -> bool:
-    """True if ffprobe finds an audio stream in `media`.
+def _has_nonempty_json(out_dir: Path) -> bool:
+    """True if `out_dir` holds any `*.json` with non-whitespace content.
 
-    Best-effort: if ffprobe is unavailable or the path is empty we cannot verify,
-    so we return False (treat as silent) — that preserves the primary goal of not
-    failing genuinely silent videos; ffprobe is present whenever `--frames` runs.
+    Mirrors xbrain's own reader (`sorted(dir.glob('*.json'))`, first non-empty),
+    so wrapper and consumer agree on what "parakeet produced a transcript" means.
+    """
+    for path in sorted(out_dir.glob("*.json")):
+        try:
+            if path.read_text().strip():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _confirmed_no_audio(media: str) -> bool:
+    """True ONLY if ffprobe positively confirms `media` has no audio stream.
+
+    Unknown (ffprobe absent / errors / empty path) → False, so we never MASK a real
+    transcribe failure as "silent". A genuinely silent video is still classified
+    correctly whenever ffprobe is available — which it is throughout the digest
+    pipeline (`--frames` needs ffmpeg/ffprobe).
     """
     ffprobe = shutil.which("ffprobe")
     if not ffprobe or not media:
         return False
     probe = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "a",
-         "-show_entries", "stream=codec_type", "-of", "csv=p=0", media],
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            media,
+        ],
         capture_output=True,
         text=True,
     )
-    return "audio" in probe.stdout
+    if probe.returncode != 0:
+        return False  # can't trust an empty result from a failed probe
+    return "audio" not in probe.stdout
 
 
 def main() -> int:
@@ -52,25 +88,24 @@ def main() -> int:
         if a == "--output-dir" and i + 1 < len(args):
             out_dir = args[i + 1]
     media = args[-1] if args else ""
-    rc = subprocess.run([PARAKEET, *args]).returncode
-    expected = Path(out_dir) / f"{Path(media).stem}.json"
-    if expected.exists():
-        return rc  # parakeet wrote the transcript; xbrain reads the file
+    rc = subprocess.run([*PARAKEET_ARGV, *args]).returncode
+    out = Path(out_dir)
+    if _has_nonempty_json(out):
+        return rc  # parakeet produced a transcript; xbrain reads it
     if rc != 0:
         return rc  # a genuine parakeet failure propagates unchanged
-    if _has_audio_stream(media):
-        # exit 0, no output, but the file HAS audio ⇒ real transcribe failure, not silent.
-        print(
-            f"xbrain-transcribe: parakeet produced no output for an audio-bearing file: {media}",
-            file=sys.stderr,
+    if _confirmed_no_audio(media):
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{Path(media).stem}.json").write_text(
+            json.dumps({"text": "", "language": None, "segments": [], "has_speech": False})
         )
-        return 1
-    # exit 0, no output, no audio stream ⇒ genuinely silent video.
-    expected.parent.mkdir(parents=True, exist_ok=True)
-    expected.write_text(
-        json.dumps({"text": "", "language": None, "segments": [], "has_speech": False})
+        return 0
+    # exit 0, no transcript, and audio is present or unverifiable ⇒ real failure.
+    print(
+        f"xbrain-transcribe: parakeet produced no transcript for: {media}",
+        file=sys.stderr,
     )
-    return 0
+    return 1
 
 
 if __name__ == "__main__":
