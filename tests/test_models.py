@@ -1185,6 +1185,93 @@ def test_article_block_adapter_discriminates_on_kind():
     assert isinstance(image.alt, type(None))
 
 
+# --------------------------------------------- text==concat invariant (#39 PR3)
+
+
+def test_content_source_text_equals_concat_of_text_blocks_validates():
+    """When `blocks` is non-empty, `text` == the `"".join` of the text runs
+    (images contribute nothing) — a matching pair validates."""
+    from xbrain.models import (
+        ArticleImageBlock,
+        ArticleTextBlock,
+        ContentSourceSuccess,
+        MediaPhotoPending,
+    )
+
+    src = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/1",
+        text="First.\n\nSecond.",
+        blocks=[
+            ArticleTextBlock(text="First."),
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/A.jpg")),
+            ArticleTextBlock(text="\n\nSecond."),
+        ],
+    )
+    assert src.text == "First.\n\nSecond."
+
+
+def test_content_source_text_mismatching_blocks_raises():
+    """Defence-in-depth: a `text` that disagrees with the rendered text blocks
+    is rejected at construction (a producer bug or hand-edited store can't ship
+    an inconsistent body)."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ArticleTextBlock, ContentSourceSuccess
+
+    with pytest.raises(ValidationError, match="text must equal"):
+        ContentSourceSuccess(
+            kind="x_article",
+            url="https://x.com/i/article/1",
+            text="a totally different flattened body",
+            blocks=[ArticleTextBlock(text="First."), ArticleTextBlock(text="Second.")],
+        )
+
+
+def test_content_source_text_mismatch_rejected_on_load():
+    """The invariant is enforced on load too (not just direct construction), so
+    a poisoned `items.json` is caught."""
+    import pytest
+    from pydantic import ValidationError
+
+    from xbrain.models import ContentSourceAdapter
+
+    with pytest.raises(ValidationError, match="text must equal"):
+        ContentSourceAdapter.validate_python(
+            {
+                "outcome": "success",
+                "kind": "x_article",
+                "url": "u",
+                "text": "wrong",
+                "blocks": [{"kind": "text", "text": "right"}],
+            }
+        )
+
+
+def test_content_source_empty_blocks_imposes_no_text_constraint():
+    """Back-compat: with empty `blocks`, `text` is unconstrained — every legacy
+    x_article/x_video/external_article record (trafilatura text, transcript, …)
+    loads unchanged."""
+    from xbrain.models import ContentSourceSuccess
+
+    # A trafilatura-fallback x_article: arbitrary text, no blocks -> fine.
+    src = ContentSourceSuccess(kind="x_article", url="u", text="free-form body")
+    assert src.blocks == []
+    # An image-only structured body: no text runs -> text must be "" and is.
+    from xbrain.models import ArticleImageBlock, MediaPhotoPending
+
+    image_only = ContentSourceSuccess(
+        kind="x_article",
+        url="u",
+        text="",
+        blocks=[
+            ArticleImageBlock(media=MediaPhotoPending(url="https://pbs.twimg.com/media/C.jpg"))
+        ],
+    )
+    assert image_only.text == ""
+
+
 def test_article_block_adapter_rejects_unknown_kind():
     """An unknown `kind` is rejected cleanly by the discriminator (no silent
     coercion to a default variant)."""
