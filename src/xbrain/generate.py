@@ -111,6 +111,9 @@ def generate(
     # Absolute file:// URI so Obsidian opens the dashboard in the external browser
     # on click — a relative `dashboard.html` link is unreliable for non-markdown
     # files (Obsidian hides .html from the explorer and won't render its JS inline).
+    # This pins the link to the machine that ran `generate` (the URI is absolute
+    # and `_index.md` syncs via iCloud), which is the unavoidable cost of opening a
+    # local file from Obsidian; it self-heals on the next `generate` per machine.
     dashboard_href = (output_dir / "dashboard.html").resolve().as_uri()
     (output_dir / "_index.md").write_text(
         _render_index(items, strings, dashboard_href), encoding="utf-8"
