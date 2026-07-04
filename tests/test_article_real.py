@@ -21,7 +21,13 @@ from typing import Any
 import pytest
 
 from xbrain.extract.article import parse_article_content_state
-from xbrain.models import ArticleImageBlock, ArticleTextBlock, ContentSourceSuccess
+from xbrain.fetch_x import _flatten_blocks
+from xbrain.models import (
+    ARTICLE_PARAGRAPH_SEP,
+    ArticleImageBlock,
+    ArticleTextBlock,
+    ContentSourceSuccess,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -95,23 +101,34 @@ def test_link_entities_never_become_images() -> None:
 
 
 def test_headings_and_bullets_render_as_markdown() -> None:
-    """`header-two` → `## ` and `unordered-list-item` → `- `, baked into runs."""
+    """`header-two` → `## ` and `unordered-list-item` → `- `, with the `\\n\\n`
+    separator applied BEFORE the prefix (an independent order check)."""
     _title, blocks = parse_article_content_state(_load("Wiki_Memory"))
     texts = [b.text for b in blocks if isinstance(b, ArticleTextBlock)]
-    assert any(t.lstrip("\n").startswith("## ") for t in texts)
-    assert any(t.lstrip("\n").startswith("- ") for t in texts)
+    # A non-first heading run is "\n\n## …"; a non-first bullet run is "\n\n- …".
+    assert any(t.startswith(ARTICLE_PARAGRAPH_SEP + "## ") for t in texts)
+    assert any(t.startswith(ARTICLE_PARAGRAPH_SEP + "- ") for t in texts)
 
 
 @pytest.mark.parametrize("name", ["OpenWiki", "Wiki_Memory", "Headcount_AI"])
-def test_flattened_text_invariant_holds(name: str) -> None:
-    """`text` == concat of the `ArticleTextBlock` texts — enforced by the model.
-
-    Building a `ContentSourceSuccess` from the parsed blocks + flattened text
-    exercises the `_text_matches_blocks` validator, so a broken separator/prefix
-    that desynced the two would raise here.
+def test_text_run_separator_structure(name: str) -> None:
+    """The FIRST text run never leads with the `\\n\\n` separator; every
+    subsequent run does. An INDEPENDENT structural check (not a tautology that
+    re-derives `text` from the same blocks): a broken separator would fail it.
     """
     _title, blocks = parse_article_content_state(_load(name))
-    flat = "".join(b.text for b in blocks if isinstance(b, ArticleTextBlock))
+    runs = [b.text for b in blocks if isinstance(b, ArticleTextBlock)]
+    assert runs, "every real fixture carries prose"
+    assert not runs[0].startswith(ARTICLE_PARAGRAPH_SEP)
+    assert all(r.startswith(ARTICLE_PARAGRAPH_SEP) for r in runs[1:])
+
+
+@pytest.mark.parametrize("name", ["OpenWiki", "Wiki_Memory", "Headcount_AI"])
+def test_flattened_text_validates_against_model(name: str) -> None:
+    """The source built the way `fetch_x` builds it (`text = _flatten_blocks`)
+    satisfies the `_text_matches_blocks` model validator on real payloads."""
+    _title, blocks = parse_article_content_state(_load(name))
+    flat = _flatten_blocks(blocks)
     source = ContentSourceSuccess(
         kind="x_article",
         url="https://x.com/i/article/1",
@@ -121,6 +138,50 @@ def test_flattened_text_invariant_holds(name: str) -> None:
         attempts=1,
     )
     assert source.text == flat
+
+
+@pytest.mark.parametrize(
+    "name, title",
+    [
+        ("OpenWiki", "Introducing OpenWiki, an open source agent for repo documentation"),
+        ("Wiki_Memory", "Wiki Memory"),
+        ("Headcount_AI", "The case for headcount in the age of AI"),
+    ],
+)
+def test_real_payload_title_is_extracted(name: str, title: str) -> None:
+    """The article title is pulled from the real payload (flows to the source)."""
+    got, _blocks = parse_article_content_state(_load(name))
+    assert got == title
+
+
+def test_cover_equal_to_an_inline_image_is_deduped() -> None:
+    """When `cover_media` resolves to a URL already present inline, it is NOT
+    emitted twice — the lead image renders once, not doubled."""
+    payload = _load("OpenWiki")
+    payload["cover_media"]["media_info"]["original_img_url"] = _OPENWIKI_INLINE
+    _title, blocks = parse_article_content_state(payload)
+    urls = _image_urls(blocks)
+    assert urls == [_OPENWIKI_INLINE]  # single image, no doubled lead
+
+
+def test_media_tripwire_warns_when_media_present_but_zero_images(caplog) -> None:
+    """Media indicators present (atomic block) but 0 images resolved → WARN —
+    the exact regression signal the original #39 defect lacked."""
+    payload = _load("OpenWiki")
+    payload.pop("media_entities", None)
+    payload.pop("cover_media", None)
+    with caplog.at_level("WARNING", logger="xbrain.extract.article"):
+        _title, blocks = parse_article_content_state(payload)
+    assert _image_urls(blocks) == []
+    assert any("resolved 0 images" in r.message for r in caplog.records)
+
+
+def test_text_only_article_does_not_trip_the_media_warning(caplog) -> None:
+    """A genuinely text-only article (no atomic/media siblings) is NOT flagged."""
+    with caplog.at_level("WARNING", logger="xbrain.extract.article"):
+        _title, blocks = parse_article_content_state(_load("Headcount_AI"))
+    assert _image_urls(blocks) == []
+    assert not any("resolved 0 images" in r.message for r in caplog.records)
 
 
 def test_missing_media_entities_drops_image_but_keeps_text() -> None:

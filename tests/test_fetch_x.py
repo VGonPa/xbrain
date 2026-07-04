@@ -1,5 +1,7 @@
 # tests/test_fetch_x.py
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import xbrain.fetch_x as fx
 from xbrain.fetch_x import (
@@ -562,3 +564,57 @@ def test_attach_x_sources_uses_injected_clock():
     _attach_x_sources(item, [_blocks_source()], now=lambda: fixed)
     assert item.content is not None
     assert item.content.fetched_at == fixed
+
+
+# --- _structured_article on the REAL captured payload shape (#66) ---
+#
+# Unlike the constructed `_article_payload()` above, these feed a real trimmed
+# `article_results.result` (from tests/fixtures/art-*.json) through the PRODUCTION
+# wrapper, so the BFS-locates-container-then-reads-`media_entities`/`cover_media`
+# combination is exercised end-to-end, not just the pure parser.
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_OPENWIKI_TITLE = "Introducing OpenWiki, an open source agent for repo documentation"
+_OPENWIKI_COVER = "https://pbs.twimg.com/media/HMKNwxAbUAEMrOF.jpg"
+_OPENWIKI_INLINE = "https://pbs.twimg.com/media/HMKNQeJbMAA9ljZ.jpg"
+
+
+def _real_result(name: str) -> dict:
+    return json.loads((_FIXTURES / f"art-{name}.json").read_text(encoding="utf-8"))
+
+
+def _wrap_result(result: dict) -> dict:
+    """Nest a real `article_results.result` under a full GraphQL response shape."""
+    return {"data": {"article": {"article_results": {"result": result}}}}
+
+
+def test_structured_article_on_real_openwiki_payload():
+    source = fx._structured_article([_wrap_result(_real_result("OpenWiki"))], _ARTICLE_URL)
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.kind == "x_article"
+    assert source.title == _OPENWIKI_TITLE
+    images = [b for b in source.blocks if isinstance(b, ArticleImageBlock)]
+    # cover first, then the inline MEDIA image — resolved off the sibling arrays.
+    assert [b.media.url for b in images] == [_OPENWIKI_COVER, _OPENWIKI_INLINE]
+    assert isinstance(source.blocks[0], ArticleImageBlock)
+    assert source.text == "".join(b.text for b in source.blocks if isinstance(b, ArticleTextBlock))
+
+
+def test_structured_article_selects_richest_of_multiple_payloads(caplog):
+    preview = _wrap_result(
+        {
+            "title": "Preview",
+            "content_state": {
+                "blocks": [{"key": "a", "text": "preview only", "type": "unstyled"}],
+                "entityMap": [],
+            },
+        }
+    )
+    full = _wrap_result(_real_result("OpenWiki"))
+    with caplog.at_level("WARNING", logger="xbrain.fetch_x"):
+        source = fx._structured_article([preview, full], _ARTICLE_URL)
+    assert isinstance(source, ContentSourceSuccess)
+    # The rich OpenWiki body wins over the 1-block preview, and the ambiguity logs.
+    assert source.title == _OPENWIKI_TITLE
+    assert len(source.blocks) > 5
+    assert any("selecting the" in r.message for r in caplog.records)
