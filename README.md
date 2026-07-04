@@ -324,6 +324,10 @@ uv run xbrain status     # see the counts
 `sync` builds the mechanical layers. The LLM layers (`vocab`, `enrich`,
 `topics`) are run explicitly — see [The pipeline](#the-pipeline).
 
+> **New to XBrain?** The [**Tutorial**](docs/tutorial.md) walks through the whole
+> thing end-to-end — pull your posts, add topics, download + describe media, and
+> digest a bookmarked talk — with the output you should see at each step.
+
 ---
 
 ## Prerequisites
@@ -1211,6 +1215,9 @@ client. Respect X's Terms of Service.
 
 | Document | Description |
 |----------|-------------|
+| [docs/tutorial.md](docs/tutorial.md) | **Start here** — end-to-end walkthrough from install to a searchable wiki. |
+| [docs/digest-video.md](docs/digest-video.md) | Worked example: turn a bookmarked talk into transcript + slide notes. |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failures & fixes (auth, PATH, digest-video, iCloud). |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How XBrain is shaped: pipeline stages, artifacts, rubrics, executors, invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — including PRs written with AI agents. |
 | [LICENSE](LICENSE) | MIT. |
