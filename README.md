@@ -337,6 +337,7 @@ uv run xbrain status     # see the counts
 | An X account | — | Yours. XBrain reads *your* bookmarks and tweets. |
 | `ANTHROPIC_API_KEY` | — | **Optional.** Only for the `api` execution mode. |
 | `FIRECRAWL_API_KEY` | — | **Optional.** Fallback fetcher for JavaScript-heavy pages. |
+| ffmpeg, `parakeet-mlx`, `mlx-vlm` | — | **Optional — only for `digest-video`** (video → transcript/slide digests). External, not pulled by `uv pip install`. See [Local models for `digest-video`](#local-models-for-digest-video-apple-silicon). |
 
 Neither API key is required: the default execution mode uses a Claude Code
 session and costs nothing.
@@ -451,23 +452,34 @@ only** — never in `config.toml`, never in the repo.
 
 ### Local models for `digest-video` (Apple Silicon)
 
-`digest-video` shells out to external ML tools — xbrain core carries no ML
-dependency. On an Apple-Silicon Mac:
+`digest-video` shells out to external tools — xbrain core carries no ML or ffmpeg
+dependency. None of this is needed unless you run `digest-video`. On an
+Apple-Silicon Mac:
 
 ```bash
-# 1. ASR (always needed) — Parakeet TDT via mlx, installed as an isolated tool:
+# 1. ffmpeg — frame extraction (--frames) + the transcribe wrapper's audio probe.
+brew install ffmpeg                    # gives ffmpeg + ffprobe on your PATH
+
+# 2. ASR (always needed for digest-video) — Parakeet TDT via mlx, isolated tool:
 uv tool install parakeet-mlx           # gives `parakeet-mlx` on your PATH
 
-# 2. Vision (only for --frames) — mlx-vlm powers the local backend of the selector:
+# 3. Vision (only for --frames) — mlx-vlm powers the local backend of the selector:
 uv tool install mlx-vlm
 
-# 3. Point config.toml at them (absolute paths survive any PATH):
+# 4. Point config.toml at the wrappers (absolute paths survive any PATH):
 #    [transcribe]
 #    command = "/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
 #    [vision]
 #    command = "/path/to/xbrain/scripts/xbrain-vision"
-#    model   = "qwen-3b"
+#    model   = "qwen-7b"
 ```
+
+Models download on first use and cache under `~/.cache/huggingface`: the ASR
+model (`parakeet-tdt-0.6b`, ~600 MB) and, for `--frames`, the vision model you
+select (`qwen-7b` ≈ 5 GB; `qwen-3b` ≈ 2 GB; `qwen-32b` ≈ 18 GB — needs ~20 GB
+RAM). Pre-pull a large vision model once before a `--frames` run so the first
+frame doesn't hit the per-frame timeout. Cloud vision (`--vision-model opus`)
+needs only `ANTHROPIC_API_KEY`, no local install.
 
 **Transcriber wrapper — `scripts/xbrain-transcribe`.** Points `[transcribe]` at a
 thin parakeet-mlx wrapper: parakeet writes no file for a video with **no audio
