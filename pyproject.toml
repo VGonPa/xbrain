@@ -10,6 +10,8 @@ dependencies = [
     "trafilatura>=1.9",
     "anthropic>=0.39",
     "pyyaml>=6.0",
+    "pillow>=12.2.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]
@@ -95,10 +97,14 @@ DEP002 = [
     "pytest-cov",
     "ruff",
 ]
-# DEP001: scripts/import_chrome_session.py imports browser-cookie3 behind a
-# guarded `try/except ImportError` — it is a deliberately optional helper
-# dependency, installed on demand, not a declared runtime requirement.
+# DEP001 + DEP003: scripts/import_chrome_session.py + import_safari_session.py
+# import browser-cookie3 behind a guarded `try/except ImportError` — it is a
+# deliberately optional helper dependency, installed on demand, not a declared
+# runtime requirement. Deptry sees it as both undeclared (DEP001) and, once
+# pulled in via another package's extras on some machines, as transitive
+# (DEP003). Both are intentional for this opt-in helper.
 DEP001 = ["browser_cookie3"]
+DEP003 = ["browser_cookie3"]
 
 [tool.coverage.run]
 source = ["src/xbrain"]
@@ -121,3 +127,8 @@ docs       = "interrogate src/xbrain"
 deps       = "deptry ."
 test       = "pytest -q"
 check      = "bash scripts/check.sh"
+
+[dependency-groups]
+dev = [
+    "requests-mock>=1.12.1",
+]

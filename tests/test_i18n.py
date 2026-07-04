@@ -33,7 +33,7 @@ def test_spanish_strings_returned_for_spanish() -> None:
     assert s.also_relevant == "También relevante"
 
 
-def test_strings_dataclass_has_exactly_five_fields() -> None:
+def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
     """If a field is added or removed, every translation must be updated."""
     field_names = {f.name for f in dataclasses.fields(Strings)}
     assert field_names == {
@@ -42,7 +42,17 @@ def test_strings_dataclass_has_exactly_five_fields() -> None:
         "summary_header",
         "primary_posts",
         "also_relevant",
+        "video_digest_header",
+        "silent_video",
     }
+
+
+def test_video_digest_strings_present_in_every_language() -> None:
+    """The #44 video-digest headers must exist in every supported language."""
+    for language in SUPPORTED_LANGUAGES:
+        s = strings_for(language)
+        assert s.video_digest_header
+        assert s.silent_video
 
 
 def test_unknown_language_raises_with_supported_list() -> None:

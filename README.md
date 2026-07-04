@@ -165,7 +165,33 @@ posts → fewer topics → one index.
 
 One note per bookmark or own-tweet: the original text, the link, the **linked
 article fetched and stored inline**, an LLM summary and its topics. A saved link
-stops being a URL that will quietly rot and becomes a saved *article*.
+stops being a URL that will quietly rot and becomes a saved *article*. This now
+includes an X long-form **Article you bookmarked directly** (not just one linked
+inside a tweet): `extract` detects the Article and threads it into the same fetch
+pipeline as any other x.com link. `fetch` then captures the Article as a
+**structured, ordered body** — its paragraphs and inline images in the order the
+author wrote them; if that structured capture can't be read, it **falls back to
+text-only** extraction (no images), exactly as before. [`media`](#commands) then
+**downloads those inline images** locally alongside the item's own photos (under
+`data/media/<id>/article/`), and [`generate`](#commands) **renders the Article as
+a blogpost** — the body prose with its inline images embedded in the author's
+order (the text-only fallback still renders the article text).
+
+A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
+and its transcript is attached to the item, so the video flows through the *same*
+`enrich → topics → generate` pipeline as an article. The note gains a real
+`primary_topic` (video items used to show `—`, because enrich only ever saw the
+2-line tweet), appears on its topic page(s), and renders a **`## Video digest`**
+section with the talk's title and transcript — a 72-minute talk you never watched
+becomes a readable, searchable, topic-linked note. A silent/no-speech clip
+degrades gracefully to a one-line "silent video" note instead of an empty digest.
+
+For **slide/screen/demo-heavy** talks, add the opt-in `--frames` flag: xbrain
+extracts the key slides, describes each with an **external** vision model, and
+embeds them into the digest section next to the transcript — so the visual
+content is captured too, not just the audio. It is content-aware: an interview /
+talking-head video is detected and its (camera-cut) frames are skipped, so you
+never waste vision calls where the slides are noise.
 
 *Example:*
 
@@ -311,6 +337,7 @@ uv run xbrain status     # see the counts
 | An X account | — | Yours. XBrain reads *your* bookmarks and tweets. |
 | `ANTHROPIC_API_KEY` | — | **Optional.** Only for the `api` execution mode. |
 | `FIRECRAWL_API_KEY` | — | **Optional.** Fallback fetcher for JavaScript-heavy pages. |
+| ffmpeg, `parakeet-mlx`, `mlx-vlm` | — | **Optional — only for `digest-video`** (video → transcript/slide digests). External, not pulled by `uv pip install`. See [Local models for `digest-video`](#local-models-for-digest-video-apple-silicon). |
 
 Neither API key is required: the default execution mode uses a Claude Code
 session and costs nothing.
@@ -383,6 +410,14 @@ resynth_threshold = 25                    # re-synthesise an overview after N ne
 [output]
 language = "English"                      # English | Spanish
 topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: line)
+
+[transcribe]
+command = "parakeet-mlx"                  # external transcriber for `digest-video`
+# model = "parakeet-tdt-0.6b-v2"          # optional; omit for the tool default
+
+[vision]
+# command = "vlm-describe"                # external vision model for `digest-video --frames`
+# model = "qwen2-vl-7b"                   # optional; omit for the tool default
 ```
 
 | Section | Key | Default | Purpose |
@@ -397,16 +432,85 @@ topic_style = "wikilink"                  # wikilink | hashtag (in-body Topics: 
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
 | `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
+| `[describe]` | `model` | `claude-sonnet-4-6` | Vision model for `xbrain describe`. Override per run with `--model`. |
+| `[describe]` | `version` | `v1` | Tag persisted on every described photo. Bumping invalidates existing descriptions so the next `xbrain describe` re-describes stale entries. |
+| `[transcribe]` | `command` | `parakeet-mlx` | External transcriber `xbrain digest-video` shells out to (the ASR lives outside xbrain core). May be a multi-token wrapper; whisper / faster-whisper is the portable fallback. |
+| `[transcribe]` | `model` | — | Optional model id passed to the transcriber (`--model`). Omit for the tool default. |
+| `[vision]` | `command` | — (unset) | External vision model `xbrain digest-video --frames` shells out to (describes key-frame slides; lives outside xbrain core). No bundled default — `--frames` errors until it is set. May be a multi-token wrapper. |
+| `[vision]` | `model` | — | Optional model id passed to the vision command (`--model`). Omit for the tool default. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
-whole corpus to the new language, run `xbrain enrich --regenerate` and
+whole corpus to the new language, run `xbrain vocab --regenerate` (it clears
+every enrichment; the next `xbrain enrich` re-enriches in the new language) and
 `xbrain topics --resynth` (both auto-snapshotted, see
 [Snapshots & safety](#snapshots--safety)). Otherwise new items get the new
 language while old summaries stay as they were.
 
 Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
 only** — never in `config.toml`, never in the repo.
+
+### Local models for `digest-video` (Apple Silicon)
+
+`digest-video` shells out to external tools — xbrain core carries no ML or ffmpeg
+dependency. None of this is needed unless you run `digest-video`. On an
+Apple-Silicon Mac:
+
+```bash
+# 1. ffmpeg — frame extraction (--frames) + the transcribe wrapper's audio probe.
+brew install ffmpeg                    # gives ffmpeg + ffprobe on your PATH
+
+# 2. ASR (always needed for digest-video) — Parakeet TDT via mlx, isolated tool:
+uv tool install parakeet-mlx           # gives `parakeet-mlx` on your PATH
+
+# 3. Vision (only for --frames) — mlx-vlm powers the local backend of the selector:
+uv tool install mlx-vlm
+
+# 4. Point config.toml at the wrappers (absolute paths survive any PATH):
+#    [transcribe]
+#    command = "/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
+#    [vision]
+#    command = "/path/to/xbrain/scripts/xbrain-vision"
+#    model   = "qwen-7b"
+```
+
+Models download on first use and cache under `~/.cache/huggingface`: the ASR
+model (`parakeet-tdt-0.6b`, ~600 MB) and, for `--frames`, the vision model you
+select (`qwen-7b` ≈ 5 GB; `qwen-3b` ≈ 2 GB; `qwen-32b` ≈ 18 GB — needs ~20 GB
+RAM). Pre-pull a large vision model once before a `--frames` run so the first
+frame doesn't hit the per-frame timeout. Cloud vision (`--vision-model opus`)
+needs only `ANTHROPIC_API_KEY`, no local install.
+
+**Transcriber wrapper — `scripts/xbrain-transcribe`.** Points `[transcribe]` at a
+thin parakeet-mlx wrapper: parakeet writes no file for a video with **no audio
+track** (silent clips, GIFs, muted screencasts), which xbrain would otherwise
+count as a failure. The wrapper checks with `ffprobe` and emits the empty-speech
+JSON so such videos attach as `has_speech=false` ("silent video"), while a real
+parakeet failure on an audio-bearing file still surfaces. You can point
+`[transcribe].command` straight at `parakeet-mlx` if you don't need this.
+
+**Vision model selector — `scripts/xbrain-vision`.** One `[vision].command`
+serves both local and cloud models; the `--model` name is routed by a registry:
+
+| Name | Backend | Runs on | Cost / privacy |
+|------|---------|---------|----------------|
+| `qwen-3b` (default), `qwen-7b`, `qwen-32b`, or any `hf/repo` | local (mlx-vlm) | your Mac's Neural Engine/GPU | free, fully offline |
+| `opus`, `sonnet`, `haiku`, or any `claude-<id>` | cloud (Anthropic REST, stdlib — no SDK) | Anthropic API | needs `ANTHROPIC_API_KEY`; frames leave the machine |
+
+Pick per run without editing config:
+
+```bash
+xbrain digest-video --all-pending --frames                       # default (qwen-3b, local)
+xbrain digest-video --ids <slide-heavy-id> --frames --vision-model opus   # cloud, top quality
+xbrain digest-video --topic ai-coding --frames --vision-model qwen-7b     # better local
+```
+
+`--vision-model` overrides `[vision].model` for that run only (and requires
+`--frames`). Local mlx models download once and cache; the **local** backend
+reads `XBRAIN_VISION_MLX_PYTHON` only if mlx-vlm is not at the uv-tool default
+(`~/.local/share/uv/tools/mlx-vlm`). Pre-pull a **large** local model once before
+a `--frames` run — a cold `qwen-32b` (~18 GB) download can exceed the 300 s
+per-frame vision timeout and fail the first run (a re-run uses the cache).
 
 ---
 
@@ -516,6 +620,13 @@ uv run xbrain <command> [options]
 | `extract` | Extract bookmarks and/or own tweets from X. `--source bookmarks\|tweets\|all`. |
 | `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
 | `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state. |
+| `media` | Download X-post photos referenced in `Item.media` **and the inline images of a bookmarked X Article** (stored under `data/media/<id>/article/<n>`, separate from the item's own photos), reusing the one photo-download engine for both. `--limit` is a combined budget; the SUMMARY reports article images separately. Item photos and the downloaded Article images both render inline in the wiki — `generate` embeds each Article image in the author's order (see the blogpost render). `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
+| `describe` | Describe downloaded photos with a vision LLM (Claude Sonnet 4.6 by default) and feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described photos unless `[describe].version` is bumped in `config.toml`. |
+| `refresh-media` | Re-capture X and backfill the **playable video URL + bitrate + duration** onto items whose video is still poster-era (incremental `extract` + non-overwriting merge never refresh existing videos). Video-only — photos and enrichment/description state are preserved, and a good video is never degraded back to its poster if X drifts. Scrolls the full history (slow); destructive → auto-snapshot; prints a download-size estimate. Does **not** download video (that is `download-videos`). Re-seeing 0 known items on a non-empty store (likely expired session / GraphQL drift) aborts without saving unless `--force`. `--source bookmarks\|tweets\|all`, `--force`. |
+| `download-videos` | Download the actual **mp4 bytes** for backfilled videos and embed them inline in the wiki — the video counterpart to `media`. mp4 only: HLS (`.m3u8`) needs ffmpeg and is a deferred follow-up (skipped + counted); poster-era entries (run `refresh-media` first) are skipped too. Prints a `~X.X GB` size estimate and asks for confirmation **unless `--yes`**. `--max-size 500MB\|2GB` skips videos whose estimated size exceeds the cap. Validates the response is really a video (rejects HTML/JSON interstitials served as 200). Destructive → auto-snapshot; idempotent (re-runs skip downloaded videos unless `--force`). `--source bookmarks\|tweets\|all`, `--limit N`, `--items <a,b,c>`, `--max-size <size>`, `--force`, `--yes`. See [Local media storage](#local-media-storage). |
+| `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
+| `fetch-video` | **Ephemeral** download of the real mp4 for selected videos to `--to <dir>/<id>.mp4`, for agent-side processing (transcription/analysis is external — see below). Select with `--ids a,b` and/or `--topic <t>` (+ `--max-size`, `--limit`, `--source`). Reuses `download-videos`' content-validation, failure classification, atomic write and mp4/HLS/poster discriminator; HLS and poster-era are skipped + counted. **Deliberately non-persisting:** never mutates `items.json`, never snapshots, never touches `data/media/` — it writes only under `--to`. `--json` for machine output. |
+| `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). **`--frames`** (opt-in visual layer, needs `[vision].command`): for slide-heavy videos it extracts key slides (ffmpeg scene detection + interval sampling so the whole video is covered), describes each via the **external** vision model, records the descriptions on the `x_video` source, and embeds the slide images into the note like downloaded photos; talking-head videos are detected and skipped (logged). The transcript then flows through the normal `enrich → topics → generate` pipeline. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
@@ -527,7 +638,262 @@ uv run xbrain <command> [options]
 | `login` | Open a browser to log in to X (see [Authentication](#authentication) — prefer the cookie import). |
 
 Every stage accepts `--since` / `--until` (ISO dates) to narrow the date window.
+The window is inclusive at both ends: a date-only `--until 2025-12-31` covers the
+whole of Dec 31 (up to `23:59:59.999999` UTC). Pass an explicit time
+(`--until 2025-12-31T09:00:00`) to cut off mid-day instead.
 Run `uv run xbrain <command> --help` for the full option list.
+
+---
+
+## Local media storage
+
+`xbrain media` downloads X-post photos **and the inline images of a
+bookmarked X Article** and persists the bytes locally. Item photos are then
+shown inline in the generated wiki; the downloaded Article images are embedded
+in the note by `generate`, in the author's order, as a blogpost.
+
+**Layout**
+
+```
+data/
+└── media/
+    ├── 1234567890/        # one directory per item id
+    │   ├── 0.jpg          # one file per photo, indexed by media position
+    │   ├── 1.jpg
+    │   ├── 2.png
+    │   └── article/       # inline images of an X Article (#39), namespaced
+    │       ├── 0.jpg      #   so they never collide with the item's photos
+    │       └── 1.png
+    └── ...
+```
+
+Item photos are stored under `data/media/<item-id>/<index>.<ext>` and Article
+inline images under `data/media/<item-id>/article/<n>.<ext>` (both via the
+same download engine); the extension matches the format the X CDN sent us
+(`.jpg`, `.png`, or `.webp`). `data/` is gitignored — the bytes never enter
+the repo.
+
+**Vault rendering**
+
+`xbrain generate` mirrors each downloaded photo from `data/media/` into
+`<vault>/<output_subdir>/_media/<item-id>/<index>.<ext>` at render time
+and emits Obsidian wikilink embeds (`![[_media/<id>/<n>.<ext>]]`) so the
+vault is fully self-contained. No symlinks, no Obsidian config needed.
+
+**Disk budget (approximate)**
+
+X serves `name=orig` JPEGs typically in the 1-2 MP range, averaging
+~300 KB per photo on our corpora. A library of ~2,000 items with roughly
+one photo per item lands in the ballpark of 300-500 MB on disk —
+comfortably within personal-machine scale. Use `--limit N` to throttle
+the first backfill.
+
+**Throttling**
+
+The downloader sleeps 0.5 s between requests by default and uses a
+browser-style User-Agent. pbs.twimg.com tolerates that pattern; bursting
+from a fresh IP earns a 429.
+
+**Failure handling**
+
+Failures are categorised on the item itself
+(`MediaPhotoFailed.failure_reason`):
+- `http_4xx`, `format_error` — permanent; only `--force` retries.
+- `http_5xx`, `timeout`, `unknown_error` — transient; auto-retried on
+  the next `xbrain media` run.
+
+Run `xbrain diff <snapshot>` after a media run to see how many photos
+moved from `pending` / `failed` into `downloaded` (or, after `xbrain
+describe`, into `described`).
+
+**Vision descriptions**
+
+Once `xbrain media` has the bytes on disk, `xbrain describe` runs every
+photo through Claude vision and stores a short prose description on
+the entry (transitioning `MediaPhotoDownloaded` → `MediaPhotoDescribed`).
+Descriptions are 1-3 sentences, faithful, in the configured
+`output_language`. Decorative photos (avatars, reaction memes,
+abstract backgrounds) are classified as such and persisted with an
+empty description so they introduce no topic noise downstream.
+
+`xbrain enrich` and `xbrain topics` consume the descriptions
+automatically, on **both** the API and the worksheet (`claude-code` /
+`manual`) tracks: an item with content-bearing photos gets an
+`Images in this post:` block in the API enrichment prompt and an
+`image_descriptions` field in the worksheet; topic-page synthesis sees
+the flat list of content image descriptions across the topic's posts on
+either track. This is how a tweet that is mostly a screenshot of a
+paper becomes searchable by what the screenshot was actually about —
+even when the pipeline runs entirely on the Claude Code subscription.
+
+These descriptions flow whenever `enrich` / `topics` next run for an
+item. To back-fill items that were already enriched *before* the
+describe pass (a one-time LLM cost), force the re-run: `xbrain vocab
+--regenerate` (clears enrichments) then `xbrain enrich`, and `xbrain
+topics --resynth`.
+
+Describing the full corpus costs about $3-5 with the default model
+(Sonnet 4.6, 5 images per call). Bump `[describe].version` in
+`config.toml` to invalidate stored descriptions when you change the
+rubric — the next `xbrain describe` run re-describes stale entries
+automatically without `--force`.
+
+**Video media**
+
+A video entry carries the playable stream URL, the poster `thumbnail_url`, and
+the chosen `bitrate` + `duration_millis` (so a download can estimate size
+without fetching a byte). Getting a video's bytes onto disk is two steps:
+`refresh-media` backfills the playable URL onto poster-era records, then
+`download-videos` fetches the mp4 bytes.
+
+Because `extract` is incremental and the store merge never overwrites,
+videos captured before the playable-stream capability landed are
+**poster-era**: their stored URL is the poster image and the bitrate /
+duration are blank. They are never refreshed by a normal `xbrain extract`.
+`xbrain refresh-media` is the backfill: it re-captures the full X history,
+swaps each poster-era video entry for the freshly-parsed one (playable URL
++ bitrate + duration) **in place**, and leaves photos and enrichment
+untouched. It only upgrades — if X has drifted and serves no usable stream
+(a poster fallback), the existing record is kept, so a re-run never degrades
+a good video back to its poster. It auto-snapshots `data/` first
+(destructive) and prints a download-size estimate (`~X.X GB across N videos;
+M with unknown size`) so you can size the video download.
+
+If a run re-sees **0** known items against a non-empty store — the symptom of
+an expired X session or a GraphQL parser drift, where the capture comes back
+empty without raising — `refresh-media` treats that as a failed run: it warns
+and aborts **without saving** (nothing was matched, so `data/` is untouched
+and the pre-snapshot already exists). Pass `--force` to save anyway.
+
+```bash
+xbrain refresh-media                      # backfill bookmarks + own tweets
+xbrain refresh-media --source bookmarks   # bookmarks only
+xbrain refresh-media --force              # save even if 0 known items re-seen
+```
+
+**Downloading video**
+
+Once `refresh-media` has populated the playable URLs, `xbrain download-videos`
+fetches the actual bytes — the video counterpart to `xbrain media` for photos.
+It downloads **mp4 only** this stage: a real progressive mp4 stream advances
+`video_pending → video_downloaded` (bytes under `data/media/<id>/<n>.mp4`,
+embedded as `![[_media/<id>/<n>.mp4]]` in the note, which Obsidian renders as an
+inline player) or `video_failed` (categorised, with the same transient-retry
+contract as `media`). HLS (`.m3u8`) manifests need ffmpeg to mux into a playable
+file — they are **skipped and counted**, deferred to a follow-up. Poster-era
+entries (not yet backfilled) are skipped too; run `refresh-media` first.
+
+Video files are large, so `download-videos` prints a **size gate** before
+fetching — e.g. `About to download ~1.2 GB across 8 videos (3 HLS skipped, 1
+already downloaded).` — and asks for confirmation. Pass `--yes` to skip the
+prompt (non-interactive runs). For a per-video cap, `--max-size` skips any video
+whose **estimated** size exceeds it (accepts `500MB` / `2GB`; a bare number is
+MB). With a cap set, videos of unknown size (no bitrate/duration) can't be
+verified under it and are skipped too — without the cap they download normally.
+The size estimate and the "N videos / ~X GB" line always reflect only the
+under-cap set you're about to fetch.
+
+Because a 200 status isn't trust — a CDN/captcha/auth-wall page can come back as
+200 with an HTML or JSON body — the downloaded bytes are validated (a `video/*`
+content-type or an mp4 `ftyp` signature; a body that starts with HTML/JSON markup
+is rejected even under a `video/*` header) before being written. A non-video
+response is recorded as a **transient** failure (no corrupt `.mp4` is written) so
+the next run retries automatically once the rate-limit or session clears. A
+mid-download connection drop or an out-of-memory body is likewise recorded and
+the batch continues — one bad video never aborts the whole run.
+
+The run is idempotent (already-downloaded videos are skipped unless `--force`),
+auto-snapshots `data/` first (destructive), and a Ctrl-C between videos leaves
+`items.json` coherent.
+
+```bash
+xbrain download-videos                     # size gate + confirm, then download
+xbrain download-videos --yes               # non-interactive (CI / scripts)
+xbrain download-videos --max-size 500MB    # skip videos estimated over 500 MB
+xbrain download-videos --source bookmarks  # bookmarks only
+xbrain download-videos --limit 5 --items 123,456   # scope the run
+xbrain download-videos --force             # re-download + retry permanent failures
+```
+
+**Selecting and fetching video for agent-side processing**
+
+`download-videos` keeps the mp4 in the store (`data/media/`) to embed inline. But
+the whole corpus is far too large to keep on disk to *process* — the diagnostic
+from the video-capture work was **225 mp4s ≈ 140 GB**. When the goal is to turn a
+saved talk into a readable digest, the video is a means, not an end: you want the
+*transcript*, not 140 GB of bytes. `list-videos` + `fetch-video` are the
+**ephemeral, agent-driven** surface for exactly that — one video at a time, bytes
+discarded after the text is extracted.
+
+xbrain stays **mechanical**: it *lists* and *fetches*. The heavy ML — ASR
+(transcription) and any vision — is **external / agent-side tooling**, not baked
+into the CLI (no bundled MLX/CoreML/ML *library* in xbrain core — ffmpeg and the
+vision model are shelled out as external subprocesses, used only by `--frames`).
+The agent loop is
+**list → fetch → analyze → discard**:
+
+```bash
+# 1. List — machine-readable catalog the agent picks from (read-only).
+xbrain list-videos --topic ai --status pending --json
+# → [{"id":"2068…","url":"https://x.com/…","state":"pending",
+#     "topic":"ai","size_bytes":81600000,"mp4_url":"https://video.twimg.com/…",
+#     "text":"a great talk on …"}, …]
+
+# 2. Fetch — the chosen videos land as ephemeral files under --to (nothing else).
+xbrain fetch-video --ids 2068…,2069… --to /tmp/xbrain-videos
+# → /tmp/xbrain-videos/2068….mp4  (items.json untouched, no snapshot)
+
+# 3. Analyze — the agent runs its own local transcriber (e.g. parakeet-mlx /
+#    whisper) over each mp4. Transcription is EXTERNAL to xbrain by design.
+# 4. Discard — delete /tmp/xbrain-videos when done; the store never grew.
+```
+
+`list-videos` writes nothing and takes no snapshot. `fetch-video` is deliberately
+**non-persisting**: it never mutates `items.json`, never snapshots, and never
+writes to `data/media/` — it only writes `<--to>/<id>.mp4`. That is *why*
+`fetch-video` is intentionally **not** in the destructive auto-snapshot set: it
+has nothing destructive to protect against.
+
+**`digest-video` — the built-in transcript path.** `list-videos` + `fetch-video`
+give an agent the raw surface; `digest-video` is the batteries-included command
+that does the whole loop for you and *attaches* the result:
+
+```bash
+# One video, N bookmarks, one transcript — dedup handles the fan-out for you.
+xbrain digest-video --ids 2068…,2069…      # both reference the same talk → fetched + transcribed once
+xbrain digest-video --topic ai             # every ai-topic video
+xbrain digest-video --all-pending          # every fetchable pending video
+```
+
+It fetches each video ephemerally, shells out to the **external** transcriber you
+configure in `[transcribe]` (default `parakeet-mlx`; the ASR is *not* bundled —
+xbrain core carries no MLX/CoreML dependency), attaches the transcript to the item
+as an `x_video` content source, and discards the bytes — never more than one video
+on disk. It **dedups by video identity** (the stable id in the mp4 path, not the
+rotating signed URL), so N bookmarks of the same video are fetched + transcribed
+**once** and all of them get the transcript. Silent / no-audio videos attach with
+empty text + a `has_speech=false` marker (recorded, never a crash). It is
+idempotent (skip items already carrying an `x_video` source unless `--force`)
+and destructive (it rewrites `items.json`), so it **auto-snapshots** first. From
+there the transcript flows through the normal `enrich → topics → generate`
+pipeline, turning the once-unwatchable bookmark into a topic-linked note — see the
+[digest module](https://github.com/VGonPa/xbrain/issues/44).
+
+```bash
+# Opt-in visual layer for slide-heavy talks (needs [vision].command configured):
+xbrain digest-video --topic ai --frames    # describe + embed key slides where they carry content
+```
+
+**When `--frames` pays off.** For a slide/screen/demo talk the visual carries as
+much as the audio, so `--frames` extracts the key slides (ffmpeg scene detection,
+with interval sampling so a long static tail is still covered), describes each via
+the **external** vision model you configure in `[vision].command` (like the
+transcriber, *not* bundled — no vision/ML dependency in core), records the
+descriptions on the `x_video` source, and embeds the slide images into the note
+exactly like downloaded photos. It is **content-aware**: a talking-head / interview
+video is detected and its visual layer is skipped (logged, never silently), so you
+don't spend vision calls on camera-cut noise. `--frames` is fully opt-in — a normal
+`digest-video` run never touches ffmpeg or the vision model.
 
 ---
 
@@ -781,6 +1147,14 @@ xbrain/
 │   ├── config.py         # config.toml loading
 │   ├── models.py         # pydantic data models (Item, Enrichment, Topic, ...)
 │   ├── store.py          # JSON load/save for items + topic pages
+│   ├── refresh.py        # refresh-media backfill: video media swap + size estimate
+│   ├── video_media.py    # download-videos: mp4 byte download (reuses media.py)
+│   ├── video_select.py   # list-videos: read-only video catalog (VideoRow)
+│   ├── video_fetch.py    # fetch-video: ephemeral mp4 fetch, non-persisting
+│   ├── transcribe.py     # digest-video: external transcriber subprocess (no ML in core)
+│   ├── video_frames.py   # digest-video --frames: ffmpeg key-frame extraction + classify (no ML)
+│   ├── vision.py         # digest-video --frames: external vision subprocess (no ML in core)
+│   ├── digest.py         # digest-video: fetch → transcribe (+ optional frames) → attach x_video
 │   ├── extract/          # X extraction (Playwright + GraphQL interception)
 │   │   ├── browser.py    #   session / browser context
 │   │   ├── graphql.py    #   parse X's internal GraphQL responses

@@ -26,11 +26,22 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, assert_never
 
 from pydantic import BaseModel, Field
 
-from xbrain.models import Item, Topic, TopicPage
+from xbrain.models import (
+    Item,
+    MediaPhotoDescribed,
+    MediaPhotoDownloaded,
+    MediaPhotoFailed,
+    MediaPhotoPending,
+    MediaVideoDownloaded,
+    MediaVideoFailed,
+    MediaVideoPending,
+    Topic,
+    TopicPage,
+)
 from xbrain.rubrics import load_vocab
 from xbrain.store import load_store, load_topic_pages
 
@@ -121,6 +132,52 @@ class VocabDiff(BaseModel):
     unchanged_count: int = 0
 
 
+class MediaStateCounts(BaseModel):
+    """Counts of media variants on one side of a diff.
+
+    Mirrors the seven-variant union: the four photo states (downloaded /
+    described / pending / failed) plus the three video states (video_pending /
+    video_downloaded / video_failed). Counts are global across all items in the
+    store — per-item resolution lives on the items themselves (already
+    diff-able via the items round-trip). `described` is the terminal
+    state for content-bearing photos after a vision-describe pass;
+    `video_downloaded` / `video_failed` are the outcomes of `xbrain
+    download-videos` on a `video_pending` mp4.
+    """
+
+    downloaded: int = 0
+    described: int = 0
+    pending: int = 0
+    failed: int = 0
+    video_pending: int = 0
+    video_downloaded: int = 0
+    video_failed: int = 0
+
+
+class MediaDiff(BaseModel):
+    """Side-by-side media state counts + deltas.
+
+    `delta_downloaded = b.downloaded - a.downloaded` answers the
+    operator's first question after `xbrain media`: "how many new photos
+    landed?" `delta_described` answers the analogous question after
+    `xbrain describe`: "how many photos transitioned from downloaded to
+    described?" Negative deltas are legal — `--force` runs can move
+    photos backwards along the pipeline (e.g. a `describe --force`
+    behind a CDN change drops the previous description; a
+    `media --force` re-download collapses described back to downloaded).
+    """
+
+    a: MediaStateCounts = Field(default_factory=MediaStateCounts)
+    b: MediaStateCounts = Field(default_factory=MediaStateCounts)
+    delta_downloaded: int = 0
+    delta_described: int = 0
+    delta_pending: int = 0
+    delta_failed: int = 0
+    delta_video_pending: int = 0
+    delta_video_downloaded: int = 0
+    delta_video_failed: int = 0
+
+
 class DiffSummary(BaseModel):
     """Flat top-level counts — used by both the text header and JSON consumers."""
 
@@ -134,6 +191,9 @@ class DiffSummary(BaseModel):
     vocab_removed: int
     topic_pages_a: int
     topic_pages_b: int
+    media_delta_downloaded: int = 0
+    media_delta_described: int = 0
+    media_delta_failed: int = 0
 
 
 class DiffReport(BaseModel):
@@ -143,6 +203,7 @@ class DiffReport(BaseModel):
     items: ItemsDiff
     topics: TopicsDiff
     vocab: VocabDiff
+    media: MediaDiff = Field(default_factory=MediaDiff)
 
 
 # ----------------------------------------------------------------- public orchestrator
@@ -214,6 +275,7 @@ def diff_snapshots(
         growth_flag_threshold=growth_flag_threshold,
         overview_similarity_threshold=overview_similarity_threshold,
     )
+    media_diff = _compute_media_diff(items_a, items_b)
     summary = DiffSummary(
         items_a=items_diff.count_a,
         items_b=items_diff.count_b,
@@ -225,12 +287,16 @@ def diff_snapshots(
         vocab_removed=len(vocab_diff.removed),
         topic_pages_a=len(pages_a),
         topic_pages_b=len(pages_b),
+        media_delta_downloaded=media_diff.delta_downloaded,
+        media_delta_described=media_diff.delta_described,
+        media_delta_failed=media_diff.delta_failed,
     )
     return DiffReport(
         summary=summary,
         items=items_diff,
         topics=topics_diff,
         vocab=vocab_diff,
+        media=media_diff,
     )
 
 
@@ -335,6 +401,56 @@ def _compute_topics_diff(
     return TopicsDiff(per_slug=per_slug)
 
 
+def _compute_media_diff(
+    items_a: dict[str, Item],
+    items_b: dict[str, Item],
+) -> MediaDiff:
+    """Count media variants on each side and return the deltas.
+
+    Walks every media entry on every item — not just the ones in both
+    sides, because the question "how many new photos landed?" applies
+    equally to items that exist only on B (a fresh `xbrain extract` +
+    `xbrain media` run).
+    """
+    counts_a = _count_media_variants(items_a)
+    counts_b = _count_media_variants(items_b)
+    return MediaDiff(
+        a=counts_a,
+        b=counts_b,
+        delta_downloaded=counts_b.downloaded - counts_a.downloaded,
+        delta_described=counts_b.described - counts_a.described,
+        delta_pending=counts_b.pending - counts_a.pending,
+        delta_failed=counts_b.failed - counts_a.failed,
+        delta_video_pending=counts_b.video_pending - counts_a.video_pending,
+        delta_video_downloaded=counts_b.video_downloaded - counts_a.video_downloaded,
+        delta_video_failed=counts_b.video_failed - counts_a.video_failed,
+    )
+
+
+def _count_media_variants(items: dict[str, Item]) -> MediaStateCounts:
+    """Tally the five media variants across every item in the store."""
+    counts = MediaStateCounts()
+    for item in items.values():
+        for entry in item.media:
+            if isinstance(entry, MediaPhotoDownloaded):
+                counts.downloaded += 1
+            elif isinstance(entry, MediaPhotoDescribed):
+                counts.described += 1
+            elif isinstance(entry, MediaPhotoPending):
+                counts.pending += 1
+            elif isinstance(entry, MediaPhotoFailed):
+                counts.failed += 1
+            elif isinstance(entry, MediaVideoPending):
+                counts.video_pending += 1
+            elif isinstance(entry, MediaVideoDownloaded):
+                counts.video_downloaded += 1
+            elif isinstance(entry, MediaVideoFailed):
+                counts.video_failed += 1
+            else:
+                assert_never(entry)
+    return counts
+
+
 def _compute_vocab_diff(vocab_a: list[Topic], vocab_b: list[Topic]) -> VocabDiff:
     """Slug set-difference between two vocab.yaml files (sorted output)."""
     slugs_a = {t.slug for t in vocab_a}
@@ -422,7 +538,45 @@ def format_text(report: DiffReport) -> str:
         f"{', '.join(report.vocab.removed) if report.vocab.removed else '(none)'}"
     )
     lines.append(f"  unchanged: {report.vocab.unchanged_count} slugs")
+    lines.append("")
+    lines.append("MEDIA")
+    lines.extend(_format_media_block(report.media))
     return "\n".join(lines)
+
+
+def _format_media_block(media: MediaDiff) -> list[str]:
+    """Render the per-variant media state counts + deltas.
+
+    The `+N` / `-N` deltas answer the most common operator question after
+    `xbrain media`: "did this run move the needle?" Negative deltas show
+    up legitimately when `--force` re-downloads a previously-downloaded
+    photo whose URL has turned 404.
+    """
+    return [
+        f"  downloaded:    A={media.a.downloaded:>5}  B={media.b.downloaded:>5}  "
+        f"({_format_delta(media.delta_downloaded)})",
+        f"  described:     A={media.a.described:>5}  B={media.b.described:>5}  "
+        f"({_format_delta(media.delta_described)})",
+        f"  pending:       A={media.a.pending:>5}  B={media.b.pending:>5}  "
+        f"({_format_delta(media.delta_pending)})",
+        f"  failed:        A={media.a.failed:>5}  B={media.b.failed:>5}  "
+        f"({_format_delta(media.delta_failed)})",
+        f"  video_pending: A={media.a.video_pending:>5}  B={media.b.video_pending:>5}  "
+        f"({_format_delta(media.delta_video_pending)})",
+        f"  video_downloaded: A={media.a.video_downloaded:>5}  B={media.b.video_downloaded:>5}  "
+        f"({_format_delta(media.delta_video_downloaded)})",
+        f"  video_failed:  A={media.a.video_failed:>5}  B={media.b.video_failed:>5}  "
+        f"({_format_delta(media.delta_video_failed)})",
+    ]
+
+
+def _format_delta(value: int) -> str:
+    """Render a delta as `+N`, `-N`, or `±0` for the text report."""
+    if value > 0:
+        return f"+{value}"
+    if value < 0:
+        return str(value)
+    return "±0"
 
 
 def format_json(report: DiffReport) -> str:

@@ -194,3 +194,161 @@ def test_api_executor_emits_no_summary_when_all_succeed(capsys):
     ex = ApiExecutor(model="m", output_language="English", client=client)
     ex.enrich_items([_item("1")], VOCAB)
     assert "SUMMARY:" not in capsys.readouterr().err
+
+
+def _described_photo(*, description: str, decorative: bool = False):
+    """Build a `MediaPhotoDescribed` for prompt-integration tests.
+
+    `MediaPhotoDescribed` enforces `is_decorative => description == ""`
+    at the model layer; this helper honours that contract by forcing an
+    empty description when `decorative=True`, so the caller's `description`
+    argument is silently dropped in the decorative branch.
+    """
+    from datetime import datetime, timezone
+
+    from xbrain.models import MediaPhotoDescribed
+
+    return MediaPhotoDescribed(
+        url="https://pbs.twimg.com/media/X.jpg",
+        local_path="1/0.jpg",
+        width=4,
+        height=3,
+        bytes_size=512,
+        downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        is_decorative=decorative,
+        description="" if decorative else description,
+        description_lang="English",
+        description_version="v1",
+        described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+    )
+
+
+def test_user_prompt_includes_content_bearing_image_descriptions():
+    """Non-decorative described photos must surface as `Images in this post:` lines."""
+    item = _item("1", media=[_described_photo(description="A chart of MMLU scores.")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "Images in this post:" in prompt
+    assert "A chart of MMLU scores." in prompt
+
+
+def test_user_prompt_excludes_decorative_image_descriptions():
+    """Decorative photos must NOT appear in the prompt — pure noise."""
+    item = _item("1", media=[_described_photo(description="ignored", decorative=True)])
+    prompt = _user_prompt(item, VOCAB)
+    assert "Images in this post:" not in prompt
+
+
+def test_user_prompt_omits_images_section_when_no_described_photos():
+    """Items without any described photos must NOT have the images section.
+
+    Otherwise the LLM sees a hint of missing context and may hallucinate
+    visual evidence that does not exist. Regression guard.
+    """
+    item = _item("1")  # no media
+    prompt = _user_prompt(item, VOCAB)
+    assert "Images in this post:" not in prompt
+
+
+def test_user_prompt_image_descriptions_precede_links_and_article():
+    """Image section sits between the post body and the links/article."""
+    from xbrain.models import Link
+
+    item = _item(
+        "1",
+        media=[_described_photo(description="A diagram of GraphQL caching.")],
+        links=[Link(url="https://example.com/x", domain="example.com")],
+    )
+    prompt = _user_prompt(item, VOCAB)
+    image_idx = prompt.index("Images in this post:")
+    links_idx = prompt.index("Links in the post")
+    assert image_idx < links_idx
+
+
+def _video_item(item_id: str, *, text: str = "a talk about scaling laws", has_speech: bool = True):
+    """An item whose only content is an `x_video` transcript source (#44)."""
+    from xbrain.models import Content, ContentSourceSuccess
+
+    return _item(
+        item_id,
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/a/status/1/video/1",
+                    title="A great talk",
+                    text=text,
+                    has_speech=has_speech,
+                )
+            ],
+        ),
+    )
+
+
+def test_user_prompt_includes_video_transcript_section():
+    """An `x_video` transcript surfaces under a labelled `Video transcript:` block."""
+    prompt = _user_prompt(_video_item("1"), VOCAB)
+    assert "Video transcript:" in prompt
+    assert "a talk about scaling laws" in prompt
+
+
+def test_user_prompt_omits_video_transcript_when_no_speech():
+    """A no-speech (has_speech=False, empty) transcript adds nothing — no section."""
+    prompt = _user_prompt(_video_item("1", text="", has_speech=False), VOCAB)
+    assert "Video transcript:" not in prompt
+
+
+def test_user_prompt_video_transcript_not_relabelled_as_article():
+    """The transcript must render as `Video transcript:`, never mislabelled as a
+    `Linked article` (would tell the LLM the wrong content type)."""
+    prompt = _user_prompt(_video_item("1"), VOCAB)
+    assert "Linked article" not in prompt
+
+
+def test_user_prompt_truncates_a_long_video_transcript():
+    """A 72-min-talk-scale transcript is capped so one item can't blow the prompt."""
+    from xbrain.rubrics import TRANSCRIPT_CHAR_LIMIT
+
+    long_text = "word " * (TRANSCRIPT_CHAR_LIMIT)  # >> the cap
+    prompt = _user_prompt(_video_item("1", text=long_text), VOCAB)
+    assert "transcript truncated" in prompt
+    assert len(prompt) < len(long_text)
+
+
+def test_user_prompt_video_transcript_sits_between_images_and_links_and_article():
+    """The `Video transcript:` block is spliced AFTER the image descriptions and
+    BEFORE the links/article — mirroring the image-ordering guard so an accidental
+    reorder in `_user_prompt` is caught (the transcript is post content, read in the
+    same natural order as images: post body → images → transcript → links → article)."""
+    from xbrain.models import Content, ContentSourceSuccess, Link
+
+    item = _item(
+        "1",
+        media=[_described_photo(description="A diagram of the training loop.")],
+        links=[Link(url="https://example.com/x", domain="example.com")],
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/a/status/1/video/1",
+                    title="A great talk",
+                    text="a talk about scaling laws",
+                    has_speech=True,
+                ),
+                ContentSourceSuccess(
+                    kind="external_article",
+                    url="https://example.com/x",
+                    title="An article",
+                    text="the article body",
+                ),
+            ],
+        ),
+    )
+    prompt = _user_prompt(item, VOCAB)
+    image_idx = prompt.index("Images in this post:")
+    transcript_idx = prompt.index("Video transcript:")
+    links_idx = prompt.index("Links in the post")
+    article_idx = prompt.index("Linked article")
+    assert image_idx < transcript_idx < links_idx
+    assert transcript_idx < article_idx

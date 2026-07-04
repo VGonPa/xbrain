@@ -438,9 +438,296 @@ def test_format_json_round_trips_through_model(tmp_path: Path) -> None:
     text = format_json(diff_snapshots(a, a))
     parsed = json.loads(text)
     # Top-level keys match the model
-    assert set(parsed.keys()) == {"summary", "items", "topics", "vocab"}
+    assert set(parsed.keys()) == {"summary", "items", "topics", "vocab", "media"}
     # And the model can re-validate its own JSON
     DiffReport.model_validate_json(text)
+
+
+# ----------------------------------------------------------------------- media diff
+
+
+def _item_with_media(item_id: str, media_entries: list) -> Item:
+    """Construct an Item with the given media entries (no enrichment, no links)."""
+    item = Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text=f"Note {item_id}",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+    )
+    item.media = media_entries
+    return item
+
+
+def test_diff_reports_media_state_counts(tmp_path: Path) -> None:
+    """`MediaDiff` carries the four-variant counts on both sides + deltas.
+
+    Scenario: A has 1 pending photo. B has 1 downloaded photo for the same
+    item. The transition counts as `delta_downloaded=+1, delta_pending=-1`.
+    """
+    from xbrain.models import MediaPhotoDownloaded, MediaPhotoPending
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    item_a = _item_with_media("1", [MediaPhotoPending(url="https://pbs.twimg.com/media/A.png")])
+    item_b = _item_with_media(
+        "1",
+        [
+            MediaPhotoDownloaded(
+                url="https://pbs.twimg.com/media/A.png",
+                local_path="1/0.png",
+                width=10,
+                height=8,
+                bytes_size=100,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    _seed(a, items={"1": item_a}, vocab_slugs=[])
+    _seed(b, items={"1": item_b}, vocab_slugs=[])
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.pending == 1
+    assert report.media.a.downloaded == 0
+    assert report.media.b.pending == 0
+    assert report.media.b.downloaded == 1
+    assert report.media.delta_downloaded == 1
+    assert report.media.delta_pending == -1
+    # Surfaces in the summary line too — quick-glance counters.
+    assert report.summary.media_delta_downloaded == 1
+
+
+def test_diff_media_zero_when_no_media(tmp_path: Path) -> None:
+    """A diff between two stores without media reports zero everywhere."""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _seed(a, items={"1": _item("1", primary="misc")}, vocab_slugs=["misc"])
+    _seed(b, items={"1": _item("1", primary="misc")}, vocab_slugs=["misc"])
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.downloaded == 0
+    assert report.media.b.downloaded == 0
+    assert report.media.delta_downloaded == 0
+
+
+def test_diff_media_reports_delta_failed(tmp_path: Path) -> None:
+    """The diff surfaces a `delta_failed` count between snapshots.
+
+    Setup: snapshot A has 1 failed photo, snapshot B has 3 failed photos
+    (e.g. a re-run hit more 4xx URLs). The delta is +2, surfaced both on
+    `report.media.delta_failed` and on `summary.media_delta_failed`.
+    """
+    from xbrain.models import MediaPhotoFailed
+
+    def _failed(url: str) -> MediaPhotoFailed:
+        return MediaPhotoFailed(
+            url=url,
+            failure_reason="http_4xx",
+            attempts=1,
+            last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _seed(
+        a,
+        items={
+            "1": _item_with_media("1", [_failed("https://pbs.twimg.com/media/A1.png")]),
+        },
+        vocab_slugs=[],
+    )
+    _seed(
+        b,
+        items={
+            "1": _item_with_media(
+                "1",
+                [
+                    _failed("https://pbs.twimg.com/media/A1.png"),
+                    _failed("https://pbs.twimg.com/media/A2.png"),
+                ],
+            ),
+            "2": _item_with_media("2", [_failed("https://pbs.twimg.com/media/B1.png")]),
+        },
+        vocab_slugs=[],
+    )
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.failed == 1
+    assert report.media.b.failed == 3
+    assert report.media.delta_failed == 2
+    assert report.summary.media_delta_failed == 2
+
+
+def test_diff_media_counts_video_pending_separately(tmp_path: Path) -> None:
+    """Video-pending entries don't bleed into the photo counters."""
+    from xbrain.models import MediaVideoPending
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _seed(a, items={"1": _item_with_media("1", [])}, vocab_slugs=[])
+    _seed(
+        b,
+        items={
+            "1": _item_with_media("1", [MediaVideoPending(url="https://video.twimg.com/x.mp4")])
+        },
+        vocab_slugs=[],
+    )
+
+    report = diff_snapshots(a, b)
+    assert report.media.b.video_pending == 1
+    assert report.media.b.downloaded == 0
+    assert report.media.delta_video_pending == 1
+
+
+def test_diff_media_counts_video_downloaded_and_failed(tmp_path: Path) -> None:
+    """`xbrain download-videos` advances video_pending → video_downloaded /
+    video_failed; the diff surfaces those as their own counters."""
+    from xbrain.models import MediaVideoDownloaded, MediaVideoFailed, MediaVideoPending
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    item_a = _item_with_media(
+        "1",
+        [
+            MediaVideoPending(url="https://video.twimg.com/x.mp4"),
+            MediaVideoPending(url="https://video.twimg.com/y.mp4"),
+        ],
+    )
+    item_b = _item_with_media(
+        "1",
+        [
+            MediaVideoDownloaded(
+                url="https://video.twimg.com/x.mp4",
+                local_path="1/0.mp4",
+                bytes_size=100,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            ),
+            MediaVideoFailed(
+                url="https://video.twimg.com/y.mp4",
+                failure_reason="http_4xx",
+                attempts=1,
+                last_attempt_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            ),
+        ],
+    )
+    _seed(a, items={"1": item_a}, vocab_slugs=[])
+    _seed(b, items={"1": item_b}, vocab_slugs=[])
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.video_pending == 2
+    assert report.media.b.video_downloaded == 1
+    assert report.media.b.video_failed == 1
+    assert report.media.delta_video_pending == -2
+    assert report.media.delta_video_downloaded == 1
+    assert report.media.delta_video_failed == 1
+    # JSON round-trips with the new counters.
+    restored = type(report).model_validate(report.model_dump(mode="json"))
+    assert restored.media.b.video_downloaded == 1
+    # The text block renders the new rows.
+    text = format_text(report)
+    assert "video_downloaded:" in text
+    assert "video_failed:" in text
+
+
+def test_diff_media_reports_delta_described(tmp_path: Path) -> None:
+    """`xbrain describe` advances downloaded → described; the diff surfaces +N described.
+
+    Setup: snapshot A has 1 downloaded photo. Snapshot B has the same
+    URL transitioned to described (same on-disk bytes, plus the new
+    description payload). The transition shows up as
+    `delta_downloaded=-1, delta_described=+1`.
+    """
+    from xbrain.models import MediaPhotoDescribed, MediaPhotoDownloaded
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    item_a = _item_with_media(
+        "1",
+        [
+            MediaPhotoDownloaded(
+                url="https://pbs.twimg.com/media/A.png",
+                local_path="1/0.png",
+                width=10,
+                height=8,
+                bytes_size=100,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    item_b = _item_with_media(
+        "1",
+        [
+            MediaPhotoDescribed(
+                url="https://pbs.twimg.com/media/A.png",
+                local_path="1/0.png",
+                width=10,
+                height=8,
+                bytes_size=100,
+                downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+                is_decorative=False,
+                description="A chart of accuracy by model.",
+                description_lang="English",
+                description_version="v1",
+                described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    _seed(a, items={"1": item_a}, vocab_slugs=[])
+    _seed(b, items={"1": item_b}, vocab_slugs=[])
+
+    report = diff_snapshots(a, b)
+    assert report.media.a.downloaded == 1
+    assert report.media.a.described == 0
+    assert report.media.b.downloaded == 0
+    assert report.media.b.described == 1
+    assert report.media.delta_downloaded == -1
+    assert report.media.delta_described == 1
+    assert report.summary.media_delta_described == 1
+
+
+def test_diff_media_text_format_includes_described_row(tmp_path: Path) -> None:
+    """The text renderer emits a `described:` row alongside the others."""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _seed(a, items={"1": _item_with_media("1", [])}, vocab_slugs=[])
+    _seed(b, items={"1": _item_with_media("1", [])}, vocab_slugs=[])
+    text = format_text(diff_snapshots(a, b))
+    assert "described:" in text
+
+
+def test_diff_media_text_format_includes_block(tmp_path: Path) -> None:
+    """The text renderer includes a `MEDIA` block with the four counters."""
+    from xbrain.models import MediaPhotoDownloaded
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _seed(a, items={"1": _item_with_media("1", [])}, vocab_slugs=[])
+    _seed(
+        b,
+        items={
+            "1": _item_with_media(
+                "1",
+                [
+                    MediaPhotoDownloaded(
+                        url="u",
+                        local_path="1/0.png",
+                        width=4,
+                        height=3,
+                        bytes_size=10,
+                        downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+                    )
+                ],
+            )
+        },
+        vocab_slugs=[],
+    )
+
+    text = format_text(diff_snapshots(a, b))
+    assert "MEDIA" in text
+    assert "downloaded:" in text
+    assert "+1" in text  # delta marker
 
 
 # ------------------------------------------------------------------------- CLI
@@ -503,7 +790,7 @@ def test_cli_diff_format_json_parses_back(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     parsed = json.loads(result.stdout)
-    assert set(parsed.keys()) == {"summary", "items", "topics", "vocab"}
+    assert set(parsed.keys()) == {"summary", "items", "topics", "vocab", "media"}
 
 
 def test_cli_diff_unknown_snapshot_exits_1(tmp_path: Path, monkeypatch) -> None:

@@ -36,7 +36,9 @@ def assemble_thread(responses: list[dict], author_handle: str) -> str:
     return "\n\n".join(tweet.text for tweet in tweets)
 
 
-def expand_threads(store: dict[str, Item], storage_state_path: Path, force: bool = False) -> int:
+def expand_threads(
+    store: dict[str, Item], storage_state_path: Path, force: bool = False, *, headless: bool = False
+) -> int:
     """Fetch full thread text for every item flagged as a thread."""
     pending = [
         item
@@ -45,7 +47,7 @@ def expand_threads(store: dict[str, Item], storage_state_path: Path, force: bool
     ]
     if not pending:
         return 0
-    with x_context(storage_state_path) as context:
+    with x_context(storage_state_path, headless=headless) as context:
         for item in pending:
             text = _fetch_thread_text(context, item)
             source: ContentSource

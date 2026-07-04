@@ -86,3 +86,24 @@ def test_topic_page_rubric_loads():
     text = load_rubric("topic-page")
     assert "overview" in text
     assert "notes" in text
+
+
+def test_describe_image_rubric_loads_and_substitutes_language():
+    """The describe-image rubric ships a `{language}` placeholder; the
+    loader must substitute it, and the defensive check must not trip on
+    correctly-spelt placeholders.
+    """
+    text = load_rubric("describe-image", language="English")
+    assert "{language}" not in text
+    assert "English" in text
+    # Sanity: the contract keys must appear in the prompt so the LLM
+    # produces the right JSON shape.
+    assert "is_decorative" in text
+    assert "description" in text
+    assert "index" in text
+
+
+def test_describe_image_rubric_preserves_placeholder_when_language_none():
+    """No-language calls (tests, manual inspection) keep the literal placeholder."""
+    text = load_rubric("describe-image")
+    assert "{language}" in text

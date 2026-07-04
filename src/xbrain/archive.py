@@ -11,7 +11,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from xbrain.extract.graphql import _parse_x_date
-from xbrain.models import Author, Item, Link, Media
+from xbrain.extract.video import build_video_media
+from xbrain.models import Author, Item, Link, Media, MediaEntry
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,50 @@ def _parse_js_array(raw: str, tweets_file: str) -> list:
         raise ValueError(f"{tweets_file}: malformed JSON in archive tweets file: {exc}") from exc
 
 
+def _extract_archive_links(tweet: dict[str, Any]) -> list[Link]:
+    """Parse `entities.urls` from an archive tweet into Link objects.
+
+    Each URL entity in the archive carries an `expanded_url`; we derive the
+    domain from it and drop any entry that lacks an expanded URL.
+    """
+    return [
+        Link(
+            url=url_entity["expanded_url"],
+            domain=urlparse(url_entity["expanded_url"]).netloc,
+        )
+        for url_entity in tweet.get("entities", {}).get("urls", [])
+        if url_entity.get("expanded_url")
+    ]
+
+
+def _extract_archive_media(tweet: dict[str, Any]) -> list[MediaEntry]:
+    """Parse media from `extended_entities.media`, falling back to `entities.media`.
+
+    Videos and animated GIFs go through `build_video_media` (shared with the
+    GraphQL path) so the archive captures the playable mp4/HLS stream from
+    `video_info.variants` — plus the poster as `thumbnail_url`, the chosen
+    bitrate, and the duration — rather than storing the poster image as the
+    video URL. Photos keep the canonical URL (`media_url_https`, falling back
+    to `expanded_url`). Entries with no usable URL are dropped.
+    """
+    media_entries = tweet.get("extended_entities", {}).get("media") or tweet.get(
+        "entities", {}
+    ).get("media", [])
+    media: list[MediaEntry] = []
+    for media_entity in media_entries:
+        if media_entity.get("type") in ("video", "animated_gif"):
+            video = build_video_media(media_entity)
+            if video is not None:
+                media.append(video)
+            continue
+        url = media_entity.get("media_url_https") or media_entity.get("expanded_url")
+        if url:
+            media.append(Media(type="photo", url=url))
+    return media
+
+
 def _archive_tweet_to_item(entry: dict[str, Any], author: Author) -> Item | None:
+    """Map one archive entry into an Item, returning None for malformed rows."""
     tweet = entry.get("tweet")
     if not isinstance(tweet, dict):
         logger.warning("archive entry missing 'tweet' object, skipping")
@@ -60,25 +104,6 @@ def _archive_tweet_to_item(entry: dict[str, Any], author: Author) -> Item | None
         logger.warning("archive tweet missing 'id_str', skipping")
         return None
     rest_id = str(rest_id)
-    links = [
-        Link(
-            url=url_entity["expanded_url"],
-            domain=urlparse(url_entity["expanded_url"]).netloc,
-        )
-        for url_entity in tweet.get("entities", {}).get("urls", [])
-        if url_entity.get("expanded_url")
-    ]
-    media_entries = tweet.get("extended_entities", {}).get("media") or tweet.get(
-        "entities", {}
-    ).get("media", [])
-    media = [
-        Media(
-            type="video" if media_entity.get("type") in ("video", "animated_gif") else "photo",
-            url=media_entity.get("media_url_https") or media_entity["expanded_url"],
-        )
-        for media_entity in media_entries
-        if media_entity.get("media_url_https") or media_entity.get("expanded_url")
-    ]
     return Item(
         id=rest_id,
         source="own_tweet",
@@ -87,7 +112,7 @@ def _archive_tweet_to_item(entry: dict[str, Any], author: Author) -> Item | None
         text=tweet.get("full_text", ""),
         created_at=_parse_x_date(tweet.get("created_at")),
         captured_at=datetime.now(timezone.utc),
-        media=media,
-        links=links,
+        media=_extract_archive_media(tweet),
+        links=_extract_archive_links(tweet),
         quoted_id=None,
     )

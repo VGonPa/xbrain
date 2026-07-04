@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,11 +37,26 @@ class OverviewJudgment(BaseModel):
 
 @dataclass
 class TopicInput:
-    """Everything an executor needs to synthesize one topic's overview."""
+    """Everything an executor needs to synthesize one topic's overview.
+
+    `summaries` is the per-post text already enrichment produced.
+    `image_descriptions` is the vision-LLM-produced prose for every
+    non-decorative photo in the topic's posts — fed to the
+    topic-synthesis LLM alongside the summaries so the topic page
+    reflects visual evidence that the per-post enrichment may have
+    only partially captured. Decorative photos are excluded at the
+    seam (mirrors `xbrain.executors.api._content_image_descriptions`).
+    `video_transcripts` is the bounded per-video transcript excerpt for
+    every with-speech `x_video` source in the topic's posts (#44) — richer
+    evidence than the one-line summary alone, trimmed per video so a topic
+    full of long talks stays within the prompt's token budget.
+    """
 
     slug: str
     description: str
     summaries: list[str]
+    image_descriptions: list[str] = field(default_factory=list)
+    video_transcripts: list[str] = field(default_factory=list)
 
 
 def _system_prompt(language: str) -> str:
@@ -64,6 +79,26 @@ def _user_prompt(topic: TopicInput) -> str:
         f"Summaries of the {len(topic.summaries)} posts in this topic:",
     ]
     lines += [f"- {summary}" for summary in topic.summaries]
+    if topic.image_descriptions:
+        # Visual evidence supplements the per-post summaries: a chart
+        # or screenshot in a topic carries signal the summary may have
+        # only hinted at. Decorative photos are filtered out by the
+        # caller (`build_topic_inputs`) so they introduce no noise.
+        lines += [
+            "",
+            f"Images across the {len(topic.image_descriptions)} content-bearing photos in this topic:",
+        ]
+        lines += [f"- {description}" for description in topic.image_descriptions]
+    if topic.video_transcripts:
+        # Transcript evidence supplements the summaries the same way images
+        # do: a talk's transcript carries detail a one-line summary drops.
+        # Each excerpt is already bounded by the caller (`build_topic_inputs`)
+        # so a topic full of long talks stays within the token budget (#44).
+        lines += [
+            "",
+            f"Video transcripts across the {len(topic.video_transcripts)} videos in this topic (truncated):",
+        ]
+        lines += [f"- {transcript}" for transcript in topic.video_transcripts]
     return "\n".join(lines)
 
 
@@ -160,12 +195,32 @@ def export_topic_worksheet(inputs: list[TopicInput], path: Path, output_language
             f"For each entry in `topics`, append one object to `judgments` with "
             f"keys {{slug, overview, notes}}. `overview` is plain prose in "
             f"{output_language}; `notes` is a list of plain-prose strings in "
-            f"{output_language}. No wikilinks, no filenames. Then run: "
+            f"{output_language}. A topic may also carry `image_descriptions` "
+            f"(content-bearing photos) and `video_transcripts` (bounded excerpts) "
+            f"— weigh them as visual/transcript evidence alongside the summaries. "
+            f"No wikilinks, no filenames. Then run: "
             f"xbrain topics --apply <this file>."
         ),
         "rubric": load_rubric("topic-page", language=output_language),
         "topics": [
-            {"slug": t.slug, "description": t.description, "summaries": t.summaries} for t in inputs
+            {
+                "slug": t.slug,
+                "description": t.description,
+                "summaries": t.summaries,
+                # Content-bearing photo descriptions (#34): mirrors the `api` track's
+                # topic block ("Images across the N content-bearing photos in this
+                # topic"). Already collected + decorative-filtered by `build_topic_inputs`
+                # into `TopicInput.image_descriptions`; empty list when the topic has
+                # none. No truncation — the api path doesn't bound these either.
+                "image_descriptions": t.image_descriptions,
+                # Bounded video-transcript excerpts (#56 transcript-to-topics half):
+                # mirrors the `api` track's topic block ("Video transcripts across
+                # the N videos in this topic"). Already collected + per-video bounded
+                # (`TOPIC_TRANSCRIPT_CHAR_LIMIT`) by `build_topic_inputs` into
+                # `TopicInput.video_transcripts`; empty list when the topic has none.
+                "video_transcripts": t.video_transcripts,
+            }
+            for t in inputs
         ],
         "judgments": [],
     }

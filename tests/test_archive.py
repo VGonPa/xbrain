@@ -99,6 +99,61 @@ def test_parse_archive_extracts_media(tmp_path: Path):
     assert items[0].media[0].url == "https://pbs.twimg.com/media/a.jpg"
 
 
+def test_parse_archive_extracts_video_playable_url_not_poster(tmp_path: Path):
+    """An archive video entry yields the highest-bitrate mp4 as its URL — not
+    the poster image — plus the poster as thumbnail_url, the chosen bitrate, and
+    the clip duration. The X archive carries the same
+    `extended_entities.media[].video_info.variants` shape as the live GraphQL
+    response, so the archive path must capture the playable stream too."""
+    from xbrain.models import MediaVideoPending
+
+    author = Author(handle="vgonpa", name="Victor")
+    tweets = [
+        {
+            "tweet": {
+                "id_str": "888",
+                "created_at": "Wed May 10 14:23:00 +0000 2026",
+                "full_text": "with a video",
+                "extended_entities": {
+                    "media": [
+                        {
+                            "type": "video",
+                            "media_url_https": "https://pbs.twimg.com/poster.jpg",
+                            "video_info": {
+                                "duration_millis": 30000,
+                                "variants": [
+                                    {
+                                        "bitrate": 256000,
+                                        "content_type": "video/mp4",
+                                        "url": "https://video.twimg.com/low.mp4?tag=12",
+                                    },
+                                    {
+                                        "bitrate": 2176000,
+                                        "content_type": "video/mp4",
+                                        "url": "https://video.twimg.com/high.mp4?tag=12",
+                                    },
+                                    {
+                                        "content_type": "application/x-mpegURL",
+                                        "url": "https://video.twimg.com/playlist.m3u8?tag=12",
+                                    },
+                                ],
+                            },
+                        }
+                    ]
+                },
+            }
+        }
+    ]
+    items = parse_archive(_make_archive_from_tweets(tmp_path, tweets), author)
+    assert len(items) == 1
+    entry = items[0].media[0]
+    assert isinstance(entry, MediaVideoPending)
+    assert entry.url == "https://video.twimg.com/high.mp4?tag=12"
+    assert entry.thumbnail_url == "https://pbs.twimg.com/poster.jpg"
+    assert entry.bitrate == 2176000
+    assert entry.duration_millis == 30000
+
+
 def test_parse_archive_skips_malformed_entry(tmp_path: Path):
     author = Author(handle="vgonpa", name="Victor")
     tweets = [

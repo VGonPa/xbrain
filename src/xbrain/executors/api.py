@@ -13,8 +13,13 @@ import sys
 
 from xbrain.executors.base import EnrichmentJudgment
 from xbrain.llm_json import json_from_response
-from xbrain.models import ContentSourceSuccess, Item, Topic
-from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
+from xbrain.models import ContentSourceSuccess, Item, MediaPhotoDescribed, Topic
+from xbrain.rubrics import (
+    ARTICLE_CHAR_LIMIT,
+    TRANSCRIPT_CHAR_LIMIT,
+    load_rubric,
+    truncate_transcript,
+)
 
 _MAX_TOKENS = 600
 
@@ -60,6 +65,94 @@ def _system_prompt(language: str) -> str:
     )
 
 
+def _content_image_descriptions(item: Item) -> list[str]:
+    """Return non-decorative image descriptions on the item, in media order.
+
+    Decorative photos (`is_decorative=True`) are filtered out at this
+    seam so they introduce no topic noise — an avatar or a reaction
+    meme would otherwise drag the assigned topics toward whatever the
+    image happened to depict. Items without described photos return an
+    empty list.
+    """
+    return [
+        entry.description
+        for entry in item.media
+        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
+    ]
+
+
+def _images_section(item: Item) -> list[str]:
+    """Build the `Images in this post:` block, or an empty list when not applicable.
+
+    Visual content carries topic signal too. The describe stage
+    already filtered decoratives — this just splices the prose in
+    right before the article body so the LLM reads the post + the
+    image evidence + the article in natural order.
+    """
+    image_descriptions = _content_image_descriptions(item)
+    if not image_descriptions:
+        return []
+    lines = ["", "Images in this post:"]
+    lines += [f"- {description}" for description in image_descriptions]
+    return lines
+
+
+def _links_section(item: Item) -> list[str]:
+    """Build the `Links in the post:` block, or an empty list when not applicable."""
+    if not item.links:
+        return []
+    lines = [
+        "",
+        "Links in the post (the domain is topic signal even when the article body is unavailable):",
+    ]
+    lines += [f"- {ln.url}  (domain: {ln.domain})" for ln in item.links]
+    return lines
+
+
+def _article_sections(item: Item) -> list[str]:
+    """Build one block per successfully-fetched article. Empty if no content.
+
+    `x_video` sources are excluded here — a video transcript is manufactured
+    text, not a linked article, and gets its own labelled `Video transcript:`
+    block (`_video_transcript_section`). Rendering it as a "Linked article"
+    would mislabel the content type to the LLM.
+    """
+    if item.content is None or not item.content.sources:
+        return []
+    lines: list[str] = []
+    for src in item.content.sources:
+        # Narrow to the success variant — only those carry `title`/`text`.
+        if isinstance(src, ContentSourceSuccess) and src.kind != "x_video" and src.text:
+            lines += [
+                "",
+                f"Linked article ({src.title or src.url}):",
+                src.text[:ARTICLE_CHAR_LIMIT],
+            ]
+    return lines
+
+
+def _video_transcript_section(item: Item) -> list[str]:
+    """Build the `Video transcript:` block(s) for `x_video` sources with speech.
+
+    A no-speech source (`has_speech=False`, empty text) contributes nothing —
+    it carries no topic signal and would only add noise. Long transcripts are
+    truncated to `TRANSCRIPT_CHAR_LIMIT` so one 72-min talk can't blow the
+    per-item prompt (#44).
+    """
+    if item.content is None:
+        return []
+    lines: list[str] = []
+    for src in item.content.sources:
+        if (
+            isinstance(src, ContentSourceSuccess)
+            and src.kind == "x_video"
+            and src.has_speech
+            and src.text
+        ):
+            lines += ["", "Video transcript:", truncate_transcript(src.text, TRANSCRIPT_CHAR_LIMIT)]
+    return lines
+
+
 def _user_prompt(item: Item, vocab: list[Topic]) -> str:
     parts = [
         "Controlled vocabulary (use only these slugs):",
@@ -70,22 +163,10 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
     ]
     if item.bookmark_folder:
         parts += ["", f"Saved by the user in the bookmark folder: {item.bookmark_folder}"]
-    if item.links:
-        parts += [
-            "",
-            "Links in the post (the domain is topic signal even when "
-            "the article body is unavailable):",
-        ]
-        parts += [f"- {ln.url}  (domain: {ln.domain})" for ln in item.links]
-    if item.content and item.content.sources:
-        # Narrow to the success variant — only those carry `title`/`text`.
-        for src in item.content.sources:
-            if isinstance(src, ContentSourceSuccess) and src.text:
-                parts += [
-                    "",
-                    f"Linked article ({src.title or src.url}):",
-                    src.text[:ARTICLE_CHAR_LIMIT],
-                ]
+    parts += _images_section(item)
+    parts += _video_transcript_section(item)
+    parts += _links_section(item)
+    parts += _article_sections(item)
     return "\n".join(parts)
 
 

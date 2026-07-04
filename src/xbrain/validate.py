@@ -14,46 +14,75 @@ from xbrain.rubrics import load_guardrails
 _ALLOWED_KEYS = {"summary", "primary_topic", "topics"}
 
 
+def _validate_judgment_keys(judgment: dict) -> list[str]:
+    """Reject any key outside the allowed enrichment schema."""
+    extra = set(judgment) - _ALLOWED_KEYS
+    if extra:
+        return [f"unexpected keys (LLM must emit only judgment): {sorted(extra)}"]
+    return []
+
+
+def _validate_summary(judgment: dict, rules: dict) -> list[str]:
+    """Require a non-empty summary when guardrails demand it."""
+    summary = judgment.get("summary")
+    if rules.get("summary_required", True) and not (summary and str(summary).strip()):
+        return ["summary is missing or empty"]
+    return []
+
+
+def _validate_topics_list(judgment: dict, rules: dict, vocab: set[str]) -> list[str]:
+    """Validate the topics list itself: count bounds, duplicates, vocabulary membership.
+
+    Returns an empty list when `topics` is not a list — the caller (`validate_judgment`)
+    is responsible for emitting the type error and aborting further topic-related checks.
+    """
+    topics = judgment.get("topics")
+    if not isinstance(topics, list):
+        return []
+    errors: list[str] = []
+    lo, hi = rules.get("topics_min", 1), rules.get("topics_max", 4)
+    if not (lo <= len(topics) <= hi):
+        errors.append(f"topics has {len(topics)} entries, must be {lo}-{hi}")
+    if len(set(topics)) != len(topics):
+        errors.append("topics has duplicate entries")
+    if rules.get("topics_must_be_in_vocab", True):
+        for slug in topics:
+            if slug not in vocab:
+                errors.append(f"topic '{slug}' is not in the vocabulary")
+    return errors
+
+
+def _validate_primary_topic(
+    judgment: dict, topics: list, rules: dict, vocab: set[str]
+) -> list[str]:
+    """Validate `primary_topic`: presence, vocabulary membership, and inclusion in topics."""
+    primary = judgment.get("primary_topic")
+    if not primary:
+        return ["primary_topic is missing"]
+    errors: list[str] = []
+    if rules.get("topics_must_be_in_vocab", True) and primary not in vocab:
+        errors.append(f"primary_topic '{primary}' is not in the vocabulary")
+    if rules.get("primary_topic_must_be_in_topics", True) and primary not in topics:
+        errors.append(f"primary_topic '{primary}' is not inside topics")
+    return errors
+
+
 def validate_judgment(judgment: dict, vocab_slugs: Iterable[str]) -> list[str]:
     """Return a list of human-readable errors; an empty list means valid."""
     rules = load_guardrails().get("enrichment", {})
     vocab = set(vocab_slugs)
+
     errors: list[str] = []
-
-    extra = set(judgment) - _ALLOWED_KEYS
-    if extra:
-        errors.append(f"unexpected keys (LLM must emit only judgment): {sorted(extra)}")
-
-    summary = judgment.get("summary")
-    if rules.get("summary_required", True) and not (summary and str(summary).strip()):
-        errors.append("summary is missing or empty")
+    errors += _validate_judgment_keys(judgment)
+    errors += _validate_summary(judgment, rules)
 
     topics = judgment.get("topics")
     if not isinstance(topics, list):
         errors.append("topics must be a list")
         return errors
 
-    lo, hi = rules.get("topics_min", 1), rules.get("topics_max", 4)
-    if not (lo <= len(topics) <= hi):
-        errors.append(f"topics has {len(topics)} entries, must be {lo}-{hi}")
-
-    if len(set(topics)) != len(topics):
-        errors.append("topics has duplicate entries")
-
-    if rules.get("topics_must_be_in_vocab", True):
-        for slug in topics:
-            if slug not in vocab:
-                errors.append(f"topic '{slug}' is not in the vocabulary")
-
-    primary = judgment.get("primary_topic")
-    if not primary:
-        errors.append("primary_topic is missing")
-    else:
-        if rules.get("topics_must_be_in_vocab", True) and primary not in vocab:
-            errors.append(f"primary_topic '{primary}' is not in the vocabulary")
-        if rules.get("primary_topic_must_be_in_topics", True) and primary not in topics:
-            errors.append(f"primary_topic '{primary}' is not inside topics")
-
+    errors += _validate_topics_list(judgment, rules, vocab)
+    errors += _validate_primary_topic(judgment, topics, rules, vocab)
     return errors
 
 

@@ -14,3 +14,6 @@ auth/storage_state.json
 data/*
 !data/.gitkeep
 config.toml
+
+# Working docs (not tracked)
+zz-support-files/

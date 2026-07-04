@@ -29,10 +29,52 @@ class Config:
     topics_resynth_threshold: int
     output_language: str  # one of xbrain.i18n.SUPPORTED_LANGUAGES
     topic_style: str  # one of xbrain.config.SUPPORTED_TOPIC_STYLES
+    # `describe_model` defaults to Sonnet 4.6 — the spec settled on it as the
+    # quality / cost sweet spot for vision (~$3-5 for a 2k-image corpus).
+    # Override per run via `xbrain describe --model ...` when iterating on
+    # prompt or budget; the CLI flag wins over the config value.
+    describe_model: str
+    # `describe_version` tags every produced description so a prompt
+    # evolution can be rolled out incrementally: bumping the value here
+    # makes the next `xbrain describe` run re-describe stale entries
+    # automatically (no `--force` needed). The string is exact-match —
+    # there is no ordering relation, only equality.
+    describe_version: str
+    # `transcribe_command` is the EXTERNAL transcriber `xbrain digest-video`
+    # shells out to (#44) — the heavy ASR lives outside xbrain core, invoked as
+    # a subprocess located via PATH/config. Defaults to `parakeet-mlx`; may be a
+    # multi-token wrapper command (split with shlex, no shell). `transcribe_model`
+    # is the optional model id passed through (`None` → the transcriber's own
+    # default).
+    transcribe_command: str
+    transcribe_model: str | None
+    # `vision_command` is the EXTERNAL vision model `xbrain digest-video --frames`
+    # shells out to (#44 PR4) to describe key-frame slides — the heavy vision lives
+    # outside xbrain core, invoked as a subprocess located via PATH/config. There
+    # is NO bundled default: it defaults to `""` (unset), and `--frames` errors
+    # clearly until it is configured. May be a multi-token wrapper (split with
+    # shlex, no shell). `vision_model` is the optional model id passed through
+    # (`None` → the vision tool's own default).
+    vision_command: str
+    vision_model: str | None
 
     @property
     def items_path(self) -> Path:
         return self.data_dir / "items.json"
+
+    @property
+    def media_dir(self) -> Path:
+        """Root directory for downloaded photo bytes.
+
+        Photos are stored at ``<media_dir>/<item-id>/<index>.<ext>``. Lives
+        under `data/` so it shares the gitignore with the rest of the
+        artifact tree. The snapshot lifecycle in `xbrain.snapshot`
+        currently covers only the JSON store (`items.json`, `state.json`,
+        `vocab.yaml`, `topics.json`) — the binary photo bytes are NOT
+        snapshotted today. A re-download via `xbrain media` is the
+        recovery path if `data/media/` is lost.
+        """
+        return self.data_dir / "media"
 
     @property
     def state_path(self) -> Path:
@@ -81,6 +123,9 @@ def load_config(repo_root: Path) -> Config:
             f"config.toml: [output].topic_style must be one of "
             f"{list(SUPPORTED_TOPIC_STYLES)}, got {topic_style!r}"
         )
+    describe = settings.get("describe", {})
+    transcribe = settings.get("transcribe", {})
+    vision = settings.get("vision", {})
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -93,4 +138,10 @@ def load_config(repo_root: Path) -> Config:
         topics_resynth_threshold=resynth_threshold,
         output_language=output_language,
         topic_style=topic_style,
+        describe_model=describe.get("model", "claude-sonnet-4-6"),
+        describe_version=describe.get("version", "v1"),
+        transcribe_command=transcribe.get("command", "parakeet-mlx"),
+        transcribe_model=transcribe.get("model"),
+        vision_command=vision.get("command", ""),
+        vision_model=vision.get("model"),
     )
