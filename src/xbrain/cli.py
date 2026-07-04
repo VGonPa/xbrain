@@ -66,10 +66,9 @@ from xbrain.video_fetch import (
     format_fetch_summary,
 )
 from xbrain.video_frames import (
-    DEFAULT_MAX_FRAMES,
-    DEFAULT_SCENE_THRESHOLD,
     KeyFrame,
     extract_key_frames,
+    select_frames,
 )
 from xbrain.video_media import (
     VideoDownloadPlan,
@@ -1141,14 +1140,29 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
     model = vision_model or cfg.vision_model
 
     def _extract(path: Path) -> list[KeyFrame]:
+        # RAW frames (cap=False): classification runs on the full distribution; the
+        # reduce step below dedupes + caps only what the vision model describes.
         return extract_key_frames(
-            path, threshold=DEFAULT_SCENE_THRESHOLD, max_frames=DEFAULT_MAX_FRAMES
+            path,
+            threshold=cfg.frames_scene_threshold,
+            interval_seconds=cfg.frames_interval_seconds,
+            cap=False,
+        )
+
+    def _reduce(frames: list[KeyFrame]) -> list[KeyFrame]:
+        return select_frames(
+            frames,
+            dedupe=cfg.frames_dedupe,
+            dedupe_distance=cfg.frames_dedupe_distance,
+            max_frames=cfg.frames_max_frames,
         )
 
     def _describe(path: Path) -> str:
         return describe_image(path, command=cfg.vision_command, model=model)
 
-    return VisualConfig(media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe)
+    return VisualConfig(
+        media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe, reduce_fn=_reduce
+    )
 
 
 def _run_digest_video(
