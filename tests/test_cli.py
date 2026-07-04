@@ -2474,14 +2474,21 @@ def _setup_repo_with_vision(tmp_path: Path, monkeypatch, command: str = "vlm-des
 
 
 def _write_slide_png(path: Path) -> None:
-    """A high-edge (text/line) image so the REAL `classify_visual` reads 'slides'."""
+    """A high-edge (text/line) image so the REAL `classify_visual` reads 'slides'.
+
+    Content varies by the frame index in the filename (a big filled bar in a
+    distinct vertical band) so DISTINCT frames get distinct perceptual hashes and
+    survive dedup — two identically-drawn frames would (correctly) collapse to one.
+    """
     from PIL import Image, ImageDraw
 
+    idx = int("".join(c for c in path.stem if c.isdigit()) or "0")
     img = Image.new("RGB", (640, 360), "white")
     draw = ImageDraw.Draw(img)
     for y in range(40, 320, 24):
         draw.line([(40, y), (600, y)], fill="black", width=3)
-    draw.rectangle([300, 200, 560, 330], outline="black", width=4)
+    band = 30 + (idx % 5) * 60
+    draw.rectangle([120, band, 560, band + 50], fill="black")
     img.save(path)
 
 

@@ -69,6 +69,16 @@ TranscribeFn = Callable[[Path], Transcript]
 ExtractFn = Callable[[Path], list[KeyFrame]]
 DescribeFn = Callable[[Path], str]
 ClassifyFn = Callable[[list[KeyFrame]], str]
+# `reduce_fn` runs on the RAW extracted frames AFTER classification (so dedup can't
+# skew the slides-vs-talking-head vote) and BEFORE describe — it dedupes + caps the
+# set the vision model actually captions. Default = identity (describe them all).
+ReduceFn = Callable[[list[KeyFrame]], list[KeyFrame]]
+
+
+def _no_reduce(frames: list[KeyFrame]) -> list[KeyFrame]:
+    """Default `reduce_fn` — identity (describe every frame `extract_fn` returned)."""
+    return frames
+
 
 # The per-video visual-layer outcome. `disabled` = no `--frames`; `slides` = kept
 # + described + embedded (counts as a "with slides" video); `talking_head` = a
@@ -93,6 +103,7 @@ class VisualConfig:
     extract_fn: ExtractFn
     describe_fn: DescribeFn
     classify_fn: ClassifyFn = classify_visual
+    reduce_fn: ReduceFn = _no_reduce
 
 
 @dataclass(frozen=True)
@@ -371,6 +382,8 @@ def _extract_described_slides(path: Path, visual: VisualConfig, *, item_id: str)
             item_id,
         )
         return _VisualResult(classification="skipped")
+    # Classification saw the RAW frames; now dedupe + cap only the describe set.
+    frames = visual.reduce_fn(frames)
     try:
         slides = [
             _DescribedSlide(frame.timestamp, frame.path, visual.describe_fn(frame.path))

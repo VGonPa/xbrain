@@ -146,6 +146,14 @@ def load_config(repo_root: Path) -> Config:
     frames_dedupe_distance = int(frames.get("dedupe_distance", DEFAULT_DEDUPE_DISTANCE))
     if frames_dedupe_distance < 0:
         raise ValueError("config.toml: [frames].dedupe_distance must be >= 0")
+    frames_scene_threshold = float(frames.get("scene_threshold", DEFAULT_SCENE_THRESHOLD))
+    if not 0.0 <= frames_scene_threshold <= 1.0:
+        raise ValueError("config.toml: [frames].scene_threshold must be in [0.0, 1.0]")
+    frames_interval_seconds = float(frames.get("interval_seconds", DEFAULT_INTERVAL_SECONDS))
+    if frames_interval_seconds <= 0:
+        raise ValueError(
+            "config.toml: [frames].interval_seconds must be > 0 (0 selects every frame)"
+        )
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -165,8 +173,8 @@ def load_config(repo_root: Path) -> Config:
         vision_command=vision.get("command", ""),
         vision_model=vision.get("model"),
         frames_max_frames=frames_max_frames,
-        frames_scene_threshold=float(frames.get("scene_threshold", DEFAULT_SCENE_THRESHOLD)),
-        frames_interval_seconds=float(frames.get("interval_seconds", DEFAULT_INTERVAL_SECONDS)),
+        frames_scene_threshold=frames_scene_threshold,
+        frames_interval_seconds=frames_interval_seconds,
         frames_dedupe=bool(frames.get("dedupe", True)),
         frames_dedupe_distance=frames_dedupe_distance,
     )

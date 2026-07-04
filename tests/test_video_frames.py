@@ -29,6 +29,7 @@ from xbrain.video_frames import (
     classify_visual,
     dedupe_frames,
     extract_key_frames,
+    select_frames,
 )
 
 
@@ -370,3 +371,30 @@ def test_dedupe_keeps_unreadable_frames(tmp_path: Path):
     bad = KeyFrame(timestamp=1.0, path=tmp_path / "nope.png")  # no file → unreadable
     kept = dedupe_frames([good, bad, good], max_distance=6)
     assert bad in kept  # unreadable is never silently dropped
+
+
+def test_extract_cap_false_returns_raw_frames(tmp_path: Path):
+    """`cap=False` returns the RAW extraction (no even-subsample) — the digest
+    classifies slides-vs-talking-head on this full distribution before reducing."""
+    runner = _ffmpeg_runner([float(t) for t in range(10)])
+    frames = extract_key_frames(tmp_path / "vid.mp4", max_frames=3, cap=False, runner=runner)
+    assert len(frames) == 10  # not capped to 3
+
+
+def test_select_frames_dedupes_then_caps(tmp_path: Path):
+    """`select_frames` = dedupe (drop held-slide near-dups) → cap evenly."""
+    a = _frame(tmp_path, "a.png", [(10, 10, 100, 130)])
+    a_dup = _frame(tmp_path, "a2.png", [(10, 10, 100, 130)])  # dropped by dedup
+    frames = [
+        a,
+        a_dup,
+        _frame(tmp_path, "b.png", [(10, 10, 90, 40)]),
+        _frame(tmp_path, "c.png", [(160, 100, 250, 140)]),
+        _frame(tmp_path, "d.png", [(10, 100, 250, 140)]),
+    ]
+    # dedup → [a, b, c, d] (4 distinct); cap 2 → 2, front+tail preserved.
+    kept = select_frames(frames, dedupe=True, dedupe_distance=6, max_frames=2)
+    assert len(kept) == 2
+    assert kept[0].path.name == "a.png"  # front kept
+    # dedupe=False → no dedup, cap 3 of the 5.
+    assert len(select_frames(frames, dedupe=False, max_frames=3)) == 3

@@ -329,3 +329,23 @@ def test_load_config_frames_rejects_non_positive_max(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="max_frames"):
         load_config(tmp_path)
+
+
+def test_load_config_frames_rejects_bad_scene_threshold(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n[frames]\nscene_threshold = 1.5\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="scene_threshold"):
+        load_config(tmp_path)
+
+
+def test_load_config_frames_rejects_non_positive_interval(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n[frames]\ninterval_seconds = 0\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="interval_seconds"):
+        load_config(tmp_path)

@@ -312,8 +312,7 @@ def extract_key_frames(
     threshold: float = DEFAULT_SCENE_THRESHOLD,
     max_frames: int = DEFAULT_MAX_FRAMES,
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
-    dedupe: bool = True,
-    dedupe_distance: int = DEFAULT_DEDUPE_DISTANCE,
+    cap: bool = True,
     command: str = DEFAULT_FFMPEG_COMMAND,
     runner: Runner | None = None,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
@@ -322,13 +321,13 @@ def extract_key_frames(
 
     Combines scene-change detection (`threshold`) with periodic interval sampling
     (`interval_seconds`) in ONE ffmpeg `select` pass, so extraction covers the
-    WHOLE video — including a long static tail — not just the front. The pipeline
-    is **extract → dedupe → cap**: `dedupe` (default on) drops near-identical
-    consecutive frames (a held slide) by perceptual hash so the budget covers
-    DISTINCT slides, then the result is subsampled EVENLY to at most `max_frames`
-    (a safety ceiling; front + tail preserved). Frames are written under a temp
-    subdir of the video's parent and returned as `KeyFrame`s; the CALLER owns
-    cleanup (the digest's ephemeral temp dir reclaims them).
+    WHOLE video — including a long static tail — not just the front. When `cap` is
+    on (default) the result is subsampled EVENLY to at most `max_frames` (front +
+    tail preserved); the digest passes `cap=False` to get the RAW set so it can
+    **classify slides-vs-talking-head on the raw distribution** and dedupe/cap only
+    the describe path (`select_frames`). Frames are written under a temp subdir of
+    the video's parent and returned as `KeyFrame`s; the CALLER owns cleanup (the
+    digest's ephemeral temp dir reclaims them).
 
     A missing ffmpeg raises `FrameExtractionToolNotFound` (aborts the run); a
     non-zero exit / timeout raises `FrameExtractionFailed` (per-video — the digest
@@ -343,11 +342,38 @@ def extract_key_frames(
     argv = _build_argv(command, video, out_pattern, select_expr)
     stderr = _run_ffmpeg(argv, active_runner, timeout_seconds)
     frames = _pair_frames(out_dir, _parse_timestamps(stderr))
+    return _cap_evenly(frames, max_frames) if cap else frames
+
+
+def select_frames(
+    frames: list[KeyFrame],
+    *,
+    dedupe: bool = True,
+    dedupe_distance: int = DEFAULT_DEDUPE_DISTANCE,
+    max_frames: int = DEFAULT_MAX_FRAMES,
+) -> list[KeyFrame]:
+    """Reduce RAW key frames for the describe path: dedupe near-dups, then cap.
+
+    Runs AFTER slide/talking-head classification so dedup never skews that vote
+    (which frames the vision model actually describes is a separate decision from
+    what the video *is*). `dedupe` drops near-identical held slides so the budget
+    covers DISTINCT slides; `max_frames` is a safety ceiling (a genuine deck with
+    more distinct slides than the ceiling loses some to even subsampling — WARNED,
+    not silent).
+    """
     if dedupe:
         before = len(frames)
         frames = dedupe_frames(frames, max_distance=dedupe_distance)
         logger.debug("digest-video: dedup kept %d/%d frames", len(frames), before)
-    return _cap_evenly(frames, max_frames)
+    capped = _cap_evenly(frames, max_frames)
+    if len(capped) < len(frames):
+        logger.warning(
+            "digest-video: capped %d distinct frames to max_frames=%d — raise "
+            "[frames].max_frames to describe them all",
+            len(frames),
+            max_frames,
+        )
+    return capped
 
 
 def _edge_density(path: Path) -> float | None:
