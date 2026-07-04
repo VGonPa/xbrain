@@ -1,0 +1,189 @@
+{
+  "content_state": {
+    "blocks": [
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "espbg",
+        "text": "By Leo Bashlykov, Head of Product · Crypto",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "agevm",
+        "text": "Everyone's writing about how AI is shrinking product teams and killing product jobs. In my case, I'm fighting to hire more.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2ajug",
+        "text": "The dominant narrative is clear by now: Brian Chesky (Airbnb) says pure people managers have no future. Tomer Cohen killed LinkedIn's APM program and replaced it with Full Stack Builders. Tobias Lütke told Shopify to prove AI can't do the job before asking for more headcount.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "5rcp7",
+        "text": "All real. All worth taking seriously. Proving AI can't do it before asking for headcount is already part of Revolut's process.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1vbq7",
+        "text": "But here's what AI actually did to my teams in Crypto at Revolut: it didn't reduce my need for people. It exposed how badly under-resourced my ambition was.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "cgpjm",
+        "text": "We're running 5 new big bets in parallel right now. If I had one more strong PO tomorrow, I'd start a 6th and a 7th. The constraint was never \"do we have enough work to keep teams busy\" — it was always \"do we have enough strong POs to point at the next opportunity.\"",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "bskeh",
+        "text": "What AI actually changed:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "5iplo",
+        "text": "PRD (product requirements document) prep / review / iteration — 5x faster.",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "8q2j5",
+        "text": "Regulatory research — every PO can now dig into the depth of each regime and navigate the product accordingly.",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "dnhll",
+        "text": "Coding — talented engineers shipping 10x faster, no comments needed.",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2ri2v",
+        "text": "Automations — nearly in every workflow → less routine nonsense.",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "7ivrt",
+        "text": "Concrete output — launching our MCP (Model Context Protocol) server for Revolut X as a side project. Without AI-driven release capacity and simple building tools, it wouldn't have shipped.",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "fafc8",
+        "text": "What we haven't cracked yet — governance. And this is non-negotiable in a regulated business like Revolut. Anyone selling you \"AI replaces compliance review\" is selling you a future lawsuit.",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "3o5p0",
+        "text": "So, my take:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "5rteg",
+        "text": "→ AI fluency is now the baseline. Agree with Tobias Lütke here — stagnation is slow-motion failure. 70% of skills in tech jobs will change by 2030, no argument there.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "f4h82",
+        "text": "→ But the narrative that AI = smaller teams is mostly a story from consumer SaaS and dev tools. From where I sit, AI is doing something different: it's enabling top talent to operate at 3-5x capacity, which means I can finally chase the bets that were previously beyond reach.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "fpv2d",
+        "text": "→ We still have 18 months of strong items in the backlog. I'm all in on AI to compress that to 3 months, so we can move on to brainstorming what comes next and drive the next revolution in the space.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 0,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "8eu8q",
+        "text": "💡 The real question isn't \"how many people will AI replace?\"",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2e15a",
+        "text": "It's: how big is your ambition, and do you have the builders to match it?",
+        "type": "unstyled"
+      }
+    ],
+    "entityMap": [
+      {
+        "key": "0",
+        "value": {
+          "data": {
+            "url": "https://abs.twimg.com/emoji/v2/svg/1f4a1.svg"
+          },
+          "mutability": "Immutable",
+          "type": "TWEMOJI"
+        }
+      }
+    ]
+  },
+  "id": "QXJ0aWNsZUVudGl0eToyMDcxODkyMjg2MzE3NzI3NzQ0",
+  "is_grok_summary_eligible": true,
+  "lifecycle_state": {
+    "modified_at_secs": 1782816104
+  },
+  "media_entities": [],
+  "metadata": {
+    "first_published_at_secs": 1782816104
+  },
+  "preview_text": "By Leo Bashlykov, Head of Product · Crypto\nEveryone's writing about how AI is shrinking product teams and killing product jobs. In my case, I'm fighting to hire more.\nThe dominant narrative is clear",
+  "rest_id": "2071892286317727744",
+  "summary_text": "- I’m fighting to hire more in Crypto at Revolut as AI exposes how under-resourced my ambition was.\n- AI makes PRD prep 5x faster, regulatory research deeper, coding 10x quicker, and launches side projects like MCP server possible.\n- We run 5 big bets in parallel; one strong PO would unlock a 6th and 7th.\n- AI enables top talent to operate at 3-5x capacity, compressing backlog and chasing previously unreachable bets.\n- The real question is how big your ambition is and whether you have the builders to match it.",
+  "title": "The case for headcount in the age of AI"
+}
