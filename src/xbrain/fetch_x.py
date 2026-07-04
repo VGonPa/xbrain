@@ -185,7 +185,13 @@ def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess 
     never a silent empty success. The parse is wrapped so ANY parser exception
     (incl. a `RecursionError` on a pathological payload) degrades to the
     fallback instead of aborting the fetch — the "degrade, not crash" guarantee.
+
+    When MORE THAN ONE captured payload parses to blocks (e.g. X emits a
+    preview/skeleton article response before the full-body one), the RICHEST body
+    (most blocks) is selected rather than the first — so a truncated preview never
+    masquerades as the complete article — and the ambiguity is logged.
     """
+    parsed: list[tuple[str | None, list[ArticleBlock]]] = []
     for payload in captured:
         try:
             title, blocks = parse_article_content_state(payload)
@@ -198,23 +204,33 @@ def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess 
             )
             continue
         if blocks:
-            n_images = sum(1 for b in blocks if isinstance(b, ArticleImageBlock))
-            logger.info(
-                "article: built structured body (%d blocks, %d images) for %s",
-                len(blocks),
-                n_images,
-                url,
-            )
-            return ContentSourceSuccess(
-                kind="x_article",
-                url=url,
-                title=title,
-                text=_flatten_blocks(blocks),
-                blocks=blocks,
-                http_status=200,
-                attempts=1,
-            )
-    return None
+            parsed.append((title, blocks))
+    if not parsed:
+        return None
+    if len(parsed) > 1:
+        logger.warning(
+            "article: %d captured payloads parsed to blocks for %s; selecting the "
+            "richest — a preview/duplicate article response may be present",
+            len(parsed),
+            url,
+        )
+    title, blocks = max(parsed, key=lambda item: len(item[1]))
+    n_images = sum(1 for b in blocks if isinstance(b, ArticleImageBlock))
+    logger.info(
+        "article: built structured body (%d blocks, %d images) for %s",
+        len(blocks),
+        n_images,
+        url,
+    )
+    return ContentSourceSuccess(
+        kind="x_article",
+        url=url,
+        title=title,
+        text=_flatten_blocks(blocks),
+        blocks=blocks,
+        http_status=200,
+        attempts=1,
+    )
 
 
 def _log_article_fallback(captured: list[dict], url: str) -> None:
