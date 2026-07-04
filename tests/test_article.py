@@ -334,3 +334,160 @@ def test_dropped_media_block_is_logged(caplog):
         _title, blocks = parse_article_content_state(_payload(content_state))
     assert blocks == []
     assert any("dropped a non-text block" in r.message for r in caplog.records)
+
+
+# --- REAL-shape (list entityMap + media_entities indirection) edge cases ------
+#
+# These mirror the live X shape validated in tests/test_article_real.py, but
+# CONSTRUCTED so they can exercise branches the three captured fixtures do not
+# reach: multi-image galleries, int/str media_id coercion, list-shape drops,
+# the stray-URL guard, and the extra heading/list/quote block types.
+
+
+def _real_shape_payload(
+    content_state: dict, *, media_entities=None, cover_media=None, title: str = "Real Read"
+) -> dict:
+    """A payload shaped like the LIVE X response: `content_state` sits beside
+    `media_entities` / `cover_media` on the `article_results.result` node."""
+    result: dict = {"__typename": "Article", "title": title, "content_state": content_state}
+    if media_entities is not None:
+        result["media_entities"] = media_entities
+    if cover_media is not None:
+        result["cover_media"] = cover_media
+    return {"data": {"article": {"article_results": {"result": result}}}}
+
+
+def _media_entity(media_id, url: str) -> dict:
+    return {"media_id": media_id, "media_info": {"original_img_url": url}}
+
+
+def _atomic_media_block(entity_key: int, *, text: str = " ") -> dict:
+    return {
+        "key": "g",
+        "text": text,
+        "type": "atomic",
+        "entityRanges": [{"offset": 0, "length": 1, "key": entity_key}],
+    }
+
+
+def test_media_gallery_yields_one_image_block_per_resolvable_item():
+    url1 = "https://pbs.twimg.com/media/G1.jpg"
+    url2 = "https://pbs.twimg.com/media/G2.jpg"
+    content_state = {
+        "blocks": [_atomic_media_block(0)],
+        "entityMap": [
+            {
+                "key": 0,
+                "value": {
+                    "type": "MEDIA",
+                    "data": {"mediaItems": [{"mediaId": "1"}, {"mediaId": "2"}]},
+                },
+            }
+        ],
+    }
+    payload = _real_shape_payload(
+        content_state, media_entities=[_media_entity("1", url1), _media_entity("2", url2)]
+    )
+    _title, blocks = parse_article_content_state(payload)
+    assert [b.media.url for b in blocks if isinstance(b, ArticleImageBlock)] == [url1, url2]
+
+
+def test_partial_gallery_drops_unresolved_item_and_warns(caplog):
+    url1 = "https://pbs.twimg.com/media/G1.jpg"
+    content_state = {
+        "blocks": [_atomic_media_block(0)],
+        "entityMap": [
+            {
+                "key": 0,
+                "value": {
+                    "type": "MEDIA",
+                    "data": {"mediaItems": [{"mediaId": "1"}, {"mediaId": "missing"}]},
+                },
+            }
+        ],
+    }
+    payload = _real_shape_payload(content_state, media_entities=[_media_entity("1", url1)])
+    with caplog.at_level("WARNING", logger="xbrain.extract.article"):
+        _title, blocks = parse_article_content_state(payload)
+    assert [b.media.url for b in blocks if isinstance(b, ArticleImageBlock)] == [url1]
+    assert any("gallery item(s) had no URL" in r.message for r in caplog.records)
+
+
+def test_media_id_int_str_coercion_matches():
+    # media_entities carries the id as an INT; the item's mediaId is a STR.
+    url = "https://pbs.twimg.com/media/COERCE.jpg"
+    content_state = {
+        "blocks": [_atomic_media_block(0)],
+        "entityMap": [
+            {"key": 0, "value": {"type": "MEDIA", "data": {"mediaItems": [{"mediaId": "12345"}]}}}
+        ],
+    }
+    payload = _real_shape_payload(content_state, media_entities=[_media_entity(12345, url)])
+    _title, blocks = parse_article_content_state(payload)
+    assert [b.media.url for b in blocks if isinstance(b, ArticleImageBlock)] == [url]
+
+
+def test_list_shape_media_that_does_not_resolve_is_dropped_and_warned(caplog):
+    content_state = {
+        "blocks": [_atomic_media_block(0)],
+        "entityMap": [
+            {"key": 0, "value": {"type": "MEDIA", "data": {"mediaItems": [{"mediaId": "nope"}]}}}
+        ],
+    }
+    payload = _real_shape_payload(content_state, media_entities=[])  # empty index -> unresolved
+    with caplog.at_level("WARNING", logger="xbrain.extract.article"):
+        _title, blocks = parse_article_content_state(payload)
+    assert [b for b in blocks if isinstance(b, ArticleImageBlock)] == []
+    assert any("dropped a non-text block" in r.message for r in caplog.records)
+
+
+def test_caption_bearing_atomic_image_that_fails_resolution_is_dropped_not_texted():
+    # A MEDIA atomic block whose text is a caption (not blank) must NOT be demoted
+    # to a text run when its image fails to resolve — it is a dropped image.
+    content_state = {
+        "blocks": [_atomic_media_block(0, text="a caption")],
+        "entityMap": [
+            {"key": 0, "value": {"type": "MEDIA", "data": {"mediaItems": [{"mediaId": "nope"}]}}}
+        ],
+    }
+    payload = _real_shape_payload(content_state, media_entities=[])
+    _title, blocks = parse_article_content_state(payload)
+    assert blocks == []  # not [ArticleTextBlock("a caption")]
+
+
+def test_failed_gallery_does_not_grab_a_stray_data_url():
+    # mediaItems present but unresolvable: a stray click-through `url` on the
+    # entity data must NOT be emitted as the image (the real-shape guard for E).
+    content_state = {
+        "blocks": [_atomic_media_block(0)],
+        "entityMap": [
+            {
+                "key": 0,
+                "value": {
+                    "type": "MEDIA",
+                    "data": {
+                        "mediaItems": [{"mediaId": "nope"}],
+                        "url": "https://example.com/click",
+                    },
+                },
+            }
+        ],
+    }
+    payload = _real_shape_payload(content_state, media_entities=[])
+    _title, blocks = parse_article_content_state(payload)
+    assert [b for b in blocks if isinstance(b, ArticleImageBlock)] == []
+
+
+def test_heading_list_and_quote_block_prefixes_are_baked_in():
+    content_state = {
+        "blocks": [
+            {"key": "1", "text": "H1", "type": "header-one"},
+            {"key": "3", "text": "H3", "type": "header-three"},
+            {"key": "o", "text": "step", "type": "ordered-list-item"},
+            {"key": "q", "text": "quote", "type": "blockquote"},
+        ],
+        "entityMap": [],
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    texts = [b.text for b in blocks if isinstance(b, ArticleTextBlock)]
+    assert texts == ["# H1", "\n\n### H3", "\n\n1. step", "\n\n> quote"]
