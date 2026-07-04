@@ -1,0 +1,437 @@
+{
+  "content_state": {
+    "blocks": [
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 11,
+            "offset": 147,
+            "style": "Bold"
+          }
+        ],
+        "key": "6krvg",
+        "text": "Memory for agents is still early, with little to no standards. “Memory” means something different to everyone. But one common pattern is emerging: wiki memory.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "8v4se",
+        "text": "The idea is simple: use an agent to turn raw source data into a compact, persistent, agent-readable knowledge layer.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "8vi2h",
+        "text": "Why wikis?",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "bkgit",
+        "text": "Raw data contains a lot of knowledge, but it is often inefficient to expose directly to an agent. Logs, notes, code, docs, experiments, Slack threads, and transcripts are too noisy and too large. So instead, we run a process over that data and transform it into a denser representation.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1ia2h",
+        "text": "This is different from basic RAG. RAG usually retrieves raw chunks at query time. A wiki precomputes and maintains a higher-level synthesis, so the agent does not have to rediscover the structure every time.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2pp95",
+        "text": "This desire exists almost everywhere. When speaking to a friend at a research company, he talked about all the knowledge in their researchers' heads. He wanted to “clone their brain” so that if they left, the knowledge still remained with the company. His hope was that by looking at the experiments they ran, the notes they wrote, and the actions they took, they could approximate this “brain clone.”",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "639m0",
+        "text": "A wiki is one practical way to do that: not by storing everything, but by compressing what matters into a reusable knowledge base.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "a62ce",
+        "text": "What is a “wiki”?",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "3nfvl",
+        "text": "A wiki is an agent-maintained data structure that represents source knowledge in an agent-friendly way.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "aodgn",
+        "text": "In practice, this often means running an agent over some source material and asking it to create a set of files that future agents can use to understand the domain faster.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "abju9",
+        "text": "The important bit is not that it literally looks like Wikipedia. The important bit is that it is persistent, structured, inspectable, and updated over time.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "dgbn0",
+        "text": "Examples of wikis",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 0,
+            "length": 21,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "9p8s8",
+        "text": "DeepWiki by Cognition is probably the first example of this I remember seeing. DeepWiki creates AI-generated documentation for GitHub repositories. It is intended to give humans and coding agents a higher-level mental map of a codebase, making it easier to understand and navigate.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 1,
+            "length": 29,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "2s5pb",
+        "text": "Karpathy recently wrote about what he called an “LLM Wiki” or “LLM knowledge base.” This is a more general form of the same pattern: instead of only working over code, it can work over arbitrary source files. His framing is that the LLM incrementally builds and maintains a persistent markdown wiki that sits between the user and the raw sources.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 2,
+            "length": 25,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "d541l",
+        "text": "Factory launched AutoWiki as a similar offering to DeepWiki. AutoWiki analyzes a codebase and generates structured, browsable documentation that stays current as the repo changes.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 3,
+            "length": 7,
+            "offset": 55
+          },
+          {
+            "key": 4,
+            "length": 5,
+            "offset": 64
+          },
+          {
+            "key": 5,
+            "length": 4,
+            "offset": 71
+          },
+          {
+            "key": 6,
+            "length": 3,
+            "offset": 81
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "dtjma",
+        "text": "This pattern also sits adjacent to memory systems like LangMem, Letta, Mem0, and Zep. Those systems attack the broader agent-memory problem, while wiki memory is notable because it often uses the simplest possible substrate: files.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1qbbv",
+        "text": "A wiki for every domain",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 3,
+            "offset": 125,
+            "style": "Bold"
+          }
+        ],
+        "key": "7vg9u",
+        "text": "I would argue that for every domain there exists a knowledge base you would be well served to create. This knowledge base is not just the raw data. It is an intelligently compressed version of the raw data.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "d532p",
+        "text": "There are a bunch of open questions here:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "75ilc",
+        "text": "What is the raw data?",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "ev8hd",
+        "text": "What is the best format for the compressed data?",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "9uh6d",
+        "text": "How should that data be compressed?",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1v5fb",
+        "text": "How should the compressed representation stay up to date?",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "58j4o",
+        "text": "We are starting to see some common answers emerge:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "afedk",
+        "text": "What is the raw data? → anything an agent can read or access",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2ve0i",
+        "text": "What is the best format for the compressed data? → files",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "4mrn4",
+        "text": "How do you compress that data? → an agent",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "9o7j6",
+        "text": "How do you maintain it? → an agent",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "8ehuq",
+        "text": "Files are attractive because they are inspectable, editable, versionable, and easy for agents to read and write.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "6a1b8",
+        "text": "Wikis are not all of memory. They are best for durable domain knowledge, not necessarily short-term conversation state, user preferences, or high-frequency event logs. But for many domains, wiki memory may be the simplest useful long-term memory pattern we have.",
+        "type": "unstyled"
+      }
+    ],
+    "entityMap": [
+      {
+        "key": "4",
+        "value": {
+          "data": {
+            "url": "https://www.letta.com/blog/agent-memory"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "5",
+        "value": {
+          "data": {
+            "url": "https://arxiv.org/html/2504.19413v1"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "6",
+        "value": {
+          "data": {
+            "url": "https://www.getzep.com/"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "1",
+        "value": {
+          "data": {
+            "url": "https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "0",
+        "value": {
+          "data": {
+            "url": "https://cognition.ai/blog/deepwiki"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "2",
+        "value": {
+          "data": {
+            "url": "https://factory.ai/news/wiki"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "3",
+        "value": {
+          "data": {
+            "url": "https://docs.langchain.com/oss/python/concepts/memory"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      }
+    ]
+  },
+  "cover_media": {
+    "id": "QXBpTWVkaWE6DAAFCgABHMEX45LWoAAKAAIAAAAAoqCtagAA",
+    "media_id": "2071963569755693056",
+    "media_info": {
+      "__typename": "ApiImage",
+      "color_info": {
+        "palette": [
+          {
+            "percentage": 91.76,
+            "rgb": {
+              "blue": 0,
+              "green": 0,
+              "red": 0
+            }
+          },
+          {
+            "percentage": 7.29,
+            "rgb": {
+              "blue": 107,
+              "green": 106,
+              "red": 106
+            }
+          },
+          {
+            "percentage": 0.26,
+            "rgb": {
+              "blue": 187,
+              "green": 228,
+              "red": 228
+            }
+          },
+          {
+            "percentage": 0.21,
+            "rgb": {
+              "blue": 83,
+              "green": 169,
+              "red": 185
+            }
+          },
+          {
+            "percentage": 0.12,
+            "rgb": {
+              "blue": 84,
+              "green": 130,
+              "red": 86
+            }
+          }
+        ]
+      },
+      "original_img_height": 534,
+      "original_img_url": "https://pbs.twimg.com/media/HMEX45LWoAA7btu.jpg",
+      "original_img_width": 1334
+    },
+    "media_key": "3_2071963569755693056"
+  },
+  "id": "QXJ0aWNsZUVudGl0eToyMDcxOTYzMjcyNzI3OTI4ODMz",
+  "is_grok_summary_eligible": true,
+  "lifecycle_state": {
+    "modified_at_secs": 1782829597
+  },
+  "media_entities": [],
+  "metadata": {
+    "first_published_at_secs": 1782829597
+  },
+  "preview_text": "Memory for agents is still early, with little to no standards. “Memory” means something different to everyone. But one common pattern is emerging: wiki memory.\nThe idea is simple: use an agent to turn",
+  "rest_id": "2071963272727928833",
+  "summary_text": "- Memory for agents lacks standards but wiki memory emerges as a pattern: agents turn raw noisy data like logs, notes, and code into compact persistent agent-readable knowledge layer.  \n- Unlike RAG retrieving raw chunks, wiki precomputes higher-level synthesis so agents avoid rediscovering structure every time.  \n- Wiki is agent-maintained persistent structured files representing source knowledge for faster domain understanding.  \n- Examples include DeepWiki and AutoWiki for codebases plus LLM Wiki for arbitrary sources using markdown files.  \n- For every domain create intelligently compressed knowledge base with agent compression and maintenance on simple file substrate for durable knowledge.",
+  "title": "Wiki Memory"
+}

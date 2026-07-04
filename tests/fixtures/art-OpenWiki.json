@@ -1,0 +1,529 @@
+{
+  "content_state": {
+    "blocks": [
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1a3kl",
+        "text": "Today we're releasing OpenWiki, an open source agent and CLI for generating and maintaining documentation for codebases.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "63p07",
+        "text": "Agents write better code when they understand the repo they're working in. They need to know where key logic lives, how files connect, and which patterns the codebase expects. Good documentation gives agents that context, which leads to more informed code changes and fewer avoidable mistakes.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "14csu",
+        "text": "The problem is that documentation is hard to keep current. Writing the initial docs takes time, and updating them every time the code changes is even harder. In large repos with frequent PRs, docs can fall out of date quickly.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "bh2cd",
+        "text": "OpenWiki handles that work automatically. It creates a wiki for your repo, connects that wiki to your coding agent, and keeps it updated as your code changes.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 20,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "8186u",
+        "text": "Why wikis for agents",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 0,
+            "length": 8,
+            "offset": 67
+          },
+          {
+            "key": 1,
+            "length": 8,
+            "offset": 77
+          },
+          {
+            "key": 2,
+            "length": 19,
+            "offset": 91
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "8oqju",
+        "text": "We were inspired by existing work around codebase wikis, including DeepWiki, AutoWiki, and Karpathy’s LLM Wiki concept. The shared idea is simple. A wiki gives humans and agents a structured way to understand a codebase without forcing all context into one giant file.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2h0ij",
+        "text": "That matters because most coding agents already read files like AGENTS.md or CLAUDE.md for instructions. Those files are useful, but they’re not the right place to store hundreds of pages of repo documentation. They should point the agent toward the right context, then let the agent retrieve what it needs.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "8vn9b",
+        "text": "OpenWiki follows that model. It generates a repo wiki, then updates your agent instruction files with a reference to that wiki. From there, your coding agent can discover and use the docs automatically.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 15,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "f2dt1",
+        "text": "Getting started",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "4kbn4",
+        "text": "OpenWiki is designed to be easy to run from the command line.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "31inp",
+        "text": "Install it with NPM:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "2usuh",
+        "text": "npm install -g openwiki",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "162a4",
+        "text": "then run:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "4dlft",
+        "text": "openwiki --init",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 3,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "6ene2",
+        "text": " ",
+        "type": "atomic"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1fdqh",
+        "text": "The init command asks for a model provider and API key, then generates documentation for your repo.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "1qi44",
+        "text": "OpenWiki supports both open and closed model providers, including OpenRouter, Fireworks, Baseten, OpenAI, and Anthropic. By default, it uses OpenRouter with an open model, but you can configure the provider that works best for your setup.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 4,
+            "length": 10,
+            "offset": 36
+          },
+          {
+            "key": 5,
+            "length": 9,
+            "offset": 76
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "1ve3e",
+        "text": "Because OpenWiki is built on top of DeepAgents, it also supports tracing to LangSmith. If you provide a LangSmith API key, OpenWiki will trace runs to a LangSmith project so you can inspect exactly what the agent did while generating or updating your docs.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 42,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "dc1ji",
+        "text": "How OpenWiki connects to your coding agent",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "9jjqd",
+        "text": "After generating the wiki, OpenWiki updates your repo’s agent instruction files. If your repo uses AGENTS.md, CLAUDE.md, or both, OpenWiki adds a reference to the generated wiki and explains when the agent should use it.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "ecq9o",
+        "text": "We chose this approach because putting the entire wiki inside an instruction file would add too much context. In a large repo, the wiki can span hundreds of files. Loading all of that into every agent run would be wasteful and hard to maintain.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "ilp0",
+        "text": "A short reference works better. Your coding agent already reads the instruction file. Once OpenWiki adds the reference, the agent can find the wiki when it needs repo context, without requiring you to change your workflow.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 27,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "nvu",
+        "text": "Keeping the wiki up to date",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "7gqs4",
+        "text": "Generating docs once is useful. Keeping them current is where OpenWiki becomes more valuable.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 6,
+            "length": 40,
+            "offset": 20
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "97flt",
+        "text": "OpenWiki includes a GitHub Action that can run on a schedule, for example once a day. The action runs OpenWiki with the update flag. OpenWiki checks which commits landed since the last run, uses git diffs to understand what changed, then updates the wiki with the relevant context.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "hf0f",
+        "text": "That means the workflow can run in the background. As your codebase changes, OpenWiki updates the documentation. Your coding agent keeps picking up the latest wiki through the existing instruction file reference.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 25,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "f4ueu",
+        "text": "Built for codebases first",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "7v1vg",
+        "text": "This first release focuses on wikis for codebases. The goal is to make it easier for agents to understand the repos they work in, without asking developers to manually write and maintain detailed docs.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "dq2jp",
+        "text": "Over time, we think the OpenWiki concept can apply more broadly. Agents need durable context for many kinds of work, not just coding. Codebase documentation is the first use case, but the same pattern can help agents maintain useful context across other workflows too.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 6,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "eluqq",
+        "text": "Try it",
+        "type": "header-two"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "di84i",
+        "text": "OpenWiki is open source and available now.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "4nd7p",
+        "text": "You can install it, run `openwiki --init`, and generate a wiki for your repo in a few minutes.",
+        "type": "unstyled"
+      },
+      {
+        "data": {
+          "urls": [
+            {
+              "fromIndex": 25,
+              "text": "https://github.com/langchain-ai/openwiki",
+              "toIndex": 65
+            },
+            {
+              "fromIndex": 99,
+              "text": "https://youtu.be/nIVu3zfYprI",
+              "toIndex": 127
+            }
+          ]
+        },
+        "entityRanges": [
+          {
+            "key": 7,
+            "length": 40,
+            "offset": 25
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "1a3cd",
+        "text": "Check out the repo here: https://github.com/langchain-ai/openwiki and watch the walkthrough video: https://youtu.be/nIVu3zfYprI",
+        "type": "unstyled"
+      }
+    ],
+    "entityMap": [
+      {
+        "key": "4",
+        "value": {
+          "data": {
+            "url": "https://docs.langchain.com/oss/python/deepagents/overview"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "5",
+        "value": {
+          "data": {
+            "url": "https://langsmith.com/"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "6",
+        "value": {
+          "data": {
+            "url": "https://github.com/langchain-ai/openwiki/blob/main/examples/openwiki-update.yml"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "1",
+        "value": {
+          "data": {
+            "url": "https://docs.factory.ai/cli/features/wiki/overview"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "0",
+        "value": {
+          "data": {
+            "url": "https://deepwiki.com/"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "2",
+        "value": {
+          "data": {
+            "url": "https://x.com/karpathy/status/2040470801506541998"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "7",
+        "value": {
+          "data": {
+            "url": "https://github.com/langchain-ai/openwiki"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      },
+      {
+        "key": "3",
+        "value": {
+          "data": {
+            "entityKey": "c07613ca-f39c-4d08-8262-0046a1fad70f",
+            "mediaItems": [
+              {
+                "localMediaId": "1",
+                "mediaCategory": "DraftTweetImage",
+                "mediaId": "2072374092653867008"
+              }
+            ]
+          },
+          "mutability": "Immutable",
+          "type": "MEDIA"
+        }
+      }
+    ]
+  },
+  "cover_media": {
+    "id": "QXBpTWVkaWE6DAAFCgABHMKNwxAbUAEKAAIAAAAAL4hatQAA",
+    "media_id": "2072374647472214017",
+    "media_info": {
+      "__typename": "ApiImage",
+      "color_info": {
+        "palette": [
+          {
+            "percentage": 99.83,
+            "rgb": {
+              "blue": 1,
+              "green": 1,
+              "red": 1
+            }
+          }
+        ]
+      },
+      "original_img_height": 893,
+      "original_img_url": "https://pbs.twimg.com/media/HMKNwxAbUAEMrOF.jpg",
+      "original_img_width": 2232
+    },
+    "media_key": "3_2072374647472214017"
+  },
+  "id": "QXJ0aWNsZUVudGl0eToyMDcyMzYxNDUwOTI1MDk2OTYx",
+  "is_grok_summary_eligible": true,
+  "lifecycle_state": {
+    "modified_at_secs": 1782927710
+  },
+  "media_entities": [
+    {
+      "id": "QXBpTWVkaWE6DAAFCgABHMKNQeJbMAAKAAIAAAAAL4hatQAA",
+      "media_id": "2072374092653867008",
+      "media_info": {
+        "__typename": "ApiImage",
+        "color_info": {
+          "palette": [
+            {
+              "percentage": 98.8,
+              "rgb": {
+                "blue": 0,
+                "green": 0,
+                "red": 0
+              }
+            },
+            {
+              "percentage": 1.01,
+              "rgb": {
+                "blue": 105,
+                "green": 105,
+                "red": 105
+              }
+            },
+            {
+              "percentage": 0.17,
+              "rgb": {
+                "blue": 35,
+                "green": 65,
+                "red": 49
+              }
+            }
+          ]
+        },
+        "original_img_height": 946,
+        "original_img_url": "https://pbs.twimg.com/media/HMKNQeJbMAA9ljZ.jpg",
+        "original_img_width": 1582
+      },
+      "media_key": "3_2072374092653867008"
+    }
+  ],
+  "metadata": {
+    "first_published_at_secs": 1782927710
+  },
+  "preview_text": "Today we're releasing OpenWiki, an open source agent and CLI for generating and maintaining documentation for codebases.\nAgents write better code when they understand the repo they're working in. They",
+  "rest_id": "2072361450925096961",
+  "summary_text": "- We're releasing OpenWiki, an open source agent and CLI for generating and maintaining codebase documentation.\n- Agents need repo context on key logic, file connections, and patterns to make informed code changes with fewer mistakes.\n- OpenWiki creates a wiki, connects it to coding agents via instruction file references, and keeps docs current automatically.\n- Install with npm, run openwiki --init to generate using supported models, and use GitHub Action for scheduled updates via git diffs.\n- Built first for codebases to give agents durable context without manual maintenance.",
+  "title": "Introducing OpenWiki, an open source agent for repo documentation"
+}
