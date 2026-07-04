@@ -58,14 +58,16 @@ def parse_article_content_state(payload: Any) -> tuple[str | None, list[ArticleB
     `title` may be `None` even when blocks are found (a title-less shape still
     yields a body).
     """
-    content_state = _find_content_state(payload)
+    container, content_state = _find_article_container(payload)
     if content_state is None:
         return None, []
     raw_blocks = content_state.get("blocks")
     if not isinstance(raw_blocks, list):
         return None, []
-    entity_map = _entity_map(content_state)
-    blocks = _build_blocks(raw_blocks, entity_map)
+    entity_by_key = _entity_by_key(content_state)
+    media_index = _media_index(container)
+    blocks = _build_blocks(raw_blocks, entity_by_key, media_index)
+    blocks = _prepend_cover(blocks, container)
     return _find_title(payload), blocks
 
 
@@ -106,12 +108,18 @@ def _looks_like_draftjs_blocks(blocks: Any) -> bool:
     return any(isinstance(b, dict) and ("type" in b or "text" in b) for b in blocks)
 
 
-def _find_content_state(node: Any) -> dict[str, Any] | None:
-    """Locate the content_state dict anywhere in `node` (BFS, key-anchored).
+def _find_article_container(node: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Locate the article container + its content_state anywhere in `node` (BFS).
 
-    Prefers an explicit `content_state` / `contentState` key at any level, but
-    also accepts a node that IS a content_state (the response being the body
-    itself). Null-safe: a missing/renamed path degrades to None.
+    Returns `(container, content_state)` where `container` is the dict that HOLDS
+    the `content_state` — on the real X shape it is the `article_results.result`
+    node, so its sibling `media_entities` (inline-image CDN URLs) and
+    `cover_media` (the lead image) are readable off it. When the response IS the
+    content_state itself (a title-less body passed directly), the container is
+    that same dict — its media siblings are simply absent (null-safe reads).
+
+    Prefers an explicit `content_state` / `contentState` key at any level. Both
+    elements are `None` on a missing/renamed path (degrade to the fallback).
     """
     queue: list[Any] = [node]
     while queue:
@@ -121,47 +129,147 @@ def _find_content_state(node: Any) -> dict[str, Any] | None:
                 if key in current:
                     coerced = _coerce_content_state(current[key])
                     if coerced is not None:
-                        return coerced
+                        return current, coerced
             coerced = _coerce_content_state(current)
             if coerced is not None:
-                return coerced
+                return current, coerced
             queue.extend(current.values())
         elif isinstance(current, list):
             queue.extend(current)
-    return None
+    return None, None
 
 
-def _entity_map(content_state: dict[str, Any]) -> dict[str, Any]:
-    for key in ("entityMap", "entity_map"):
-        value = content_state.get(key)
-        if isinstance(value, dict):
-            return value
+def _entity_by_key(content_state: dict[str, Any]) -> dict[str, Any]:
+    """Index the Draft.js `entityMap` by entity key, LIST or dict shape.
+
+    The REAL X shape is a LIST of `{"key": <int|str>, "value": {type, data}}`;
+    a block's `entityRanges[0].key` matches an element's `key` (NOT its list
+    index), so we key by `str(entry["key"])`. The older CONSTRUCTED shape is a
+    plain `{key: value}` dict — accepted verbatim as the defensive path. Any
+    other shape yields an empty map (every atomic block then resolves to no
+    image, and the body degrades to text).
+    """
+    raw = content_state.get("entityMap")
+    if raw is None:
+        raw = content_state.get("entity_map")
+    if isinstance(raw, list):
+        indexed: dict[str, Any] = {}
+        for entry in raw:
+            if isinstance(entry, dict) and "key" in entry and isinstance(entry.get("value"), dict):
+                indexed[str(entry["key"])] = entry["value"]
+        return indexed
+    if isinstance(raw, dict):
+        return raw
     return {}
 
 
-def _build_blocks(raw_blocks: list[Any], entity_map: dict[str, Any]) -> list[ArticleBlock]:
+def _media_info_url(node: Any) -> str | None:
+    """The `media_info.original_img_url` CDN URL on a media node, or None.
+
+    Shared by the inline `media_entities[]` index and the `cover_media` reader.
+    Null-safe: a missing `media_info` / URL (or a non-http value) yields None.
+    """
+    if not isinstance(node, dict):
+        return None
+    info = node.get("media_info")
+    if isinstance(info, dict):
+        url = info.get("original_img_url")
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+    return None
+
+
+def _media_index(container: dict[str, Any] | None) -> dict[str, str]:
+    """Map `str(media_id)` → CDN URL from the container's `media_entities[]`.
+
+    A `MEDIA` entity carries only a `mediaId`; the CDN URL lives on the sibling
+    `media_entities[]` array keyed by `media_id`. This builds that lookup so
+    `_resolve_media_url` can turn a `mediaId` into a real image URL. Null-safe:
+    a missing / non-list `media_entities` yields an empty index.
+    """
+    index: dict[str, str] = {}
+    if not isinstance(container, dict):
+        return index
+    entities = container.get("media_entities")
+    if not isinstance(entities, list):
+        return index
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        media_id = entity.get("media_id")
+        url = _media_info_url(entity)
+        if media_id is not None and url:
+            index[str(media_id)] = url
+    return index
+
+
+# Draft.js block `type`s whose text run carries a markdown prefix, baked into
+# the run AFTER the `\n\n` separator so the flattened-text invariant still holds
+# (`generate` strips only the leading separator, leaving the prefix to render).
+_BLOCK_PREFIXES = {
+    "header-one": "# ",
+    "header-two": "## ",
+    "header-three": "### ",
+    "unordered-list-item": "- ",
+    "ordered-list-item": "1. ",
+}
+
+
+def _block_prefix(block_type: Any) -> str:
+    """The markdown prefix for a heading / list block `type` (else "")."""
+    if isinstance(block_type, str):
+        return _BLOCK_PREFIXES.get(block_type, "")
+    return ""
+
+
+def _build_blocks(
+    raw_blocks: list[Any], entity_by_key: dict[str, Any], media_index: dict[str, str]
+) -> list[ArticleBlock]:
     """Turn Draft.js blocks into ordered `ArticleBlock`s (images + text runs)."""
     blocks: list[ArticleBlock] = []
     have_text = False
     for raw in raw_blocks:
         if not isinstance(raw, dict):
             continue
-        image = _image_block(raw, entity_map)
+        image = _image_block(raw, entity_by_key, media_index)
         if image is not None:
             blocks.append(image)
             continue
         text = raw.get("text")
         if isinstance(text, str) and text.strip():
             separator = ARTICLE_PARAGRAPH_SEP if have_text else ""
-            blocks.append(ArticleTextBlock(text=separator + text))
+            prefix = _block_prefix(raw.get("type"))
+            blocks.append(ArticleTextBlock(text=separator + prefix + text))
             have_text = True
             continue
         # Neither an image nor a text run: if it referenced an entity, it is a
         # DROPPED media/atomic block (an embed/divider, or an image whose URL did
         # not resolve). Log it so a real-payload key drift is visible rather than
         # silently losing content (data-safety observability, #39 PR3 review).
-        _log_dropped_block(raw, entity_map)
+        _log_dropped_block(raw, entity_by_key)
     return blocks
+
+
+def _prepend_cover(
+    blocks: list[ArticleBlock], container: dict[str, Any] | None
+) -> list[ArticleBlock]:
+    """Prepend the article's `cover_media` lead image as an `ArticleImageBlock`.
+
+    The cover lives outside `content_state.blocks` entirely (a `cover_media`
+    sibling), so it is added as the FIRST block — the lead image, before any text
+    run. Null-safe: no cover (or no URL) leaves `blocks` untouched. Dedup: if the
+    cover URL already appears inline, it is not emitted twice.
+    """
+    if not isinstance(container, dict):
+        return blocks
+    url = _media_info_url(container.get("cover_media"))
+    if not url:
+        return blocks
+    for block in blocks:
+        if isinstance(block, ArticleImageBlock) and block.media.url == url:
+            return blocks
+    cover = ArticleImageBlock(media=MediaPhotoPending(url=url), alt=None)
+    return [cover, *blocks]
 
 
 def _log_dropped_block(raw: dict[str, Any], entity_map: dict[str, Any]) -> None:
@@ -183,9 +291,18 @@ def _log_dropped_block(raw: dict[str, Any], entity_map: dict[str, Any]) -> None:
     )
 
 
-def _image_block(raw: dict[str, Any], entity_map: dict[str, Any]) -> ArticleImageBlock | None:
-    """An `ArticleImageBlock` when `raw` references an inline image, else None."""
-    entity = _first_entity(raw, entity_map)
+def _image_block(
+    raw: dict[str, Any], entity_by_key: dict[str, Any], media_index: dict[str, str]
+) -> ArticleImageBlock | None:
+    """An `ArticleImageBlock` when `raw` references an inline image, else None.
+
+    Resolves the CDN URL in two ways, in order: (1) the REAL X indirection —
+    `data.mediaItems[i].mediaId` looked up in `media_index` (built from the
+    sibling `media_entities[]`); (2) the defensive fallback — a URL stored
+    directly on the entity `data` (`media_url_https`, `mediaUrl`, … the old
+    CONSTRUCTED shape). A non-image entity (LINK/TWEET/…) is never an image.
+    """
+    entity = _first_entity(raw, entity_by_key)
     if entity is None:
         return None
     if str(entity.get("type", "")).upper() not in _IMAGE_ENTITY_TYPES:
@@ -193,10 +310,32 @@ def _image_block(raw: dict[str, Any], entity_map: dict[str, Any]) -> ArticleImag
     data = entity.get("data")
     if not isinstance(data, dict):
         return None
-    url = _find_url_by_key(data)
+    url = _resolve_media_url(data, media_index) or _find_url_by_key(data)
     if not url:
         return None
     return ArticleImageBlock(media=MediaPhotoPending(url=url), alt=_alt_text(data))
+
+
+def _resolve_media_url(data: dict[str, Any], media_index: dict[str, str]) -> str | None:
+    """Resolve a `MEDIA` entity's CDN URL via `data.mediaItems[].mediaId`.
+
+    Each `mediaItems[i]` carries a `mediaId` (never the URL itself); the URL is
+    looked up in `media_index` (`str(media_id)` → CDN URL, from the sibling
+    `media_entities[]`). Returns the first resolvable URL, or None when no item
+    resolves (the caller then tries the defensive URL-in-entity fallback).
+    """
+    items = data.get("mediaItems")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        media_id = item.get("mediaId") or item.get("media_id")
+        if media_id is not None:
+            url = media_index.get(str(media_id))
+            if url:
+                return url
+    return None
 
 
 def _first_entity(raw: dict[str, Any], entity_map: dict[str, Any]) -> dict[str, Any] | None:
