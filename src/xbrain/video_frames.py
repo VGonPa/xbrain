@@ -73,10 +73,18 @@ DEFAULT_FFMPEG_COMMAND = "ffmpeg"
 # enough to catch a slide transition.
 DEFAULT_SCENE_THRESHOLD = 0.4
 
-# Upper bound on kept frames. A 72-min slide deck can yield hundreds of scene +
-# interval samples; 40 is enough to represent a talk's slides without bloating
-# the note or the vision-call budget.
-DEFAULT_MAX_FRAMES = 40
+# SAFETY ceiling on kept frames — applied AFTER perceptual dedup, which is the
+# real reducer. Dedup drops near-identical slides so the budget covers DISTINCT
+# ones; this cap only stops a pathological continuous-motion clip (gameplay) from
+# emitting hundreds of frames. Raise it (`[frames].max_frames`) for very long decks.
+DEFAULT_MAX_FRAMES = 60
+
+# Perceptual-hash (dHash) near-duplicate removal. Two frames whose 64-bit dHashes
+# differ by <= this Hamming distance are "the same slide" — the later one is
+# dropped. 6/64 tolerates JPEG/scale noise + a cursor/laser-pointer moving on a
+# held slide, without merging two genuinely different slides.
+DEFAULT_DEDUPE_DISTANCE = 6
+_DHASH_SIZE = 8  # 8x8 difference hash → 64-bit fingerprint
 
 # The periodic interval (seconds) for the static-tail fallback: the `select`
 # filter also keeps a frame whenever this long has elapsed since the last kept
@@ -251,12 +259,61 @@ def _cap_evenly(frames: list[KeyFrame], max_frames: int) -> list[KeyFrame]:
     return [frames[index] for index in indices]
 
 
+def _dhash(path: Path, hash_size: int = _DHASH_SIZE) -> int | None:
+    """Perceptual difference-hash of a frame as an int, or None if unreadable.
+
+    Downscales to (hash_size+1) x hash_size grayscale and encodes each row's
+    left>right gradient as one bit — a compact fingerprint robust to scale / JPEG
+    noise. Reads bytes fully before decode (same cold-FS guard as `_edge_density`).
+    """
+    try:
+        with Image.open(io.BytesIO(path.read_bytes())) as img:
+            small = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+    except (OSError, ValueError) as exc:
+        logger.warning("digest-video: could not hash frame %s for dedup: %s", path, exc)
+        return None
+    px = small.tobytes()  # "L" mode → one byte per pixel, row-major (width = hash_size+1)
+    bits = 0
+    for row in range(hash_size):
+        base = row * (hash_size + 1)
+        for col in range(hash_size):
+            bits = (bits << 1) | int(px[base + col] > px[base + col + 1])
+    return bits
+
+
+def _hamming(a: int, b: int) -> int:
+    return (a ^ b).bit_count()
+
+
+def dedupe_frames(
+    frames: list[KeyFrame], *, max_distance: int = DEFAULT_DEDUPE_DISTANCE
+) -> list[KeyFrame]:
+    """Drop consecutive near-duplicate frames (a held slide) by perceptual hash.
+
+    Keeps a frame when its dHash differs from the LAST KEPT frame's by more than
+    `max_distance` bits — so a slide held across several interval samples costs one
+    kept frame, not many, and the frame budget covers DISTINCT slides. An
+    unreadable frame is kept (never silently dropped) and resets the comparison.
+    Order-preserving.
+    """
+    kept: list[KeyFrame] = []
+    last_hash: int | None = None
+    for frame in frames:
+        h = _dhash(frame.path)
+        if h is None or last_hash is None or _hamming(h, last_hash) > max_distance:
+            kept.append(frame)
+            last_hash = h
+    return kept
+
+
 def extract_key_frames(
     video_path: Path | str,
     *,
     threshold: float = DEFAULT_SCENE_THRESHOLD,
     max_frames: int = DEFAULT_MAX_FRAMES,
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+    dedupe: bool = True,
+    dedupe_distance: int = DEFAULT_DEDUPE_DISTANCE,
     command: str = DEFAULT_FFMPEG_COMMAND,
     runner: Runner | None = None,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
@@ -265,10 +322,13 @@ def extract_key_frames(
 
     Combines scene-change detection (`threshold`) with periodic interval sampling
     (`interval_seconds`) in ONE ffmpeg `select` pass, so extraction covers the
-    WHOLE video — including a long static tail — not just the front. The result is
-    subsampled EVENLY to at most `max_frames` (front + tail preserved). Frames are
-    written under a temp subdir of the video's parent and returned as `KeyFrame`s;
-    the CALLER owns cleanup (the digest's ephemeral temp dir reclaims them).
+    WHOLE video — including a long static tail — not just the front. The pipeline
+    is **extract → dedupe → cap**: `dedupe` (default on) drops near-identical
+    consecutive frames (a held slide) by perceptual hash so the budget covers
+    DISTINCT slides, then the result is subsampled EVENLY to at most `max_frames`
+    (a safety ceiling; front + tail preserved). Frames are written under a temp
+    subdir of the video's parent and returned as `KeyFrame`s; the CALLER owns
+    cleanup (the digest's ephemeral temp dir reclaims them).
 
     A missing ffmpeg raises `FrameExtractionToolNotFound` (aborts the run); a
     non-zero exit / timeout raises `FrameExtractionFailed` (per-video — the digest
@@ -283,6 +343,10 @@ def extract_key_frames(
     argv = _build_argv(command, video, out_pattern, select_expr)
     stderr = _run_ffmpeg(argv, active_runner, timeout_seconds)
     frames = _pair_frames(out_dir, _parse_timestamps(stderr))
+    if dedupe:
+        before = len(frames)
+        frames = dedupe_frames(frames, max_distance=dedupe_distance)
+        logger.debug("digest-video: dedup kept %d/%d frames", len(frames), before)
     return _cap_evenly(frames, max_frames)
 
 

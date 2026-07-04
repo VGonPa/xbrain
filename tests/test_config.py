@@ -277,3 +277,55 @@ def test_load_config_round_trips_describe_overrides(tmp_path: Path):
     cfg = load_config(tmp_path)
     assert cfg.describe_model == "claude-opus-4-1"
     assert cfg.describe_version == "v3"
+
+
+def test_load_config_frames_defaults(tmp_path: Path):
+    """No [frames] section → the visual-layer knobs take their video_frames
+    defaults: safety-ceiling cap, dedup on."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.frames_max_frames == 60
+    assert cfg.frames_scene_threshold == 0.4
+    assert cfg.frames_interval_seconds == 15.0
+    assert cfg.frames_dedupe is True
+    assert cfg.frames_dedupe_distance == 6
+
+
+def test_load_config_frames_overrides(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[frames]\n"
+        "max_frames = 120\n"
+        "scene_threshold = 0.5\n"
+        "interval_seconds = 20\n"
+        "dedupe = false\n"
+        "dedupe_distance = 10\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.frames_max_frames == 120
+    assert cfg.frames_scene_threshold == 0.5
+    assert cfg.frames_interval_seconds == 20.0
+    assert cfg.frames_dedupe is False
+    assert cfg.frames_dedupe_distance == 10
+
+
+def test_load_config_frames_rejects_non_positive_max(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        "[paths]\n"
+        'vault = "/tmp/vault"\n'
+        'output_subdir = "learnings/x-knowledge"\n'
+        'data_dir = "data"\n'
+        "[x]\n"
+        'handle = "vgonpa"\n'
+        "[frames]\n"
+        "max_frames = 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="max_frames"):
+        load_config(tmp_path)

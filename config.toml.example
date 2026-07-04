@@ -91,3 +91,14 @@ command = "parakeet-mlx"
 #   cloud (needs ANTHROPIC_API_KEY):      opus | sonnet | haiku | claude-<id>
 # command = "/absolute/path/to/scripts/xbrain-vision"
 # model = "qwen-3b"                       # omit → the wrapper's default (qwen-3b)
+
+[frames]
+# `digest-video --frames` key-frame extraction. Pipeline: ffmpeg (scene-change +
+# interval) → dedupe (perceptual hash drops near-identical held slides) → cap.
+# dedupe is the real reducer, so the budget covers DISTINCT slides; max_frames is
+# a safety ceiling for a pathological continuous-motion clip.
+# max_frames       = 60      # safety ceiling AFTER dedup
+# scene_threshold  = 0.4     # ffmpeg scene-change sensitivity (higher = fewer cuts)
+# interval_seconds = 15      # also keep a frame every N s (covers static tails)
+# dedupe           = true    # perceptual-hash near-duplicate removal
+# dedupe_distance  = 6        # max dHash Hamming distance to call two frames "same" (0-64)

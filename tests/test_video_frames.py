@@ -25,7 +25,9 @@ from xbrain.video_frames import (
     FrameExtractionFailed,
     FrameExtractionToolNotFound,
     KeyFrame,
+    _dhash,
     classify_visual,
+    dedupe_frames,
     extract_key_frames,
 )
 
@@ -320,3 +322,51 @@ def test_video_frames_imports_no_ml_or_vision_library():
         "transformers",
     ):
         assert forbidden not in source
+
+
+def _frame(tmp_path: Path, name: str, boxes: list[tuple[int, int, int, int]]) -> KeyFrame:
+    """A structured 'slide' PNG (white with black boxes) → a KeyFrame.
+
+    dHash captures STRUCTURE, not brightness (a uniform image hashes to 0), so the
+    fixtures draw distinct box layouts to exercise the perceptual hash meaningfully.
+    """
+    img = Image.new("RGB", (256, 144), "white")
+    draw = ImageDraw.Draw(img)
+    for box in boxes:
+        draw.rectangle(box, fill="black")
+    path = tmp_path / name
+    img.save(path)
+    return KeyFrame(timestamp=0.0, path=path)
+
+
+def test_dhash_is_stable_and_discriminates(tmp_path: Path):
+    a = _frame(tmp_path, "a.png", [(10, 10, 100, 130)]).path
+    a_copy = _frame(tmp_path, "a2.png", [(10, 10, 100, 130)]).path  # identical drawing
+    b = _frame(tmp_path, "b.png", [(150, 10, 240, 130)]).path  # box on the far side
+    assert _dhash(a) == _dhash(a_copy)  # identical structure → same fingerprint
+    assert _dhash(a) != _dhash(b)  # different structure → different fingerprint
+    assert _dhash(tmp_path / "missing.png") is None  # unreadable → None
+
+
+def test_dedupe_drops_consecutive_near_duplicates(tmp_path: Path):
+    a = _frame(tmp_path, "a.png", [(10, 10, 100, 130)])
+    a_dup = _frame(tmp_path, "a2.png", [(10, 10, 100, 130)])  # a held slide, re-sampled
+    b = _frame(tmp_path, "b.png", [(150, 10, 240, 130)])
+    kept = dedupe_frames([a, a_dup, b], max_distance=6)
+    assert [f.path.name for f in kept] == ["a.png", "b.png"]  # the duplicate is dropped
+
+
+def test_dedupe_keeps_distinct_slides(tmp_path: Path):
+    frames = [
+        _frame(tmp_path, "tl.png", [(10, 10, 90, 60)]),  # top-left
+        _frame(tmp_path, "br.png", [(170, 90, 250, 135)]),  # bottom-right
+        _frame(tmp_path, "wide.png", [(10, 10, 250, 40)]),  # wide top bar
+    ]
+    assert len(dedupe_frames(frames, max_distance=6)) == 3
+
+
+def test_dedupe_keeps_unreadable_frames(tmp_path: Path):
+    good = _frame(tmp_path, "good.png", [(10, 10, 100, 130)])
+    bad = KeyFrame(timestamp=1.0, path=tmp_path / "nope.png")  # no file → unreadable
+    kept = dedupe_frames([good, bad, good], max_distance=6)
+    assert bad in kept  # unreadable is never silently dropped

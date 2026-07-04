@@ -66,8 +66,6 @@ from xbrain.video_fetch import (
     format_fetch_summary,
 )
 from xbrain.video_frames import (
-    DEFAULT_MAX_FRAMES,
-    DEFAULT_SCENE_THRESHOLD,
     KeyFrame,
     extract_key_frames,
 )
@@ -1142,7 +1140,12 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
 
     def _extract(path: Path) -> list[KeyFrame]:
         return extract_key_frames(
-            path, threshold=DEFAULT_SCENE_THRESHOLD, max_frames=DEFAULT_MAX_FRAMES
+            path,
+            threshold=cfg.frames_scene_threshold,
+            max_frames=cfg.frames_max_frames,
+            interval_seconds=cfg.frames_interval_seconds,
+            dedupe=cfg.frames_dedupe,
+            dedupe_distance=cfg.frames_dedupe_distance,
         )
 
     def _describe(path: Path) -> str:
