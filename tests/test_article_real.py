@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from xbrain.extract.article import parse_article_content_state
 from xbrain.models import ArticleImageBlock, ArticleTextBlock, ContentSourceSuccess
 
@@ -52,7 +54,92 @@ def test_openwiki_resolves_inline_media_from_entitymap_list():
     # The inline image sits among the text runs, not at the very front (that is
     # the cover's slot), and is preceded + followed by text.
     inline_idx = next(
-        i for i, b in enumerate(blocks) if isinstance(b, ArticleImageBlock) and b.media.url == _OPENWIKI_INLINE
+        i
+        for i, b in enumerate(blocks)
+        if isinstance(b, ArticleImageBlock) and b.media.url == _OPENWIKI_INLINE
     )
     assert any(isinstance(b, ArticleTextBlock) for b in blocks[:inline_idx])
     assert any(isinstance(b, ArticleTextBlock) for b in blocks[inline_idx + 1 :])
+
+
+# Ground-truth image inventory per real Article (cover first, then inline, in
+# document order). This is the #66 acceptance table, locked as a test.
+_EXPECTED_IMAGES = [
+    ("OpenWiki", [_OPENWIKI_COVER, _OPENWIKI_INLINE]),
+    ("Wiki_Memory", [_WIKI_MEMORY_COVER]),
+    ("Headcount_AI", []),
+]
+
+
+@pytest.mark.parametrize("name, expected", _EXPECTED_IMAGES)
+def test_real_payload_image_inventory(name: str, expected: list[str]) -> None:
+    """Every real Article resolves EXACTLY its ground-truth images, in order."""
+    _title, blocks = parse_article_content_state(_load(name))
+    assert _image_urls(blocks) == expected
+
+
+@pytest.mark.parametrize(
+    "name, cover", [("OpenWiki", _OPENWIKI_COVER), ("Wiki_Memory", _WIKI_MEMORY_COVER)]
+)
+def test_cover_media_is_the_lead_block(name: str, cover: str) -> None:
+    """When a `cover_media` exists, it is prepended as the FIRST block."""
+    _title, blocks = parse_article_content_state(_load(name))
+    assert isinstance(blocks[0], ArticleImageBlock)
+    assert blocks[0].media.url == cover
+
+
+def test_link_entities_never_become_images() -> None:
+    """art-OpenWiki has 7 LINK entities + 1 MEDIA; only MEDIA + cover are images."""
+    _title, blocks = parse_article_content_state(_load("OpenWiki"))
+    assert len(_image_urls(blocks)) == 2
+
+
+def test_headings_and_bullets_render_as_markdown() -> None:
+    """`header-two` → `## ` and `unordered-list-item` → `- `, baked into runs."""
+    _title, blocks = parse_article_content_state(_load("Wiki_Memory"))
+    texts = [b.text for b in blocks if isinstance(b, ArticleTextBlock)]
+    assert any(t.lstrip("\n").startswith("## ") for t in texts)
+    assert any(t.lstrip("\n").startswith("- ") for t in texts)
+
+
+@pytest.mark.parametrize("name", ["OpenWiki", "Wiki_Memory", "Headcount_AI"])
+def test_flattened_text_invariant_holds(name: str) -> None:
+    """`text` == concat of the `ArticleTextBlock` texts — enforced by the model.
+
+    Building a `ContentSourceSuccess` from the parsed blocks + flattened text
+    exercises the `_text_matches_blocks` validator, so a broken separator/prefix
+    that desynced the two would raise here.
+    """
+    _title, blocks = parse_article_content_state(_load(name))
+    flat = "".join(b.text for b in blocks if isinstance(b, ArticleTextBlock))
+    source = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/1",
+        text=flat,
+        blocks=blocks,
+        http_status=200,
+        attempts=1,
+    )
+    assert source.text == flat
+
+
+def test_missing_media_entities_drops_image_but_keeps_text() -> None:
+    """No `media_entities`/`cover_media` → images unresolved, text still complete.
+
+    The degrade-not-crash guarantee: a real body whose media siblings are absent
+    (or renamed) yields zero images but loses no text run — never a crash.
+    """
+    payload = _load("OpenWiki")
+    payload.pop("media_entities", None)
+    payload.pop("cover_media", None)
+    _title, blocks = parse_article_content_state(payload)
+    assert _image_urls(blocks) == []
+    assert any(isinstance(b, ArticleTextBlock) for b in blocks)
+
+
+@pytest.mark.parametrize(
+    "payload", [{}, {"foo": "bar"}, [], None, {"content_state": {"blocks": []}}]
+)
+def test_foreign_payload_degrades_to_none_empty(payload: Any) -> None:
+    """Any non-Article / empty-body shape degrades to `(None, [])`, never a crash."""
+    assert parse_article_content_state(payload) == (None, [])
