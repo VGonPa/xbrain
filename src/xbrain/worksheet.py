@@ -12,14 +12,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.executors.api import _content_image_descriptions
+from xbrain.executors.api import _content_image_descriptions, _video_frame_descriptions
 from xbrain.models import ContentSourceSuccess, Item, Topic
-from xbrain.rubrics import (
-    ARTICLE_CHAR_LIMIT,
-    TRANSCRIPT_CHAR_LIMIT,
-    load_rubric,
-    truncate_transcript,
-)
+from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 
 
 def _article_text(item: Item) -> str | None:
@@ -41,11 +36,13 @@ def _article_text(item: Item) -> str | None:
 
 
 def _video_transcript(item: Item) -> str | None:
-    """First with-speech `x_video` transcript body, truncated, or None (#44).
+    """First with-speech `x_video` transcript body, FULL (untruncated), or None (#44).
 
-    A no-speech source (`has_speech=False`, empty text) yields None — no
-    transcript to enrich from. Truncated to `TRANSCRIPT_CHAR_LIMIT`, matching
-    the `api` executor prompt so both tracks see identical input.
+    Unlike the `api` executor prompt — a bounded per-item model call that truncates
+    to `TRANSCRIPT_CHAR_LIMIT` — the worksheet is judged by a full-context agent, so
+    it carries the whole talk. The summary/topics are then not front-biased to the
+    first ~13 min of a long video. A no-speech source (`has_speech=False`, empty
+    text) yields None — no transcript to enrich from.
     """
     if not item.content:
         return None
@@ -56,7 +53,7 @@ def _video_transcript(item: Item) -> str | None:
             and src.has_speech
             and src.text
         ):
-            return truncate_transcript(src.text, TRANSCRIPT_CHAR_LIMIT)
+            return src.text
     return None
 
 
@@ -79,8 +76,11 @@ def export_worksheet(
             "For each entry in `items`, append one object to `judgments` with "
             "keys {item_id, summary, primary_topic, topics}. Use only slugs from "
             "`vocab`. An item may also carry `links`, `article`, `video_transcript` "
-            "and `image_descriptions` (content-bearing photos) — weigh them all as "
-            "topic signal, not just `text`. Then run: xbrain enrich --apply <this file>."
+            "(the full talk — what the video SAYS), `video_frame_descriptions` (what "
+            "the video SHOWS: slides/screens, present even when there is no "
+            "transcript) and `image_descriptions` (content-bearing photos) — weigh "
+            "them all as topic signal, not just `text`. Then run: xbrain enrich "
+            "--apply <this file>."
         ),
         "rubrics": {
             "summary": load_rubric("summary", language=output_language),
@@ -102,6 +102,13 @@ def export_worksheet(
                 # enrich track sees the identical visual signal. Empty list when the
                 # item has no described photos or only decorative ones.
                 "image_descriptions": _content_image_descriptions(it),
+                # Video key-frame descriptions: what the video SHOWS (slides/screens),
+                # the same signal the `api` executor injects as its `Video frames`
+                # section (`_video_frame_descriptions`). Present even for a mute
+                # screen-share (no transcript). Empty list when the video has no
+                # described frames. All frames are carried (agent-judged, full
+                # context) — the `api` engine bounds its block instead.
+                "video_frame_descriptions": _video_frame_descriptions(it),
             }
             for it in items
         ],

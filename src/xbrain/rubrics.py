@@ -27,13 +27,23 @@ _GUARDRAILS = _PKG / "guardrails.yaml"
 ARTICLE_CHAR_LIMIT = 4000
 
 # Max characters of an `x_video` transcript passed to the per-item ENRICH prompt
-# (#44). A 72-min talk transcribes to ~68k chars, but the LLM saturates on
-# topic + gist far sooner, so we cap at 12000 chars (~3k tokens, ~3× the article
-# limit): the first ~13 minutes of speech, enough to assign a real
-# `primary_topic` + summary without a single long talk blowing the prompt.
-# Shared by the `api` executor prompt and the worksheet export so both truncate
-# identically.
+# on the `api` engine (#44). A 72-min talk transcribes to ~68k chars, but the LLM
+# saturates on topic + gist far sooner, so we cap at 12000 chars (~3k tokens, ~3×
+# the article limit): the first ~13 minutes of speech, enough to assign a real
+# `primary_topic` + summary without a single long talk blowing the per-item prompt.
+# The `api` engine is a bounded per-item model call, so it truncates here; the
+# worksheet engine is judged by a full-context agent and carries the FULL
+# transcript instead (`worksheet._video_transcript`) — the two engines
+# legitimately diverge on input size.
 TRANSCRIPT_CHAR_LIMIT = 12000
+
+# Max characters of the `Video frames` block (key-frame descriptions of the
+# slides/screens a video shows) passed to the per-item ENRICH prompt on the `api`
+# engine. A slide deck can dedup to dozens of distinct frames (~300 chars each);
+# 6000 chars (~1.5k tokens) is plenty of visual topic signal without a screen-heavy
+# talk crowding out the transcript. Bounds the `api` engine only — the worksheet
+# engine carries every frame description (agent-judged, full context).
+FRAME_DESC_CHAR_LIMIT = 6000
 
 # Tighter per-video cap for the TOPIC-page synthesis prompt (#44). A single topic
 # can gather many video items, so each member's transcript is trimmed to 2000

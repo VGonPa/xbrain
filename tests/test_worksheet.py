@@ -175,9 +175,19 @@ def test_export_worksheet_omits_image_descriptions_when_no_described_photos(tmp_
     assert data["items"][0]["image_descriptions"] == []
 
 
-def _video_item(item_id: str, *, text: str, has_speech: bool = True) -> Item:
-    """An item carrying an `x_video` transcript content source (#44)."""
-    from xbrain.models import Content, ContentSourceSuccess
+def _video_item(
+    item_id: str,
+    *,
+    text: str,
+    has_speech: bool = True,
+    frame_descs: tuple[str, ...] = (),
+) -> Item:
+    """An item carrying an `x_video` transcript + key-frame content source (#44).
+
+    `frame_descs` populate the `x_video` `frames` list (slides/screens shown in the
+    video), a different field from the `MediaPhotoDescribed` photos on `item.media`.
+    """
+    from xbrain.models import Content, ContentSourceSuccess, VideoFrame
 
     return Item(
         id=item_id,
@@ -195,6 +205,14 @@ def _video_item(item_id: str, *, text: str, has_speech: bool = True) -> Item:
                     url="https://x.com/v",
                     text=text,
                     has_speech=has_speech,
+                    frames=[
+                        VideoFrame(
+                            timestamp=float(i),
+                            local_path=f"{item_id}/frames/{i}.png",
+                            description=d,
+                        )
+                        for i, d in enumerate(frame_descs)
+                    ],
                 )
             ],
         ),
@@ -224,16 +242,75 @@ def test_export_worksheet_omits_no_speech_video_transcript(tmp_path):
     assert data["items"][0]["video_transcript"] is None
 
 
-def test_export_worksheet_truncates_an_over_cap_video_transcript(tmp_path):
-    """A 72-min-talk-scale transcript is capped in the worksheet's `video_transcript`
-    field (same `TRANSCRIPT_CHAR_LIMIT` as the `api` prompt) so the manual/claude-code
-    track sees identical, bounded input and one long talk can't bloat the worksheet."""
+def test_export_worksheet_carries_the_full_video_transcript(tmp_path):
+    """The worksheet carries the FULL transcript — unlike the `api` prompt, which is
+    truncated to `TRANSCRIPT_CHAR_LIMIT`. The worksheet is judged by a full-context
+    agent (not a bounded per-item model call), so it reads the whole talk and its
+    summary/topics are not front-biased to the first ~13 min. The two engines
+    legitimately diverge on input size (see `worksheet._video_transcript`)."""
     from xbrain.rubrics import TRANSCRIPT_CHAR_LIMIT
 
-    long_text = "word " * TRANSCRIPT_CHAR_LIMIT  # >> the cap
+    long_text = "word " * TRANSCRIPT_CHAR_LIMIT  # >> the api cap
     path = tmp_path / "ws.json"
     export_worksheet([_video_item("1", text=long_text)], VOCAB, path, "manual", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     transcript = data["items"][0]["video_transcript"]
-    assert "transcript truncated" in transcript
-    assert len(transcript) < len(long_text)
+    assert transcript == long_text  # full, untruncated
+    assert "transcript truncated" not in transcript
+
+
+def test_export_worksheet_includes_video_frame_descriptions(tmp_path):
+    """Key-frame descriptions surface under `video_frame_descriptions` so the
+    manual/claude-code enrich track sees what the video SHOWS (slides/screens),
+    mirroring the api path's `Video frames` section."""
+    path = tmp_path / "ws.json"
+    export_worksheet(
+        [
+            _video_item(
+                "1",
+                text="a talk",
+                frame_descs=("A title slide: 'Scaling'.", "A chart of loss curves."),
+            )
+        ],
+        VOCAB,
+        path,
+        "manual",
+        "English",
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["video_frame_descriptions"] == [
+        "A title slide: 'Scaling'.",
+        "A chart of loss curves.",
+    ]
+
+
+def test_export_worksheet_frame_descriptions_present_when_no_speech(tmp_path):
+    """A mute slide/screen-share video (has_speech=False) contributes its frame
+    descriptions even with no transcript — the whole point of feeding frames."""
+    path = tmp_path / "ws.json"
+    export_worksheet(
+        [
+            _video_item(
+                "1",
+                text="",
+                has_speech=False,
+                frame_descs=("A slide: Postgres vs DynamoDB latency.",),
+            )
+        ],
+        VOCAB,
+        path,
+        "manual",
+        "English",
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entry = data["items"][0]
+    assert entry["video_frame_descriptions"] == ["A slide: Postgres vs DynamoDB latency."]
+    assert entry["video_transcript"] is None  # no speech → no transcript
+
+
+def test_export_worksheet_omits_video_frame_descriptions_when_none(tmp_path):
+    """A video without described frames exports a clean empty list, not a missing key."""
+    path = tmp_path / "ws.json"
+    export_worksheet([_video_item("1", text="a talk")], VOCAB, path, "manual", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["video_frame_descriptions"] == []

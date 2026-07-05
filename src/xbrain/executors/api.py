@@ -16,6 +16,7 @@ from xbrain.llm_json import json_from_response
 from xbrain.models import ContentSourceSuccess, Item, MediaPhotoDescribed, Topic
 from xbrain.rubrics import (
     ARTICLE_CHAR_LIMIT,
+    FRAME_DESC_CHAR_LIMIT,
     TRANSCRIPT_CHAR_LIMIT,
     load_rubric,
     truncate_transcript,
@@ -79,6 +80,53 @@ def _content_image_descriptions(item: Item) -> list[str]:
         for entry in item.media
         if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
     ]
+
+
+def _video_frame_descriptions(item: Item) -> list[str]:
+    """Return the key-frame descriptions of every `x_video` source, in order.
+
+    These are the slides/screens a video SHOWS — visual topic signal present even
+    when the video has no speech (`has_speech=False`, no transcript). They live on
+    the `x_video` `ContentSourceSuccess.frames` list, a DIFFERENT field from the
+    `MediaPhotoDescribed` photo descriptions on `item.media`
+    (`_content_image_descriptions`). Empty-description frames (the VLM found nothing
+    to say, or the frame was unreadable) are skipped.
+    """
+    if item.content is None:
+        return []
+    descriptions: list[str] = []
+    for src in item.content.sources:
+        if isinstance(src, ContentSourceSuccess) and src.kind == "x_video":
+            descriptions += [frame.description for frame in src.frames if frame.description]
+    return descriptions
+
+
+def _video_frames_section(item: Item) -> list[str]:
+    """Build the `Video frames` block bounded to `FRAME_DESC_CHAR_LIMIT`, or [].
+
+    A slide-heavy or screen-share talk can dedup to dozens of distinct frames; the
+    block is capped so it can't crowd the transcript out of the per-item prompt.
+    When the cap clips frames, an explicit `[… N further frames omitted …]` marker
+    signposts the cut so the LLM does not read it as the end of the deck. At least
+    one frame is always kept, even if a single description exceeds the cap.
+    """
+    descriptions = _video_frame_descriptions(item)
+    if not descriptions:
+        return []
+    lines = ["", "Video frames (slides/screens shown in the video):"]
+    used = 0
+    kept = 0
+    for description in descriptions:
+        line = f"- {description}"
+        if kept > 0 and used + len(line) > FRAME_DESC_CHAR_LIMIT:
+            break
+        lines.append(line)
+        used += len(line)
+        kept += 1
+    omitted = len(descriptions) - kept
+    if omitted > 0:
+        lines.append(f"[… {omitted} further frames omitted …]")
+    return lines
 
 
 def _images_section(item: Item) -> list[str]:
@@ -165,6 +213,7 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
         parts += ["", f"Saved by the user in the bookmark folder: {item.bookmark_folder}"]
     parts += _images_section(item)
     parts += _video_transcript_section(item)
+    parts += _video_frames_section(item)
     parts += _links_section(item)
     parts += _article_sections(item)
     return "\n".join(parts)
