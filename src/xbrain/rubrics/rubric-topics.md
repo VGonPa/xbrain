@@ -24,3 +24,12 @@ articles). **A missing article is NOT a reason to fall back to `misc`.**
 - Use `misc` **only** when the post has genuinely no identifiable subject (a
   pure greeting, a single word, an image with no text). Never use `misc` merely
   because the article body is absent.
+
+## Classifying a video
+
+A `Video transcript:` (what the video says) and a `Video frames` block (what it
+shows on screen — slides, charts, screens) are **strong subject signal**.
+Classify a video from what it actually says and shows, not from the tweet's
+one-line caption — a bare "watch this incredible talk" caption is not a reason
+to fall back to `misc`. A slide or screen-share video with no transcript is
+still classifiable from its frame descriptions.
