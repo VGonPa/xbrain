@@ -87,6 +87,14 @@ from xbrain.vocab import (
     import_vocab_worksheet,
     induce_vocab,
 )
+from xbrain.verification import (
+    aggregate_verify_judgments,
+    export_verify_worksheet,
+    import_verify_judgments,
+    items_for_verification,
+    parse_targets,
+    render_verify_report,
+)
 from xbrain.video_digest import (
     apply_video_digest_judgments,
     export_video_digest_worksheet,
@@ -1391,6 +1399,49 @@ def video_digest_command(
         f"{len(pending)} vídeos exportados a {worksheet}\n"
         f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
         f"  xbrain video-digest --apply {worksheet}"
+    )
+
+
+@app.command(name="verify")
+@_handle_cli_errors
+def verify_command(
+    target: str = typer.Option("all", help="summary | digest | topics | all"),
+    executor: str | None = typer.Option(
+        None, help="manual | claude-code (default: the executor set in config.toml)"
+    ),
+    apply: list[Path] = typer.Option(
+        None, "--apply", help="Filled worksheet(s), one per judge — aggregated into a report"
+    ),
+) -> None:
+    """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
+    cfg = _config()
+
+    if apply:
+        # Report-only: aggregate the N judges' passes; the store is not mutated.
+        aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
+        json_report, md_report = render_verify_report(aggregated)
+        (cfg.data_dir / "verify-report.json").write_text(json_report, encoding="utf-8")
+        (cfg.data_dir / "verify-report.md").write_text(md_report, encoding="utf-8")
+        typer.echo(
+            md_report.splitlines()[2] if len(md_report.splitlines()) > 2 else "Report escrito"
+        )
+        typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
+        return
+
+    chosen = executor or cfg.enrich_executor
+    if chosen not in ("manual", "claude-code"):
+        raise ValueError(f"Ejecutor {chosen!r} no soportado para verify — usa manual|claude-code.")
+    store = load_store(cfg.items_path)
+    pairs = items_for_verification(store, parse_targets(target))
+    if not pairs:
+        typer.echo("No hay outputs que verificar.")
+        return
+    worksheet = cfg.data_dir / "verify-worksheet.json"
+    export_verify_worksheet(pairs, worksheet, chosen, cfg.output_language)
+    typer.echo(
+        f"{len(pairs)} outputs exportados a {worksheet}\n"
+        f"Copia N veces (una por juez), rellena `judgments` en cada una, y ejecuta:\n"
+        f"  xbrain verify --apply ws1.json --apply ws2.json ..."
     )
 
 
