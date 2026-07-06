@@ -107,3 +107,18 @@ def test_describe_image_rubric_preserves_placeholder_when_language_none():
     """No-language calls (tests, manual inspection) keep the literal placeholder."""
     text = load_rubric("describe-image")
     assert "{language}" in text
+
+
+def test_video_digest_rubric_loads_and_substitutes_language():
+    """The video-digest rubric ships a `{language}` placeholder the loader must
+    substitute; its structural section keys must reach the LLM."""
+    text = load_rubric("video-digest", language="Spanish")
+    assert "{language}" not in text
+    assert "Spanish" in text
+    assert "Key points" in text
+    assert "What it is" in text
+
+
+def test_video_digest_rubric_preserves_placeholder_when_language_none():
+    text = load_rubric("video-digest")
+    assert "{language}" in text
