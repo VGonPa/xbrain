@@ -181,17 +181,27 @@ A **bookmarked video** gets the same treatment: run [`digest-video`](#commands)
 and its transcript is attached to the item, so the video flows through the *same*
 `enrich → topics → generate` pipeline as an article. The note gains a real
 `primary_topic` (video items used to show `—`, because enrich only ever saw the
-2-line tweet), appears on its topic page(s), and renders a **`## Video digest`**
-section with the talk's title and transcript — a 72-minute talk you never watched
-becomes a readable, searchable, topic-linked note. A silent/no-speech clip
-degrades gracefully to a one-line "silent video" note instead of an empty digest.
+2-line tweet) and appears on its topic page(s). The **full** transcript — and, with
+`--frames`, the slide **frame descriptions** — also feed `enrich` and `topics`, so
+what the video *says* and what it *shows* both count toward its topics and summary.
 
-For **slide/screen/demo-heavy** talks, add the opt-in `--frames` flag: xbrain
-extracts the key slides, describes each with an **external** vision model, and
-embeds them into the digest section next to the transcript — so the visual
-content is captured too, not just the audio. It is content-aware: an interview /
-talking-head video is detected and its (camera-cut) frames are skipped, so you
-never waste vision calls where the slides are noise.
+Then run [`video-digest`](#commands) to turn the raw transcript + frames into a
+**readable long-form digest** (what it is · key points · why it matters).
+`generate` renders that digest as the **headline** of the note's **`## Video
+digest`** section, with the raw transcript and slide frames demoted into a
+collapsible `<details>` block below it — a 72-minute talk you never watched becomes
+a readable, searchable, topic-linked note. Before you run `video-digest` (or for a
+video with no digest yet) the section falls back to the raw transcript inline,
+exactly as before. A silent/no-speech clip degrades gracefully to a one-line
+"silent video" note instead of an empty digest.
+
+For **slide/screen/demo-heavy** talks, add the opt-in `--frames` flag to
+`digest-video`: xbrain extracts the key slides, describes each with an **external**
+vision model, and records the descriptions on the video source — they feed the
+digest, `enrich` and `topics`, and embed into the `<details>` evidence block next
+to the transcript, so the visual content is captured too, not just the audio. It is
+content-aware: an interview / talking-head video is detected and its (camera-cut)
+frames are skipped, so you never waste vision calls where the slides are noise.
 
 *Example:*
 
@@ -631,9 +641,11 @@ uv run xbrain <command> [options]
 | `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
 | `fetch-video` | **Ephemeral** download of the real mp4 for selected videos to `--to <dir>/<id>.mp4`, for agent-side processing (transcription/analysis is external — see below). Select with `--ids a,b` and/or `--topic <t>` (+ `--max-size`, `--limit`, `--source`). Reuses `download-videos`' content-validation, failure classification, atomic write and mp4/HLS/poster discriminator; HLS and poster-era are skipped + counted. **Deliberately non-persisting:** never mutates `items.json`, never snapshots, never touches `data/media/` — it writes only under `--to`. `--json` for machine output. |
 | `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). **`--frames`** (opt-in visual layer, needs `[vision].command`): for slide-heavy videos it extracts key slides (ffmpeg scene detection + interval sampling so the whole video is covered), describes each via the **external** vision model, records the descriptions on the `x_video` source, and embeds the slide images into the note like downloaded photos; talking-head videos are detected and skipped (logged). The transcript then flows through the normal `enrich → topics → generate` pipeline. |
+| `video-digest` | Generate the long-form **readable digest** per bookmarked video — the "what it is · key points · why it matters" synthesis of its transcript + slide-frame descriptions, written into the `x_video` source's `digest` field. Worksheet flow like the LLM stages: `--executor manual\|claude-code` exports `data/video-digest-worksheet.json`; fill it (Claude Code session or by hand) and `--apply <file>` writes every digest back to `items.json`. `generate` then renders the digest as the **headline** of the `## Video digest` section, with the raw transcript + slide frames demoted into a collapsible `<details>`. Auto-snapshots on `--apply` (the store write). Defaults to `[enrich].executor`; worksheet tracks only (no `api`). |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
+| `verify` | **LLM-as-judge** QA over the enrichment outputs — scores each `summary`, video `digest` and `topics` assignment for **faithfulness** (grounded in its source?) and **adherence** (follows its rubric?). `--target summary\|digest\|topics\|all`, `--executor manual\|claude-code`. Worksheet flow: exports `data/verify-worksheet.json`; copy it once **per judge**, fill each, then `--apply` accepts **multiple** worksheets (repeat the flag, one per judge) and aggregates them into `data/verify-report.{json,md}`. **Report-only — never mutates the store, never snapshots.** Defaults to `[enrich].executor`; worksheet tracks only (no `api`). |
 | `generate` | Render the wiki into the vault. |
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
@@ -939,9 +951,12 @@ xbrain diff <snap-a> --format json | jq '.summary.reassigned_pct'
 
 ## Execution modes
 
-`vocab`, `enrich` and `topics` need an LLM. XBrain never embeds a Claude
-subscription token — instead the LLM work is **pluggable**, with three modes,
-selected by `--executor` or `config.toml`'s `[enrich].executor`.
+`vocab`, `enrich`, `topics`, `video-digest` and `verify` need an LLM. XBrain never
+embeds a Claude subscription token — instead the LLM work is **pluggable**, with
+three modes, selected by `--executor` or `config.toml`'s `[enrich].executor`. All
+five stages read that one `[enrich].executor` default; `video-digest` and `verify`
+have no config section of their own and run **only** their worksheet / `claude-code`
+tracks (never `api`).
 
 | Mode | Cost | When you reach for it |
 |------|------|----------------------|
