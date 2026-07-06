@@ -168,4 +168,6 @@ generates an Obsidian wiki.
   All are gitignored.
 
 ## Git workflow
-- This repo has only `main`: `feature-branch → PR → main`.
+- `develop` is the integration branch: `feature-branch → PR → develop`. Branch
+  from `develop` (never from `main`) and target every PR at `develop`.
+- `develop → main` only via PR — never merge or push directly to `main`.
