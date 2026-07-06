@@ -87,6 +87,12 @@ from xbrain.vocab import (
     import_vocab_worksheet,
     induce_vocab,
 )
+from xbrain.video_digest import (
+    apply_video_digest_judgments,
+    export_video_digest_worksheet,
+    import_video_digest_worksheet,
+    items_pending_video_digest,
+)
 from xbrain.worksheet import export_worksheet, import_worksheet
 
 app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
@@ -1342,6 +1348,50 @@ def enrich(
     save_store(store, cfg.items_path)
     typer.echo(f"Enriquecidos: {enriched} items")
     _report_invalid(invalid)
+
+
+@app.command(name="video-digest")
+@_handle_cli_errors
+def video_digest_command(
+    executor: str | None = typer.Option(
+        None, help="manual | claude-code (default: the executor set in config.toml)"
+    ),
+    apply: Path | None = typer.Option(
+        None, "--apply", help="Import a filled worksheet and apply it"
+    ),
+) -> None:
+    """Genera un digest legible (largo) por vídeo, desde su transcripción + frames."""
+    cfg = _config()
+    store = load_store(cfg.items_path)
+
+    if apply is not None:
+        # Snapshot on the APPLY branch — this is the one that mutates `items.json`
+        # (writes every `source.digest` + `save_store`); export only writes the
+        # worksheet JSON. Mirrors `describe`'s `describe-apply` snapshot.
+        _auto_snapshot(cfg, "video-digest-apply")
+        judgments = import_video_digest_worksheet(apply)
+        applied, invalid = apply_video_digest_judgments(store, judgments)
+        save_store(store, cfg.items_path)
+        typer.echo(f"Worksheet aplicada: {applied} digests de vídeo")
+        _report_invalid(invalid)
+        return
+
+    chosen = executor or cfg.enrich_executor
+    if chosen not in ("manual", "claude-code"):
+        raise ValueError(
+            f"Ejecutor {chosen!r} no soportado para video-digest — usa manual|claude-code."
+        )
+    pending = items_pending_video_digest(store)
+    if not pending:
+        typer.echo("No hay vídeos pendientes de digest.")
+        return
+    worksheet = cfg.data_dir / "video-digest-worksheet.json"
+    export_video_digest_worksheet(pending, worksheet, chosen, cfg.output_language)
+    typer.echo(
+        f"{len(pending)} vídeos exportados a {worksheet}\n"
+        f"Rellena el array `judgments` (con Claude Code o a mano) y ejecuta:\n"
+        f"  xbrain video-digest --apply {worksheet}"
+    )
 
 
 def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:
