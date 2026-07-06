@@ -44,6 +44,7 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
         "also_relevant",
         "video_digest_header",
         "silent_video",
+        "video_evidence_header",
     }
 
 

@@ -32,6 +32,7 @@ class Strings:
     also_relevant: str  # "También relevante" / "Also relevant"
     video_digest_header: str  # "Resumen del vídeo" / "Video digest" (#44)
     silent_video: str  # the one-line no-speech marker (#44)
+    video_evidence_header: str  # collapsible label for the raw frames + transcript
 
 
 _STRINGS: dict[str, Strings] = {
@@ -43,6 +44,7 @@ _STRINGS: dict[str, Strings] = {
         also_relevant="Also relevant",
         video_digest_header="Video digest",
         silent_video="🔇 Silent video (no speech detected).",
+        video_evidence_header="Frames + transcript",
     ),
     "Spanish": Strings(
         topics_label="Temas",
@@ -52,6 +54,7 @@ _STRINGS: dict[str, Strings] = {
         also_relevant="También relevante",
         video_digest_header="Resumen del vídeo",
         silent_video="🔇 Vídeo sin voz (sin transcripción).",
+        video_evidence_header="Frames y transcripción",
     ),
 }
 

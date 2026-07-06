@@ -646,6 +646,13 @@ class ContentSourceSuccess(BaseModel):
     # one-time backward-compatible additive churn as `has_speech`/`language`. Each
     # `VideoFrame` embeds into the note like a downloaded photo (see `VideoFrame`).
     frames: list[VideoFrame] = Field(default_factory=list)
+    # Long-form readable digest of an `x_video` source — a "what it is · key
+    # points · why it matters" synthesis of the transcript (`text`) + `frames`,
+    # written by `xbrain video-digest`. Optional + additive (defaults to `""`), so
+    # every EXISTING record LOADS unchanged — a pre-digest `x_video` source (and
+    # every article source) simply carries an empty digest, and `generate` falls
+    # back to rendering the raw transcript + frames. `""` = "no digest yet".
+    digest: str = ""
     # Ordered body blocks (text + inline images) for `kind="x_article"` sources
     # captured as a structured Article (#39). Optional + additive (defaults to
     # `[]`), so every EXISTING record LOADS unchanged — a pre-#39 `x_article`
