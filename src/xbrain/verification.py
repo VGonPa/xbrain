@@ -161,6 +161,8 @@ def _union_flags(judgments: list[dict]) -> list[dict]:
     flags: list[dict] = []
     for judgment in judgments:
         for flag in judgment.get("flags") or []:
+            if not isinstance(flag, dict):
+                continue  # a malformed judge may emit a bare string flag — skip, don't crash
             pair = (str(flag.get("claim")), str(flag.get("issue")))
             if pair not in seen:
                 seen.add(pair)
@@ -205,6 +207,8 @@ def aggregate_verify_judgments(judgment_sets: list[list[dict]]) -> list[dict]:
     groups: dict[tuple[str, str], list[dict]] = {}
     for judgments in judgment_sets:
         for judgment in judgments:
+            if not isinstance(judgment, dict):
+                continue  # a malformed judge worksheet may hold a non-object — skip it
             key = (str(judgment.get("item_id")), str(judgment.get("target")))
             groups.setdefault(key, []).append(judgment)
     aggregated = [_aggregate_group(iid, target, js) for (iid, target), js in groups.items()]

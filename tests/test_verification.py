@@ -205,6 +205,23 @@ def test_aggregate_dedupes_flags_across_judges():
     assert len(out[0]["flags"]) == 1
 
 
+def test_aggregate_tolerates_malformed_judgments_and_flags():
+    """A non-dict judgment or a non-dict flag from a broken judge is skipped, not fatal."""
+    out = aggregate_verify_judgments(
+        [
+            [
+                "not a dict",  # non-dict judgment
+                _j(
+                    "FAIL", faithfulness="FAIL", flags=["bare string", {"claim": "X", "issue": "y"}]
+                ),
+            ]
+        ]
+    )
+    assert len(out) == 1
+    assert out[0]["verdict"] == "FAIL"
+    assert [f["claim"] for f in out[0]["flags"]] == ["X"]  # the bare-string flag was dropped
+
+
 def test_aggregate_groups_by_item_and_target():
     sets = [[_j("PASS", target="summary"), _j("FAIL", faithfulness="FAIL", target="digest")]]
     out = aggregate_verify_judgments(sets)
