@@ -2794,7 +2794,14 @@ def test_verify_audit_apply_revokes_and_flips_report(tmp_path: Path, monkeypatch
                         "target": "summary",
                         "reverdict": "PASS",
                         "flags": [
-                            {"claim": "€150M in revenue", "issue": "unsupported", "audit": "REVOKE"}
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.9,
+                                "reason": "stated verbatim in the transcript",
+                            }
                         ],
                     }
                 ]
@@ -2808,6 +2815,58 @@ def test_verify_audit_apply_revokes_and_flips_report(tmp_path: Path, monkeypatch
     assert report["records"][0]["verdict"] == "PASS"
     assert report["records"][0]["audited"] is True
     assert report["counts"] == {"PASS": 1, "REVIEW": 0, "FAIL": 0}
+    assert report["audit_log"]["matched"] == 1
+    md = (tmp_path / "data" / "verify-report.md").read_text(encoding="utf-8")
+    assert "## Audit" in md and "FAIL → PASS" in md
+
+
+def test_verify_audit_low_confidence_revoke_keeps_fail(tmp_path: Path, monkeypatch):
+    """A REVOKE below the confidence gate is not applied — the record stays FAIL."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    ws = tmp_path / "data" / "audit.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.4,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert report["records"][0]["verdict"] == "FAIL"
+
+
+def test_verify_audit_rejects_multiple_apply(tmp_path: Path, monkeypatch):
+    """The audit is a single independent auditor — more than one --apply is rejected."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    a = tmp_path / "data" / "a.json"
+    b = tmp_path / "data" / "b.json"
+    for p in (a, b):
+        p.write_text(json.dumps({"audits": []}), encoding="utf-8")
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(a), "--apply", str(b)])
+    assert result.exit_code != 0
+    assert "único auditor" in result.output
 
 
 def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):

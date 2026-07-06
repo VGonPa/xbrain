@@ -1426,6 +1426,33 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
     typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
 
 
+def _verify_audit_apply(cfg: Config, aggregated: list[dict], apply: list[Path]) -> None:
+    """Merge one auditor's worksheet onto the aggregate and re-render the report.
+
+    The audit is a SINGLE independent auditor (judge ≠ party) by design, so more than
+    one `--apply` is rejected rather than silently last-wins-merged. Report-only.
+    """
+    if len(apply) > 1:
+        raise ValueError(
+            "El audit es de un único auditor independiente — pasa un solo --apply "
+            f"(recibidos {len(apply)})."
+        )
+    audits = import_audit_judgments(apply[0])
+    records, audit_log = merge_audit(aggregated, audits)
+    _write_verify_report(cfg, *render_verify_report(records, audit_log))
+    unmatched = audit_log["unmatched"]
+    typer.echo(
+        f"Audit: {audit_log['matched']}/{audit_log['supplied']} aplicados, "
+        f"{len(audit_log['washed'])} revertidos a menor severidad"
+        + (f", {len(unmatched)} sin correspondencia" if unmatched else "")
+        + (
+            " · GUARDA anti-revocación-masiva ACTIVADA"
+            if audit_log["mass_revocation_guard"]
+            else ""
+        )
+    )
+
+
 def _verify_audit(cfg: Config, executor: str | None, apply: list[Path]) -> None:
     """The judge≠party audit mode of `verify` (`--audit`): export or apply.
 
@@ -1434,13 +1461,9 @@ def _verify_audit(cfg: Config, executor: str | None, apply: list[Path]) -> None:
     report (report-only, store untouched); without it, it exports an audit
     worksheet for the consequential (FAIL/divergent) subset.
     """
-    report_path = cfg.data_dir / "verify-report.json"
-    aggregated = load_report_records(report_path)
+    aggregated = load_report_records(cfg.data_dir / "verify-report.json")
     if apply:
-        audits: list[dict] = []
-        for path in apply:
-            audits.extend(import_audit_judgments(path))
-        _write_verify_report(cfg, *render_verify_report(merge_audit(aggregated, audits)))
+        _verify_audit_apply(cfg, aggregated, apply)
         return
     chosen = _resolve_verify_executor(executor, cfg)
     records = consequential_records(aggregated)
@@ -1448,11 +1471,14 @@ def _verify_audit(cfg: Config, executor: str | None, apply: list[Path]) -> None:
         typer.echo("No hay verdicts consecuentes (FAIL/divergentes) que auditar.")
         return
     worksheet = cfg.data_dir / "verify-audit-worksheet.json"
-    export_audit_worksheet(
+    exported, skipped = export_audit_worksheet(
         records, load_store(cfg.items_path), worksheet, chosen, cfg.output_language
     )
+    skip_note = (
+        f" ({len(skipped)} omitidos sin item en el store: {', '.join(skipped)})" if skipped else ""
+    )
     typer.echo(
-        f"{len(records)} verdicts consecuentes exportados a {worksheet}\n"
+        f"{exported} verdicts consecuentes exportados a {worksheet}{skip_note}\n"
         f"Rellena `audits` (auditor independiente, juez ≠ parte) y ejecuta:\n"
         f"  xbrain verify --audit --apply {worksheet.name}"
     )

@@ -39,8 +39,15 @@ Respond with the judgment object only:
  "faithfulness": "PASS|FAIL",
  "adherence": "PASS|REVIEW|FAIL",
  "flags": [{"claim": "<the offending span from the output>",
-            "issue": "<why: unsupported / wrong topic / too long / …>"}]}
+            "issue": "<why: unsupported / wrong topic / too long / …>",
+            "axis": "faithfulness|adherence"}]}
 ```
+
+Tag each flag with its `axis`: **faithfulness** for an unsupported claim/number/
+name, **adherence** for a rubric-shape issue (too long, weak structure, wrong
+topic). The audit stage clears a faithfulness FAIL only when EVERY faithfulness
+flag is revoked, so a mis-tagged adherence note must never sit on the faithfulness
+axis.
 
 `flags` is empty on a clean PASS. Never invent a flag to look thorough; never wave
 through an unsupported claim to be agreeable. Language of the `issue` text: the
