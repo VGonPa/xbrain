@@ -171,19 +171,32 @@ def _union_flags(judgments: list[dict]) -> list[dict]:
 
 
 def _group_verdict(faithfulness: str, adherence: str, verdicts: list[str]) -> str:
-    """FAIL if faithfulness/adherence failed, else REVIEW if any reviewed, else PASS."""
-    if faithfulness == "FAIL" or adherence == "FAIL":
+    """FAIL if any axis OR any judge's own verdict failed, else REVIEW, else PASS.
+
+    A raw `verdict == "FAIL"` must sink the group even when the judge left the
+    `faithfulness`/`adherence` axes at their lenient defaults — otherwise a
+    FAIL-but-under-populated judgment would silently render as PASS, the worst
+    failure mode for a verification layer. Symmetric with the REVIEW clause.
+    """
+    if faithfulness == "FAIL" or adherence == "FAIL" or "FAIL" in verdicts:
         return "FAIL"
     if adherence == "REVIEW" or "REVIEW" in verdicts:
         return "REVIEW"
     return "PASS"
 
 
+def _verdict_of(judgment: dict, key: str, default: str = "PASS") -> str:
+    """Read a verdict-like field, upper-cased + trimmed, so `fail`/`Fail` == `FAIL`."""
+    return str(judgment.get(key, default)).strip().upper()
+
+
 def _aggregate_group(item_id: str, target: str, judgments: list[dict]) -> dict:
     """Combine one `(item_id, target)` group's N judgments into a verdict record."""
-    faithfulness = "FAIL" if any(j.get("faithfulness") == "FAIL" for j in judgments) else "PASS"
-    adherence = _worst([str(j.get("adherence", "PASS")) for j in judgments])
-    verdicts = [str(j.get("verdict", "PASS")) for j in judgments]
+    faithfulness = (
+        "FAIL" if any(_verdict_of(j, "faithfulness") == "FAIL" for j in judgments) else "PASS"
+    )
+    adherence = _worst([_verdict_of(j, "adherence") for j in judgments])
+    verdicts = [_verdict_of(j, "verdict") for j in judgments]
     return {
         "item_id": item_id,
         "target": target,

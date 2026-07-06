@@ -222,6 +222,33 @@ def test_aggregate_tolerates_malformed_judgments_and_flags():
     assert [f["claim"] for f in out[0]["flags"]] == ["X"]  # the bare-string flag was dropped
 
 
+def test_aggregate_raw_fail_verdict_forces_fail_even_without_axes():
+    """A judge's verdict=FAIL with the axis fields omitted must still yield group FAIL —
+    a FAIL must never be swallowed to PASS (the worst failure mode for a verifier)."""
+    out = aggregate_verify_judgments(
+        [
+            [
+                {
+                    "item_id": "7",
+                    "target": "summary",
+                    "verdict": "FAIL",
+                    "flags": [{"claim": "€150M", "issue": "unsupported"}],
+                }
+            ]
+        ]
+    )
+    assert out[0]["verdict"] == "FAIL"
+
+
+def test_aggregate_verdict_casing_is_normalised():
+    """Lowercase verdicts still count (`fail` == `FAIL`)."""
+    out = aggregate_verify_judgments(
+        [[{"item_id": "7", "target": "summary", "verdict": "fail", "faithfulness": "fail"}]]
+    )
+    assert out[0]["verdict"] == "FAIL"
+    assert out[0]["faithfulness"] == "FAIL"
+
+
 def test_aggregate_groups_by_item_and_target():
     sets = [[_j("PASS", target="summary"), _j("FAIL", faithfulness="FAIL", target="digest")]]
     out = aggregate_verify_judgments(sets)
