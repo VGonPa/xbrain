@@ -94,8 +94,27 @@ uv run xbrain digest-video --all-pending
 
 # With the visual layer: also describe the slides of slide-heavy talks
 uv run xbrain digest-video --all-pending --frames
+
+# Turn the transcript (+ slides) into a readable long-form digest — worksheet flow,
+# just like enrich: export → fill in a Claude Code session → apply.
+uv run xbrain video-digest --executor claude-code
+uv run xbrain video-digest --apply data/video-digest-worksheet.json
+
 uv run xbrain generate
-# → the video's note now has a "## Video digest" section: transcript + slides
+# → the video's note now leads with a readable "## Video digest"; the raw
+#   transcript + slides are tucked into a collapsible "Frames + transcript" block
+```
+
+Skip the `video-digest` step and the note still renders — it just falls back to the
+raw transcript inline, without the readable digest.
+
+Optionally, sanity-check the LLM outputs with `verify` — an LLM-as-judge pass over
+the summaries, digests and topics. It writes `data/verify-report.md` and **never
+touches your store**:
+
+```bash
+uv run xbrain verify --target all --executor claude-code
+uv run xbrain verify --apply data/verify-worksheet.json   # one worksheet per judge
 ```
 
 ## 6. See the whole corpus at a glance

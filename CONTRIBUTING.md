@@ -32,9 +32,11 @@ file is not tracked by git.
 ## Safety: destructive operations auto-snapshot
 
 Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`,
-`refresh-media`, `media`, `describe`, `download-videos`, `digest-video`) copy the
-full `data/` directory to
-`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`download-videos`
+`refresh-media`, `media`, `describe`, `download-videos`, `digest-video`,
+`video-digest --apply`) copy the full `data/` directory to
+`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`video-digest`
+snapshots only on `--apply` — the branch that writes each `source.digest` — never on
+plain worksheet export; `verify` writes only its report and is not destructive.) (`download-videos`
 takes its snapshot *after* the interactive size-gate confirmation, so a declined
 run leaves no stray snapshot — but always before the first byte is written.) If your change introduces or modifies a destructive
 operation, **wire the auto-snapshot** — see `_auto_snapshot` in `src/xbrain/cli.py`
