@@ -221,6 +221,35 @@ def test_import_audit_rejects_invalid_reverdict_loudly(tmp_path):
         import_audit_judgments(path)
 
 
+def test_import_audit_rejects_non_numeric_confidence(tmp_path):
+    """NIT 4: a garbage `confidence` like "high" is rejected, not silently gated to 0.0."""
+    path = tmp_path / "audit-ws.json"
+    path.write_text(
+        json.dumps({"audits": [_audit(flags=[_decision(audit="REVOKE", confidence="high")])]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="confidence"):
+        import_audit_judgments(path)
+
+
+def test_import_audit_rejects_out_of_range_confidence(tmp_path):
+    path = tmp_path / "audit-ws.json"
+    path.write_text(
+        json.dumps({"audits": [_audit(flags=[_decision(audit="REVOKE", confidence=1.5)])]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="confidence"):
+        import_audit_judgments(path)
+
+
+def test_import_audit_allows_omitted_confidence(tmp_path):
+    """An omitted confidence is valid (means 0.0 → a REVOKE gates)."""
+    flag = {"claim": "€150M", "issue": "unsupported", "axis": "faithfulness", "audit": "REVOKE"}
+    path = tmp_path / "audit-ws.json"
+    path.write_text(json.dumps({"audits": [_audit(flags=[flag])]}), encoding="utf-8")
+    assert import_audit_judgments(path)[0]["flags"][0]["audit"] == "REVOKE"
+
+
 def test_load_report_records_reads_records(tmp_path):
     path = tmp_path / "verify-report.json"
     path.write_text(json.dumps({"total": 1, "records": [_record()]}), encoding="utf-8")
@@ -272,6 +301,60 @@ def test_merge_confirm_wins_over_revoke_on_same_key():
     out, _ = _one([_record()], [audit])
     assert out["verdict"] == "FAIL"
     assert out["flags"][0]["claim"] == "€150M"
+
+
+def test_merge_added_confirmed_faith_flag_reestablishes_fail_after_original_revoked():
+    """BUG 1: revoking the original faithfulness flag while the auditor CONFIRMS a NEW
+    faithfulness hallucination must NOT wash to PASS — the added confirmed flag keeps the
+    FAIL (safety must not fall back to the optional free-text reverdict)."""
+    record = _record(faithfulness="FAIL", flags=[_flag(claim="F1")])
+    audit = _audit(
+        flags=[
+            _decision(claim="F1", audit="REVOKE", confidence=0.99),
+            _decision(
+                claim="F2-NEW",
+                issue="hallucination",
+                axis="faithfulness",
+                audit="CONFIRM",
+                confidence=0.99,
+            ),
+        ],
+        reverdict=None,
+    )
+    out, log = _one([record], [audit])
+    assert out["verdict"] == "FAIL"
+    assert out["faithfulness"] == "FAIL"
+    assert any(f["claim"] == "F2-NEW" for f in out["flags"])
+    assert log["anomalies"] == []
+
+
+def test_pass_review_never_carries_surviving_faithfulness_flag():
+    """INVARIANT: a standing (confirmed/unaudited) faithfulness flag forces FAIL — even
+    when the aggregate's faithfulness axis was PASS (inconsistent judge) and the auditor
+    resolves to PASS. A PASS/REVIEW record can NEVER carry a confirmed faithfulness flag."""
+    record = _record(
+        verdict="REVIEW", faithfulness="PASS", divergent=True, flags=[_flag(claim="X")]
+    )
+    out, log = merge_audit([record], [_audit(reverdict="PASS")])
+    r = out[0]
+    assert r["verdict"] == "FAIL"
+    assert not (
+        r["verdict"] in ("PASS", "REVIEW") and any(f["axis"] == "faithfulness" for f in r["flags"])
+    )
+    assert log["anomalies"] == []
+
+
+def test_merge_revoke_then_confirm_same_key_confirm_still_wins():
+    """NIT 3: a REVOKE listed BEFORE a CONFIRM on the same key still keeps FAIL (kills a
+    'first-seen wins' mutation — CONFIRM wins regardless of order)."""
+    audit = _audit(
+        flags=[
+            _decision(audit="REVOKE", confidence=0.9),
+            _decision(audit="CONFIRM", confidence=0.9),
+        ]
+    )
+    out, _ = _one([_record()], [audit])
+    assert out["verdict"] == "FAIL"
 
 
 def test_merge_same_claim_different_issue_are_distinct_flags():
@@ -509,3 +592,17 @@ def test_report_audit_section_lists_washed_record():
     _, md = render_verify_report(records, log)
     assert "washed" in md
     assert "FAIL → PASS" in md
+
+
+def test_report_audit_section_renders_gated_and_unmatched_lines():
+    """NIT 5: the gated (low-confidence) and unmatched audit LINES actually render."""
+    records = [_record(item_id="7")]
+    audits = [
+        _audit(item_id="7", flags=[_decision(audit="REVOKE", confidence=0.4)]),  # gated
+        _audit(item_id="404", flags=[]),  # unmatched
+    ]
+    merged, log = merge_audit(records, audits)
+    _, md = render_verify_report(merged, log)
+    assert "gated" in md
+    assert "unmatched audit" in md
+    assert "[404]" in md

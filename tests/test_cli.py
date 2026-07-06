@@ -2869,6 +2869,53 @@ def test_verify_audit_rejects_multiple_apply(tmp_path: Path, monkeypatch):
     assert "único auditor" in result.output
 
 
+def _write_revoke_audit_ws(path: Path) -> None:
+    """A single-flag audit worksheet that validly revokes the seeded FAIL to PASS."""
+    path.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.9,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_verify_audit_apply_refuses_second_run_on_audited_report(tmp_path: Path, monkeypatch):
+    """BUG 2: a second --audit --apply on an already-audited report is refused (it would
+    let N single-revoke runs bypass the mass-revocation guard); --force overrides."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    ws = tmp_path / "data" / "audit.json"
+    _write_revoke_audit_ws(ws)
+
+    first = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert second.exit_code != 0
+    assert "ya contiene un audit" in second.output
+
+    forced = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--force"])
+    assert forced.exit_code == 0, forced.output
+
+
 def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")

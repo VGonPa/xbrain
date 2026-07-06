@@ -1426,16 +1426,28 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
     typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
 
 
-def _verify_audit_apply(cfg: Config, aggregated: list[dict], apply: list[Path]) -> None:
+def _verify_audit_apply(
+    cfg: Config, aggregated: list[dict], apply: list[Path], force: bool
+) -> None:
     """Merge one auditor's worksheet onto the aggregate and re-render the report.
 
-    The audit is a SINGLE independent auditor (judge ≠ party) by design, so more than
-    one `--apply` is rejected rather than silently last-wins-merged. Report-only.
+    The audit is a SINGLE independent auditor (judge ≠ party) in ONE pass over the full
+    consequential set. More than one `--apply` is rejected, and a second `--audit
+    --apply` on an already-audited report is refused (unless `--force`): re-reading the
+    already-shrunk FAIL set would let N single-revoke runs bypass the mass-revocation
+    guard by splitting revocations across runs. Report-only.
     """
     if len(apply) > 1:
         raise ValueError(
             "El audit es de un único auditor independiente — pasa un solo --apply "
             f"(recibidos {len(apply)})."
+        )
+    if not force and any(isinstance(r, dict) and r.get("audited") for r in aggregated):
+        raise ValueError(
+            "verify-report.json ya contiene un audit aplicado. Re-agrega los jueces "
+            "(xbrain verify --apply ...) antes de re-auditar, o pasa --force para "
+            "sobrescribir a sabiendas (evita bypass de la guarda anti-revocación-masiva "
+            "repartiendo revocaciones entre pasadas)."
         )
     audits = import_audit_judgments(apply[0])
     records, audit_log = merge_audit(aggregated, audits)
@@ -1453,7 +1465,7 @@ def _verify_audit_apply(cfg: Config, aggregated: list[dict], apply: list[Path]) 
     )
 
 
-def _verify_audit(cfg: Config, executor: str | None, apply: list[Path]) -> None:
+def _verify_audit(cfg: Config, executor: str | None, apply: list[Path], force: bool) -> None:
     """The judge≠party audit mode of `verify` (`--audit`): export or apply.
 
     Reads the aggregated records back from the `verify-report.json` PR-1 wrote.
@@ -1463,7 +1475,7 @@ def _verify_audit(cfg: Config, executor: str | None, apply: list[Path]) -> None:
     """
     aggregated = load_report_records(cfg.data_dir / "verify-report.json")
     if apply:
-        _verify_audit_apply(cfg, aggregated, apply)
+        _verify_audit_apply(cfg, aggregated, apply, force)
         return
     chosen = _resolve_verify_executor(executor, cfg)
     records = consequential_records(aggregated)
@@ -1499,12 +1511,17 @@ def verify_command(
         "--audit",
         help="Judge≠party audit of the consequential (FAIL/divergent) verdicts",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-apply an audit onto an already-audited report (--audit --apply)",
+    ),
 ) -> None:
     """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
     cfg = _config()
 
     if audit:
-        _verify_audit(cfg, executor, apply)
+        _verify_audit(cfg, executor, apply, force)
         return
 
     if apply:

@@ -315,6 +315,11 @@ def _render_audit_section(audit_log: dict) -> list[str]:
         )
     for miss in unmatched:
         lines.append(f"- ⚠️ unmatched audit [{miss['item_id']}] `{miss['target']}` — not applied")
+    for anomaly in audit_log.get("anomalies", []):
+        lines.append(
+            f"- ❗ ANOMALY [{anomaly['item_id']}] `{anomaly['target']}` — verdict "
+            f"{anomaly['verdict']} still carries a confirmed faithfulness flag; investigate."
+        )
     return lines
 
 

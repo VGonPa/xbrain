@@ -150,9 +150,23 @@ def export_audit_worksheet(
     return len(items), skipped
 
 
+def _validate_confidence(value: object) -> None:
+    """Reject a present-but-invalid `confidence` LOUDLY (must be a number in [0, 1]).
+
+    An omitted `confidence` (None) is allowed — it means 0.0 (a REVOKE will not apply).
+    Rejecting a garbage value like `"high"` is consistent with the enum checks: a
+    silent coercion to 0.0 would only ever fail-safe, but a mistyped `"0.9"` string
+    the author believed would apply must not silently gate.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+        raise ValueError(f"audit flag confidence must be a number in [0, 1], got {value!r}")
+
+
 def _validate_audit(audit: dict) -> None:
-    """Reject an invalid `audit`/`reverdict` enum LOUDLY (a mistyped escalation must
-    not be silently coerced to a lenient default).
+    """Reject an invalid `audit`/`reverdict`/`confidence` field LOUDLY (a mistyped
+    decision must not be silently coerced to a lenient default).
     """
     reverdict = audit.get("reverdict")
     if reverdict is not None and _norm(reverdict) not in _VERDICTS:
@@ -164,6 +178,7 @@ def _validate_audit(audit: dict) -> None:
             raise ValueError(
                 f"audit flag decision must be CONFIRM|REVOKE, got {flag.get('audit')!r}"
             )
+        _validate_confidence(flag.get("confidence"))
 
 
 def import_audit_judgments(path: Path) -> list[dict]:
@@ -326,16 +341,27 @@ def _final_verdict(
     return final
 
 
-def _faith_after(prior_faith: str, all_faith_revoked: bool, added: list[dict]) -> str:
-    """The faithfulness axis after the audit.
+def _has_faith_flag(flags: list[dict]) -> bool:
+    """True when any flag in `flags` stands on the faithfulness axis."""
+    return any(f.get("axis") == "faithfulness" for f in flags)
 
-    A prior FAIL clears to PASS ONLY when every faithfulness flag was validly revoked;
-    a prior PASS escalates to FAIL only when the auditor ADDED a faithfulness flag (a
-    shared blind spot the N judges missed).
+
+def _faith_after(
+    prior_faith: str, all_faith_revoked: bool, surviving: list[dict], added: list[dict]
+) -> str:
+    """The faithfulness axis after the audit — symmetric across the prior state.
+
+    Faithfulness is FAIL whenever standing faithfulness evidence remains: a prior FAIL
+    whose original flags were NOT all validly revoked (this also covers a flagless FAIL,
+    which has no revocable evidence), OR any surviving/auditor-ADDED confirmed
+    faithfulness flag (a blind spot the N judges missed). It clears to PASS only when
+    NO faithfulness evidence stands. This is what guarantees the invariant that a
+    PASS/REVIEW record never carries a confirmed faithfulness flag.
     """
-    if prior_faith == "FAIL":
-        return "PASS" if all_faith_revoked else "FAIL"
-    return "FAIL" if any(f["axis"] == "faithfulness" for f in added) else "PASS"
+    unrevoked_prior = prior_faith == "FAIL" and not all_faith_revoked
+    if unrevoked_prior or _has_faith_flag(surviving) or _has_faith_flag(added):
+        return "FAIL"
+    return "PASS"
 
 
 def _apply_audit(record: dict, audit: dict, *, min_confidence: float, suppress: bool) -> dict:
@@ -359,7 +385,10 @@ def _apply_audit(record: dict, audit: dict, *, min_confidence: float, suppress: 
     added = _added_flags(audit_flags, {_flag_key(f) for f in flags})
 
     all_faith_revoked = n_faith_flags > 0 and n_faith_revoked == n_faith_flags
-    faith_after = _faith_after(prior_faith, all_faith_revoked, added)
+    faith_after = _faith_after(prior_faith, all_faith_revoked, surviving, added)
+    # A prior FAIL is revocable only when it was faithfulness-driven AND every
+    # faithfulness flag was explicitly revoked (a raw verdict=FAIL with no revocable
+    # evidence, or a still-standing flag, keeps the FAIL floor).
     revocable_fail_cleared = (
         prior_verdict == "FAIL"
         and prior_faith == "FAIL"
@@ -471,5 +500,23 @@ def merge_audit(
         "washed": washed,
         "gated": gated,
         "mass_revocation_guard": suppress,
+        "anomalies": _anomalies(records),
     }
     return records, audit_log
+
+
+def _anomalies(records: list[dict]) -> list[dict]:
+    """Defence-in-depth: any AUDITED non-FAIL record still carrying a confirmed
+    faithfulness flag violates the core invariant. `_faith_after` guarantees this list is
+    empty; it is surfaced (not swallowed) so a future regression is caught in the report.
+
+    Scoped to `audited` records — a pass-through record's verdict/flags are PR-1's (a
+    legacy untagged flag defaults to the faithfulness axis), not this merge's to police.
+    """
+    return [
+        {"item_id": str(r.get("item_id")), "target": str(r.get("target")), "verdict": r["verdict"]}
+        for r in records
+        if r.get("audited")
+        and _norm(r.get("verdict")) != "FAIL"
+        and _has_faith_flag(r.get("flags") or [])
+    ]
