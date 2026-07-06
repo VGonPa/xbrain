@@ -1365,6 +1365,10 @@ def video_digest_command(
     store = load_store(cfg.items_path)
 
     if apply is not None:
+        # Snapshot on the APPLY branch — this is the one that mutates `items.json`
+        # (writes every `source.digest` + `save_store`); export only writes the
+        # worksheet JSON. Mirrors `describe`'s `describe-apply` snapshot.
+        _auto_snapshot(cfg, "video-digest-apply")
         judgments = import_video_digest_worksheet(apply)
         applied, invalid = apply_video_digest_judgments(store, judgments)
         save_store(store, cfg.items_path)
@@ -1381,7 +1385,6 @@ def video_digest_command(
     if not pending:
         typer.echo("No hay vídeos pendientes de digest.")
         return
-    _auto_snapshot(cfg, "video-digest")
     worksheet = cfg.data_dir / "video-digest-worksheet.json"
     export_video_digest_worksheet(pending, worksheet, chosen, cfg.output_language)
     typer.echo(

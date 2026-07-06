@@ -86,6 +86,14 @@ def test_pending_skips_silent_video_without_frames():
     assert items_pending_video_digest(store) == []
 
 
+def test_pending_skips_mute_video_whose_frames_have_empty_descriptions():
+    """Selection must match the exporter: a mute video whose frames all carry EMPTY
+    descriptions serialises to an empty worksheet (`_video_frame_descriptions` drops
+    them), so it must NOT be selected — else it is re-exported every run forever."""
+    store = {"7": _video_item(text="", has_speech=False, frame_descs=("", ""))}
+    assert items_pending_video_digest(store) == []
+
+
 def test_pending_skips_already_digested_video():
     store = {"7": _video_item(text="deep talk", digest="Already has a digest.")}
     assert items_pending_video_digest(store) == []

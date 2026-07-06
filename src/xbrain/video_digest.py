@@ -34,14 +34,20 @@ def _video_source(item: Item) -> ContentSourceSuccess | None:
 
 
 def _has_digestible_content(source: ContentSourceSuccess) -> bool:
-    """True when the `x_video` source carries content to digest.
+    """True when the `x_video` source carries content the worksheet will actually
+    serialise to digest.
 
-    A with-speech transcript (`has_speech` not False and non-empty `text`) OR any
-    key frames. A silent video with no frames has nothing to synthesise — it is
-    skipped, exactly as `generate` renders it as a one-line silent-video marker.
+    Aligned with the exporter so selection never outruns the payload: the
+    worksheet's transcript comes from `worksheet._video_transcript` (requires
+    `has_speech` truthy + non-empty `text`) and its frames from
+    `_video_frame_descriptions` (keeps only frames with a NON-EMPTY description).
+    A looser predicate (e.g. counting frames whose descriptions are all empty)
+    would export an item with nothing to digest and re-select it every run,
+    forever. A silent video with no described frames has nothing to synthesise.
     """
-    has_text = source.has_speech is not False and bool(source.text)
-    return has_text or bool(source.frames)
+    has_transcript = bool(source.has_speech) and bool(source.text)
+    has_frame_descriptions = any(frame.description for frame in source.frames)
+    return has_transcript or has_frame_descriptions
 
 
 def items_pending_video_digest(store: dict[str, Item]) -> list[Item]:
