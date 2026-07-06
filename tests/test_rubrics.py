@@ -122,3 +122,12 @@ def test_video_digest_rubric_loads_and_substitutes_language():
 def test_video_digest_rubric_preserves_placeholder_when_language_none():
     text = load_rubric("video-digest")
     assert "{language}" in text
+
+
+def test_verify_rubric_loads_and_substitutes_language():
+    """The verify rubric ships a `{language}` placeholder + names its axes/verdicts."""
+    text = load_rubric("verify", language="Spanish")
+    assert "{language}" not in text
+    assert "Spanish" in text
+    assert "Faithfulness" in text
+    assert "FAIL" in text
