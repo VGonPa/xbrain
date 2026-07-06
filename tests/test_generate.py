@@ -576,6 +576,7 @@ def _video_item(
     has_speech: bool = True,
     title: str | None = "The Talk",
     frames: list | None = None,
+    digest: str = "",
 ) -> Item:
     """An enriched video bookmark carrying an `x_video` transcript source (#44)."""
     return Item(
@@ -603,6 +604,7 @@ def _video_item(
                     text=text,
                     has_speech=has_speech,
                     frames=frames or [],
+                    digest=digest,
                 )
             ],
         ),
@@ -651,6 +653,60 @@ def test_generate_video_digest_spanish_header(tmp_path: Path):
     assert "## Video digest:" not in note
     assert "## Resumen del vídeo: The Talk" in note  # the localised heading IS rendered
     assert "Cuerpo de la transcripción." in note
+
+
+def test_generate_renders_video_digest_prose_when_present(tmp_path: Path):
+    """When the `x_video` source carries a long-form `digest`, it renders as the
+    body of the `## Video digest` section — the readable headline of the video."""
+    generate(
+        {"7": _video_item(text="raw transcript body", digest="This talk explains scaling laws.")},
+        tmp_path,
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "## Video digest: The Talk" in note
+    assert "This talk explains scaling laws." in note
+
+
+def test_generate_video_digest_demotes_raw_to_details_when_digest_present(tmp_path: Path):
+    """With a digest, the raw transcript + frame embeds are demoted into a collapsible
+    `<details>` below the digest prose — evidence kept, noise hidden. The digest prose
+    sits ABOVE the `<details>`, the transcript + embeds INSIDE it."""
+    generate(
+        {
+            "7": _video_item(
+                text="raw transcript body", frames=_frames(), digest="A concise digest."
+            )
+        },
+        tmp_path,
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "<details>" in note and "</details>" in note
+    digest_idx = note.index("A concise digest.")
+    details_idx = note.index("<details>")
+    assert digest_idx < details_idx  # digest prose is the headline, above the raw dump
+    inside = note[details_idx : note.index("</details>")]
+    assert "raw transcript body" in inside
+    assert "![[_media/7/frames/0.png]]" in inside
+
+
+def test_generate_video_digest_no_details_when_digest_absent(tmp_path: Path):
+    """Fallback: with no digest, the section is unchanged — transcript rendered inline,
+    no `<details>` wrapper. Safe to ship the render change before any digest exists."""
+    generate({"7": _video_item(text="inline transcript body")}, tmp_path)
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "inline transcript body" in note
+    assert "<details>" not in note
+
+
+def test_generate_video_digest_evidence_label_is_localised(tmp_path: Path):
+    """The `<details>` summary label follows the configured output language."""
+    generate(
+        {"7": _video_item(text="cuerpo", digest="Un resumen conciso.")},
+        tmp_path,
+        output_language="Spanish",
+    )
+    note = next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+    assert "transcripción" in note.lower()  # the ES evidence label
 
 
 # ----------------------------------------------------------- x_video slide frames (#44 PR4)

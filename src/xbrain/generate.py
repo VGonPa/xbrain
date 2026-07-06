@@ -440,9 +440,27 @@ def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[
         return [f"> {strings.silent_video}", ""]
     heading = source.title or source.url
     lines = [f"## {strings.video_digest_header}: {heading}", ""]
+    if not source.digest:
+        # Fallback (no long-form digest yet): the raw transcript + frame embeds
+        # render inline, exactly as before — so this render change is safe to ship
+        # before any digest exists (an empty `digest` is the default).
+        if has_text:
+            lines += [source.text, ""]
+        lines += _slide_embed_lines(source.frames)
+        return lines
+    # With a digest, it is the readable headline of the section; the raw transcript
+    # + frame slides are demoted into a collapsible `<details>` below — the evidence
+    # stays in the note without the 40-frame wall of noise up top. Blank lines around
+    # the inner content let Obsidian render the markdown/embeds inside the HTML block.
+    lines += [source.digest, ""]
+    evidence: list[str] = []
     if has_text:
-        lines += [source.text, ""]
-    lines += _slide_embed_lines(source.frames)
+        evidence += [source.text, ""]
+    evidence += _slide_embed_lines(source.frames)
+    if evidence:
+        lines += ["<details>", f"<summary>{strings.video_evidence_header}</summary>", ""]
+        lines += evidence
+        lines += ["</details>", ""]
     return lines
 
 
