@@ -95,6 +95,13 @@ from xbrain.verification import (
     parse_targets,
     render_verify_report,
 )
+from xbrain.verification_audit import (
+    consequential_records,
+    export_audit_worksheet,
+    import_audit_judgments,
+    load_report_records,
+    merge_audit,
+)
 from xbrain.video_digest import (
     apply_video_digest_judgments,
     export_video_digest_worksheet,
@@ -1402,6 +1409,55 @@ def video_digest_command(
     )
 
 
+def _resolve_verify_executor(executor: str | None, cfg: Config) -> str:
+    """The worksheet track for `verify`, defaulting to config; only manual/claude-code."""
+    chosen = executor or cfg.enrich_executor
+    if chosen not in ("manual", "claude-code"):
+        raise ValueError(f"Ejecutor {chosen!r} no soportado para verify — usa manual|claude-code.")
+    return chosen
+
+
+def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
+    """Persist `verify-report.{json,md}` and echo its headline + path."""
+    (cfg.data_dir / "verify-report.json").write_text(json_report, encoding="utf-8")
+    (cfg.data_dir / "verify-report.md").write_text(md_report, encoding="utf-8")
+    lines = md_report.splitlines()
+    typer.echo(lines[2] if len(lines) > 2 else "Report escrito")
+    typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
+
+
+def _verify_audit(cfg: Config, executor: str | None, apply: list[Path]) -> None:
+    """The judge≠party audit mode of `verify` (`--audit`): export or apply.
+
+    Reads the aggregated records back from the `verify-report.json` PR-1 wrote.
+    With `--apply` it merges the auditor's decisions onto them and re-renders the
+    report (report-only, store untouched); without it, it exports an audit
+    worksheet for the consequential (FAIL/divergent) subset.
+    """
+    report_path = cfg.data_dir / "verify-report.json"
+    aggregated = load_report_records(report_path)
+    if apply:
+        audits: list[dict] = []
+        for path in apply:
+            audits.extend(import_audit_judgments(path))
+        _write_verify_report(cfg, *render_verify_report(merge_audit(aggregated, audits)))
+        return
+    chosen = _resolve_verify_executor(executor, cfg)
+    records = consequential_records(aggregated)
+    if not records:
+        typer.echo("No hay verdicts consecuentes (FAIL/divergentes) que auditar.")
+        return
+    worksheet = cfg.data_dir / "verify-audit-worksheet.json"
+    export_audit_worksheet(
+        records, load_store(cfg.items_path), worksheet, chosen, cfg.output_language
+    )
+    typer.echo(
+        f"{len(records)} verdicts consecuentes exportados a {worksheet}\n"
+        f"Rellena `audits` (auditor independiente, juez ≠ parte) y ejecuta:\n"
+        f"  xbrain verify --audit --apply {worksheet.name}"
+    )
+
+
 @app.command(name="verify")
 @_handle_cli_errors
 def verify_command(
@@ -1412,25 +1468,26 @@ def verify_command(
     apply: list[Path] = typer.Option(
         None, "--apply", help="Filled worksheet(s), one per judge — aggregated into a report"
     ),
+    audit: bool = typer.Option(
+        False,
+        "--audit",
+        help="Judge≠party audit of the consequential (FAIL/divergent) verdicts",
+    ),
 ) -> None:
     """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
     cfg = _config()
 
+    if audit:
+        _verify_audit(cfg, executor, apply)
+        return
+
     if apply:
         # Report-only: aggregate the N judges' passes; the store is not mutated.
         aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
-        json_report, md_report = render_verify_report(aggregated)
-        (cfg.data_dir / "verify-report.json").write_text(json_report, encoding="utf-8")
-        (cfg.data_dir / "verify-report.md").write_text(md_report, encoding="utf-8")
-        typer.echo(
-            md_report.splitlines()[2] if len(md_report.splitlines()) > 2 else "Report escrito"
-        )
-        typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
+        _write_verify_report(cfg, *render_verify_report(aggregated))
         return
 
-    chosen = executor or cfg.enrich_executor
-    if chosen not in ("manual", "claude-code"):
-        raise ValueError(f"Ejecutor {chosen!r} no soportado para verify — usa manual|claude-code.")
+    chosen = _resolve_verify_executor(executor, cfg)
     store = load_store(cfg.items_path)
     pairs = items_for_verification(store, parse_targets(target))
     if not pairs:

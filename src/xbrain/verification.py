@@ -249,11 +249,12 @@ def render_verify_report(aggregated: list[dict]) -> tuple[str, str]:
             continue  # the report leads with what needs a human; clean passes are in the JSON
         badge = {"FAIL": "❌", "REVIEW": "⚠️", "PASS": "✅"}[record["verdict"]]
         divergent = " · divergent" if record["divergent"] else ""
+        audited = " · audited" if record.get("audited") else ""
         lines.append(
             f"- {badge} **{record['verdict']}** `{record['target']}` "
             f"[{record['item_id']}] "
             f"(faithfulness {record['faithfulness']}, adherence {record['adherence']}, "
-            f"{record['n_judges']} judges{divergent})"
+            f"{record['n_judges']} judges{divergent}{audited})"
         )
         for flag in record["flags"]:
             lines.append(f"    - ⚑ {flag['issue']}: “{flag['claim']}”")

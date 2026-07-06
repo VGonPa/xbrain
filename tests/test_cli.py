@@ -1,11 +1,20 @@
 # tests/test_cli.py
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from xbrain.cli import app
-from xbrain.models import Author, Item, Link
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Link,
+    VideoFrame,
+)
 from xbrain.store import save_store
 
 runner = CliRunner()
@@ -2694,3 +2703,128 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
     assert "## Video digest" in note  # the transcript digest still renders
     assert "_media/42/frames" not in note  # but NO slide embed
     assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()
+
+
+def _verify_video_item(item_id: str = "7") -> Item:
+    """An enriched item with an x_video source — the shape `verify` audits."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="watch this",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="claude-code",
+            summary="The talk moved €150M in revenue.",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/v",
+                    title="A talk",
+                    text="the full transcript body about agents and revenue",
+                    has_speech=True,
+                    frames=[
+                        VideoFrame(
+                            timestamp=0.0, local_path="7/frames/0.png", description="A chart."
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+
+
+def _write_fail_report(tmp_path: Path) -> None:
+    """Seed a verify-report.json with one FAIL record (as PR-1's aggregate writes it)."""
+    report = {
+        "total": 1,
+        "counts": {"PASS": 0, "REVIEW": 0, "FAIL": 1},
+        "records": [
+            {
+                "item_id": "7",
+                "target": "summary",
+                "verdict": "FAIL",
+                "faithfulness": "FAIL",
+                "adherence": "PASS",
+                "divergent": False,
+                "n_judges": 3,
+                "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+            }
+        ],
+    }
+    (tmp_path / "data" / "verify-report.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_verify_audit_exports_consequential_worksheet(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    ws = tmp_path / "data" / "verify-audit-worksheet.json"
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    assert data["items"][0]["item_id"] == "7"
+    assert data["items"][0]["output"] == "The talk moved €150M in revenue."
+    assert "transcript body about agents" in data["items"][0]["source"]
+    assert data["items"][0]["current_verdict"] == "FAIL"
+    assert "CONFIRM" in data["audit_rubric"]
+
+
+def test_verify_audit_apply_revokes_and_flips_report(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+
+    ws = tmp_path / "data" / "audit.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {"claim": "€150M in revenue", "issue": "unsupported", "audit": "REVOKE"}
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert report["records"][0]["verdict"] == "PASS"
+    assert report["records"][0]["audited"] is True
+    assert report["counts"] == {"PASS": 1, "REVIEW": 0, "FAIL": 0}
+
+
+def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    (tmp_path / "data" / "verify-report.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "records": [
+                    {"item_id": "7", "target": "summary", "verdict": "PASS", "divergent": False}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "consecuentes" in result.output
+    assert not (tmp_path / "data" / "verify-audit-worksheet.json").exists()
