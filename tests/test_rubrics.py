@@ -131,3 +131,12 @@ def test_verify_rubric_loads_and_substitutes_language():
     assert "Spanish" in text
     assert "Faithfulness" in text
     assert "FAIL" in text
+
+
+def test_verify_audit_rubric_loads_and_substitutes_language():
+    """The audit rubric ships a `{language}` placeholder + names CONFIRM/REVOKE."""
+    text = load_rubric("verify-audit", language="Spanish")
+    assert "{language}" not in text
+    assert "Spanish" in text
+    assert "CONFIRM" in text
+    assert "REVOKE" in text

@@ -155,8 +155,27 @@ def _worst(verdicts: list[str]) -> str:
     return _ORDER_VERDICT[max((_VERDICT_ORDER.get(v, 0) for v in verdicts), default=0)]
 
 
+def flag_axis(flag: dict) -> str:
+    """Which axis a flag belongs to: `"adherence"` iff explicitly tagged so, else
+    `"faithfulness"`.
+
+    Defaulting an untagged flag to `faithfulness` is the SAFE choice: the audit
+    stage clears a faithfulness FAIL only when EVERY faithfulness flag is revoked,
+    so an untagged flag counts as faithfulness evidence and cannot be washed away
+    as if it were a soft adherence note.
+    """
+    return (
+        "adherence" if str(flag.get("axis", "")).strip().lower() == "adherence" else "faithfulness"
+    )
+
+
 def _union_flags(judgments: list[dict]) -> list[dict]:
-    """Every judge's flags, de-duplicated by `(claim, issue)`, in first-seen order."""
+    """Every judge's flags, de-duplicated by `(claim, issue)`, in first-seen order.
+
+    Each flag carries its `axis` (`faithfulness`|`adherence`) so the audit stage can
+    scope a revocation to the right axis (revoking an adherence note must never clear
+    a faithfulness FAIL).
+    """
     seen: set[tuple[str, str]] = set()
     flags: list[dict] = []
     for judgment in judgments:
@@ -166,8 +185,29 @@ def _union_flags(judgments: list[dict]) -> list[dict]:
             pair = (str(flag.get("claim")), str(flag.get("issue")))
             if pair not in seen:
                 seen.add(pair)
-                flags.append({"claim": flag.get("claim"), "issue": flag.get("issue")})
+                flags.append(
+                    {
+                        "claim": flag.get("claim"),
+                        "issue": flag.get("issue"),
+                        "axis": flag_axis(flag),
+                    }
+                )
     return flags
+
+
+def derive_verdict(faithfulness: str, adherence: str) -> str:
+    """The verdict implied by the two axes ALONE: FAIL if either axis fails, REVIEW on
+    a soft adherence issue, else PASS.
+
+    The shared deterministic core (mirrors `cv-guardrail._score_clusters`): both the
+    aggregate and the verifier-audit re-verdict derive from THIS function, so the
+    scoring is identical before and after an audit and cannot drift.
+    """
+    if faithfulness == "FAIL" or adherence == "FAIL":
+        return "FAIL"
+    if adherence == "REVIEW":
+        return "REVIEW"
+    return "PASS"
 
 
 def _group_verdict(faithfulness: str, adherence: str, verdicts: list[str]) -> str:
@@ -176,13 +216,10 @@ def _group_verdict(faithfulness: str, adherence: str, verdicts: list[str]) -> st
     A raw `verdict == "FAIL"` must sink the group even when the judge left the
     `faithfulness`/`adherence` axes at their lenient defaults — otherwise a
     FAIL-but-under-populated judgment would silently render as PASS, the worst
-    failure mode for a verification layer. Symmetric with the REVIEW clause.
+    failure mode for a verification layer. Built on the shared `derive_verdict` core
+    (axes) widened by the judges' own raw verdicts, so both stages agree.
     """
-    if faithfulness == "FAIL" or adherence == "FAIL" or "FAIL" in verdicts:
-        return "FAIL"
-    if adherence == "REVIEW" or "REVIEW" in verdicts:
-        return "REVIEW"
-    return "PASS"
+    return _worst([derive_verdict(faithfulness, adherence), *verdicts])
 
 
 def _verdict_of(judgment: dict, key: str, default: str = "PASS") -> str:
@@ -229,13 +266,77 @@ def aggregate_verify_judgments(judgment_sets: list[list[dict]]) -> list[dict]:
     return aggregated
 
 
-def render_verify_report(aggregated: list[dict]) -> tuple[str, str]:
-    """Render `(json_report, markdown_report)` from the aggregated verdicts."""
+def _render_flag(flag: dict) -> str:
+    """One flag line, appending the auditor's cited `reason` when present."""
+    reason = f" — {flag['reason']}" if flag.get("reason") else ""
+    return f"    - ⚑ {flag['issue']}: “{flag['claim']}”{reason}"
+
+
+def _render_record_lines(record: dict) -> list[str]:
+    """The badge line for one consequential record plus its (reason-annotated) flags."""
+    badge = {"FAIL": "❌", "REVIEW": "⚠️", "PASS": "✅"}[record["verdict"]]
+    divergent = " · divergent" if record["divergent"] else ""
+    audited = " · audited" if record.get("audited") else ""
+    header = (
+        f"- {badge} **{record['verdict']}** `{record['target']}` "
+        f"[{record['item_id']}] "
+        f"(faithfulness {record['faithfulness']}, adherence {record['adherence']}, "
+        f"{record['n_judges']} judges{divergent}{audited})"
+    )
+    return [header, *(_render_flag(flag) for flag in record["flags"])]
+
+
+def _render_audit_section(audit_log: dict) -> list[str]:
+    """The `## Audit` block: match counts, the mass-revocation guard, unmatched audits
+    and every audit-WASHED record (a FAIL/REVIEW the auditor lowered) so a wash never
+    hides in the clean bucket.
+    """
+    unmatched = audit_log.get("unmatched", [])
+    lines = [
+        "",
+        "## Audit",
+        f"{audit_log.get('matched', 0)}/{audit_log.get('supplied', 0)} audits matched"
+        + (f" · {len(unmatched)} unmatched" if unmatched else ""),
+    ]
+    if audit_log.get("mass_revocation_guard"):
+        lines.append(
+            "- 🛑 mass-revocation guard TRIPPED — revocations on FAIL records were "
+            "suppressed (kept FAIL); a human must review."
+        )
+    for washed in audit_log.get("washed", []):
+        lines.append(
+            f"- ✅ washed `{washed['target']}` [{washed['item_id']}] "
+            f"{washed['from']} → {washed['to']}"
+        )
+    for gate in audit_log.get("gated", []):
+        lines.append(
+            f"- ⏸ gated (low-confidence revoke, kept) `{gate['target']}` [{gate['item_id']}] "
+            f"“{gate['claim']}” (confidence {gate['confidence']})"
+        )
+    for miss in unmatched:
+        lines.append(f"- ⚠️ unmatched audit [{miss['item_id']}] `{miss['target']}` — not applied")
+    for anomaly in audit_log.get("anomalies", []):
+        lines.append(
+            f"- ❗ ANOMALY [{anomaly['item_id']}] `{anomaly['target']}` — verdict "
+            f"{anomaly['verdict']} still carries a confirmed faithfulness flag; investigate."
+        )
+    return lines
+
+
+def render_verify_report(aggregated: list[dict], audit_log: dict | None = None) -> tuple[str, str]:
+    """Render `(json_report, markdown_report)` from the aggregated verdicts.
+
+    When `audit_log` is supplied (the verifier-audit stage), an `## Audit` section is
+    appended surfacing match counts, the mass-revocation guard, unmatched audits and
+    every audit-washed record — so a lowered verdict is always visible.
+    """
     counts = {"PASS": 0, "REVIEW": 0, "FAIL": 0}
     for record in aggregated:
         counts[record["verdict"]] = counts.get(record["verdict"], 0) + 1
     total = len(aggregated)
     report = {"total": total, "counts": counts, "records": aggregated}
+    if audit_log is not None:
+        report["audit_log"] = audit_log
 
     lines = [
         "# Verify report",
@@ -245,18 +346,11 @@ def render_verify_report(aggregated: list[dict]) -> tuple[str, str]:
         "",
     ]
     for record in aggregated:
-        if record["verdict"] == "PASS" and not record["divergent"]:
+        if record["verdict"] == "PASS" and not record["divergent"] and not record.get("audited"):
             continue  # the report leads with what needs a human; clean passes are in the JSON
-        badge = {"FAIL": "❌", "REVIEW": "⚠️", "PASS": "✅"}[record["verdict"]]
-        divergent = " · divergent" if record["divergent"] else ""
-        lines.append(
-            f"- {badge} **{record['verdict']}** `{record['target']}` "
-            f"[{record['item_id']}] "
-            f"(faithfulness {record['faithfulness']}, adherence {record['adherence']}, "
-            f"{record['n_judges']} judges{divergent})"
-        )
-        for flag in record["flags"]:
-            lines.append(f"    - ⚑ {flag['issue']}: “{flag['claim']}”")
+        lines.extend(_render_record_lines(record))
     if counts["FAIL"] == 0 and counts["REVIEW"] == 0:
         lines.append("_No FAIL/REVIEW verdicts — the corpus passed._")
+    if audit_log is not None:
+        lines.extend(_render_audit_section(audit_log))
     return json.dumps(report, indent=2, ensure_ascii=False), "\n".join(lines) + "\n"
