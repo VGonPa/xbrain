@@ -97,9 +97,11 @@ loses data — just re-run it.
 ## Do I need an API key?
 
 No. The default execution mode (`vocab`/`enrich`/`topics`/`describe`) uses a
-**Claude Code session** — no key, no cost. `ANTHROPIC_API_KEY` is only for
-`--executor api` (unattended LLM runs) and cloud vision (`--vision-model opus`).
-`FIRECRAWL_API_KEY` is an optional fallback fetcher for JavaScript-heavy pages.
+**Claude Code session** — no key, no cost — and `video-digest`/`verify` run **only**
+on that keyless `claude-code` (or `manual`) track; they have no `api` track at all.
+`ANTHROPIC_API_KEY` is only for `--executor api` on the first four stages (unattended
+LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
+fallback fetcher for JavaScript-heavy pages.
 
 ## `video-digest` / `verify` say "no pending" or "nothing to verify"
 

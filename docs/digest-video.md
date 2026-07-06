@@ -84,8 +84,8 @@ to Tesla's early bet on proving what electric cars could actually do… (readabl
 <details>
 <summary>Frames + transcript</summary>
 
-> Uh, the goal with Tesla was really to try to show what electric cars can do,
-> because people had the wrong impression… (full transcript)
+Uh, the goal with Tesla was really to try to show what electric cars can do,
+because people had the wrong impression… (full transcript, rendered raw)
 
 ![[_media/1874.../frames/0.png]]
 > Slide: a line chart of Model S range vs. price, 2012–2015.
