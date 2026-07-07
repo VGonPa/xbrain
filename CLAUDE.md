@@ -99,7 +99,11 @@ generates an Obsidian wiki.
   manual|claude-code`, reuses `[enrich].executor`, no `api`); `--apply` accepts
   **multiple** worksheets (one per judge), aggregates them (faithfulness unforgiving:
   one judge's FAIL sinks the group), and writes `data/verify-report.{json,md}`.
-  **Never mutates the store, never snapshots** (mirrors `cv-guardrail`).
+  **Report-only by default — never mutates the store, never snapshots** (mirrors
+  `cv-guardrail`). **Opt-in `--write-verdicts`** (only with `--apply`) persists each
+  verdict onto `Item.verification` and auto-snapshots — see the badge bullet below;
+  **`--audit`** runs the verifier-audit judge≠party re-check over the FAIL/divergent
+  verdicts (`verification_audit.py`).
 - X Articles as blogposts — model seam (#39 PR1): an `x_article`
   `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
   body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
