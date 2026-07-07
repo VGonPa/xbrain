@@ -15,6 +15,9 @@ handle = "your_handle"
 #   "claude-code" - exports a worksheet a Claude Code session fills (no API cost) [default]
 #   "api"         - calls the Anthropic API (needs ANTHROPIC_API_KEY, pay-per-token)
 #   "manual"      - exports a worksheet to fill by hand
+# Also read by `xbrain video-digest` and `xbrain verify` — they have no config
+# section of their own. Those two run only the worksheet tracks
+# ("claude-code" / "manual"), never "api".
 executor = "claude-code"
 # Model used by the "api" executor. A cheap model for volume; a stronger one for quality.
 model = "claude-haiku-4-5-20251001"

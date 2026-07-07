@@ -97,9 +97,31 @@ loses data — just re-run it.
 ## Do I need an API key?
 
 No. The default execution mode (`vocab`/`enrich`/`topics`/`describe`) uses a
-**Claude Code session** — no key, no cost. `ANTHROPIC_API_KEY` is only for
-`--executor api` (unattended LLM runs) and cloud vision (`--vision-model opus`).
-`FIRECRAWL_API_KEY` is an optional fallback fetcher for JavaScript-heavy pages.
+**Claude Code session** — no key, no cost — and `video-digest`/`verify` run **only**
+on that keyless `claude-code` (or `manual`) track; they have no `api` track at all.
+`ANTHROPIC_API_KEY` is only for `--executor api` on the first four stages (unattended
+LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
+fallback fetcher for JavaScript-heavy pages.
+
+## `video-digest` / `verify` say "no pending" or "nothing to verify"
+
+Both are **worksheet** stages (like `enrich`): the first run *exports* a worksheet,
+you fill it, and a second `--apply` run consumes it. Common cases:
+
+- **`video-digest` → "No hay vídeos pendientes de digest."** Every video already has
+  a `digest`, or none has a transcript yet. Run `digest-video` first — a digest is a
+  synthesis *of* the transcript, so there is nothing to digest without one.
+- **`verify` → "No hay outputs que verificar."** There are no enrichment outputs for
+  the chosen `--target`. Run `enrich` (and, for `--target digest`, `video-digest`)
+  first — `verify` judges *existing* `summary` / `digest` / `topics`, it never
+  generates them.
+- **`--apply` did nothing / an empty report.** You applied the *exported* worksheet
+  without filling its `judgments` array. Fill it (Claude Code session or by hand)
+  between the export and the `--apply`. `verify --apply` takes **one worksheet per
+  judge** — pass several with repeated `--apply` flags to aggregate them.
+
+Both default to `[enrich].executor` and support only `--executor claude-code|manual`
+(no `api` track).
 
 ## Where's the source of truth? Can I delete the vault notes?
 

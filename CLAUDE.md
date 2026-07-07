@@ -47,12 +47,17 @@ generates an Obsidian wiki.
   fetch+transcribe, all get the source. No-speech videos attach with empty text +
   `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
   `x_video` source unless `--force`); destructive → auto-snapshot.
-- Video digest — pipeline integration (PR3): the attached `x_video` transcript
+- Video digest — pipeline integration (PR3, + #75): the attached `x_video` transcript
   flows through the **existing** `enrich → topics → generate` steps, no new stage.
-  `enrich` splices a `Video transcript:` block into the item prompt (skips
-  no-speech; caps at `TRANSCRIPT_CHAR_LIMIT`=12000 chars); `topics` folds a tighter
-  per-video excerpt (`TOPIC_TRANSCRIPT_CHAR_LIMIT`=2000) into the synthesis prompt;
-  `generate` renders a `## Video digest` section (or a one-line silent-video note).
+  `enrich` feeds the transcript (+ frame descriptions) into the item prompt (skips
+  no-speech). **The two tracks differ on length:** the `api` executor splices a
+  `Video transcript:` block capped at `TRANSCRIPT_CHAR_LIMIT`=12000 chars, while the
+  worksheet (`claude-code`/`manual`) track sends the **FULL untruncated** transcript
+  (`worksheet._video_transcript`) — a full-context agent judges it — plus a
+  `video_frame_descriptions` field (what the video SHOWS — the slide descriptions,
+  #75; the `api` track injects the same as a `Video frames:` block). `topics` folds a
+  tighter per-video excerpt (`TOPIC_TRANSCRIPT_CHAR_LIMIT`=2000) into the synthesis
+  prompt; `generate` renders a `## Video digest` section (or a one-line silent-video note).
   This is what fixes video items showing topic `—`. Re-enrichment trigger:
   `attach_transcript` bumps `content.fetched_at`, and `enrich` re-enriches any item
   whose `content.fetched_at > enriched.enriched_at`, so a transcript attached AFTER
@@ -74,6 +79,27 @@ generates an Obsidian wiki.
   downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
   videos are detected and the visual layer is skipped + logged (never a silent
   drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
+- Video digest — long-form synthesis (`video-digest`, #44 / PR #78): a **separate**
+  worksheet stage (not folded into `digest-video`) that reads the transcript + frame
+  descriptions and writes a readable long-form digest ("what it is · key points · why
+  it matters") to the `x_video` source's **additive `digest: str = ""`** field on
+  `ContentSourceSuccess` (`""` = "no digest yet", so every pre-digest record loads
+  unchanged). Worksheet flow like enrich (`--executor manual|claude-code`, reuses
+  `[enrich].executor`; NO `api` track, NO config section of its own); `--apply`
+  imports the filled worksheet, writes every `source.digest`, and **auto-snapshots**
+  (the apply branch is the one that mutates `items.json`; export only writes the
+  worksheet JSON). `generate` then renders the digest as the section HEADLINE,
+  demoting the raw transcript + frames into a collapsible `<details>`
+  (`i18n.Strings.video_evidence_header`); an empty `digest` falls back to the old
+  inline raw layout (back-compat).
+- Enrichment verification (`verify`, LLM-as-judge, #79 / PR #80): a **report-only**
+  QA stage — an ensemble of LLM judges scores each enrichment output (`summary`,
+  video `digest`, `topics`) for **faithfulness** (grounded in source?) + **adherence**
+  (follows rubric?). `--target summary|digest|topics|all`; worksheet flow (`--executor
+  manual|claude-code`, reuses `[enrich].executor`, no `api`); `--apply` accepts
+  **multiple** worksheets (one per judge), aggregates them (faithfulness unforgiving:
+  one judge's FAIL sinks the group), and writes `data/verify-report.{json,md}`.
+  **Never mutates the store, never snapshots** (mirrors `cv-guardrail`).
 - X Articles as blogposts — model seam (#39 PR1): an `x_article`
   `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
   body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
@@ -158,4 +184,6 @@ generates an Obsidian wiki.
   All are gitignored.
 
 ## Git workflow
-- This repo has only `main`: `feature-branch → PR → main`.
+- `develop` is the integration branch: `feature-branch → PR → develop`. Branch
+  from `develop` (never from `main`) and target every PR at `develop`.
+- `develop → main` only via PR — never merge or push directly to `main`.
