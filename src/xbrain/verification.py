@@ -194,28 +194,54 @@ def import_verify_fingerprints(paths: list[Path]) -> dict[tuple[str, str], str]:
 
     This is the plumbing that lets the writer store the JUDGED fingerprint instead of a
     write-time recompute (#79): the N judge copies all derive from one export, so their
-    `items` blocks carry the same fingerprints — first-seen wins. A missing/garbage
+    `items` blocks carry IDENTICAL fingerprints for each `(item, target)`. A missing/garbage
     fingerprint (an old worksheet without the field, or a hand-edited hash) is skipped, so
     the writer treats that `(item, target)` as unfingerprintable and does not badge it.
+
+    **Conflict is fail-safe, never silently first-seen.** If two applied worksheets stamp
+    DIFFERENT valid fingerprints for the same `(item, target)` — off-workflow (judges did not
+    all copy one export) — the key is DROPPED entirely, not resolved to whichever came first.
+    A dropped key becomes `fingerprint-missing` at write, so no verdict is persisted and
+    nothing is badged: we refuse to guess which stamp was the judged one.
     """
     fingerprints: dict[tuple[str, str], str] = {}
+    conflicting: set[tuple[str, str]] = set()
     for path in paths:
-        if not path.exists():
-            raise FileNotFoundError(f"Worksheet not found: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        items = data.get("items", []) if isinstance(data, dict) else []
-        if not isinstance(items, list):
-            continue
-        for entry in items:
-            if not isinstance(entry, dict):
+        for entry in _worksheet_items(path):
+            resolved = _entry_fingerprint(entry)
+            if resolved is None:
                 continue
-            fingerprint = entry.get("output_fingerprint")
-            key = (str(entry.get("item_id")), str(entry.get("target")))
-            if isinstance(fingerprint, str) and _FINGERPRINT_RE.match(fingerprint):
-                fingerprints.setdefault(key, fingerprint)
-            else:
-                logger.debug("worksheet entry %s carries no valid output_fingerprint", key)
+            key, fingerprint = resolved
+            existing = fingerprints.get(key)
+            if existing is not None and existing != fingerprint:
+                logger.debug("conflicting output_fingerprint stamps for %s — dropping key", key)
+                conflicting.add(key)
+            fingerprints.setdefault(key, fingerprint)
+    for key in conflicting:
+        del fingerprints[key]
     return fingerprints
+
+
+def _worksheet_items(path: Path) -> list:
+    """The `items` block of one worksheet, or `[]` when it is absent/misshapen."""
+    if not path.exists():
+        raise FileNotFoundError(f"Worksheet not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.get("items", []) if isinstance(data, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _entry_fingerprint(entry: object) -> tuple[tuple[str, str], str] | None:
+    """`((item_id, target), fingerprint)` for a worksheet entry carrying a valid stamped
+    fingerprint, else None (a non-dict entry or a missing/garbage hash)."""
+    if not isinstance(entry, dict):
+        return None
+    fingerprint = entry.get("output_fingerprint")
+    key = (str(entry.get("item_id")), str(entry.get("target")))
+    if isinstance(fingerprint, str) and _FINGERPRINT_RE.match(fingerprint):
+        return key, fingerprint
+    logger.debug("worksheet entry %s carries no valid output_fingerprint", key)
+    return None
 
 
 def _worst(verdicts: list[str]) -> str:

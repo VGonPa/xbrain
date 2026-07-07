@@ -336,6 +336,40 @@ def test_import_verify_fingerprints_round_trips_and_rejects_garbage(tmp_path):
     assert import_verify_fingerprints([garbage]) == {}
 
 
+def test_import_verify_fingerprints_drops_conflicting_stamps(tmp_path):
+    """Off-workflow: two worksheets stamp DIFFERENT fingerprints for the same (item, target).
+    The conflicting key is DROPPED (fail-safe → fingerprint-missing → not written), while a
+    key both agree on still resolves and writes (#79 divergent-stamp co-mingling)."""
+
+    def _ws(path, summary_fp: str) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {"item_id": "7", "target": "summary", "output_fingerprint": summary_fp},
+                        {"item_id": "7", "target": "digest", "output_fingerprint": "c" * 64},
+                    ]
+                }
+            )
+        )
+
+    ws_a, ws_b = tmp_path / "a.json", tmp_path / "b.json"
+    _ws(ws_a, "a" * 64)
+    _ws(ws_b, "b" * 64)  # summary stamp conflicts across worksheets; digest agrees
+
+    fingerprints = import_verify_fingerprints([ws_a, ws_b])
+    assert ("7", "summary") not in fingerprints  # conflict → dropped
+    assert fingerprints[("7", "digest")] == "c" * 64  # agreement → kept
+
+    # Consequence: the dropped key is not written (fingerprint-missing); the agreed key is.
+    store = {"7": _item()}
+    aggregated = [_j("FAIL", target="summary"), _j("FAIL", target="digest")]
+    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+    assert "summary" not in store["7"].verification  # dropped → no verdict, no badge
+    assert store["7"].verification["digest"].output_fingerprint == "c" * 64
+    assert ("7", "summary", "fingerprint-missing") in result.skipped
+
+
 def test_apply_verdicts_writes_verdict_with_the_judged_fingerprint():
     store = {"7": _item(summary="Judged summary.")}
     judged_fp = fingerprint_output(store["7"], "summary")
