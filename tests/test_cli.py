@@ -1,5 +1,6 @@
 # tests/test_cli.py
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,24 @@ from xbrain.models import (
 from xbrain.store import save_store
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Rich panel/box-drawing chrome (Unicode block U+2500–U+257F): ╭ ╮ ╰ ╯ ─ │ etc.
+_BOX_RE = re.compile("[─-╿]")
+
+
+def _plain_output(output: str) -> str:
+    """Normalize CliRunner output for substring assertions on Rich/Typer error boxes.
+
+    When color is enabled (as in CI, but not in pytest's captured output), Rich styles
+    each flag with the leading dash in its own ANSI span (``-`` + ``-apply``), so the
+    literal ``--apply`` never appears contiguously; the narrow box also wraps the message
+    onto several lines, with box borders (``│``) landing between words. Stripping the ANSI
+    escapes rejoins the split flag, dropping the box-drawing chrome and collapsing
+    whitespace rejoins words wrapped across lines — making the assertion fully
+    terminal-width independent.
+    """
+    return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
 
 
 def _setup_repo(tmp_path: Path, monkeypatch) -> Path:
@@ -2606,15 +2625,12 @@ def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
 
 def test_digest_video_vision_model_without_frames_errors(tmp_path: Path, monkeypatch):
     """`--vision-model` without `--frames` is a hard error, not a silent no-op."""
-    import re
-
     _setup_repo_with_vision(tmp_path, monkeypatch)
     save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["digest-video", "--ids", "42", "--vision-model", "opus"])
     assert result.exit_code == 2  # click usage error (BadParameter), robust across widths
-    # Strip ANSI + collapse Rich's width-dependent wrapping before matching the message.
-    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
-    assert "--frames" in plain
+    # Normalize ANSI flag-styling + Rich's width-dependent wrapping before matching.
+    assert "--frames" in _plain_output(result.output)
 
 
 def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatch):
@@ -3059,4 +3075,6 @@ def test_verify_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch)
     save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
     result = runner.invoke(app, ["verify", "--write-verdicts"])
     assert result.exit_code != 0
-    assert "--apply" in result.output
+    # Assert the code-controlled BadParameter message, normalized so the check survives
+    # Rich's ANSI flag-styling and 80-col box wrapping (see _plain_output).
+    assert "--write-verdicts requires --apply" in _plain_output(result.output)
