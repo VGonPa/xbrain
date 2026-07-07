@@ -16,18 +16,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 
 from xbrain.executors.api import _video_frame_descriptions
-from xbrain.models import Item, VerificationVerdict
+from xbrain.models import Item, Verdict, VerificationVerdict
 from xbrain.rubrics import load_rubric
 from xbrain.video_digest import _video_source
 from xbrain.worksheet import _article_text, _video_transcript
 
+logger = logging.getLogger(__name__)
+
 VerifyTarget = Literal["summary", "digest", "topics"]
 ALL_TARGETS: tuple[VerifyTarget, ...] = ("summary", "digest", "topics")
+
+# A stored/exported output fingerprint is a lowercase-hex sha256 (see `fingerprint_output`);
+# anything else in a filled worksheet is hand-edited garbage and is rejected, not trusted.
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # The generation rubric each target is judged against (a valid-but-wrong topic is
 # an adherence failure, so the topics judge reads the topics rubric).
@@ -68,17 +78,21 @@ def _output_for(item: Item, target: VerifyTarget) -> str | None:
 
 
 def fingerprint_output(item: Item, target: VerifyTarget) -> str | None:
-    """The sha256 hex of the item's CURRENT output text for `target`, or None when the
+    """The sha256 hex of the item's output text for `target` right now, or None when the
     output is absent.
 
-    This is the SINGLE canonicalization shared by the write path (`apply_verdicts_to_store`,
-    which stores it) and `generate._verdict_badge` (which recomputes it): a badge shows iff
-    the judged text is byte-identical to what a reader sees now. Hashing (not storing the
-    text) keeps `items.json` small and makes the staleness comparison exact — the moment the
-    summary/digest/topics output is re-generated, its fingerprint diverges and the stored
-    verdict is treated as stale. Not a security primitive (sha256 is used purely as a stable
-    content hash); it just needs to be collision-resistant enough that two different outputs
-    never share a fingerprint.
+    This is the SINGLE canonicalization shared by TWO callers: `export_verify_worksheet`,
+    which stamps each entry's fingerprint at export time (the fingerprint of the output the
+    judge actually sees — later threaded through the filled worksheet to the writer), and
+    `generate._verdict_badge`, which recomputes it against the CURRENT output. A badge shows
+    iff the judged text is byte-identical to what a reader sees now. The write path
+    (`apply_verdicts_to_store`) does NOT call this — it stores the export-time fingerprint
+    verbatim, so a regeneration between export and write can never bind a verdict to output
+    it never judged. Hashing (not storing the text) keeps `items.json` small and makes the
+    staleness comparison exact — the moment the summary/digest/topics output is re-generated,
+    its fingerprint diverges and the stored verdict is treated as stale. Not a security
+    primitive (sha256 is a stable content hash); it just needs to be collision-resistant
+    enough that two different outputs never share a fingerprint.
     """
     output = _output_for(item, target)
     if output is None:
@@ -146,6 +160,10 @@ def export_verify_worksheet(
                 "target": target,
                 "author": item.author.handle,
                 "output": _output_for(item, target),
+                # The fingerprint of the EXACT output shown to the judge, captured here so the
+                # verdict binds to the JUDGED text, not to whatever the store holds at write
+                # time (#79). Threaded through the filled worksheet to `apply_verdicts_to_store`.
+                "output_fingerprint": fingerprint_output(item, target),
                 "source": _source_text(item),
                 "generation_rubric": load_rubric(_TARGET_RUBRIC[target], language=output_language),
             }
@@ -168,6 +186,36 @@ def import_verify_judgments(path: Path) -> list[dict]:
     if not isinstance(judgments, list):
         raise ValueError("worksheet `judgments` must be a list")
     return judgments
+
+
+def import_verify_fingerprints(paths: list[Path]) -> dict[tuple[str, str], str]:
+    """Map every `(item_id, target)` to the fingerprint of the output that was JUDGED, read
+    from the worksheet(s) `items` block (stamped by `export_verify_worksheet`).
+
+    This is the plumbing that lets the writer store the JUDGED fingerprint instead of a
+    write-time recompute (#79): the N judge copies all derive from one export, so their
+    `items` blocks carry the same fingerprints — first-seen wins. A missing/garbage
+    fingerprint (an old worksheet without the field, or a hand-edited hash) is skipped, so
+    the writer treats that `(item, target)` as unfingerprintable and does not badge it.
+    """
+    fingerprints: dict[tuple[str, str], str] = {}
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Worksheet not found: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        items = data.get("items", []) if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            continue
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            fingerprint = entry.get("output_fingerprint")
+            key = (str(entry.get("item_id")), str(entry.get("target")))
+            if isinstance(fingerprint, str) and _FINGERPRINT_RE.match(fingerprint):
+                fingerprints.setdefault(key, fingerprint)
+            else:
+                logger.debug("worksheet entry %s carries no valid output_fingerprint", key)
+    return fingerprints
 
 
 def _worst(verdicts: list[str]) -> str:
@@ -201,6 +249,7 @@ def _union_flags(judgments: list[dict]) -> list[dict]:
     for judgment in judgments:
         for flag in judgment.get("flags") or []:
             if not isinstance(flag, dict):
+                logger.debug("skipping non-dict flag in judgment: %r", flag)
                 continue  # a malformed judge may emit a bare string flag — skip, don't crash
             pair = (str(flag.get("claim")), str(flag.get("issue")))
             if pair not in seen:
@@ -278,6 +327,7 @@ def aggregate_verify_judgments(judgment_sets: list[list[dict]]) -> list[dict]:
     for judgments in judgment_sets:
         for judgment in judgments:
             if not isinstance(judgment, dict):
+                logger.debug("skipping non-dict judgment in worksheet: %r", judgment)
                 continue  # a malformed judge worksheet may hold a non-object — skip it
             key = (str(judgment.get("item_id")), str(judgment.get("target")))
             groups.setdefault(key, []).append(judgment)
@@ -384,38 +434,111 @@ def _flag_issues(flags: list) -> list[str]:
     for flag in flags:
         if isinstance(flag, dict) and flag.get("issue"):
             issues.append(str(flag["issue"]))
+        else:
+            logger.debug("skipping flag with no issue label: %r", flag)
     return issues
 
 
-def apply_verdicts_to_store(store: dict[str, Item], aggregated: list[dict]) -> int:
-    """Persist each aggregated verdict onto its item as a `VerificationVerdict`, keyed by
-    target, fingerprinting the item's CURRENT output (opt-in `verify --write-verdicts`).
+def _axis(value: object) -> Verdict:
+    """Coerce an aggregated axis value to a valid `Verdict`, defaulting to PASS on anything
+    unexpected — so a malformed record downgrades gracefully instead of crashing the typed
+    `VerificationVerdict` construction."""
+    normalized = str(value).strip().upper()
+    return cast(Verdict, normalized) if normalized in _VERDICT_ORDER else "PASS"
 
-    Backward-compatible and defensive: a record is SKIPPED (never crashes the write) when
-    it is not a dict, its item is gone from the store, its target is not a known
-    `VerifyTarget`, its verdict is not PASS/REVIEW/FAIL, or its output is now absent
-    (nothing to fingerprint or badge). Mutates `store` in place — the caller snapshots +
-    saves. Returns the number of verdicts written.
+
+@dataclass(frozen=True)
+class VerdictWriteResult:
+    """The outcome of an opt-in `--write-verdicts` pass: how many verdicts were persisted,
+    and every record that was SKIPPED with its reason — so a dropped FAIL is never silent."""
+
+    written: int
+    skipped: list[tuple[str, str, str]] = field(default_factory=list)  # (item_id, target, reason)
+
+    @property
+    def attempted(self) -> int:
+        return self.written + len(self.skipped)
+
+    def summary(self) -> str:
+        """A one-line human summary: written / attempted, and the skip reasons tallied."""
+        if not self.skipped:
+            return f"{self.written} verdicts escritos"
+        tally = Counter(reason for _, _, reason in self.skipped)
+        detail = ", ".join(f"{count} {reason}" for reason, count in sorted(tally.items()))
+        return (
+            f"{self.written} de {self.attempted} verdicts escritos "
+            f"({len(self.skipped)} omitidos: {detail})"
+        )
+
+
+def _verdict_skip_reason(
+    record: object, store: dict[str, Item], fingerprints: dict[tuple[str, str], str]
+) -> str | None:
+    """Why this aggregated record cannot be written as a verdict, or None if it can.
+
+    The judged fingerprint MUST come from `fingerprints` (stamped at export) — a record with
+    no such fingerprint is `fingerprint-missing`, never silently re-fingerprinted against the
+    live store (that is the exact bug this plumbing closes, #79).
+    """
+    if not isinstance(record, dict):
+        return "malformed-record"
+    item_id = str(record.get("item_id"))
+    target = str(record.get("target"))
+    if item_id not in store:
+        return "item-gone"
+    if target not in ALL_TARGETS:
+        return "bad-target"
+    if _verdict_of(record, "verdict", "") not in _VERDICT_ORDER:
+        return "bad-verdict"
+    fingerprint = fingerprints.get((item_id, target))
+    if fingerprint is None:
+        return "fingerprint-missing"
+    if not _FINGERPRINT_RE.match(fingerprint):
+        return "fingerprint-invalid"
+    return None
+
+
+def _build_verdict(record: dict, output_fingerprint: str) -> VerificationVerdict:
+    """Assemble one `VerificationVerdict` from an aggregated record + its JUDGED fingerprint."""
+    return VerificationVerdict(
+        verdict=cast(Verdict, _verdict_of(record, "verdict")),
+        faithfulness=_axis(record.get("faithfulness")),
+        adherence=_axis(record.get("adherence")),
+        output_fingerprint=output_fingerprint,
+        verified_at=datetime.now(timezone.utc),
+        flags=_flag_issues(record.get("flags") or []),
+    )
+
+
+def apply_verdicts_to_store(
+    store: dict[str, Item],
+    aggregated: list[dict],
+    fingerprints: dict[tuple[str, str], str],
+) -> VerdictWriteResult:
+    """Persist each aggregated verdict onto its item as a `VerificationVerdict`, keyed by
+    target, storing the JUDGED output fingerprint from `fingerprints` (opt-in
+    `verify --write-verdicts`).
+
+    The stored `output_fingerprint` is the one stamped at worksheet export (threaded here via
+    `import_verify_fingerprints`), NOT a write-time recompute against the live store — so a
+    regeneration between export and write cannot bind a verdict to output it never judged
+    (#79). Backward-compatible and defensive: a record is SKIPPED (never crashes the write,
+    never silently dropped) when it is not a dict, its item is gone from the store, its target
+    is unknown, its verdict is not PASS/REVIEW/FAIL, or it has no valid judged fingerprint —
+    each reason is tallied on the returned `VerdictWriteResult`. Mutates `store` in place; the
+    caller snapshots + saves.
     """
     written = 0
+    skipped: list[tuple[str, str, str]] = []
     for record in aggregated:
-        if not isinstance(record, dict):
+        reason = _verdict_skip_reason(record, store, fingerprints)
+        if reason is not None:
+            as_dict = record if isinstance(record, dict) else {}
+            skipped.append((str(as_dict.get("item_id")), str(as_dict.get("target")), reason))
             continue
-        item = store.get(str(record.get("item_id")))
-        target = str(record.get("target"))
-        verdict = str(record.get("verdict", "")).strip().upper()
-        if item is None or target not in ALL_TARGETS or verdict not in _VERDICT_ORDER:
-            continue
-        fingerprint = fingerprint_output(item, cast(VerifyTarget, target))
-        if fingerprint is None:
-            continue  # the output vanished since it was judged — nothing to badge
-        item.verification[target] = VerificationVerdict(
-            verdict=cast(Literal["PASS", "REVIEW", "FAIL"], verdict),
-            faithfulness=str(record.get("faithfulness", "PASS")),
-            adherence=str(record.get("adherence", "PASS")),
-            output_fingerprint=fingerprint,
-            verified_at=datetime.now(timezone.utc),
-            flags=_flag_issues(record.get("flags") or []),
+        item_id, target = str(record["item_id"]), str(record["target"])
+        store[item_id].verification[target] = _build_verdict(
+            record, fingerprints[(item_id, target)]
         )
         written += 1
-    return written
+    return VerdictWriteResult(written=written, skipped=skipped)

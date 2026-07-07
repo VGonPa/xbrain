@@ -235,7 +235,9 @@ def _verdict_badge(item: Item, target: str, strings: Strings) -> str | None:
       silently skipped, so an output fixed after a FAIL never shows a ❌, AND
     - the verdict is FAIL or REVIEW (a PASS renders no badge, keeping the note clean).
 
-    The leading flag issue is appended when present (`❌ **Verification: FAIL** — <issue>`).
+    The leading flag issue is appended when present (`❌ **Verification: FAIL** — <issue>`),
+    with any internal newline collapsed to a space so a multi-line issue can't break out of
+    the single-line `> …` blockquote (mirrors `_slide_embed_lines`' caption handling).
     A verdict stored under an unknown target is defensively ignored.
     """
     if target not in ALL_TARGETS:
@@ -247,7 +249,7 @@ def _verdict_badge(item: Item, target: str, strings: Strings) -> str | None:
         return None  # stale: the judged output changed since the verdict was stored
     label = strings.verify_badge_fail if verdict.verdict == "FAIL" else strings.verify_badge_review
     issue = next((flag for flag in verdict.flags if flag), None)
-    suffix = f" — {issue}" if issue else ""
+    suffix = f" — {' '.join(issue.splitlines())}" if issue else ""
     return f"> {_VERDICT_BADGE_EMOJI[verdict.verdict]} **{label}**{suffix}"
 
 

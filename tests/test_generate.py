@@ -1335,3 +1335,47 @@ def test_generate_spanish_badge_label_is_localized(tmp_path: Path):
     generate({item.id: item}, tmp_path, output_language="Spanish")
     body = _note_body(tmp_path)
     assert "Verificación: FALLA" in body
+
+
+def test_generate_badge_collapses_newline_in_flag_issue(tmp_path: Path):
+    """A multi-line flag issue must not break out of the single-line `> …` blockquote —
+    internal newlines are collapsed to spaces (mirrors the frame-caption invariant)."""
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["line one\nline two"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    badge_line = next(line for line in body.splitlines() if "Verification: FAIL" in line)
+    assert badge_line.startswith(">")  # still one blockquote line
+    assert "line one line two" in badge_line
+
+
+def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
+    """End-to-end (#79): a FAIL judged on summary "A", the summary regenerated to "B" BEFORE
+    `--write-verdicts`, must never badge "B" — the stored (judged) fingerprint is of "A", so
+    `generate` on "B" finds a mismatch. Uses the real write path with a judged fingerprint."""
+    from xbrain.verification import apply_verdicts_to_store, fingerprint_output
+
+    item = _badge_item(summary="A - judged and FAILED.")
+    judged_fp = fingerprint_output(item, "summary")
+    item.enriched.summary = "B - fixed before the write."  # regenerated in the window
+    store = {item.id: item}
+    result = apply_verdicts_to_store(
+        store,
+        [
+            {
+                "item_id": item.id,
+                "target": "summary",
+                "verdict": "FAIL",
+                "faithfulness": "FAIL",
+                "adherence": "PASS",
+                "flags": [],
+            }
+        ],
+        {(item.id, "summary"): judged_fp},
+    )
+    assert result.written == 1
+    assert store[item.id].verification["summary"].output_fingerprint == judged_fp
+    generate(store, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body and "Verification: FAIL" not in body
+    assert "B - fixed before the write." in body  # the current output still renders

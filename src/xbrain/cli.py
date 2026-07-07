@@ -91,6 +91,7 @@ from xbrain.verification import (
     aggregate_verify_judgments,
     apply_verdicts_to_store,
     export_verify_worksheet,
+    import_verify_fingerprints,
     import_verify_judgments,
     items_for_verification,
     parse_targets,
@@ -1427,19 +1428,22 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
     typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
 
 
-def _verify_write_verdicts(cfg: Config, aggregated: list[dict]) -> None:
+def _verify_write_verdicts(
+    cfg: Config, aggregated: list[dict], fingerprints: dict[tuple[str, str], str]
+) -> None:
     """Opt-in write path for `verify --apply --write-verdicts`: persist each aggregated
-    verdict onto its item (with a fingerprint of the CURRENT output), so `generate` can
-    badge a still-current FAIL/REVIEW.
+    verdict onto its item with the JUDGED output fingerprint (`fingerprints`, stamped at
+    export), so `generate` can badge a still-current FAIL/REVIEW.
 
     Mutates `items.json`, so it auto-snapshots `data/` first (label
-    `pre-verify-write-verdicts`) — undoable with `xbrain snapshot restore`.
+    `pre-verify-write-verdicts`) — undoable with `xbrain snapshot restore`. Echoes the
+    written/skipped tally so a dropped verdict is never silent.
     """
     _auto_snapshot(cfg, "verify-write-verdicts")
     store = load_store(cfg.items_path)
-    written = apply_verdicts_to_store(store, aggregated)
+    result = apply_verdicts_to_store(store, aggregated, fingerprints)
     save_store(store, cfg.items_path)
-    typer.echo(f"Verdicts escritos en {written} outputs de {cfg.items_path}")
+    typer.echo(f"{result.summary()} → {cfg.items_path}")
 
 
 def _verify_audit_apply(
@@ -1557,7 +1561,9 @@ def verify_command(
         aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
         _write_verify_report(cfg, *render_verify_report(aggregated))
         if write_verdicts:
-            _verify_write_verdicts(cfg, aggregated)
+            # The JUDGED fingerprints come from the worksheet `items` block (stamped at
+            # export), so a verdict binds to the output the judge saw — never a live recompute.
+            _verify_write_verdicts(cfg, aggregated, import_verify_fingerprints(apply))
         return
 
     chosen = _resolve_verify_executor(executor, cfg)

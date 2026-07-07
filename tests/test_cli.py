@@ -2964,11 +2964,39 @@ def _write_judge_worksheet(tmp_path: Path, verdict: str = "FAIL") -> Path:
     return ws
 
 
+def _export_summary_worksheet(tmp_path: Path) -> Path:
+    """Run the REAL `verify` summary export (stamps each entry's judged fingerprint) and
+    return the worksheet path — the faithful input to `--write-verdicts`."""
+    result = runner.invoke(app, ["verify", "--target", "summary"])
+    assert result.exit_code == 0, result.output
+    return tmp_path / "data" / "verify-worksheet.json"
+
+
+def _fill_summary_judgment(ws: Path, verdict: str = "FAIL") -> None:
+    """Inject one judge's judgment into an exported worksheet, PRESERVING its `items` block
+    (which carries the export-time fingerprints)."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": "7",
+            "target": "summary",
+            "verdict": verdict,
+            "faithfulness": "FAIL" if verdict == "FAIL" else "PASS",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}]
+            if verdict == "FAIL"
+            else [],
+        }
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
 def test_verify_apply_write_verdicts_persists_verdict_and_snapshots(tmp_path: Path, monkeypatch):
     _setup_repo(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store({"7": _verify_video_item("7")}, items_path)
-    ws = _write_judge_worksheet(tmp_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
 
     result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
     assert result.exit_code == 0, result.output
@@ -2981,6 +3009,35 @@ def test_verify_apply_write_verdicts_persists_verdict_and_snapshots(tmp_path: Pa
     # The write path snapshots data/ first (mutates items.json).
     snapshots = list((tmp_path / "data" / "snapshots").iterdir())
     assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
+
+
+def test_verify_write_verdicts_binds_to_judged_output_not_live_store(tmp_path: Path, monkeypatch):
+    """#79 headline at the CLI: the summary is regenerated BETWEEN export/judge and
+    `--write-verdicts`; the stored fingerprint must be the JUDGED one ("A"), never a recompute
+    of the live store ("B") — so `generate` on "B" later finds a mismatch and shows no badge."""
+    import hashlib
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    judged, regenerated = "A - the judged summary.", "B - regenerated before the write."
+    item = _verify_video_item("7")
+    item.enriched.summary = judged
+    save_store({"7": item}, items_path)
+    ws = _export_summary_worksheet(tmp_path)  # stamps fp of the judged summary
+    _fill_summary_judgment(ws)
+
+    # Regenerate the summary AFTER export/judge, BEFORE the write.
+    item.enriched.summary = regenerated
+    save_store({"7": item}, items_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    fp = json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"]["summary"][
+        "output_fingerprint"
+    ]
+    assert fp == hashlib.sha256(judged.encode("utf-8")).hexdigest()  # the JUDGED output
+    assert fp != hashlib.sha256(regenerated.encode("utf-8")).hexdigest()  # never the live one
 
 
 def test_verify_apply_default_is_report_only_and_does_not_write(tmp_path: Path, monkeypatch):
