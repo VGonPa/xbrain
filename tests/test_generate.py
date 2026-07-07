@@ -1211,3 +1211,171 @@ def test_article_blocks_lines_strips_baked_separator(tmp_path: Path):
     # Every rendered line is a single physical line (no internal newline that
     # would desync the `"\n".join` in `_render_note`).
     assert all("\n" not in line for line in lines)
+
+
+# ----------------------------------------------------- verification badges (#79, staleness-aware)
+
+
+def _badge_item(item_id: str = "9", *, summary: str = "A crisp summary.") -> Item:
+    """An enriched (non-video) item for verification-badge tests."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="a tweet",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="api",
+            summary=summary,
+            primary_topic="ai-coding",
+            topics=["ai-coding", "software-engineering"],
+        ),
+    )
+
+
+def _stamp(item: Item, target: str, verdict: str, *, flags: list[str] | None = None) -> None:
+    """Stamp a CURRENT verification verdict (matching fingerprint) onto `item`."""
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import fingerprint_output
+
+    fp = fingerprint_output(item, target)
+    assert fp is not None
+    item.verification[target] = VerificationVerdict(
+        verdict=verdict,
+        faithfulness="FAIL" if verdict == "FAIL" else "PASS",
+        adherence="REVIEW" if verdict == "REVIEW" else "PASS",
+        output_fingerprint=fp,
+        verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        flags=flags or [],
+    )
+
+
+def _note_body(tmp_path: Path) -> str:
+    return next((tmp_path / "items").glob("*.md")).read_text(encoding="utf-8")
+
+
+def test_generate_badges_a_current_summary_fail(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" in body
+    assert "Verification: FAIL" in body
+    assert "unsupported number" in body
+
+
+def test_generate_badges_a_current_review_with_warning_emoji(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "REVIEW")
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "⚠️" in body
+    assert "Verification: REVIEW" in body
+
+
+def test_generate_does_not_badge_a_stale_verdict(tmp_path: Path):
+    """THE core correctness test: a verdict stored against the OLD summary is silently
+    NOT badged once the summary is re-generated (fingerprint no longer matches) — a fixed
+    output never shows a ❌."""
+    item = _badge_item(summary="Original summary that FAILED.")
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+    # The summary is re-generated (fixed) AFTER the verdict was stored.
+    item.enriched.summary = "Corrected, faithful summary."
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+    assert "Corrected, faithful summary." in body  # the current output still renders
+
+
+def test_generate_does_not_badge_a_pass(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "PASS")
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "Verification:" not in body
+
+
+def test_generate_legacy_item_without_verification_renders_no_badge(tmp_path: Path):
+    item = _badge_item()
+    assert item.verification == {}
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "Verification:" not in body
+    assert "A crisp summary." in body
+
+
+def test_generate_badges_topics_verdict(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "topics", "FAIL", flags=["wrong topic"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "Verification: FAIL" in body
+    assert "wrong topic" in body
+
+
+def test_generate_badges_digest_verdict_near_video_header(tmp_path: Path):
+    item = _video_item(item_id="12", text="Transcript body.", digest="A long readable digest.")
+    _stamp(item, "digest", "FAIL", flags=["hallucinated claim"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    header_idx = body.index("## Video digest")
+    badge_idx = body.index("Verification: FAIL")
+    assert badge_idx > header_idx
+    # The badge sits right by the header, above the digest body.
+    assert badge_idx < body.index("A long readable digest.")
+
+
+def test_generate_spanish_badge_label_is_localized(tmp_path: Path):
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["número no soportado"])
+    generate({item.id: item}, tmp_path, output_language="Spanish")
+    body = _note_body(tmp_path)
+    assert "Verificación: FALLA" in body
+
+
+def test_generate_badge_collapses_newline_in_flag_issue(tmp_path: Path):
+    """A multi-line flag issue must not break out of the single-line `> …` blockquote —
+    internal newlines are collapsed to spaces (mirrors the frame-caption invariant)."""
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["line one\nline two"])
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    badge_line = next(line for line in body.splitlines() if "Verification: FAIL" in line)
+    assert badge_line.startswith(">")  # still one blockquote line
+    assert "line one line two" in badge_line
+
+
+def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
+    """End-to-end (#79): a FAIL judged on summary "A", the summary regenerated to "B" BEFORE
+    `--write-verdicts`, must never badge "B" — the stored (judged) fingerprint is of "A", so
+    `generate` on "B" finds a mismatch. Uses the real write path with a judged fingerprint."""
+    from xbrain.verification import apply_verdicts_to_store, fingerprint_output
+
+    item = _badge_item(summary="A - judged and FAILED.")
+    judged_fp = fingerprint_output(item, "summary")
+    item.enriched.summary = "B - fixed before the write."  # regenerated in the window
+    store = {item.id: item}
+    result = apply_verdicts_to_store(
+        store,
+        [
+            {
+                "item_id": item.id,
+                "target": "summary",
+                "verdict": "FAIL",
+                "faithfulness": "FAIL",
+                "adherence": "PASS",
+                "flags": [],
+            }
+        ],
+        {(item.id, "summary"): judged_fp},
+    )
+    assert result.written == 1
+    assert store[item.id].verification["summary"].output_fingerprint == judged_fp
+    generate(store, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body and "Verification: FAIL" not in body
+    assert "B - fixed before the write." in body  # the current output still renders

@@ -832,6 +832,51 @@ class Enrichment(BaseModel):
     user_notes: str | None = None
 
 
+# The three-way verification verdict shared by `verdict` and the two axes. A single
+# alias keeps them in lockstep and rejects a garbage value at load — see `VerificationVerdict`.
+Verdict = Literal["PASS", "REVIEW", "FAIL"]
+
+
+class VerificationVerdict(BaseModel):
+    """A stored per-target verification verdict for an item — opt-in, written by
+    `xbrain verify --apply --write-verdicts` (#79), so `generate` can badge it.
+
+    STALENESS-AWARENESS lives in `output_fingerprint`: the sha256 hex of the EXACT
+    output text that was JUDGED (the `summary` / `topics` string, or the `x_video`
+    `digest`). It is captured at worksheet-**export** time (`export_verify_worksheet`
+    stamps it) and threaded through the filled worksheet to the writer — it is NEVER a
+    write-time recompute against the live store, so a regeneration in the
+    export→judge→write window cannot bind a verdict to output it never saw. `generate`
+    recomputes the CURRENT output's fingerprint and renders the badge only when it
+    matches — a verdict for an output re-generated since (a different fingerprint) is
+    silently stale and never badged, so an output fixed after a FAIL never shows a ❌.
+    The single canonicalization is `verification.fingerprint_output`, shared by the
+    export stamp and `generate`'s read. The field is pattern-constrained to a 64-char
+    lowercase-hex sha256 so a hand-edited/garbage hash is rejected at load.
+
+    Additive + backward-compatible: this rides on `Item.verification`, a map keyed by
+    target that defaults to `{}` — every legacy item (no `verification` key) loads
+    unchanged. `verdict` is the PASS/REVIEW/FAIL enum; `faithfulness`/`adherence` are
+    the two axes (same `Verdict` enum) carried for at-a-glance context, mirroring the
+    aggregated record shape. `flags` are the concise judge/auditor issue labels
+    (worst-first); the badge surfaces the leading one. `verified_at` MUST be
+    timezone-aware (UTC) — the same contract as every other persisted instant.
+    """
+
+    verdict: Verdict
+    faithfulness: Verdict = "PASS"
+    adherence: Verdict = "PASS"
+    output_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_at: datetime
+    flags: list[str] = Field(default_factory=list)
+
+    @field_validator("verified_at")
+    @classmethod
+    def _validate_verified_at(cls, value: datetime) -> datetime:
+        _ = cls  # required by @field_validator+@classmethod; placate vulture
+        return _require_utc_aware("verified_at", value)
+
+
 class Topic(BaseModel):
     """One entry of the induced topic vocabulary (data/vocab.yaml)."""
 
@@ -870,6 +915,12 @@ class Item(BaseModel):
     thread: ThreadInfo | None = None
     content: Content | None = None
     enriched: Enrichment | None = None
+    # Per-target verification verdicts (keyed by target: "summary"|"digest"|"topics"),
+    # written opt-in by `xbrain verify --apply --write-verdicts` (#79). Additive +
+    # backward-compatible: a legacy item has no `verification` key and defaults to `{}`.
+    # Each verdict carries a fingerprint of the judged output so `generate` badges only a
+    # verdict still current for the output a reader sees (see `VerificationVerdict`).
+    verification: dict[str, VerificationVerdict] = Field(default_factory=dict)
     bookmark_folder: str | None = None
 
 

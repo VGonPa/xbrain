@@ -131,6 +131,22 @@ generates an Obsidian wiki.
   `_mirror_file`, keyed by the STORED `local_path` (no per-source index recompute). An
   `x_article` with empty `blocks` (trafilatura fallback / pre-#39) renders the plain
   `source.text` — byte-unchanged, no regression. Deterministic + regen-stable.
+- Verification badge — staleness-aware (#79, follow-up of the verification layer): opt-in
+  `verify --apply --write-verdicts` persists each verdict onto the **additive** `Item.verification`
+  field (`dict[str, VerificationVerdict]` keyed by target, defaults `{}` so legacy items load
+  unchanged), each carrying a **sha256 `output_fingerprint` of the exact judged text** +
+  `verified_at`; the write path auto-snapshots (`pre-verify-write-verdicts`) and echoes a
+  written/skipped tally. Default `verify` stays report-only. **The judged fingerprint is stamped
+  at worksheet EXPORT** (`export_verify_worksheet`) and threaded through the filled worksheet to
+  the writer (`import_verify_fingerprints` → `apply_verdicts_to_store` stores it verbatim) —
+  NEVER a write-time recompute against the live store, so a regen in the export→judge→write
+  window can't bind a verdict to output it never judged. `generate._verdict_badge` recomputes
+  `verification.fingerprint_output` on the item's CURRENT output and renders a localised badge
+  (❌ FAIL / ⚠️ REVIEW; PASS unbadged) **only when it matches the stored fingerprint** — a STALE
+  verdict (output re-generated in EITHER window) is silently NOT badged, so a fixed output never
+  shows a ❌. `fingerprint_output` is the single canonicalization shared by the export stamp + the
+  reader; `verdict`/`faithfulness`/`adherence` are a shared `Verdict` Literal and
+  `output_fingerprint` is `Field(pattern=...)`-hardened; labels via `i18n.Strings`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

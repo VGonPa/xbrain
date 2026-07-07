@@ -45,7 +45,17 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
         "video_digest_header",
         "silent_video",
         "video_evidence_header",
+        "verify_badge_fail",
+        "verify_badge_review",
     }
+
+
+def test_verify_badge_strings_present_in_every_language() -> None:
+    """The #79 verification-badge labels must exist in every supported language."""
+    for language in SUPPORTED_LANGUAGES:
+        s = strings_for(language)
+        assert s.verify_badge_fail
+        assert s.verify_badge_review
 
 
 def test_video_digest_strings_present_in_every_language() -> None:

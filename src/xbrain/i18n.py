@@ -33,6 +33,8 @@ class Strings:
     video_digest_header: str  # "Resumen del vídeo" / "Video digest" (#44)
     silent_video: str  # the one-line no-speech marker (#44)
     video_evidence_header: str  # collapsible label for the raw frames + transcript
+    verify_badge_fail: str  # "Verification: FAIL" / "Verificación: FALLA" (#79 badge)
+    verify_badge_review: str  # "Verification: REVIEW" / "Verificación: REVISAR" (#79 badge)
 
 
 _STRINGS: dict[str, Strings] = {
@@ -45,6 +47,8 @@ _STRINGS: dict[str, Strings] = {
         video_digest_header="Video digest",
         silent_video="🔇 Silent video (no speech detected).",
         video_evidence_header="Frames + transcript",
+        verify_badge_fail="Verification: FAIL",
+        verify_badge_review="Verification: REVIEW",
     ),
     "Spanish": Strings(
         topics_label="Temas",
@@ -55,6 +59,8 @@ _STRINGS: dict[str, Strings] = {
         video_digest_header="Resumen del vídeo",
         silent_video="🔇 Vídeo sin voz (sin transcripción).",
         video_evidence_header="Frames y transcripción",
+        verify_badge_fail="Verificación: FALLA",
+        verify_badge_review="Verificación: REVISAR",
     ),
 }
 

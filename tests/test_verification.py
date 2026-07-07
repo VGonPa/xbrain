@@ -15,7 +15,10 @@ from xbrain.models import (
 from xbrain.verification import (
     ALL_TARGETS,
     aggregate_verify_judgments,
+    apply_verdicts_to_store,
     export_verify_worksheet,
+    fingerprint_output,
+    import_verify_fingerprints,
     import_verify_judgments,
     items_for_verification,
     parse_targets,
@@ -287,3 +290,133 @@ def test_render_report_all_pass_says_so():
     aggregated = aggregate_verify_judgments([[_j("PASS", item_id="1")]])
     _, md = render_verify_report(aggregated)
     assert "passed" in md.lower()
+
+
+# ------------------------------------------------- fingerprint + write-verdicts (#79 badge)
+
+
+def test_fingerprint_output_is_deterministic_and_none_when_absent():
+    item = _item(summary="A crisp summary.")
+    fp1 = fingerprint_output(item, "summary")
+    fp2 = fingerprint_output(item, "summary")
+    assert fp1 == fp2 and len(fp1) == 64  # sha256 hex
+    # A different summary yields a different fingerprint.
+    assert fingerprint_output(_item(summary="Different."), "summary") != fp1
+    # Absent output → None.
+    assert fingerprint_output(_item(summary=""), "summary") is None
+
+
+def test_export_verify_worksheet_stamps_judged_output_fingerprint(tmp_path):
+    """The worksheet stamps each entry with the fingerprint of the JUDGED output (#79), so
+    the writer can bind a verdict to it later without a live recompute."""
+    item = _item(summary="A crisp summary.")
+    ws = tmp_path / "ws.json"
+    export_verify_worksheet(
+        items_for_verification({"7": item}, ("summary",)), ws, "claude-code", "English"
+    )
+    entry = next(e for e in json.loads(ws.read_text())["items"] if e["target"] == "summary")
+    assert entry["output_fingerprint"] == fingerprint_output(item, "summary")
+
+
+def test_import_verify_fingerprints_round_trips_and_rejects_garbage(tmp_path):
+    item = _item(summary="A crisp summary.")
+    ws = tmp_path / "ws.json"
+    export_verify_worksheet(
+        items_for_verification({"7": item}, ("summary", "digest")), ws, "claude-code", "English"
+    )
+    fingerprints = import_verify_fingerprints([ws])
+    assert fingerprints[("7", "summary")] == fingerprint_output(item, "summary")
+    assert fingerprints[("7", "digest")] == fingerprint_output(item, "digest")
+
+    # A hand-edited/garbage hash is rejected — the key is dropped, not trusted.
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text(
+        json.dumps({"items": [{"item_id": "9", "target": "summary", "output_fingerprint": "nope"}]})
+    )
+    assert import_verify_fingerprints([garbage]) == {}
+
+
+def test_import_verify_fingerprints_drops_conflicting_stamps(tmp_path):
+    """Off-workflow: two worksheets stamp DIFFERENT fingerprints for the same (item, target).
+    The conflicting key is DROPPED (fail-safe → fingerprint-missing → not written), while a
+    key both agree on still resolves and writes (#79 divergent-stamp co-mingling)."""
+
+    def _ws(path, summary_fp: str) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {"item_id": "7", "target": "summary", "output_fingerprint": summary_fp},
+                        {"item_id": "7", "target": "digest", "output_fingerprint": "c" * 64},
+                    ]
+                }
+            )
+        )
+
+    ws_a, ws_b = tmp_path / "a.json", tmp_path / "b.json"
+    _ws(ws_a, "a" * 64)
+    _ws(ws_b, "b" * 64)  # summary stamp conflicts across worksheets; digest agrees
+
+    fingerprints = import_verify_fingerprints([ws_a, ws_b])
+    assert ("7", "summary") not in fingerprints  # conflict → dropped
+    assert fingerprints[("7", "digest")] == "c" * 64  # agreement → kept
+
+    # Consequence: the dropped key is not written (fingerprint-missing); the agreed key is.
+    store = {"7": _item()}
+    aggregated = [_j("FAIL", target="summary"), _j("FAIL", target="digest")]
+    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+    assert "summary" not in store["7"].verification  # dropped → no verdict, no badge
+    assert store["7"].verification["digest"].output_fingerprint == "c" * 64
+    assert ("7", "summary", "fingerprint-missing") in result.skipped
+
+
+def test_apply_verdicts_writes_verdict_with_the_judged_fingerprint():
+    store = {"7": _item(summary="Judged summary.")}
+    judged_fp = fingerprint_output(store["7"], "summary")
+    aggregated = aggregate_verify_judgments(
+        [[_j("FAIL", faithfulness="FAIL", flags=[{"claim": "€150M", "issue": "unsupported"}])]]
+    )
+    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    assert result.written == 1 and result.skipped == []
+    verdict = store["7"].verification["summary"]
+    assert verdict.verdict == "FAIL"
+    assert verdict.output_fingerprint == judged_fp
+    assert verdict.flags == ["unsupported"]  # the top flag issue is stored for the badge
+
+
+def test_apply_verdicts_stores_judged_fingerprint_not_live_recompute():
+    """THE headline fix (#79): the summary is regenerated to "B" AFTER export/judge but
+    BEFORE write — the stored fingerprint must be the judged one (of "A"), NEVER a recompute
+    of the live "B", so `generate` on "B" later finds a mismatch and shows no badge."""
+    store = {"7": _item(summary="A — the judged summary.")}
+    judged_fp = fingerprint_output(store["7"], "summary")
+    aggregated = aggregate_verify_judgments([[_j("FAIL", faithfulness="FAIL")]])
+
+    store["7"].enriched.summary = "B — regenerated before the write."  # output changed
+    live_fp = fingerprint_output(store["7"], "summary")
+    assert live_fp != judged_fp
+
+    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    assert result.written == 1
+    stored = store["7"].verification["summary"].output_fingerprint
+    assert stored == judged_fp  # the JUDGED output's fingerprint
+    assert stored != live_fp  # never the live recompute
+
+
+def test_apply_verdicts_tallies_skipped_records_with_reasons():
+    """A dropped verdict is never silent — item-gone, unknown record, and a missing judged
+    fingerprint are each tallied on the result."""
+    store = {"7": _item(summary="S.")}
+    judged_fp = fingerprint_output(store["7"], "summary")
+    aggregated = [
+        _j("FAIL", item_id="7", target="summary"),  # writes (has a judged fingerprint)
+        _j("FAIL", item_id="ghost", target="summary"),  # item-gone
+        _j("FAIL", item_id="7", target="digest"),  # fingerprint-missing (not in the map)
+        "not a dict",  # malformed-record
+    ]
+    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    assert result.written == 1
+    reasons = {reason for _, _, reason in result.skipped}
+    assert reasons == {"item-gone", "fingerprint-missing", "malformed-record"}
+    assert result.attempted == 4
+    assert "1 de 4" in result.summary() and "item-gone" in result.summary()
