@@ -131,6 +131,16 @@ generates an Obsidian wiki.
   `_mirror_file`, keyed by the STORED `local_path` (no per-source index recompute). An
   `x_article` with empty `blocks` (trafilatura fallback / pre-#39) renders the plain
   `source.text` — byte-unchanged, no regression. Deterministic + regen-stable.
+- Verification badge — staleness-aware (#79, follow-up of the verification layer): opt-in
+  `verify --apply --write-verdicts` persists each verdict onto the **additive** `Item.verification`
+  field (`dict[str, VerificationVerdict]` keyed by target, defaults `{}` so legacy items load
+  unchanged), each carrying a **sha256 `output_fingerprint` of the exact judged text** +
+  `verified_at`; the write path auto-snapshots (`pre-verify-write-verdicts`). Default `verify`
+  stays report-only. `generate._verdict_badge` recomputes `verification.fingerprint_output` on
+  the item's CURRENT output and renders a localised badge (❌ FAIL / ⚠️ REVIEW; PASS unbadged)
+  **only when it matches the stored fingerprint** — a STALE verdict (output re-generated since)
+  is silently NOT badged, so a fixed output never shows a ❌. `fingerprint_output` is the single
+  canonicalization shared by writer + reader; labels via `i18n.Strings`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).

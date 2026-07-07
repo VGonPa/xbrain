@@ -89,6 +89,7 @@ from xbrain.vocab import (
 )
 from xbrain.verification import (
     aggregate_verify_judgments,
+    apply_verdicts_to_store,
     export_verify_worksheet,
     import_verify_judgments,
     items_for_verification,
@@ -1426,6 +1427,21 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
     typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
 
 
+def _verify_write_verdicts(cfg: Config, aggregated: list[dict]) -> None:
+    """Opt-in write path for `verify --apply --write-verdicts`: persist each aggregated
+    verdict onto its item (with a fingerprint of the CURRENT output), so `generate` can
+    badge a still-current FAIL/REVIEW.
+
+    Mutates `items.json`, so it auto-snapshots `data/` first (label
+    `pre-verify-write-verdicts`) — undoable with `xbrain snapshot restore`.
+    """
+    _auto_snapshot(cfg, "verify-write-verdicts")
+    store = load_store(cfg.items_path)
+    written = apply_verdicts_to_store(store, aggregated)
+    save_store(store, cfg.items_path)
+    typer.echo(f"Verdicts escritos en {written} outputs de {cfg.items_path}")
+
+
 def _verify_audit_apply(
     cfg: Config, aggregated: list[dict], apply: list[Path], force: bool
 ) -> None:
@@ -1516,18 +1532,32 @@ def verify_command(
         "--force",
         help="Re-apply an audit onto an already-audited report (--audit --apply)",
     ),
+    write_verdicts: bool = typer.Option(
+        False,
+        "--write-verdicts",
+        help="Opt-in: also persist each verdict + output fingerprint onto its item "
+        "(so `generate` can badge it). Requires --apply; snapshots data/ first.",
+    ),
 ) -> None:
     """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
     cfg = _config()
+
+    if write_verdicts and (audit or not apply):
+        raise typer.BadParameter(
+            "--write-verdicts requires --apply (the plain apply path), not --audit"
+        )
 
     if audit:
         _verify_audit(cfg, executor, apply, force)
         return
 
     if apply:
-        # Report-only: aggregate the N judges' passes; the store is not mutated.
+        # Aggregate the N judges' passes and write the report. Default is report-only —
+        # the store is untouched unless --write-verdicts opts into the additive write.
         aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
         _write_verify_report(cfg, *render_verify_report(aggregated))
+        if write_verdicts:
+            _verify_write_verdicts(cfg, aggregated)
         return
 
     chosen = _resolve_verify_executor(executor, cfg)

@@ -287,3 +287,71 @@ def test_render_report_all_pass_says_so():
     aggregated = aggregate_verify_judgments([[_j("PASS", item_id="1")]])
     _, md = render_verify_report(aggregated)
     assert "passed" in md.lower()
+
+
+# ------------------------------------------------- fingerprint + write-verdicts (#79 badge)
+
+
+def test_fingerprint_output_is_deterministic_and_none_when_absent():
+    from xbrain.verification import fingerprint_output
+
+    item = _item(summary="A crisp summary.")
+    fp1 = fingerprint_output(item, "summary")
+    fp2 = fingerprint_output(item, "summary")
+    assert fp1 == fp2 and len(fp1) == 64  # sha256 hex
+    # A different summary yields a different fingerprint.
+    assert fingerprint_output(_item(summary="Different."), "summary") != fp1
+    # Absent output → None.
+    assert fingerprint_output(_item(summary=""), "summary") is None
+
+
+def test_apply_verdicts_writes_verdict_and_current_fingerprint():
+    from xbrain.verification import apply_verdicts_to_store, fingerprint_output
+
+    store = {"7": _item(summary="Judged summary.")}
+    aggregated = aggregate_verify_judgments(
+        [[_j("FAIL", faithfulness="FAIL", flags=[{"claim": "€150M", "issue": "unsupported"}])]]
+    )
+    written = apply_verdicts_to_store(store, aggregated)
+    assert written == 1
+    verdict = store["7"].verification["summary"]
+    assert verdict.verdict == "FAIL"
+    assert verdict.output_fingerprint == fingerprint_output(store["7"], "summary")
+    assert verdict.flags == ["unsupported"]  # the top flag issue is stored for the badge
+
+
+def test_apply_verdicts_skips_missing_item_and_absent_output():
+    from xbrain.verification import apply_verdicts_to_store
+
+    store = {"7": _item(summary="")}  # summary output absent
+    # One record for the present item (no summary output) + one for a ghost item.
+    aggregated = [
+        {
+            "item_id": "7",
+            "target": "summary",
+            "verdict": "FAIL",
+            "faithfulness": "FAIL",
+            "adherence": "PASS",
+            "flags": [],
+        },
+        {
+            "item_id": "ghost",
+            "target": "summary",
+            "verdict": "FAIL",
+            "faithfulness": "FAIL",
+            "adherence": "PASS",
+            "flags": [],
+        },
+    ]
+    written = apply_verdicts_to_store(store, aggregated)
+    assert written == 0
+    assert store["7"].verification == {}
+
+
+def test_apply_verdicts_skips_malformed_record():
+    from xbrain.verification import apply_verdicts_to_store
+
+    store = {"7": _item(summary="S.")}
+    written = apply_verdicts_to_store(store, ["not a dict", {"item_id": "7"}])  # no target/verdict
+    assert written == 0
+    assert store["7"].verification == {}

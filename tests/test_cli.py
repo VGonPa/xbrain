@@ -2934,3 +2934,72 @@ def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "consecuentes" in result.output
     assert not (tmp_path / "data" / "verify-audit-worksheet.json").exists()
+
+
+# ----------------------------------------- verify --write-verdicts (#79 staleness badge)
+
+
+def _write_judge_worksheet(tmp_path: Path, verdict: str = "FAIL") -> Path:
+    """A filled single-judge worksheet the `verify --apply` path aggregates."""
+    ws = tmp_path / "data" / "ws.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "judgments": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "verdict": verdict,
+                        "faithfulness": "FAIL" if verdict == "FAIL" else "PASS",
+                        "adherence": "PASS",
+                        "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}]
+                        if verdict == "FAIL"
+                        else [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ws
+
+
+def test_verify_apply_write_verdicts_persists_verdict_and_snapshots(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    ws = _write_judge_worksheet(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    # The verdict is persisted onto the item, keyed by target, with a fingerprint.
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    verification = stored["7"]["verification"]
+    assert verification["summary"]["verdict"] == "FAIL"
+    assert len(verification["summary"]["output_fingerprint"]) == 64
+    # The write path snapshots data/ first (mutates items.json).
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
+
+
+def test_verify_apply_default_is_report_only_and_does_not_write(tmp_path: Path, monkeypatch):
+    """The default apply path (no --write-verdicts) honours PR-1's report-only contract."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    before = items_path.read_bytes()
+    ws = _write_judge_worksheet(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before  # items.json untouched
+    assert (tmp_path / "data" / "verify-report.json").exists()  # report still written
+
+
+def test_verify_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["verify", "--write-verdicts"])
+    assert result.exit_code != 0
+    assert "--apply" in result.output

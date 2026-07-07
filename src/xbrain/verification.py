@@ -14,13 +14,14 @@ aggregate → verifier). Keyless worksheet+agents engine, like `enrich`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 
 from xbrain.executors.api import _video_frame_descriptions
-from xbrain.models import Item
+from xbrain.models import Item, VerificationVerdict
 from xbrain.rubrics import load_rubric
 from xbrain.video_digest import _video_source
 from xbrain.worksheet import _article_text, _video_transcript
@@ -64,6 +65,25 @@ def _output_for(item: Item, target: VerifyTarget) -> str | None:
         return f"primary_topic: {item.enriched.primary_topic}\ntopics: {', '.join(item.enriched.topics)}"
     source = _video_source(item)
     return source.digest if (source and source.digest) else None
+
+
+def fingerprint_output(item: Item, target: VerifyTarget) -> str | None:
+    """The sha256 hex of the item's CURRENT output text for `target`, or None when the
+    output is absent.
+
+    This is the SINGLE canonicalization shared by the write path (`apply_verdicts_to_store`,
+    which stores it) and `generate._verdict_badge` (which recomputes it): a badge shows iff
+    the judged text is byte-identical to what a reader sees now. Hashing (not storing the
+    text) keeps `items.json` small and makes the staleness comparison exact — the moment the
+    summary/digest/topics output is re-generated, its fingerprint diverges and the stored
+    verdict is treated as stale. Not a security primitive (sha256 is used purely as a stable
+    content hash); it just needs to be collision-resistant enough that two different outputs
+    never share a fingerprint.
+    """
+    output = _output_for(item, target)
+    if output is None:
+        return None
+    return hashlib.sha256(output.encode("utf-8")).hexdigest()
 
 
 def _source_text(item: Item) -> str:
@@ -354,3 +374,48 @@ def render_verify_report(aggregated: list[dict], audit_log: dict | None = None) 
     if audit_log is not None:
         lines.extend(_render_audit_section(audit_log))
     return json.dumps(report, indent=2, ensure_ascii=False), "\n".join(lines) + "\n"
+
+
+def _flag_issues(flags: list) -> list[str]:
+    """The concise issue labels from an aggregated record's flags, in order — what the
+    note badge surfaces as the "top flag issue". A non-dict or issue-less flag is skipped
+    (a malformed judge/auditor flag must not crash the write path)."""
+    issues: list[str] = []
+    for flag in flags:
+        if isinstance(flag, dict) and flag.get("issue"):
+            issues.append(str(flag["issue"]))
+    return issues
+
+
+def apply_verdicts_to_store(store: dict[str, Item], aggregated: list[dict]) -> int:
+    """Persist each aggregated verdict onto its item as a `VerificationVerdict`, keyed by
+    target, fingerprinting the item's CURRENT output (opt-in `verify --write-verdicts`).
+
+    Backward-compatible and defensive: a record is SKIPPED (never crashes the write) when
+    it is not a dict, its item is gone from the store, its target is not a known
+    `VerifyTarget`, its verdict is not PASS/REVIEW/FAIL, or its output is now absent
+    (nothing to fingerprint or badge). Mutates `store` in place — the caller snapshots +
+    saves. Returns the number of verdicts written.
+    """
+    written = 0
+    for record in aggregated:
+        if not isinstance(record, dict):
+            continue
+        item = store.get(str(record.get("item_id")))
+        target = str(record.get("target"))
+        verdict = str(record.get("verdict", "")).strip().upper()
+        if item is None or target not in ALL_TARGETS or verdict not in _VERDICT_ORDER:
+            continue
+        fingerprint = fingerprint_output(item, cast(VerifyTarget, target))
+        if fingerprint is None:
+            continue  # the output vanished since it was judged — nothing to badge
+        item.verification[target] = VerificationVerdict(
+            verdict=cast(Literal["PASS", "REVIEW", "FAIL"], verdict),
+            faithfulness=str(record.get("faithfulness", "PASS")),
+            adherence=str(record.get("adherence", "PASS")),
+            output_fingerprint=fingerprint,
+            verified_at=datetime.now(timezone.utc),
+            flags=_flag_issues(record.get("flags") or []),
+        )
+        written += 1
+    return written
