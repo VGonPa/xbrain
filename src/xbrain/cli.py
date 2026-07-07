@@ -89,11 +89,20 @@ from xbrain.vocab import (
 )
 from xbrain.verification import (
     aggregate_verify_judgments,
+    apply_verdicts_to_store,
     export_verify_worksheet,
+    import_verify_fingerprints,
     import_verify_judgments,
     items_for_verification,
     parse_targets,
     render_verify_report,
+)
+from xbrain.verification_audit import (
+    consequential_records,
+    export_audit_worksheet,
+    import_audit_judgments,
+    load_report_records,
+    merge_audit,
 )
 from xbrain.video_digest import (
     apply_video_digest_judgments,
@@ -1402,6 +1411,111 @@ def video_digest_command(
     )
 
 
+def _resolve_verify_executor(executor: str | None, cfg: Config) -> str:
+    """The worksheet track for `verify`, defaulting to config; only manual/claude-code."""
+    chosen = executor or cfg.enrich_executor
+    if chosen not in ("manual", "claude-code"):
+        raise ValueError(f"Ejecutor {chosen!r} no soportado para verify — usa manual|claude-code.")
+    return chosen
+
+
+def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
+    """Persist `verify-report.{json,md}` and echo its headline + path."""
+    (cfg.data_dir / "verify-report.json").write_text(json_report, encoding="utf-8")
+    (cfg.data_dir / "verify-report.md").write_text(md_report, encoding="utf-8")
+    lines = md_report.splitlines()
+    typer.echo(lines[2] if len(lines) > 2 else "Report escrito")
+    typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
+
+
+def _verify_write_verdicts(
+    cfg: Config, aggregated: list[dict], fingerprints: dict[tuple[str, str], str]
+) -> None:
+    """Opt-in write path for `verify --apply --write-verdicts`: persist each aggregated
+    verdict onto its item with the JUDGED output fingerprint (`fingerprints`, stamped at
+    export), so `generate` can badge a still-current FAIL/REVIEW.
+
+    Mutates `items.json`, so it auto-snapshots `data/` first (label
+    `pre-verify-write-verdicts`) — undoable with `xbrain snapshot restore`. Echoes the
+    written/skipped tally so a dropped verdict is never silent.
+    """
+    _auto_snapshot(cfg, "verify-write-verdicts")
+    store = load_store(cfg.items_path)
+    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+    save_store(store, cfg.items_path)
+    typer.echo(f"{result.summary()} → {cfg.items_path}")
+
+
+def _verify_audit_apply(
+    cfg: Config, aggregated: list[dict], apply: list[Path], force: bool
+) -> None:
+    """Merge one auditor's worksheet onto the aggregate and re-render the report.
+
+    The audit is a SINGLE independent auditor (judge ≠ party) in ONE pass over the full
+    consequential set. More than one `--apply` is rejected, and a second `--audit
+    --apply` on an already-audited report is refused (unless `--force`): re-reading the
+    already-shrunk FAIL set would let N single-revoke runs bypass the mass-revocation
+    guard by splitting revocations across runs. Report-only.
+    """
+    if len(apply) > 1:
+        raise ValueError(
+            "El audit es de un único auditor independiente — pasa un solo --apply "
+            f"(recibidos {len(apply)})."
+        )
+    if not force and any(isinstance(r, dict) and r.get("audited") for r in aggregated):
+        raise ValueError(
+            "verify-report.json ya contiene un audit aplicado. Re-agrega los jueces "
+            "(xbrain verify --apply ...) antes de re-auditar, o pasa --force para "
+            "sobrescribir a sabiendas (evita bypass de la guarda anti-revocación-masiva "
+            "repartiendo revocaciones entre pasadas)."
+        )
+    audits = import_audit_judgments(apply[0])
+    records, audit_log = merge_audit(aggregated, audits)
+    _write_verify_report(cfg, *render_verify_report(records, audit_log))
+    unmatched = audit_log["unmatched"]
+    typer.echo(
+        f"Audit: {audit_log['matched']}/{audit_log['supplied']} aplicados, "
+        f"{len(audit_log['washed'])} revertidos a menor severidad"
+        + (f", {len(unmatched)} sin correspondencia" if unmatched else "")
+        + (
+            " · GUARDA anti-revocación-masiva ACTIVADA"
+            if audit_log["mass_revocation_guard"]
+            else ""
+        )
+    )
+
+
+def _verify_audit(cfg: Config, executor: str | None, apply: list[Path], force: bool) -> None:
+    """The judge≠party audit mode of `verify` (`--audit`): export or apply.
+
+    Reads the aggregated records back from the `verify-report.json` PR-1 wrote.
+    With `--apply` it merges the auditor's decisions onto them and re-renders the
+    report (report-only, store untouched); without it, it exports an audit
+    worksheet for the consequential (FAIL/divergent) subset.
+    """
+    aggregated = load_report_records(cfg.data_dir / "verify-report.json")
+    if apply:
+        _verify_audit_apply(cfg, aggregated, apply, force)
+        return
+    chosen = _resolve_verify_executor(executor, cfg)
+    records = consequential_records(aggregated)
+    if not records:
+        typer.echo("No hay verdicts consecuentes (FAIL/divergentes) que auditar.")
+        return
+    worksheet = cfg.data_dir / "verify-audit-worksheet.json"
+    exported, skipped = export_audit_worksheet(
+        records, load_store(cfg.items_path), worksheet, chosen, cfg.output_language
+    )
+    skip_note = (
+        f" ({len(skipped)} omitidos sin item en el store: {', '.join(skipped)})" if skipped else ""
+    )
+    typer.echo(
+        f"{exported} verdicts consecuentes exportados a {worksheet}{skip_note}\n"
+        f"Rellena `audits` (auditor independiente, juez ≠ parte) y ejecuta:\n"
+        f"  xbrain verify --audit --apply {worksheet.name}"
+    )
+
+
 @app.command(name="verify")
 @_handle_cli_errors
 def verify_command(
@@ -1412,25 +1526,47 @@ def verify_command(
     apply: list[Path] = typer.Option(
         None, "--apply", help="Filled worksheet(s), one per judge — aggregated into a report"
     ),
+    audit: bool = typer.Option(
+        False,
+        "--audit",
+        help="Judge≠party audit of the consequential (FAIL/divergent) verdicts",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-apply an audit onto an already-audited report (--audit --apply)",
+    ),
+    write_verdicts: bool = typer.Option(
+        False,
+        "--write-verdicts",
+        help="Opt-in: also persist each verdict + output fingerprint onto its item "
+        "(so `generate` can badge it). Requires --apply; snapshots data/ first.",
+    ),
 ) -> None:
     """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
     cfg = _config()
 
-    if apply:
-        # Report-only: aggregate the N judges' passes; the store is not mutated.
-        aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
-        json_report, md_report = render_verify_report(aggregated)
-        (cfg.data_dir / "verify-report.json").write_text(json_report, encoding="utf-8")
-        (cfg.data_dir / "verify-report.md").write_text(md_report, encoding="utf-8")
-        typer.echo(
-            md_report.splitlines()[2] if len(md_report.splitlines()) > 2 else "Report escrito"
+    if write_verdicts and (audit or not apply):
+        raise typer.BadParameter(
+            "--write-verdicts requires --apply (the plain apply path), not --audit"
         )
-        typer.echo(f"Report: {cfg.data_dir / 'verify-report.md'}")
+
+    if audit:
+        _verify_audit(cfg, executor, apply, force)
         return
 
-    chosen = executor or cfg.enrich_executor
-    if chosen not in ("manual", "claude-code"):
-        raise ValueError(f"Ejecutor {chosen!r} no soportado para verify — usa manual|claude-code.")
+    if apply:
+        # Aggregate the N judges' passes and write the report. Default is report-only —
+        # the store is untouched unless --write-verdicts opts into the additive write.
+        aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
+        _write_verify_report(cfg, *render_verify_report(aggregated))
+        if write_verdicts:
+            # The JUDGED fingerprints come from the worksheet `items` block (stamped at
+            # export), so a verdict binds to the output the judge saw — never a live recompute.
+            _verify_write_verdicts(cfg, aggregated, import_verify_fingerprints(apply))
+        return
+
+    chosen = _resolve_verify_executor(executor, cfg)
     store = load_store(cfg.items_path)
     pairs = items_for_verification(store, parse_targets(target))
     if not pairs:

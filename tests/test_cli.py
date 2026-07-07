@@ -1,11 +1,20 @@
 # tests/test_cli.py
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from xbrain.cli import app
-from xbrain.models import Author, Item, Link
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Link,
+    VideoFrame,
+)
 from xbrain.store import save_store
 
 runner = CliRunner()
@@ -2694,3 +2703,360 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
     assert "## Video digest" in note  # the transcript digest still renders
     assert "_media/42/frames" not in note  # but NO slide embed
     assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()
+
+
+def _verify_video_item(item_id: str = "7") -> Item:
+    """An enriched item with an x_video source — the shape `verify` audits."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="watch this",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        enriched=Enrichment(
+            enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+            executor="claude-code",
+            summary="The talk moved €150M in revenue.",
+            primary_topic="ai-coding",
+            topics=["ai-coding"],
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://x.com/v",
+                    title="A talk",
+                    text="the full transcript body about agents and revenue",
+                    has_speech=True,
+                    frames=[
+                        VideoFrame(
+                            timestamp=0.0, local_path="7/frames/0.png", description="A chart."
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+
+
+def _write_fail_report(tmp_path: Path) -> None:
+    """Seed a verify-report.json with one FAIL record (as PR-1's aggregate writes it)."""
+    report = {
+        "total": 1,
+        "counts": {"PASS": 0, "REVIEW": 0, "FAIL": 1},
+        "records": [
+            {
+                "item_id": "7",
+                "target": "summary",
+                "verdict": "FAIL",
+                "faithfulness": "FAIL",
+                "adherence": "PASS",
+                "divergent": False,
+                "n_judges": 3,
+                "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+            }
+        ],
+    }
+    (tmp_path / "data" / "verify-report.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_verify_audit_exports_consequential_worksheet(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    ws = tmp_path / "data" / "verify-audit-worksheet.json"
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    assert data["items"][0]["item_id"] == "7"
+    assert data["items"][0]["output"] == "The talk moved €150M in revenue."
+    assert "transcript body about agents" in data["items"][0]["source"]
+    assert data["items"][0]["current_verdict"] == "FAIL"
+    assert "CONFIRM" in data["audit_rubric"]
+
+
+def test_verify_audit_apply_revokes_and_flips_report(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+
+    ws = tmp_path / "data" / "audit.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.9,
+                                "reason": "stated verbatim in the transcript",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert report["records"][0]["verdict"] == "PASS"
+    assert report["records"][0]["audited"] is True
+    assert report["counts"] == {"PASS": 1, "REVIEW": 0, "FAIL": 0}
+    assert report["audit_log"]["matched"] == 1
+    md = (tmp_path / "data" / "verify-report.md").read_text(encoding="utf-8")
+    assert "## Audit" in md and "FAIL → PASS" in md
+
+
+def test_verify_audit_low_confidence_revoke_keeps_fail(tmp_path: Path, monkeypatch):
+    """A REVOKE below the confidence gate is not applied — the record stays FAIL."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    ws = tmp_path / "data" / "audit.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.4,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    report = json.loads((tmp_path / "data" / "verify-report.json").read_text(encoding="utf-8"))
+    assert report["records"][0]["verdict"] == "FAIL"
+
+
+def test_verify_audit_rejects_multiple_apply(tmp_path: Path, monkeypatch):
+    """The audit is a single independent auditor — more than one --apply is rejected."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    a = tmp_path / "data" / "a.json"
+    b = tmp_path / "data" / "b.json"
+    for p in (a, b):
+        p.write_text(json.dumps({"audits": []}), encoding="utf-8")
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(a), "--apply", str(b)])
+    assert result.exit_code != 0
+    assert "único auditor" in result.output
+
+
+def _write_revoke_audit_ws(path: Path) -> None:
+    """A single-flag audit worksheet that validly revokes the seeded FAIL to PASS."""
+    path.write_text(
+        json.dumps(
+            {
+                "audits": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "reverdict": "PASS",
+                        "flags": [
+                            {
+                                "claim": "€150M in revenue",
+                                "issue": "unsupported",
+                                "axis": "faithfulness",
+                                "audit": "REVOKE",
+                                "confidence": 0.9,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_verify_audit_apply_refuses_second_run_on_audited_report(tmp_path: Path, monkeypatch):
+    """BUG 2: a second --audit --apply on an already-audited report is refused (it would
+    let N single-revoke runs bypass the mass-revocation guard); --force overrides."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    _write_fail_report(tmp_path)
+    ws = tmp_path / "data" / "audit.json"
+    _write_revoke_audit_ws(ws)
+
+    first = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert second.exit_code != 0
+    assert "ya contiene un audit" in second.output
+
+    forced = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--force"])
+    assert forced.exit_code == 0, forced.output
+
+
+def test_verify_audit_no_consequential_records(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    (tmp_path / "data" / "verify-report.json").write_text(
+        json.dumps(
+            {
+                "total": 1,
+                "records": [
+                    {"item_id": "7", "target": "summary", "verdict": "PASS", "divergent": False}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert "consecuentes" in result.output
+    assert not (tmp_path / "data" / "verify-audit-worksheet.json").exists()
+
+
+# ----------------------------------------- verify --write-verdicts (#79 staleness badge)
+
+
+def _write_judge_worksheet(tmp_path: Path, verdict: str = "FAIL") -> Path:
+    """A filled single-judge worksheet the `verify --apply` path aggregates."""
+    ws = tmp_path / "data" / "ws.json"
+    ws.write_text(
+        json.dumps(
+            {
+                "judgments": [
+                    {
+                        "item_id": "7",
+                        "target": "summary",
+                        "verdict": verdict,
+                        "faithfulness": "FAIL" if verdict == "FAIL" else "PASS",
+                        "adherence": "PASS",
+                        "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}]
+                        if verdict == "FAIL"
+                        else [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ws
+
+
+def _export_summary_worksheet(tmp_path: Path) -> Path:
+    """Run the REAL `verify` summary export (stamps each entry's judged fingerprint) and
+    return the worksheet path — the faithful input to `--write-verdicts`."""
+    result = runner.invoke(app, ["verify", "--target", "summary"])
+    assert result.exit_code == 0, result.output
+    return tmp_path / "data" / "verify-worksheet.json"
+
+
+def _fill_summary_judgment(ws: Path, verdict: str = "FAIL") -> None:
+    """Inject one judge's judgment into an exported worksheet, PRESERVING its `items` block
+    (which carries the export-time fingerprints)."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": "7",
+            "target": "summary",
+            "verdict": verdict,
+            "faithfulness": "FAIL" if verdict == "FAIL" else "PASS",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}]
+            if verdict == "FAIL"
+            else [],
+        }
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_verify_apply_write_verdicts_persists_verdict_and_snapshots(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    # The verdict is persisted onto the item, keyed by target, with a fingerprint.
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    verification = stored["7"]["verification"]
+    assert verification["summary"]["verdict"] == "FAIL"
+    assert len(verification["summary"]["output_fingerprint"]) == 64
+    # The write path snapshots data/ first (mutates items.json).
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
+
+
+def test_verify_write_verdicts_binds_to_judged_output_not_live_store(tmp_path: Path, monkeypatch):
+    """#79 headline at the CLI: the summary is regenerated BETWEEN export/judge and
+    `--write-verdicts`; the stored fingerprint must be the JUDGED one ("A"), never a recompute
+    of the live store ("B") — so `generate` on "B" later finds a mismatch and shows no badge."""
+    import hashlib
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    judged, regenerated = "A - the judged summary.", "B - regenerated before the write."
+    item = _verify_video_item("7")
+    item.enriched.summary = judged
+    save_store({"7": item}, items_path)
+    ws = _export_summary_worksheet(tmp_path)  # stamps fp of the judged summary
+    _fill_summary_judgment(ws)
+
+    # Regenerate the summary AFTER export/judge, BEFORE the write.
+    item.enriched.summary = regenerated
+    save_store({"7": item}, items_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    fp = json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"]["summary"][
+        "output_fingerprint"
+    ]
+    assert fp == hashlib.sha256(judged.encode("utf-8")).hexdigest()  # the JUDGED output
+    assert fp != hashlib.sha256(regenerated.encode("utf-8")).hexdigest()  # never the live one
+
+
+def test_verify_apply_default_is_report_only_and_does_not_write(tmp_path: Path, monkeypatch):
+    """The default apply path (no --write-verdicts) honours PR-1's report-only contract."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    before = items_path.read_bytes()
+    ws = _write_judge_worksheet(tmp_path)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before  # items.json untouched
+    assert (tmp_path / "data" / "verify-report.json").exists()  # report still written
+
+
+def test_verify_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["verify", "--write-verdicts"])
+    assert result.exit_code != 0
+    assert "--apply" in result.output

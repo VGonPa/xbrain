@@ -1348,3 +1348,84 @@ def test_item_with_article_blocks_round_trips_through_json():
     assert len(source.blocks) == 2
     assert isinstance(source.blocks[0], ArticleTextBlock)
     assert isinstance(source.blocks[1], ArticleImageBlock)
+
+
+# ----------------------------------------------------- verification verdict (#79 badge)
+
+
+def _base_item(**overrides) -> Item:
+    """A minimal item for verification-verdict tests."""
+    fields = dict(
+        id="7",
+        source="bookmark",
+        url="https://x.com/a/status/7",
+        author=Author(handle="a", name="A"),
+        text="t",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+    )
+    fields.update(overrides)
+    return Item(**fields)
+
+
+def test_item_verification_defaults_to_empty_map_and_legacy_loads_unchanged():
+    """A legacy item (no `verification` key) loads and defaults to `{}` — additive,
+    backward-compatible model change."""
+    from xbrain.models import Item as _Item
+
+    legacy = _Item.model_validate(
+        {
+            "id": "7",
+            "source": "bookmark",
+            "url": "https://x.com/a/status/7",
+            "author": {"handle": "a", "name": "A"},
+            "text": "t",
+            "created_at": "2026-05-10T00:00:00+00:00",
+            "captured_at": "2026-05-16T00:00:00+00:00",
+        }
+    )
+    assert legacy.verification == {}
+
+
+def test_verification_verdict_round_trips_through_json():
+    from xbrain.models import VerificationVerdict
+
+    item = _base_item(
+        verification={
+            "summary": VerificationVerdict(
+                verdict="FAIL",
+                faithfulness="FAIL",
+                adherence="PASS",
+                output_fingerprint="a" * 64,
+                verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+                flags=["unsupported number"],
+            )
+        }
+    )
+    restored = Item.model_validate(item.model_dump(mode="json"))
+    verdict = restored.verification["summary"]
+    assert verdict.verdict == "FAIL"
+    assert verdict.output_fingerprint == "a" * 64
+    assert verdict.flags == ["unsupported number"]
+
+
+def test_verification_verdict_rejects_naive_verified_at():
+    from xbrain.models import VerificationVerdict
+
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        VerificationVerdict(
+            verdict="FAIL",
+            output_fingerprint="a" * 64,
+            verified_at=datetime(2026, 5, 18),  # naive
+        )
+
+
+def test_verification_verdict_rejects_unknown_verdict():
+    from xbrain.models import VerificationVerdict
+
+    with pytest.raises(ValidationError):
+        VerificationVerdict(
+            verdict="MAYBE",  # not PASS/REVIEW/FAIL
+            output_fingerprint="a" * 64,
+            verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        )

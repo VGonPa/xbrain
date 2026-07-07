@@ -6,7 +6,7 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import assert_never
+from typing import assert_never, cast
 
 from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
@@ -15,7 +15,6 @@ from xbrain.models import (
     ARTICLE_PARAGRAPH_SEP,
     ArticleImageBlock,
     ArticleTextBlock,
-    Content,
     ContentSourceFailure,
     ContentSourceSuccess,
     FailureReason,
@@ -31,6 +30,8 @@ from xbrain.models import (
     VideoFrame,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
+from xbrain.verification import ALL_TARGETS, VerifyTarget, fingerprint_output
+from xbrain.video_digest import _video_source
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +221,38 @@ def _stale_note(items_dir: Path, item: Item, current: Path) -> Path | None:
     return None
 
 
+# Emoji per badge-worthy verdict (PASS is never badged — the note stays clean).
+_VERDICT_BADGE_EMOJI: dict[str, str] = {"FAIL": "❌", "REVIEW": "⚠️"}
+
+
+def _verdict_badge(item: Item, target: str, strings: Strings) -> str | None:
+    """A localized verification badge line for one `target`, or None (#79).
+
+    Renders a badge ONLY for a CURRENT, consequential verdict:
+    - the item carries a stored `VerificationVerdict` for `target`, AND
+    - its `output_fingerprint` still equals the item's CURRENT output fingerprint — a
+      STALE verdict (the summary/digest/topics was re-generated since it was judged) is
+      silently skipped, so an output fixed after a FAIL never shows a ❌, AND
+    - the verdict is FAIL or REVIEW (a PASS renders no badge, keeping the note clean).
+
+    The leading flag issue is appended when present (`❌ **Verification: FAIL** — <issue>`),
+    with any internal newline collapsed to a space so a multi-line issue can't break out of
+    the single-line `> …` blockquote (mirrors `_slide_embed_lines`' caption handling).
+    A verdict stored under an unknown target is defensively ignored.
+    """
+    if target not in ALL_TARGETS:
+        return None
+    verdict = item.verification.get(target)
+    if verdict is None or verdict.verdict not in _VERDICT_BADGE_EMOJI:
+        return None
+    if fingerprint_output(item, cast(VerifyTarget, target)) != verdict.output_fingerprint:
+        return None  # stale: the judged output changed since the verdict was stored
+    label = strings.verify_badge_fail if verdict.verdict == "FAIL" else strings.verify_badge_review
+    issue = next((flag for flag in verdict.flags if flag), None)
+    suffix = f" — {' '.join(issue.splitlines())}" if issue else ""
+    return f"> {_VERDICT_BADGE_EMOJI[verdict.verdict]} **{label}**{suffix}"
+
+
 def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[str]:
     """Summary + topic refs for an enriched item (empty if not enriched).
 
@@ -237,12 +270,18 @@ def _enrichment_lines(item: Item, strings: Strings, topic_style: str) -> list[st
     lines: list[str] = []
     if item.enriched.summary:
         lines += [item.enriched.summary, ""]
+        summary_badge = _verdict_badge(item, "summary", strings)
+        if summary_badge:
+            lines += [summary_badge, ""]
     if item.enriched.topics:
         if topic_style == "hashtag":
             refs = " ".join(f"#{t}" for t in item.enriched.topics)
         else:
             refs = " · ".join(f"[[{t}]]" for t in item.enriched.topics)
         lines += [f"**{strings.topics_label}:** {refs}", ""]
+        topics_badge = _verdict_badge(item, "topics", strings)
+        if topics_badge:
+            lines += [topics_badge, ""]
     return lines
 
 
@@ -423,7 +462,9 @@ def _slide_embed_lines(frames: list[VideoFrame]) -> list[str]:
     return lines
 
 
-def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[str]:
+def _video_digest_lines(
+    source: ContentSourceSuccess, strings: Strings, badge: str | None = None
+) -> list[str]:
     """Render an `x_video` source as a `Video digest` section (#44 PR3 + PR4).
 
     A with-speech transcript renders under a ``## Video digest: <title>`` heading
@@ -434,12 +475,18 @@ def _video_digest_lines(source: ContentSourceSuccess, strings: Strings) -> list[
     renders a single silent-video line instead of an empty digest block; a SILENT
     slide deck (no speech, but with frames) still renders the heading + the slides,
     since that is exactly where a screen-only video carries its content.
+
+    `badge` is the caller's staleness-checked verification badge for the digest (#79):
+    when present it sits right under the heading, where a reader meets the digest. It is
+    already gated to a CURRENT FAIL/REVIEW verdict, so it only appears with a real digest.
     """
     has_text = source.has_speech is not False and bool(source.text)
     if not has_text and not source.frames:
         return [f"> {strings.silent_video}", ""]
     heading = source.title or source.url
     lines = [f"## {strings.video_digest_header}: {heading}", ""]
+    if badge:
+        lines += [badge, ""]
     if not source.digest:
         # Fallback (no long-form digest yet): the raw transcript + frame embeds
         # render inline, exactly as before — so this render change is safe to ship
@@ -544,7 +591,7 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
     return [f"## {strings.content_header}: {heading}", "", *body]
 
 
-def _content_lines(content: Content, strings: Strings) -> list[str]:
+def _content_lines(item: Item, strings: Strings) -> list[str]:
     """Rendered article bodies + broken-link evidence for a fetched item.
 
     Switches on the `ContentSource` variant: the success variant is
@@ -558,12 +605,24 @@ def _content_lines(content: Content, strings: Strings) -> list[str]:
     rather than a plain text block (#39 PR5), while an `x_article` with
     empty `blocks` (trafilatura fallback) keeps the plain `source.text`
     block — byte-unchanged.
+
+    Takes the whole `item` (not just its `content`) so the digest verification badge
+    (#79) can be resolved for the item's canonical `x_video` source — the one
+    `verification._output_for(item, "digest")` fingerprints — and only that source.
+    Returns `[]` when the item has no content.
     """
+    content = item.content
+    if content is None:
+        return []
+    digest_source = _video_source(item)
     lines: list[str] = []
     for source in content.sources:
         if isinstance(source, ContentSourceSuccess):
             if source.kind == "x_video":
-                lines += _video_digest_lines(source, strings)
+                # Badge only the canonical digest source (the one whose digest is
+                # fingerprinted); a second x_video source, if any, is never mis-badged.
+                badge = _verdict_badge(item, "digest", strings) if source is digest_source else None
+                lines += _video_digest_lines(source, strings, badge)
             elif source.kind == "x_article" and source.blocks:
                 # Structured Article (#39): render the ordered text+image blocks
                 # as a blogpost. An `x_article` with EMPTY blocks (trafilatura
@@ -597,8 +656,7 @@ def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
         lines += [f"- <{link.url}>" for link in item.links]
         lines.append("")
     lines += [f"[Ver tweet original]({item.url})", ""]
-    if item.content:
-        lines += _content_lines(item.content, strings)
+    lines += _content_lines(item, strings)
     return "\n".join(lines).rstrip()
 
 
