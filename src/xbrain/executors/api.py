@@ -145,6 +145,35 @@ def _images_section(item: Item) -> list[str]:
     return lines
 
 
+# The guardrail note stamped wherever an item links out but nothing was fetched.
+# One constant shared by every LLM surface (api prompt, enrich worksheet, verify
+# source) so the generator and the judge read the SAME contract.
+UNFETCHED_LINKS_NOTE = (
+    "The linked content was NOT fetched. Beyond the URL/domain itself, nothing "
+    "about the linked content is known — never describe, reconstruct or guess it "
+    "from the URL, the domain or world knowledge."
+)
+
+
+def links_content_unfetched(item: Item) -> bool:
+    """True when the item links out but NO linked content was fetched.
+
+    The predicate mirrors `_article_sections`: fetched content is any
+    non-`x_video` success source with text (a transcript is manufactured text,
+    not linked content). Partial fetches (some links fetched, some not) are NOT
+    flagged — a fetched-article block is present then, and per-link matching by
+    URL is unreliable (t.co redirects vs resolved URLs).
+    """
+    if not item.links:
+        return False
+    if item.content is None:
+        return True
+    return not any(
+        isinstance(src, ContentSourceSuccess) and src.kind != "x_video" and src.text
+        for src in item.content.sources
+    )
+
+
 def _links_section(item: Item) -> list[str]:
     """Build the `Links in the post:` block, or an empty list when not applicable."""
     if not item.links:
@@ -154,6 +183,8 @@ def _links_section(item: Item) -> list[str]:
         "Links in the post (the domain is topic signal even when the article body is unavailable):",
     ]
     lines += [f"- {ln.url}  (domain: {ln.domain})" for ln in item.links]
+    if links_content_unfetched(item):
+        lines += ["", UNFETCHED_LINKS_NOTE]
     return lines
 
 

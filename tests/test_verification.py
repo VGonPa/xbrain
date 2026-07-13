@@ -420,3 +420,48 @@ def test_apply_verdicts_tallies_skipped_records_with_reasons():
     assert reasons == {"item-gone", "fingerprint-missing", "malformed-record"}
     assert result.attempted == 4
     assert "1 de 4" in result.summary() and "item-gone" in result.summary()
+
+
+# ---------------------------------------------------------------- source text
+
+
+def test_source_text_includes_author():
+    """The judge's source carries the item's author metadata — attributing a post
+    to its own author must be verifiable from the source, not world knowledge."""
+    from xbrain.verification import _source_text
+
+    text = _source_text(_item())
+    assert "[Author]" in text
+    assert "@a (A)" in text
+
+
+def test_source_text_marks_unfetched_links():
+    """A link whose content was never fetched is explicitly marked, so a judge
+    treats any claim about the linked content as unsupported."""
+    from xbrain.models import Link
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [Link(url="https://t.co/x", domain="time.com")]
+    # the only content source is the x_video transcript — no fetched article
+    text = _source_text(item)
+    assert "NOT fetched" in text
+    assert "time.com" in text
+
+
+def test_source_text_no_unfetched_marker_when_article_fetched():
+    from xbrain.models import Link
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [Link(url="https://example.com/a", domain="example.com")]
+    item.content.sources.append(
+        ContentSourceSuccess(
+            kind="external_article",
+            url="https://example.com/a",
+            title="The piece",
+            text="the fetched article body",
+        )
+    )
+    text = _source_text(item)
+    assert "NOT fetched" not in text

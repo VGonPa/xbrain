@@ -478,3 +478,36 @@ def test_user_prompt_video_frames_sit_after_transcript_before_links():
     article_idx = prompt.index("Linked article")
     assert transcript_idx < frames_idx < links_idx
     assert frames_idx < article_idx
+
+
+def test_user_prompt_flags_unfetched_links():
+    """When the linked content was never fetched, the prompt says so explicitly —
+    the model must not reconstruct the linked content from the URL/domain."""
+    from xbrain.models import Link
+
+    item = _item("1", links=[Link(url="https://t.co/x", domain="time.com")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "NOT fetched" in prompt
+
+
+def test_user_prompt_does_not_flag_links_when_article_fetched():
+    from datetime import datetime, timezone
+
+    from xbrain.models import Content, ContentSourceSuccess
+
+    from xbrain.models import Link
+
+    item = _item("1", links=[Link(url="https://arxiv.org/abs/1", domain="arxiv.org")])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://arxiv.org/abs/1",
+                title="Paper",
+                text="the fetched body",
+            )
+        ],
+    )
+    prompt = _user_prompt(item, VOCAB)
+    assert "NOT fetched" not in prompt

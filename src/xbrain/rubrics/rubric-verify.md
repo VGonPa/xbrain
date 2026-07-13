@@ -10,7 +10,10 @@ Two axes:
 
 ## 1. Faithfulness (PRIMARY)
 Every claim, number, name, date and quote in the output MUST be supported by the
-`source`. If the output states something the source does not — a hallucinated
+`source`. The `[Author]` block is trusted item metadata — attributing the post to
+its own author is supported. If the source marks links as `content NOT fetched`,
+any output claim describing that linked content (beyond the URL/domain itself) is
+unsupported — flag it. If the output states something the source does not — a hallucinated
 figure, a speaker/company not present, an invented conclusion — that is a
 faithfulness failure. Cite the offending span. A single unsupported factual claim
 is enough to FAIL, regardless of how well-written the output is. When the source

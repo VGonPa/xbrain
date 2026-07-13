@@ -14,8 +14,11 @@ Produce a `summary` for one X post (a bookmark or the user's own tweet).
   it says) and the frame descriptions (what it shows on screen). For a slide or
   screen-share video with no transcript, summarise from the frame descriptions.
   Still 1-3 sentences: capture the whole talk's subject, not just its opening.
-- **If the linked article could NOT be fetched:** summarise from the post's own
-  text. Do not write "article unavailable" — just describe what the post says.
+- **If the linked article could NOT be fetched** (the item says so explicitly —
+  an `unfetched_links_note` or a "content NOT fetched" line): summarise from the
+  post's own text. Do not write "article unavailable" — just describe what the
+  post says. NEVER describe, reconstruct or guess the linked content from its
+  URL, its domain or your own knowledge of it.
 - **Retweets / quotes:** summarise the substantive content being shared.
 - **Noise** (greetings, one-word posts): a short factual description is fine.
 - Output the summary text only. No markdown, no headings, no quotes.

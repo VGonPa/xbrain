@@ -24,7 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 
-from xbrain.executors.api import _video_frame_descriptions
+from xbrain.executors.api import (
+    UNFETCHED_LINKS_NOTE,
+    _video_frame_descriptions,
+    links_content_unfetched,
+)
 from xbrain.models import Item, Verdict, VerificationVerdict
 from xbrain.rubrics import load_rubric
 from xbrain.video_digest import _video_source
@@ -103,11 +107,14 @@ def fingerprint_output(item: Item, target: VerifyTarget) -> str | None:
 def _source_text(item: Item) -> str:
     """The ground-truth source the judge checks the output against.
 
-    Concatenates the labelled evidence present on the item — the FULL video
-    transcript (what it says), the frame descriptions (what it shows), the article
-    body, and the tweet text — so a claim in the output can be traced to it.
+    Concatenates the labelled evidence present on the item — the author metadata
+    (attributing a post to its own author is supported, not world knowledge), the
+    FULL video transcript (what it says), the frame descriptions (what it shows),
+    the article body, and the tweet text — so a claim in the output can be traced
+    to it. A link whose content was never fetched is explicitly marked, so any
+    output claim describing that linked content is checkable as unsupported.
     """
-    parts: list[str] = []
+    parts: list[str] = ["[Author]", f"@{item.author.handle} ({item.author.name})"]
     transcript = _video_transcript(item)
     if transcript:
         parts += ["[Video transcript]", transcript]
@@ -117,6 +124,12 @@ def _source_text(item: Item) -> str:
     article = _article_text(item)
     if article:
         parts += ["[Linked article]", article]
+    if links_content_unfetched(item):
+        parts += [
+            "[Links — content NOT fetched]",
+            *(f"- {link.url}  (domain: {link.domain})" for link in item.links),
+            UNFETCHED_LINKS_NOTE,
+        ]
     if item.text:
         parts += ["[Tweet]", item.text]
     return "\n".join(parts)

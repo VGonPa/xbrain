@@ -12,7 +12,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.executors.api import _content_image_descriptions, _video_frame_descriptions
+from xbrain.executors.api import (
+    UNFETCHED_LINKS_NOTE,
+    _content_image_descriptions,
+    _video_frame_descriptions,
+    links_content_unfetched,
+)
 from xbrain.models import ContentSourceSuccess, Item, Topic
 from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 
@@ -95,6 +100,12 @@ def export_worksheet(
                 "bookmark_folder": it.bookmark_folder,
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
+                # Guardrail: when the item links out but nothing was fetched, say so
+                # explicitly — the agent must not reconstruct the linked content
+                # from the URL/domain (see `links_content_unfetched`).
+                "unfetched_links_note": (
+                    UNFETCHED_LINKS_NOTE if links_content_unfetched(it) else None
+                ),
                 "video_transcript": _video_transcript(it),
                 # Content-bearing photo descriptions (#34): the same non-decorative
                 # selection the `api` executor injects as its `Images in this post:`

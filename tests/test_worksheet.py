@@ -314,3 +314,44 @@ def test_export_worksheet_omits_video_frame_descriptions_when_none(tmp_path):
     export_worksheet([_video_item("1", text="a talk")], VOCAB, path, "manual", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["items"][0]["video_frame_descriptions"] == []
+
+
+def test_export_worksheet_notes_unfetched_links(tmp_path):
+    """A linking item with no fetched content carries an explicit guardrail note,
+    so the enrich agent never guesses the linked content from the URL/domain."""
+    path = tmp_path / "ws.json"
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    note = data["items"][0]["unfetched_links_note"]
+    assert note is not None
+    assert "NOT fetched" in note
+
+
+def test_export_worksheet_no_unfetched_note_when_article_fetched(tmp_path):
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _item("1")
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://arxiv.org/abs/1",
+                title="Paper",
+                text="the fetched body",
+            )
+        ],
+    )
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["unfetched_links_note"] is None
+
+
+def test_export_worksheet_no_unfetched_note_without_links(tmp_path):
+    item = _item("1")
+    item.links = []
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["items"][0]["unfetched_links_note"] is None
