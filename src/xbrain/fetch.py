@@ -9,6 +9,28 @@ they are handled by `xbrain.fetch_x`.
 union (`FetchSuccess | FetchFailure`) so callers cannot accidentally read a
 success-only field off a failure record (or vice versa). The persisted
 `ContentSource` is itself a tagged union — see `xbrain.models`.
+
+**A non-empty body is not an article.** For a long time the only content check was
+`if not text` — non-empty ⇒ success — and that is how YouTube's footer menu, a Cloudflare
+challenge and a bare page title became `[Linked article]` evidence: 28 of the store's 189
+fetched "articles" (14.8%), measured. The guardrail cannot fire for them (they are recorded
+as successes), so the generator was ordered to "summarise the article's substance" while
+being handed a footer menu. `validate_body` is the fix, and it sits at the PERSISTENCE
+boundary (`_safe_extract`), so the ordinary `fetch` path is covered — not just the retry.
+
+The wall detector is a heuristic, and its bias is deliberate and MEASURED, not assumed:
+
+    Rejecting a good article merely leaves the honest failure we already had — the guardrail
+    fires, the generator is told nothing is known, and nothing is lost but an opportunity.
+    ACCEPTING a wall poisons the evidence: it silences the guardrail, grounds an entity in a
+    cookie banner, and hands the judge a `[Linked article]` it will PASS.
+
+The costs are asymmetric, so the bias is to over-reject. Tuned against the real corpus rather
+than guessed: over its 189 successfully-fetched articles it rejects 28, and all 28 are junk —
+**zero false rejects**. (An earlier list used a bare `"log in to"`, which is ordinary English
+prose, and it wrongly rejected three real bodies — two GitHub READMEs and a docs page. A marker
+that fires on prose is not a wall detector, it is a coin flip. Hence `_WALL_MARKERS` vs
+`_CHROME_MARKERS`.)
 """
 
 from __future__ import annotations
@@ -677,7 +699,15 @@ def plan_retry_failed(store: dict[str, Item], *, firecrawl_configured: bool) -> 
     return plan
 
 
-def revalidate_stored_bodies(store: dict[str, Item]) -> list[str]:
+class RevalidateResult(BaseModel):
+    """What a revalidation sweep found. `urls` are the DEMOTED SOURCES themselves — reporting the
+    item's link domains instead would blame a good link that happens to sit on the same item."""
+
+    items: list[str] = []  # item ids whose evidence changed
+    urls: list[str] = []  # the source URLs whose body is not an article
+
+
+def revalidate_stored_bodies(store: dict[str, Item]) -> RevalidateResult:
     """Re-run `validate_body` over the ALREADY-PERSISTED article bodies; demote the walls.
 
     `--retry-failed` cannot reach these: it selects recorded FAILURES, and a wall that was
@@ -691,9 +721,9 @@ def revalidate_stored_bodies(store: dict[str, Item]) -> list[str]:
     Purely local — no network, no extractor. It only re-judges bytes we already hold, so a
     demotion cannot lose anything: the body was never evidence in the first place.
 
-    Returns the ids of the items whose evidence changed. Mutates `store`; the caller snapshots.
+    Mutates `store`; the caller snapshots and saves.
     """
-    demoted: list[str] = []
+    result = RevalidateResult()
     for item in store.values():
         content = item.content
         if content is None:
@@ -711,11 +741,12 @@ def revalidate_stored_bodies(store: dict[str, Item]) -> list[str]:
                 sources.append(src)  # a good body is left byte-identical
                 continue
             changed = True
+            result.urls.append(src.url)
             sources.append(_content_source_from(src.url, verdict))
         if changed:
             item.content = Content(fetched_at=content.fetched_at, sources=sources)
-            demoted.append(item.id)
-    return demoted
+            result.items.append(item.id)
+    return result
 
 
 def _refetch_failed_sources(

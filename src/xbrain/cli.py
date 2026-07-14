@@ -8,9 +8,11 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 
@@ -646,29 +648,38 @@ def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
     )
 
 
-def _run_revalidate(cfg: Config, *, dry_run: bool) -> None:
-    """`fetch --revalidate`: re-judge the article bodies ALREADY in the store and demote the walls.
+def _run_revalidate(cfg: Config, *, write: bool) -> None:
+    """`fetch --revalidate`: re-judge the article bodies ALREADY in the store and demote the junk.
 
-    Local only — no network. A wall that was accepted as a success is invisible to
-    `--retry-failed` (which selects failures), so without this the 28 measured walls in the real
-    corpus keep silencing the guardrail forever.
+    REPORT-ONLY unless `--write`. This one rewrites recorded evidence, so the safe default is to
+    show the operator exactly which items and which domains would change, and let them decide.
+
+    Local — no network, no extractor. A junk body that was accepted as a success is invisible to
+    `--retry-failed` (which selects FAILURES), so without this the 28 measured junk bodies in the
+    real corpus keep serving as `[Linked article]` evidence forever. Demoting cannot lose
+    anything: the body was never evidence in the first place.
     """
     store = load_store(cfg.items_path)
-    demoted = revalidate_stored_bodies(store)
+    found = revalidate_stored_bodies(store)
+    domains = Counter(urlparse(u).hostname or u for u in found.urls)
     typer.echo(
-        f"Cuerpos revalidados: {len(demoted)} items cuyo 'artículo' era en realidad un muro "
-        "(cookies/login) o puro chrome de página. Pasan a fallo `blocked_interstitial`, "
-        "con lo que el guardarraíl vuelve a dispararse y el generador deja de recibirlos "
-        "como `[Linked article]`."
+        f"Cuerpos que NO son artículos: {len(found.items)} items. Su 'artículo' es en realidad un "
+        "muro (cookies/login), un reto anti-bot o puro chrome de página — hoy se le sirven al "
+        "juez como `[Linked article]` y el guardarraíl NO se dispara para ellos."
     )
-    if dry_run:
-        typer.echo("--dry-run: no se ha tocado el store.")
+    for domain, count in domains.most_common(12):
+        typer.echo(f"  {count:>3}  {domain}")
+    if not write:
+        typer.echo(
+            "\nInforme solamente — el store NO se ha tocado. Repite con --write para degradarlos "
+            "a fallo `blocked_interstitial` (se hace snapshot antes)."
+        )
         return
-    if not demoted:
+    if not found.items:
         return
     _auto_snapshot(cfg, "fetch-revalidate")
     save_store(store, cfg.items_path)
-    typer.echo(f"Reescrito → {cfg.items_path}")
+    typer.echo(f"\nDegradados a `blocked_interstitial` → {cfg.items_path}")
 
 
 @app.command()
@@ -691,22 +702,27 @@ def fetch(
         help="Re-juzga los cuerpos YA guardados y degrada los que son muros de cookies/login o "
         "chrome de página (28 medidos en el corpus real). Local, sin red.",
     ),
-    dry_run: bool = typer.Option(
+    write: bool = typer.Option(
         False,
-        "--dry-run",
-        help="Con --retry-failed / --revalidate: informa del plan sin tocar el store.",
+        "--write",
+        help="Con --revalidate: aplica las degradaciones (por defecto solo informa).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Con --retry-failed: informa del plan sin tocar el store."
     ),
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
-    if dry_run and not (retry_failed or revalidate):
-        raise typer.BadParameter("--dry-run requires --retry-failed or --revalidate.")
+    if dry_run and not retry_failed:
+        raise typer.BadParameter("--dry-run requires --retry-failed.")
+    if write and not revalidate:
+        raise typer.BadParameter("--write requires --revalidate.")
     if revalidate:
         if retry_failed or force:
             raise typer.BadParameter(
                 "--revalidate re-judges the bodies already in the store (no network); it does "
                 "not combine with --retry-failed or --force."
             )
-        _run_revalidate(_config(), dry_run=dry_run)
+        _run_revalidate(_config(), write=write)
         return
     if retry_failed:
         if force:

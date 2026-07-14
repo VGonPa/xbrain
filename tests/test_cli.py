@@ -3799,7 +3799,7 @@ def test_re_aggregating_the_judges_restores_the_full_fail_set_so_the_wash_cannot
         }
 
 
-def test_fetch_revalidate_dry_run_reports_and_never_touches_the_store(tmp_path: Path, monkeypatch):
+def test_fetch_revalidate_is_report_only_until_write(tmp_path: Path, monkeypatch):
     """`--revalidate` demotes walls ALREADY persisted as successes — invisible to --retry-failed,
     which selects failures. Measured: 28 of the real corpus's 189 fetched "articles" are walls or
     page chrome. The dry run must classify without mutating a byte."""
@@ -3822,13 +3822,16 @@ def test_fetch_revalidate_dry_run_reports_and_never_touches_the_store(tmp_path: 
     save_store({"7": wall}, items_path)
     before = items_path.read_bytes()
 
-    result = runner.invoke(app, ["fetch", "--revalidate", "--dry-run"])
-    assert result.exit_code == 0, result.output
-    assert "Cuerpos revalidados: 1 items" in _plain_output(result.output)
-    assert items_path.read_bytes() == before  # not a byte touched
-
-    # And the real run demotes it, so the guardrail starts firing on that item.
+    # REPORT-ONLY by default: this rewrites recorded evidence, so it must not act unasked.
     result = runner.invoke(app, ["fetch", "--revalidate"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    assert "Cuerpos que NO son artículos: 1 items" in out
+    assert "youtu.be" in out  # the DOMAIN is reported, not just a count
+    assert items_path.read_bytes() == before  # not a byte touched without --write
+
+    # --write applies the demotion, so the guardrail starts firing on that item.
+    result = runner.invoke(app, ["fetch", "--revalidate", "--write"])
     assert result.exit_code == 0, result.output
     stored = json.loads(items_path.read_text(encoding="utf-8"))["7"]["content"]["sources"][0]
     assert stored["outcome"] == "failure"

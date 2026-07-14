@@ -1297,7 +1297,8 @@ def test_revalidate_demotes_a_stored_wall_and_the_guardrail_starts_firing():
 
     demoted = revalidate_stored_bodies(store)
 
-    assert demoted == ["7"]
+    assert demoted.items == ["7"]
+    assert demoted.urls == ["https://youtu.be/kkXsDGmpLU4"]
     source = store["7"].content.sources[0]
     assert isinstance(source, ContentSourceFailure)
     assert source.failure_reason == "blocked_interstitial"
@@ -1320,7 +1321,7 @@ def test_revalidate_leaves_a_real_article_alone():
     )
     store = {"7": item}
 
-    assert revalidate_stored_bodies(store) == []
+    assert revalidate_stored_bodies(store).items == []
     source = store["7"].content.sources[0]
     assert isinstance(source, ContentSourceSuccess)
     assert source.text == body  # byte-identical: revalidation never rewrites a good body
@@ -1345,4 +1346,4 @@ def test_revalidate_keeps_a_real_article_that_merely_carries_one_cookie_line():
             )
         ],
     )
-    assert revalidate_stored_bodies({"7": item}) == []
+    assert revalidate_stored_bodies({"7": item}).items == []
