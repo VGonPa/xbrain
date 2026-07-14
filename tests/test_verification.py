@@ -29,6 +29,20 @@ from xbrain.verification import (
 )
 
 
+def _contracts(store: dict) -> dict[tuple[str, str], str]:
+    """The contract stamps `export_verify_worksheet` would put on every (item, target) —
+    what the writer threads through when the judging was done under the current contract."""
+    from xbrain.verification import ALL_TARGETS, contract_fingerprint
+
+    stamps: dict[tuple[str, str], str] = {}
+    for item_id, item in store.items():
+        for target in ALL_TARGETS:
+            contract = contract_fingerprint(item, target, "English")
+            if contract is not None:
+                stamps[(item_id, target)] = contract
+    return stamps
+
+
 def test_parse_targets_resolves_and_validates():
     assert parse_targets("all") == ALL_TARGETS
     assert parse_targets("digest") == ("digest",)
@@ -367,7 +381,7 @@ def test_import_verify_fingerprints_drops_conflicting_stamps(tmp_path):
     # Consequence: the dropped key is not written (fingerprint-missing); the agreed key is.
     store = {"7": _item()}
     aggregated = [_j("FAIL", target="summary"), _j("FAIL", target="digest")]
-    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+    result = apply_verdicts_to_store(store, aggregated, fingerprints, _contracts(store))
     assert "summary" not in store["7"].verification  # dropped → no verdict, no badge
     assert store["7"].verification["digest"].output_fingerprint == "c" * 64
     assert ("7", "summary", "fingerprint-missing") in result.skipped
@@ -379,7 +393,9 @@ def test_apply_verdicts_writes_verdict_with_the_judged_fingerprint():
     aggregated = aggregate_verify_judgments(
         [[_j("FAIL", faithfulness="FAIL", flags=[{"claim": "€150M", "issue": "unsupported"}])]]
     )
-    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    result = apply_verdicts_to_store(
+        store, aggregated, {("7", "summary"): judged_fp}, _contracts(store)
+    )
     assert result.written == 1 and result.skipped == []
     verdict = store["7"].verification["summary"]
     assert verdict.verdict == "FAIL"
@@ -399,7 +415,9 @@ def test_apply_verdicts_stores_judged_fingerprint_not_live_recompute():
     live_fp = fingerprint_output(store["7"], "summary")
     assert live_fp != judged_fp
 
-    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    result = apply_verdicts_to_store(
+        store, aggregated, {("7", "summary"): judged_fp}, _contracts(store)
+    )
     assert result.written == 1
     stored = store["7"].verification["summary"].output_fingerprint
     assert stored == judged_fp  # the JUDGED output's fingerprint
@@ -437,7 +455,7 @@ def test_apply_verdicts_tallies_every_skip_reason_and_never_crashes_the_write():
         ("8", "summary"): "nope",
     }
 
-    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+    result = apply_verdicts_to_store(store, aggregated, fingerprints, _contracts(store))
 
     assert result.written == 1 and result.attempted == 7
     assert {reason for _, _, reason in result.skipped} == {
@@ -684,7 +702,7 @@ def test_apply_verdicts_refuses_duplicate_records_so_a_pass_cannot_overwrite_a_f
     ]
 
     with pytest.raises(ValueError, match="duplicate"):
-        apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+        apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp}, _contracts(store))
     assert store["7"].verification == {}  # nothing partially written
 
 

@@ -37,6 +37,7 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
     """If a field is added or removed, every translation must be updated."""
     field_names = {f.name for f in dataclasses.fields(Strings)}
     assert field_names == {
+        "language",
         "topics_label",
         "content_header",
         "summary_header",
