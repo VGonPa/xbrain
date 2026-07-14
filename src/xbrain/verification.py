@@ -316,15 +316,32 @@ def record_fingerprints(records: Iterable[object]) -> dict[tuple[str, str], str]
     return _fold_fingerprints(_entry_stamps(records))
 
 
-def combine_fingerprints(*sources: dict[tuple[str, str], str]) -> dict[tuple[str, str], str]:
-    """Union of several judged-fingerprint maps under the one fail-safe conflict policy.
+def cross_check_fingerprints(
+    primary: dict[tuple[str, str], str], *cross_checks: dict[tuple[str, str], str]
+) -> dict[tuple[str, str], str]:
+    """`primary`, minus every key a cross-check DISAGREES with. Asymmetric on purpose: a
+    cross-check can only ever REMOVE a fingerprint, never introduce one.
 
-    The post-audit write reads the fingerprint from TWO sources that agree by construction —
-    the report records and the applied audit worksheet, both descending from the same
-    judge-export stamp. If they DISAGREE (one of the two artifacts was hand-edited), the key
-    is dropped and the record is skipped, never resolved by precedence.
+    On the audit write the authority is the merged RECORDS — they are what the report being
+    written describes. The applied audit worksheet is a second copy of the same judge-export
+    stamp, so it can catch a hand-edited record (disagreement → drop the key → the record is
+    skipped as `fingerprint-missing`, never resolved by precedence).
+
+    It must NOT be a union. Nothing binds a worksheet to the report it is applied against —
+    there is no run-id — so a union lets a STALE worksheet supply a fingerprint the record
+    never carried: re-aggregate the judges from a worksheet with no `items` block and the
+    records come back unstamped, whereupon an older worksheet's stamp would bind the new
+    verdict to a text those judges never read. Absence is not conflict; an unstamped record
+    stays unwritable.
     """
-    return _fold_fingerprints(stamp for source in sources for stamp in source.items())
+    checked = dict(primary)
+    for source in cross_checks:
+        for key, fingerprint in source.items():
+            existing = checked.get(key)
+            if existing is not None and existing != fingerprint:
+                logger.debug("audit worksheet disagrees with the record for %s — dropping", key)
+                del checked[key]
+    return checked
 
 
 def stamp_record_fingerprints(
@@ -657,6 +674,22 @@ def _build_verdict(record: dict, output_fingerprint: str) -> VerificationVerdict
     )
 
 
+def _reject_duplicate_records(aggregated: list[dict]) -> None:
+    """Raise if two records claim the same `(item_id, target)` — see `apply_verdicts_to_store`."""
+    seen: set[tuple[str, str]] = set()
+    for record in aggregated:
+        if not isinstance(record, dict):
+            continue
+        key = (str(record.get("item_id")), str(record.get("target")))
+        if key in seen:
+            raise ValueError(
+                f"duplicate verdict record for {key[0]}/{key[1]} — one verdict per "
+                "(item, target). A report with duplicates would let the last one written win "
+                "(a PASS could overwrite a FAIL); refusing the write."
+            )
+        seen.add(key)
+
+
 def apply_verdicts_to_store(
     store: dict[str, Item],
     aggregated: list[dict],
@@ -674,7 +707,13 @@ def apply_verdicts_to_store(
     is unknown, its verdict is not PASS/REVIEW/FAIL, or it has no valid judged fingerprint —
     each reason is tallied on the returned `VerdictWriteResult`. Mutates `store` in place; the
     caller snapshots + saves.
+
+    A DUPLICATED `(item_id, target)` is the one thing it refuses outright, before touching the
+    store: assignment is by list order while `merge_audit` sorts worst-first, so a trailing PASS
+    would silently overwrite a leading FAIL and the note would lose its badge. That is a corrupt
+    report, not a per-record defect — there is no honest winner to pick.
     """
+    _reject_duplicate_records(aggregated)
     written = 0
     skipped: list[tuple[str, str, str]] = []
     for record in aggregated:

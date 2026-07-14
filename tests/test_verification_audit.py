@@ -645,3 +645,18 @@ def test_merge_audit_preserves_the_judged_fingerprint_on_the_merged_record():
     merged, _ = merge_audit([record], [_audit(flags=[_decision()])])
     assert merged[0]["output_fingerprint"] == "a" * 64
     assert merged[0]["audited"] is True
+
+
+def test_import_audit_judgments_rejects_a_worksheet_with_no_audits_key(tmp_path):
+    """B3: ABSENT is not EMPTY. `data.get("audits", [])` treated a file with no `audits` key as
+    "the auditor confirmed nothing", so `merge_audit` passed every record through untouched and
+    the caller would persist the UN-AUDITED aggregate under the audit banner. A worksheet that
+    was never filled in — or a JUDGE worksheet fed to the audit path — must raise."""
+    ws = tmp_path / "no-audits.json"
+    ws.write_text(json.dumps({"judgments": [{"item_id": "7"}]}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="audits"):
+        import_audit_judgments(ws)
+
+    ws.write_text(json.dumps({"audits": []}), encoding="utf-8")  # explicitly empty stays legal
+    assert import_audit_judgments(ws) == []

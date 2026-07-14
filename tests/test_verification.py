@@ -16,7 +16,7 @@ from xbrain.verification import (
     ALL_TARGETS,
     aggregate_verify_judgments,
     apply_verdicts_to_store,
-    combine_fingerprints,
+    cross_check_fingerprints,
     export_verify_worksheet,
     fingerprint_output,
     import_verify_fingerprints,
@@ -452,15 +452,6 @@ def test_record_fingerprints_reads_stamps_back_and_rejects_garbage():
     assert record_fingerprints(records) == {("7", "summary"): "a" * 64}
 
 
-def test_combine_fingerprints_unions_sources_and_drops_conflicts():
-    """The audit write reads the fingerprint from BOTH the report records and the applied
-    audit worksheet. They agree by construction; if they DISAGREE (a hand-edited artifact),
-    the key is dropped fail-safe — never resolved by precedence."""
-    from_records = {("7", "summary"): "a" * 64, ("7", "digest"): "b" * 64}
-    from_worksheet = {("7", "summary"): "a" * 64, ("7", "digest"): "c" * 64}
-
-    combined = combine_fingerprints(from_records, from_worksheet)
-    assert combined == {("7", "summary"): "a" * 64}  # agreement kept, conflict dropped
 # ---------------------------------------------------------------- source text
 
 
@@ -623,3 +614,38 @@ def test_source_text_omits_decorative_image_descriptions():
     from xbrain.verification import _source_text
 
     assert "[Images in the post]" not in _source_text(_item())
+
+
+def test_cross_check_fingerprints_never_introduces_a_key_the_primary_lacks():
+    """B2: the merged RECORDS are the authority on the audit write; the audit worksheet only
+    CROSS-CHECKS them. A union would let the worksheet SUPPLY a fingerprint the record never
+    carried — binding a verdict to a text those judges never read (nothing ties the worksheet to
+    the report being written: there is no run-id). Absence is not conflict: the cross-check may
+    DROP a key, never add one."""
+    primary = {("7", "summary"): "a" * 64, ("7", "digest"): "b" * 64}
+    cross_check = {
+        ("7", "summary"): "a" * 64,  # agrees → kept
+        ("7", "digest"): "c" * 64,  # disagrees → the key is DROPPED (fail-safe, no precedence)
+        ("9", "summary"): "d" * 64,  # the primary never had it → must NOT be introduced
+    }
+
+    assert cross_check_fingerprints(primary, cross_check) == {("7", "summary"): "a" * 64}
+    # The unstamped-report case the union got wrong: no records stamped ⇒ nothing writable.
+    assert cross_check_fingerprints({}, {("7", "summary"): "a" * 64}) == {}
+
+
+def test_apply_verdicts_refuses_duplicate_records_so_a_pass_cannot_overwrite_a_fail():
+    """B4: `apply_verdicts_to_store` assigns in list order, but `merge_audit` sorts worst-first —
+    so with two records for the same `(item, target)` a trailing PASS would silently overwrite the
+    leading FAIL and the note would lose its ❌. A duplicated key is a corrupt report, not a
+    per-record defect: refuse the whole write (store untouched) rather than pick a winner."""
+    store = {"7": _item(summary="S.")}
+    judged_fp = fingerprint_output(store["7"], "summary")
+    aggregated = [
+        _j("FAIL", item_id="7", target="summary", faithfulness="FAIL"),
+        _j("PASS", item_id="7", target="summary"),  # same key — would win by loop order
+    ]
+
+    with pytest.raises(ValueError, match="duplicate"):
+        apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    assert store["7"].verification == {}  # nothing partially written

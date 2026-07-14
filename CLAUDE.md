@@ -107,7 +107,16 @@ generates an Obsidian wiki.
   MERGED, post-audit verdicts** — the audited verdict is the authoritative one, so a FAIL the
   auditor revoked never badges a note and a confirmed/auditor-added failure does. The write
   consumes `merge_audit`'s output (floor, confidence gate, mass-revocation guard, anti-washing
-  all intact); it never re-derives a verdict.
+  all intact); it never re-derives a verdict. Three rules keep a persisted verdict from LYING:
+  **`--write-verdicts` is incompatible with `--force`** (`--force` bypasses the already-audited
+  guard, and each forced run re-renders the report from the merged records — so the FAIL set
+  shrinks and N single-revoke runs would clear every FAIL without ever tripping the
+  mass-revocation guard, which needs ≥2 FAILs; forced re-audits stay available report-only);
+  an **absent `audits` key is not an empty audit** (it would pass every record through
+  un-audited, persisting the PRE-audit aggregate), and a **write whose audit matched nothing**
+  while consequential records remain is refused; and the **store is written BEFORE the report**,
+  so a failed write never leaves the report marked `audited` (which would deadlock the retry
+  behind the now-forbidden `--force`).
 - X Articles as blogposts — model seam (#39 PR1): an `x_article`
   `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
   body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
@@ -178,8 +187,12 @@ generates an Obsidian wiki.
   window can't bind a verdict to output it never judged. The SAME stamp rides through the audit
   window: `stamp_record_fingerprints` puts it on the report records → `export_audit_worksheet`
   copies it from the record (never re-fingerprints the live store) → `merge_audit` preserves it →
-  the post-audit write reads it back from both artifacts (`combine_fingerprints`, conflicting
-  stamps drop the key fail-safe → the record is skipped, not badged). `generate._verdict_badge` recomputes
+  the post-audit write reads it off the merged RECORDS (`record_fingerprints`), with the applied
+  audit worksheet as a CROSS-CHECK only (`cross_check_fingerprints`: a disagreeing stamp DROPS the
+  key fail-safe → the record is skipped, not badged). Deliberately **not a union** — nothing binds
+  a worksheet to the report it is applied against (no run-id), so a union would let a stale
+  worksheet SUPPLY a fingerprint the record never carried, binding a verdict to a text those
+  judges never read. An unstamped record stays unwritable. `generate._verdict_badge` recomputes
   `verification.fingerprint_output` on the item's CURRENT output and renders a localised badge
   (❌ FAIL / ⚠️ REVIEW; PASS unbadged) **only when it matches the stored fingerprint** — a STALE
   verdict (output re-generated in EITHER window) is silently NOT badged, so a fixed output never

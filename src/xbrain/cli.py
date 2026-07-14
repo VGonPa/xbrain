@@ -90,7 +90,7 @@ from xbrain.vocab import (
 from xbrain.verification import (
     aggregate_verify_judgments,
     apply_verdicts_to_store,
-    combine_fingerprints,
+    cross_check_fingerprints,
     export_verify_worksheet,
     import_verify_fingerprints,
     import_verify_judgments,
@@ -1455,15 +1455,16 @@ def _verify_write_verdicts(
 
 
 def _audit_write_fingerprints(records: list[dict], apply: list[Path]) -> dict[tuple[str, str], str]:
-    """The JUDGED fingerprints for the post-audit write, from the two artifacts that carry
-    them: the merged report records and the applied audit worksheet's `items` block.
+    """The JUDGED fingerprints for the post-audit write.
 
-    Both descend from the SAME stamp taken at judge-worksheet export, so they agree by
-    construction; a disagreement (a hand-edited artifact) drops the key, and the record is
-    skipped as `fingerprint-missing`. Nothing here recomputes a fingerprint from the live
-    store — that is the invariant the whole plumbing exists to protect (#79).
+    The MERGED RECORDS are the authority — they are what the report being written describes,
+    and they carry the stamp taken at judge-worksheet export. The applied audit worksheet is
+    only a CROSS-CHECK: a second copy of that same stamp, able to DROP a key it disagrees with
+    (a hand-edited artifact → `fingerprint-missing` → the record is skipped), never to supply
+    one the record lacks. Nothing here recomputes a fingerprint from the live store — that is
+    the invariant the whole plumbing exists to protect (#79).
     """
-    return combine_fingerprints(record_fingerprints(records), import_verify_fingerprints(apply))
+    return cross_check_fingerprints(record_fingerprints(records), import_verify_fingerprints(apply))
 
 
 def _verify_audit_apply(
@@ -1498,7 +1499,19 @@ def _verify_audit_apply(
         )
     audits = import_audit_judgments(apply[0])
     records, audit_log = merge_audit(aggregated, audits)
+    _echo_audit_log(audit_log)
+    if write_verdicts:
+        _reject_unaudited_write(aggregated, audit_log)
+        _verify_write_verdicts(cfg, records, _audit_write_fingerprints(records, apply))
+    # The report is written LAST, and only once the store write has succeeded. It is the report
+    # that carries `audited: True`, which the guard above reads to refuse a second audit — so
+    # marking it before a write that then dies would block the retry behind `--force`, which
+    # `--write-verdicts` may not use. Report written ⇒ store already written.
     _write_verify_report(cfg, *render_verify_report(records, audit_log))
+
+
+def _echo_audit_log(audit_log: dict) -> None:
+    """The one-line summary of what the merge did — matched, washed, unmatched, guard."""
     unmatched = audit_log["unmatched"]
     typer.echo(
         f"Audit: {audit_log['matched']}/{audit_log['supplied']} aplicados, "
@@ -1510,8 +1523,26 @@ def _verify_audit_apply(
             else ""
         )
     )
-    if write_verdicts:
-        _verify_write_verdicts(cfg, records, _audit_write_fingerprints(records, apply))
+
+
+def _reject_unaudited_write(aggregated: list[dict], audit_log: dict) -> None:
+    """Refuse `--write-verdicts` when the audit matched NOTHING while consequential records exist.
+
+    An `audits` block that matches no record is an audit that never happened: `merge_audit` passes
+    every record through untouched, so the write would persist the PRE-audit aggregate — the set
+    this path exists to keep out of the store — while echoing `0/N aplicados` and exiting 0. The
+    report-only run stays allowed (it is a human-read artifact); the STORE write is refused.
+    """
+    if audit_log["matched"]:
+        return
+    pending = consequential_records(aggregated)
+    if pending:
+        raise ValueError(
+            f"El audit no casó con ningún record, pero hay {len(pending)} verdicts consecuentes "
+            "(FAIL/divergentes) sin auditar. Escribirlos persistiría el agregado PRE-audit. "
+            "Rellena `audits` en la worksheet (o quita --write-verdicts para re-renderizar solo "
+            "el informe)."
+        )
 
 
 def _verify_audit(
@@ -1582,6 +1613,16 @@ def verify_command(
         raise typer.BadParameter(
             "--write-verdicts requires --apply — there is nothing judged to persist on a "
             "bare export."
+        )
+
+    if write_verdicts and force:
+        raise typer.BadParameter(
+            "--write-verdicts cannot be combined with --force. --force exists to bypass the "
+            "already-audited guard, and that guard is what keeps the mass-revocation guard "
+            "honest: each forced re-audit re-renders the report from the MERGED records, so the "
+            "FAIL set shrinks and N single-revoke runs can clear every FAIL without ever "
+            "tripping it (it needs >=2 FAILs). Report-only forced re-audits stay available; "
+            "re-aggregate the judges (xbrain verify --apply ...) before writing verdicts."
         )
 
     if audit:
