@@ -331,10 +331,14 @@ badge.
 
 **Do:** any change to evidence must invalidate everything derived from it
 (`contract_fingerprint` does this for verdicts: it hashes the output **and** the source
-the judge read **and** the rubrics it applied). And check the invalidation signal
-actually **reaches the population being repaired** — the `fetched_at` lever cannot reach
-an item that has no `content` at all, which was exactly the population one repair
-existed to fix.
+the judge read **and** the rubrics it applied).
+
+And check the invalidation signal actually **reaches the population being repaired**. The
+usual lever is `content.fetched_at` — and it cannot reach an item whose `content` is
+`None`, because there is nothing to stamp. Measured on the real store: **1,551 of 2,168
+items (72%) have no `content` at all**, and **686 of them quote a post** — the exact
+population a quoted-post repair exists to fix. A repair whose staleness signal lives on
+the object it is creating reaches nobody.
 
 ### 7. The cheapest verification layer is showing the user the evidence next to the claim
 
@@ -345,3 +349,17 @@ never mentions Anthropic. No tokens, no threshold, no false positives.
 
 **Do:** before building an instrument to detect a defect, ask whether **showing the
 evidence** to the human would make the defect self-evident.
+
+### 8. Once a review lands on a PR, its author owns the fix — unless reassigned out loud
+
+Six times in one day, two agents built the same thing in parallel: the review fixes for one
+PR (both versions complete, one thrown away), a `develop`-is-red hotfix (opened twice,
+minutes apart), a whole feature re-implemented and opened as a duplicate PR **29 seconds
+after the original merged** — and the same missing evidence surface was independently fixed
+by three different people.
+
+**Do:** when a review lands, the PR's author fixes it. Reassignment is stated explicitly,
+to both agents. Before starting anything that someone else might already be doing, check
+the actual remote state (`gh pr view`, `git ls-remote`) rather than the state you remember
+— and note that a PR in **CONFLICTING** state runs **no checks at all**, so from the
+outside it looks identical to a dead one.
