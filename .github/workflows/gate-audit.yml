@@ -1,0 +1,307 @@
+# Does the `quality` gate actually DO what it REPORTS?
+#
+# ============================================================================================
+# READ THIS BEFORE YOU MOVE, RENAME, OR "TIDY" THIS FILE
+# ============================================================================================
+#
+# THE HOLE THIS CLOSES
+#
+# `quality` is a required status check on `develop` and `main` (strict, enforce_admins). Two
+# one-line edits to `quality.yml` make it report GREEN while testing nothing. Both were
+# measured against the live API on this repo:
+#
+#   1. `continue-on-error: true` on the `Quality gate` STEP (probes #121, #125).
+#      `check.sh` genuinely exits 1. The step reports `success`. The job reports `success`.
+#      The check run reports `SUCCESS`. `mergeStateStatus` is `CLEAN`. EVERY API SURFACE SAYS
+#      GREEN. The failure survives only as text in a log nobody opens.
+#      (At JOB level — `jobs.quality.continue-on-error` — it is harmless: the check reports
+#      FAILURE and the merge is BLOCKED, probe #119. The difference is ONE INDENT. This is
+#      not a distinction anyone should have to hold in their head, which is why both are
+#      banned.)
+#
+#   2. `checkout` with an explicit `ref:` (probe #124). The gate runs, everything passes,
+#      the check reports `SUCCESS`, `CLEAN` — against the WRONG TREE. What gave it away was
+#      the test count: `1088 passed`, where develop's suite has ~1600. Nobody reads the test
+#      count on a green run.
+#
+# WHY NO IN-REPO TEST CAN CATCH #1
+#
+# A PR's CI runs the PR's OWN HEAD copy of the workflow. Our guards
+# (`tests/test_ci_workflow.py`) live inside `scripts/check.sh`, which is what the gate runs.
+# On a PR that adds `continue-on-error: true`, those guards fire correctly and `check.sh`
+# exits 1 — and the very same `continue-on-error` swallows THAT failure too. The alarm rings
+# inside the soundproofed room. Something OUTSIDE the room has to listen. This is it.
+#
+# AND IT IS NOT ONLY AN ATTACK. `continue-on-error: true` on a failing step is THE canonical
+# "make flaky CI stop blocking merges" edit. An agent told "the build keeps failing, make it
+# pass" reaches for it in perfectly good faith and produces a permanently dead gate wearing a
+# green badge. No adversary required. That is the likelier way this happens.
+#
+# ---------------------------------------------------------------------------------------------
+# THE ONE FACT THIS WHOLE FILE RESTS ON — DO NOT DESTROY IT
+# ---------------------------------------------------------------------------------------------
+#
+#   A `schedule`-triggered workflow runs from the DEFAULT BRANCH's version of the file.
+#
+# This repo's default branch is `main` (verified against the API). So this auditor's
+# definition lives on `main`, and A PULL REQUEST INTO `develop` CANNOT EDIT IT. The thing
+# being audited has no reach over the thing auditing it. That is the fail-closed property,
+# and it is the entire security model.
+#
+# It is the same guarantee `pull_request_target` would give (that also runs the base branch's
+# copy) — but WITHOUT its cost. `pull_request_target` hands a base-scoped WRITE token to a
+# workflow running in the context of a fork's pull request, on a PUBLIC repo: the textbook
+# fork-PR RCE surface. It was considered and DECLINED. `schedule` gets the same fail-closed
+# property for free, because no outsider can fire a clock and no fork input is ever executed.
+#
+# => If you "tidy" this workflow so it also runs on `push` or `pull_request`, or you move its
+#    logic onto `develop`, YOU SILENTLY DESTROY THE ONLY THING IT HAS. It would then run from
+#    the PR's own copy, and the accused would be holding the gavel. `tests/
+#    test_gate_audit_workflow.py` fails loudly if you try. Do not "fix" that test.
+#
+# => Corollary, and the reason this is not live yet: a workflow must exist ON THE DEFAULT
+#    BRANCH to be scheduled at all. This lands on `develop` first, so IT DOES NOTHING UNTIL
+#    `develop` IS PROMOTED TO `main`. Until that promotion, this layer is not armed.
+#
+# ---------------------------------------------------------------------------------------------
+# HONEST LIMITS
+# ---------------------------------------------------------------------------------------------
+#
+# * THIS IS DETECTION, NOT PREVENTION. A weakened gate can merge and live on `develop` until
+#   the next audit run — up to 24h. That is an ACCEPTED trade, not an oversight: the accident
+#   is recoverable (it is visible in the diff and one commit to fix), and every mechanical
+#   prevention was checked against the live API and is unavailable on this public, user-owned
+#   repo — merge queue (org-only), required-workflows ruleset (Enterprise),
+#   file_path_restriction ruleset (Enterprise), required approvals (sole collaborator; nobody
+#   can approve). The one remaining preventive option, `pull_request_target`, would have cost
+#   an RCE surface. Detection at 24h beats prevention that opens a hole.
+#
+# * IT CANNOT CATCH A GATE THAT LIES ABOUT ITSELF FROM INSIDE `check.sh`. The audit executes
+#   develop's `check.sh` — that IS the gate under audit — so a `check.sh` neutered to exit 0
+#   would be executed, honestly, and agree with a green report. The static audit and
+#   `tests/test_quality_gate_scope.py` cover that flank; this one covers the workflow.
+#
+# * To disarm THIS file you must weaken `main`, which is a `develop -> main` PR: a separate,
+#   visible, deliberate act. That asymmetry is the point.
+#
+# Permissions: read-only on code everywhere, `issues: write` only where the alarm is raised.
+# No PAT, no secrets beyond the built-in GITHUB_TOKEN, no second identity to rotate or leak.
+# ============================================================================================
+
+name: Gate audit
+
+on:
+  schedule:
+    # 06:17 UTC daily (~07:17/08:17 Madrid). Chosen, not defaulted:
+    #   * Early morning EU, so a lie caught overnight is at the top of the inbox at the start
+    #     of the day rather than discovered at 5pm.
+    #   * `develop`'s HEAD is settled — no pushes overnight — so the `quality` check run for
+    #     it is long since COMPLETED. Auditing a branch mid-push would race an in-flight gate
+    #     and land in `inconclusive`, which is a wasted run.
+    #   * :17, not :00. GitHub explicitly warns that scheduled workflows cluster at the top of
+    #     the hour and are delayed or dropped under that load. An audit that silently does not
+    #     run is exactly the failure this file exists to prevent.
+    - cron: "17 6 * * *"
+  # Run it by hand — the ONLY way to clear an alert the same day you fix it. Without this, a
+  # fix pushed at noon leaves the alarm standing until tomorrow's cron, and a routinely stale
+  # alert is one people learn to scroll past.
+  workflow_dispatch:
+
+# Read-only by default. The single job that needs to speak asks for `issues: write` itself.
+permissions:
+  contents: read
+
+env:
+  AUDITED_BRANCH: develop
+
+jobs:
+  # ------------------------------------------------------------------------------------------
+  # 1. Pin the commit. Everything downstream must agree on ONE SHA.
+  #
+  # The audit compares three views of `develop`: the tree we EXECUTE, the `quality.yml` we
+  # READ, and the check run GitHub REPORTED. If each resolved `develop` independently, a push
+  # landing mid-run would leave them looking at different commits — and comparing an honest
+  # execution of commit A against the reported verdict for commit B produces a FALSE
+  # ACCUSATION. Resolve once, here, and pin all three to the result.
+  #
+  # This job also exists so the SHA survives a FAILING gate: outputs from a failed job are not
+  # dependable, and the gate-execution job is designed to fail. This one cannot.
+  # ------------------------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.head.outputs.sha }}
+    steps:
+      - name: Resolve the audited branch to a single commit
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          sha=$(gh api "repos/${REPO}/commits/${AUDITED_BRANCH}" --jq '.sha')
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Auditing ${AUDITED_BRANCH} @ ${sha}"
+
+  # ------------------------------------------------------------------------------------------
+  # 2. RUN THE REAL GATE. Judge != party — and the judge must EXECUTE, not read.
+  #
+  # This is the half that makes the audit more than a linter. It runs `bash scripts/check.sh`
+  # — the actual gate, from develop's actual tree — in a job whose definition lives on `main`
+  # and which a PR into `develop` therefore cannot touch.
+  #
+  # NOTE WHAT IS ABSENT: no `continue-on-error`, no `if:`, no pinned `ref:` to a tree other
+  # than the commit under audit. Every one of those is a way to make a gate lie, and this job
+  # is the honest control that the lying gate is measured against. It is ALLOWED TO FAIL — a
+  # failure here is the signal, not an error. The `audit` job reads `needs.execute-gate.result`.
+  # ------------------------------------------------------------------------------------------
+  execute-gate:
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # Match quality.yml exactly. A gate run under a different hash seed is not the same gate,
+      # and a spurious difference would read as a lie.
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Check out the exact commit under audit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Create venv and install dependencies
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
+
+      # The whole point. If this disagrees with what GitHub published, the gate is lying.
+      - name: Run the real quality gate, honestly
+        run: bash scripts/check.sh
+
+  # ------------------------------------------------------------------------------------------
+  # 3. COMPARE, and raise the alarm.
+  #
+  # `if: always()` is load-bearing: `execute-gate` is EXPECTED to fail when develop is red or
+  # the gate is lying, and a failed dependency would otherwise skip this job — burying the
+  # alarm exactly when it matters. This is NOT `continue-on-error`: `execute-gate` still fails
+  # honestly and still turns this workflow red. We just insist on being told.
+  #
+  # THE SUBTLETY THAT MAKES THIS JOB TRUSTWORTHY — the comparator is OUR code, not theirs:
+  #
+  #   * The bare `actions/checkout` below takes NO `ref:`. On a scheduled run that resolves to
+  #     the DEFAULT BRANCH — so `xbrain.gate_audit` and `scripts/audit_gate_issue.sh` are
+  #     `main`'s copies. A PR into `develop` cannot edit the judge.
+  #   * develop's `quality.yml` is pulled in through a SEPARATE, SPARSE checkout into
+  #     `audited/`. It is read as DATA and never executed. Sparse-checking-out exactly one
+  #     file makes that structural rather than a promise.
+  #
+  # If the comparator ran from the audited tree instead, a single PR could neuter the gate and
+  # the judge in the same diff, and this entire workflow would be decorative.
+  # ------------------------------------------------------------------------------------------
+  audit:
+    needs: [resolve, execute-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # clone this repo
+      checks: read # ask what the `quality` check run concluded
+      issues: write # raise the alarm. The only write scope in this file.
+    steps:
+      - name: Check out the AUDITOR's own tree (default branch — not the audited branch)
+        uses: actions/checkout@v4
+
+      - name: Fetch the audited quality.yml as DATA (never executed)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: audited
+          sparse-checkout: .github/workflows/quality.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install the auditor
+        run: |
+          uv venv
+          uv pip install -e .
+
+      # What the gate CLAIMED for this exact commit. Pinned to the resolved SHA, never to
+      # `develop`, so it cannot drift onto a different commit than the one we executed.
+      # Every `${{ }}` below is routed through `env:` rather than interpolated into the shell.
+      # Nothing here is attacker-controlled — this workflow fires only on `schedule` and
+      # `workflow_dispatch`, so there is no `github.event.*` payload for an outsider to poison,
+      # and SHA comes from the API as a hex string. The discipline is kept anyway: it costs
+      # nothing, and a file whose whole purpose is to be trustworthy should not ask a reviewer
+      # to first prove that its interpolations happen to be safe.
+      - name: Ask GitHub what the gate REPORTED
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" > check-runs.json
+          echo "--- check runs GitHub published for this commit ---"
+          jq -r '.check_runs[] | "  \(.name): \(.status)/\(.conclusion)"' check-runs.json
+
+      # The comparison. Reported vs. actually-executed, plus a static read of develop's
+      # quality.yml for the known banned patterns. Writes `verdict`, `file_issue`, `clean`
+      # and `title` to $GITHUB_OUTPUT, and always exits 0 — the alarm must be raised BEFORE
+      # anything is allowed to fail.
+      - name: Compare what the gate REPORTED with what it actually DOES
+        id: audit
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          GATE_RESULT: ${{ needs.execute-gate.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run python -m xbrain.gate_audit \
+            --check-runs check-runs.json \
+            --workflow audited/.github/workflows/quality.yml \
+            --audit-result "$GATE_RESULT" \
+            --sha "$SHA" \
+            --repo "$REPO" \
+            --run-url "$RUN_URL" \
+            --body-out issue-body.md
+
+      - name: Raise the alarm
+        if: steps.audit.outputs.file_issue == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: ${{ steps.audit.outputs.title }}
+        run: bash scripts/audit_gate_issue.sh open "$TITLE" issue-body.md
+
+      # Stand down ONLY on a positively CLEAN verdict — never on merely "no new accusation".
+      # An inconclusive audit or a plainly-red develop must leave a live alarm standing; see
+      # `should_stand_down` in xbrain/gate_audit.py.
+      - name: Stand down a resolved alarm
+        if: steps.audit.outputs.clean == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/audit_gate_issue.sh close
+
+      # Turn the run red, AFTER the issue is filed. An audit that catches a lying gate and
+      # still shows a green tick would be the very thing it exists to detect.
+      - name: Fail the audit when the gate cannot be trusted
+        if: steps.audit.outputs.file_issue == 'true'
+        run: |
+          echo "::error::develop's quality gate is not trustworthy — see the issue just filed."
+          exit 1
