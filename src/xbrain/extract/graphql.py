@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterator
 from urllib.parse import urlparse
@@ -109,6 +110,67 @@ def _unwrap(result: dict[str, Any]) -> dict[str, Any] | None:
     return result if "legacy" in result else None
 
 
+# X truncates a long post at 280 characters of prose and appends a t.co self-link.
+_TRAILING_TCO = re.compile(r"https://t\.co/\w+\s*$")
+# A sentence that really ended does so on punctuation. Anything else at the cap is a cut.
+_TERMINAL = (".", "!", "?", "…", '"', "”", ")", ":", ";", "»")
+# The observed cut lands at 270–290 chars of body (the store's median body is 279).
+_TRUNCATION_FLOOR = 265
+
+
+def looks_truncated(text: str, links: list[str]) -> bool:
+    """True when `text` bears X's 280-character truncation signature.
+
+    The mechanical marks: ~280 characters of prose, ending mid-word with no terminal
+    punctuation, optionally followed by an appended `t.co` self-link that is NOT among the
+    tweet's own `links` (X adds it; the tweet never contained it).
+
+    Deliberately biased towards FLAGGING: a detector that silently passes a genuinely
+    truncated tweet reproduces the very bug it exists to catch — the generator gets half a
+    sentence and finishes it. A false flag costs a re-fetch; a missed one costs a
+    fabrication in the knowledge base.
+    """
+    body = text.rstrip()
+    match = _TRAILING_TCO.search(body)
+    if match and match.group().strip() not in links:
+        body = body[: match.start()].rstrip()
+    return len(body) >= _TRUNCATION_FLOOR and not body.endswith(_TERMINAL)
+
+
+def items_needing_refetch(store: dict[str, Item]) -> list[Item]:
+    """Every stored item whose text was truncated at ingest.
+
+    These were extracted before the `note_tweet` fix, so their long-form body was never
+    read. The raw GraphQL payloads are NOT persisted (they are captured in-flight during
+    the browser session), so repairing them REQUIRES a re-fetch from X — this is not a
+    free re-parse of data we already hold.
+    """
+    return [
+        item
+        for item in store.values()
+        if looks_truncated(item.text, [link.url for link in item.links])
+    ]
+
+
+def _tweet_text(tweet: dict[str, Any], legacy: dict[str, Any]) -> str:
+    """The tweet's FULL text — the long-form body when X provides one.
+
+    `legacy.full_text` is capped at 280 characters: X truncates a long post there and
+    appends a t.co self-link, so the stored text ends mid-word ("…solve literally any").
+    The generator is then handed half a sentence and told to summarise it, and it completes
+    the sentence itself — a fabrication WE cause, at ingest. The real body lives in
+    `note_tweet.note_tweet_results.result.text`.
+
+    An empty long-form body falls back to `full_text`: shipping a truncated tweet is bad,
+    shipping an EMPTY one is worse.
+    """
+    # `_dig` coerces a non-dict leaf to {}, so walk to the parent and read the leaf here.
+    note = _dig(tweet, "note_tweet", "note_tweet_results", "result").get("text")
+    if isinstance(note, str) and note.strip():
+        return note
+    return legacy.get("full_text", "")
+
+
 def _tweet_to_item(tweet: dict[str, Any], source: SourceName) -> Item | None:
     legacy = tweet.get("legacy")
     rest_id = tweet.get("rest_id")
@@ -123,7 +185,7 @@ def _tweet_to_item(tweet: dict[str, Any], source: SourceName) -> Item | None:
         source=source,
         url=f"https://x.com/{author.handle}/status/{rest_id}",
         author=author,
-        text=legacy.get("full_text", ""),
+        text=_tweet_text(tweet, legacy),
         created_at=_parse_x_date(legacy.get("created_at")),
         captured_at=datetime.now(timezone.utc),
         media=_extract_media(legacy),

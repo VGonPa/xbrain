@@ -618,3 +618,56 @@ def test_structured_article_selects_richest_of_multiple_payloads(caplog):
     assert source.title == _OPENWIKI_TITLE
     assert len(source.blocks) > 5
     assert any("selecting the" in r.message for r in caplog.records)
+
+
+def test_refetch_full_texts_replaces_only_the_truncated_text():
+    """The backfill's core is pure and injected, exactly like `fetch_x_articles`'s
+    `link_fetcher`: the browser hop is the only untested surface."""
+    from datetime import datetime, timezone
+
+    from xbrain.fetch_x import refetch_full_texts
+    from xbrain.models import Author, Item
+
+    def mk(item_id: str, text: str) -> Item:
+        return Item(
+            id=item_id,
+            source="bookmark",
+            url=f"https://x.com/a/status/{item_id}",
+            author=Author(handle="a", name="A"),
+            text=text,
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+
+    cut, whole = "cut off mid", "The whole post, complete."
+    store = {"1": mk("1", cut), "2": mk("2", "untouched")}
+    fetched = {"https://x.com/a/status/1": whole}
+
+    repaired = refetch_full_texts(store, [store["1"]], lambda url: fetched.get(url))
+    assert repaired == 1
+    assert store["1"].text == whole
+    assert store["2"].text == "untouched"
+
+
+def test_refetch_full_texts_never_blanks_an_item_when_the_refetch_fails():
+    """A failed re-fetch (None/empty) must leave the truncated text in place. Half a tweet
+    is bad; no tweet at all is worse, and it would be a silent data loss."""
+    from datetime import datetime, timezone
+
+    from xbrain.fetch_x import refetch_full_texts
+    from xbrain.models import Author, Item
+
+    item = Item(
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="cut off mid",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    store = {"1": item}
+    assert refetch_full_texts(store, [item], lambda url: None) == 0
+    assert item.text == "cut off mid"
+    assert refetch_full_texts(store, [item], lambda url: "   ") == 0
+    assert item.text == "cut off mid"

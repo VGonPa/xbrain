@@ -29,7 +29,12 @@ from xbrain.extract.browser import x_context
 from xbrain.extract.extractor import RateLimitTruncated, extract_source
 from xbrain.extract.threads import expand_threads
 from xbrain.fetch import fetch_pending
-from xbrain.fetch_x import fetch_x_articles
+from xbrain.extract.graphql import items_needing_refetch
+from xbrain.fetch_x import (
+    browser_text_fetcher,
+    fetch_x_articles,
+    refetch_full_texts,
+)
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -2154,6 +2159,38 @@ def reextract_command(
         typer.echo(f"{len(report.changed)} campo(s) actualizados → {cfg.items_path}")
     else:
         typer.echo("Dry run. Pass --apply to write.")
+@app.command(name="refetch-truncated")
+@_handle_cli_errors
+def refetch_truncated_command(
+    apply: bool = typer.Option(False, "--apply", help="Actually re-fetch from X (network)"),
+) -> None:
+    """List (or re-fetch) items whose tweet text was TRUNCATED at ingest.
+
+    `legacy.full_text` is capped at 280 chars: X cuts a long post mid-word and appends a
+    t.co self-link. Items ingested before the `note_tweet` fix carry half a sentence, and
+    the generator — told to summarise it — finishes the sentence itself.
+
+    The raw GraphQL payloads are NOT on disk (they are captured in-flight), so this is NOT
+    a free re-parse: `--apply` re-fetches each affected tweet from X. It snapshots `data/`
+    first. Without `--apply` it only reports, and writes the id list.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    targets = items_needing_refetch(store)
+    path = cfg.data_dir / "truncated-items.json"
+    path.write_text(
+        json.dumps([{"id": i.id, "url": i.url, "text": i.text} for i in targets], indent=2),
+        encoding="utf-8",
+    )
+    typer.echo(f"{len(targets)}/{len(store)} items truncated at ingest → {path}")
+    if not apply:
+        typer.echo("Dry run. Re-fetching requires the network: pass --apply.")
+        return
+    _auto_snapshot(cfg, "refetch-truncated")
+    with x_context(cfg.storage_state_path, headless=False) as context:
+        repaired = refetch_full_texts(store, targets, browser_text_fetcher(context))
+    save_store(store, cfg.items_path)
+    typer.echo(f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}")
 
 
 if __name__ == "__main__":

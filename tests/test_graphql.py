@@ -581,3 +581,285 @@ def test_iter_tweet_payloads_yields_the_full_subtree_per_tweet():
     assert set(pairs) == {"111"}
     assert pairs["111"]["legacy"]["full_text"]  # the whole subtree, not a summary
     assert pairs["111"]["rest_id"] == "111"
+
+def _quoted_author_block(handle: str, name: str) -> dict:
+    return {"user_results": {"result": {"legacy": {"screen_name": handle, "name": name}}}}
+
+
+def _quoting_tweet(quoted_result: dict | None, *, quoted_id: str | None = "222") -> dict:
+    """Tweet 111 quoting tweet `quoted_id`; `quoted_result` is what X hydrated
+    (None = X sent the id but embedded no post)."""
+    tweet = _tweet_result("111", "alice", "Read this and you'll understand better this career move")
+    if quoted_id is not None:
+        tweet["legacy"]["quoted_status_id_str"] = quoted_id
+    if quoted_result is not None:
+        tweet["quoted_status_result"] = {"result": quoted_result}
+    return tweet
+
+
+def _quoted_post(**over) -> dict:
+    quoted = _tweet_result("222", "karpathy", "I am leaving OpenAI.")
+    quoted["core"] = _quoted_author_block("karpathy", "Andrej Karpathy")
+    quoted.update(over)
+    return quoted
+
+
+def _timeline(tweet: dict) -> dict:
+    """Wrap one tweet result in a bookmark-timeline envelope."""
+    return {
+        "data": {
+            "bookmark_timeline_v2": {
+                "timeline": {
+                    "instructions": [
+                        {
+                            "type": "TimelineAddEntries",
+                            "entries": [
+                                {
+                                    "entryId": f"tweet-{tweet['rest_id']}",
+                                    "content": {
+                                        "itemContent": {
+                                            "itemType": "TimelineTweet",
+                                            "tweet_results": {"result": tweet},
+                                        }
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+
+# --- Long-form posts: `legacy.full_text` is a 280-char TRUNCATION -------------------
+#
+# X caps `legacy.full_text` at 280 characters and appends a t.co self-link. For a long
+# post the real body lives in `note_tweet.note_tweet_results.result.text`. Reading
+# `full_text` hands the generator half a sentence — ending mid-word, mid-clause — and the
+# rubric then tells it to summarise. It completes the sentence itself. That is a
+# fabrication WE cause, at ingest, and it affects ~18% of the store (382 items); for 281
+# of them the truncated tweet is the only evidence there is.
+
+
+def _long_post_response(full_text: str, note_text: str | None) -> dict:
+    """A bookmark payload whose tweet may carry a `note_tweet` long-form body.
+
+    Built on the SHARED `_tweet_result` / `_timeline` helpers rather than a private copy of
+    the envelope — two fixtures for one payload shape is how the two sides drift apart.
+    """
+    tweet = _tweet_result("999", "bob", full_text)
+    if note_text is not None:
+        tweet["note_tweet"] = {"note_tweet_results": {"result": {"id": "N1", "text": note_text}}}
+    return _timeline(tweet)
+
+
+def _only_source(tweet: dict):
+    items = parse_tweets(_timeline(tweet), "bookmark")
+    assert len(items) == 1
+    item = items[0]
+    assert item.content is not None, "the quoting item must carry a Content block"
+    assert len(item.content.sources) == 1
+    return item, item.content.sources[0]
+
+
+def test_quoted_post_body_and_author_land_as_a_content_source():
+    """The quoted post's TEXT and its AUTHOR are the evidence that was missing.
+
+    The author matters as much as the body: the quoted post is a third party's,
+    and naming the poster as its author is the attribution bug #86 guards against.
+    """
+    from xbrain.models import Author, ContentSourceSuccess
+
+    item, source = _only_source(_quoting_tweet(_quoted_post()))
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.kind == "quoted_tweet"
+    assert source.text == "I am leaving OpenAI."
+    assert source.author == Author(handle="karpathy", name="Andrej Karpathy")
+    assert source.url == "https://x.com/karpathy/status/222"
+    assert item.quoted_id == "222"
+
+
+def test_the_quoted_source_carries_no_title():
+    """`notes_io.note_title` takes the first source with a `title` — a quoted post
+    has no title, and borrowing that field for the author would hijack note titles."""
+    _, source = _only_source(_quoting_tweet(_quoted_post()))
+    assert source.title is None
+
+
+def test_the_quoted_source_is_not_a_link_content_kind():
+    """It must never be mistaken for a fetched LINK body: a quoted post is not the
+    content of any link the post points at."""
+    from xbrain.executors.api import fetched_link_sources
+    from xbrain.models import LINK_CONTENT_KINDS
+
+    item, source = _only_source(_quoting_tweet(_quoted_post()))
+
+    assert source.kind not in LINK_CONTENT_KINDS
+    assert fetched_link_sources(item) == 0
+
+
+def test_a_deleted_quoted_post_lands_as_a_not_found_failure():
+    from xbrain.models import ContentSourceFailure
+
+    tombstone = {"__typename": "TweetTombstone", "tombstone": {"text": {"text": "unavailable"}}}
+    _, source = _only_source(_quoting_tweet(tombstone))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.kind == "quoted_tweet"
+    assert source.failure_reason == "not_found"
+    assert source.url == "https://x.com/i/status/222"
+
+
+def test_a_protected_quoted_post_lands_as_a_forbidden_failure():
+    from xbrain.models import ContentSourceFailure
+
+    unavailable = {"__typename": "TweetUnavailable", "reason": "Protected"}
+    _, source = _only_source(_quoting_tweet(unavailable))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "forbidden"
+
+
+def test_an_unhydrated_quoted_post_lands_as_an_empty_content_failure():
+    """X sent the id but embedded no post — we know a quote exists and hold none
+    of it. That is a FAILURE state, not the absence of a quote."""
+    from xbrain.models import ContentSourceFailure
+
+    _, source = _only_source(_quoting_tweet(None))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+    assert source.url == "https://x.com/i/status/222"
+
+
+def test_a_quoted_post_with_no_body_and_no_author_is_an_empty_content_failure():
+    from xbrain.models import ContentSourceFailure
+
+    _, source = _only_source(_quoting_tweet({"__typename": "Tweet", "rest_id": "222"}))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+
+
+def test_a_tweet_that_quotes_nothing_gets_no_content_block():
+    """No quote → no source, and crucially no EMPTY `Content` that would later read
+    as "already fetched" to the link fetcher."""
+    items = parse_tweets(_timeline(_tweet_result("111", "alice", "just a post")), "bookmark")
+    assert items[0].quoted_id is None
+    assert items[0].content is None
+
+
+# ------------------------------------------- L6/M5: an honest record of what X did
+
+
+def test_a_media_only_quoted_post_is_not_recorded_as_X_refusing_it():
+    """X DID serve the post — it simply carries no text (a photo/video quote). Recording
+    "X did not serve the quoted post" is a false statement about the world, in the very
+    evidence store whose whole purpose is to stop us inventing facts."""
+    from xbrain.models import ContentSourceFailure
+
+    media_only = _quoted_post()
+    media_only["legacy"]["full_text"] = ""
+    _, source = _only_source(_quoting_tweet(media_only))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+    assert "no text" in (source.error or "")
+    assert "did not serve" not in (source.error or "")
+
+
+def test_a_quoted_post_with_a_body_but_no_author_still_ships_its_body():
+    """The body is evidence even when X hydrates no author. Dropping it would throw away
+    the cure because one field is missing; the attribution simply names nobody."""
+    from xbrain.models import ContentSourceSuccess
+
+    anonymous = _quoted_post()
+    del anonymous["core"]
+    _, source = _only_source(_quoting_tweet(anonymous))
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == "I am leaving OpenAI."
+    assert source.author is None
+def test_long_post_uses_the_note_tweet_body_not_the_truncated_full_text():
+    """The whole bug in one assertion: when X provides the long-form body, take it."""
+    truncated = "a" * 277 + " https://t.co/abc123"
+    full = "The complete thought, all of it, ending in a real sentence."
+    items = parse_tweets([_long_post_response(truncated, full)], "bookmark")
+    assert len(items) == 1
+    assert items[0].text == full  # identity, not a substring check
+    assert "t.co" not in items[0].text
+
+
+def test_a_short_post_still_uses_full_text():
+    """No `note_tweet` → `full_text` IS the whole post. The fix must not disturb the 82%."""
+    items = parse_tweets([_long_post_response("A short thought.", None)], "bookmark")
+    assert items[0].text == "A short thought."
+
+
+def test_an_empty_note_tweet_body_never_silently_replaces_the_tweet():
+    """A present-but-empty long-form body must not blank the item: falling back to the
+    truncated text is bad, but shipping an EMPTY tweet to the generator is worse."""
+    items = parse_tweets([_long_post_response("Real text here.", "")], "bookmark")
+    assert items[0].text == "Real text here."
+
+
+# --- The ingest guard that would have caught this ------------------------------------
+
+
+def test_truncation_detector_flags_x_s_long_post_signature():
+    """X's signature is unmistakable and mechanical: ~280 characters of prose, cut
+    mid-word, followed by an appended t.co self-link that is NOT among the tweet's own
+    links. 382 items in the store carry it; 281 of them have no other evidence at all."""
+    from xbrain.extract.graphql import looks_truncated
+
+    body = "En este hilo explico por qué el modelo " * 7  # ~270 chars, cut mid-clause
+    assert looks_truncated(body[:277] + " https://t.co/abc123", links=[])
+
+
+def test_truncation_detector_does_not_flag_a_short_post_or_a_real_trailing_link():
+    """A short post is not truncated, and a genuine link the tweet actually contains (it is
+    in `links`) is not the appended self-link marker."""
+    from xbrain.extract.graphql import looks_truncated
+
+    assert not looks_truncated("A short thought.", links=[])
+    real = "https://t.co/realone"
+    assert not looks_truncated("Read this: " + real, links=[real])
+
+
+def test_truncation_detector_flags_a_long_post_cut_without_any_link():
+    """When in doubt, FLAG. A ~280-char text ending mid-word with no terminal punctuation is
+    truncated even if the trailing link is absent — a detector that silently passes a
+    genuinely truncated tweet is the failure mode that produced this bug."""
+    from xbrain.extract.graphql import looks_truncated
+
+    assert looks_truncated("palabra " * 35 + "cortado a mitad de", links=[])
+
+
+def test_items_needing_refetch_selects_exactly_the_truncated_ones():
+    """The backfill's selection is pure and testable; only the browser hop is not."""
+    from datetime import datetime, timezone
+
+    from xbrain.extract.graphql import items_needing_refetch
+    from xbrain.models import Author, Item, Link
+
+    def mk(item_id: str, text: str, links: list[str] | None = None) -> Item:
+        return Item(
+            id=item_id,
+            source="bookmark",
+            url=f"https://x.com/a/status/{item_id}",
+            author=Author(handle="a", name="A"),
+            text=text,
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            links=[Link(url=u, domain="t.co") for u in (links or [])],
+        )
+
+    cut = "palabra " * 35 + "cortado a mitad de"
+    store = {
+        "1": mk("1", cut),  # truncated
+        "2": mk("2", "Un post corto y completo."),  # fine
+        "3": mk("3", "x" * 300 + " https://t.co/aaa"),  # truncated + appended self-link
+    }
+    assert [i.id for i in items_needing_refetch(store)] == ["1", "3"]

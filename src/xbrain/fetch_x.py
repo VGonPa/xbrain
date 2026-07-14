@@ -395,6 +395,40 @@ def _attach_x_sources(
         item.content.fetched_at = now()
 
 
+def browser_text_fetcher(context: BrowserContext) -> Callable[[str], str | None]:
+    """Bind a full-text fetcher to a live X session: visit the status page, intercept the
+    TweetDetail payload, and re-parse it with the (now note_tweet-aware) extractor."""
+
+    def fetch(url: str) -> str | None:
+        source = _fetch_tweet(context, url)
+        return getattr(source, "text", None)
+
+    return fetch
+
+
+def refetch_full_texts(
+    store: dict[str, Item],
+    targets: list[Item],
+    text_fetcher: Callable[[str], str | None],
+) -> int:
+    """Replace each truncated item's text with the full post re-fetched from X.
+
+    `text_fetcher` is injected (tests pass a fake; production binds it to a Playwright
+    TweetDetail capture) — the same seam `fetch_x_articles` uses for `link_fetcher`.
+
+    A failed or empty re-fetch leaves the truncated text ALONE. Half a tweet is bad;
+    blanking the item is worse, and it would be a silent data loss on the one surface that
+    is the only evidence 432 items have.
+    """
+    repaired = 0
+    for item in targets:
+        fresh = text_fetcher(item.url)
+        if fresh and fresh.strip() and fresh != item.text:
+            item.text = fresh
+            repaired += 1
+    return repaired
+
+
 def fetch_x_articles(
     store: dict[str, Item],
     storage_state_path: Path | None,
