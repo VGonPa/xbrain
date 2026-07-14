@@ -5,11 +5,24 @@ That sentence — not "the workflow declares a push trigger" — is the property
 exists to defend. Two things depend on it:
 
 1. **Detection.** CLAUDE.md rule 4 ("A green PR against a moving `develop` is not a green
-   `develop`") was paid for in blood on 2026-07-14. PR #94 changed `_source_text(item)` to
-   `_source_text(item, target)`; PR #97 added a test calling `_source_text(item)`. Both
-   green on their own branches, zero textual conflict, so git merged both happily — and
-   `develop` was RED. CI never said a word: it only ran on `pull_request`, so the one
-   commit nobody ever tested was the merge commit itself. A human found it by hand (#103).
+   `develop`") was paid for in blood on 2026-07-14 (#103). PR #94 changed
+   `_source_text(item)` to `_source_text(item, target)`; PR #97 added a test calling
+   `_source_text(item)`. Both were green, there was zero textual conflict, git merged both
+   happily — and `develop` was RED.
+
+   Be precise about WHY, because the obvious explanation is wrong: it is **not** that the
+   merge went untested. `pull_request` already tests a merge — GitHub builds
+   `refs/pull/N/merge` (the PR head merged into the base) and checks THAT out. The defect
+   is that the merge ref is computed when the run is **triggered** and is never recomputed
+   when the base moves under it. #97 landed at 14:01:08Z; #94 merged at 14:04:08Z on a
+   green measured against a base that did not contain #97. Merging #97 does not re-trigger
+   #94. So the merge that was *tested* was not the merge that *landed*. The failure mode is
+   **staleness, not absence** — and nothing caught it, because nothing ran on the branch
+   afterwards. A human found it by hand.
+
+   Hence: `push` is the **detector** (every push to a gated branch IS the true merge
+   result), and branch protection's `strict` is the **preventer** (it forces the merge ref
+   to be recomputed against the current base before merging). Complementary, not redundant.
 
 2. **Branch protection.** `develop` and `main` require a status check named exactly
    `quality`. GitHub derives that name from the job's `name:` if it declares one, else
@@ -17,6 +30,11 @@ exists to defend. Two things depend on it:
    it and the required check never appears, GitHub waits for it forever, and **every merge
    is blocked permanently**. That deadlock is strictly worse than the bug this file was
    written to catch.
+
+3. **Alerting.** A red push run blocks nothing — the commit has already landed — so it must
+   raise an alarm or it is detecting into a void. On 2026-07-14 `develop` sat red for
+   9m15s, three commits took the red commit as their parent, and two agents opened
+   duplicate hotfix PRs 31 seconds apart. Watching the Actions tab is not a control.
 
 An earlier version of this file asserted only that a `push:` key existed with the right
 `branches:`. Four independent edits killed the gate while it stayed green:
@@ -60,6 +78,17 @@ _GATING_EVENTS = ("push", "pull_request")
 # GitHub's defaults for `pull_request`; narrowing `types:` away from them silently drops
 # the PR-head runs.
 _REQUIRED_PR_TYPES = ("opened", "synchronize")
+
+# The script that files/updates/closes the "branch is RED" issue. A push-triggered red run
+# blocks nothing — the commit has already landed — so if it does not SPEAK, it detects into
+# a void. On 2026-07-14 `develop` was red for 9m15s and three commits took the red commit as
+# their parent, including two duplicate hotfixes opened 31s apart by two agents who each
+# rediscovered the breakage by hand.
+_ALERT_SCRIPT = "scripts/announce_red_branch.sh"
+
+# The alert steps must be scoped to `push`: a failing PR run must NOT open issues (the PR's
+# own red check is already visible to its author, and one issue per pushed PR commit is spam).
+_PUSH_GUARD = "github.event_name == 'push'"
 
 
 def _workflow() -> dict[Any, Any]:
@@ -271,4 +300,88 @@ def test_gate_step_actually_runs_and_is_not_conditional() -> None:
         f"skipped, the job still SUCCEEDS and the required `{_REQUIRED_CHECK}` check "
         f"reports GREEN having run none of the quality checks. Branch protection would "
         f"then be waving through completely unverified code."
+    )
+
+
+def _alert_steps() -> list[dict[str, Any]]:
+    """Every step that runs the red-branch alert script."""
+    steps = _gate_job().get("steps") or []
+    return [s for s in steps if _ALERT_SCRIPT in str(s.get("run", ""))]
+
+
+def test_red_branch_failure_is_announced() -> None:
+    """A red `develop` must SPEAK. Detecting into a void is not detecting.
+
+    A push run that goes red blocks nothing — the commit has already landed. If it does not
+    raise an alarm, the only thing standing between a red `develop` and the next twenty
+    commits built on top of it is somebody happening to look at the Actions tab. On
+    2026-07-14 nobody did, for 9m15s.
+    """
+    on_failure = [s for s in _alert_steps() if "failure()" in str(s.get("if", ""))]
+    assert on_failure, (
+        f"The `{_REQUIRED_CHECK}` job has no step running `{_ALERT_SCRIPT}` under "
+        f"`if: failure()`. A red push run would then block nothing and tell nobody: the bad "
+        f"commit is already on the branch, and the next commits will take it as their "
+        f"parent. That is exactly how 2026-07-14 produced two duplicate hotfixes, opened 31 "
+        f"seconds apart by two agents who each rediscovered the same breakage by hand."
+    )
+
+
+def test_red_branch_alert_only_fires_on_push() -> None:
+    """The alert must be scoped to `push` — a failing PR must not open issues.
+
+    A PR's red check is already in front of its author, and a PR that is pushed to five
+    times would file five issues. The alert exists for the one case where nothing else
+    speaks: a merge result that is already on the branch.
+    """
+    steps = _alert_steps()
+    # Assert the steps EXIST before asserting a property of them. `all(... for s in [])` is
+    # vacuously true: without this line the test would pass on a workflow with no alert at
+    # all — a green test for a feature that had been deleted (CLAUDE.md rule 1).
+    assert steps, f"No step runs `{_ALERT_SCRIPT}`, so there is nothing to scope to `push`."
+    unguarded = [s for s in steps if _PUSH_GUARD not in str(s.get("if", ""))]
+    assert not unguarded, (
+        f"An alert step is not guarded by `{_PUSH_GUARD}`: "
+        f"{[s.get('name', s.get('run')) for s in unguarded]}. Without that guard a failing "
+        f"PULL REQUEST run also files issues — spamming one per pushed commit for a failure "
+        f"its author is already looking at."
+    )
+
+
+def test_red_branch_alert_is_resolved_when_the_branch_goes_green() -> None:
+    """A green push must close the alert. A stale alert is a training exercise in ignoring it.
+
+    The issue asserts a live fact — "this branch is red RIGHT NOW" — and a green push on the
+    true merge result disproves it. Leaving it open would teach everyone that the alert is
+    usually out of date, which is exactly how the Actions tab stopped being read.
+    """
+    on_success = [s for s in _alert_steps() if "success()" in str(s.get("if", ""))]
+    assert on_success, (
+        f"No step runs `{_ALERT_SCRIPT}` under `if: success()`, so the red-branch issue is "
+        f"never closed when the branch recovers. The alert would stay open after the fix "
+        f"landed — and an alert that is routinely stale is one nobody reads."
+    )
+
+
+def test_gate_job_may_file_the_red_branch_issue() -> None:
+    """The job needs `issues: write` to alert, and `contents: read` to exist at all.
+
+    Declaring a `permissions:` block sets every scope NOT listed to `none` — so omitting
+    `contents: read` does not merely narrow the token, it stops `actions/checkout` cloning
+    the repo and the gate cannot run at all. The two entries are asserted together because
+    adding the first without the second bricks the job.
+
+    `issues: write` on the built-in `GITHUB_TOKEN` is what lets `github-actions[bot]` file
+    the alert with no PAT, no bot account, and no second human in the loop.
+    """
+    permissions = _gate_job().get("permissions") or {}
+    assert permissions.get("issues") == "write", (
+        f"The `{_REQUIRED_CHECK}` job does not declare `permissions: issues: write`, so the "
+        f"built-in GITHUB_TOKEN cannot file the red-branch issue and the alert step fails "
+        f"with 403 exactly when it is needed most — on a red `develop`."
+    )
+    assert permissions.get("contents") == "read", (
+        f"The `{_REQUIRED_CHECK}` job declares a `permissions:` block without "
+        f"`contents: read`. A permissions block sets every unlisted scope to `none`, so "
+        f"`actions/checkout` can no longer clone the repo and the gate cannot run AT ALL."
     )

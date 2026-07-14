@@ -1,15 +1,38 @@
 name: Quality
 on:
-  # `pull_request` tests the PR head; `push` tests the MERGE RESULT. Both are needed:
-  # two PRs can each be green in isolation, merge with no textual conflict, and leave
-  # `develop` red (#103). Only a run on the pushed merge commit catches that.
+  # `pull_request` ALREADY tests a merge result: GitHub builds `refs/pull/N/merge` — the PR
+  # head merged into the base — and checks THAT out, not the bare PR head. The defect is not
+  # that the merge goes untested. It is that the merge ref is computed when the run is
+  # TRIGGERED, and is never recomputed when the base moves underneath it.
+  #
+  # #103, to the second: #94's green was measured against a base that did not yet contain
+  # #97. #97 landed at 14:01:08Z. #94 merged at 14:04:08Z on that now-stale green. Merging
+  # #97 does not re-trigger #94's checks, so nothing ever ran the two together — and
+  # `develop` went red with no textual conflict anywhere for git to complain about.
+  #
+  # `push` is therefore a DETECTOR: every push to develop/main IS the true merge result, and
+  # this run tests it — after the fact. The PREVENTER is branch protection's `strict`
+  # (require branches up to date before merging), which forces the merge ref to be
+  # recomputed against the current base first. They are complementary: `strict` stops the
+  # stale merge landing; `push` catches whatever lands anyway. Neither replaces the other.
   push:
     branches: [develop, main]
   pull_request:
     branches: [develop, main]
 jobs:
+  # The job id IS the required status check name on develop/main. Renaming it (or giving it
+  # a `name:`) makes the required check never appear, and GitHub then waits for it forever:
+  # every merge blocks, permanently. Change the branch-protection setting FIRST if you ever
+  # must rename it. Guarded by tests/test_ci_workflow.py.
   quality:
     runs-on: ubuntu-latest
+    permissions:
+      # A `permissions:` block sets every scope NOT listed to `none` — `contents: read` is
+      # what lets actions/checkout clone the repo, so it is load-bearing, not boilerplate.
+      contents: read
+      # Lets the built-in GITHUB_TOKEN (`github-actions[bot]`) file the red-branch issue
+      # below. No PAT and no bot account, so no second identity to manage.
+      issues: write
     env:
       # Pin the Python hash seed so the gate is byte-reproducible run-to-run
       # (determinism; check.sh pins the same default for local runs).
@@ -26,3 +49,28 @@ jobs:
           uv pip install -e ".[dev]"
       - name: Quality gate
         run: bash scripts/check.sh
+
+      # A red PUSH run blocks nothing — the commit has already landed — so it must speak, or
+      # it is detecting into a void. Scoped to `push`: a red PR is already in front of its
+      # author, and alerting on it would file one issue per pushed commit.
+      - name: Announce a red branch
+        if: failure() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/announce_red_branch.sh open
+
+      # A green push on the true merge result disproves the alert, so close it. An alert that
+      # is routinely stale is one people learn to scroll past.
+      - name: Resolve the red-branch alert
+        if: success() && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/announce_red_branch.sh close
