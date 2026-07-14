@@ -461,3 +461,165 @@ def test_combine_fingerprints_unions_sources_and_drops_conflicts():
 
     combined = combine_fingerprints(from_records, from_worksheet)
     assert combined == {("7", "summary"): "a" * 64}  # agreement kept, conflict dropped
+# ---------------------------------------------------------------- source text
+
+
+def test_source_text_includes_author():
+    """The judge's source carries the item's author metadata — attributing a post
+    to its own author must be verifiable from the source, not world knowledge."""
+    from xbrain.verification import _source_text
+
+    text = _source_text(_item())
+    assert "[Author]" in text
+    assert "@a (A)" in text
+
+
+def test_source_text_marks_unfetched_links():
+    """A link whose content was never fetched is explicitly marked, so a judge
+    treats any claim about the linked content as unsupported."""
+    from xbrain.models import Link
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [Link(url="https://t.co/x", domain="time.com")]
+    # the only content source is the x_video transcript — no fetched article
+    text = _source_text(item)
+    assert "NOT fetched" in text
+    assert "time.com" in text
+
+
+def test_source_text_no_unfetched_marker_when_article_fetched():
+    from xbrain.models import Link
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [Link(url="https://example.com/a", domain="example.com")]
+    item.content.sources.append(
+        ContentSourceSuccess(
+            kind="external_article",
+            url="https://example.com/a",
+            title="The piece",
+            text="the fetched article body",
+        )
+    )
+    text = _source_text(item)
+    assert "NOT fetched" not in text
+    assert "[Linked article" in text
+    assert "the fetched article body" in text
+
+
+def _label_of(text: str, needle: str) -> str:
+    """The `[Label]` block heading the line `needle` appears under, in `_source_text`."""
+    label = "<none>"
+    for line in text.splitlines():
+        if line.startswith("["):
+            label = line
+        if needle in line:
+            return label
+    raise AssertionError(f"{needle!r} not found in source:\n{text}")
+
+
+def test_source_text_labels_thread_text_as_thread_not_a_fetched_article():
+    """F1 (the regression this PR must not ship): a THREAD's own text is the
+    poster's own words. Served under `[Linked article]` it tells the skeptical judge
+    an article was fetched and hands it the thread body as that article's content —
+    so a claim about the linked piece would be judged SUPPORTED against text that is
+    not the piece. It must keep its own label AND still flag the unfetched link."""
+    from xbrain.models import Link
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [Link(url="https://t.co/x", domain="time.com")]
+    item.content.sources.append(
+        ContentSourceSuccess(
+            kind="thread",
+            url="https://x.com/a/status/7",
+            text="1/ my thread about agents",
+        )
+    )
+    text = _source_text(item)
+    assert "1/ my thread about agents" in text  # not dropped — a thread is real evidence
+    assert _label_of(text, "1/ my thread about agents") == "[Thread — full text, same author]"
+    assert "[Linked article" not in text
+    assert "[Links — content NOT fetched]" in text
+
+
+def test_source_text_partial_fetch_marks_the_unfetched_link_with_counts():
+    """F5: 2 links, 1 fetched — the article block is present, but the judge is told
+    only 1 of 2 links was fetched, so a claim about the other one stays checkable."""
+    from xbrain.models import Link
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [
+        Link(url="https://example.com/a", domain="example.com"),
+        Link(url="https://t.co/x", domain="time.com"),
+    ]
+    item.content.sources.append(
+        ContentSourceSuccess(
+            kind="external_article",
+            url="https://example.com/a",
+            title="The piece",
+            text="the fetched article body",
+        )
+    )
+    text = _source_text(item)
+    assert "the fetched article body" in text
+    assert "[Links — content NOT fetched]" in text
+    assert "1 of 2" in text
+
+
+def test_source_text_marks_an_unfetched_quoted_post():
+    """F3: `quoted_id` is captured but the quoted post is never fetched — the judge
+    must be told, so a summary describing the quoted content is unsupported."""
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.quoted_id = "999"
+    text = _source_text(item)
+    assert "[Quoted post — content NOT fetched]" in text
+
+
+def test_source_text_carries_images_and_titles_the_generators_ship():
+    """F4: the judge must not see LESS than the generator. The image descriptions,
+    the article title and the video title all reach the generators — a summary
+    grounded in them would otherwise be judged unsupported (a false FAIL)."""
+    from xbrain.models import Link, MediaPhotoDescribed
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.links = [Link(url="https://example.com/a", domain="example.com")]
+    item.media = [
+        MediaPhotoDescribed(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="7/0.jpg",
+            width=4,
+            height=3,
+            bytes_size=512,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            is_decorative=False,
+            description="A bar chart of GPU prices.",
+            description_lang="English",
+            description_version="v1",
+            described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+        )
+    ]
+    item.content.sources.append(
+        ContentSourceSuccess(
+            kind="external_article",
+            url="https://example.com/a",
+            title="The TIME piece",
+            text="the fetched article body",
+        )
+    )
+    text = _source_text(item)
+    assert _label_of(text, "A bar chart of GPU prices.") == "[Images in the post]"
+    assert "The TIME piece" in text  # the article title the api prompt already ships
+    assert _label_of(text, "A talk") == "[Video title]"  # the video title the digest ships
+
+
+def test_source_text_omits_decorative_image_descriptions():
+    """A decorative photo carries no description — it must not add an empty bullet."""
+    from xbrain.verification import _source_text
+
+    assert "[Images in the post]" not in _source_text(_item())
