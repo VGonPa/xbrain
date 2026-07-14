@@ -175,6 +175,16 @@ QUOTED_CONTENT_UNFETCHED_NOTE = f"The quoted post's content was NOT fetched. {_U
 # The stem of the ONE label under which the quoted post travels, on every surface.
 QUOTED_LABEL = "Quoted post"
 
+# `bookmark_folder` is the USER'S OWN filing label — how HE sorted the post, not a fact the
+# post asserts about the world. It is deliberately NO evidence surface (`xbrain.evidence`),
+# and the judge never sees it. But both generators ship it (it is genuine topic signal), so
+# both must say what it is — otherwise a generator grounds a claim in it and the judge,
+# which never saw it, flags that claim: a false FAIL by construction. ONE wording, shared,
+# so the two generators cannot drift.
+BOOKMARK_FOLDER_RULE = (
+    "the user's own filing label — topic signal only, never a name and never a fact"
+)
+
 
 def fetched_link_sources(item: Item) -> int:
     """How many fetched LINK-content bodies the item carries (`LINK_CONTENT_KINDS`).
@@ -422,6 +432,42 @@ def _article_sections(item: Item) -> list[str]:
     return lines
 
 
+def _video_source(item: Item) -> ContentSourceSuccess | None:
+    """The item's first `x_video` content source, or None.
+
+    Defined HERE, in the module every evidence reader already imports, because it was
+    defined TWICE — identically — in `worksheet.py` and `video_digest.py`. Two copies of
+    "which source is the video" is the same drift, one level down, that `xbrain.evidence`
+    exists to end. One definition; every consumer imports it.
+    """
+    if item.content is None:
+        return None
+    for source in item.content.sources:
+        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
+            return source
+    return None
+
+
+def _video_title_section(item: Item) -> list[str]:
+    """Build the `Video title:` block — the video's own title, when it has one.
+
+    An ADMITTED evidence surface (`xbrain.evidence`): the digest worksheet has always
+    shipped it and the judge's `_source_text` carries `[Video title]`. The `api` prompt
+    was the one generator that never emitted it — so an `--executor api` summary would be
+    judged against a title its generator was never shown, which is the "judge sees MORE
+    than the generator" pathology the evidence contract exists to kill, arriving through
+    the one generator the old contract test could not see (it OR-ed the two generators
+    together, so the worksheet's copy covered for this one).
+
+    0 of 2,168 items carry a title today, so this is dormant — and would have gone live,
+    silently, on the first backfill that populates them.
+    """
+    source = _video_source(item)
+    if source is None or not source.title:
+        return []
+    return ["", f"Video title: {source.title}"]
+
+
 def _video_transcript_section(item: Item) -> list[str]:
     """Build the `Video transcript:` block(s) for `x_video` sources with speech.
 
@@ -449,13 +495,21 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
         "Controlled vocabulary (use only these slugs):",
         _vocab_block(vocab),
         "",
-        f"Post author: @{item.author.handle}",
+        f"Post author: @{item.author.handle} ({item.author.name})",
         f"Post text:\n{item.text}",
     ]
     if item.bookmark_folder:
-        parts += ["", f"Saved by the user in the bookmark folder: {item.bookmark_folder}"]
+        # The user's OWN filing label — organisational metadata, NOT evidence about the
+        # world (see `xbrain.evidence`: it is deliberately no surface). Topic signal only:
+        # a folder called "ai-industry" must never ground a name or a fact in the output.
+        parts += [
+            "",
+            f"Saved by the user in the bookmark folder: {item.bookmark_folder} "
+            f"({BOOKMARK_FOLDER_RULE})",
+        ]
     parts += _thread_section(item)
     parts += _images_section(item)
+    parts += _video_title_section(item)
     parts += _video_transcript_section(item)
     parts += _video_frames_section(item)
     parts += _quoted_section(item)

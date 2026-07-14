@@ -493,7 +493,7 @@ def test_source_text_includes_author():
     to its own author must be verifiable from the source, not world knowledge."""
     from xbrain.verification import _source_text
 
-    text = _source_text(_item())
+    text = _source_text(_item(), "summary")
     assert "[Author]" in text
     assert "@a (A)" in text
 
@@ -509,7 +509,7 @@ def test_source_text_marks_unfetched_links():
     item = _item()
     item.links = [Link(url="https://t.co/x", domain="time.com")]
     # the only content source is the x_video transcript — no fetched article
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     # Identity, not a substring: `"NOT fetched" in text` is already satisfied by the
     # `[Links — content NOT fetched]` HEADER, so it would pass with the instruction gone.
     assert unfetched_links_note(item) in text
@@ -530,7 +530,7 @@ def test_source_text_no_unfetched_marker_when_article_fetched():
             text="the fetched article body",
         )
     )
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert "NOT fetched" not in text
     assert "[Linked article" in text
     assert "the fetched article body" in text
@@ -565,7 +565,7 @@ def test_source_text_labels_thread_text_as_thread_not_a_fetched_article():
             text="1/ my thread about agents",
         )
     )
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert "1/ my thread about agents" in text  # not dropped — a thread is real evidence
     assert _label_of(text, "1/ my thread about agents") == "[Thread — full text, same author]"
     assert "[Linked article" not in text
@@ -591,7 +591,7 @@ def test_source_text_partial_fetch_marks_the_unfetched_link_with_counts():
             text="the fetched article body",
         )
     )
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert "the fetched article body" in text
     assert "[Links — content NOT fetched]" in text
     assert "1 of 2" in text
@@ -604,7 +604,7 @@ def test_source_text_marks_an_unfetched_quoted_post():
 
     item = _item()
     item.quoted_id = "999"
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert "[Quoted post — content NOT fetched]" in text
 
 
@@ -640,7 +640,7 @@ def test_source_text_carries_images_and_titles_the_generators_ship():
             text="the fetched article body",
         )
     )
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert _label_of(text, "A bar chart of GPU prices.") == "[Images in the post]"
     assert "The TIME piece" in text  # the article title the api prompt already ships
     assert _label_of(text, "A talk") == "[Video title]"  # the video title the digest ships
@@ -650,7 +650,7 @@ def test_source_text_omits_decorative_image_descriptions():
     """A decorative photo carries no description — it must not add an empty bullet."""
     from xbrain.verification import _source_text
 
-    assert "[Images in the post]" not in _source_text(_item())
+    assert "[Images in the post]" not in _source_text(_item(), "summary")
 
 
 def test_cross_check_fingerprints_never_introduces_a_key_the_primary_lacks():
@@ -697,7 +697,7 @@ def test_source_text_omits_the_author_block_without_a_handle():
 
     item = _item()
     item.author = Author(handle="", name="")
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert "[Author]" not in text
     assert "@ ()" not in text
     assert "[Video transcript]" in text  # the rest of the source is unaffected

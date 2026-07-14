@@ -140,7 +140,7 @@ def test_every_surface_carries_the_identical_unfetched_links_note(links, article
     assert note is not None
     assert note in _user_prompt(item, VOCAB)  # generator: api prompt
     assert _worksheet_entry(item, tmp_path)["unfetched_links_note"] == note  # generator: worksheet
-    assert note in _source_text(item)  # judge: verify source
+    assert note in _source_text(item, "summary")  # judge: verify source
 
 
 def test_every_surface_carries_the_identical_quoted_note(tmp_path):
@@ -148,7 +148,7 @@ def test_every_surface_carries_the_identical_quoted_note(tmp_path):
     item = _item(quoted=True)
     assert QUOTED_CONTENT_UNFETCHED_NOTE in _user_prompt(item, VOCAB)
     assert _worksheet_entry(item, tmp_path)["quoted_content_note"] == QUOTED_CONTENT_UNFETCHED_NOTE
-    assert QUOTED_CONTENT_UNFETCHED_NOTE in _source_text(item)
+    assert QUOTED_CONTENT_UNFETCHED_NOTE in _source_text(item, "summary")
 
 
 def test_the_judge_source_carries_the_note_not_merely_the_header():
@@ -156,7 +156,7 @@ def test_the_judge_source_carries_the_note_not_merely_the_header():
     NOT fetched]` heading. Deleting the note while keeping the header is the mutation
     that survived review: the header alone satisfies a `"NOT fetched"` substring."""
     item = _item(links=1)
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     header = "[Links — content NOT fetched]"
     assert header in text
     assert text.replace(header, "").count("NOT fetched") >= 1  # the note survives header removal
@@ -165,7 +165,7 @@ def test_the_judge_source_carries_the_note_not_merely_the_header():
 
 def test_the_judge_source_carries_the_quoted_note_not_merely_the_header():
     item = _item(quoted=True)
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     header = "[Quoted post — content NOT fetched]"
     assert header in text
     assert QUOTED_CONTENT_UNFETCHED_NOTE in text.replace(header, "")
@@ -269,7 +269,7 @@ def test_every_surface_carries_the_fetched_quoted_body_under_the_same_attributio
     entry = _worksheet_entry(item, tmp_path)  # generator: worksheet
     assert entry["quoted_attribution"] == label
     assert entry["quoted_text"] == QUOTED_SOURCE.text
-    assert f"[{label}]" in _source_text(item)  # judge: verify source
+    assert f"[{label}]" in _source_text(item, "summary")  # judge: verify source
 
 
 def test_the_fetched_quoted_body_reaches_every_surface(tmp_path):
@@ -278,7 +278,7 @@ def test_the_fetched_quoted_body_reaches_every_surface(tmp_path):
 
     assert body in _user_prompt(item, VOCAB)
     assert _worksheet_entry(item, tmp_path)["quoted_text"] == body
-    assert body in _source_text(item)
+    assert body in _source_text(item, "summary")
 
 
 def test_a_fetched_quote_silences_the_unfetched_marker(tmp_path):
@@ -289,7 +289,7 @@ def test_a_fetched_quote_silences_the_unfetched_marker(tmp_path):
 
     assert QUOTED_CONTENT_UNFETCHED_NOTE not in _user_prompt(item, VOCAB)
     assert _worksheet_entry(item, tmp_path)["quoted_content_note"] is None
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     assert QUOTED_CONTENT_UNFETCHED_NOTE not in text
     assert "[Quoted post — content NOT fetched]" not in text
 
@@ -304,7 +304,7 @@ def test_an_unfetched_quote_still_fires_the_marker_and_carries_no_body(tmp_path)
     assert entry["quoted_content_note"] == QUOTED_CONTENT_UNFETCHED_NOTE
     assert entry["quoted_text"] is None
     assert entry["quoted_attribution"] is None
-    assert "[Quoted post — content NOT fetched]" in _source_text(item)
+    assert "[Quoted post — content NOT fetched]" in _source_text(item, "summary")
 
 
 def test_the_quoted_body_sits_under_the_quoted_label_never_the_article_label():
@@ -313,12 +313,12 @@ def test_the_quoted_body_sits_under_the_quoted_label_never_the_article_label():
     `[Linked article]` would tell the judge a link was downloaded and hand it text
     that is not that link's content."""
     item = _item(quoted=True, quoted_fetched=True, links=1, article=True)
-    blocks = _blocks(_source_text(item))
+    blocks = _blocks(_source_text(item, "summary"))
     quoted_block = blocks[f"[{quoted_attribution(item)}]"]
-    # The article label embeds the title (`[Linked article — The piece]`), so find it
-    # by its stem rather than pinning a literal that a title change would break.
-    article_label = next(key for key in blocks if key.startswith("[Linked article"))
-    article_block = blocks[article_label]
+    # #94 split the article into TWO surfaces — `[Linked article title]` and
+    # `[Linked article]` — so the body sits under the exact `[Linked article]` label.
+    # Matching on the stem would grab the TITLE block and test the wrong thing.
+    article_block = blocks["[Linked article]"]
 
     assert QUOTED_SOURCE.text in quoted_block
     assert QUOTED_SOURCE.text not in article_block
@@ -333,7 +333,7 @@ def test_the_quoted_post_never_counts_as_a_fetched_LINK_body():
 
     assert fetched_link_sources(item) == 0
     assert unfetched_links_note(item) is not None
-    assert unfetched_links_note(item) in _source_text(item)
+    assert unfetched_links_note(item) in _source_text(item, "summary")
 
 
 def test_the_attribution_degrades_when_the_quoted_author_is_unknown():

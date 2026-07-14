@@ -297,7 +297,9 @@ def _quoting_video_item() -> Item:
 
 def test_the_judge_shows_the_digest_a_quoted_post_block(tmp_path):
     """The premise. If this ever stops holding, the coupling below is moot."""
-    assert f"[{quoted_attribution(_quoting_video_item())}]" in _source_text(_quoting_video_item())
+    assert f"[{quoted_attribution(_quoting_video_item())}]" in _source_text(
+        _quoting_video_item(), "digest"
+    )
 
 
 def test_the_digest_worksheet_ships_the_quoted_post_the_judge_will_check_against(tmp_path):

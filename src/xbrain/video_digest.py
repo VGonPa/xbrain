@@ -17,20 +17,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.executors.api import _video_frame_descriptions, quoted_attribution, quoted_text
+from xbrain.executors.api import (
+    _video_frame_descriptions,
+    _video_source,
+    quoted_attribution,
+    quoted_text,
+)
 from xbrain.models import ContentSourceSuccess, Item
 from xbrain.rubrics import load_rubric
 from xbrain.worksheet import _video_transcript
-
-
-def _video_source(item: Item) -> ContentSourceSuccess | None:
-    """The item's first `x_video` content source, or None when it has none."""
-    if item.content is None:
-        return None
-    for source in item.content.sources:
-        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
-            return source
-    return None
 
 
 def _has_digestible_content(source: ContentSourceSuccess) -> bool:

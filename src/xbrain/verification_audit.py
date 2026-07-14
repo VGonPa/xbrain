@@ -129,7 +129,7 @@ def export_audit_worksheet(
                 "author": item.author.handle,
                 "output": _output_for(item, target),
                 "output_fingerprint": record.get("output_fingerprint"),
-                "source": _source_text(item),
+                "source": _source_text(item, target),
                 "current_verdict": record.get("verdict"),
                 "faithfulness": record.get("faithfulness"),
                 "adherence": record.get("adherence"),
