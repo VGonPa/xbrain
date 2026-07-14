@@ -1,8 +1,17 @@
 # tests/test_rubrics.py
 from pathlib import Path
 
+import pytest
+
+from xbrain import rubrics as rubrics_module
 from xbrain.models import Topic
 from xbrain.rubrics import load_guardrails, load_rubric, load_vocab, save_vocab
+
+# Every rubric the package ships, by the short name `load_rubric` takes.
+RUBRIC_NAMES = sorted(
+    path.name.removeprefix("rubric-").removesuffix(".md")
+    for path in (Path(rubrics_module.__file__).parent / "rubrics").glob("rubric-*.md")
+)
 
 
 def test_load_rubric_returns_file_text():
@@ -122,6 +131,64 @@ def test_video_digest_rubric_loads_and_substitutes_language():
 def test_video_digest_rubric_preserves_placeholder_when_language_none():
     text = load_rubric("video-digest")
     assert "{language}" in text
+
+
+# --- Faithfulness rules (regression guards) ---------------------------------
+#
+# An LLM-as-judge run over all 193 generated digests (N=3 judges + an
+# independent judge≠party audit) confirmed 17 faithfulness FAILs. The dominant
+# pattern was not invention but RECOGNITION: the model named an entity the
+# source never names ("Dwarkesh Patel", "Jensen Huang", "ARK Invest", "CS336"),
+# repaired a quote to the real-world phrase it thought was meant, and sharpened
+# vague terms ("beans" → "coffee"). The rubric's generic "never invent facts,
+# numbers, names or claims" line did not close those paths — the model does not
+# classify recognising a famous speaker as inventing. The three tests below
+# guard the explicit, mechanical rule that does. Deleting the rule fails them.
+
+
+def test_video_digest_rubric_forbids_naming_entities_the_source_never_names():
+    """The rule must enumerate the entity kinds that actually leaked, deny that
+    recognition counts as evidence, and offer the neutral-descriptor escape."""
+    text = load_rubric("video-digest").lower()
+    for entity in (
+        "interviewer",
+        "employer",
+        "publication",
+        "podcast",
+        "university",
+        "course code",
+    ):
+        assert entity in text, f"digest rubric no longer forbids naming an unnamed {entity}"
+    # Recognising who someone probably is must be explicitly disqualified as evidence.
+    assert "world knowledge" in text
+    assert "literally" in text
+    # Without an escape hatch the model names the entity anyway.
+    assert "neutral descriptor" in text
+
+
+def test_video_digest_rubric_requires_verbatim_quotes():
+    """Quotes must be reproduced as the transcript renders them — ASR errors included."""
+    text = load_rubric("video-digest").lower()
+    assert "verbatim" in text
+    assert "asr" in text
+    for forbidden in ("repair", "normalise"):
+        assert forbidden in text, f"digest rubric no longer forbids quote {forbidden}"
+
+
+def test_video_digest_rubric_forbids_sharpening_the_source():
+    """No vague→specific resolution, and no specifics the source never states."""
+    text = load_rubric("video-digest").lower()
+    assert "sharpen" in text
+    for specific in ("duration", "date", "figure", "version", "affiliation"):
+        assert specific in text, f"digest rubric no longer forbids adding an unsourced {specific}"
+
+
+@pytest.mark.parametrize("name", RUBRIC_NAMES)
+def test_every_rubric_renders_with_its_placeholders_substituted(name: str):
+    """Every shipped rubric loads and leaves no `{language}` placeholder behind."""
+    text = load_rubric(name, language="English")
+    assert text.strip()
+    assert "{language}" not in text
 
 
 def test_verify_rubric_loads_and_substitutes_language():
