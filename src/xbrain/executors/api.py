@@ -403,7 +403,7 @@ def _user_prompt(item: Item, vocab: list[Topic]) -> str:
         "Controlled vocabulary (use only these slugs):",
         _vocab_block(vocab),
         "",
-        f"Post author: @{item.author.handle}",
+        f"Post author: @{item.author.handle} ({item.author.name})",
         f"Post text:\n{item.text}",
     ]
     if item.bookmark_folder:

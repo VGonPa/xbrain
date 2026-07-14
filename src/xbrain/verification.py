@@ -23,27 +23,23 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
+from xbrain.evidence import evidence_surfaces
 from xbrain.executors.api import (
     QUOTED_CONTENT_UNFETCHED_NOTE,
-    _content_image_descriptions,
-    _video_frame_descriptions,
-    quoted_attribution,
     quoted_content_unfetched,
-    quoted_text,
-    thread_text,
     unfetched_links_note,
 )
-from xbrain.models import Item, Verdict, VerificationVerdict
-from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
+from xbrain.models import ALL_TARGETS, Item, Verdict, VerificationVerdict, VerifyTarget
+from xbrain.rubrics import load_rubric
 from xbrain.video_digest import _video_source
-from xbrain.worksheet import _link_content_source, _video_transcript
 
 logger = logging.getLogger(__name__)
 
-VerifyTarget = Literal["summary", "digest", "topics"]
-ALL_TARGETS: tuple[VerifyTarget, ...] = ("summary", "digest", "topics")
+# Re-exported from `models` so every existing caller (`generate`, `verification_audit`,
+# the entity checker) keeps importing them from here.
+__all__ = ["ALL_TARGETS", "VerifyTarget"]
 
 # A stored/exported output fingerprint is a lowercase-hex sha256 (see `fingerprint_output`);
 # anything else in a filled worksheet is hand-edited garbage and is rejected, not trusted.
@@ -110,61 +106,19 @@ def fingerprint_output(item: Item, target: VerifyTarget) -> str | None:
     return hashlib.sha256(output.encode("utf-8")).hexdigest()
 
 
-def _video_parts(item: Item) -> list[str]:
-    """The video evidence: its title, the FULL transcript (what it says) and the frame
-    descriptions (what it shows). The title reaches the digest generator, so the judge
-    must see it too — a digest naming the talk is otherwise unsupported."""
-    source = _video_source(item)
-    parts: list[str] = []
-    if source and source.title:
-        parts += ["[Video title]", source.title]
-    transcript = _video_transcript(item)
-    if transcript:
-        parts += ["[Video transcript]", transcript]
-    frames = _video_frame_descriptions(item)
-    if frames:
-        parts += ["[Video frames shown]", *(f"- {description}" for description in frames)]
-    return parts
-
-
-def _article_parts(item: Item) -> list[str]:
-    """The fetched LINKED article, with its title (which the api prompt already ships).
-
-    Only `LINK_CONTENT_KINDS` reach this label. A thread or a transcript under it would
-    tell the judge a page was downloaded when none was, and hand it the wrong text as
-    that page's content.
-    """
-    source = _link_content_source(item)
-    if source is None:
-        return []
-    label = f"[Linked article — {source.title}]" if source.title else "[Linked article]"
-    return [label, source.text[:ARTICLE_CHAR_LIMIT]]
-
-
-def _quoted_parts(item: Item) -> list[str]:
-    """The quoted post the item is sharing, under a label that NAMES ITS AUTHOR.
-
-    The judge must see every surface the generators see, or a summary correctly
-    grounded in the quoted body gets flagged unsupported (a false FAIL) — the mirror
-    of the bug that motivated this: the generator, shown nothing, invented instead.
-
-    The label carries the third party's `@handle (Name)` — built by the SAME
-    `quoted_attribution` the generators read — so the judge can enforce #86's
-    attribution rule: the poster is not the author of the content they quoted. Its own
-    label, never `[Linked article]`: a quoted post is not the content of any link.
-    """
-    label = quoted_attribution(item)
-    body = quoted_text(item)
-    if not (label and body):
-        return []
-    return [f"[{label}]", body]
-
-
-def _unfetched_parts(item: Item) -> list[str]:
+def _unfetched_parts(item: Item, target: VerifyTarget) -> list[str]:
     """The markers for content the pipeline never downloaded: links whose body is
     missing (all of them, or the remainder of a PARTIAL fetch) and a quoted post, which
     no fetcher retrieves. An output describing either is then checkable as unsupported
-    instead of being waved through against evidence that is not there."""
+    instead of being waved through against evidence that is not there.
+
+    Only for the ENRICH targets. The digest generator is never handed the links or the
+    quote — `export_video_digest_worksheet` ships the video and the post — so there is
+    nothing to guard, and a marker listing URLs would put a domain in front of a judge
+    whose generator never saw one.
+    """
+    if target == "digest":
+        return []
     parts: list[str] = []
     links_note = unfetched_links_note(item)
     if links_note:
@@ -178,42 +132,27 @@ def _unfetched_parts(item: Item) -> list[str]:
     return parts
 
 
-def _source_text(item: Item) -> str:
-    """The ground-truth source the judge checks the output against.
+def _source_text(item: Item, target: VerifyTarget) -> str:
+    """The ground-truth source the judge checks `target`'s output against.
 
-    Concatenates the labelled evidence present on the item — the author metadata (WHO
-    POSTED it, not who wrote its content), the video title + FULL transcript (what it
-    says) + frame descriptions (what it shows), the image descriptions, the fetched
-    article body, the poster's own thread text, the QUOTED post (under its own author's
-    name), and the tweet text — so a claim in the output can be traced to it. The judge must see everything the GENERATORS see: an
-    output grounded in a photo description or an article title would otherwise be
-    judged against a source that never held it, and flagged unsupported (a false FAIL).
+    It is EXACTLY `evidence_surfaces(item, target)` — the one definition the generators,
+    the rubric and the entity checker also read (see `xbrain.evidence`) — plus the
+    markers for content nobody downloaded. The judge therefore sees neither less nor more
+    than the generator was handed:
 
-    Every kind of evidence keeps its OWN label. A thread is the poster's own words, not
-    a fetched page. Serving one under `[Linked article]` would affirmatively tell the
-    skeptical judge that a link was downloaded and hand it text that is not that link's
-    content — turning an unsupported claim about the linked piece into a PASS. Content
-    the pipeline never downloaded (a link's body, a quoted post) is marked as such.
+    * LESS would flag a claim the generator was entitled to make (the 36+ false
+      author-attribution flags that started this).
+    * MORE would excuse an invention the generator could not have sourced — which is what
+      a target-BLIND source did: it handed the linked article, the thread and the images
+      to the judge of a DIGEST, whose generator receives none of them.
+
+    Every surface keeps its own label, so a thread is never read as a fetched page and a
+    transcript is never read as an article.
     """
     parts: list[str] = []
-    # No handle, no block. The rubric tells the judge the `[Author]` block is TRUSTED
-    # metadata, so an empty one (`[Author]\n@ ()`) would present a garbage anchor as
-    # trustworthy. Omitting it is the strict direction: with no author in the source,
-    # the judge has nobody to attribute anything to.
-    if item.author.handle:
-        parts += ["[Author]", f"@{item.author.handle} ({item.author.name})"]
-    parts += _video_parts(item)
-    images = _content_image_descriptions(item)
-    if images:
-        parts += ["[Images in the post]", *(f"- {description}" for description in images)]
-    parts += _article_parts(item)
-    thread = thread_text(item)
-    if thread:
-        parts += ["[Thread — full text, same author]", thread]
-    parts += _quoted_parts(item)
-    parts += _unfetched_parts(item)
-    if item.text:
-        parts += ["[Tweet]", item.text]
+    for surface in evidence_surfaces(item, target):
+        parts += [surface.label, surface.text]
+    parts += _unfetched_parts(item, target)
     return "\n".join(parts)
 
 
@@ -259,7 +198,7 @@ def export_verify_worksheet(
                 # verdict binds to the JUDGED text, not to whatever the store holds at write
                 # time (#79). Threaded through the filled worksheet to `apply_verdicts_to_store`.
                 "output_fingerprint": fingerprint_output(item, target),
-                "source": _source_text(item),
+                "source": _source_text(item, target),
                 "generation_rubric": load_rubric(_TARGET_RUBRIC[target], language=output_language),
             }
             for item, target in pairs

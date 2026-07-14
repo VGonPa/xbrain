@@ -46,42 +46,50 @@ def _link_content_source(item: Item) -> ContentSourceSuccess | None:
     return None
 
 
-def _article_title(item: Item) -> str | None:
-    """The FETCHED linked article's title, or None.
+def _article_text(item: Item) -> str | None:
+    """First successfully-fetched LINKED article body, truncated, or None."""
+    return first_source_text(item, LINK_CONTENT_KINDS)
 
-    The summary rubric declares "the fetched article body and its title" as evidence, the
-    api prompt ships it and the judge's `_source_text` ships it — but the worksheet track,
-    the one that actually runs, shipped the body alone. The rubric was naming a surface the
-    running generator never received. Cost, measured: 8 summaries flagged ungrounded for a
-    name that sits in the article's TITLE.
+
+def _article_title(item: Item) -> str | None:
+    """The FETCHED linked article's title, or None — its own evidence surface.
+
+    The summary rubric declares "the fetched article body and its title" as evidence, and
+    the judge's `_source_text` ships it — but the worksheet track, the one that actually
+    runs, shipped the body alone. The rubric was naming a surface the running generator
+    never received. Cost, measured: 8 summaries flagged ungrounded for a name that sits in
+    the article's TITLE.
     """
-    if not item.content:
+    source = _link_content_source(item)
+    return source.title if source else None
+
+
+def _video_source(item: Item) -> ContentSourceSuccess | None:
+    """The item's first `x_video` content source, or None when it has none.
+
+    Lives here, with the other source readers, because `video_digest` imports this module
+    — defining it there and reading it here would make the two import each other.
+    `video_digest` re-exports it, so every existing `from xbrain.video_digest import
+    _video_source` keeps working.
+    """
+    if item.content is None:
         return None
     for source in item.content.sources:
-        if isinstance(source, ContentSourceSuccess) and source.kind in LINK_CONTENT_KINDS:
-            return source.title
+        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
+            return source
     return None
 
 
 def _video_title(item: Item) -> str | None:
-    """The `x_video` source's title, or None.
+    """The `x_video` source's title, or None — an evidence surface for BOTH targets.
 
-    The judge's `_source_text` carries `[Video title]` (#86), and the summary rubric
-    admits it as evidence — so the generator must be handed it too, or the rubric names a
-    surface the generator was never given. Defined locally: importing `video_digest`
-    would be circular (it imports `_video_transcript` from here).
+    The digest worksheet has shipped it since #44 and the judge reads it since #86; the
+    enrich track was the odd one out, so the rubric named a surface its generator never
+    received. (Reading it through `_video_source`, which lives here now — the circular
+    import that once forced a hand-rolled copy is gone.)
     """
-    if not item.content:
-        return None
-    for source in item.content.sources:
-        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
-            return source.title
-    return None
-
-
-def _article_text(item: Item) -> str | None:
-    """First successfully-fetched LINKED article body, truncated, or None."""
-    return first_source_text(item, LINK_CONTENT_KINDS)
+    source = _video_source(item)
+    return source.title if source else None
 
 
 def _video_transcript(item: Item) -> str | None:
@@ -156,8 +164,10 @@ def export_worksheet(
                 "text": it.text,
                 "bookmark_folder": it.bookmark_folder,
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
-                "article": _article_text(it),
+                # The article's TITLE is its own evidence surface: a summary naming the
+                # publication is grounded in the title, never in the link's domain.
                 "article_title": _article_title(it),
+                "article": _article_text(it),
                 # The poster's OWN expanded thread — real signal, but NOT a fetched
                 # linked page. It ships in its own field so the agent never reads the
                 # author's own words as the body of an article nobody downloaded.

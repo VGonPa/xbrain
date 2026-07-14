@@ -862,6 +862,12 @@ class Enrichment(BaseModel):
 # alias keeps them in lockstep and rejects a garbage value at load — see `VerificationVerdict`.
 Verdict = Literal["PASS", "REVIEW", "FAIL"]
 
+# The generated outputs a verdict can be about. It lives HERE, not in `verification`,
+# because `evidence` needs it too and evidence must not import the judge (the judge
+# imports evidence). `verification` re-exports both names, so its callers are unchanged.
+VerifyTarget = Literal["summary", "digest", "topics"]
+ALL_TARGETS: tuple[VerifyTarget, ...] = ("summary", "digest", "topics")
+
 
 class VerificationVerdict(BaseModel):
     """A stored per-target verification verdict for an item — opt-in, written by
