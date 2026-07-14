@@ -120,6 +120,13 @@ from xbrain.verification import (
     render_verify_report,
     stamp_record_fingerprints,
 )
+from xbrain.entity_grounding import (
+    load_ensemble_verdicts,
+    outputs_present,
+    render_entity_report,
+    scan_store,
+    summarise_scan,
+)
 from xbrain.verification_audit import (
     consequential_records,
     export_audit_worksheet,
@@ -2344,6 +2351,42 @@ def refetch_truncated_command(
         f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}\n"
         f"{repaired} resúmenes invalidados: vuelve a ejecutar `xbrain enrich`."
     )
+
+
+@app.command(name="verify-entities")
+@_handle_cli_errors
+def verify_entities_command(
+    target: str = typer.Option("digest", help="digest | summary | topics"),
+    verdicts: Path | None = typer.Option(
+        None,
+        "--verdicts",
+        help="A verify-report.json to cross-reference (measures the judges' recall)",
+    ),
+) -> None:
+    """Sweep every generated output for entities no evidence surface supports.
+
+    Deterministic and token-free — no LLM, so it cannot inherit the judge ensemble's blind
+    spot, and the whole corpus is swept rather than sampled. With `--verdicts` it reports
+    how many flagged outputs the judges passed UNANIMOUSLY: that count is the ensemble's
+    false-negative floor, the one number it cannot produce about itself.
+
+    Read-only: writes `entity-report.{json,md}` and never touches the store.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    records = scan_store(store, target)
+    ensemble = load_ensemble_verdicts(verdicts, target) if verdicts else {}
+    summary = summarise_scan(records, ensemble)
+    scanned = outputs_present(store, target)
+    json_report, md_report = render_entity_report(records, summary, scanned, target)
+    (cfg.data_dir / "entity-report.json").write_text(json_report, encoding="utf-8")
+    (cfg.data_dir / "entity-report.md").write_text(md_report, encoding="utf-8")
+    typer.echo(
+        f"{summary['flagged']} outputs con entidades sin soporte "
+        f"({summary['entities']} entidades); "
+        f"{summary['unanimous_pass_but_ungrounded']} de ellas con PASS UNÁNIME de los jueces."
+    )
+    typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
 
 
 if __name__ == "__main__":
