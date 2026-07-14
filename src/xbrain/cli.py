@@ -531,10 +531,20 @@ def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
         return
     _auto_snapshot(cfg, "fetch-retry-failed")
     try:
-        refetched = retry_failed(store, plan)
+        refetched = retry_failed(store, plan, firecrawl_configured=has_key)
     finally:
         save_store(store, cfg.items_path)
-    typer.echo(f"Reintentados: {refetched} items → {cfg.items_path}")
+    # What actually LANDED. A retry that "succeeded" into a cookie wall is now recorded as a
+    # `blocked_interstitial` failure rather than evidence, so this tally is the operator's
+    # direct read on whether the run repaired anything or merely re-confirmed the walls.
+    after = plan_retry_failed(store, firecrawl_configured=has_key)
+    repaired = [i for i in plan.retryable if i not in set(after.retryable) | set(after.terminal)]
+    typer.echo(
+        f"Reintentados: {refetched} items → {cfg.items_path}\n"
+        f"  reparados (ya tienen artículo): {len(repaired)}\n"
+        f"  siguen sin contenido: {refetched - len(repaired)} "
+        "(su nota de guardarraíl sigue activa y nombra la causa)"
+    )
 
 
 @app.command()

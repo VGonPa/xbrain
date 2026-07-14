@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -40,6 +41,10 @@ _UA = "Mozilla/5.0 (compatible; XBrain/1.0)"
 _TIMEOUT = 20
 _FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape"
 _FIRECRAWL_TIMEOUT = 60
+
+# Pacing between items in a `--retry-failed` run. These are other people's servers, and the
+# corpus's one transient failure is a recorded HTTP 429 — a host that already rate-limited us.
+_RETRY_DELAY_SECONDS = 1.0
 
 
 class FetchSuccess(BaseModel):
@@ -70,6 +75,10 @@ class FetchFailure(BaseModel):
     error: str | None = None
     http_status: int | None = None
     attempts: int = 1
+    # The extractor could not be REACHED at all (network error, 503, rate-limit) — as opposed
+    # to running and finding nothing. Never persisted; `extract_article` reads it to decide
+    # whether the attempt counts. A transient outage must not permanently burn an item's retry.
+    transport_error: bool = False
 
 
 # The in-memory FetchResult — internal to this module. Never persisted (the
@@ -178,11 +187,12 @@ def _firecrawl_extract(
         with opener(req, timeout=_FIRECRAWL_TIMEOUT) as resp:
             payload = json.loads(resp.read())
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        return FetchFailure(error=f"Firecrawl falló: {exc}", attempts=1)
+        return FetchFailure(error=f"Firecrawl falló: {exc}", attempts=1, transport_error=True)
     if payload.get("success") is False or payload.get("error"):
         return FetchFailure(
             error=f"Firecrawl falló: {payload.get('error') or 'respuesta de error'}",
             attempts=1,
+            transport_error=True,  # it refused (5xx / 429) — it did not judge the page
         )
     data = payload.get("data") or {}
     text = data.get("markdown")
@@ -196,6 +206,103 @@ def _firecrawl_extract(
     )
 
 
+# An article body shorter than this is not an article. Chrome, a paywall teaser or a consent
+# shell lands here; a real piece does not. Failing CLOSED is the safe direction — a rejected
+# body becomes a recorded failure, which keeps the guardrail firing, while a wrongly ACCEPTED
+# body becomes evidence the judge will trust.
+_MIN_ARTICLE_CHARS = 300
+
+# Phrases that only ever appear on a wall, never in the article behind it. Matched
+# case-insensitively against the extracted body.
+_INTERSTITIAL_MARKERS = (
+    # consent / login walls
+    "accept all cookies",
+    "we value your privacy",
+    "we and our partners store",
+    "log in to",
+    "sign in to continue",
+    "subscribe to continue",
+    "create an account",
+    "enable javascript",
+    "turn on javascript",
+    "verify you are human",
+    "checking your browser",
+    "are you a robot",
+    # PAGE CHROME. Observed on the real URLs this backfill would hit (nature.com et al). Their
+    # presence means we captured the whole page — nav, banner, footer — not the article. That is
+    # not evidence: it is a body a model can mine for claims the article never made. Firecrawl is
+    # asked for `onlyMainContent`, so a clean extraction should contain none of these; if one
+    # shows up, the extraction is not clean and we fail closed.
+    "skip to main content",
+    "limited support for css",
+    "turn off compatibility mode",
+    "cookie policy",
+    "privacy policy",
+    "manage preferences",
+)
+
+
+def _interstitial_marker(text: str) -> str | None:
+    """The wall phrase this body contains, if any."""
+    lowered = text.lower()
+    return next((m for m in _INTERSTITIAL_MARKERS if m in lowered), None)
+
+
+def validate_body(url: str, result: FetchResult) -> FetchResult:
+    """Refuse to call a cookie/login wall — or a body too thin to be an article — a SUCCESS.
+
+    The only content check used to be `if not text`: non-empty ⇒ success. Firecrawl RENDERS
+    JavaScript, and `js_required` means "downloadable but no extractable article" — the most
+    enriched population there is for consent shells and SPA login walls. So a retry would very
+    often "succeed" on exactly those pages and hand back the banner markdown.
+
+    That is strictly worse than the honest failure it replaces: flipping the source to success
+    makes `links_content_unfetched` False, which DELETES the `[Links — content NOT fetched]`
+    block from all three LLM surfaces, whereupon `rubric-summary` orders the generator to
+    summarise "the article's substance" and the judge sees a `[Linked article]` and trusts it.
+    A rendered Instagram login wall even contains the word "Instagram", so the entity checker
+    would call the entity GROUNDED. A wall is recorded as a failure, with a true cause.
+    """
+    if not isinstance(result, FetchSuccess):
+        return result
+    marker = _interstitial_marker(result.text)
+    if marker:
+        return FetchFailure(
+            failure_reason="blocked_interstitial",
+            error=f"La página devolvió un muro (cookies/login), no un artículo: {marker!r}.",
+            http_status=result.http_status,
+            attempts=result.attempts,
+        )
+    if len(result.text.strip()) < _MIN_ARTICLE_CHARS:
+        return FetchFailure(
+            failure_reason="blocked_interstitial",
+            error=(
+                f"El cuerpo extraído ({len(result.text.strip())} caracteres) es demasiado "
+                "corto para ser un artículo."
+            ),
+            http_status=result.http_status,
+            attempts=result.attempts,
+        )
+    if _title_is_bare_domain(url, result.title):
+        return FetchFailure(
+            failure_reason="blocked_interstitial",
+            error=f"El título extraído ({result.title!r}) es el dominio, no un artículo.",
+            http_status=result.http_status,
+            attempts=result.attempts,
+        )
+    return result
+
+
+def _title_is_bare_domain(url: str, title: str | None) -> bool:
+    """A page whose whole title is its own domain ("Instagram", "twitch.tv") is a wall or a
+    landing page, not an article."""
+    if not title:
+        return False
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    normalized = title.strip().lower()
+    return normalized in {host, host.split(".")[0], host.removesuffix(".com")}
+
+
 def extract_article(
     url: str,
     *,
@@ -205,19 +312,32 @@ def extract_article(
     """Default extractor: trafilatura, then Firecrawl for JS-rendered pages.
 
     Switches on the `FetchResult` variant: a `FetchSuccess` is returned
-    as-is. A `FetchFailure` whose `failure_reason` is in
-    ``{"js_required", "empty_content"}`` triggers the Firecrawl fallback;
-    anything else (404, dns, ...) is terminal and Firecrawl is not called.
+    as-is. A `FetchFailure` whose `failure_reason` is in `_FALLBACK_ELIGIBLE`
+    triggers the Firecrawl fallback; anything else (404, dns, ...) is terminal
+    and Firecrawl is not called.
+
+    Every accepted body passes `validate_body` first — a consent/login wall or a body too thin
+    to be an article is recorded as a `blocked_interstitial` FAILURE, never as evidence. A wall
+    seen by TRAFILATURA still escalates (Firecrawl may reach the article behind it); a wall
+    seen by FIRECRAWL is the end of the road, and `attempts=2` then keeps it there.
+
+    A Firecrawl TRANSPORT error (unreachable, 503, rate-limited) does NOT count as an attempt:
+    the fallback never ran, so burning the item's one retry on an outage would strand it
+    forever — `--retry-failed` would never select it again and the dry run would cheerfully
+    report "Reintentables: 0".
     """
-    result = primary(url)
+    result = validate_body(url, primary(url))
     if isinstance(result, FetchSuccess):
         return result
     # mypy now narrows `result` to FetchFailure for the rest of this function.
-    if result.failure_reason not in ("js_required", "empty_content"):
+    if result.failure_reason not in _FALLBACK_ELIGIBLE:
         return result  # hard failure (404, dns, ...) — Firecrawl will not help
     fallback = firecrawl(url)
     if fallback is None:
         return result  # Firecrawl not configured — keep the original evidence
+    if isinstance(fallback, FetchFailure) and fallback.transport_error:
+        return result  # Firecrawl never ran — do NOT burn the retry on an outage
+    fallback = validate_body(url, fallback)
     if isinstance(fallback, FetchSuccess):
         return fallback.model_copy(update={"attempts": result.attempts + 1})
     # Both attempts exhausted — merge evidence and bump the attempt counter.
@@ -306,25 +426,26 @@ def _build_external_sources(item: Item, extractor: ArticleExtractor) -> list[Con
     sources: list[ContentSource] = []
     non_x_urls = dict.fromkeys(link.url for link in item.links if not is_x_url(link.url))
     for url in non_x_urls:
-        try:
-            result = extractor(url)
-        except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
-            sources.append(
-                ContentSourceFailure(
-                    kind="external_article",
-                    url=url,
-                    # Transient bucket: an uncaught extractor exception is
-                    # almost always something that may succeed on the next
-                    # run (network blip, intermittent SSL, …). #19 relied on
-                    # this being retry-worthy; preserve that.
-                    failure_reason="unknown_error",
-                    error=f"Error al descargar el artículo: {exc}",
-                    attempts=1,
-                )
-            )
-            continue
-        sources.append(_content_source_from(url, result))
+        sources.append(_content_source_from(url, _safe_extract(url, extractor)))
     return sources
+
+
+def _safe_extract(url: str, extractor: ArticleExtractor) -> FetchResult:
+    """Extract one URL, VALIDATED, with a per-URL exception isolated as a transient failure.
+
+    Validation happens at this persistence boundary, not just inside `extract_article`: no
+    extractor — injected, custom, or future — may write a cookie/login wall into the store as
+    evidence. `validate_body` is idempotent on a failure, so the default path (which already
+    validated) passes straight through.
+    """
+    try:
+        return validate_body(url, extractor(url))
+    except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
+        return FetchFailure(
+            failure_reason="unknown_error",
+            error=f"Extractor falló: {exc}",
+            attempts=1,
+        )
 
 
 def fetch_item(
@@ -376,7 +497,9 @@ _TRANSIENT_FAILURES: frozenset[FailureReason] = frozenset({"timeout", "dns_error
 # `_TRANSIENT_FAILURES`, so `_should_refetch` treats them as terminal and never retries them.
 # That is right only while trafilatura is the whole pipeline — the moment a JS-capable
 # extractor is available they become the most recoverable bucket there is.
-_FALLBACK_ELIGIBLE: frozenset[FailureReason] = frozenset({"js_required", "empty_content"})
+_FALLBACK_ELIGIBLE: frozenset[FailureReason] = frozenset(
+    {"js_required", "empty_content", "blocked_interstitial"}
+)
 
 # trafilatura = 1 attempt, + Firecrawl = 2 (see `ContentSourceFailure.attempts`).
 _BOTH_EXTRACTORS_TRIED = 2
@@ -513,19 +636,68 @@ def plan_retry_failed(store: dict[str, Item], *, firecrawl_configured: bool) -> 
     return plan
 
 
+def _refetch_failed_sources(
+    item: Item,
+    extractor: ArticleExtractor,
+    *,
+    firecrawl_configured: bool,
+    now: Callable[[], datetime],
+) -> Content:
+    """Re-extract ONLY the retryable failed link sources; carry everything else across untouched.
+
+    Deliberately NOT `fetch_item`, which re-extracts every non-x link on the item. Because
+    `should_retry_failed` uses ANY semantics, a PARTIAL item (one link fetched, one still
+    failing) is selected — and `fetch_item` would re-fetch the good article too. A 429 during
+    the retry would then replace a perfectly good body with a failure, destroying evidence that
+    exists nowhere else in the store. Repairing one link must never cost another one.
+
+    Non-link sources (`x_video` transcripts, frames, threads) are likewise carried across:
+    they are not this stage's business.
+    """
+    content = item.content
+    assert content is not None  # `plan_retry_failed` only selects items that have content
+    retry_urls = {
+        src.url
+        for src in content.sources
+        if isinstance(src, ContentSourceFailure)
+        and src.kind == "external_article"
+        and _retryable_now(src, firecrawl_configured=firecrawl_configured)
+    }
+    sources: list[ContentSource] = [
+        _content_source_from(src.url, _safe_extract(src.url, extractor))
+        if src.url in retry_urls and isinstance(src, ContentSourceFailure)
+        else src
+        for src in content.sources
+    ]
+    if _sources_materially_equal(content.sources, sources):
+        return content  # nothing changed — do not advance fetched_at (cf. `fetch_item`)
+    return Content(fetched_at=now(), sources=sources)
+
+
 def retry_failed(
     store: dict[str, Item],
     plan: RetryPlan,
     extractor: ArticleExtractor = extract_article,
     *,
+    firecrawl_configured: bool = False,
     now: Callable[[], datetime] = _utcnow,
+    sleep: Callable[[float], None] = time.sleep,
+    delay: float = _RETRY_DELAY_SECONDS,
 ) -> int:
-    """Re-fetch exactly the items `plan` marked retryable. Mutates `store`; the caller
-    snapshots and saves. A retry that reproduces the same content does not advance
-    `content.fetched_at` (see `fetch_item`), so a no-op retry cannot re-trigger enrichment."""
-    for item_id in plan.retryable:
+    """Re-fetch the failed link sources of exactly the items `plan` marked retryable.
+
+    Mutates `store`; the caller snapshots and saves. Paced by `delay` between items: these are
+    other people's servers, and the one `unknown_error` in the real corpus is a recorded HTTP
+    429 — hammering a host that already rate-limited us is the one place backoff is not
+    optional.
+    """
+    for index, item_id in enumerate(plan.retryable):
+        if index:
+            sleep(delay)
         item = store[item_id]
-        item.content = fetch_item(item, extractor, now=now)
+        item.content = _refetch_failed_sources(
+            item, extractor, firecrawl_configured=firecrawl_configured, now=now
+        )
     return len(plan.retryable)
 
 

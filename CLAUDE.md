@@ -52,6 +52,18 @@ generates an Obsidian wiki.
   be extracted") — one builder, so all three LLM surfaces (api prompt · enrich worksheet · verify
   source) get it verbatim, and the judge can hold the generator to it. Naming the cause never
   licenses describing the content: the rule sentence is unconditional.
+- **A wall is never evidence (`validate_body`).** The only content check used to be `if not text`
+  — non-empty ⇒ success. Firecrawl RENDERS JavaScript and `js_required` means "downloadable but
+  no extractable article", so a retry would very often "succeed" on a consent/login wall and hand
+  back the banner. Accepting it flips the source to success → `links_content_unfetched` goes False
+  → the `[Links — content NOT fetched]` block DISAPPEARS from all three surfaces → rubric-summary
+  orders the generator to summarise "the article's substance" and the judge sees a
+  `[Linked article]` and trusts it. A rendered Instagram wall even contains "Instagram", so the
+  entity checker would call it GROUNDED. `validate_body` (length floor · wall + page-chrome
+  markers · title≈bare-domain) records these as a `blocked_interstitial` FAILURE instead, at the
+  PERSISTENCE boundary (`_safe_extract`), so no extractor — injected or future — can write a wall
+  into the store. Verified against the real nature.com / reddit / instagram / twitch URLs the
+  backfill would hit.
 - **`fetch --retry-failed`.** `_should_refetch` retries only `_TRANSIENT_FAILURES`, so
   `js_required`/`empty_content` are treated as terminal and NEVER retried — yet those are exactly
   the two reasons `extract_article` escalates to the Firecrawl fallback, which returns None (and

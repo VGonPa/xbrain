@@ -207,6 +207,7 @@ _FAILURE_CLAUSE: dict[FailureReason, str] = {
     "not_found": "the page no longer exists (HTTP 404)",
     "forbidden": "access was denied (paywall or block)",
     "paywall": "the page is behind a paywall",
+    "blocked_interstitial": "the page served a cookie/login wall, not an article",
     "js_required": "the page could not be extracted",
     "empty_content": "the page could not be extracted",
     "timeout": "the fetch failed",
@@ -225,7 +226,7 @@ def _failure_clause(item: Item) -> str | None:
         _FAILURE_CLAUSE[src.failure_reason]
         for src in item.content.sources
         if isinstance(src, ContentSourceFailure)
-        and src.kind != "x_video"
+        and src.kind == "external_article"  # a failed thread/quoted_tweet is not a LINK failure
         and src.failure_reason in _FAILURE_CLAUSE
     ]
     if not reasons:

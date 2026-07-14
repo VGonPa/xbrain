@@ -42,6 +42,11 @@ FailureReason = Literal[
     "dns_error",
     "js_required",
     "empty_content",
+    "blocked_interstitial",  # the page returned a cookie/consent or login wall instead of an
+    # article. TERMINAL on purpose: retrying serves the same wall. Recording it as a FAILURE
+    # (never a thin "success") is what keeps the unfetched-links guardrail firing — a rendered
+    # consent banner accepted as evidence would delete the note from every LLM surface, ground
+    # an entity in boilerplate, and hand the judge a `[Linked article]` it would trust.
     "unknown_error",  # catch-all for uncategorised failures (e.g. an extractor
     # exception we did not classify). Transient by default — `_should_refetch`
     # in fetch.py treats it as retry-worthy on the next run, mirroring the
