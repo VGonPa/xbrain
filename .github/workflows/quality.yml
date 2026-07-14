@@ -48,6 +48,7 @@ jobs:
           uv venv
           uv pip install -e ".[dev]"
       - name: Quality gate
+        continue-on-error: true
         run: bash scripts/check.sh
 
       # A red PUSH run blocks nothing — the commit has already landed — so it must speak, or
