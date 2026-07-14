@@ -24,6 +24,7 @@ import pytest
 from xbrain.entity_grounding import scan_store
 from xbrain.models import (
     Author,
+    MediaPhotoDescribed,
     Content,
     ContentSourceSuccess,
     Enrichment,
@@ -210,34 +211,97 @@ def test_a_name_no_surface_names_is_still_flagged_on_a_quote_tweet():
     assert [e for r in records for e in r.ungrounded] == ["Anthropic"]
 
 
-# ------------------------------------------------------------------ the URL hole
+# ------------------------------------------- a domain-shaped token is not a URL
 #
-# 1,281 of the 2,168 items carry a URL inside their OWN tweet text, and `[Tweet]` is the
-# post's words verbatim — so a URL rides into the evidence blob. A naive substring search
-# then grounds "Anthropic" in the slug of a link that was NEVER FETCHED. That is the exact
-# failure this whole workstream started from ("Axios", "Anthropic", read off
-# `axios.com/2025/05/28/ai-jobs-white-collar-unemployment-anthropic`), and the checker is
-# the component that does the matching, so the strip belongs here.
+# I shipped a `strip_urls()` that removed every URL-shaped token from the evidence blob
+# before matching a name. It scored **0 true positives and 5 false positives** on the real
+# corpus, and it had to: the case it targeted — a name readable ONLY off an unfetched
+# link's slug — was ALREADY handled, structurally, because `xbrain.evidence` derives no
+# surface from `item.links` (#94). There was nothing left for a strip to catch.
+#
+# What it DID catch was evidence. A token that LOOKS like a domain is very often the
+# CONTENT of a surface: a row in a rankings table an image description transcribes, a logo
+# a vision model reads off a slide, a product name a speaker says out loud. Stripping it
+# deletes the grounding and reports the generator for inventing what the item plainly
+# shows.
+#
+# These pin both arms so the mistake cannot come back.
 
 
-def test_a_name_read_off_a_URL_IN_THE_TWEET_is_NOT_grounded():
-    """Both names sit in the slug of a link that was NEVER FETCHED. Neither is grounded.
+def test_a_domain_shaped_token_IN_AN_IMAGE_DESCRIPTION_grounds_the_name():
+    """The real item that exposed this (1888651361094717717). The tweet MISSPELLS it
+    ("GhatGPT"); the IMAGE — a vision-described traffic-share table — carries
+    `chatgpt.com 2,33%`. The name is genuinely shown, in a table, as data."""
+    item = _item(summary="ChatGPT tiene el 2,3% del tráfico web.")
+    item.media = [
+        MediaPhotoDescribed(
+            url="https://pbs.twimg.com/media/X.jpg",
+            local_path="7/0.jpg",
+            width=4,
+            height=3,
+            bytes_size=512,
+            downloaded_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            is_decorative=False,
+            description="Tabla de dominios: google.com 29,21%, chatgpt.com 2,33%, x.com 1,92%.",
+            description_lang="Spanish",
+            description_version="v1",
+            described_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+        )
+    ]
 
-    (Named mid-sentence on purpose: a sentence-initial capital is `uncertain` by design,
-    and this test is about grounding, not about the confidence split.)"""
-    item = _item(summary="Según Axios, la empresa Anthropic recorta empleos.")
-    item.text = "Worth reading https://axios.com/2025/05/28/ai-jobs-white-collar-anthropic"
+    assert _ungrounded(item, "summary") == []
 
-    flagged = [e for r in scan_store({"1": item}, "summary") for e in r.ungrounded]
+
+def test_a_domain_shaped_token_IN_A_TRANSCRIPT_grounds_the_name():
+    """The speaker SAYS it: "a new website called Codream.ai". That is the video's content."""
+    item = _item(
+        digest="Presentan Codream, una web en preview.",
+        transcript="What we shipped is a new website in our preview called Codream.ai.",
+    )
+    assert _ungrounded(item, "digest") == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN GAP, measured, deliberately not fixed here. A human typo is a mangled SOURCE, "
+        "not an invention — the same species as the ASR corruption the fuzzy matcher exists "
+        "for. But `_FUZZY_MIN_LEN = 8` skips the fuzzy pass entirely for a 7-character "
+        "needle, so 'chatgpt' never reaches the 0.80 threshold even though 'ghatgpt' sits "
+        "right there at ratio 0.857. Lowering it to 7 newly grounds 11 entities on the real "
+        "corpus — and while 2 are real ('ChatGPT'), the rest are common-word collisions "
+        "('Rumanía', 'Malasia', 'Cultura', 'Perdona', 'Vizcaya'), i.e. it would start HIDING "
+        "inventions behind fuzzy hits. That is a precision trade to settle against the "
+        "hand-labelled set, not by intuition. Pinned as xfail so it flips green the day "
+        "someone does the measurement."
+    ),
+)
+def test_a_MISSPELLED_name_grounded_ONLY_by_the_typo_is_not_yet_caught():
+    """The residual false-positive shape: the typo'd tweet is the ONLY grounding.
+
+    Note the real item that started this (1888651361094717717) does NOT hit this path — its
+    IMAGE description carries `chatgpt.com 2,33%`, so it is grounded regardless (pinned
+    above). This is the narrower case where nothing else names it."""
+    item = _item(
+        summary="ChatGPT tiene el 2,3% del tráfico web.",
+        tweet="Google has nearly 1/3rd of the web traffic. GhatGPT 10x less than that (2.3%)",
+        transcript="",
+        article_body="",
+    )
+
+    assert _ungrounded(item, "summary") == []
+
+
+def test_a_name_readable_ONLY_off_an_unfetched_LINK_is_still_flagged():
+    """The other arm, and the reason no strip is needed: `item.links` is NO evidence
+    surface (#94), so `axios.com/...-anthropic` never reaches the blob in the first place.
+    The name is flagged structurally."""
+    item = _item(
+        summary="Según Axios, la empresa Anthropic recorta empleos.",
+        link_url="https://www.axios.com/2025/05/28/ai-jobs-white-collar-unemployment-anthropic",
+    )
+
+    flagged = _ungrounded(item, "summary")
 
     assert "Anthropic" in flagged
     assert "Axios" in flagged
-
-
-def test_stripping_a_URL_does_not_swallow_the_words_around_it():
-    """The strip must remove the URL, not the sentence. A name the tweet ACTUALLY says
-    stays grounded even when a URL sits beside it."""
-    item = _item(summary="Anthropic recorta empleos.")
-    item.text = "Anthropic just posted this https://example.com/a/b-anthropic-c"
-
-    assert scan_store({"1": item}, "summary") == []

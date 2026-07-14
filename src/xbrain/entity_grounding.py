@@ -468,51 +468,13 @@ def uncertain_entities(item: Item, target: str) -> list[str]:
     return _ungrounded(item, target, confident=False)
 
 
-# A URL — bare or schemed — inside an evidence surface. It is CONTENT the surface really
-# carries (1,281 of the 2,168 items have one inside their own tweet text, and `[Tweet]` is
-# the post's words verbatim), but it grounds NOTHING: a domain is topic signal, never a
-# name. Both rubrics say so; only this module does the substring matching, so only this
-# module can enforce it.
-_URL = re.compile(
-    r"""(?xi)
-    \b(?:https?://|www\.)\S+          # a schemed or www URL
-    | \b[\w-]+(?:\.[\w-]+)*\.         # or a bare host: labels, then a TLD…
-      (?:com|org|net|io|ai|co|dev|me|app|xyz|edu|gov|news|blog|so|to|ly|be|tv)
-      \b(?:/\S*)?                     # …plus any path
-    """
-)
-
-
-def strip_urls(text: str) -> str:
-    """Remove every URL from an evidence blob, leaving the words around it intact.
-
-    THE HOLE THIS CLOSES. The checker asks "does this name appear anywhere in the
-    evidence?" by substring. A URL rides into the evidence with the tweet's own words —
-    and `axios.com/2025/05/28/ai-jobs-white-collar-unemployment-anthropic` contains the
-    literal strings "axios" and "anthropic". So the naive search GROUNDS "Axios" and
-    "Anthropic" in the slug of a link that was never fetched, and reports the summary
-    that invented them as clean.
-
-    That is not a hypothetical: it is the exact defect this whole workstream started
-    from. `xbrain.evidence` states the invariant (no surface is derived from `item.links`)
-    and is careful to say what it does NOT mean — a URL inside the tweet's own text does
-    ride in. Enforcing it belongs HERE, at the only place a name is matched against a
-    blob.
-
-    A space replaces the URL rather than nothing, so the words on either side stay
-    separate tokens ("Anthropic" beside a link is still grounded; it is the SLUG that
-    stops grounding).
-    """
-    return _URL.sub(" ", text)
-
-
 def _ungrounded(item: Item, target: str, *, confident: bool) -> list[str]:
     """Candidates of the requested confidence that no evidence surface supports."""
     checked = _as_target(target)
     output = _output_for(item, checked)
     if not output:
         return []
-    evidence = strip_urls(evidence_text(item, checked))
+    evidence = evidence_text(item, checked)
     return [
         c.text
         for c in _candidates(output)
