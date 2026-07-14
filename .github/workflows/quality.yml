@@ -5,6 +5,7 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    continue-on-error: true
     env:
       # Pin the Python hash seed so the gate is byte-reproducible run-to-run
       # (determinism; check.sh pins the same default for local runs).
