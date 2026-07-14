@@ -11,6 +11,11 @@ jobs:
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: PROBE-HEAD-MARKER
+        continue-on-error: true
+        run: |
+          echo "PROBE_HEAD_MARKER_PRESENT"
+          exit 1
       - name: Install uv
         uses: astral-sh/setup-uv@v3
       - name: Set up Python
