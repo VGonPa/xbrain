@@ -251,11 +251,15 @@ generates an Obsidian wiki.
   from `develop` (never from `main`) and target every PR at `develop`.
 - `develop → main` only via PR — never merge or push directly to `main`.
 
-## Rules paid for in blood (2026-07-14 verification audit)
+## Rules paid for in blood (2026-07-14: verification audit, then CI audit)
 
 Fifteen PRs merged in one day (`gh pr list --state merged`, 2026-07-14), six agents.
 Every rule below is here because we broke it and something shipped wrong while the suite
 was green. They are ordered by how often they bit us. Apply them; do not admire them.
+
+Rules 1–8 came out of the morning's audit of the data pipeline. Rules 9–13 came out of
+the afternoon's audit of CI and branch protection, and each one was **measured against the
+live GitHub API**, with a probe PR number as the receipt. Do not soften them.
 
 ### 1. A test that passes before you write the fix is not a test
 
@@ -299,6 +303,10 @@ in the user's note as if the poster had written it; an entity checker with ~0% p
 **Do:** judge ≠ party, and the judge must **execute**, not read. Run the thing against
 the real store (read-only) before you claim it works.
 
+**And the base case**, for when "what guards the guard?" threatens to regress forever: the
+escape is **not another catcher**. It is making the **absence** of the catcher fail closed.
+Where removing a guard blocks the merge, the regress terminates — see rule 11.
+
 ### 4. A green PR against a moving `develop` is not a green `develop`
 
 One PR added a test calling `_source_text(item)`; another changed that signature. No
@@ -310,6 +318,18 @@ ran the combination.
 tests proves it works). And read a check's **reported conclusion** — never infer it from
 the exit status of the command that printed it. A red check has already reached `develop`
 that way.
+
+**This is now mechanized** (PR #110 + branch protection). `quality.yml` runs on `push` to
+`develop`/`main`, so the merge commit itself is finally tested — before this the repo had
+**zero** `push` runs in its entire history, and `1209094`, the merge that broke `develop`,
+carried `total_count: 0` check runs. Nobody had ever tested it. And `strict: true` forces
+the merge ref to be recomputed against the current base *before* merging, so the stale
+green cannot land in the first place. `push` is the detector; `strict` is the preventer.
+
+**Caveat, and it is a sharp one:** the advice above — *read the reported conclusion* —
+assumed the conclusion is the trustworthy surface. **Rule 10 is the case where it is not.**
+A step that ran `exit 1` can report `"conclusion": "success"`. Read rule 9 before you trust
+any conclusion field.
 
 ### 5. One definition, or five that silently diverge
 
@@ -373,3 +393,119 @@ to both agents. Before starting anything that someone else might already be doin
 the actual remote state (`gh pr view`, `git ls-remote`) rather than the state you remember
 — and note that a PR in **CONFLICTING** state runs **no checks at all**, so from the
 outside it looks identical to a dead one.
+
+### 9. Two instruments report the same event with opposite answers — name the surface
+
+`gh run list` shows the **workflow run**. `gh pr view --json statusCheckRollup` shows the
+job's **check run**. Branch protection reads the **check run**. A `continue-on-error` job
+reports the workflow run as `success` and the check run as `FAILURE`. Read the wrong
+instrument and you conclude the exact **opposite** of the truth.
+
+This was the third costume the same bug wore in one day:
+
+| The instrument | What it actually reports |
+|---|---|
+| `gh pr checks` | exits **0** on a failing check. Cost: a red merge (#96). |
+| `git push … \| tail` | `$?` comes from **`tail`**, not from `push`. |
+| a step that ran `exit 1` | `"conclusion": "success"` — see rule 10. |
+
+**Do:** always name **which surface you read**. And **never trust a reported conclusion —
+assert on the SOURCE.** We have a receipt that the conclusion field lies, so any guard that
+verifies "every step concluded success" is defeated by the exact attack it exists to catch.
+`tests/test_ci_workflow.py` and the `gate-integrity` suite parse `quality.yml` and
+`check.sh` and assert on what they **say**.
+
+### 10. The keyword does not have a column; the placement does
+
+`continue-on-error: true` in two places, opposite outcomes:
+
+| Where | Check run | Merge | |
+|---|---|---|---|
+| on the **job** (`jobs.quality.continue-on-error`) | `FAILURE` | `BLOCKED` | harmless *(probe #119)* |
+| on the gate **step** | `SUCCESS`, `mergeStateStatus: CLEAN` | **merges** | **lethal** *(probes #121, #125)* |
+
+On the step, the step that ran `exit 1` reports `success`, the job reports `success`, the
+check reports `SUCCESS`. Two people each measured **one cell of a 2×2** and each claimed
+the whole table.
+
+**Do:** measure **the cell**, not the keyword.
+
+### 11. Removing a guard fails closed; hollowing it out fails open
+
+First, the mechanism that makes this the only distinction that matters: **a PR's CI runs
+the HEAD version of the workflow, not the base's** *(measured: a probe step added on a
+branch executed; and #112 — deleting `quality.yml` on a branch produced **zero** runs,
+impossible if the base's workflow were used)*. **A PR that neuters the gate is judged by
+the neutered gate. It absolves itself.** Which is why asserting on the workflow's
+*triggers* alone was never going to be enough.
+
+So every attack on the gate sorts into exactly two bins:
+
+- **FAIL-CLOSED (safe)** — anything that stops the required check from **reporting**:
+  deleting the workflow file *(probe #112: zero runs, `BLOCKED`)*; renaming the job (the
+  required context `quality` never appears); `continue-on-error` on the job;
+  `branches-ignore`; `paths:` under `pull_request`; an invalid `types:`. GitHub blocks the
+  merge. **The change cannot ship a lie.**
+- **FAIL-OPEN (lethal)** — anything that lets the check still say **PASS while testing
+  less**: `continue-on-error` on the gate step; `checkout` with an explicit `ref:` *(probe
+  #124 — the gate ran green **on the wrong tree**; the test count gave it away, `1088
+  passed` where `develop`'s suite ran 1604 that day)*; gutted `steps:`; `COVERAGE_MIN=0`;
+  `pytest --ignore=…`; demoting `Tests` to warn-only.
+
+**Do: guard what can be hollowed out — what can be removed already guards itself.** This is
+also the base case that terminates rule 3's regress: where a guard's *absence* fails closed,
+you do not need a catcher for the catcher.
+
+### 12. `required_approving_review_count` must stay **0**. Never set it to 1
+
+`VGonPa` is the repo's **only collaborator** and authored all 76 PRs. GitHub forbids a PR
+author from approving their own PR, and `can_approve_pull_request_reviews` is `false` for
+`github-actions[bot]`. **No identity in this repository can satisfy a required approval.**
+
+With `enforce_admins: true`, setting it to 1 makes **every PR permanently unmergeable, with
+no bypass — including the PR that would undo it.** A reviewer proposed this today as its top
+recommendation. It was thirty seconds from bricking the repo.
+
+**Do:** leave it at 0. This is written down so the next agent does not helpfully re-propose it.
+
+### 13. The honest residue — state it as social, do not dress it as mechanical
+
+**Two lines in `.github/workflows/quality.yml` can make the gate lie** — a
+`continue-on-error` on the gate step, or a pinned `checkout ref:` — and **nothing mechanical
+prevents it on this repo.** Every escape was checked against the live API and is unavailable:
+merge queue is **org-only**; the required-workflows ruleset is **GHEC/GHES-only**;
+`file_path_restriction` rulesets are **Enterprise-only**; required approvals are impossible
+(rule 12).
+
+The one mechanism that would work — `pull_request_target`, whose definition comes from the
+**base** branch, which the PR head therefore cannot edit — was **deliberately declined**: it
+runs with the base's secrets and a write token, and on a **public** repo a single careless
+future edit that makes it touch head code hands the repository to any stranger who opens a
+fork PR. That is a permanent RCE surface bought to defend against an adversary who does not
+exist.
+
+**The guards catch mistakes, not attacks. The only backstop against an attack is that
+someone reads the diff of `.github/`.** Say so plainly; do not claim the gate is airtight.
+
+### Branch protection: the live settings, and what each one cost
+
+Live on **`develop` and `main`** (`gh api repos/VGonPa/xbrain/branches/develop/protection`):
+
+| Setting | What it prevents | What it costs |
+|---|---|---|
+| required check **`quality`** | a merge with no green gate | nothing |
+| **PRs required** | pushing straight to `develop`/`main` | one PR per change |
+| **`strict: true`** (up to date before merging) | the stale-green merge of rule 4 | a rebase when the base moves |
+| **`enforce_admins: true`** | the owner waving his own change through | the owner waits like everyone else |
+| no force pushes / no deletions | rewriting or vaporizing the integration branch | nothing |
+| approvals **0** | — | **must stay 0 — see rule 12** |
+
+`strict` was the contested one. The rationale for leaving it off (CI is slow, merges are
+frequent, you would rebase all day) was **asserted, never measured** — and the measurement
+pointed the other way: **CI median 73 s** *(measured: `[70,66,72,73,73,79,65,74,76,71]`)*
+against a **median 7.6 min gap between merges**. The queue never forms.
+
+And the coupling nobody guarded until today: **the required check's name comes from the job
+id `quality`.** Rename the job and the required check **never appears** — every merge blocks,
+forever. Change the branch-protection setting **first** if you ever must rename it. Guarded
+by `tests/test_ci_workflow.py` (17 assertions); ruff's scope by `tests/test_quality_gate_scope.py`.
