@@ -205,6 +205,8 @@ def test_recapture_history_persists_payloads(monkeypatch, tmp_path: Path):
     assert seen["payload_dir"] == tmp_path / "payloads", (
         "the full-history scroll must persist payloads — it is the cheapest backfill we have"
     )
+
+
 # --- Review #96: every one of these was reproduced by running the code -----------------
 
 
