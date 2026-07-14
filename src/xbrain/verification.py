@@ -174,7 +174,13 @@ def _source_text(item: Item) -> str:
     content — turning an unsupported claim about the linked piece into a PASS. Content
     the pipeline never downloaded (a link's body, a quoted post) is marked as such.
     """
-    parts: list[str] = ["[Author]", f"@{item.author.handle} ({item.author.name})"]
+    parts: list[str] = []
+    # No handle, no block. The rubric tells the judge the `[Author]` block is TRUSTED
+    # metadata, so an empty one (`[Author]\n@ ()`) would present a garbage anchor as
+    # trustworthy. Omitting it is the strict direction: with no author in the source,
+    # the judge has nobody to attribute anything to.
+    if item.author.handle:
+        parts += ["[Author]", f"@{item.author.handle} ({item.author.name})"]
     parts += _video_parts(item)
     images = _content_image_descriptions(item)
     if images:

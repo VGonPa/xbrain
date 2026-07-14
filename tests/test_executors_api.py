@@ -3,7 +3,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from xbrain.executors.api import ApiExecutor, _user_prompt, links_content_unfetched
+from xbrain.executors.api import (
+    QUOTED_CONTENT_UNFETCHED_NOTE,
+    ApiExecutor,
+    _user_prompt,
+    links_content_unfetched,
+    unfetched_links_note,
+)
 from xbrain.models import Author, Content, ContentSourceSuccess, Item, Link, Topic
 
 from tests.conftest import FakeAnthropic
@@ -538,9 +544,11 @@ def test_links_content_unfetched_ignores_a_textless_source():
 def test_user_prompt_flags_unfetched_links():
     """When the linked content was never fetched, the prompt carries the guardrail
     note — the model must not reconstruct the linked content from the URL/domain."""
-    prompt = _user_prompt(_linked_item(), VOCAB)
-    assert "NOT fetched" in prompt
-    assert "never describe, reconstruct or guess" in prompt
+    item = _linked_item()
+    prompt = _user_prompt(item, VOCAB)
+    # Identity, not a substring: the prompt must carry the SHARED note verbatim, so the
+    # judge can hold the generator to exactly what it was told.
+    assert unfetched_links_note(item) in prompt
 
 
 def test_user_prompt_does_not_flag_links_when_article_fetched():
@@ -560,7 +568,7 @@ def test_user_prompt_labels_thread_text_as_thread_not_article():
     thread_idx = prompt.index("Thread (full text by the same author):")
     assert thread_idx < prompt.index("1/ my thread")
     assert "Linked article" not in prompt  # …but it is not served as a fetched article
-    assert "NOT fetched" in prompt  # …and the unfetched link is still flagged
+    assert unfetched_links_note(item) in prompt  # …and the unfetched link is still flagged
 
 
 def test_user_prompt_partial_fetch_flags_the_missing_link_with_counts():
@@ -569,8 +577,9 @@ def test_user_prompt_partial_fetch_flags_the_missing_link_with_counts():
     item = _linked_item(links=2, sources=[_source("external_article", "the fetched body")])
     prompt = _user_prompt(item, VOCAB)
     assert "the fetched body" in prompt
-    assert "1 of 2" in prompt
-    assert "NOT fetched" in prompt
+    note = unfetched_links_note(item)
+    assert note is not None and "1 of 2" in note
+    assert note in prompt
 
 
 def test_user_prompt_marks_an_unfetched_quoted_post():
@@ -579,7 +588,7 @@ def test_user_prompt_marks_an_unfetched_quoted_post():
     item = _item("1", quoted_id="123")
     prompt = _user_prompt(item, VOCAB)
     assert "Quoted post" in prompt
-    assert "NOT fetched" in prompt
+    assert QUOTED_CONTENT_UNFETCHED_NOTE in prompt
 
 
 def test_user_prompt_has_no_quoted_marker_without_a_quote():
