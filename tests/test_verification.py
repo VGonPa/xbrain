@@ -653,6 +653,8 @@ def test_apply_verdicts_refuses_duplicate_records_so_a_pass_cannot_overwrite_a_f
     with pytest.raises(ValueError, match="duplicate"):
         apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
     assert store["7"].verification == {}  # nothing partially written
+
+
 def test_source_text_omits_the_author_block_without_a_handle():
     """G4: the rubric tells the judge the `[Author]` block is TRUSTED metadata, so an
     empty one (`[Author]\\n@ ()`) would present a garbage anchor as trustworthy. No
