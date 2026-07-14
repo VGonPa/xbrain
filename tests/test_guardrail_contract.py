@@ -20,12 +20,14 @@ import pytest
 
 from xbrain.executors.api import (
     QUOTED_CONTENT_UNFETCHED_NOTE,
+    QUOTED_LABEL,
     _user_prompt,
     fetched_link_sources,
     quoted_attribution,
     unfetched_links_note,
 )
 from xbrain.models import Author, Content, ContentSourceSuccess, Item, Link, Topic
+from xbrain.rubrics import load_rubric
 from xbrain.verification import _source_text
 from xbrain.worksheet import export_worksheet
 
@@ -280,3 +282,91 @@ def test_the_attribution_degrades_when_the_quoted_author_is_unknown():
 
     assert quoted_attribution(item) == "Quoted post"
     assert "@" not in quoted_attribution(item)
+
+
+# ------------------- H3: the two rubrics must not teach OPPOSITE readings of one label
+#
+# The generator is now told the `Quoted post — @handle (Name)` label names the author of
+# the quoted words. The judge's rubric says a `@handle (Name)` label is item metadata and
+# "does NOT establish who WROTE or SPOKE the content", and orders a named-speaker check
+# FIRST. Left alone, the judge would flag a CORRECT attribution as invented — false FAILs
+# concentrated on exactly the 762 items this change repairs.
+
+
+def _rubric(name: str) -> str:
+    return load_rubric(name, language="Spanish")
+
+
+def test_both_rubrics_speak_of_the_same_quoted_label():
+    """One label, one contract. Compared against the shared constant BY REFERENCE, so
+    renaming `QUOTED_LABEL` cannot leave a rubric quietly talking about the old one."""
+    for name in ("summary", "verify"):
+        assert QUOTED_LABEL in _rubric(name)
+
+
+def test_the_judge_rubric_declares_the_quoted_block_to_BE_authorship():
+    """The judge must be told that the quoted block is trusted authorship metadata for
+    the body beneath it — otherwise its `[Author]` rule ("names WHO POSTED, nothing
+    more") swallows the quoted label too, and a correct attribution reads as invented.
+
+    Pins the INSTRUCTION, not the heading: a rubric that merely mentions "Quoted post"
+    while still teaching that such a label is not authorship would pass a bare substring
+    check and still produce the false FAILs.
+    """
+    verify = _rubric("verify")
+    quoted_rules = [para for para in verify.split("\n\n") if QUOTED_LABEL in para]
+    assert quoted_rules
+    rule = " ".join(quoted_rules).lower()
+
+    # the block ESTABLISHES who wrote the quoted body…
+    assert "authorship" in rule
+    assert "written by" in rule or "wrote" in rule
+    # …naming THAT account is SUPPORTED (this is precisely the false FAIL the judge,
+    # left with only the `[Author]` rule, would otherwise emit on a correct output)…
+    assert "supported" in rule
+    # …and the poster is explicitly not the author of those words.
+    assert "poster" in rule
+
+
+def test_the_judge_rubric_enumerates_the_quoted_post_as_source():
+    """The rubric's opening enumeration of what the `source` contains must list the
+    quoted post, or the judge is told to check against a surface it was never promised."""
+    opening = _rubric("verify").split("## 1.")[0].lower()
+    assert "quoted" in opening or "citado" in opening
+
+
+# ------------------------------------ M5: no author → name NOBODY, and say so plainly
+
+
+def _bodied_quote_without_author(item: Item) -> Item:
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="quoted_tweet", url="https://x.com/i/status/999", text="a body, no author"
+            )
+        ],
+    )
+    return item
+
+
+def test_an_authorless_quote_tells_the_generator_the_author_is_UNKNOWN():
+    """`quoted_attribution` correctly degrades to a label naming nobody — but the prompt
+    still said "These are that account's words", a pronoun pointing at no account, while
+    the rubric tells the generator to attribute using a name it was never given. Say the
+    quiet part: the author is unknown, do not invent one."""
+    item = _bodied_quote_without_author(_item(quoted=True))
+    prompt = _user_prompt(item, VOCAB)
+
+    assert "a body, no author" in prompt  # the body is still evidence
+    assert "that account's" not in prompt  # the dangling pronoun is gone
+    lowered = prompt.lower()
+    assert "unknown" in lowered and "do not name" in lowered
+
+
+def test_a_quote_WITH_an_author_still_names_them_as_the_third_party():
+    item = _item(quoted=True, quoted_fetched=True)
+    prompt = _user_prompt(item, VOCAB)
+
+    assert quoted_attribution(item) in prompt
+    assert "NOT the poster's" in prompt

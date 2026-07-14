@@ -271,15 +271,20 @@ def _quoted_content(tweet: dict[str, Any], quoted_id: str | None) -> Content | N
         return None
     result = _quoted_result(tweet)
     quoted = _unwrap(result) if result else None
-    source: ContentSource = _quoted_failure(result, quoted_id)
+    source: ContentSource = _quoted_failure(result, quoted_id, served=quoted is not None)
     if quoted is not None:
+        # The BODY is what makes the quote evidence. An author X did not hydrate costs us
+        # the attribution — `quoted_attribution` then names nobody — but it must not cost
+        # us the body too: dropping the cure because one field is missing would be the
+        # bug wearing a different hat.
         author = _extract_author(quoted)
         text = _dig(quoted, "legacy").get("full_text") or ""
         rest_id = quoted.get("rest_id") or quoted_id
-        if author is not None and text:
+        handle = author.handle if author else "i"
+        if text:
             source = ContentSourceSuccess(
                 kind="quoted_tweet",
-                url=f"https://x.com/{author.handle}/status/{rest_id}",
+                url=f"https://x.com/{handle}/status/{rest_id}",
                 # No title: a post has none, and `notes_io.note_title` takes the first
                 # source that carries one — borrowing the field for the author would
                 # rename the note after the account it quotes.
@@ -297,18 +302,32 @@ _QUOTED_FAILURE_REASONS: dict[str, FailureReason] = {
 }
 
 
-def _quoted_failure(result: dict[str, Any], quoted_id: str) -> ContentSourceFailure:
-    """Why the quoted post is not readable. `empty_content` is the catch-all: X sent
-    us the id and no usable post, so we know a quote exists and hold none of it."""
+def _quoted_failure(
+    result: dict[str, Any], quoted_id: str, *, served: bool
+) -> ContentSourceFailure:
+    """Why the quoted post is not readable — a record of what X ACTUALLY did.
+
+    Three different facts, and they must not be flattened into one: X tombstoned the post
+    (`not_found`), X refused it (`forbidden`), or X gave us nothing usable
+    (`empty_content`). That last bucket splits again — `served` distinguishes a post X
+    HANDED US that simply carries no text (a photo/video quote: X served it, there is
+    just nothing to read) from one X never hydrated at all. Writing "X did not serve the
+    quoted post" over a media-only quote would be a false statement about the world,
+    stored in the very evidence base whose purpose is to stop us inventing facts.
+    """
     typename = str(result.get("__typename") or "")
     reason = _QUOTED_FAILURE_REASONS.get(typename, "empty_content")
+    if reason == "empty_content" and served:
+        error = "the quoted post carries no text (media-only)"
+    else:
+        error = f"X did not serve the quoted post ({typename or 'not hydrated'})"
     return ContentSourceFailure(
         kind="quoted_tweet",
         # The id-only permalink: with no author handle there is no /<handle>/status/
         # form, and x.com/i/status/<id> resolves to the same post.
         url=f"https://x.com/i/status/{quoted_id}",
         failure_reason=reason,
-        error=f"X did not serve the quoted post ({typename or 'not hydrated'})",
+        error=error,
         attempts=1,
     )
 

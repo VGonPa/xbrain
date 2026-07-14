@@ -414,10 +414,11 @@ def _run_refresh_quoted_from_store(cfg: Config) -> None:
         f"{report.quoted_items_not_seen} quote-tweets quote a post we do NOT hold "
         "(run `xbrain refresh-quoted` to capture those)."
     )
-    if report.sources_attached:
+    if report.readable:
         typer.echo(
-            f"Ahora: `xbrain enrich` re-genera los {report.sources_attached} summaries "
-            "con la evidencia nueva (su `content.fetched_at` ha avanzado)."
+            f"Ahora: `xbrain enrich` re-genera los {report.readable} summaries con la "
+            "evidencia nueva (solo esos avanzan `content.fetched_at`; un post citado "
+            "ilegible se registra pero no re-enriquece)."
         )
 
 
@@ -446,10 +447,11 @@ def _run_refresh_quoted(cfg: Config, source: str, *, force: bool, headless: bool
         f"{report.already_present} already had one; "
         f"{report.quoted_items_not_seen} quote-tweets NOT re-seen (still evidence-less)."
     )
-    if report.sources_attached:
+    if report.readable:
         typer.echo(
-            f"Ahora: `xbrain enrich` re-genera los {report.sources_attached} summaries "
-            "con la evidencia nueva (su `content.fetched_at` ha avanzado)."
+            f"Ahora: `xbrain enrich` re-genera los {report.readable} summaries con la "
+            "evidencia nueva (solo esos avanzan `content.fetched_at`; un post citado "
+            "ilegible se registra pero no re-enriquece)."
         )
 
 

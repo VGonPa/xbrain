@@ -28,8 +28,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from xbrain.executors.api import quoted_source
 from xbrain.models import (
     QUOTED_CONTENT_KINDS,
+    Author,
     Content,
     ContentSource,
     ContentSourceSuccess,
@@ -221,31 +223,73 @@ class QuotedBackfillReport:
 
 
 def _quoted_source(item: Item) -> ContentSource | None:
-    """The item's `quoted_tweet` source in either variant (readable or failed)."""
+    """The item's `quoted_tweet` source in either variant (readable or failed).
+
+    The either-variant selector, for deciding what is RECORDED. "Is there readable
+    evidence?" is a different question with exactly one answer in this codebase —
+    `executors.api.quoted_source`, which every LLM surface reads — so it is imported,
+    not re-implemented here.
+    """
     if item.content is None:
         return None
     return next((s for s in item.content.sources if s.kind in QUOTED_CONTENT_KINDS), None)
 
 
-def _has_readable_quote(item: Item) -> bool:
-    source = _quoted_source(item)
-    return isinstance(source, ContentSourceSuccess) and bool(source.text)
+def _quoted_evidence(item: Item) -> tuple[str, Author | None] | None:
+    """Exactly what the LLM surfaces READ from the quoted post, or None.
 
-
-def _attach_quoted(item: Item, source: ContentSource, now: datetime) -> None:
-    """Put `source` on `item`, replacing any prior `quoted_tweet` and keeping the rest.
-
-    `fetched_at` advances: the item just gained the evidence its summary was generated
-    without, so `enrich._needs_reenrichment` must see a material content change and
-    flow it back through generation. Otherwise the body lands in the store and the
-    defective summary stands — the fix would ship having repaired nothing.
+    Every quoted surface — the api prompt's body + label, the worksheet's `quoted_text` +
+    `quoted_attribution`, the judge's `[Quoted post — …]` block, and the `NOT fetched`
+    marker's on/off — is a function of `quoted_source(item)`, i.e. of exactly this pair.
+    So this IS the generator's view, and comparing it before/after answers the only
+    question that matters: did anything the model will read actually change?
     """
+    source = quoted_source(item)
+    return None if source is None else (source.text, source.author)
+
+
+def _readable_evidence(source: ContentSource) -> tuple[str, Author | None] | None:
+    """`_quoted_evidence` for a source about to be attached (it replaces any prior one)."""
+    if isinstance(source, ContentSourceSuccess) and source.text:
+        return (source.text, source.author)
+    return None
+
+
+def _attach_quoted(item: Item, source: ContentSource, now: datetime) -> bool:
+    """Put `source` on `item`, replacing any prior `quoted_tweet` and keeping the rest.
+    Return True iff the LLM-visible evidence changed (and `fetched_at` was advanced).
+
+    **The clock moves only when the EVIDENCE moves.** `enrich._needs_reenrichment` keys
+    on `content.fetched_at > enriched_at`, and `verify` fingerprints the OUTPUT — so an
+    unconditional bump would, on every single run: re-run the model on a byte-identical
+    prompt, non-deterministically rewrite a good summary, AND staleness-invalidate every
+    persisted verdict badge on the item. A deleted or protected quote re-attaches
+    identically on each re-capture, so that churn would be permanent. This is bug #44,
+    and `fetch.fetch_item` / `fetch_x._attach_x_sources` both guard it (via
+    `_sources_materially_equal`) with a comment describing this exact failure.
+
+    The guard here is STRICTER than `_sources_materially_equal`: identical sources
+    obviously leave the evidence identical, but so does replacing one *unreadable* record
+    with a different unreadable one (`not_found` → `forbidden`, a changed `error`
+    string). No LLM surface reads those fields — the `NOT fetched` marker fires either
+    way — so there is nothing to re-generate. Record the failure; do not move the clock.
+    """
+    changed = _quoted_evidence(item) != _readable_evidence(source)
     kept = (
         [s for s in item.content.sources if s.kind not in QUOTED_CONTENT_KINDS]
         if item.content
         else []
     )
-    item.content = Content(fetched_at=now, sources=[*kept, source])
+    if item.content is not None:
+        fetched_at = now if changed else item.content.fetched_at
+    else:
+        # No content yet. Starting the clock at `now()` for a record no generator will
+        # read would itself trip `_needs_reenrichment` — the churn, from a standing
+        # start. Anchor at capture time instead: nothing was fetched, and the item's own
+        # capture is when we learned what we know.
+        fetched_at = now if changed else item.captured_at
+    item.content = Content(fetched_at=fetched_at, sources=[*kept, source])
+    return changed
 
 
 def backfill_quoted_sources(
@@ -272,23 +316,38 @@ def backfill_quoted_sources(
         seen.add(fresh.id)
         report.items_seen += 1
         incoming = _quoted_source(fresh)
-        if incoming is None:
-            continue
-        if _has_readable_quote(stored):
-            report.already_present += 1
-            continue
-        _attach_quoted(stored, incoming, now())
-        report.sources_attached += 1
-        if isinstance(incoming, ContentSourceSuccess):
-            report.readable += 1
-        else:
-            report.unreadable += 1
+        if incoming is not None:
+            _merge_quoted(stored, incoming, report, now)
     report.quoted_items_not_seen = sum(
         1
         for item in store.values()
-        if item.quoted_id and item.id not in seen and not _has_readable_quote(item)
+        if item.quoted_id and item.id not in seen and quoted_source(item) is None
     )
     return report
+
+
+def _merge_quoted(
+    stored: Item,
+    incoming: ContentSource,
+    report: QuotedBackfillReport,
+    now: Callable[[], datetime],
+) -> None:
+    """Merge one freshly-captured quoted source onto its stored item, tallying `report`.
+
+    Skipped when the item already holds a READABLE quote (there is nothing better to
+    gain), and when the incoming record is byte-identical to the one we hold — a
+    re-capture re-serves the same deleted post on every run, and rewriting an identical
+    failure would churn the store for nothing.
+    """
+    if quoted_source(stored) is not None or _quoted_source(stored) == incoming:
+        report.already_present += 1
+        return
+    _attach_quoted(stored, incoming, now())
+    report.sources_attached += 1
+    if isinstance(incoming, ContentSourceSuccess):
+        report.readable += 1
+    else:
+        report.unreadable += 1
 
 
 def quoted_source_from_item(quoted: Item) -> ContentSourceSuccess:
@@ -328,7 +387,7 @@ def backfill_quoted_from_store(
     for item in store.values():
         if not item.quoted_id:
             continue
-        if _has_readable_quote(item):
+        if quoted_source(item) is not None:
             report.already_present += 1
             continue
         # `quoted_id == item.id` would make the item its own evidence — a self-quote is

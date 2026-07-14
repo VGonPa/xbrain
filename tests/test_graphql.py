@@ -726,3 +726,36 @@ def test_a_tweet_that_quotes_nothing_gets_no_content_block():
     items = parse_tweets(_timeline(_tweet_result("111", "alice", "just a post")), "bookmark")
     assert items[0].quoted_id is None
     assert items[0].content is None
+
+
+# ------------------------------------------- L6/M5: an honest record of what X did
+
+
+def test_a_media_only_quoted_post_is_not_recorded_as_X_refusing_it():
+    """X DID serve the post — it simply carries no text (a photo/video quote). Recording
+    "X did not serve the quoted post" is a false statement about the world, in the very
+    evidence store whose whole purpose is to stop us inventing facts."""
+    from xbrain.models import ContentSourceFailure
+
+    media_only = _quoted_post()
+    media_only["legacy"]["full_text"] = ""
+    _, source = _only_source(_quoting_tweet(media_only))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+    assert "no text" in (source.error or "")
+    assert "did not serve" not in (source.error or "")
+
+
+def test_a_quoted_post_with_a_body_but_no_author_still_ships_its_body():
+    """The body is evidence even when X hydrates no author. Dropping it would throw away
+    the cure because one field is missing; the attribution simply names nobody."""
+    from xbrain.models import ContentSourceSuccess
+
+    anonymous = _quoted_post()
+    del anonymous["core"]
+    _, source = _only_source(_quoting_tweet(anonymous))
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == "I am leaving OpenAI."
+    assert source.author is None

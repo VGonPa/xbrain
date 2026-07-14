@@ -335,14 +335,22 @@ def _quoted_section(item: Item) -> list[str]:
         return []
     label = quoted_attribution(item)
     body = quoted_text(item)
-    if label and body:
-        return [
-            "",
-            f"{label} — the content this post is sharing. These are that account's "
-            "words, NOT the poster's:",
-            body,
-        ]
-    return ["", f"{QUOTED_LABEL} — content NOT fetched:", QUOTED_CONTENT_UNFETCHED_NOTE]
+    if not (label and body):
+        return ["", f"{QUOTED_LABEL} — content NOT fetched:", QUOTED_CONTENT_UNFETCHED_NOTE]
+    source = quoted_source(item)
+    if source is not None and source.author is not None:
+        rule = f"These are @{source.author.handle}'s words, NOT the poster's"
+    else:
+        # X gave us the body but no author. The label already names nobody; the rule must
+        # say so OUT LOUD. "These are that account's words" would point at an account
+        # that was never named — and the summary rubric, which tells the generator to
+        # attribute the quoted words to the account in the label, would be an order to
+        # invent one.
+        rule = (
+            "The author of this quoted post is UNKNOWN — do not name one, and do not "
+            "attribute these words to the poster"
+        )
+    return ["", f"{label} — the content this post is sharing. {rule}:", body]
 
 
 def _article_sections(item: Item) -> list[str]:

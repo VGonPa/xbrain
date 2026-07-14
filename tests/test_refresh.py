@@ -376,8 +376,8 @@ def test_estimate_mixes_estimable_and_unknown_across_items():
 
 # --------------------------------------------------------- quoted-post backfill
 
-from xbrain.models import Content, ContentSourceFailure, ContentSourceSuccess  # noqa: E402
-from xbrain.refresh import backfill_quoted_sources  # noqa: E402
+from xbrain.models import Content, ContentSourceFailure, ContentSourceSuccess, Enrichment  # noqa: E402
+from xbrain.refresh import _quoted_source, backfill_quoted_sources  # noqa: E402
 
 _T0 = datetime(2026, 5, 1, tzinfo=timezone.utc)
 
@@ -618,3 +618,105 @@ def test_offline_backfill_is_idempotent_and_preserves_other_sources():
     assert second.sources_attached == 0
     assert second.already_present == 1
     assert article in store["1"].content.sources
+
+
+# ------------------------------- H2: the clock moves only when the EVIDENCE moves
+#
+# `content.fetched_at > enriched_at` is what flags an item for re-enrichment, and
+# `verify` fingerprints the OUTPUT — so bumping the clock on a run that changed no LLM
+# surface re-runs the model on a byte-identical prompt, non-deterministically rewrites a
+# good summary, AND staleness-invalidates every persisted verdict badge. Every run.
+# Forever. This is bug #44 reopened; `fetch_item` and `fetch_x._attach_x_sources` both
+# guard it, and `_attach_quoted` must too.
+
+from xbrain.enrich import items_pending_enrichment  # noqa: E402
+
+
+def _enriched_at(when: datetime) -> Enrichment:
+    return Enrichment(
+        summary="s", primary_topic="t", topics=["t"], executor="api", enriched_at=when
+    )
+
+
+def _unreadable() -> ContentSourceFailure:
+    return ContentSourceFailure(
+        kind="quoted_tweet", url="https://x.com/i/status/999", failure_reason="not_found"
+    )
+
+
+def _enriched_quote_item(sources) -> Item:
+    item = _quoted_item("1", sources=sources)
+    item.enriched = _enriched_at(datetime(2026, 5, 2, tzinfo=timezone.utc))  # after _T0
+    return item
+
+
+def test_re_attaching_an_identical_unreadable_quote_does_not_move_the_clock():
+    """A deleted quote re-attaches identically on every re-capture. Nothing the model
+    reads has changed, so the item must NOT come back pending."""
+    store = {"1": _enriched_quote_item([_unreadable()])}
+    fresh = [_quoted_item("1", sources=[_unreadable()])]
+
+    backfill_quoted_sources(store, fresh)
+
+    assert store["1"].content.fetched_at == _T0
+    assert items_pending_enrichment(store) == []
+
+
+def test_recording_a_first_unreadable_quote_does_not_move_the_clock():
+    """An item that had NO quoted source and gains a FAILURE one: the failure is
+    recorded, but no LLM surface changed (the `NOT fetched` marker already fired on the
+    bare `quoted_id`), so re-enriching would be a wasted, identical call."""
+    item = _enriched_quote_item(None)
+    store = {"1": item}
+    fresh = [_quoted_item("1", sources=[_unreadable()])]
+
+    report = backfill_quoted_sources(store, fresh)
+
+    assert report.unreadable == 1
+    assert _quoted_source(store["1"]) == _unreadable()  # the failure IS recorded
+    assert items_pending_enrichment(store) == []  # …but the model is not re-run
+
+
+def test_gaining_a_READABLE_quote_does_move_the_clock():
+    """The other arm — real new evidence must re-enrich, or the fix repairs nothing."""
+    store = {"1": _enriched_quote_item([_unreadable()])}
+    fresh = [_quoted_item("1", sources=[_quoted_success()])]
+
+    backfill_quoted_sources(store, fresh)
+
+    assert store["1"].content.fetched_at > _T0
+    assert [i.id for i in items_pending_enrichment(store)] == ["1"]
+
+
+def test_the_offline_backfill_obeys_the_same_clock_rule():
+    from xbrain.refresh import backfill_quoted_from_store
+
+    store = {"1": _enriched_quote_item([_unreadable()])}  # quotes 999, which we do NOT hold
+
+    backfill_quoted_from_store(store)
+
+    assert store["1"].content.fetched_at == _T0
+    assert items_pending_enrichment(store) == []
+
+
+def test_backfill_is_a_no_op_on_an_identical_failure_record():
+    """Re-running must not churn the store: an identical failure is left exactly as-is."""
+    store = {"1": _enriched_quote_item([_unreadable()])}
+    fresh = [_quoted_item("1", sources=[_unreadable()])]
+
+    report = backfill_quoted_sources(store, fresh)
+
+    assert report.sources_attached == 0
+    assert report.already_present == 1
+
+
+# ---------------------------------------------- L7: ONE selector, not two that agree
+
+
+def test_refresh_and_the_llm_surfaces_share_one_readable_quote_selector():
+    """Two selectors that agree today are the drift this whole workstream exists to
+    stop. Identity, by reference — not "they return the same thing"."""
+    from xbrain import refresh
+    from xbrain.executors import api
+
+    assert refresh.quoted_source is api.quoted_source
