@@ -122,9 +122,72 @@ def test_export_worksheet_carries_transcript_frames_and_rubric(tmp_path):
     assert entry["title"] == "A great talk"
     assert data["executor"] == "claude-code"
     assert data["judgments"] == []
-    # The rubric ships with {language} already substituted.
+    # The rubric ships with {language} already substituted. NOTE: these two
+    # assertions hold for EVERY rubric in the package — they do not pin WHICH
+    # rubric was exported. `test_export_worksheet_rubric_carries_the_faithfulness_rules`
+    # does that.
     assert "{language}" not in data["rubric"]
     assert "English" in data["rubric"]
+
+
+def test_export_worksheet_rubric_carries_the_faithfulness_rules(tmp_path):
+    """The exported worksheet IS the digest model's prompt — the digest flow has no
+    other path to an LLM — so the payload's `rubric` is the closest a deterministic
+    test gets to "the model sees the anti-inference rule".
+
+    Guards a real, silent failure: wiring `load_rubric("summary", ...)` into
+    `export_video_digest_worksheet` would strip the hardening from the prompt while
+    every other assertion above stays green, since every rubric substitutes
+    `{language}`. One canary per rule — name-nothing-unnamed, quote-verbatim,
+    do-not-sharpen — so a deleted rule or a swapped rubric reds here.
+    """
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([_video_item()], path, "claude-code", "English")
+    rubric = json.loads(path.read_text(encoding="utf-8"))["rubric"].lower()
+    assert "neutral descriptor" in rubric, (
+        "exported rubric lost the never-name-an-unnamed-entity rule"
+    )
+    assert "attribution" in rubric, "exported rubric lost the attribution-vs-content rule"
+    assert "verbatim" in rubric, "exported rubric lost the quote-verbatim rule"
+    assert "sharpen" in rubric, "exported rubric lost the do-not-sharpen rule"
+
+
+def test_export_worksheet_instructions_agree_with_the_rubrics_evidence_contract(tmp_path):
+    """The worksheet's `instructions` and its `rubric` are ONE prompt — they must not
+    contradict each other.
+
+    The old instruction line said to ground the digest "NOT the tweet text/caption",
+    which flatly denies the rubric's rule that the tweet text and author metadata ARE
+    valid evidence for attribution. A model reading both would have to pick one. The
+    line must keep the caption out of the SUBSTANCE while admitting it for ATTRIBUTION.
+    """
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([_video_item()], path, "claude-code", "English")
+    instructions = json.loads(path.read_text(encoding="utf-8"))["instructions"].lower()
+    assert "attribut" in instructions, "worksheet instructions do not mention attribution"
+    # The caption must still be excluded from what gets summarised.
+    assert "caption" in instructions
+    assert "not the tweet `text`/caption" not in instructions, (
+        "instructions still blanket-forbid the tweet text, contradicting the rubric"
+    )
+
+
+def test_export_worksheet_carries_author_handle_and_display_name(tmp_path):
+    """The digest rubric admits the author metadata as evidence for WHO is speaking,
+    so the generator must be handed the same metadata the judge holds.
+
+    Post-#86 the judge's `_source_text` opens with `@handle (Display Name)`. Shipping
+    only the handle would leave the generator de-abbreviating `@lexfridman` into a
+    name it never saw, while the judge validates against the display name it did —
+    the two sides disagreeing about what evidence exists. 221 of the 235 video items
+    in the store have a display name that differs from the handle, so this is the
+    common case, not an edge one.
+    """
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([_video_item()], path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["author"] == "a"
+    assert entry["author_name"] == "A"
 
 
 def test_export_worksheet_carries_full_untruncated_transcript(tmp_path):
@@ -197,3 +260,63 @@ def test_apply_rejects_empty_digest():
     assert applied == 0
     assert "empty" in invalid[0][1][0]
     assert store["7"].content.sources[0].digest == ""  # unchanged
+
+
+# ------- the digest's evidence set must match what the generator AND judge are given
+#
+# 45 of the 235 video items are ALSO quote-tweets. Since #98 the judge's `_source_text`
+# carries a `[Quoted post — @handle (Name)]` block for those — so a digest rubric that
+# declares "the evidence is exactly these FIVE surfaces", a worksheet that never ships
+# the quoted post, and a judge that is shown it, are three different answers to one
+# question. That one-field-many-rules drift is precisely what this PR exists to kill.
+#
+# And the attribution runs the WRONG way if left alone: the rubric says the author
+# metadata attributes the clip ("posted by the speaker's own account"). On a quote-tweet
+# the poster is NOT the author of the quoted content — the #86 conflation, aimed at the
+# digest.
+
+from xbrain.executors.api import quoted_attribution, quoted_text  # noqa: E402
+from xbrain.rubrics import load_rubric  # noqa: E402
+from xbrain.verification import _source_text  # noqa: E402
+
+
+def _quoting_video_item() -> Item:
+    item = _video_item()
+    item.quoted_id = "999"
+    item.content.sources = [
+        *item.content.sources,
+        ContentSourceSuccess(
+            kind="quoted_tweet",
+            url="https://x.com/karpathy/status/999",
+            text="My talk on why RL is terrible.",
+            author=Author(handle="karpathy", name="Andrej Karpathy"),
+        ),
+    ]
+    return item
+
+
+def test_the_judge_shows_the_digest_a_quoted_post_block(tmp_path):
+    """The premise. If this ever stops holding, the coupling below is moot."""
+    assert f"[{quoted_attribution(_quoting_video_item())}]" in _source_text(_quoting_video_item())
+
+
+def test_the_digest_worksheet_ships_the_quoted_post_the_judge_will_check_against(tmp_path):
+    """The generator must hold every surface the judge holds, or the rubric names a
+    surface the running generator was never given — the bug this PR was written for."""
+    item = _quoting_video_item()
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([item], path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+
+    assert entry["quoted_text"] == quoted_text(item)
+    assert entry["quoted_attribution"] == quoted_attribution(item)
+
+
+def test_the_digest_rubric_admits_the_quoted_post_and_denies_the_poster_its_authorship():
+    """Attribution evidence, not substance — and pointed the right way round: on a
+    quote-tweet the speaker may be the QUOTED account, never the poster by default."""
+    text = load_rubric("video-digest").lower()
+
+    assert "quoted post" in text
+    assert "five surfaces" not in text  # the count moved; the enumeration must move with it
+    assert "poster" in text
