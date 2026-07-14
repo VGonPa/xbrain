@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,28 +36,25 @@ from xbrain.models import Item
 # in request headers, not response bodies. We scrub anyway. The cost of scrubbing is nothing;
 # the cost of being wrong once is a credential on disk, in a directory we now write to on
 # every sync.
-_SECRET_MARKERS = (
-    "token",
-    "cookie",
-    "session",
-    "auth",
-    "bearer",
-    "csrf",
-    "secret",
-    "password",
-    "credential",
-    "guest_id",
-    "api_key",
+# WHOLE key names, never substrings. The first version matched substrings, and "auth" ate
+# "author" / "author_id" / "authors" / "authorship" — deleting an author block on write,
+# silently and permanently, with the original already discarded. Today's tweet subtree
+# survived only by luck (it uses `core.user_results`), and luck is precisely what this module
+# exists to eliminate: THE PAYLOAD IS KEPT FOR THE PARSER WE HAVE NOT WRITTEN. A substring
+# deny-list cannot be reasoned about; an explicit one can.
+_SECRET_KEYS = frozenset(
+    """
+    auth_token authorization access_token refresh_token bearer_token id_token
+    csrf_token x_csrf_token ct0 cookie cookies set_cookie session session_id sessionid
+    guest_id guest_token secret client_secret password credential credentials api_key apikey
+    """.split()
 )
-
-# The extractor's own field. It must survive scrubbing: `note_tweet` contains "tweet", not a
-# secret marker — but be explicit rather than lucky.
-_KEEP = frozenset({"note_tweet", "note_tweet_results"})
 
 
 def _is_secret_key(key: str) -> bool:
-    lowered = key.lower()
-    return key not in _KEEP and any(marker in lowered for marker in _SECRET_MARKERS)
+    """True only for an EXACT credential key. A key that merely CONTAINS one of these
+    substrings (`author`, `authored_at`, `note_tweet`) is item data and must survive."""
+    return key.lower() in _SECRET_KEYS
 
 
 def scrub(obj: Any) -> Any:
@@ -96,15 +94,31 @@ def save_payload(payload_dir: Path, item_id: str, subtree: dict) -> None:
     path = payload_path(payload_dir, item_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(scrub(subtree), ensure_ascii=False).encode("utf-8")
-    path.write_bytes(gzip.compress(body))
+    # Atomic: truncate-and-write in a tight loop over thousands of tweets means one Ctrl-C
+    # leaves a truncated gzip that `load_payload` cannot read and `reextract` dies on. A
+    # reader must see the old bytes or the new bytes, never half of either.
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(gzip.compress(body))
+    os.replace(tmp, path)
 
 
 def load_payload(payload_dir: Path, item_id: str) -> dict | None:
-    """The stored subtree, or None when this item predates payload persistence."""
+    """The stored subtree; None when absent; raises `CorruptPayload` when unreadable.
+
+    A truncated gzip (an interrupted write) EXISTS, so it is not `missing` and is never
+    skipped — unhandled, it killed the whole command and left the operator bisecting by hand.
+    """
     path = payload_path(payload_dir, item_id)
     if not path.exists():
         return None
-    return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+    try:
+        return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
+    except (OSError, EOFError, gzip.BadGzipFile, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CorruptPayload(f"unreadable payload for {item_id}: {exc}") from exc
+
+
+class CorruptPayload(RuntimeError):
+    """A stored payload exists but cannot be read (a truncated write, a damaged file)."""
 
 
 def stored_ids(payload_dir: Path) -> set[str]:
@@ -114,6 +128,35 @@ def stored_ids(payload_dir: Path) -> set[str]:
     return {path.name.removesuffix(".json.gz") for path in payload_dir.rglob("*.json.gz")}
 
 
+def payload_stats(payload_dir: Path) -> dict[str, int]:
+    """Measure what is ACTUALLY on disk: count, raw bytes, gzipped bytes, mean per item.
+
+    The disk figures in the original PR body were the gzip of `tests/fixtures/art-OpenWiki
+    .json` — an X *Article* body, which contains no tweets at all. A tweet's real subtree
+    (`note_tweet` + `quoted_status_result` + `card` + `extended_entities` + a full user
+    object) is a different thing entirely, and its size was never measured. Nor was the
+    secrets sweep, which ran over that same non-authenticated file — the one claim that had
+    to be measured on the real thing.
+
+    Both were presented as measured. They were not. This function is how they get measured:
+    run one `xbrain sync`, then `xbrain payload-stats`. A number I have not taken is worth
+    more than one I have taken from the wrong file.
+    """
+    raw = gzipped = 0
+    count = 0
+    for path in payload_dir.rglob("*.json.gz") if payload_dir.exists() else []:
+        blob = path.read_bytes()
+        gzipped += len(blob)
+        raw += len(gzip.decompress(blob))
+        count += 1
+    return {
+        "count": count,
+        "raw_bytes": raw,
+        "gzipped_bytes": gzipped,
+        "mean_gzipped_bytes": gzipped // count if count else 0,
+    }
+
+
 @dataclass
 class ReextractReport:
     """What a re-parse WOULD change (dry run) or DID change (`--apply`)."""
@@ -121,6 +164,10 @@ class ReextractReport:
     total: int = 0
     covered: int = 0
     changed: list[tuple[str, str, Any, Any]] = field(default_factory=list)
+    # A payload that is PRESENT but unreadable or unparseable. It is neither coverage nor
+    # `missing`, and reporting it as either is the failure this whole module exists to
+    # prevent: "cannot be re-extracted" must never look like "re-extracted cleanly".
+    unparseable: list[str] = field(default_factory=list)
     # Items with no stored payload. Surfaced explicitly because "no payload" must never be
     # indistinguishable from "re-extracted cleanly": one means fine, the other means
     # UNCHECKABLE, and silence would read as the first.
@@ -128,15 +175,27 @@ class ReextractReport:
 
     def summary(self) -> str:
         return (
-            f"{self.covered}/{self.total} items have a stored payload; "
+            f"{self.covered}/{self.total} items re-extracted from a stored payload; "
             f"{len(self.changed)} field(s) would change; "
-            f"{len(self.missing)} item(s) cannot be re-extracted (no payload)"
+            f"{len(self.missing)} item(s) have no payload; "
+            f"{len(self.unparseable)} item(s) could not be parsed"
         )
 
 
-# The fields a re-parse may legitimately correct. `captured_at` is when WE saw the tweet, so
-# a re-parse must never touch it, and the id is the join key.
-_REPARSED_FIELDS = ("text", "links", "media", "quoted_id", "thread", "author")
+# The fields a re-parse may legitimately correct.
+#
+# `media` is NOT among them, and this is CRITICAL. The store holds ENRICHED media — photos
+# with a vision-LLM description, videos with a downloaded `local_path` — while a fresh parse
+# emits PENDING states. Overwriting would destroy the description, which is an EVIDENCE
+# SURFACE for both the generator and the judge: the summary written from it survives
+# verbatim, nothing bumps `fetched_at`, so it is never re-enriched, and the next `verify`
+# hands the judge a source with no description and a summary asserting the slide's contents.
+# Unsupported → FAIL. The module built to make the corpus repairable would MANUFACTURE
+# defects in it, one per described photo. Adding genuinely-new media is `refresh-media`'s
+# job (`refresh._rebuild_media`), which preserves enriched states by design.
+#
+# `captured_at` is when WE saw the tweet, so a re-parse must never touch it; the id joins.
+_REPARSED_FIELDS = ("text", "links", "quoted_id", "thread", "author")
 
 
 def _diff_item(old: Item, new: Item) -> list[tuple[str, Any, Any]]:
@@ -159,16 +218,46 @@ def reextract_from_payloads(
     """
     report = ReextractReport(total=len(store))
     for item_id, item in store.items():
-        subtree = load_payload(payload_dir, item_id)
-        if subtree is None:
-            report.missing.append(item_id)
+        parsed = _reparse(payload_dir, item, report)
+        if parsed is None:
             continue
         report.covered += 1
-        parsed = parse_tweets({"tweet_results": {"result": subtree}}, item.source)
-        if not parsed:
-            continue
-        for name, old, new in _diff_item(item, parsed[0]):
-            report.changed.append((item_id, name, old, new))
-            if apply:
-                setattr(item, name, new)
+        changes = _diff_item(item, parsed)
+        report.changed += [(item_id, name, old, new) for name, old, new in changes]
+        if apply:
+            _apply_changes(item, changes)
     return report
+
+
+def _reparse(payload_dir: Path, item: Item, report: ReextractReport) -> Item | None:
+    """Re-parse one item's stored payload, bucketing every way it can fail to yield one."""
+    try:
+        subtree = load_payload(payload_dir, item.id)
+    except CorruptPayload:
+        report.unparseable.append(item.id)
+        return None
+    if subtree is None:
+        report.missing.append(item.id)
+        return None
+    parsed = parse_tweets({"tweet_results": {"result": subtree}}, item.source)
+    if not parsed:
+        # Present, readable, and the parser makes nothing of it — X schema drift, or a
+        # payload an earlier scrub damaged. NOT coverage. Counting it as clean was the
+        # missing-PARSE case walking straight through the missing-FILE guard.
+        report.unparseable.append(item.id)
+        return None
+    return parsed[0]
+
+
+def _apply_changes(item: Item, changes: list[tuple[str, Any, Any]]) -> None:
+    """Write the re-parsed fields, and INVALIDATE anything derived from what changed.
+
+    Fixing the text (#95: 432 items truncated mid-word) exists to regenerate the summaries
+    written from half a sentence. Writing the corrected text and marking nothing leaves
+    `generate` rendering the FULL tweet beside a summary built from the TRUNCATED one —
+    silently, and looking perfectly fine.
+    """
+    for name, _old, new in changes:
+        setattr(item, name, new)
+    if any(name == "text" for name, _o, _n in changes):
+        item.enriched = None

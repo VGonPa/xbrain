@@ -33,7 +33,7 @@ from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
-from xbrain.payloads import reextract_from_payloads
+from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.models import ArchiveImport, Author, Item, SourceName
 from xbrain.refresh import (
     backfill_quoted_from_store,
@@ -2105,6 +2105,28 @@ def diff(
         typer.echo(f"  B: {b_label}")
         typer.echo("")
         typer.echo(format_text(report))
+
+
+@app.command(name="payload-stats")
+@_handle_cli_errors
+def payload_stats_command() -> None:
+    """Measure the raw payloads actually on disk (count, size, projection).
+
+    The disk figures first quoted for this feature were taken from an X *Article* fixture
+    that contains no tweets. This measures the real thing.
+    """
+    cfg = _config()
+    stats = payload_stats(cfg.payload_dir)
+    if not stats["count"]:
+        typer.echo("No hay payloads en disco todavía. Ejecuta `xbrain sync` primero.")
+        return
+    mean = stats["mean_gzipped_bytes"]
+    typer.echo(
+        f"{stats['count']} payloads · {stats['raw_bytes'] / 1e6:.1f} MB en crudo · "
+        f"{stats['gzipped_bytes'] / 1e6:.1f} MB comprimidos · media {mean:,} B/ítem"
+    )
+    for n in (10_000, 100_000):
+        typer.echo(f"  proyección a {n:,} ítems: {n * mean / 1e6:,.0f} MB")
 
 
 @app.command(name="reextract")

@@ -61,6 +61,21 @@ def rate_limit_decision(
     return "backoff"
 
 
+def persist_payloads(responses: list[dict], payload_dir: Path | None) -> None:
+    """Store every tweet subtree in `responses`. Idempotent: the same tweet overwrites itself.
+
+    Separated from `collect_new_items` so a scroll that is CUT SHORT — rate-limited, aborted
+    — still keeps what it captured. Refusing to merge the ITEMS from a truncated run is
+    correct (it would seal a permanent gap); throwing away the PAYLOADS is not, and that run
+    is exactly the one where going back to the source costs most.
+    """
+    if payload_dir is None:
+        return
+    for response in responses:
+        for rest_id, subtree in iter_tweet_payloads(response):
+            save_payload(payload_dir, rest_id, subtree)
+
+
 def collect_new_items(
     responses: list[dict],
     source: SourceName,
@@ -78,10 +93,8 @@ def collect_new_items(
     """
     new_items: list[Item] = []
     hit_known = False
+    persist_payloads(responses, payload_dir)
     for response in responses:
-        if payload_dir is not None:
-            for rest_id, subtree in iter_tweet_payloads(response):
-                save_payload(payload_dir, rest_id, subtree)
         for item in parse_tweets(response, source):
             if item.id in known_ids:
                 hit_known = True
@@ -183,9 +196,16 @@ def extract_source(
                 idle = 0
                 last_count = len(captured)
     finally:
+        # Keep what we captured EVEN IF the scroll was cut short. `RateLimitTruncated` is
+        # raised inside the loop above, so a run that captured 2,000 tweets and then hit the
+        # limit used to persist ZERO payloads — and that is precisely the run where going
+        # back to the source costs most, which is this feature's whole thesis. Refusing to
+        # merge the ITEMS from a truncated run is right (it would seal a permanent gap);
+        # discarding the PAYLOADS is not — they are id-addressable and idempotent.
+        persist_payloads(captured, payload_dir)
         page.close()
 
-    new_items, _ = collect_new_items(captured, source, known_ids, payload_dir)
+    new_items, _ = collect_new_items(captured, source, known_ids)
     return _filter_in_range(new_items, since, until)
 
 
