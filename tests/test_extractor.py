@@ -82,3 +82,99 @@ def test_filter_in_range_dedup_keeps_first_seen():
     out = _filter_in_range([first, second], None, None)
     assert len(out) == 1
     assert out[0].text == first.text
+
+
+def _tweet_response(rest_id: str) -> dict:
+    """One minimal, REAL-shaped bookmark response carrying a single tweet."""
+    return {
+        "data": {
+            "x": {
+                "tweet_results": {
+                    "result": {
+                        "__typename": "Tweet",
+                        "rest_id": rest_id,
+                        "core": {
+                            "user_results": {
+                                "result": {"legacy": {"screen_name": "a", "name": "A"}}
+                            }
+                        },
+                        "legacy": {
+                            "full_text": "hello",
+                            "created_at": "Wed Jan 01 10:00:00 +0000 2025",
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+
+def test_collect_new_items_persists_the_raw_payload_before_parsing(tmp_path):
+    """Persistence happens at INGEST, before any parsing decision — so a field we do not
+    yet read (the next `note_tweet`) is on disk anyway. That is the entire point: the
+    payload is kept for the parser we have not written yet."""
+    from xbrain.extract.extractor import collect_new_items
+    from xbrain.payloads import load_payload
+
+    response = {
+        "data": {
+            "x": {
+                "tweet_results": {
+                    "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "42",
+                        "core": {
+                            "user_results": {
+                                "result": {"legacy": {"screen_name": "a", "name": "A"}}
+                            }
+                        },
+                        "legacy": {
+                            "full_text": "hello",
+                            "created_at": "Wed Jan 01 10:00:00 +0000 2025",
+                        },
+                        "a_field_no_parser_reads_yet": "kept anyway",
+                    }
+                }
+            }
+        }
+    }
+    items, _ = collect_new_items([response], "bookmark", set(), tmp_path)
+
+    assert [i.id for i in items] == ["42"]
+    stored = load_payload(tmp_path, "42")
+    assert stored["a_field_no_parser_reads_yet"] == "kept anyway"
+
+
+def test_collect_new_items_without_a_payload_dir_persists_nothing(tmp_path):
+    """Backwards compatible: the pure path stays pure (tests, archive imports).
+
+    The first version of this test called the function with an EMPTY response list and a
+    payload_dir of None, then asserted an untouched `tmp_path` was empty — i.e. it asserted
+    that a fresh directory is fresh. It would have passed even if the function wrote a
+    payload on every call. It now passes a REAL response and asserts the directory the
+    function could have written to is still empty.
+    """
+    from xbrain.extract.extractor import collect_new_items
+    from xbrain.payloads import stored_ids
+
+    response = _tweet_response("77")
+    items, _ = collect_new_items([response], "bookmark", set(), None)
+
+    assert [i.id for i in items] == ["77"], "the parse still happens"
+    assert stored_ids(tmp_path) == set(), "...but nothing is persisted"
+
+
+def test_a_rate_limited_run_keeps_the_payloads_it_already_captured(tmp_path):
+    """P7. `RateLimitTruncated` is raised inside the scroll loop, BEFORE the only call that
+    passed `payload_dir` — so a run that captured 2,000 tweets and then hit the limit
+    persisted ZERO payloads. That is precisely the run where going back to the source is most
+    expensive, which is this module's entire thesis.
+
+    Not merging the ITEMS on a truncated run is right (it would seal a permanent gap).
+    Payloads are id-addressable and idempotent and are under no such constraint.
+    """
+    from xbrain.extract.extractor import persist_payloads
+    from xbrain.payloads import stored_ids
+
+    persist_payloads([_tweet_response("77"), _tweet_response("78")], tmp_path)
+    assert stored_ids(tmp_path) == {"77", "78"}
