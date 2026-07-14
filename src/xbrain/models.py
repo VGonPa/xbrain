@@ -882,6 +882,12 @@ class VerificationVerdict(BaseModel):
     faithfulness: Verdict = "PASS"
     adherence: Verdict = "PASS"
     output_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # The FULL judging contract: the output + the source the judge read for this target +
+    # the rubrics it applied (see `verification.contract_fingerprint`). This — not
+    # `output_fingerprint` — is what decides whether a badge may paint. Optional, so a
+    # verdict stored before it existed still LOADS; None means "judged under a contract we
+    # cannot reconstruct" → permanently stale, never grandfathered in.
+    contract_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     verified_at: datetime
     flags: list[str] = Field(default_factory=list)
 

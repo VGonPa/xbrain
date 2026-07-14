@@ -1236,18 +1236,29 @@ def _badge_item(item_id: str = "9", *, summary: str = "A crisp summary.") -> Ite
     )
 
 
-def _stamp(item: Item, target: str, verdict: str, *, flags: list[str] | None = None) -> None:
-    """Stamp a CURRENT verification verdict (matching fingerprint) onto `item`."""
+def _stamp(
+    item: Item,
+    target: str,
+    verdict: str,
+    *,
+    flags: list[str] | None = None,
+    language: str = "English",
+) -> None:
+    """Stamp a CURRENT verification verdict onto `item` — current under the whole judging
+    CONTRACT (the output it judged, the source it read, the rubric it applied), not just
+    the output text."""
     from xbrain.models import VerificationVerdict
-    from xbrain.verification import fingerprint_output
+    from xbrain.verification import contract_fingerprint, fingerprint_output
 
     fp = fingerprint_output(item, target)
-    assert fp is not None
+    contract = contract_fingerprint(item, target, language)
+    assert fp is not None and contract is not None
     item.verification[target] = VerificationVerdict(
         verdict=verdict,
         faithfulness="FAIL" if verdict == "FAIL" else "PASS",
         adherence="REVIEW" if verdict == "REVIEW" else "PASS",
         output_fingerprint=fp,
+        contract_fingerprint=contract,
         verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
         flags=flags or [],
     )
@@ -1331,7 +1342,7 @@ def test_generate_badges_digest_verdict_near_video_header(tmp_path: Path):
 
 def test_generate_spanish_badge_label_is_localized(tmp_path: Path):
     item = _badge_item()
-    _stamp(item, "summary", "FAIL", flags=["número no soportado"])
+    _stamp(item, "summary", "FAIL", flags=["número no soportado"], language="Spanish")
     generate({item.id: item}, tmp_path, output_language="Spanish")
     body = _note_body(tmp_path)
     assert "Verificación: FALLA" in body
@@ -1353,10 +1364,15 @@ def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
     """End-to-end (#79): a FAIL judged on summary "A", the summary regenerated to "B" BEFORE
     `--write-verdicts`, must never badge "B" — the stored (judged) fingerprint is of "A", so
     `generate` on "B" finds a mismatch. Uses the real write path with a judged fingerprint."""
-    from xbrain.verification import apply_verdicts_to_store, fingerprint_output
+    from xbrain.verification import (
+        apply_verdicts_to_store,
+        contract_fingerprint,
+        fingerprint_output,
+    )
 
     item = _badge_item(summary="A - judged and FAILED.")
     judged_fp = fingerprint_output(item, "summary")
+    judged_contract = contract_fingerprint(item, "summary", "English")
     item.enriched.summary = "B - fixed before the write."  # regenerated in the window
     store = {item.id: item}
     result = apply_verdicts_to_store(
@@ -1372,6 +1388,7 @@ def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
             }
         ],
         {(item.id, "summary"): judged_fp},
+        {(item.id, "summary"): judged_contract},
     )
     assert result.written == 1
     assert store[item.id].verification["summary"].output_fingerprint == judged_fp
@@ -1379,3 +1396,88 @@ def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
     body = _note_body(tmp_path)
     assert "❌" not in body and "Verification: FAIL" not in body
     assert "B - fixed before the write." in body  # the current output still renders
+
+
+def test_generate_does_not_badge_a_verdict_judged_against_a_DIFFERENT_SOURCE(tmp_path: Path):
+    """The output is untouched, but the evidence under it changed (a new frame description
+    landed). The judge never saw that source, so its verdict says nothing about this
+    output-plus-source pair. No badge."""
+    from xbrain.models import Content, ContentSourceSuccess, VideoFrame
+
+    item = _badge_item()
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_video",
+                url="https://x.com/v",
+                title="A talk",
+                text="the transcript body",
+                has_speech=True,
+                frames=[
+                    VideoFrame(timestamp=0.0, local_path="9/frames/0.png", description="A chart.")
+                ],
+            )
+        ],
+    )
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+    source = item.content.sources[0]
+    source.frames = [
+        *source.frames,
+        VideoFrame(timestamp=9.0, local_path="9/frames/9.png", description="A brand-new slide."),
+    ]
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+
+
+def test_generate_does_not_badge_a_verdict_judged_under_an_OLD_RUBRIC(tmp_path: Path, monkeypatch):
+    """#86 rewrote `rubric-verify.md` without touching one output character, and every
+    stored verdict still painted. This is the arm that closes it."""
+    from xbrain import rubrics as rubrics_mod
+    from xbrain.verification import rubric_digest
+
+    item = _badge_item()
+    _stamp(item, "summary", "FAIL", flags=["unsupported number"])
+
+    original = rubrics_mod._RUBRICS_DIR
+    shadow = tmp_path / "rubrics"
+    shadow.mkdir()
+    for rubric in original.glob("*.md"):
+        shadow.joinpath(rubric.name).write_text(
+            rubric.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    verify = shadow / "rubric-verify.md"
+    verify.write_text(
+        verify.read_text(encoding="utf-8") + "\nA RULE THE JUDGE NEVER SAW.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", shadow)
+    rubric_digest.cache_clear()
+    try:
+        generate({item.id: item}, tmp_path / "out")
+        body = next((tmp_path / "out" / "items").glob("*.md")).read_text(encoding="utf-8")
+    finally:
+        rubric_digest.cache_clear()
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
+
+
+def test_generate_does_not_badge_a_LEGACY_verdict_with_no_contract(tmp_path: Path):
+    """Every verdict stored before this change was judged under a contract we cannot
+    reconstruct. It is not grandfathered in: it paints NOTHING."""
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import fingerprint_output
+
+    item = _badge_item()
+    item.verification["summary"] = VerificationVerdict(
+        verdict="FAIL",
+        faithfulness="FAIL",
+        output_fingerprint=fingerprint_output(item, "summary"),
+        verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
+        flags=["unsupported number"],
+    )  # no contract_fingerprint — the old shape
+    generate({item.id: item}, tmp_path)
+    body = _note_body(tmp_path)
+    assert "❌" not in body
+    assert "Verification: FAIL" not in body
