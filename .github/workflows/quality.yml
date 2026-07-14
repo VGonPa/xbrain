@@ -1,5 +1,10 @@
 name: Quality
 on:
+  # `pull_request` tests the PR head; `push` tests the MERGE RESULT. Both are needed:
+  # two PRs can each be green in isolation, merge with no textual conflict, and leave
+  # `develop` red (#103). Only a run on the pushed merge commit catches that.
+  push:
+    branches: [develop, main]
   pull_request:
     branches: [develop, main]
 jobs:
