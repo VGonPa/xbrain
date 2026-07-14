@@ -50,8 +50,34 @@ So the assertions below model the *effect*, not the spelling: would a normal mer
 pushed to `develop` actually produce a check run named `quality` that actually executes the
 gate? Reformatting the YAML while preserving that behaviour stays green; any edit that
 breaks it goes red, and says why in the failure message.
+
+THE ASYMMETRY THAT SHAPES THIS WHOLE FILE
+-----------------------------------------
+A gate can die in two opposite directions, and they need opposite assertions. This is the
+single fact most worth knowing here, and it is not intuitive:
+
+* **A skipped JOB reports SUCCESS.** GitHub, verbatim: *"if a job within a workflow is
+  skipped due to a conditional, it will report its status as 'Success.'"* So `if: false` on
+  the job, or `continue-on-error: true`, or a `steps:` block gutted down to `echo ok`, all
+  publish a **green** `quality` check having verified nothing. Branch protection is
+  satisfied and merges the lot. This is SILENT GREEN — false confidence, worse than having
+  no gate, because a decoration is trusted.
+
+* **A skipped WORKFLOW hangs PENDING.** GitHub, verbatim: *"When a workflow is skipped due
+  to path filtering, branch filtering or a commit message, checks associated with that
+  workflow will remain in a 'Pending' state."* So a `paths:` filter that matches nothing, a
+  `branches-ignore` glob, or an invalid workflow file means the required `quality` check is
+  **never published at all**. Every PR waits on a check that will never report, forever —
+  and with `enforce_admins` nobody can override, *including the PR that would fix it*. This
+  is HARD LOCKOUT.
+
+Same intent ("stop this workflow running"), opposite consequences: one waves everything
+through, the other blocks everything permanently. Neither is detectable by asking "does the
+workflow declare a push trigger?", which is why the assertions here reach all the way down
+to the job's steps, its `continue-on-error`, its permissions, and its checkout `ref`.
 """
 
+import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -129,20 +155,50 @@ def _event(event: str) -> dict[str, Any] | None:
     return triggers[event] or {}  # `push:` with an empty body == every branch
 
 
+def _matches_any(patterns: list[str], branch: str) -> bool:
+    """Does `branch` match any GitHub branch-filter pattern?
+
+    GitHub's branch filters are GLOBS, not literals — so a membership test (`branch in
+    patterns`) is not merely imprecise, it is exploitable: `branches-ignore: ["**"]`
+    disables the trigger for every branch, and `"develop" in ["**"]` is False, so a
+    membership test concludes the gate still runs. Measured: that exact edit left an earlier
+    version of this file green with the gate dead.
+
+    `fnmatch` treats `*` as matching across `/` where GitHub does not, which makes this
+    slightly MORE eager to conclude "this branch is matched". For the two slash-free branch
+    names we gate that distinction cannot arise, and erring toward "matched" fails safe in
+    both directions here: an over-eager match on `branches` says the gate runs (it does), and
+    on `branches-ignore` says it does not (which raises the alarm rather than suppressing it).
+    """
+    return any(fnmatch.fnmatch(branch, str(pattern)) for pattern in patterns)
+
+
 def _fires_on_branch(event: str, branch: str) -> bool:
     """Would `event` on `branch` trigger the workflow, per the branch filters?
 
-    An absent `branches:` means GitHub runs the event on EVERY branch, which covers
-    `branch` too — that is a pass, not a miss. `branches-ignore` is the inverse filter and
-    is checked first: it is the other way to exclude a branch while `branches:` looks fine.
+    GitHub forbids `branches` and `branches-ignore` on the same event, so this is a genuine
+    three-way choice, not two independent filters:
+
+    * `branches-ignore` present -> the event fires on everything EXCEPT what it matches.
+    * `branches` present        -> the event fires ONLY on what it matches.
+    * neither                   -> the event fires on every branch.
+
+    The ordering is load-bearing. An earlier version read `branches`, found it absent, and
+    concluded "absent filter means every branch" — which is true ONLY when `branches-ignore`
+    is absent too. With `branches-ignore` present, an absent `branches` means the exact
+    OPPOSITE, and the helper cheerfully reported that a suppressed gate was running. That
+    latent bug is now fixed at the source rather than masked by the ban in
+    `test_gate_trigger_declares_no_path_filter` and friends, so this helper stays correct if
+    anyone ever relaxes those bans.
     """
     config = _event(event)
     if config is None:
         return False
-    if branch in (config.get("branches-ignore") or []):
-        return False
+    ignore = config.get("branches-ignore")
+    if ignore is not None:
+        return not _matches_any(ignore, branch)
     branches = config.get("branches")
-    return branches is None or branch in branches
+    return branches is None or _matches_any(branches, branch)
 
 
 def _gate_job() -> dict[str, Any]:
@@ -301,6 +357,84 @@ def test_gate_step_actually_runs_and_is_not_conditional() -> None:
         f"reports GREEN having run none of the quality checks. Branch protection would "
         f"then be waving through completely unverified code."
     )
+
+
+def test_gate_cannot_report_success_while_failing() -> None:
+    """`continue-on-error` must appear NOWHERE in the gate job. It manufactures a green lie.
+
+    This is the worst failure mode in this file's threat model, worse than any deadlock.
+    `continue-on-error: true` does not stop the gate running — it runs, it FAILS, and the
+    check run reports **success** anyway. Branch protection is satisfied, the merge sails
+    through, and the ✅ next to `quality` is now actively lying about code nobody verified.
+    A gate that cannot fail is not a gate; it is a decoration that costs 73 seconds.
+
+    Banned at BOTH levels, because either one alone produces the lie: on the job (its
+    conclusion is forced to success) and on any step (a failing step no longer fails the job).
+    """
+    job = _gate_job()
+    assert "continue-on-error" not in job, (
+        f"The `{_REQUIRED_CHECK}` job declares `continue-on-error: "
+        f"{job.get('continue-on-error')!r}`. The gate would still RUN, still FAIL — and the "
+        f"required check would report ✅ SUCCESS regardless. Every red merge sails through on "
+        f"a green light. Delete it."
+    )
+    offenders = [
+        step.get("name", step.get("run", "?"))
+        for step in (job.get("steps") or [])
+        if "continue-on-error" in step
+    ]
+    assert not offenders, (
+        f"These steps in the `{_REQUIRED_CHECK}` job declare `continue-on-error`: "
+        f"{offenders}. A failing step with `continue-on-error: true` does not fail its job, "
+        f"so the required check reports ✅ SUCCESS while the gate is red underneath it."
+    )
+
+
+def test_push_trigger_declares_no_activity_types() -> None:
+    """`types:` is not a valid key for `push` — it makes the whole workflow file invalid.
+
+    GitHub documents activity types as "Not applicable" to `push`. An invalid workflow does
+    not fail loudly; it simply never runs, so the required check is never published and every
+    PR hangs Pending. This is a typo away from a repo lockout — `pull_request` DOES take
+    `types:`, so copy-pasting the block up one event is an easy, silent mistake.
+    """
+    config = _event("push") or {}
+    assert "types" not in config, (
+        f"The `push` trigger declares `types: {config.get('types')!r}`, which GitHub does not "
+        f"accept for `push` ('Not applicable'). The workflow file is INVALID and will never "
+        f"run at all — so the `{_REQUIRED_CHECK}` check is never published and every PR to "
+        f"{list(_GATED_BRANCHES)} hangs Pending forever. `types:` belongs only on "
+        f"`pull_request`."
+    )
+
+
+def test_checkout_takes_no_explicit_ref() -> None:
+    """The gate must test the commit that triggered it — the merge result — not a fixed ref.
+
+    `actions/checkout` defaults to `GITHUB_SHA`, which on a `push` to `develop` IS the merge
+    commit. That default is the entire mechanism of this PR. Pin `ref:` to anything fixed
+    (`main`, a tag, a branch name) and the gate still runs, still reports honestly, still goes
+    green — while testing a tree that has nothing to do with what was just merged. Everything
+    looks healthy and the merge result is never examined, which is #103 with a green light on
+    top.
+    """
+    checkout = [
+        step
+        for step in (_gate_job().get("steps") or [])
+        if "actions/checkout" in str(step.get("uses", ""))
+    ]
+    assert checkout, (
+        f"The `{_REQUIRED_CHECK}` job never checks out the repository, so it cannot be "
+        f"running the gate against the merge result — or against anything."
+    )
+    for step in checkout:
+        ref = (step.get("with") or {}).get("ref")
+        assert ref is None, (
+            f"`actions/checkout` pins `ref: {ref!r}`. The gate would then test THAT tree "
+            f"instead of the commit that triggered the run. On a push to a gated branch the "
+            f"triggering commit IS the merge result — testing it is the whole point of this "
+            f"workflow. Remove the `ref:` and let checkout default to GITHUB_SHA."
+        )
 
 
 def _alert_steps() -> list[dict[str, Any]]:
