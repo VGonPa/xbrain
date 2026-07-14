@@ -24,11 +24,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 
-from xbrain.executors.api import _video_frame_descriptions
+from xbrain.executors.api import (
+    QUOTED_CONTENT_UNFETCHED_NOTE,
+    _content_image_descriptions,
+    _video_frame_descriptions,
+    quoted_content_unfetched,
+    thread_text,
+    unfetched_links_note,
+)
 from xbrain.models import Item, Verdict, VerificationVerdict
-from xbrain.rubrics import load_rubric
+from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
 from xbrain.video_digest import _video_source
-from xbrain.worksheet import _article_text, _video_transcript
+from xbrain.worksheet import _link_content_source, _video_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -100,23 +107,82 @@ def fingerprint_output(item: Item, target: VerifyTarget) -> str | None:
     return hashlib.sha256(output.encode("utf-8")).hexdigest()
 
 
-def _source_text(item: Item) -> str:
-    """The ground-truth source the judge checks the output against.
-
-    Concatenates the labelled evidence present on the item — the FULL video
-    transcript (what it says), the frame descriptions (what it shows), the article
-    body, and the tweet text — so a claim in the output can be traced to it.
-    """
+def _video_parts(item: Item) -> list[str]:
+    """The video evidence: its title, the FULL transcript (what it says) and the frame
+    descriptions (what it shows). The title reaches the digest generator, so the judge
+    must see it too — a digest naming the talk is otherwise unsupported."""
+    source = _video_source(item)
     parts: list[str] = []
+    if source and source.title:
+        parts += ["[Video title]", source.title]
     transcript = _video_transcript(item)
     if transcript:
         parts += ["[Video transcript]", transcript]
     frames = _video_frame_descriptions(item)
     if frames:
         parts += ["[Video frames shown]", *(f"- {description}" for description in frames)]
-    article = _article_text(item)
-    if article:
-        parts += ["[Linked article]", article]
+    return parts
+
+
+def _article_parts(item: Item) -> list[str]:
+    """The fetched LINKED article, with its title (which the api prompt already ships).
+
+    Only `LINK_CONTENT_KINDS` reach this label. A thread or a transcript under it would
+    tell the judge a page was downloaded when none was, and hand it the wrong text as
+    that page's content.
+    """
+    source = _link_content_source(item)
+    if source is None:
+        return []
+    label = f"[Linked article — {source.title}]" if source.title else "[Linked article]"
+    return [label, source.text[:ARTICLE_CHAR_LIMIT]]
+
+
+def _unfetched_parts(item: Item) -> list[str]:
+    """The markers for content the pipeline never downloaded: links whose body is
+    missing (all of them, or the remainder of a PARTIAL fetch) and a quoted post, which
+    no fetcher retrieves. An output describing either is then checkable as unsupported
+    instead of being waved through against evidence that is not there."""
+    parts: list[str] = []
+    links_note = unfetched_links_note(item)
+    if links_note:
+        parts += [
+            "[Links — content NOT fetched]",
+            *(f"- {link.url}  (domain: {link.domain})" for link in item.links),
+            links_note,
+        ]
+    if quoted_content_unfetched(item):
+        parts += ["[Quoted post — content NOT fetched]", QUOTED_CONTENT_UNFETCHED_NOTE]
+    return parts
+
+
+def _source_text(item: Item) -> str:
+    """The ground-truth source the judge checks the output against.
+
+    Concatenates the labelled evidence present on the item — the author metadata (WHO
+    POSTED it, not who wrote its content), the video title + FULL transcript (what it
+    says) + frame descriptions (what it shows), the image descriptions, the fetched
+    article body, the poster's own thread text, and the tweet text — so a claim in the
+    output can be traced to it. The judge must see everything the GENERATORS see: an
+    output grounded in a photo description or an article title would otherwise be
+    judged against a source that never held it, and flagged unsupported (a false FAIL).
+
+    Every kind of evidence keeps its OWN label. A thread is the poster's own words, not
+    a fetched page. Serving one under `[Linked article]` would affirmatively tell the
+    skeptical judge that a link was downloaded and hand it text that is not that link's
+    content — turning an unsupported claim about the linked piece into a PASS. Content
+    the pipeline never downloaded (a link's body, a quoted post) is marked as such.
+    """
+    parts: list[str] = ["[Author]", f"@{item.author.handle} ({item.author.name})"]
+    parts += _video_parts(item)
+    images = _content_image_descriptions(item)
+    if images:
+        parts += ["[Images in the post]", *(f"- {description}" for description in images)]
+    parts += _article_parts(item)
+    thread = thread_text(item)
+    if thread:
+        parts += ["[Thread — full text, same author]", thread]
+    parts += _unfetched_parts(item)
     if item.text:
         parts += ["[Tweet]", item.text]
     return "\n".join(parts)
