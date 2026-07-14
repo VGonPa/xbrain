@@ -28,6 +28,11 @@ file is not tracked by git.
   test-first.
 - Keep the PR focused on one change. No drive-by refactors.
 - Describe what changed and why, in your own words.
+- **Watch every new test fail before you make it pass.** A test that is green before the
+  fix exists is testing nothing — this repo has shipped six of them, each satisfied for
+  the wrong reason. See *Rules paid for in blood* in `CLAUDE.md`.
+- **Run the suite on the merge result, not just on your branch.** Two PRs, each green
+  alone, have already merged into a red `develop`.
 
 ## Safety: destructive operations auto-snapshot
 
@@ -171,6 +176,11 @@ the same bar as hand-written code:
   AI agent") is enough and appreciated.
 - **Do not point agents at this repo's dependencies** or open agent-generated PRs
   to upstream projects from this work.
+- **Point your agent at `CLAUDE.md` § *Rules paid for in blood*.** Seven rules, each one
+  written the day it cost us a wrong answer that CI called green: assert where a value
+  lives (not that a string appears somewhere), never quote a number without saying what
+  it was measured on, bind agreeing components in code rather than prose, and invalidate
+  everything derived from evidence you repair.
 
 ## Adding an output language
 
