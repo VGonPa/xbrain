@@ -250,3 +250,98 @@ generates an Obsidian wiki.
 - `develop` is the integration branch: `feature-branch → PR → develop`. Branch
   from `develop` (never from `main`) and target every PR at `develop`.
 - `develop → main` only via PR — never merge or push directly to `main`.
+
+## Rules paid for in blood (2026-07-14 verification audit)
+
+Fifteen PRs merged in one day (`gh pr list --state merged`, 2026-07-14), six agents.
+Every rule below is here because we broke it and something shipped wrong while the suite
+was green. They are ordered by how often they bit us. Apply them; do not admire them.
+
+### 1. A test that passes before you write the fix is not a test
+
+Six times in one day, six different agents, the same defect: an assertion satisfied for
+the wrong reason.
+
+| The assertion | Why it passed anyway |
+|---|---|
+| `assert "NOT fetched" in source` | satisfied by the section **header** `[Links — content NOT fetched]`. The rule sentence it claimed to pin was unprotected — deleting it stayed green. |
+| `assert "1 verdicts escritos" in output` | satisfied verbatim by `"0 de 1 verdicts escritos (1 omitidos: …)"`. The test for *one written* passed on *zero written*. |
+| `assert stored_ids(tmp_path) == set()` | `tmp_path` was never passed to the function. It asserted that an empty directory is empty. |
+| `assert evidence_text(i, t) == …evidence_surfaces(i, t)` | **both sides came from the same module.** It asserted `evidence.py` against itself — inside the PR written to end this class of test. |
+| `assert "topic signal only" in payload` | already satisfied by the *links* rule; it said nothing about the *bookmark folder* it claimed to pin. |
+| `assert checker.evidence_text is evidence.evidence_text` | once the checker delegated, the module attribute **is** the same object. The tautology reappears in disguise the moment you think you have killed it. |
+
+**Do:** assert **where** a value lives and **which source** it came from — the label it
+sits under, the shared constant it is *identical* to, the behaviour it produces through
+the **public API**. Never that a string appears *somewhere*.
+
+**And watch it go red first.** A green test before the fix exists is the only reliable
+tell that it is testing nothing. If you cannot make it fail, you have not written a test.
+
+### 2. A metric that cannot come out any other way is not a measurement
+
+`"0 false flags on tweets under 200 chars"` — with a 265-char floor, nothing under 265
+*can* be flagged. The number restated the constant. A disk-footprint table and a secrets
+sweep were both computed on a fixture that contained **no tweets**. Three headline
+numbers were retracted in one day.
+
+**Do:** state the population you measured **on** and the way a different answer could
+have come out. If neither exists, do not quote the number.
+
+### 3. Nothing catches itself
+
+Not one defect that mattered was found by CI, by review, or by the author re-reading.
+Every one was found by **someone who did not write it, running it against real data**: an
+attribution rule that let a false speaker through 8 judges out of 8; a thread served to
+the judge as a fetched article; a cookie wall stored as evidence; a quoted post rendered
+in the user's note as if the poster had written it; an entity checker with ~0% precision.
+
+**Do:** judge ≠ party, and the judge must **execute**, not read. Run the thing against
+the real store (read-only) before you claim it works.
+
+### 4. A green PR against a moving `develop` is not a green `develop`
+
+One PR added a test calling `_source_text(item)`; another changed that signature. No
+textual conflict. Both green on their own branches. **The merge was red** — nothing ever
+ran the combination.
+
+**Do:** before merging, run the suite on the **merge result**, not on your branch
+(`git merge-tree --write-tree origin/develop HEAD` proves it merges; only running the
+tests proves it works). And read a check's **reported conclusion** — never infer it from
+the exit status of the command that printed it. A red check has already reached `develop`
+that way.
+
+### 5. One definition, or five that silently diverge
+
+"What counts as evidence" was written **five times by five hands** — the generator, the
+generator rubrics, the judge's rubric, the judge, the checker. Every divergence produced
+a confident wrong number with the suite green. Three people independently fixed the same
+missing surface. The fix was ONE function (`evidence.evidence_surfaces`) plus a
+cross-component test that fails when any consumer drifts.
+
+**Do:** if two components must agree, bind them **in code** (one function, one constant,
+one test asserting identity across all consumers) — never in prose, and never in two
+lists that "should" match.
+
+### 6. Repair the evidence, invalidate the derivative
+
+Three PRs shipped a repair that fixed the source and left the summary, the digest and the
+verdict standing — a full tweet sitting next to a summary of half of it, wearing a PASS
+badge.
+
+**Do:** any change to evidence must invalidate everything derived from it
+(`contract_fingerprint` does this for verdicts: it hashes the output **and** the source
+the judge read **and** the rubrics it applied). And check the invalidation signal
+actually **reaches the population being repaired** — the `fetched_at` lever cannot reach
+an item that has no `content` at all, which was exactly the population one repair
+existed to fix.
+
+### 7. The cheapest verification layer is showing the user the evidence next to the claim
+
+We built three judges, an independent auditor, a deterministic checker, and a contract to
+bind them. Then we rendered the quoted post in the note — and a reader sees in two
+seconds that a summary claiming *"his move to Anthropic"* sits above a quoted post that
+never mentions Anthropic. No tokens, no threshold, no false positives.
+
+**Do:** before building an instrument to detect a defect, ask whether **showing the
+evidence** to the human would make the defect self-evident.
