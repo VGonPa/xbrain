@@ -147,8 +147,47 @@ def test_export_worksheet_rubric_carries_the_faithfulness_rules(tmp_path):
     assert "neutral descriptor" in rubric, (
         "exported rubric lost the never-name-an-unnamed-entity rule"
     )
+    assert "attribution" in rubric, "exported rubric lost the attribution-vs-content rule"
     assert "verbatim" in rubric, "exported rubric lost the quote-verbatim rule"
     assert "sharpen" in rubric, "exported rubric lost the do-not-sharpen rule"
+
+
+def test_export_worksheet_instructions_agree_with_the_rubrics_evidence_contract(tmp_path):
+    """The worksheet's `instructions` and its `rubric` are ONE prompt — they must not
+    contradict each other.
+
+    The old instruction line said to ground the digest "NOT the tweet text/caption",
+    which flatly denies the rubric's rule that the tweet text and author metadata ARE
+    valid evidence for attribution. A model reading both would have to pick one. The
+    line must keep the caption out of the SUBSTANCE while admitting it for ATTRIBUTION.
+    """
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([_video_item()], path, "claude-code", "English")
+    instructions = json.loads(path.read_text(encoding="utf-8"))["instructions"].lower()
+    assert "attribut" in instructions, "worksheet instructions do not mention attribution"
+    # The caption must still be excluded from what gets summarised.
+    assert "caption" in instructions
+    assert "not the tweet `text`/caption" not in instructions, (
+        "instructions still blanket-forbid the tweet text, contradicting the rubric"
+    )
+
+
+def test_export_worksheet_carries_author_handle_and_display_name(tmp_path):
+    """The digest rubric admits the author metadata as evidence for WHO is speaking,
+    so the generator must be handed the same metadata the judge holds.
+
+    Post-#86 the judge's `_source_text` opens with `@handle (Display Name)`. Shipping
+    only the handle would leave the generator de-abbreviating `@lexfridman` into a
+    name it never saw, while the judge validates against the display name it did —
+    the two sides disagreeing about what evidence exists. 221 of the 235 video items
+    in the store have a display name that differs from the handle, so this is the
+    common case, not an edge one.
+    """
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([_video_item()], path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["author"] == "a"
+    assert entry["author_name"] == "A"
 
 
 def test_export_worksheet_carries_full_untruncated_transcript(tmp_path):

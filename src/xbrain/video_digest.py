@@ -85,16 +85,26 @@ def export_video_digest_worksheet(
         "executor": executor,
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with keys "
-            "{item_id, digest}. Write the `digest` following `rubric` — grounded in "
-            "`video_transcript` (what the video says) and `video_frame_descriptions` "
-            "(what it shows), NOT the tweet `text`/caption. Then run: xbrain "
-            "video-digest --apply <this file>."
+            "{item_id, digest}. Write the `digest` following `rubric`. Ground the "
+            "SUBSTANCE in `video_transcript` (what the video says) and "
+            "`video_frame_descriptions` (what it shows) — never summarise the tweet "
+            "`text`, which is often a clickbait caption. `author`/`author_name` and "
+            "`text` are evidence for ATTRIBUTION only (who is speaking, what is being "
+            "shown). Name no entity that none of these surfaces names. Then run: "
+            "xbrain video-digest --apply <this file>."
         ),
         "rubric": load_rubric("video-digest", language=output_language),
         "items": [
             {
                 "item_id": item.id,
                 "author": item.author.handle,
+                # The display name travels WITH the handle: the digest rubric admits
+                # the author metadata as evidence for who is speaking, and the judge's
+                # `verification._source_text` holds `@handle (Display Name)`. Shipping
+                # the handle alone would have the generator de-abbreviate `@lexfridman`
+                # into a name it was never shown, while the judge checks against the
+                # display name it WAS shown — the two sides disagreeing on the evidence.
+                "author_name": item.author.name,
                 "text": item.text,
                 "title": (source.title if (source := _video_source(item)) else None),
                 "video_transcript": _video_transcript(item),

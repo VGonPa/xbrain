@@ -146,7 +146,7 @@ def test_video_digest_rubric_preserves_placeholder_when_language_none():
 # is what closes that path, so it must survive a well-meaning "simplification".
 
 
-def test_video_digest_rubric_forbids_naming_entities_the_source_never_names():
+def test_video_digest_rubric_forbids_naming_entities_no_surface_names():
     """The rule must enumerate the entity kinds that actually leaked, deny that
     recognition counts as evidence, and offer the neutral-descriptor escape.
 
@@ -158,9 +158,29 @@ def test_video_digest_rubric_forbids_naming_entities_the_source_never_names():
         assert entity in text, f"digest rubric no longer forbids naming an unnamed {entity}"
     # Recognising who someone probably is must be explicitly disqualified as evidence.
     assert "world knowledge" in text
-    assert "literally" in text
     # Without an escape hatch the model names the entity anyway.
     assert "neutral descriptor" in text
+
+
+def test_video_digest_rubric_admits_author_metadata_as_evidence():
+    """The evidence set must match what the generator is handed and the judge accepts.
+
+    A clip of a speaker posted by that speaker's own account attributes itself: the
+    author metadata is EVIDENCE (the verify rubric declares the `[Author]` block
+    supported, not world knowledge). A rule bound only to transcript+frames would
+    force "the speaker…" on a self-posted clip AND contradict the judge.
+    """
+    text = load_rubric("video-digest").lower()
+    assert "display name" in text, "digest rubric no longer admits the author metadata as evidence"
+    assert "tweet text" in text, "digest rubric no longer admits the tweet text as evidence"
+
+
+def test_video_digest_rubric_separates_attribution_evidence_from_summary_content():
+    """The tweet/author are evidence for WHO speaks — never content to summarise.
+    Without this the reader collapses "the caption is evidence" into "summarise the
+    caption", which the clickbait-caption rule exists to forbid."""
+    text = load_rubric("video-digest").lower()
+    assert "attribution" in text, "digest rubric no longer separates attribution from content"
 
 
 def test_video_digest_rubric_requires_verbatim_quotes():
