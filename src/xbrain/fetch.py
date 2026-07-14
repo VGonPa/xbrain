@@ -372,6 +372,64 @@ def fetch_item(
 # is anomalous; re-fetching gives it a chance to land on a known result").
 _TRANSIENT_FAILURES: frozenset[FailureReason] = frozenset({"timeout", "dns_error", "unknown_error"})
 
+# The two reasons `extract_article` escalates to the Firecrawl fallback. They are NOT in
+# `_TRANSIENT_FAILURES`, so `_should_refetch` treats them as terminal and never retries them.
+# That is right only while trafilatura is the whole pipeline — the moment a JS-capable
+# extractor is available they become the most recoverable bucket there is.
+_FALLBACK_ELIGIBLE: frozenset[FailureReason] = frozenset({"js_required", "empty_content"})
+
+# trafilatura = 1 attempt, + Firecrawl = 2 (see `ContentSourceFailure.attempts`).
+_BOTH_EXTRACTORS_TRIED = 2
+
+
+def _retryable_now(src: ContentSourceFailure, *, firecrawl_configured: bool) -> bool:
+    """Could re-fetching this failed source plausibly produce a DIFFERENT outcome today?
+
+    Two ways it can, and one way it cannot:
+
+    - a TRANSIENT failure (timeout, dns, and the `unknown_error` bucket that catches HTTP 429)
+      may simply succeed on a retry — same extractor, better day;
+    - a FALLBACK-ELIGIBLE failure (`js_required`, `empty_content`) recorded at `attempts=1`
+      never actually got the Firecrawl pass: `_firecrawl_extract` returns None when
+      `FIRECRAWL_API_KEY` is unset, and `extract_article` then keeps the original failure. With
+      the key configured, the retry brings a genuinely different extractor;
+    - anything else (404, 403, paywall) is not an extraction problem, and a fallback-eligible
+      failure already at `attempts=2` has had both extractors. Retrying either one only
+      reproduces the recorded failure — that is not a repair, it is load on someone's server.
+    """
+    if src.failure_reason in _TRANSIENT_FAILURES:
+        return True
+    return (
+        firecrawl_configured
+        and src.failure_reason in _FALLBACK_ELIGIBLE
+        and src.attempts < _BOTH_EXTRACTORS_TRIED
+    )
+
+
+def firecrawl_available() -> bool:
+    """Is the JS-capable fallback extractor configured? (Mirrors `_firecrawl_extract`'s check —
+    one source of truth for "can a retry bring a different extractor".)"""
+    return bool(os.environ.get("FIRECRAWL_API_KEY"))
+
+
+def should_retry_failed(content: Content | None, *, firecrawl_configured: bool) -> bool:
+    """Select an item for `fetch --retry-failed`: does it carry a link failure a retry could
+    actually repair?
+
+    Unlike `_should_refetch` this is ANY, not ALL: a PARTIAL fetch (one link fetched, one
+    still failing) is still missing evidence for the failed link, and the fetched article is
+    no evidence for it. `content is None` is excluded — a never-fetched item is the plain
+    `fetch` path's job, and `--retry-failed` must not silently widen into a general backfill.
+    """
+    if content is None:
+        return False
+    return any(
+        isinstance(src, ContentSourceFailure)
+        and src.kind == "external_article"
+        and _retryable_now(src, firecrawl_configured=firecrawl_configured)
+        for src in content.sources
+    )
+
 
 def _should_refetch(content: Content | None, force: bool) -> bool:
     """Return True if `fetch_pending` should (re)fetch this item.
@@ -406,6 +464,69 @@ def _should_refetch(content: Content | None, force: bool) -> bool:
         isinstance(src, ContentSourceFailure) and src.failure_reason in _TRANSIENT_FAILURES
         for src in external
     )
+
+
+class RetryPlan(BaseModel):
+    """What `fetch --retry-failed` would do, and — just as important — what it would NOT.
+
+    `blocked_on_firecrawl` is the whole point of the dry run: those items are recoverable in
+    principle (a JS-capable extractor would very likely get them) but re-fetching them WITHOUT
+    the key just replays the identical failure. Reporting them as blocked, rather than silently
+    dropping them, is the difference between "nothing to do" and "set the key and run again".
+    """
+
+    retryable: list[str] = []  # item ids a retry could actually repair
+    reasons: dict[str, int] = {}  # failure_reason → count, over the retryable set
+    blocked_on_firecrawl: list[str] = []  # fallback-eligible, but no key configured
+    terminal: list[str] = []  # dead/blocked — no extractor will ever fix these
+
+
+def _link_failures(content: Content | None) -> list[ContentSourceFailure]:
+    """The recorded `external_article` failures on this item, if any."""
+    if content is None:
+        return []
+    return [
+        src
+        for src in content.sources
+        if isinstance(src, ContentSourceFailure) and src.kind == "external_article"
+    ]
+
+
+def plan_retry_failed(store: dict[str, Item], *, firecrawl_configured: bool) -> RetryPlan:
+    """Classify every item with a recorded link failure into: retryable now · blocked on the
+    Firecrawl key · terminal. Pure — it reads the store and mutates nothing."""
+    plan = RetryPlan()
+    for item in store.values():
+        failures = _link_failures(item.content) if item.links else []
+        if not failures:
+            continue
+        if should_retry_failed(item.content, firecrawl_configured=firecrawl_configured):
+            plan.retryable.append(item.id)
+            for src in failures:
+                if _retryable_now(src, firecrawl_configured=firecrawl_configured):
+                    plan.reasons[src.failure_reason] = plan.reasons.get(src.failure_reason, 0) + 1
+        # Would the SAME item be retryable if the key were set? Then the key is what blocks it.
+        elif should_retry_failed(item.content, firecrawl_configured=True):
+            plan.blocked_on_firecrawl.append(item.id)
+        else:
+            plan.terminal.append(item.id)
+    return plan
+
+
+def retry_failed(
+    store: dict[str, Item],
+    plan: RetryPlan,
+    extractor: ArticleExtractor = extract_article,
+    *,
+    now: Callable[[], datetime] = _utcnow,
+) -> int:
+    """Re-fetch exactly the items `plan` marked retryable. Mutates `store`; the caller
+    snapshots and saves. A retry that reproduces the same content does not advance
+    `content.fetched_at` (see `fetch_item`), so a no-op retry cannot re-trigger enrichment."""
+    for item_id in plan.retryable:
+        item = store[item_id]
+        item.content = fetch_item(item, extractor, now=now)
+    return len(plan.retryable)
 
 
 def fetch_pending(

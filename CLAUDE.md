@@ -47,6 +47,19 @@ generates an Obsidian wiki.
   fetch+transcribe, all get the source. No-speech videos attach with empty text +
   `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
   `x_video` source unless `--force`); destructive → auto-snapshot.
+- **Unfetched links carry their REASON (PR-I).** The shared `unfetched_links_note` builder now
+  names WHY the content is missing ("the page no longer exists (HTTP 404)" vs "the page could not
+  be extracted") — one builder, so all three LLM surfaces (api prompt · enrich worksheet · verify
+  source) get it verbatim, and the judge can hold the generator to it. Naming the cause never
+  licenses describing the content: the rule sentence is unconditional.
+- **`fetch --retry-failed`.** `_should_refetch` retries only `_TRANSIENT_FAILURES`, so
+  `js_required`/`empty_content` are treated as terminal and NEVER retried — yet those are exactly
+  the two reasons `extract_article` escalates to the Firecrawl fallback, which returns None (and
+  keeps the failure at `attempts=1`) when `FIRECRAWL_API_KEY` is unset. Every failure in the real
+  corpus is at `attempts=1`: the fallback has never run. "trafilatura cannot do better" is not the
+  same fact as "the pipeline cannot do better". `--retry-failed` targets only the failures a retry
+  could repair (transient, plus fallback-eligible when the key is set), with `--dry-run`; it does
+  NOT re-fetch what already succeeded, which is what `--force` does.
 - Video digest — pipeline integration (PR3, + #75): the attached `x_video` transcript
   flows through the **existing** `enrich → topics → generate` steps, no new stage.
   `enrich` feeds the transcript (+ frame descriptions) into the item prompt (skips

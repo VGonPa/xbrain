@@ -28,7 +28,13 @@ from xbrain.extract.browser import login as run_login
 from xbrain.extract.browser import x_context
 from xbrain.extract.extractor import RateLimitTruncated, extract_source
 from xbrain.extract.threads import expand_threads
-from xbrain.fetch import fetch_pending
+from xbrain.fetch import (
+    RetryPlan,
+    fetch_pending,
+    firecrawl_available,
+    plan_retry_failed,
+    retry_failed,
+)
 from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
@@ -486,6 +492,51 @@ def import_archive(zip_path: Path) -> None:
     typer.echo(f"Archivo importado: {added} tweets nuevos")
 
 
+def _echo_retry_plan(plan: RetryPlan, *, has_key: bool) -> None:
+    """Report the plan — including, loudly, what it will NOT attempt and why."""
+    reasons = ", ".join(f"{n} {reason}" for reason, n in sorted(plan.reasons.items()))
+    typer.echo(f"Reintentables: {len(plan.retryable)} items" + (f" ({reasons})" if reasons else ""))
+    if plan.blocked_on_firecrawl:
+        typer.echo(
+            f"BLOQUEADOS por falta de FIRECRAWL_API_KEY: {len(plan.blocked_on_firecrawl)} items "
+            "con fallos js_required/empty_content que NUNCA llegaron a pasar por el fallback "
+            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo. Configúrala y "
+            "vuelve a ejecutar."
+        )
+    elif has_key:
+        typer.echo("FIRECRAWL_API_KEY configurada — el fallback JS entra en los reintentos.")
+    typer.echo(
+        f"Terminales (ningún extractor los arregla): {len(plan.terminal)} items. "
+        "Su nota de guardarraíl ya nombra la causa."
+    )
+
+
+def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
+    """`fetch --retry-failed`: re-fetch ONLY the link failures a retry could actually repair.
+
+    Distinct from `--force`, which re-hits every link in the store (400 items in the real
+    corpus) and re-downloads the ones that already succeeded. This targets the recorded
+    failures, so it is the safe way to pick up the Firecrawl fallback on the
+    `js_required`/`empty_content` bucket that `_should_refetch` calls terminal and therefore
+    never retries.
+    """
+    has_key = firecrawl_available()
+    store = load_store(cfg.items_path)
+    plan = plan_retry_failed(store, firecrawl_configured=has_key)
+    _echo_retry_plan(plan, has_key=has_key)
+    if dry_run:
+        typer.echo("--dry-run: no se ha tocado el store.")
+        return
+    if not plan.retryable:
+        return
+    _auto_snapshot(cfg, "fetch-retry-failed")
+    try:
+        refetched = retry_failed(store, plan)
+    finally:
+        save_store(store, cfg.items_path)
+    typer.echo(f"Reintentados: {refetched} items → {cfg.items_path}")
+
+
 @app.command()
 @_handle_cli_errors
 def fetch(
@@ -493,8 +544,29 @@ def fetch(
     until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
     force: bool = typer.Option(False, help="Volver a descargar lo ya descargado"),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="Reintenta SOLO los enlaces cuyo fallo registrado un reintento puede reparar "
+        "(transitorios, y js_required/empty_content si hay FIRECRAWL_API_KEY). No re-descarga "
+        "lo que ya funcionó, a diferencia de --force.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Con --retry-failed: informa del plan sin tocar el store."
+    ),
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
+    if dry_run and not retry_failed:
+        raise typer.BadParameter("--dry-run requires --retry-failed.")
+    if retry_failed:
+        if force:
+            raise typer.BadParameter(
+                "--retry-failed and --force are mutually exclusive: --force re-fetches EVERY "
+                "link (including the ones that already succeeded), --retry-failed targets only "
+                "the recorded failures a retry could repair."
+            )
+        _run_retry_failed(_config(), dry_run=dry_run)
+        return
     _run_fetch(
         _config(), _parse_date(since), _parse_date(until, end_of_day=True), force, headless=headless
     )

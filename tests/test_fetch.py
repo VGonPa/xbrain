@@ -12,6 +12,7 @@ from xbrain.fetch import (
     _probe_status,
     _reason_for_status,
     _should_refetch,
+    should_retry_failed,
     _sources_materially_equal,
     fetch_item,
     fetch_pending,
@@ -370,7 +371,9 @@ def test_extract_article_merges_firecrawl_error_when_both_fail():
 # --------------------------------------------------------------------- #19: transient retry
 
 
-def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_article", text=None):
+def _content_with_source(
+    *, ok: bool, failure_reason="timeout", kind="external_article", text=None, attempts=1
+):
     """Helper: build a Content with a single ContentSource of the requested shape.
 
     `ok=True` builds a `ContentSourceSuccess` (text required); `ok=False`
@@ -381,7 +384,10 @@ def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_a
         source = ContentSourceSuccess(kind=kind, url="https://example.com/p", text=text or "body")
     else:
         source = ContentSourceFailure(
-            kind=kind, url="https://example.com/p", failure_reason=failure_reason
+            kind=kind,
+            url="https://example.com/p",
+            failure_reason=failure_reason,
+            attempts=attempts,
         )
     return Content(
         fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
@@ -830,3 +836,78 @@ def test_force_refetch_unchanged_success_does_not_reenrich():
     assert item.content is not None
     assert item.content.fetched_at == _T0  # preserved despite --force
     assert items_pending_enrichment(store) == []  # not re-enriched
+
+
+# --- fetch --retry-failed: which failures a retry could actually change ---------------------
+# `_should_refetch` retries only _TRANSIENT_FAILURES, so `js_required` / `empty_content` are
+# never retried. But those are the exact two reasons `extract_article` escalates to the
+# Firecrawl fallback — and when FIRECRAWL_API_KEY is unset the fallback returns None and the
+# original failure is kept at attempts=1. The whole real corpus is in that state: 33 of 44
+# exposed items are fallback-eligible failures the fallback NEVER ran on, permanently stuck
+# because the policy calls them terminal. "trafilatura cannot do better" is not the same fact
+# as "the pipeline cannot do better".
+
+
+def test_retry_failed_selects_a_fallback_eligible_failure_the_fallback_never_ran_on():
+    """js_required at attempts=1 = the Firecrawl pass never happened. With Firecrawl now
+    configured a retry has a genuinely different extractor to offer — so it is selected."""
+    c = _content_with_source(ok=False, failure_reason="js_required", attempts=1)
+    assert should_retry_failed(c, firecrawl_configured=True) is True
+
+
+def test_retry_failed_skips_a_fallback_eligible_failure_when_firecrawl_is_unconfigured():
+    """Without the key the retry runs the SAME extractor and reproduces the SAME failure. That
+    is not a repair, it is just hammering someone's server — so it is not selected."""
+    c = _content_with_source(ok=False, failure_reason="js_required", attempts=1)
+    assert should_retry_failed(c, firecrawl_configured=False) is False
+
+
+def test_retry_failed_skips_a_fallback_eligible_failure_both_extractors_already_tried():
+    """attempts=2 means trafilatura AND Firecrawl both failed. Nothing new to bring."""
+    c = _content_with_source(ok=False, failure_reason="empty_content", attempts=2)
+    assert should_retry_failed(c, firecrawl_configured=True) is False
+
+
+def test_retry_failed_selects_a_transient_failure_regardless_of_firecrawl():
+    """A 429/timeout/dns blip may simply succeed today — no new extractor needed. (The real
+    corpus's `cursor.directory/mcp` is exactly this: HTTP 429, recorded `unknown_error`.)"""
+    c = _content_with_source(ok=False, failure_reason="unknown_error", attempts=1)
+    assert should_retry_failed(c, firecrawl_configured=False) is True
+
+
+def test_retry_failed_skips_a_terminal_failure_no_extractor_can_fix():
+    """A dead page or a hard 403 is not an extraction problem. Retrying cannot help; the note
+    (which now names the reason) is what protects these."""
+    for reason in ("not_found", "forbidden", "paywall"):
+        c = _content_with_source(ok=False, failure_reason=reason)
+        assert should_retry_failed(c, firecrawl_configured=True) is False, reason
+
+
+def test_retry_failed_skips_an_item_whose_link_content_was_fetched():
+    c = _content_with_source(ok=True, text="body")
+    assert should_retry_failed(c, firecrawl_configured=True) is False
+
+
+def test_retry_failed_selects_a_partial_fetch_whose_other_link_is_still_recoverable():
+    """One link fetched, one still js_required: the fetched article is no evidence for the
+    other, so the recoverable one still deserves the retry (`_should_refetch`'s all() would
+    skip this item entirely)."""
+    content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(kind="external_article", url="https://example.com/a", text="body"),
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://example.com/b",
+                failure_reason="js_required",
+                attempts=1,
+            ),
+        ],
+    )
+    assert should_retry_failed(content, firecrawl_configured=True) is True
+
+
+def test_retry_failed_ignores_a_never_fetched_item():
+    """`content is None` is the plain `fetch` path's job — --retry-failed is about REPAIRING
+    recorded failures, and must not silently widen into a general backfill."""
+    assert should_retry_failed(None, firecrawl_configured=True) is False
