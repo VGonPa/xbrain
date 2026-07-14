@@ -12,7 +12,7 @@ from xbrain.models import (
     Item,
     Link,
 )
-from xbrain.notes_io import slugify
+from xbrain.notes_io import note_filename, slugify
 
 
 def _item(item_id: str, with_link: bool, text: str | None = None) -> Item:
@@ -1379,3 +1379,190 @@ def test_generate_no_badge_when_output_fixed_before_write(tmp_path: Path):
     body = _note_body(tmp_path)
     assert "❌" not in body and "Verification: FAIL" not in body
     assert "B - fixed before the write." in body  # the current output still renders
+
+
+# ------------------------------------------------------- the quoted post, for the READER
+#
+# The quoted post reaches every LLM surface (#98) and never reached the human: on 762
+# notes (35%) the reader met a summary ABOUT a post they could not see. Worse, a
+# readable quote fell into the generic `## Content: <url>` branch — a THIRD PARTY's
+# words, unattributed, in a note whose author is the poster. That is the very
+# conflation the attribution rule exists to stop, rendered for the reader.
+
+from xbrain.executors.api import quoted_source, quoted_text  # noqa: E402
+from xbrain.i18n import SUPPORTED_LANGUAGES, strings_for  # noqa: E402
+from xbrain.models import QUOTED_CONTENT_KINDS  # noqa: E402
+
+_QUOTED_BODY = "Karpathy's career moves map AI's centre of gravity.\n\n2015: co-founds OpenAI."
+
+
+def _sections(note: str) -> dict[str, str]:
+    """Split a rendered note into `{"## Heading": body}`.
+
+    So a test can assert WHICH section a span sits under. `assert body in note` would
+    pass even with the quoted post served under `## Content` — the exact mislabelling
+    this PR removes.
+    """
+    sections: dict[str, list[str]] = {}
+    heading: str | None = None
+    for line in note.split("\n"):
+        if line.startswith("## "):
+            heading = line
+            sections.setdefault(heading, [])
+        elif heading is not None:
+            sections[heading].append(line)
+    return {key: "\n".join(value) for key, value in sections.items()}
+
+
+def _quoting_item(source) -> Item:
+    """A quote-tweet as it really exists in the store: enriched (all 762 are), so it
+    already has a note — this PR changes what that note SHOWS, not which notes exist."""
+    item = _item("1", with_link=False, text="Read this and you'll understand this career move")
+    item.quoted_id = "999"
+    item.enriched = Enrichment(
+        summary="Un post sobre la trayectoria de Karpathy.",
+        primary_topic="ai",
+        topics=["ai"],
+        executor="api",
+        enriched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+    )
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=[source] if source else []
+    )
+    return item
+
+
+def _readable_quote() -> ContentSourceSuccess:
+    return ContentSourceSuccess(
+        kind="quoted_tweet",
+        url="https://x.com/karpathy/status/999",
+        text=_QUOTED_BODY,
+        author=Author(handle="karpathy", name="Andrej Karpathy"),
+    )
+
+
+def _note_text(item: Item, tmp_path: Path, language: str = "Spanish") -> str:
+    generate({item.id: item}, tmp_path, output_language=language)
+    return (tmp_path / "items" / note_filename(item)).read_text(encoding="utf-8")
+
+
+def _quoted_heading(note: str, strings) -> str:
+    return next(h for h in _sections(note) if h.startswith(f"## {strings.quoted_post_header}"))
+
+
+def test_the_note_names_the_quoted_author_and_shows_their_words(tmp_path: Path):
+    """WHO is quoted and WHAT they said — the two facts the reader was denied."""
+    strings = strings_for("Spanish")
+    note = _note_text(_quoting_item(_readable_quote()), tmp_path)
+    heading = _quoted_heading(note, strings)
+
+    assert heading == f"## {strings.quoted_post_header} — @karpathy (Andrej Karpathy)"
+    body = _sections(note)[heading]
+    assert "> Karpathy's career moves map AI's centre of gravity." in body
+    assert "> 2015: co-founds OpenAI." in body
+    assert "<https://x.com/karpathy/status/999>" in body
+
+
+def test_the_quoted_body_is_never_rendered_as_generic_content(tmp_path: Path):
+    """The regression this PR exists for: a readable quote used to fall into the
+    generic `## Content: <url>` branch — a third party's words with no author, inside
+    a note attributed to the poster."""
+    strings = strings_for("Spanish")
+    note = _note_text(_quoting_item(_readable_quote()), tmp_path)
+    sections = _sections(note)
+
+    assert not any(h.startswith(f"## {strings.content_header}") for h in sections)
+    # and the body appears under the quoted heading, nowhere else
+    assert _QUOTED_BODY.splitlines()[0] not in sections["## Tweet"]
+
+
+def test_the_quoted_post_is_distinguished_from_the_posters_own_words(tmp_path: Path):
+    """The whole failure mode is the two being conflated. The poster's text stays under
+    `## Tweet`; the quoted words sit under their own heading, blockquoted."""
+    note = _note_text(_quoting_item(_readable_quote()), tmp_path)
+    sections = _sections(note)
+    strings = strings_for("Spanish")
+
+    assert "Read this and you'll understand this career move" in sections["## Tweet"]
+    assert (
+        "Read this and you'll understand this career move"
+        not in sections[_quoted_heading(note, strings)]
+    )
+    # Every line of the quoted body is blockquoted — markdown's own idiom for words that
+    # are not the note author's — and NEVER appears unquoted anywhere in the note.
+    quoted_body = sections[_quoted_heading(note, strings)]
+    for line in _QUOTED_BODY.split("\n"):
+        if line.strip():
+            assert f"> {line}" in quoted_body
+            assert f"\n{line}\n" not in note
+
+
+def test_the_note_shows_exactly_the_body_the_LLMs_were_shown(tmp_path: Path):
+    """Identity, not coincidence: the reader sees the SAME source the generator and the
+    judge saw — selected by the SAME helper (`quoted_source`), not a parallel lookup."""
+    item = _quoting_item(_readable_quote())
+    note = _note_text(item, tmp_path)
+    source = quoted_source(item)
+
+    assert source is not None
+    assert source.author is not None
+    assert f"@{source.author.handle} ({source.author.name})" in _quoted_heading(
+        note, strings_for("Spanish")
+    )
+    for line in quoted_text(item).split("\n"):
+        if line.strip():
+            assert f"> {line}" in note
+
+
+def test_an_unavailable_quoted_post_is_written_down_not_silently_omitted(tmp_path: Path):
+    """A reader who sees nothing assumes there was nothing. A quote we could not read is
+    a FACT — carry it, with its reason."""
+    strings = strings_for("Spanish")
+    failure = ContentSourceFailure(
+        kind="quoted_tweet", url="https://x.com/i/status/999", failure_reason="not_found"
+    )
+    note = _note_text(_quoting_item(failure), tmp_path)
+    sections = _sections(note)
+    heading = f"## {strings.quoted_post_unavailable}"
+
+    assert heading in sections
+    assert strings.quoted_unavailable_deleted in sections[heading]
+    assert "<https://x.com/i/status/999>" in sections[heading]
+
+
+def test_the_unavailable_reason_distinguishes_deleted_from_protected(tmp_path: Path):
+    """`not_found` and `forbidden` are different facts about the world and must not
+    collapse into one wording."""
+    strings = strings_for("Spanish")
+    protected = ContentSourceFailure(
+        kind="quoted_tweet", url="https://x.com/i/status/999", failure_reason="forbidden"
+    )
+    note = _note_text(_quoting_item(protected), tmp_path)
+    body = _sections(note)[f"## {strings.quoted_post_unavailable}"]
+
+    assert strings.quoted_unavailable_protected in body
+    assert strings.quoted_unavailable_deleted not in body
+
+
+def test_a_note_with_no_quote_renders_no_quoted_section(tmp_path: Path):
+    strings = strings_for("Spanish")
+    note = _note_text(_item("1", with_link=True), tmp_path)
+
+    assert strings.quoted_post_header not in note
+    assert strings.quoted_post_unavailable not in note
+
+
+def test_the_quoted_section_is_localised_in_every_supported_language(tmp_path: Path):
+    """The dataclass enforces presence; this enforces USE — a hardcoded Spanish header
+    would render Spanish inside an English vault."""
+    for index, language in enumerate(SUPPORTED_LANGUAGES):
+        strings = strings_for(language)
+        out = tmp_path / f"vault-{index}"
+        note = _note_text(_quoting_item(_readable_quote()), out, language=language)
+        assert f"## {strings.quoted_post_header} — @karpathy (Andrej Karpathy)" in note
+
+
+def test_the_quoted_kind_is_selected_by_the_shared_frozenset(tmp_path: Path):
+    """Guards the drift this whole workstream is about: the renderer must not grow its
+    own private notion of what a quoted post is."""
+    assert _readable_quote().kind in QUOTED_CONTENT_KINDS

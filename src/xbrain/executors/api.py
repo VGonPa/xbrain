@@ -16,6 +16,7 @@ from xbrain.executors.base import EnrichmentJudgment
 from xbrain.llm_json import json_from_response
 from xbrain.models import (
     LINK_CONTENT_KINDS,
+    QUOTED_CONTENT_KINDS,
     ContentSourceFailure,
     ContentSourceSuccess,
     FailureReason,
@@ -163,11 +164,16 @@ _UNFETCHED_RULE = (
     "reconstruct or guess it from the URL, the domain or world knowledge."
 )
 
-# The note stamped when an item quotes a post whose content is not on the item.
-# `quoted_id` is captured at extract time but NO fetcher downloads the quoted post,
-# so without this marker the generator is ordered (rubric-summary) to summarise
-# content that is not in its inputs — an invitation to invent.
+# The note stamped when an item quotes a post whose content is not on the item —
+# X tombstoned it (deleted), refused it (protected/suspended) or hydrated nothing.
+# Without this marker the generator is ordered (rubric-summary) to summarise content
+# that is not in its inputs — an invitation to invent. It fires ONLY on that state:
+# when the quoted body IS present, stamping it would tell the generator to ignore
+# its best evidence.
 QUOTED_CONTENT_UNFETCHED_NOTE = f"The quoted post's content was NOT fetched. {_UNFETCHED_RULE}"
+
+# The stem of the ONE label under which the quoted post travels, on every surface.
+QUOTED_LABEL = "Quoted post"
 
 
 def fetched_link_sources(item: Item) -> int:
@@ -292,12 +298,45 @@ def thread_text(item: Item) -> str | None:
 
 
 def quoted_text(item: Item) -> str | None:
-    """The fetched quoted-post body, truncated, or None — today always None."""
-    return first_source_text(item, _QUOTED_KINDS)
+    """The quoted post's body, truncated, or None when it could not be fetched."""
+    return first_source_text(item, QUOTED_CONTENT_KINDS)
+
+
+def quoted_source(item: Item) -> ContentSourceSuccess | None:
+    """The item's readable quoted-post source, or None.
+
+    THE selector. Every surface asks this one question, so "is the quoted content
+    here?" cannot get five different answers.
+    """
+    if item.content is None:
+        return None
+    for src in item.content.sources:
+        if isinstance(src, ContentSourceSuccess) and src.kind in QUOTED_CONTENT_KINDS and src.text:
+            return src
+    return None
+
+
+def quoted_attribution(item: Item) -> str | None:
+    """`Quoted post — @handle (Name)`, or None when there is no readable quote.
+
+    THE label, built once and read by all three LLM surfaces (api prompt, enrich
+    worksheet, judge source) — the whole point being that they cannot drift. The
+    author is the payload: a quoted post is a THIRD PARTY's, and #86's attribution
+    rule ("the poster is not the author of the quoted content") is only enforceable
+    if every surface is told, in the same words, WHO that third party is.
+
+    Degrades to the bare `Quoted post` when X hydrated a body but no author — naming
+    nobody, rather than letting the poster's identity silently fill the hole.
+    """
+    src = quoted_source(item)
+    if src is None:
+        return None
+    if src.author is None:
+        return QUOTED_LABEL
+    return f"{QUOTED_LABEL} — @{src.author.handle} ({src.author.name})"
 
 
 _THREAD_KINDS: frozenset[str] = frozenset({"thread"})
-_QUOTED_KINDS: frozenset[str] = frozenset({"quoted_tweet"})
 
 
 def _links_section(item: Item) -> list[str]:
@@ -330,19 +369,34 @@ def _thread_section(item: Item) -> list[str]:
 
 
 def _quoted_section(item: Item) -> list[str]:
-    """Build the quoted-post block: its fetched body, else the NOT-fetched marker.
+    """Build the quoted-post block: its body under its author's name, else the
+    NOT-fetched marker. Two DIFFERENT states, both represented.
 
-    No fetcher produces a `quoted_tweet` source today, so in practice this stamps the
-    marker. The fetched branch exists so that when one lands, the quoted body reaches
-    the LLM under its OWN label instead of being dropped by the `LINK_CONTENT_KINDS`
-    narrowing in `_article_sections`.
+    The body reaches the LLM under its OWN label — never `Linked article` (it is not a
+    link's content) and never unlabelled (it is not the poster's words). The label
+    comes from `quoted_attribution`, the same builder the worksheet and the judge read,
+    so the generator and the judge are held to one contract.
     """
     if not item.quoted_id:
         return []
+    label = quoted_attribution(item)
     body = quoted_text(item)
-    if body:
-        return ["", "Quoted post (the content this post is sharing):", body]
-    return ["", "Quoted post — content NOT fetched:", QUOTED_CONTENT_UNFETCHED_NOTE]
+    if not (label and body):
+        return ["", f"{QUOTED_LABEL} — content NOT fetched:", QUOTED_CONTENT_UNFETCHED_NOTE]
+    source = quoted_source(item)
+    if source is not None and source.author is not None:
+        rule = f"These are @{source.author.handle}'s words, NOT the poster's"
+    else:
+        # X gave us the body but no author. The label already names nobody; the rule must
+        # say so OUT LOUD. "These are that account's words" would point at an account
+        # that was never named — and the summary rubric, which tells the generator to
+        # attribute the quoted words to the account in the label, would be an order to
+        # invent one.
+        rule = (
+            "The author of this quoted post is UNKNOWN — do not name one, and do not "
+            "attribute these words to the poster"
+        )
+    return ["", f"{label} — the content this post is sharing. {rule}:", body]
 
 
 def _article_sections(item: Item) -> list[str]:

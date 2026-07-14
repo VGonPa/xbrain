@@ -570,3 +570,192 @@ def test_synthesized_article_link_routes_as_article():
 
     assert link is not None
     assert _classify_x_url(link.url) == "article"
+
+
+# --------------------------------------------------------------- quoted posts
+#
+# The quoted post is a THIRD PARTY's content that the poster is reacting to. X
+# embeds it in the very timeline payload we already capture, so parsing it out
+# costs no extra network call. Before this, only its `quoted_id` was kept and the
+# body was dropped — leaving the generator a bare reaction ("Read this and you'll
+# understand") with nothing to summarise, and inviting it to invent the thing
+# being reacted to.
+
+
+def _quoted_author_block(handle: str, name: str) -> dict:
+    return {"user_results": {"result": {"legacy": {"screen_name": handle, "name": name}}}}
+
+
+def _quoting_tweet(quoted_result: dict | None, *, quoted_id: str | None = "222") -> dict:
+    """Tweet 111 quoting tweet `quoted_id`; `quoted_result` is what X hydrated
+    (None = X sent the id but embedded no post)."""
+    tweet = _tweet_result("111", "alice", "Read this and you'll understand better this career move")
+    if quoted_id is not None:
+        tweet["legacy"]["quoted_status_id_str"] = quoted_id
+    if quoted_result is not None:
+        tweet["quoted_status_result"] = {"result": quoted_result}
+    return tweet
+
+
+def _quoted_post(**over) -> dict:
+    quoted = _tweet_result("222", "karpathy", "I am leaving OpenAI.")
+    quoted["core"] = _quoted_author_block("karpathy", "Andrej Karpathy")
+    quoted.update(over)
+    return quoted
+
+
+def _timeline(tweet: dict) -> dict:
+    return {
+        "data": {
+            "bookmark_timeline_v2": {
+                "timeline": {
+                    "instructions": [
+                        {
+                            "type": "TimelineAddEntries",
+                            "entries": [
+                                {
+                                    "entryId": f"tweet-{tweet['rest_id']}",
+                                    "content": {
+                                        "itemContent": {
+                                            "itemType": "TimelineTweet",
+                                            "tweet_results": {"result": tweet},
+                                        }
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+
+def _only_source(tweet: dict):
+    items = parse_tweets(_timeline(tweet), "bookmark")
+    assert len(items) == 1
+    item = items[0]
+    assert item.content is not None, "the quoting item must carry a Content block"
+    assert len(item.content.sources) == 1
+    return item, item.content.sources[0]
+
+
+def test_quoted_post_body_and_author_land_as_a_content_source():
+    """The quoted post's TEXT and its AUTHOR are the evidence that was missing.
+
+    The author matters as much as the body: the quoted post is a third party's,
+    and naming the poster as its author is the attribution bug #86 guards against.
+    """
+    from xbrain.models import Author, ContentSourceSuccess
+
+    item, source = _only_source(_quoting_tweet(_quoted_post()))
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.kind == "quoted_tweet"
+    assert source.text == "I am leaving OpenAI."
+    assert source.author == Author(handle="karpathy", name="Andrej Karpathy")
+    assert source.url == "https://x.com/karpathy/status/222"
+    assert item.quoted_id == "222"
+
+
+def test_the_quoted_source_carries_no_title():
+    """`notes_io.note_title` takes the first source with a `title` — a quoted post
+    has no title, and borrowing that field for the author would hijack note titles."""
+    _, source = _only_source(_quoting_tweet(_quoted_post()))
+    assert source.title is None
+
+
+def test_the_quoted_source_is_not_a_link_content_kind():
+    """It must never be mistaken for a fetched LINK body: a quoted post is not the
+    content of any link the post points at."""
+    from xbrain.executors.api import fetched_link_sources
+    from xbrain.models import LINK_CONTENT_KINDS
+
+    item, source = _only_source(_quoting_tweet(_quoted_post()))
+
+    assert source.kind not in LINK_CONTENT_KINDS
+    assert fetched_link_sources(item) == 0
+
+
+def test_a_deleted_quoted_post_lands_as_a_not_found_failure():
+    from xbrain.models import ContentSourceFailure
+
+    tombstone = {"__typename": "TweetTombstone", "tombstone": {"text": {"text": "unavailable"}}}
+    _, source = _only_source(_quoting_tweet(tombstone))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.kind == "quoted_tweet"
+    assert source.failure_reason == "not_found"
+    assert source.url == "https://x.com/i/status/222"
+
+
+def test_a_protected_quoted_post_lands_as_a_forbidden_failure():
+    from xbrain.models import ContentSourceFailure
+
+    unavailable = {"__typename": "TweetUnavailable", "reason": "Protected"}
+    _, source = _only_source(_quoting_tweet(unavailable))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "forbidden"
+
+
+def test_an_unhydrated_quoted_post_lands_as_an_empty_content_failure():
+    """X sent the id but embedded no post — we know a quote exists and hold none
+    of it. That is a FAILURE state, not the absence of a quote."""
+    from xbrain.models import ContentSourceFailure
+
+    _, source = _only_source(_quoting_tweet(None))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+    assert source.url == "https://x.com/i/status/222"
+
+
+def test_a_quoted_post_with_no_body_and_no_author_is_an_empty_content_failure():
+    from xbrain.models import ContentSourceFailure
+
+    _, source = _only_source(_quoting_tweet({"__typename": "Tweet", "rest_id": "222"}))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+
+
+def test_a_tweet_that_quotes_nothing_gets_no_content_block():
+    """No quote → no source, and crucially no EMPTY `Content` that would later read
+    as "already fetched" to the link fetcher."""
+    items = parse_tweets(_timeline(_tweet_result("111", "alice", "just a post")), "bookmark")
+    assert items[0].quoted_id is None
+    assert items[0].content is None
+
+
+# ------------------------------------------- L6/M5: an honest record of what X did
+
+
+def test_a_media_only_quoted_post_is_not_recorded_as_X_refusing_it():
+    """X DID serve the post — it simply carries no text (a photo/video quote). Recording
+    "X did not serve the quoted post" is a false statement about the world, in the very
+    evidence store whose whole purpose is to stop us inventing facts."""
+    from xbrain.models import ContentSourceFailure
+
+    media_only = _quoted_post()
+    media_only["legacy"]["full_text"] = ""
+    _, source = _only_source(_quoting_tweet(media_only))
+
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "empty_content"
+    assert "no text" in (source.error or "")
+    assert "did not serve" not in (source.error or "")
+
+
+def test_a_quoted_post_with_a_body_but_no_author_still_ships_its_body():
+    """The body is evidence even when X hydrates no author. Dropping it would throw away
+    the cure because one field is missing; the attribution simply names nobody."""
+    from xbrain.models import ContentSourceSuccess
+
+    anonymous = _quoted_post()
+    del anonymous["core"]
+    _, source = _only_source(_quoting_tweet(anonymous))
+
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == "I am leaving OpenAI."
+    assert source.author is None
