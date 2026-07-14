@@ -32,7 +32,7 @@ from xbrain.models import (
     VideoFrame,
 )
 from xbrain.notes_io import DEFAULT_TAIL, note_filename, slugify, title_of, user_tail, wrap
-from xbrain.verification import ALL_TARGETS, VerifyTarget, fingerprint_output
+from xbrain.verification import ALL_TARGETS, VerifyTarget, verdict_is_current
 from xbrain.video_digest import _video_source
 
 logger = logging.getLogger(__name__)
@@ -323,8 +323,13 @@ def _verdict_badge(item: Item, target: str, strings: Strings) -> str | None:
     verdict = item.verification.get(target)
     if verdict is None or verdict.verdict not in _VERDICT_BADGE_EMOJI:
         return None
-    if fingerprint_output(item, cast(VerifyTarget, target)) != verdict.output_fingerprint:
-        return None  # stale: the judged output changed since the verdict was stored
+    if not verdict_is_current(item, cast(VerifyTarget, target), strings.language):
+        # STALE — the verdict was reached under a different contract than the one in force
+        # now: the output was re-generated, or the SOURCE the judge read changed (a frame
+        # description landed, an article got fetched), or the RUBRICS were rewritten. It
+        # says nothing about what a reader sees today, so it paints NOTHING. A verdict with
+        # no contract fingerprint at all (stored before #PR-D) is stale by construction.
+        return None
     label = strings.verify_badge_fail if verdict.verdict == "FAIL" else strings.verify_badge_review
     issue = next((flag for flag in verdict.flags if flag), None)
     suffix = f" — {' '.join(issue.splitlines())}" if issue else ""

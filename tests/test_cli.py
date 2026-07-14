@@ -3836,3 +3836,79 @@ def test_fetch_revalidate_is_report_only_until_write(tmp_path: Path, monkeypatch
     stored = json.loads(items_path.read_text(encoding="utf-8"))["7"]["content"]["sources"][0]
     assert stored["outcome"] == "failure"
     assert stored["failure_reason"] == "blocked_interstitial"
+
+
+# ---------------------------------------------------------------- PR-D: the contract fingerprint
+
+
+def test_verify_write_verdicts_stores_the_contract_it_was_judged_under(tmp_path: Path, monkeypatch):
+    """The verdict binds to the whole judging contract — the output, the source the judge
+    read, and the rubrics it applied — not just to the output text."""
+    from xbrain.store import load_store
+    from xbrain.verification import contract_fingerprint
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    item = _verify_video_item("7")
+    save_store({"7": item}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = load_store(items_path)["7"].verification["summary"]
+    assert stored.contract_fingerprint == contract_fingerprint(item, "summary", "English")
+
+
+def test_verify_reports_how_many_verdicts_the_contract_change_invalidated(
+    tmp_path: Path, monkeypatch
+):
+    """The number IS the point: it says how much of the stored verification a contract
+    change has retired. A verdict stored under the old contract (no contract fingerprint)
+    is counted, never silently kept alive."""
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import fingerprint_output
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    item = _verify_video_item("7")
+    item.verification["summary"] = VerificationVerdict(
+        verdict="FAIL",
+        faithfulness="FAIL",
+        output_fingerprint=fingerprint_output(item, "summary"),
+        verified_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        flags=["unsupported"],
+    )  # judged under the OLD contract: no contract fingerprint
+    save_store({"7": item}, items_path)
+
+    result = runner.invoke(app, ["verify"])
+    assert result.exit_code == 0, result.output
+    assert "OBSOLETOS" in result.stdout
+    assert "1 de 1" in result.stdout
+
+
+def test_verify_refuses_to_write_a_verdict_from_a_pre_contract_worksheet(
+    tmp_path: Path, monkeypatch
+):
+    """A worksheet judged before the contract stamp existed cannot say WHAT its verdict was
+    judged against. It is skipped (`contract-missing`), never written with a guessed
+    contract — the exact lie this closes."""
+    from xbrain.store import load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws)
+
+    # Strip the contract stamp: this is what a worksheet exported by the old code looks like.
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    for entry in data["items"]:
+        entry.pop("contract_fingerprint", None)
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(app, ["verify", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+    assert "contract-missing" in result.stdout
+    assert "summary" not in load_store(items_path)["7"].verification  # nothing written

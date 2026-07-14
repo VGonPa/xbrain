@@ -110,6 +110,7 @@ from xbrain.vocab import (
 from xbrain.verification import (
     aggregate_verify_judgments,
     apply_verdicts_to_store,
+    count_invalidated_verdicts,
     cross_check_fingerprints,
     export_verify_worksheet,
     import_verify_fingerprints,
@@ -1721,7 +1722,10 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
 
 
 def _verify_write_verdicts(
-    cfg: Config, records: list[dict], fingerprints: dict[tuple[str, str], str]
+    cfg: Config,
+    records: list[dict],
+    fingerprints: dict[tuple[str, str], str],
+    contracts: dict[tuple[str, str], str],
 ) -> None:
     """Opt-in write path for `verify --apply --write-verdicts` (and its post-audit twin,
     `verify --audit --apply --write-verdicts`): persist each FINAL verdict onto its item with
@@ -1738,12 +1742,33 @@ def _verify_write_verdicts(
     """
     _auto_snapshot(cfg, "verify-write-verdicts")
     store = load_store(cfg.items_path)
-    result = apply_verdicts_to_store(store, records, fingerprints)
+    result = apply_verdicts_to_store(store, records, fingerprints, contracts)
     save_store(store, cfg.items_path)
     typer.echo(f"{result.summary()} → {cfg.items_path}")
 
 
-def _audit_write_fingerprints(records: list[dict], apply: list[Path]) -> dict[tuple[str, str], str]:
+def _echo_invalidated_verdicts(cfg: Config, store: dict[str, Item]) -> None:
+    """Say how many STORED verdicts the current contract has retired, before exporting a
+    fresh worksheet.
+
+    The number is the point. A contract change (a rubric rewrite, a new evidence surface,
+    a re-fetched article) silently retires verdicts that were perfectly valid under the old
+    rules — they paint no badge and must be re-judged. Reporting it is the difference
+    between "the verification layer covers the corpus" and knowing how much of it actually
+    does right now.
+    """
+    invalidated, stored = count_invalidated_verdicts(store, cfg.output_language)
+    if invalidated:
+        typer.echo(
+            f"⚠️  {invalidated} de {stored} verdicts almacenados quedaron OBSOLETOS: se "
+            "juzgaron bajo otro contrato (otro output, otra fuente u otra rúbrica). No "
+            "pintan badge; hay que re-verificarlos."
+        )
+
+
+def _audit_write_fingerprints(
+    records: list[dict], apply: list[Path], stamp: str = "output_fingerprint"
+) -> dict[tuple[str, str], str]:
     """The JUDGED fingerprints for the post-audit write.
 
     The MERGED RECORDS are the authority — they are what the report being written describes,
@@ -1753,7 +1778,9 @@ def _audit_write_fingerprints(records: list[dict], apply: list[Path]) -> dict[tu
     one the record lacks. Nothing here recomputes a fingerprint from the live store — that is
     the invariant the whole plumbing exists to protect (#79).
     """
-    return cross_check_fingerprints(record_fingerprints(records), import_verify_fingerprints(apply))
+    return cross_check_fingerprints(
+        record_fingerprints(records, stamp), import_verify_fingerprints(apply, stamp)
+    )
 
 
 def _verify_audit_apply(
@@ -1791,7 +1818,12 @@ def _verify_audit_apply(
     _echo_audit_log(audit_log)
     if write_verdicts:
         _reject_unaudited_write(aggregated, audit_log)
-        _verify_write_verdicts(cfg, records, _audit_write_fingerprints(records, apply))
+        _verify_write_verdicts(
+            cfg,
+            records,
+            _audit_write_fingerprints(records, apply),
+            _audit_write_fingerprints(records, apply, "contract_fingerprint"),
+        )
     # The report is written LAST, and only once the store write has succeeded. It is the report
     # that carries `audited: True`, which the guard above reads to refuse a second audit — so
     # marking it before a write that then dies would block the retry behind `--force`, which
@@ -1925,15 +1957,18 @@ def verify_command(
         # so a verdict binds to the output the judge saw — never a live recompute. They are
         # stamped onto the records too, carrying them into verify-report.json → the audit.
         fingerprints = import_verify_fingerprints(apply)
+        contracts = import_verify_fingerprints(apply, "contract_fingerprint")
         aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
         stamp_record_fingerprints(aggregated, fingerprints)
+        stamp_record_fingerprints(aggregated, contracts, "contract_fingerprint")
         _write_verify_report(cfg, *render_verify_report(aggregated))
         if write_verdicts:
-            _verify_write_verdicts(cfg, aggregated, fingerprints)
+            _verify_write_verdicts(cfg, aggregated, fingerprints, contracts)
         return
 
     chosen = _resolve_verify_executor(executor, cfg)
     store = load_store(cfg.items_path)
+    _echo_invalidated_verdicts(cfg, store)
     pairs = items_for_verification(store, parse_targets(target))
     if not pairs:
         typer.echo("No hay outputs que verificar.")
