@@ -313,7 +313,12 @@ def test_video_digest_rubric_admits_the_video_title_as_evidence():
     flags it) — and #91 admits it for the summary of the SAME item, so the two rubrics
     would contradict each other on one field. 0/195 items carry a title today; this goes
     live on the first backfill.
+
+    (The enumeration reads SIX surfaces since the rebase, not five: #98 added the quoted
+    post to the judge's `_source_text`, and 45 of the 235 video items are quote-tweets —
+    so the digest gained a sixth surface it must enumerate. Exactly the same argument as
+    the title, one PR later. See `test_video_digest.py::…admits_the_quoted_post…`.)
     """
     text = load_rubric("video-digest").lower()
     assert "video title" in text, "digest rubric no longer admits the video title as evidence"
-    assert "five surfaces" in text
+    assert "six surfaces" in text

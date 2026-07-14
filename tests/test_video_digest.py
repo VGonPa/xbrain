@@ -260,3 +260,63 @@ def test_apply_rejects_empty_digest():
     assert applied == 0
     assert "empty" in invalid[0][1][0]
     assert store["7"].content.sources[0].digest == ""  # unchanged
+
+
+# ------- the digest's evidence set must match what the generator AND judge are given
+#
+# 45 of the 235 video items are ALSO quote-tweets. Since #98 the judge's `_source_text`
+# carries a `[Quoted post — @handle (Name)]` block for those — so a digest rubric that
+# declares "the evidence is exactly these FIVE surfaces", a worksheet that never ships
+# the quoted post, and a judge that is shown it, are three different answers to one
+# question. That one-field-many-rules drift is precisely what this PR exists to kill.
+#
+# And the attribution runs the WRONG way if left alone: the rubric says the author
+# metadata attributes the clip ("posted by the speaker's own account"). On a quote-tweet
+# the poster is NOT the author of the quoted content — the #86 conflation, aimed at the
+# digest.
+
+from xbrain.executors.api import quoted_attribution, quoted_text  # noqa: E402
+from xbrain.rubrics import load_rubric  # noqa: E402
+from xbrain.verification import _source_text  # noqa: E402
+
+
+def _quoting_video_item() -> Item:
+    item = _video_item()
+    item.quoted_id = "999"
+    item.content.sources = [
+        *item.content.sources,
+        ContentSourceSuccess(
+            kind="quoted_tweet",
+            url="https://x.com/karpathy/status/999",
+            text="My talk on why RL is terrible.",
+            author=Author(handle="karpathy", name="Andrej Karpathy"),
+        ),
+    ]
+    return item
+
+
+def test_the_judge_shows_the_digest_a_quoted_post_block(tmp_path):
+    """The premise. If this ever stops holding, the coupling below is moot."""
+    assert f"[{quoted_attribution(_quoting_video_item())}]" in _source_text(_quoting_video_item())
+
+
+def test_the_digest_worksheet_ships_the_quoted_post_the_judge_will_check_against(tmp_path):
+    """The generator must hold every surface the judge holds, or the rubric names a
+    surface the running generator was never given — the bug this PR was written for."""
+    item = _quoting_video_item()
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([item], path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+
+    assert entry["quoted_text"] == quoted_text(item)
+    assert entry["quoted_attribution"] == quoted_attribution(item)
+
+
+def test_the_digest_rubric_admits_the_quoted_post_and_denies_the_poster_its_authorship():
+    """Attribution evidence, not substance — and pointed the right way round: on a
+    quote-tweet the speaker may be the QUOTED account, never the poster by default."""
+    text = load_rubric("video-digest").lower()
+
+    assert "quoted post" in text
+    assert "five surfaces" not in text  # the count moved; the enumeration must move with it
+    assert "poster" in text
