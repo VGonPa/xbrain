@@ -39,6 +39,8 @@ jobs:
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: 546ed6b321267ce1b70fba09fb6d3715cc5605ac
       - name: Install uv
         uses: astral-sh/setup-uv@v3
       - name: Set up Python
