@@ -22,6 +22,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import cast
 
@@ -104,6 +105,101 @@ def fingerprint_output(item: Item, target: VerifyTarget) -> str | None:
     if output is None:
         return None
     return hashlib.sha256(output.encode("utf-8")).hexdigest()
+
+
+# Bumped ONLY when the composition of the contract hash itself changes (not when a rubric
+# or a source changes — those are hashed). It makes the retirement of every previously
+# stored fingerprint explicit and greppable, instead of an accident of collision-freedom.
+_CONTRACT_VERSION = "xbrain-verify-contract/v1"
+
+
+@lru_cache(maxsize=None)
+def rubric_digest(target: VerifyTarget, language: str) -> str:
+    """The sha256 of BOTH rubrics the judge was handed for `target`, rendered in `language`.
+
+    The judge reads two: `rubric-verify` (how to judge) and the target's generation rubric
+    (what the output was supposed to obey — the adherence axis is judged against it). A
+    change to EITHER changes the rules the verdict was reached under, so both are hashed.
+
+    CACHED per `(target, language)`: `generate` runs the staleness check once per item over
+    thousands of notes, and the rubrics do not change inside a run. Re-reading and re-hashing
+    two files per item would make the badge check O(corpus) file I/O for no information.
+    A test that edits a rubric on disk must call `rubric_digest.cache_clear()`.
+    """
+    verify = load_rubric("verify", language=language)
+    generation = load_rubric(_TARGET_RUBRIC[target], language=language)
+    return hashlib.sha256(f"{verify}\0{generation}".encode()).hexdigest()
+
+
+def contract_fingerprint(item: Item, target: VerifyTarget, language: str) -> str | None:
+    """The sha256 binding a verdict to the FULL contract it was judged under, or None when
+    there is no output for `target`.
+
+    A verdict is not a property of the output alone: it is the result of judging THAT
+    output, against THAT source, under THOSE rubrics. `fingerprint_output` hashed only the
+    first, so #86 could rewrite what the judge reads (author metadata, thread, quoted-post
+    markers, images, titles) AND rewrite the rubrics, without touching one output
+    character — and every stored verdict still matched, still looked current, and still
+    painted its badge. Including verdicts issued under the contract that was measured
+    letting a false attribution through 8 times out of 8. A verdict that lies is the one
+    thing this layer exists to prevent.
+
+    THREE ARMS, all hashed:
+    * the OUTPUT text (`_output_for`) — the claim under judgment;
+    * the SOURCE the judge actually read for THIS target (`_source_text(item, target)`,
+      i.e. `evidence_surfaces` + the not-fetched markers) — the evidence it was checked
+      against. Target-scoped: a digest and a summary are judged against different sources;
+    * the RUBRICS (`rubric_digest`) — the rules it was checked by.
+
+    Any change to any arm changes the fingerprint, so the verdict goes stale automatically,
+    with nobody having to remember. The hash is a content hash, not a security primitive;
+    the NUL separators just keep two arms from concatenating into a third value.
+    """
+    output = _output_for(item, target)
+    if output is None:
+        return None
+    blob = "\0".join(
+        [
+            _CONTRACT_VERSION,
+            target,
+            output,
+            _source_text(item, target),
+            rubric_digest(target, language),
+        ]
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def verdict_is_current(item: Item, target: VerifyTarget, language: str) -> bool:
+    """True when the item's stored verdict for `target` was judged under the CURRENT
+    contract — the only condition under which a badge may paint.
+
+    A verdict with no `contract_fingerprint` (stored before this existed) is NOT current:
+    we cannot reconstruct what it was judged against, so we do not get to claim it still
+    holds. It is retired, not grandfathered.
+    """
+    verdict = item.verification.get(target)
+    if verdict is None or verdict.contract_fingerprint is None:
+        return False
+    return verdict.contract_fingerprint == contract_fingerprint(item, target, language)
+
+
+def count_invalidated_verdicts(store: dict[str, Item], language: str) -> tuple[int, int]:
+    """`(invalidated, total)` stored verdicts across the store, under the current contract.
+
+    The CLI reports it because the number IS the point: it says how much of the stored
+    verification a contract change has just retired, instead of letting stale verdicts keep
+    painting badges nobody re-earned.
+    """
+    invalidated = total = 0
+    for item in store.values():
+        for target in item.verification:
+            if target not in ALL_TARGETS:
+                continue
+            total += 1
+            if not verdict_is_current(item, cast(VerifyTarget, target), language):
+                invalidated += 1
+    return invalidated, total
 
 
 def _unfetched_parts(item: Item, target: VerifyTarget) -> list[str]:
@@ -202,6 +298,11 @@ def export_verify_worksheet(
                 # verdict binds to the JUDGED text, not to whatever the store holds at write
                 # time (#79). Threaded through the filled worksheet to `apply_verdicts_to_store`.
                 "output_fingerprint": fingerprint_output(item, target),
+                # The contract the judge is being handed RIGHT NOW: this output, this
+                # source, these rubrics. Threaded through the filled worksheet to the
+                # writer, so the stored verdict is bound to what was actually judged —
+                # never to a contract that changed while the judging was in flight.
+                "contract_fingerprint": contract_fingerprint(item, target, output_language),
                 "source": _source_text(item, target),
                 "generation_rubric": load_rubric(_TARGET_RUBRIC[target], language=output_language),
             }
@@ -249,16 +350,20 @@ def _fold_fingerprints(stamps: Iterable[tuple[tuple[str, str], str]]) -> dict[tu
     return fingerprints
 
 
-def _entry_stamps(entries: Iterable[object]) -> Iterator[tuple[tuple[str, str], str]]:
-    """Every valid judged-fingerprint stamp carried by `entries` (worksheet items or report
-    records — both key it the same way), skipping the missing/garbage ones."""
+def _entry_stamps(
+    entries: Iterable[object], stamp: str = "output_fingerprint"
+) -> Iterator[tuple[tuple[str, str], str]]:
+    """Every valid `stamp` carried by `entries` (worksheet items or report records — both key
+    it the same way), skipping the missing/garbage ones."""
     for entry in entries:
-        resolved = _entry_fingerprint(entry)
+        resolved = _entry_fingerprint(entry, stamp)
         if resolved is not None:
             yield resolved
 
 
-def import_verify_fingerprints(paths: list[Path]) -> dict[tuple[str, str], str]:
+def import_verify_fingerprints(
+    paths: list[Path], stamp: str = "output_fingerprint"
+) -> dict[tuple[str, str], str]:
     """Map every `(item_id, target)` to the fingerprint of the output that was JUDGED, read
     from the worksheet(s) `items` block (stamped by `export_verify_worksheet`, and carried
     through to the audit worksheet by `export_audit_worksheet`).
@@ -271,11 +376,13 @@ def import_verify_fingerprints(paths: list[Path]) -> dict[tuple[str, str], str]:
     Conflicting stamps drop the key (see `_fold_fingerprints`).
     """
     return _fold_fingerprints(
-        stamp for path in paths for stamp in _entry_stamps(_worksheet_items(path))
+        found for path in paths for found in _entry_stamps(_worksheet_items(path), stamp)
     )
 
 
-def record_fingerprints(records: Iterable[object]) -> dict[tuple[str, str], str]:
+def record_fingerprints(
+    records: Iterable[object], stamp: str = "output_fingerprint"
+) -> dict[tuple[str, str], str]:
     """The judged fingerprints carried BY the aggregated records themselves (stamped into
     `verify-report.json` by `stamp_record_fingerprints`).
 
@@ -284,7 +391,7 @@ def record_fingerprints(records: Iterable[object]) -> dict[tuple[str, str], str]
     including the ones the auditor never saw (the clean passes outside the consequential set).
     A record with no stamp, or a hand-edited one, resolves to nothing → `fingerprint-missing`.
     """
-    return _fold_fingerprints(_entry_stamps(records))
+    return _fold_fingerprints(_entry_stamps(records, stamp))
 
 
 def cross_check_fingerprints(
@@ -316,7 +423,9 @@ def cross_check_fingerprints(
 
 
 def stamp_record_fingerprints(
-    aggregated: list[dict], fingerprints: dict[tuple[str, str], str]
+    aggregated: list[dict],
+    fingerprints: dict[tuple[str, str], str],
+    stamp: str = "output_fingerprint",
 ) -> None:
     """Stamp each aggregated record with the JUDGED fingerprint of its output, in place.
 
@@ -328,7 +437,7 @@ def stamp_record_fingerprints(
     for record in aggregated:
         fingerprint = fingerprints.get((str(record.get("item_id")), str(record.get("target"))))
         if fingerprint is not None:
-            record["output_fingerprint"] = fingerprint
+            record[stamp] = fingerprint
 
 
 def _worksheet_items(path: Path) -> list:
@@ -340,16 +449,22 @@ def _worksheet_items(path: Path) -> list:
     return items if isinstance(items, list) else []
 
 
-def _entry_fingerprint(entry: object) -> tuple[tuple[str, str], str] | None:
-    """`((item_id, target), fingerprint)` for a worksheet entry carrying a valid stamped
-    fingerprint, else None (a non-dict entry or a missing/garbage hash)."""
+def _entry_fingerprint(
+    entry: object, stamp: str = "output_fingerprint"
+) -> tuple[tuple[str, str], str] | None:
+    """`((item_id, target), fingerprint)` for a worksheet entry carrying a valid `stamp`,
+    else None (a non-dict entry or a missing/garbage hash).
+
+    `stamp` selects WHICH fingerprint: `output_fingerprint` (the judged text) or
+    `contract_fingerprint` (the whole judging contract). One reader, so both stamps inherit
+    the same validation and the same fail-safe conflict handling."""
     if not isinstance(entry, dict):
         return None
-    fingerprint = entry.get("output_fingerprint")
+    fingerprint = entry.get(stamp)
     key = (str(entry.get("item_id")), str(entry.get("target")))
     if isinstance(fingerprint, str) and _FINGERPRINT_RE.match(fingerprint):
         return key, fingerprint
-    logger.debug("worksheet entry %s carries no valid output_fingerprint", key)
+    logger.debug("worksheet entry %s carries no valid %s", key, stamp)
     return None
 
 
@@ -607,7 +722,10 @@ class VerdictWriteResult:
 
 
 def _verdict_skip_reason(
-    record: object, store: dict[str, Item], fingerprints: dict[tuple[str, str], str]
+    record: object,
+    store: dict[str, Item],
+    fingerprints: dict[tuple[str, str], str],
+    contracts: dict[tuple[str, str], str],
 ) -> str | None:
     """Why this aggregated record cannot be written as a verdict, or None if it can.
 
@@ -630,16 +748,28 @@ def _verdict_skip_reason(
         return "fingerprint-missing"
     if not _FINGERPRINT_RE.match(fingerprint):
         return "fingerprint-invalid"
+    contract = contracts.get((item_id, target))
+    if contract is None:
+        # A worksheet from before the contract stamp existed. The verdict may be perfectly
+        # good, but we cannot say WHAT it was judged against — and a verdict we cannot bind
+        # to a contract is exactly the lie this closes. Skip it; re-verify to write it.
+        return "contract-missing"
+    if not _FINGERPRINT_RE.match(contract):
+        return "contract-invalid"
     return None
 
 
-def _build_verdict(record: dict, output_fingerprint: str) -> VerificationVerdict:
-    """Assemble one `VerificationVerdict` from an aggregated record + its JUDGED fingerprint."""
+def _build_verdict(
+    record: dict, output_fingerprint: str, contract_fingerprint_: str
+) -> VerificationVerdict:
+    """Assemble one `VerificationVerdict` from an aggregated record + the JUDGED fingerprints:
+    the output the judges read, and the CONTRACT they judged it under."""
     return VerificationVerdict(
         verdict=cast(Verdict, _verdict_of(record, "verdict")),
         faithfulness=_axis(record.get("faithfulness")),
         adherence=_axis(record.get("adherence")),
         output_fingerprint=output_fingerprint,
+        contract_fingerprint=contract_fingerprint_,
         verified_at=datetime.now(timezone.utc),
         flags=_flag_issues(record.get("flags") or []),
     )
@@ -665,6 +795,7 @@ def apply_verdicts_to_store(
     store: dict[str, Item],
     aggregated: list[dict],
     fingerprints: dict[tuple[str, str], str],
+    contracts: dict[tuple[str, str], str],
 ) -> VerdictWriteResult:
     """Persist each aggregated verdict onto its item as a `VerificationVerdict`, keyed by
     target, storing the JUDGED output fingerprint from `fingerprints` (opt-in
@@ -688,14 +819,14 @@ def apply_verdicts_to_store(
     written = 0
     skipped: list[tuple[str, str, str]] = []
     for record in aggregated:
-        reason = _verdict_skip_reason(record, store, fingerprints)
+        reason = _verdict_skip_reason(record, store, fingerprints, contracts)
         if reason is not None:
             as_dict = record if isinstance(record, dict) else {}
             skipped.append((str(as_dict.get("item_id")), str(as_dict.get("target")), reason))
             continue
         item_id, target = str(record["item_id"]), str(record["target"])
         store[item_id].verification[target] = _build_verdict(
-            record, fingerprints[(item_id, target)]
+            record, fingerprints[(item_id, target)], contracts[(item_id, target)]
         )
         written += 1
     return VerdictWriteResult(written=written, skipped=skipped)

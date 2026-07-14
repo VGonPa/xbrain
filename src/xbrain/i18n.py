@@ -25,6 +25,8 @@ class Strings:
     suggest variance that does not exist.
     """
 
+    language: str  # the output language these strings belong to — the rubric the judge
+    # was handed is language-substituted, so the verdict's contract hash needs it (PR-D).
     topics_label: str  # "Temas" / "Topics"
     content_header: str  # "Contenido" / "Content"
     summary_header: str  # "Resumen" / "Summary"
@@ -49,6 +51,7 @@ class Strings:
 
 _STRINGS: dict[str, Strings] = {
     "English": Strings(
+        language="English",
         topics_label="Topics",
         content_header="Content",
         summary_header="Summary",
@@ -66,6 +69,7 @@ _STRINGS: dict[str, Strings] = {
         quoted_unavailable_unknown="X served no content for it",
     ),
     "Spanish": Strings(
+        language="Spanish",
         topics_label="Temas",
         content_header="Contenido",
         summary_header="Resumen",
