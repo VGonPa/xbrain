@@ -47,6 +47,11 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
         "video_evidence_header",
         "verify_badge_fail",
         "verify_badge_review",
+        "quoted_post_header",
+        "quoted_post_unavailable",
+        "quoted_unavailable_deleted",
+        "quoted_unavailable_protected",
+        "quoted_unavailable_unknown",
     }
 
 
@@ -89,3 +94,18 @@ def test_strings_dataclass_is_frozen() -> None:
     s = strings_for("English")
     with pytest.raises(dataclasses.FrozenInstanceError):
         s.topics_label = "mutated"  # type: ignore[misc]
+
+
+def test_every_language_localises_the_quoted_post_strings() -> None:
+    """The quoted post is rendered into the human's note, so its headers must speak the
+    vault's language — a hardcoded Spanish `Post citado` would sit in an English vault.
+    Asserts the strings DIFFER per language, not merely that they are present: a field
+    copied verbatim across languages passes a presence check and still reads wrong."""
+    english, spanish = strings_for("English"), strings_for("Spanish")
+
+    assert english.quoted_post_header == "Quoted post"
+    assert spanish.quoted_post_header == "Post citado"
+    assert english.quoted_post_unavailable != spanish.quoted_post_unavailable
+    assert english.quoted_unavailable_deleted != spanish.quoted_unavailable_deleted
+    assert english.quoted_unavailable_protected != spanish.quoted_unavailable_protected
+    assert english.quoted_unavailable_unknown != spanish.quoted_unavailable_unknown

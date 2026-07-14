@@ -11,8 +11,10 @@ from typing import assert_never, cast
 from xbrain.config import SUPPORTED_TOPIC_STYLES
 from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
 from xbrain.i18n import Strings, strings_for
+from xbrain.executors.api import quoted_source
 from xbrain.models import (
     ARTICLE_PARAGRAPH_SEP,
+    QUOTED_CONTENT_KINDS,
     ArticleImageBlock,
     ArticleTextBlock,
     ContentSourceFailure,
@@ -70,6 +72,81 @@ def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str
     detail = " · ".join(bits) or "no se pudo recuperar"
     date = fetched_at.date().isoformat()
     return f"> ⚠ Enlace roto: <{source.url}> — {detail} (verificado {date})"
+
+
+def _blockquote(text: str) -> list[str]:
+    """Markdown-blockquote every line of `text` — the idiom for words that are NOT the
+    note author's. A blank line becomes a bare `>`, so one quote stays one quote instead
+    of breaking into two at the paragraph gap."""
+    return [f"> {line}" if line.strip() else ">" for line in text.split("\n")]
+
+
+def _quoted_failure_source(item: Item) -> ContentSourceFailure | None:
+    """The recorded reason the quoted post could not be read, or None."""
+    if item.content is None:
+        return None
+    for source in item.content.sources:
+        if isinstance(source, ContentSourceFailure) and source.kind in QUOTED_CONTENT_KINDS:
+            return source
+    return None
+
+
+def _quoted_unavailable_reason(reason: FailureReason, strings: Strings) -> str:
+    """The reader-facing wording for WHY the quoted post is missing.
+
+    `not_found` and `forbidden` are different facts about the world — a deleted post and
+    a locked account — and collapsing them into one "unavailable" would throw away the
+    only thing the reader can act on. Everything else (X hydrated nothing, a timeout)
+    honestly says just that: we do not know what was there.
+    """
+    if reason == "not_found":
+        return strings.quoted_unavailable_deleted
+    if reason == "forbidden":
+        return strings.quoted_unavailable_protected
+    return strings.quoted_unavailable_unknown
+
+
+def _quoted_lines(item: Item, strings: Strings) -> list[str]:
+    """Render the quoted post for the HUMAN — who is quoted, and what they said.
+
+    Until now the quoted body reached every LLM surface and never the reader: on a
+    quote-tweet (35% of the corpus) he met a summary ABOUT a post he could not see. And
+    a readable quote fell into the generic `## Content: <url>` branch — a third party's
+    words, with no author, inside a note whose author is the poster. That is exactly the
+    conflation the attribution rule stops for the model, rendered for the reader.
+
+    So: its own heading, NAMING the quoted account, with the body blockquoted. Inline,
+    not collapsed behind `<details>` — the video digest hides raw *evidence* (frames,
+    transcript) but shows the digest itself, and here the quoted post is not evidence
+    for the note, it IS the note's subject. Hiding the thing the summary is about would
+    reproduce the bug in a nicer wrapper.
+
+    The source is selected by `quoted_source` — the SAME helper the api prompt, the
+    enrich worksheet and the judge read — so the reader cannot be shown a different
+    quoted post from the one the model was given.
+    """
+    source = quoted_source(item)
+    if source is not None:
+        author = source.author
+        attribution = f" — @{author.handle} ({author.name})" if author else ""
+        return [
+            f"## {strings.quoted_post_header}{attribution}",
+            "",
+            *_blockquote(source.text),
+            "",
+            f"<{source.url}>",
+            "",
+        ]
+    failure = _quoted_failure_source(item)
+    if failure is None:
+        return []
+    reason = _quoted_unavailable_reason(failure.failure_reason, strings)
+    return [
+        f"## {strings.quoted_post_unavailable}",
+        "",
+        f"> ⚠ {reason} — <{failure.url}>",
+        "",
+    ]
 
 
 def generate(
@@ -617,24 +694,41 @@ def _content_lines(item: Item, strings: Strings) -> list[str]:
     digest_source = _video_source(item)
     lines: list[str] = []
     for source in content.sources:
+        # The quoted post has its OWN attributed section under the tweet (`_quoted_lines`).
+        # It must never fall through to the generic `## Content: <url>` branch, which would
+        # print a third party's words with no author inside a note whose author is the
+        # poster — and would print them twice.
+        if source.kind in QUOTED_CONTENT_KINDS:
+            continue
         if isinstance(source, ContentSourceSuccess):
-            if source.kind == "x_video":
-                # Badge only the canonical digest source (the one whose digest is
-                # fingerprinted); a second x_video source, if any, is never mis-badged.
-                badge = _verdict_badge(item, "digest", strings) if source is digest_source else None
-                lines += _video_digest_lines(source, strings, badge)
-            elif source.kind == "x_article" and source.blocks:
-                # Structured Article (#39): render the ordered text+image blocks
-                # as a blogpost. An `x_article` with EMPTY blocks (trafilatura
-                # fallback, or a pre-#39 record) falls through to the plain
-                # `source.text` path below — byte-unchanged, no regression.
-                lines += _article_blocks_lines(source, strings)
-            else:
-                heading = source.title or source.url
-                lines += [f"## {strings.content_header}: {heading}", "", source.text, ""]
+            lines += _success_source_lines(item, source, digest_source, strings)
         elif source.kind in ("external_article", "x_article"):
             lines += [_broken_link_line(source, content.fetched_at), ""]
     return lines
+
+
+def _success_source_lines(
+    item: Item,
+    source: ContentSourceSuccess,
+    digest_source: ContentSourceSuccess | None,
+    strings: Strings,
+) -> list[str]:
+    """Render one successfully-fetched source as its own kind of block.
+
+    An `x_video` becomes a `Video digest` section (#44); an `x_article` carrying
+    structured `blocks` becomes an ordered blogpost (#39 PR5), while one with EMPTY
+    blocks (trafilatura fallback, or a pre-#39 record) keeps the plain `source.text`
+    block — byte-unchanged. Everything else falls back to that plain block.
+    """
+    if source.kind == "x_video":
+        # Badge only the canonical digest source (the one whose digest is
+        # fingerprinted); a second x_video source, if any, is never mis-badged.
+        badge = _verdict_badge(item, "digest", strings) if source is digest_source else None
+        return _video_digest_lines(source, strings, badge)
+    if source.kind == "x_article" and source.blocks:
+        return _article_blocks_lines(source, strings)
+    heading = source.title or source.url
+    return [f"## {strings.content_header}: {heading}", "", source.text, ""]
 
 
 def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
@@ -651,6 +745,12 @@ def _render_note(item: Item, strings: Strings, topic_style: str) -> str:
     if media_lines:
         lines += media_lines
         lines.append("")
+    # The quoted post sits directly under the tweet + its media, exactly where X puts the
+    # quote card — the same natural-read-order argument the media block makes above. It
+    # is the SUBJECT of a quote-tweet's summary, so burying it below `## Enlaces` and the
+    # permalink (where `_content_lines` renders) would leave the reader meeting the
+    # summary long before the thing it is about.
+    lines += _quoted_lines(item, strings)
     if item.links:
         lines.append("## Enlaces")
         lines += [f"- <{link.url}>" for link in item.links]
