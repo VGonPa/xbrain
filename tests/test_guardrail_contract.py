@@ -237,7 +237,10 @@ def test_the_reason_reaches_every_surface_identically(tmp_path):
     assert note is not None and "no longer exists" in note
     assert note in _user_prompt(item, VOCAB)  # generator: api prompt
     assert _worksheet_entry(item, tmp_path)["unfetched_links_note"] == note  # generator: worksheet
-    assert note in _source_text(item)  # judge: verify source
+    # The judge's source is TARGET-scoped since #94 (a digest is judged against different
+    # evidence than a summary). This surface check is about the ENRICH targets, whose
+    # generators ship the links.
+    assert note in _source_text(item, "summary")  # judge: verify source
 
 
 def test_an_unfetched_link_with_no_recorded_failure_still_gets_the_rule():
