@@ -44,6 +44,39 @@ def _link_content_source(item: Item) -> ContentSourceSuccess | None:
     return None
 
 
+def _article_title(item: Item) -> str | None:
+    """The FETCHED linked article's title, or None.
+
+    The summary rubric declares "the fetched article body and its title" as evidence, the
+    api prompt ships it and the judge's `_source_text` ships it — but the worksheet track,
+    the one that actually runs, shipped the body alone. The rubric was naming a surface the
+    running generator never received. Cost, measured: 8 summaries flagged ungrounded for a
+    name that sits in the article's TITLE.
+    """
+    if not item.content:
+        return None
+    for source in item.content.sources:
+        if isinstance(source, ContentSourceSuccess) and source.kind in LINK_CONTENT_KINDS:
+            return source.title
+    return None
+
+
+def _video_title(item: Item) -> str | None:
+    """The `x_video` source's title, or None.
+
+    The judge's `_source_text` carries `[Video title]` (#86), and the summary rubric
+    admits it as evidence — so the generator must be handed it too, or the rubric names a
+    surface the generator was never given. Defined locally: importing `video_digest`
+    would be circular (it imports `_video_transcript` from here).
+    """
+    if not item.content:
+        return None
+    for source in item.content.sources:
+        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
+            return source.title
+    return None
+
+
 def _article_text(item: Item) -> str | None:
     """First successfully-fetched LINKED article body, truncated, or None."""
     return first_source_text(item, LINK_CONTENT_KINDS)
@@ -97,6 +130,8 @@ def export_worksheet(
             "(content-bearing photos) — weigh them all as topic signal, not just "
             "`text`. `unfetched_links_note` / `quoted_content_note` mark content "
             "that was NEVER downloaded: obey them — never describe or guess it. "
+            "Name no entity that none of these surfaces names: `links` carry a URL "
+            "and a domain, which are topic signal only — never a name, never content. "
             "Then run: xbrain enrich --apply <this file>."
         ),
         "rubrics": {
@@ -108,10 +143,17 @@ def export_worksheet(
             {
                 "item_id": it.id,
                 "author": it.author.handle,
+                # The display name travels WITH the handle: the summary rubric admits the
+                # author metadata as evidence for WHO POSTED, and the judge's
+                # `_source_text` holds `@handle (Display Name)` since #86. Handle-only
+                # would have the generator de-abbreviating `@lexfridman` into a name it
+                # was never shown, while the judge checks the name it WAS shown.
+                "author_name": it.author.name,
                 "text": it.text,
                 "bookmark_folder": it.bookmark_folder,
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
+                "article_title": _article_title(it),
                 # The poster's OWN expanded thread — real signal, but NOT a fetched
                 # linked page. It ships in its own field so the agent never reads the
                 # author's own words as the body of an article nobody downloaded.
@@ -128,6 +170,9 @@ def export_worksheet(
                 "quoted_content_note": (
                     QUOTED_CONTENT_UNFETCHED_NOTE if quoted_content_unfetched(it) else None
                 ),
+                # The judge sees `[Video title]` (#86); the generator must hold the same
+                # surface, or the rubric's evidence set is a promise we do not keep.
+                "video_title": _video_title(it),
                 "video_transcript": _video_transcript(it),
                 # Content-bearing photo descriptions (#34): the same non-decorative
                 # selection the `api` executor injects as its `Images in this post:`

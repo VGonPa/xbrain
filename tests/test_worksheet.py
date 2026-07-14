@@ -420,3 +420,62 @@ def test_export_worksheet_marks_an_unfetched_quoted_post(tmp_path):
 
 def test_export_worksheet_no_quoted_note_without_a_quote(tmp_path):
     assert _exported(_item("1"), tmp_path)["quoted_content_note"] is None
+
+
+def test_export_worksheet_carries_author_display_name(tmp_path):
+    """The summary rubric admits the author metadata as evidence for WHO POSTED, and the
+    judge's `_source_text` holds `@handle (Display Name)` since #86. Shipping the handle
+    alone leaves the generator de-abbreviating `@lexfridman` into a name it never saw while
+    the judge validates against the display name it DID see — the two sides disagreeing
+    about what evidence exists. 221 of 235 video authors have a name that differs from the
+    handle, so this is the common case.
+    """
+    path = tmp_path / "ws.json"
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["author"] == "a"
+    assert entry["author_name"] == "A"
+
+
+def test_export_worksheet_summary_rubric_carries_the_evidence_contract(tmp_path):
+    """The exported worksheet IS the enrich model's prompt. Assert one canary per rule, so
+    a swapped or gutted rubric reds here instead of silently shipping the OLD rule that
+    produced 307 ungrounded names."""
+    path = tmp_path / "ws.json"
+    export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
+    rubric = json.loads(path.read_text(encoding="utf-8"))["rubrics"]["summary"].lower()
+    assert "neutral descriptor" in rubric, "lost the never-name-an-unnamed-entity rule"
+    assert "verbatim" in rubric, "lost the quote-verbatim rule"
+    assert "sharpen" in rubric, "lost the do-not-sharpen rule"
+    assert "domain" in rubric, "lost the URL/domain-is-not-a-name rule"
+
+
+def test_export_worksheet_carries_the_fetched_article_title(tmp_path):
+    """The summary rubric declares "the fetched article body AND ITS TITLE" as evidence.
+
+    The api prompt ships the title (`Linked article ({src.title …})`) and the judge's
+    `_source_text` ships it — but the worksheet track, the one that actually runs, shipped
+    the body only. So the rubric named a surface the running generator was never handed:
+    a promise the code did not keep. Measured cost: 8 summaries were flagged as ungrounded
+    for names that appear in the article's title — one of them "Financial Times", the case
+    we had both been citing as the canonical hallucination. It was grounded all along.
+    """
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _item("1")
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://ft.com/x",
+                title="Financial Times: the compute race",
+                text="A long article body.",
+            )
+        ],
+    )
+    path = tmp_path / "ws.json"
+    export_worksheet([item], VOCAB, path, "claude-code", "English")
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["article_title"] == "Financial Times: the compute race"
+    assert entry["article"] == "A long article body."
