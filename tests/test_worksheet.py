@@ -322,9 +322,11 @@ def test_export_worksheet_notes_unfetched_links(tmp_path):
     path = tmp_path / "ws.json"
     export_worksheet([_item("1")], VOCAB, path, "claude-code", "English")
     data = json.loads(path.read_text(encoding="utf-8"))
+    from xbrain.executors.api import unfetched_links_note
+
     note = data["items"][0]["unfetched_links_note"]
     assert note is not None
-    assert "NOT fetched" in note
+    assert note == unfetched_links_note(_item("1"))  # the SHARED note, verbatim
 
 
 def test_export_worksheet_no_unfetched_note_when_article_fetched(tmp_path):
@@ -410,9 +412,10 @@ def test_export_worksheet_marks_an_unfetched_quoted_post(tmp_path):
     does not invent the shared content the summary rubric asks it to describe."""
     item = _item("1")
     item.quoted_id = "999"
+    from xbrain.executors.api import QUOTED_CONTENT_UNFETCHED_NOTE
+
     entry = _exported(item, tmp_path)
-    assert entry["quoted_content_note"] is not None
-    assert "NOT fetched" in entry["quoted_content_note"]
+    assert entry["quoted_content_note"] == QUOTED_CONTENT_UNFETCHED_NOTE
 
 
 def test_export_worksheet_no_quoted_note_without_a_quote(tmp_path):

@@ -441,11 +441,15 @@ def test_source_text_marks_unfetched_links():
     from xbrain.models import Link
     from xbrain.verification import _source_text
 
+    from xbrain.executors.api import unfetched_links_note
+
     item = _item()
     item.links = [Link(url="https://t.co/x", domain="time.com")]
     # the only content source is the x_video transcript — no fetched article
     text = _source_text(item)
-    assert "NOT fetched" in text
+    # Identity, not a substring: `"NOT fetched" in text` is already satisfied by the
+    # `[Links — content NOT fetched]` HEADER, so it would pass with the instruction gone.
+    assert unfetched_links_note(item) in text
     assert "time.com" in text
 
 
@@ -584,3 +588,18 @@ def test_source_text_omits_decorative_image_descriptions():
     from xbrain.verification import _source_text
 
     assert "[Images in the post]" not in _source_text(_item())
+
+
+def test_source_text_omits_the_author_block_without_a_handle():
+    """G4: the rubric tells the judge the `[Author]` block is TRUSTED metadata, so an
+    empty one (`[Author]\\n@ ()`) would present a garbage anchor as trustworthy. No
+    handle, no block — the judge then has no author to attribute anything to, which is
+    the strict direction."""
+    from xbrain.verification import _source_text
+
+    item = _item()
+    item.author = Author(handle="", name="")
+    text = _source_text(item)
+    assert "[Author]" not in text
+    assert "@ ()" not in text
+    assert "[Video transcript]" in text  # the rest of the source is unaffected
