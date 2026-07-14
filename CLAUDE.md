@@ -335,10 +335,20 @@ the judge read **and** the rubrics it applied).
 
 And check the invalidation signal actually **reaches the population being repaired**. The
 usual lever is `content.fetched_at` — and it cannot reach an item whose `content` is
-`None`, because there is nothing to stamp. Measured on the real store: **1,551 of 2,168
-items (72%) have no `content` at all**, and **686 of them quote a post** — the exact
-population a quoted-post repair exists to fix. A repair whose staleness signal lives on
-the object it is creating reaches nobody.
+`None`, because there is nothing to stamp.
+
+Measured on the real store, each number with the definition it was measured under:
+
+- **620** items are truncated (`looks_truncated`);
+- of those, **526** have the truncated tweet as their **only** evidence — no article, no
+  transcript, no thread. Repairing their text changes everything downstream;
+- and **1,551 of 2,168 (72%)** carry **no `content` block at all**, so a `fetched_at`
+  lever reaches none of them.
+
+A repair whose staleness signal lives on the object it is *creating* reaches nobody. (The
+figure originally quoted here — "432" — was stale: it predated a fix that moved detection
+from 535 to 620, and nobody re-derived it when the population moved. Both numbers above
+were re-derived from the store before being written down. That is the whole of rule 2.)
 
 ### 7. The cheapest verification layer is showing the user the evidence next to the claim
 
