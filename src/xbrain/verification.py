@@ -112,15 +112,19 @@ def _unfetched_parts(item: Item, target: VerifyTarget) -> list[str]:
     no fetcher retrieves. An output describing either is then checkable as unsupported
     instead of being waved through against evidence that is not there.
 
-    Only for the ENRICH targets. The digest generator is never handed the links or the
-    quote — `export_video_digest_worksheet` ships the video and the post — so there is
+    The LINKS marker is for the ENRICH targets only. The digest generator is never handed
+    the links — `export_video_digest_worksheet` ships the video and the post — so there is
     nothing to guard, and a marker listing URLs would put a domain in front of a judge
     whose generator never saw one.
+
+    The QUOTED marker applies to EVERY target, digest included. 45 of the 235 video items
+    are quote-tweets, and since #87 the digest worksheet ships the quoted post — so the
+    quote is a digest evidence surface, and its absence is a digest guardrail. Suppressing
+    the marker there would leave the digest generator told (by its rubric) to attribute
+    via a quoted label, with no marker saying the quote could not be read.
     """
-    if target == "digest":
-        return []
     parts: list[str] = []
-    links_note = unfetched_links_note(item)
+    links_note = unfetched_links_note(item) if target != "digest" else None
     if links_note:
         parts += [
             "[Links — content NOT fetched]",

@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.executors.api import (
+    BOOKMARK_FOLDER_RULE,
+    _video_source,
     QUOTED_CONTENT_UNFETCHED_NOTE,
     quoted_attribution,
     quoted_text,
@@ -62,22 +64,6 @@ def _article_title(item: Item) -> str | None:
     """
     source = _link_content_source(item)
     return source.title if source else None
-
-
-def _video_source(item: Item) -> ContentSourceSuccess | None:
-    """The item's first `x_video` content source, or None when it has none.
-
-    Lives here, with the other source readers, because `video_digest` imports this module
-    — defining it there and reading it here would make the two import each other.
-    `video_digest` re-exports it, so every existing `from xbrain.video_digest import
-    _video_source` keeps working.
-    """
-    if item.content is None:
-        return None
-    for source in item.content.sources:
-        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
-            return source
-    return None
 
 
 def _video_title(item: Item) -> str | None:
@@ -144,6 +130,7 @@ def export_worksheet(
             "mark content that was NEVER downloaded: obey them — never describe or guess it. "
             "Name no entity that none of these surfaces names: `links` carry a URL "
             "and a domain, which are topic signal only — never a name, never content. "
+            f"`bookmark_folder` is {BOOKMARK_FOLDER_RULE}. "
             "Then run: xbrain enrich --apply <this file>."
         ),
         "rubrics": {

@@ -22,7 +22,9 @@ from xbrain.models import (
 )
 
 
-def _item(*, video: bool = True, article: bool = True, thread: bool = True) -> Item:
+def _item(
+    *, video: bool = True, article: bool = True, thread: bool = True, quoted: bool = True
+) -> Item:
     sources: list[ContentSourceSuccess] = []
     if video:
         sources.append(
@@ -54,8 +56,18 @@ def _item(*, video: bool = True, article: bool = True, thread: bool = True) -> I
                 text="1/ the poster's own thread",
             )
         )
+    if quoted:
+        sources.append(
+            ContentSourceSuccess(
+                kind="quoted_tweet",
+                url="https://x.com/karpathy/status/999",
+                text="the quoted post's body",
+                author=Author(handle="karpathy", name="Andrej Karpathy"),
+            )
+        )
     return Item(
         id="7",
+        quoted_id="999" if quoted else None,
         source="bookmark",
         url="https://x.com/a/status/7",
         author=Author(handle="emollick", name="Ethan Mollick"),
@@ -83,7 +95,11 @@ def _item(*, video: bool = True, article: bool = True, thread: bool = True) -> I
 
 
 # What each target's GENERATOR is actually handed — the whole point of the module.
-DIGEST_KEYS = ("author", "video_title", "video_transcript", "video_frames", "tweet")
+# `quoted` is a DIGEST surface too: 45 of the 235 video items are quote-tweets, the digest
+# worksheet ships the quoted post (#87), and on a quote-tweet the clip is very often the
+# QUOTED account's — so it is the attribution evidence that stops "posted by the speaker's
+# own account" from naming the wrong person.
+DIGEST_KEYS = ("author", "video_title", "video_transcript", "video_frames", "quoted", "tweet")
 ENRICH_KEYS = DIGEST_KEYS + ("images", "article_title", "article", "thread")
 
 
@@ -135,7 +151,7 @@ def test_surfaces_carry_the_items_text_under_a_label():
 def test_an_absent_surface_is_omitted_entirely():
     """No video, no article, no thread → those surfaces do not appear at all. An empty
     labelled block would tell the judge evidence exists where there is none."""
-    item = _item(video=False, article=False, thread=False)
+    item = _item(video=False, article=False, thread=False, quoted=False)
     keys = {s.key for s in evidence_surfaces(item, "summary")}
     assert keys == {"author", "tweet", "images"}
 

@@ -1,4 +1,5 @@
-"""What counts as EVIDENCE for a generated output — one definition, four consumers.
+"""What counts as EVIDENCE for a generated output — one definition, four consumers
+(three of them bound here; the fourth, the checker, in #89 — see THE INVARIANT below).
 
 THE PROBLEM THIS EXISTS TO KILL. Four components each need to know what may support a
 claim in a generated `summary` / `digest` / `topics`:
@@ -17,13 +18,23 @@ that the rubric promised the judge.
 
 THE INVARIANT. `evidence_surfaces(item, target)` is the single source of truth:
 
-    generator fields  ⊇  evidence_surfaces(item, target)
-    judge source      ==  evidence_surfaces(item, target)
-    checker evidence  ==  evidence_surfaces(item, target)
-    verify rubric     declares every surface it admits
+    generator fields  ⊇  evidence_surfaces(item, target)     [bound here]
+    judge source      ==  evidence_surfaces(item, target)     [bound here]
+    verify rubric     declares every surface it admits        [bound here]
+    checker evidence  ==  evidence_text(item, target)         [bound in #89, NOT here]
 
-`tests/test_evidence_contract.py` asserts exactly that, per target, by identity against
-this module. Add a surface to one component and forget the others → red.
+`tests/test_evidence_contract.py` asserts the first three, per target, by identity against
+this module, per generator. Add a surface to one of those components and forget the others
+→ red.
+
+**The CHECKER's leg is NOT bound in this module, and saying otherwise would be the exact
+dishonesty this PR exists to end.** The deterministic entity check lives in #89, which is
+stacked ON this branch — so nothing here can import it, and a test that compared
+`evidence_text` against `evidence_surfaces` would be asserting this module against itself:
+green forever, binding nothing. `evidence_text` is the API the checker MUST consume, and
+#89 carries the test that proves it does (it calls `evidence_text` and keeps no private
+list). Until #89 lands, `evidence_text` has no production caller, and this docstring says
+so rather than implying a fourth consumer that does not yet exist.
 
 EVIDENCE IS TARGET-DEPENDENT, and getting it wrong is a bug in BOTH directions. Judge a
 digest against the article and you excuse an invention it could not have sourced. Judge a
@@ -39,14 +50,25 @@ it was correctly given. So:
   the poster's own thread · the fetched article's title and body · the image
   descriptions.
 
-A URL IS NOT A SURFACE. A link's URL/domain is topic signal — never a name, never
-content. It is deliberately absent from every surface set, so no name can be grounded in
-it. This is not pedantry: a summary in the corpus reconstructed a whole article — its
+A LINK IS NOT A SURFACE. No surface is derived from `item.links`: a link's URL/domain is
+topic signal — never a name, never content — so nothing in `item.links` can ground a name.
+This is not pedantry: a summary in the corpus reconstructed a whole article — its
 publication ("Axios") and a company ("Anthropic") — out of the slug
 `axios.com/2025/05/28/ai-jobs-white-collar-unemployment-anthropic`, of a link that was
 never fetched. The judge could not flag it, because its own rubric carved the URL out of
 "unsupported". `rubric-verify.md` now says what the generator's rubric says: a domain is
 topic signal, never a name.
+
+BE PRECISE ABOUT WHAT THAT DOES NOT SAY. It is NOT true that "no surface contains a URL":
+**1,281 of the 2,168 items carry one inside their own tweet text**, and the `[Tweet]`
+surface is the post's words, verbatim, URLs and all — as it must be. So `evidence_text`
+does contain URL characters, and a CHECKER that asks "does this name appear anywhere in
+the evidence blob?" could ground "Anthropic" in a `t.co`-expanded slug sitting in the
+tweet. Not exploitable in the corpus today (stripping URLs from the blob leaves every
+grounded name still grounded — measured), but it is a real hole and it belongs to the
+component that does the substring search: **#89's checker must strip URLs before matching
+a name.** Stating the invariant as "no surface contains a URL" — which the earlier draft
+did — would have made that hole invisible by decree.
 """
 
 from __future__ import annotations
@@ -57,13 +79,14 @@ from dataclasses import dataclass
 from xbrain.executors.api import (
     _content_image_descriptions,
     _video_frame_descriptions,
+    _video_source,
     quoted_attribution,
     quoted_source,
     thread_text,
 )
 from xbrain.models import Item, VerifyTarget
 from xbrain.rubrics import ARTICLE_CHAR_LIMIT
-from xbrain.worksheet import _link_content_source, _video_source, _video_transcript
+from xbrain.worksheet import _link_content_source, _video_transcript
 
 
 @dataclass(frozen=True)
