@@ -66,6 +66,18 @@ from xbrain.gate_audit import (
 # ---------------------------------------------------------------------------
 
 
+#: A real, public commit SHA from this repo's history — used as realistic test data.
+#:
+#: `# pragma: allowlist secret` because detect-secrets scores any 40-char hex string as a
+#: "Hex High Entropy String". A git SHA is precisely that shape and is precisely not a secret;
+#: every commit hash in the repo is world-readable. Audited, false positive.
+#:
+#: (Worth knowing: `detect-secrets scan` only reads GIT-TRACKED files, so this fires the
+#: moment the file is `git add`ed and NOT before. A local `poe check` on a brand-new,
+#: untracked file is a FALSE GREEN — which is how this one reached CI.)
+_SHA = "9e9a5c028e48d92c71a407c9e227e79caeb54326"  # pragma: allowlist secret
+
+
 def _run(name: str, conclusion: str | None, status: str = "completed", **extra: Any) -> Any:
     """One entry as the `/commits/{sha}/check-runs` endpoint returns it."""
     return {"name": name, "status": status, "conclusion": conclusion, **extra}
@@ -383,7 +395,7 @@ def test_the_issue_body_carries_the_evidence() -> None:
     body = render_issue_body(
         verdict=Verdict.LYING,
         violations=[Violation("step-continue-on-error", "Quality gate")],
-        sha="9e9a5c028e48d92c71a407c9e227e79caeb54326",
+        sha=_SHA,
         reported="success",
         audit_passed=False,
         repo="VGonPa/xbrain",
@@ -421,7 +433,7 @@ def _invoke(
             "--check-runs", str(runs),
             "--workflow", str(workflow),
             "--audit-result", audit_result,
-            "--sha", "9e9a5c028e48d92c71a407c9e227e79caeb54326",
+            "--sha", _SHA,
             "--repo", "VGonPa/xbrain",
             "--run-url", "https://github.com/VGonPa/xbrain/actions/runs/1",
             "--body-out", str(body),
