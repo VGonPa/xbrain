@@ -14,6 +14,8 @@ from pathlib import Path
 
 from xbrain.executors.api import (
     QUOTED_CONTENT_UNFETCHED_NOTE,
+    quoted_attribution,
+    quoted_text,
     _content_image_descriptions,
     _video_frame_descriptions,
     first_source_text,
@@ -126,10 +128,12 @@ def export_worksheet(
             "page), `thread` (the poster's own full thread text — not a linked "
             "page), `video_transcript` (the full talk — what the video SAYS), "
             "`video_frame_descriptions` (what the video SHOWS: slides/screens, "
-            "present even when there is no transcript) and `image_descriptions` "
-            "(content-bearing photos) — weigh them all as topic signal, not just "
-            "`text`. `unfetched_links_note` / `quoted_content_note` mark content "
-            "that was NEVER downloaded: obey them — never describe or guess it. "
+            "present even when there is no transcript), `image_descriptions` "
+            "(content-bearing photos) and `quoted_text` (the post this one is "
+            "QUOTING — a third party's words, whose author `quoted_attribution` "
+            "names; the poster is NOT that author) — weigh them all as topic "
+            "signal, not just `text`. `unfetched_links_note` / `quoted_content_note` "
+            "mark content that was NEVER downloaded: obey them — never describe or guess it. "
             "Name no entity that none of these surfaces names: `links` carry a URL "
             "and a domain, which are topic signal only — never a name, never content. "
             "Then run: xbrain enrich --apply <this file>."
@@ -163,10 +167,20 @@ def export_worksheet(
                 # agent must not reconstruct the linked content from the URL/domain
                 # (see `links_content_unfetched`).
                 "unfetched_links_note": unfetched_links_note(it),
-                # Guardrail: `quoted_id` is captured but no fetcher downloads the
-                # quoted post, so the shared content is NOT in this worksheet. Without
-                # this note the summary rubric's "summarise the shared content" rule
-                # would be an order to invent it.
+                # The quoted post — the THIRD PARTY content a quote-tweet is reacting
+                # to, parsed from the same X payload as the tweet itself. It is the
+                # evidence the generator was missing: without it, a bare reaction
+                # ("Read this and you'll understand") had nothing to summarise, and the
+                # model filled the hole from world knowledge. `quoted_attribution`
+                # names WHOSE words these are — the same label the api prompt and the
+                # judge read, so the attribution rule is enforceable.
+                "quoted_text": quoted_text(it),
+                "quoted_attribution": quoted_attribution(it),
+                # Guardrail, unchanged in spirit: when the quoted post could NOT be
+                # fetched (deleted, protected, not hydrated), say so — the summary
+                # rubric's "summarise the shared content" rule would otherwise be an
+                # order to invent it. Fires only on that state; a fetched quote ships
+                # its body above instead.
                 "quoted_content_note": (
                     QUOTED_CONTENT_UNFETCHED_NOTE if quoted_content_unfetched(it) else None
                 ),

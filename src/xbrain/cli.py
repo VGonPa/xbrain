@@ -34,7 +34,12 @@ from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.models import ArchiveImport, Author, Item, SourceName
-from xbrain.refresh import estimate_download_size, refresh_video_media
+from xbrain.refresh import (
+    backfill_quoted_from_store,
+    backfill_quoted_sources,
+    estimate_download_size,
+    refresh_video_media,
+)
 from xbrain.rubrics import load_vocab, save_vocab
 from xbrain.store import (
     load_state,
@@ -332,6 +337,124 @@ def _format_size_estimate(estimated_bytes: int, n_estimable: int, n_unknown: int
     )
 
 
+def _recapture_history(
+    cfg: Config, source: str, *, label: str, headless: bool = False
+) -> list[Item]:
+    """Scroll the FULL X history and return every freshly-parsed item.
+
+    The shared capture harness behind every backfill (`refresh-media`,
+    `refresh-quoted`): one scroll, one parser, so a second backfill cannot drift
+    into its own subtly different ingest path.
+
+    `known_ids` is EMPTY, which disables `extract_source`'s skip-known early-stop —
+    the whole timeline is walked, not just what is newer than the cursor. Unlike
+    `_run_extract`, the `state.json` cursors are deliberately left untouched: a
+    backfill revisits existing records, so the next `extract` cursor must not move.
+    """
+    # Mirrors `_run_extract` — the source → (target URL, GraphQL source) mapping.
+    targets = {
+        "bookmark": _BOOKMARKS_URL,
+        "own_tweet": f"https://x.com/{cfg.x_handle}",
+    }
+    source_sets: dict[str, list[SourceName]] = {
+        "bookmarks": ["bookmark"],
+        "tweets": ["own_tweet"],
+        "all": ["bookmark", "own_tweet"],
+    }
+    typer.echo(
+        f"{label} scrolls the FULL X history with no skip-known — this is "
+        "slow and human-paced and can take many minutes. Leave it running."
+    )
+    fresh: list[Item] = []
+    with x_context(cfg.storage_state_path, headless=headless) as context:
+        for src in source_sets[source]:
+            fresh.extend(extract_source(context, src, targets[src], set()))
+    return fresh
+
+
+def _guard_empty_recapture(
+    store: dict[str, Item], items_seen: int, *, label: str, force: bool
+) -> None:
+    """Abort a backfill that re-saw 0 known items against a non-empty store.
+
+    `extract_source` returns `[]` (it does NOT raise) when the session is logged in
+    but the GraphQL parser drifts or the scroll is interrupted. Re-seeing nothing is
+    therefore a likely-broken run, not a successful no-op — and since the merge was a
+    no-op the store on disk is untouched, so aborting without saving is byte-identical
+    (and the pre-snapshot already fired). `--force` downgrades it to a warning.
+    """
+    if not (store and items_seen == 0):
+        return
+    warning = (
+        f"{label} re-vio 0 de los {len(store)} items ya conocidos — "
+        "la sesión de X probablemente caducó o el parser GraphQL ha derivado "
+        "(spec §6); no se actualizó nada."
+    )
+    if not force:
+        raise RuntimeError(f"{warning} Usa --force para guardar igualmente.")
+    typer.echo(f"AVISO: {warning}", err=True)
+
+
+def _run_refresh_quoted_from_store(cfg: Config) -> None:
+    """Backfill the quoted post from items ALREADY in the store — no browser, no network.
+
+    A quote-tweet's `quoted_id` often names a post we captured in its own right, so the
+    evidence is one dict lookup away. Free, instant, and re-runnable. What it cannot
+    reach (a quoted post we never captured) is left for `refresh-quoted`.
+
+    Destructive (rewrites `items.json`) → auto-snapshots first.
+    """
+    _auto_snapshot(cfg, "refresh-quoted-from-store")
+    store = load_store(cfg.items_path)
+    report = backfill_quoted_from_store(store)
+    save_store(store, cfg.items_path)
+    typer.echo(
+        f"refresh-quoted --from-store: {report.sources_attached} quoted posts attached "
+        f"from items already in the store; {report.already_present} already had one; "
+        f"{report.quoted_items_not_seen} quote-tweets quote a post we do NOT hold "
+        "(run `xbrain refresh-quoted` to capture those)."
+    )
+    if report.readable:
+        typer.echo(
+            f"Ahora: `xbrain enrich` re-genera los {report.readable} summaries con la "
+            "evidencia nueva (solo esos avanzan `content.fetched_at`; un post citado "
+            "ilegible se registra pero no re-enriquece)."
+        )
+
+
+def _run_refresh_quoted(cfg: Config, source: str, *, force: bool, headless: bool = False) -> None:
+    """Re-capture X and backfill the QUOTED POST onto already-stored quote-tweets.
+
+    No per-item fetch: X embeds the quoted post — body AND author — in the same
+    timeline payload as the tweet quoting it, so one re-capture carries everything.
+    Items that gain a quoted post get a bumped `content.fetched_at`, so the next
+    `xbrain enrich` re-generates exactly those summaries against the evidence they
+    were previously written without.
+
+    Destructive (rewrites `items.json` in place) → auto-snapshots first.
+    """
+    _auto_snapshot(cfg, "refresh-quoted")
+    store = load_store(cfg.items_path)
+    fresh = _recapture_history(cfg, source, label="refresh-quoted", headless=headless)
+    report = backfill_quoted_sources(store, fresh)
+
+    _guard_empty_recapture(store, report.items_seen, label="refresh-quoted", force=force)
+    save_store(store, cfg.items_path)
+    typer.echo(
+        f"refresh-quoted: {report.items_seen} known items re-seen; "
+        f"{report.sources_attached} quoted posts attached "
+        f"({report.readable} readable, {report.unreadable} unavailable); "
+        f"{report.already_present} already had one; "
+        f"{report.quoted_items_not_seen} quote-tweets NOT re-seen (still evidence-less)."
+    )
+    if report.readable:
+        typer.echo(
+            f"Ahora: `xbrain enrich` re-genera los {report.readable} summaries con la "
+            "evidencia nueva (solo esos avanzan `content.fetched_at`; un post citado "
+            "ilegible se registra pero no re-enriquece)."
+        )
+
+
 def _run_refresh_media(cfg: Config, source: str, *, force: bool, headless: bool = False) -> None:
     """Re-capture the FULL X history and backfill playable video media in place.
 
@@ -357,45 +480,10 @@ def _run_refresh_media(cfg: Config, source: str, *, force: bool, headless: bool 
     """
     _auto_snapshot(cfg, "refresh-media")
     store = load_store(cfg.items_path)
-    # Mirrors `_run_extract` — the source → (target URL, GraphQL source) mapping.
-    targets = {
-        "bookmark": _BOOKMARKS_URL,
-        "own_tweet": f"https://x.com/{cfg.x_handle}",
-    }
-    source_sets: dict[str, list[SourceName]] = {
-        "bookmarks": ["bookmark"],
-        "tweets": ["own_tweet"],
-        "all": ["bookmark", "own_tweet"],
-    }
-    chosen = source_sets[source]
-    typer.echo(
-        "refresh-media scrolls the FULL X history with no skip-known — this is "
-        "slow and human-paced and can take many minutes. Leave it running."
-    )
-    fresh: list[Item] = []
-    with x_context(cfg.storage_state_path, headless=headless) as context:
-        for src in chosen:
-            # Empty known_ids disables the skip-known early-stop: the whole
-            # history is returned, not just the items newer than the cursor.
-            # Unlike `_run_extract`, the `state.json` cursors are intentionally
-            # left untouched — this is a backfill of existing records, not an
-            # incremental advance, so the next `extract` cursor must not move.
-            fresh.extend(extract_source(context, src, targets[src], set()))
+    fresh = _recapture_history(cfg, source, label="refresh-media", headless=headless)
     report = refresh_video_media(store, fresh)
 
-    if store and report.items_seen == 0:
-        warning = (
-            f"refresh-media re-vio 0 de los {len(store)} items ya conocidos — "
-            "la sesión de X probablemente caducó o el parser GraphQL ha derivado "
-            "(spec §6); no se actualizó nada."
-        )
-        if not force:
-            # Nothing matched, so the store is unchanged — not saving is
-            # byte-identical and the pre-snapshot already fired. Abort non-zero
-            # so a broken capture never reports success.
-            raise RuntimeError(f"{warning} Usa --force para guardar igualmente.")
-        typer.echo(f"AVISO: {warning}", err=True)
-
+    _guard_empty_recapture(store, report.items_seen, label="refresh-media", force=force)
     save_store(store, cfg.items_path)
     estimated_bytes, n_estimable, n_unknown = estimate_download_size(store)
     typer.echo(
@@ -639,6 +727,52 @@ def refresh_media(
     tardar varios minutos.
     """
     _run_refresh_media(_config(), source.value, force=force, headless=headless)
+
+
+@app.command(name="refresh-quoted")
+@_handle_cli_errors
+def refresh_quoted(
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    from_store: bool = typer.Option(
+        False,
+        "--from-store",
+        help="Sin red: adjunta el post citado SOLO cuando ya está en el store como "
+        "item propio (medido: 199 de 762). Instantáneo y re-ejecutable.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Guardar aunque se re-vean 0 items conocidos (sesión caducada / "
+        "drift de GraphQL). Por defecto ese caso aborta sin escribir.",
+    ),
+    headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
+) -> None:
+    """Re-captura X y adjunta el POST CITADO a los quote-tweets ya guardados.
+
+    Con `--from-store` NO abre el navegador: hace el join `quoted_id → item` contra el
+    propio store, que ya contiene el post citado en 199 de los 762 casos (26,1%).
+    Empieza siempre por ahí — es gratis — y luego re-captura para el resto.
+
+    Los items existentes solo guardan `quoted_id`: el cuerpo del post citado y su
+    autor se perdían, así que el generador veía una reacción a secas ("Read this
+    and you'll understand") y no tenía qué resumir — el hueco lo rellenaba
+    inventando. X incrusta el post citado en el MISMO payload del timeline, así que
+    esto NO hace ni una petición extra por item: recorre el histórico completo (sin
+    saltarse ids conocidos) y re-parsea.
+
+    Solo toca las fuentes `quoted_tweet`: artículos, transcripciones, hilos y todo
+    el enriquecimiento se preservan. Idempotente (un post citado ya legible se deja
+    intacto; uno fallido se re-intenta). Los items que ganan evidencia avanzan su
+    `content.fetched_at`, de modo que el siguiente `xbrain enrich` re-genera
+    exactamente esos summaries.
+
+    Es destructivo (reescribe `items.json` in situ) → auto-snapshot antes de
+    escribir. El scroll es lento y a ritmo humano; puede tardar varios minutos.
+    """
+    if from_store:
+        _run_refresh_quoted_from_store(_config())
+        return
+    _run_refresh_quoted(_config(), source.value, force=force, headless=headless)
 
 
 def _run_describe(

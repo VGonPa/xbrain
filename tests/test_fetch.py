@@ -389,62 +389,75 @@ def _content_with_source(*, ok: bool, failure_reason="timeout", kind="external_a
     )
 
 
+def _refetch(content, force: bool, *, urls=("https://example.com/p",)) -> bool:
+    """`_should_refetch` asks the question of the ITEM, not of a bare `Content`.
+
+    It has to: "content exists" is not "the links were fetched" — the extract stage
+    stamps the quoted post, `digest-video` a transcript. So the decision reads the
+    item's LINKS. These wrappers keep the truth table below stated in terms of the
+    content, with the item's links held at the default single non-x link.
+    """
+    item = _item("1", list(urls))
+    item.content = content
+    return _should_refetch(item, force=force)
+
+
 # --- Truth table on _should_refetch ---
 
 
 def test_should_refetch_when_content_is_none():
-    assert _should_refetch(None, force=False) is True
-    assert _should_refetch(None, force=True) is True
+    assert _refetch(None, force=False) is True
+    assert _refetch(None, force=True) is True
 
 
 def test_should_skip_successful_fetch_without_force():
     c = _content_with_source(ok=True, text="body")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_refetch_successful_fetch_with_force():
     c = _content_with_source(ok=True, text="body")
-    assert _should_refetch(c, force=True) is True
+    assert _refetch(c, force=True) is True
 
 
 def test_should_refetch_all_transient_timeout():
     c = _content_with_source(ok=False, failure_reason="timeout")
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_should_refetch_all_transient_dns_error():
     c = _content_with_source(ok=False, failure_reason="dns_error")
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_should_skip_terminal_not_found_without_force():
     c = _content_with_source(ok=False, failure_reason="not_found")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_paywall_without_force():
     c = _content_with_source(ok=False, failure_reason="paywall")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_forbidden_without_force():
     c = _content_with_source(ok=False, failure_reason="forbidden")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_js_required_without_force():
     c = _content_with_source(ok=False, failure_reason="js_required")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_terminal_empty_content_without_force():
     c = _content_with_source(ok=False, failure_reason="empty_content")
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_refetch_terminal_with_force():
     c = _content_with_source(ok=False, failure_reason="not_found")
-    assert _should_refetch(c, force=True) is True
+    assert _refetch(c, force=True) is True
 
 
 def test_should_skip_mixed_transient_and_terminal():
@@ -456,7 +469,7 @@ def test_should_skip_mixed_transient_and_terminal():
             ContentSourceFailure(kind="external_article", url="b", failure_reason="not_found"),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_mixed_transient_and_success():
@@ -468,7 +481,7 @@ def test_should_skip_mixed_transient_and_success():
             ContentSourceSuccess(kind="external_article", url="b", text="got it"),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False) is False
 
 
 def test_should_skip_only_x_sources():
@@ -483,7 +496,7 @@ def test_should_skip_only_x_sources():
             ),
         ],
     )
-    assert _should_refetch(c, force=False) is False
+    assert _refetch(c, force=False, urls=("https://x.com/i/article/1",)) is False
 
 
 # --- Integration on fetch_pending ---
@@ -565,7 +578,7 @@ def test_should_refetch_legacy_uncategorized_failure_migrates_to_transient():
     # which would mislabel the actual cause).
     assert src.failure_reason == "unknown_error"
     c = Content(fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc), sources=[src])
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_should_refetch_external_transient_alongside_xcom_source():
@@ -589,7 +602,7 @@ def test_should_refetch_external_transient_alongside_xcom_source():
             ),
         ],
     )
-    assert _should_refetch(c, force=False) is True
+    assert _refetch(c, force=False) is True
 
 
 def test_fetch_pending_replaces_sources_does_not_append():
@@ -631,7 +644,7 @@ def test_extractor_exception_persists_as_transient_failure():
     assert failure.failure_reason == "unknown_error"
     assert "network blip" in failure.error
     # And `_should_refetch` correctly retries on the next run
-    assert _should_refetch(content, force=False) is True
+    assert _refetch(content, force=False) is True
 
 
 def test_content_source_from_uncategorised_failure_is_transient():
@@ -830,3 +843,74 @@ def test_force_refetch_unchanged_success_does_not_reenrich():
     assert item.content is not None
     assert item.content.fetched_at == _T0  # preserved despite --force
     assert items_pending_enrichment(store) == []  # not re-enriched
+
+
+# --- A non-link source must never mask an unfetched link ---
+#
+# Since the quoted post is parsed at EXTRACT time, a quote-tweet arrives at `fetch`
+# with `content` ALREADY stamped — but with no `external_article` source. Reading
+# "content exists" as "nothing left to fetch" would silently never fetch the article
+# of every quote-tweet that also links out. 35% of the corpus quotes.
+
+_QUOTED = ContentSourceSuccess(
+    kind="quoted_tweet",
+    url="https://x.com/karpathy/status/999",
+    text="I am leaving OpenAI.",
+    author=Author(handle="karpathy", name="Andrej Karpathy"),
+)
+
+
+def _item_with(sources, *, urls=("https://example.com/a",)) -> Item:
+    return Item(
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="Read this and you'll understand better this career move",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        links=[Link(url=u, domain="example.com") for u in urls],
+        quoted_id="999",
+        content=(
+            Content(fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=list(sources))
+            if sources is not None
+            else None
+        ),
+    )
+
+
+def test_a_quoted_source_does_not_mask_an_unfetched_link():
+    """The regression guard: content stamped by the EXTRACT stage (a quoted post) is
+    not evidence that the item's LINK was ever fetched."""
+    assert _should_refetch(_item_with([_QUOTED]), force=False) is True
+
+
+def test_fetch_pending_still_fetches_the_article_of_a_quote_tweet():
+    """End to end: the article of a quote-tweet is fetched, and the quoted post
+    SURVIVES the fetch (only `external_article` sources are rebuilt)."""
+    item = _item_with([_QUOTED])
+    store = {"1": item}
+
+    fetched = fetch_pending(store, extractor=lambda url: FetchSuccess(title="T", text="body"))
+
+    assert fetched == 1
+    kinds = sorted(s.kind for s in store["1"].content.sources)
+    assert kinds == ["external_article", "quoted_tweet"]
+    assert _QUOTED in store["1"].content.sources
+
+
+def test_an_item_whose_links_are_all_fetched_is_not_refetched_despite_a_quote():
+    """The other arm — the fix must not turn into a re-fetch-forever loop."""
+    item = _item_with(
+        [
+            _QUOTED,
+            ContentSourceSuccess(kind="external_article", url="https://example.com/a", text="b"),
+        ]
+    )
+    assert _should_refetch(item, force=False) is False
+
+
+def test_an_item_with_only_x_links_and_a_quote_is_not_fetched():
+    """x.com links are `fetch_x`'s job — a quoted source must not drag them here."""
+    item = _item_with([_QUOTED], urls=("https://x.com/b/status/2",))
+    assert _should_refetch(item, force=False) is False
