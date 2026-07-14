@@ -82,3 +82,48 @@ def test_filter_in_range_dedup_keeps_first_seen():
     out = _filter_in_range([first, second], None, None)
     assert len(out) == 1
     assert out[0].text == first.text
+
+
+def test_collect_new_items_persists_the_raw_payload_before_parsing(tmp_path):
+    """Persistence happens at INGEST, before any parsing decision — so a field we do not
+    yet read (the next `note_tweet`) is on disk anyway. That is the entire point: the
+    payload is kept for the parser we have not written yet."""
+    from xbrain.extract.extractor import collect_new_items
+    from xbrain.payloads import load_payload
+
+    response = {
+        "data": {
+            "x": {
+                "tweet_results": {
+                    "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "42",
+                        "core": {
+                            "user_results": {
+                                "result": {"legacy": {"screen_name": "a", "name": "A"}}
+                            }
+                        },
+                        "legacy": {
+                            "full_text": "hello",
+                            "created_at": "Wed Jan 01 10:00:00 +0000 2025",
+                        },
+                        "a_field_no_parser_reads_yet": "kept anyway",
+                    }
+                }
+            }
+        }
+    }
+    items, _ = collect_new_items([response], "bookmark", set(), tmp_path)
+
+    assert [i.id for i in items] == ["42"]
+    stored = load_payload(tmp_path, "42")
+    assert stored["a_field_no_parser_reads_yet"] == "kept anyway"
+
+
+def test_collect_new_items_without_a_payload_dir_persists_nothing(tmp_path):
+    """Backwards compatible: the pure path stays pure (tests, archive imports)."""
+    from xbrain.extract.extractor import collect_new_items
+    from xbrain.payloads import stored_ids
+
+    collect_new_items([], "bookmark", set(), None)
+    assert stored_ids(tmp_path) == set()

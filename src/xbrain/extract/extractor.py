@@ -10,7 +10,10 @@ from typing import Literal
 from playwright.sync_api import BrowserContext, Response
 
 from xbrain.extract.browser import is_logged_out
-from xbrain.extract.graphql import parse_tweets
+from pathlib import Path
+
+from xbrain.extract.graphql import iter_tweet_payloads, parse_tweets
+from xbrain.payloads import save_payload
 from xbrain.models import Item, SourceName
 
 logger = logging.getLogger(__name__)
@@ -59,15 +62,26 @@ def rate_limit_decision(
 
 
 def collect_new_items(
-    responses: list[dict], source: SourceName, known_ids: set[str]
+    responses: list[dict],
+    source: SourceName,
+    known_ids: set[str],
+    payload_dir: Path | None = None,
 ) -> tuple[list[Item], bool]:
     """Parse responses into items, flagging when a known id is reached.
 
-    Pure function — no browser. This is the unit-tested core of extraction.
+    When `payload_dir` is given, each tweet's RAW subtree is persisted first — before any
+    parsing decision — so `extract` becomes a re-runnable transformation over data we own.
+    We threw these payloads away once; `note_tweet` was in every one of them, and the bill
+    was a network re-fetch for 432 items whose only evidence was truncated.
+
+    Pure but for that one write. No browser.
     """
     new_items: list[Item] = []
     hit_known = False
     for response in responses:
+        if payload_dir is not None:
+            for rest_id, subtree in iter_tweet_payloads(response):
+                save_payload(payload_dir, rest_id, subtree)
         for item in parse_tweets(response, source):
             if item.id in known_ids:
                 hit_known = True
@@ -83,8 +97,12 @@ def extract_source(
     known_ids: set[str],
     since: datetime | None = None,
     until: datetime | None = None,
+    payload_dir: Path | None = None,
 ) -> list[Item]:
     """Scroll an X page, intercept GraphQL responses, return new items.
+
+    `payload_dir` persists each tweet's raw subtree as it arrives, so a future parse bug is
+    repairable offline instead of by a network re-fetch (see `xbrain.payloads`).
 
     Stops when a known id is reached (incremental) or no new responses arrive
     after `_MAX_IDLE_SCROLLS` scrolls (end of timeline). Raises
@@ -167,7 +185,7 @@ def extract_source(
     finally:
         page.close()
 
-    new_items, _ = collect_new_items(captured, source, known_ids)
+    new_items, _ = collect_new_items(captured, source, known_ids, payload_dir)
     return _filter_in_range(new_items, since, until)
 
 

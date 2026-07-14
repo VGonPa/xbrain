@@ -76,6 +76,21 @@ def _find_tweet_results(obj: Any) -> Iterator[dict[str, Any]]:
             yield from _find_tweet_results(value)
 
 
+def iter_tweet_payloads(response: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield `(rest_id, full result subtree)` for every tweet in one GraphQL response.
+
+    The persistence seam for `payloads.save_payload`. We keep each tweet's WHOLE subtree
+    (legacy, note_tweet, user, entities, quoted_status_result, card) and drop only the
+    timeline envelope — cursors, pagination, instructions — which carries no item data and
+    would otherwise be duplicated once per tweet in the response.
+    """
+    for result in _find_tweet_results(response):
+        tweet = _unwrap(result)
+        rest_id = tweet.get("rest_id") if tweet else None
+        if tweet and rest_id:
+            yield str(rest_id), tweet
+
+
 def _dig(obj: Any, *keys: str) -> dict[str, Any]:
     """Walk nested dict keys, returning {} on any missing/null/non-dict node."""
     for key in keys:
