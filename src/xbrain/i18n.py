@@ -35,6 +35,16 @@ class Strings:
     video_evidence_header: str  # collapsible label for the raw frames + transcript
     verify_badge_fail: str  # "Verification: FAIL" / "Verificación: FALLA" (#79 badge)
     verify_badge_review: str  # "Verification: REVIEW" / "Verificación: REVISAR" (#79 badge)
+    # The quoted post a quote-tweet is sharing. The header carries the quoted account's
+    # `@handle (Name)`, so the reader can never take a third party's words for the
+    # poster's — the same conflation the attribution rule stops on the LLM side.
+    quoted_post_header: str  # "Quoted post" / "Post citado"
+    # When we could not read the quoted post. Written down, never silently omitted: a
+    # reader who sees nothing concludes there was nothing. The reason is a fact.
+    quoted_post_unavailable: str  # "Quoted post unavailable" / "Post citado no disponible"
+    quoted_unavailable_deleted: str  # `not_found`  — X tombstoned it
+    quoted_unavailable_protected: str  # `forbidden`  — protected / suspended
+    quoted_unavailable_unknown: str  # anything else — X served us nothing usable
 
 
 _STRINGS: dict[str, Strings] = {
@@ -49,6 +59,11 @@ _STRINGS: dict[str, Strings] = {
         video_evidence_header="Frames + transcript",
         verify_badge_fail="Verification: FAIL",
         verify_badge_review="Verification: REVIEW",
+        quoted_post_header="Quoted post",
+        quoted_post_unavailable="Quoted post unavailable",
+        quoted_unavailable_deleted="deleted or never existed",
+        quoted_unavailable_protected="protected or suspended account",
+        quoted_unavailable_unknown="X served no content for it",
     ),
     "Spanish": Strings(
         topics_label="Temas",
@@ -61,6 +76,11 @@ _STRINGS: dict[str, Strings] = {
         video_evidence_header="Frames y transcripción",
         verify_badge_fail="Verificación: FALLA",
         verify_badge_review="Verificación: REVISAR",
+        quoted_post_header="Post citado",
+        quoted_post_unavailable="Post citado no disponible",
+        quoted_unavailable_deleted="borrado o inexistente",
+        quoted_unavailable_protected="cuenta protegida o suspendida",
+        quoted_unavailable_unknown="X no sirvió su contenido",
     ),
 }
 
