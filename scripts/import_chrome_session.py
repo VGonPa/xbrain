@@ -97,8 +97,7 @@ def import_session(output: Path) -> int:
 
     if not auth_token:
         print(
-            "\nNo `auth_token` cookie found. Log in to X in Chrome first, then "
-            "re-run this script.",
+            "\nNo `auth_token` cookie found. Log in to X in Chrome first, then re-run this script.",
             file=sys.stderr,
         )
         return 1

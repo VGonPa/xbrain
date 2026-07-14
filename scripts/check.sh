@@ -240,8 +240,8 @@ print_github_summary() {
 # ============================================================================
 # 1. RUFF CHECK - Code linting  (CRITICAL)
 # ============================================================================
-print_info "Running Ruff linter on src/ and tests/..."
-if uv run ruff check src tests 2>&1; then
+print_info "Running Ruff linter on src/, tests/ and scripts/..."
+if uv run ruff check src tests scripts 2>&1; then
     print_success "Ruff: code is clean"
     RUFF_STATUS="pass"
 else
@@ -253,8 +253,8 @@ fi
 # ============================================================================
 # 2. RUFF FORMAT - Formatting check  (CRITICAL)
 # ============================================================================
-print_info "Running Ruff format check on src/ and tests/..."
-if uv run ruff format --check src tests 2>&1; then
+print_info "Running Ruff format check on src/, tests/ and scripts/..."
+if uv run ruff format --check src tests scripts 2>&1; then
     print_success "Ruff format: code is formatted"
     FORMAT_STATUS="pass"
 else
