@@ -114,8 +114,13 @@ is trusted.
     special-casing the gate step: any step can become load-bearing later.
   * `paths-ignore` under `push` -> the merge-result run never happens; #103 reopens, silently.
   * `steps:` gutted to `echo ok` -> a green `quality` check that ran nothing.
-  * `if: false` on the JOB -> GitHub, verbatim: *"if a job within a workflow is skipped due
-    to a conditional, it will report its status as 'Success.'"* A skipped job is a GREEN job.
+  * `if: false` on the JOB -> measured (#130): check run conclusion = **`skipped`**, and the
+    PR goes `MERGEABLE` / **`CLEAN`**. Note that this is NOT what GitHub's own docs imply —
+    they say a skipped job *"will report its status as 'Success'"*, and the API in fact
+    reports `skipped`. The distinction does not save you: **branch protection treats a
+    skipped required check as satisfied.** The merge is waved through either way. Cited from
+    the docs before it was measured, and the docs were wrong about the mechanism while right
+    about the consequence — which is exactly the kind of luck this file refuses to run on.
   * **`checkout` with an explicit `ref:`** -> the gate RUNS. All eleven checks PASS. The check
     run reports a *truthful* ✅ `quality`. And it examined **the wrong tree** — it never looked
     at the code being merged. Not a broken gate: a working gate pointed at the wrong thing,
@@ -146,6 +151,21 @@ Four times in one PR an instrument lied, and each lie was believed until it was 
 
 (3) and (4) are the same directive, measured on the wrong placement. Being careful was not
 enough; only running the experiment on the exact thing under test was.
+
+  5. GitHub's OWN DOCS said a skipped job "will report its status as 'Success'". The API
+     reports `skipped`. The consequence happened to be the same (branch protection waves it
+     through) — so the classification survived on luck, not on evidence.
+
+THE HOUSE RULE THIS BUYS
+------------------------
+Every cell of the table above carries a probe number, or it carries the words "reasoned, not
+measured". Nothing in this file is asserted from a vendor's documentation, from a plausible
+mechanism, or from a colleague's confident summary — including this author's. Two people on
+this PR each measured ONE cell of a 2x2 and claimed the whole table; both were half right,
+and the halves they got wrong were the lethal ones. If you add a row, run the probe against
+a throwaway PR, read the CHECK RUN (not the workflow run, not the log), and close the probe
+the moment you have read it — a probe carrying a gate-killing edit is one careless click from
+a dead gate, so it never sits open.
 """
 
 import fnmatch
@@ -398,12 +418,18 @@ def test_pull_request_trigger_covers_normal_pr_activity() -> None:
 
 
 def test_gate_job_is_not_conditional() -> None:
-    """The gate job must carry no `if:`.
+    """The gate job must carry no `if:`. FAIL-OPEN — measured, not inferred.
 
-    An `if:` on the job is a way to neuter the gate while the trigger block above it looks
-    completely healthy — `if: github.event_name == 'pull_request'` would undo this entire
-    PR. Worse, a job skipped by `if:` does not run the gate yet still resolves its check
-    run, so branch protection can be satisfied by a check that verified nothing.
+    An `if:` on the job neuters the gate while the trigger block above it looks completely
+    healthy: `if: github.event_name == 'pull_request'` would undo this entire workflow in one
+    line. Measured on probe #130 with `if: false` on this job:
+
+        check run `quality` -> conclusion = skipped
+        the PR              -> mergeable = MERGEABLE, mergeStateStatus = CLEAN
+
+    The check run resolves as `skipped` — not `success`, whatever the docs say — and **branch
+    protection treats a skipped required check as satisfied**. The gate never runs, and the
+    merge is waved through. Fail-open, and one word long.
     """
     assert "if" not in _gate_job(), (
         f"The `{_REQUIRED_CHECK}` job declares `if: {_gate_job().get('if')!r}`. A condition "
