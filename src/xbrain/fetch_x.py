@@ -395,13 +395,53 @@ def _attach_x_sources(
         item.content.fetched_at = now()
 
 
+def tweet_text_from_payloads(responses: list[dict], url: str) -> str | None:
+    """THIS tweet's body from captured TweetDetail payloads — never the thread's.
+
+    Pure, and separated precisely so it can be tested: the previous version delegated to
+    `_fetch_tweet`, which was never a "get this tweet's text" function. It fetches a LINKED
+    tweet as an `x_article` source via `assemble_linked_thread`, which joins EVERY tweet by
+    the anchor's author with "\n\n". So a re-fetch would have written a three-tweet blob into
+    `item.text` — and a post long enough to hit the 280-cap is exactly the kind that gets
+    self-replies, so this fired constantly, not rarely.
+
+    We parse the payload and select the item whose id matches the STATUS ID IN THE URL. No
+    match → None: a tombstoned or protected tweet must yield nothing, never a neighbouring
+    tweet's body, which would silently write someone else's words into this item.
+    """
+    status_id = _x_status_id(url)
+    if not status_id:
+        return None
+    for response in responses:
+        for item in parse_tweets(response, "bookmark"):
+            if item.id == status_id:
+                return item.text or None
+    return None
+
+
 def browser_text_fetcher(context: BrowserContext) -> Callable[[str], str | None]:
     """Bind a full-text fetcher to a live X session: visit the status page, intercept the
-    TweetDetail payload, and re-parse it with the (now note_tweet-aware) extractor."""
+    TweetDetail payloads, and re-parse THIS tweet with the (now note_tweet-aware) extractor.
+    """
 
     def fetch(url: str) -> str | None:
-        source = _fetch_tweet(context, url)
-        return getattr(source, "text", None)
+        captured: list[dict] = []
+        page = context.new_page()
+
+        def on_response(response: Response) -> None:
+            if "/graphql/" in response.url and "TweetDetail" in response.url:
+                try:
+                    captured.append(response.json())
+                except Exception:  # noqa: BLE001 - ignore non-JSON / partial bodies
+                    logger.debug("refetch: undecodable GraphQL response: %s", response.url)
+
+        page.on("response", on_response)
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(_SETTLE_MS)
+        finally:
+            page.close()
+        return tweet_text_from_payloads(captured, url)
 
     return fetch
 
@@ -410,22 +450,44 @@ def refetch_full_texts(
     store: dict[str, Item],
     targets: list[Item],
     text_fetcher: Callable[[str], str | None],
+    *,
+    checkpoint: Callable[[], None] | None = None,
+    every: int = 25,
 ) -> int:
     """Replace each truncated item's text with the full post re-fetched from X.
 
     `text_fetcher` is injected (tests pass a fake; production binds it to a Playwright
     TweetDetail capture) — the same seam `fetch_x_articles` uses for `link_fetcher`.
 
-    A failed or empty re-fetch leaves the truncated text ALONE. Half a tweet is bad;
-    blanking the item is worse, and it would be a silent data loss on the one surface that
-    is the only evidence 432 items have.
+    A failed or empty re-fetch leaves the truncated text ALONE. Half a tweet is bad; blanking
+    the item is worse, and it would be silent data loss on the one surface that is the only
+    evidence 432 items have.
+
+    A repaired text NULLS `enriched`: the summary was written from half a sentence and must
+    be regenerated. `_needs_reenrichment` cannot do this job — it requires
+    `item.content is not None`, and the population this repairs is precisely the one with no
+    content block at all. The standard lever does not reach them.
+
+    `checkpoint` is called every `every` items and re-raised through: a session expiry on
+    item 400 of 535 must not discard the first 400 repairs — that is hours of deliberately
+    human-paced browser work.
     """
     repaired = 0
-    for item in targets:
-        fresh = text_fetcher(item.url)
-        if fresh and fresh.strip() and fresh != item.text:
-            item.text = fresh
-            repaired += 1
+    try:
+        for index, item in enumerate(targets, start=1):
+            fresh = text_fetcher(item.url)
+            if fresh and fresh.strip() and fresh != item.text:
+                item.text = fresh
+                # The summary was written from the truncation. It is stale by construction,
+                # and its persisted verdict still reads PASS because verification fingerprints
+                # the OUTPUT, not the source it was built from.
+                item.enriched = None
+                repaired += 1
+            if checkpoint and index % every == 0:
+                checkpoint()
+    finally:
+        if checkpoint:
+            checkpoint()
     return repaired
 
 

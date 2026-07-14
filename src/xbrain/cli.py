@@ -2159,6 +2159,8 @@ def reextract_command(
         typer.echo(f"{len(report.changed)} campo(s) actualizados → {cfg.items_path}")
     else:
         typer.echo("Dry run. Pass --apply to write.")
+
+
 @app.command(name="refetch-truncated")
 @_handle_cli_errors
 def refetch_truncated_command(
@@ -2187,10 +2189,21 @@ def refetch_truncated_command(
         typer.echo("Dry run. Re-fetching requires the network: pass --apply.")
         return
     _auto_snapshot(cfg, "refetch-truncated")
+
+    # Checkpoint as we go: a session expiry on item 400 of 535 must not discard the first
+    # 400 repairs. This is deliberately human-paced browser work — hours of it.
+    def _checkpoint() -> None:
+        save_store(store, cfg.items_path)
+
     with x_context(cfg.storage_state_path, headless=False) as context:
-        repaired = refetch_full_texts(store, targets, browser_text_fetcher(context))
+        repaired = refetch_full_texts(
+            store, targets, browser_text_fetcher(context), checkpoint=_checkpoint
+        )
     save_store(store, cfg.items_path)
-    typer.echo(f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}")
+    typer.echo(
+        f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}\n"
+        f"{repaired} resúmenes invalidados: vuelve a ejecutar `xbrain enrich`."
+    )
 
 
 if __name__ == "__main__":

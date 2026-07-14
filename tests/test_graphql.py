@@ -582,6 +582,7 @@ def test_iter_tweet_payloads_yields_the_full_subtree_per_tweet():
     assert pairs["111"]["legacy"]["full_text"]  # the whole subtree, not a summary
     assert pairs["111"]["rest_id"] == "111"
 
+
 def _quoted_author_block(handle: str, name: str) -> dict:
     return {"user_results": {"result": {"legacy": {"screen_name": handle, "name": name}}}}
 
@@ -782,10 +783,14 @@ def test_a_quoted_post_with_a_body_but_no_author_still_ships_its_body():
     assert isinstance(source, ContentSourceSuccess)
     assert source.text == "I am leaving OpenAI."
     assert source.author is None
+
+
 def test_long_post_uses_the_note_tweet_body_not_the_truncated_full_text():
     """The whole bug in one assertion: when X provides the long-form body, take it."""
-    truncated = "a" * 277 + " https://t.co/abc123"
-    full = "The complete thought, all of it, ending in a real sentence."
+    # A real long-form body is LONGER than the 280-char cut of itself — the fixture that
+    # said otherwise described a shape X cannot produce.
+    truncated = "The complete thought, " + "a" * 250 + " https://t.co/abc123"
+    full = "The complete thought, " + "a" * 250 + " and the rest of it, ending properly."
     items = parse_tweets([_long_post_response(truncated, full)], "bookmark")
     assert len(items) == 1
     assert items[0].text == full  # identity, not a substring check
@@ -863,3 +868,83 @@ def test_items_needing_refetch_selects_exactly_the_truncated_ones():
         "3": mk("3", "x" * 300 + " https://t.co/aaa"),  # truncated + appended self-link
     }
     assert [i.id for i in items_needing_refetch(store)] == ["1", "3"]
+
+
+def test_a_long_QUOTED_post_uses_its_note_tweet_body_too():
+    """N9, and it is live on `develop` right now.
+
+    #98 ships the quoted post's body to fix 46% of all defects — and reads
+    `legacy.full_text` DIRECTLY, so a long quoted post reaches the generator truncated at
+    280 chars, mid-word. The exact failure #98 exists to fix, reintroduced through the back
+    door. The quoted parse must go THROUGH the shared helper, not around it.
+    """
+    quoted = _tweet_result("222", "karpathy", "I am leaving " + "x" * 270 + " https://t.co/abc")
+    quoted["note_tweet"] = {
+        "note_tweet_results": {
+            "result": {"text": "I am leaving " + "x" * 270 + " — and here is the whole reason."}
+        }
+    }
+    quoted["core"] = _quoted_author_block("karpathy", "Andrej Karpathy")
+    tweet = _tweet_result("111", "bob", "read this")
+    tweet["quoted_status_result"] = {"result": quoted}
+    tweet["legacy"]["quoted_status_id_str"] = "222"
+
+    _item, source = _only_source(tweet)
+
+    assert source.text.endswith("— and here is the whole reason.")
+    assert "t.co" not in source.text
+
+
+def test_a_note_tweet_shorter_than_full_text_never_wins():
+    """N8. Unreachable in X's real schema — and this PR's entire thesis is that the
+    unreachable shape is what bites you six months later."""
+    from xbrain.extract.graphql import _tweet_text
+
+    legacy = {"full_text": "the longer, real body of the post"}
+    tweet = {"note_tweet": {"note_tweet_results": {"result": {"text": "short"}}}}
+    assert _tweet_text(tweet, legacy) == "the longer, real body of the post"
+
+
+# --- N2: the detector misses 72 of the worst-mutilated items --------------------------
+
+
+def test_truncation_detector_flags_a_cut_that_ends_on_a_colon():
+    """N2. `:` and `;` were in `_TERMINAL` — but **a colon is a CONTINUATION marker, the
+    literal opposite of a sentence terminator.** And the punctuation escape overrode the
+    LENGTH signal entirely, when X's cut is *defined* by prose length.
+
+    These are the worst-mutilated items in the corpus: a numbered list cut at item 4, a
+    promise of "the breakdown" with no breakdown. And after this PR lands,
+    `refetch-truncated` is the ONLY repair path — so a miss here keeps its half-sentence
+    forever.
+    """
+    from xbrain.extract.graphql import looks_truncated
+
+    colon = "x" * 224 + " Here's how to write headers that convert like crazy:"
+    assert len(colon) >= 274
+    assert looks_truncated(colon, links=[])
+
+    numbered = "y" * 250 + " how to select the best set of tools for your agent\n\n4."
+    assert looks_truncated(numbered, links=[])
+
+
+def test_truncation_detector_still_spares_a_short_post_that_ends_on_a_colon():
+    """Length is the signal. A colon in a SHORT post is just a colon."""
+    from xbrain.extract.graphql import looks_truncated
+
+    assert not looks_truncated("Here is the list:", links=[])
+
+
+def test_ingest_warns_when_a_tweet_arrives_truncated(caplog):
+    """N7. I called `looks_truncated` "the ingest guard that would have caught this" — and
+    never wired it into the extract path. Nothing warned at ingest, so if the `note_tweet`
+    read ever regresses it goes silent again, exactly as before. A guard that is not called
+    is a comment."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        parse_tweets(_long_post_response("x" * 279 + " https://t.co/abc", None), "bookmark")
+
+    assert any(
+        "truncad" in r.message.lower() or "truncat" in r.message.lower() for r in caplog.records
+    )

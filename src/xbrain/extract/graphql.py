@@ -112,28 +112,47 @@ def _unwrap(result: dict[str, Any]) -> dict[str, Any] | None:
 
 # X truncates a long post at 280 characters of prose and appends a t.co self-link.
 _TRAILING_TCO = re.compile(r"https://t\.co/\w+\s*$")
-# A sentence that really ended does so on punctuation. Anything else at the cap is a cut.
-_TERMINAL = (".", "!", "?", "…", '"', "”", ")", ":", ";", "»")
-# The observed cut lands at 270–290 chars of body (the store's median body is 279).
+# A sentence that really ended does so on one of these.
+#
+# `:` and `;` are DELIBERATELY ABSENT. A colon is a CONTINUATION marker — the literal
+# opposite of a terminator — and X's cut lands on one constantly: "Here's how to write
+# headers that convert like crazy:" with nothing after it, a numbered list severed at "4.".
+# Those were the worst-mutilated items in the corpus and the detector waved all 72 through.
+_TERMINAL = (".", "!", "?", "…", '"', "”", ")", "»")
+# The cut lands at 274–282 chars of prose (the store's median body is 279).
 _TRUNCATION_FLOOR = 265
+# Above this, prose length ALONE is the signal: X's cut is DEFINED by length, so no final
+# character may override it. A tweet this long that ends on a terminator is one X trimmed to
+# fit exactly — still a cut.
+_TRUNCATION_CERTAIN = 274
 
 
 def looks_truncated(text: str, links: list[str]) -> bool:
     """True when `text` bears X's 280-character truncation signature.
 
-    The mechanical marks: ~280 characters of prose, ending mid-word with no terminal
-    punctuation, optionally followed by an appended `t.co` self-link that is NOT among the
-    tweet's own `links` (X adds it; the tweet never contained it).
+    LENGTH is the signal, because X's cut is defined by length. Two bands:
 
-    Deliberately biased towards FLAGGING: a detector that silently passes a genuinely
-    truncated tweet reproduces the very bug it exists to catch — the generator gets half a
-    sentence and finishes it. A false flag costs a re-fetch; a missed one costs a
-    fabrication in the knowledge base.
+    * `>= 274` chars of prose — truncated regardless of the final character. Letting
+      punctuation override the length signal is what hid the 72 worst items in the corpus.
+    * `265–273` — truncated when it does not end on a real terminator (`:` and `;` are not
+      terminators; see `_TERMINAL`).
+
+    Biased towards FLAGGING: a detector that silently passes a genuine truncation reproduces
+    the very bug it exists to catch. A false flag costs a re-fetch; a missed one costs a
+    fabrication in the knowledge base — and after this PR, `refetch-truncated` is the ONLY
+    repair path for old items, so a miss keeps its half-sentence forever.
+
+    `links` is accepted but no longer consulted: `_extract_links` stores the RESOLVED
+    `expanded_url`, so a `t.co` can never appear there (measured: 0 of 2,168 items). The
+    condition could never be False — dead code, load-bearing in a docstring. The trailing
+    t.co is now stripped unconditionally, and the length does the work.
     """
     body = text.rstrip()
     match = _TRAILING_TCO.search(body)
-    if match and match.group().strip() not in links:
+    if match:
         body = body[: match.start()].rstrip()
+    if len(body) >= _TRUNCATION_CERTAIN:
+        return True
     return len(body) >= _TRUNCATION_FLOOR and not body.endswith(_TERMINAL)
 
 
@@ -166,9 +185,16 @@ def _tweet_text(tweet: dict[str, Any], legacy: dict[str, Any]) -> str:
     """
     # `_dig` coerces a non-dict leaf to {}, so walk to the parent and read the leaf here.
     note = _dig(tweet, "note_tweet", "note_tweet_results", "result").get("text")
-    if isinstance(note, str) and note.strip():
-        return note
-    return legacy.get("full_text", "")
+    full = legacy.get("full_text", "")
+    if not isinstance(note, str) or not note.strip():
+        return full
+    # A long-form body is by definition NOT SHORTER than the truncation of itself. Compare
+    # against the PROSE of `full_text` — the truncation carries an appended t.co that is not
+    # part of the post, so comparing raw lengths would reject a genuine 285-char body against
+    # a 303-char "280 + link". Unreachable in X's real schema, and this module's whole thesis
+    # is that the unreachable shape is what bites you six months later.
+    prose = _TRAILING_TCO.sub("", full).rstrip()
+    return note if len(note) >= len(prose) else full
 
 
 def _tweet_to_item(tweet: dict[str, Any], source: SourceName) -> Item | None:
@@ -180,12 +206,23 @@ def _tweet_to_item(tweet: dict[str, Any], source: SourceName) -> Item | None:
     if author is None:
         return None
     quoted_id = legacy.get("quoted_status_id_str") or _quoted_id(tweet)
+    text = _tweet_text(tweet, legacy)
+    if looks_truncated(text, []):
+        # N7: the guard is CALLED, not merely defined. A tweet that still arrives truncated
+        # means `note_tweet` was absent (X did not give us the body) or the read regressed —
+        # and a silent regression here is exactly how 432 items got half a sentence.
+        logger.warning(
+            "tweet %s arrives TRUNCATED (%d chars, cut mid-word) — the long-form body was "
+            "not available; the generator will be handed half a sentence.",
+            rest_id,
+            len(text),
+        )
     return Item(
         id=str(rest_id),
         source=source,
         url=f"https://x.com/{author.handle}/status/{rest_id}",
         author=author,
-        text=_tweet_text(tweet, legacy),
+        text=text,
         created_at=_parse_x_date(legacy.get("created_at")),
         captured_at=datetime.now(timezone.utc),
         media=_extract_media(legacy),
@@ -355,7 +392,10 @@ def _quoted_content(tweet: dict[str, Any], quoted_id: str | None) -> Content | N
         # us the body too: dropping the cure because one field is missing would be the
         # bug wearing a different hat.
         author = _extract_author(quoted)
-        text = _dig(quoted, "legacy").get("full_text") or ""
+        # THROUGH `_tweet_text`, never around it: reading `legacy.full_text` directly here
+        # re-introduced the 280-char truncation into the very evidence #98 exists to ship —
+        # a long quoted post reached the generator cut mid-word. One helper, one truth.
+        text = _tweet_text(quoted, _dig(quoted, "legacy"))
         rest_id = quoted.get("rest_id") or quoted_id
         handle = author.handle if author else "i"
         if text:

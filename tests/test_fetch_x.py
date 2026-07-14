@@ -1,5 +1,6 @@
 # tests/test_fetch_x.py
 import json
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -671,3 +672,145 @@ def test_refetch_full_texts_never_blanks_an_item_when_the_refetch_fails():
     assert item.text == "cut off mid"
     assert refetch_full_texts(store, [item], lambda url: "   ") == 0
     assert item.text == "cut off mid"
+
+
+# --- N1: the re-fetch was writing whole THREADS into item.text -------------------------
+
+
+def _tweet_detail_payload() -> dict:
+    """A TweetDetail response shaped like the real one: the anchor post, TWO self-replies by
+    the same author, and a third-party reply — i.e. the normal shape of the exact population
+    `refetch-truncated` targets, because a post long enough to hit the 280-cap is precisely
+    the kind that gets self-replies."""
+    from tests.test_graphql import _tweet_result
+
+    def entry(tweet):
+        return {
+            "entryId": f"tweet-{tweet['rest_id']}",
+            "content": {
+                "itemContent": {"itemType": "TimelineTweet", "tweet_results": {"result": tweet}}
+            },
+        }
+
+    anchor = _tweet_result("100", "bob", "The truncated post, now complete.")
+    reply1 = _tweet_result("101", "bob", "A follow-up reply I also wrote.")
+    reply2 = _tweet_result("102", "bob", "And one more thought.")
+    other = _tweet_result("103", "stranger", "Someone else's reply entirely.")
+    return {
+        "data": {
+            "threaded_conversation_with_injections_v2": {
+                "instructions": [
+                    {
+                        "type": "TimelineAddEntries",
+                        "entries": [entry(anchor), entry(reply1), entry(reply2), entry(other)],
+                    }
+                ]
+            }
+        }
+    }
+
+
+def test_the_refetch_returns_ONE_tweet_body_not_the_whole_thread():
+    """N1, CRITICAL. `browser_text_fetcher` called `_fetch_tweet`, which was never a
+    "get this tweet's text" function: it fetches a LINKED tweet as an `x_article` source via
+    `assemble_linked_thread`, which joins EVERY tweet by the anchor's author with "\\n\\n".
+
+    So `item.text` — one tweet's body — would have become a three-tweet blob. The existing
+    guard (`fresh != item.text`) waves that through happily. Blast radius: the judge's
+    `[Tweet]` block, the worksheet text, the note body, and `title_of()` — so note FILENAMES
+    change too. And if the item also has `item.thread`, the judge sees the same content twice
+    and can only conclude the poster wrote it twice.
+
+    It was the one code path with no test — both existing tests inject a fake fetcher — which
+    is exactly why CI was green.
+    """
+    from xbrain.fetch_x import tweet_text_from_payloads
+
+    text = tweet_text_from_payloads([_tweet_detail_payload()], "https://x.com/bob/status/100")
+
+    assert text == "The truncated post, now complete."
+    assert "follow-up" not in text, "a self-reply is NOT part of this tweet's body"
+    assert "one more thought" not in text
+    assert "Someone else" not in text
+
+
+def test_the_refetch_returns_None_when_the_anchor_is_not_in_the_payload():
+    """A tombstoned or protected tweet must yield nothing — never a neighbouring tweet's
+    body, which would silently write someone else's words into this item."""
+    from xbrain.fetch_x import tweet_text_from_payloads
+
+    assert tweet_text_from_payloads([_tweet_detail_payload()], "https://x.com/x/status/999") is None
+
+
+def test_a_repaired_text_invalidates_the_stale_summary(tmp_path):
+    """N3. After repair: the FULL tweet in the note, and a summary still written from half a
+    sentence — with its PASS badge intact, because verification fingerprints the OUTPUT.
+
+    And the sharp edge specific to this PR: `_needs_reenrichment` requires
+    `item.content is not None`, and for the 432 items where the tweet is the ONLY evidence,
+    `content` is exactly what they do NOT have. **The standard lever cannot reach the
+    population this command exists to repair.** So we null `enriched` directly.
+    """
+    from datetime import datetime, timezone
+
+    from xbrain.fetch_x import refetch_full_texts
+    from xbrain.models import Author, Enrichment, Item
+
+    item = Item(
+        id="1",
+        source="bookmark",
+        url="https://x.com/a/status/1",
+        author=Author(handle="a", name="A"),
+        text="cut off mid",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    item.enriched = Enrichment(
+        enriched_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        executor="api",
+        summary="a summary written from HALF a sentence",
+    )
+    assert item.content is None, "the population this repairs has no content block at all"
+
+    store = {"1": item}
+    repaired = refetch_full_texts(store, [item], lambda url: "The whole post, complete.")
+
+    assert repaired == 1
+    assert item.text == "The whole post, complete."
+    assert item.enriched is None, "the summary built on the truncated text must not survive"
+
+
+def test_refetch_checkpoints_so_a_mid_run_failure_keeps_its_repairs():
+    """N6. `save_store` fired once, after the browser context closed. A session expiry on
+    item 400 of 535 lost all 400 — hours of deliberately human-paced scrolling, gone."""
+    from datetime import datetime, timezone
+
+    from xbrain.fetch_x import refetch_full_texts
+    from xbrain.models import Author, Item
+
+    def mk(i: str) -> Item:
+        return Item(
+            id=i,
+            source="bookmark",
+            url=f"https://x.com/a/status/{i}",
+            author=Author(handle="a", name="A"),
+            text="cut off mid",
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+
+    items = [mk("1"), mk("2"), mk("3")]
+    store = {i.id: i for i in items}
+    saved: list[int] = []
+
+    def explode(url: str) -> str:
+        if url.endswith("3"):
+            raise RuntimeError("Sesión de X caducada")
+        return "repaired"
+
+    with pytest.raises(RuntimeError):
+        refetch_full_texts(store, items, explode, checkpoint=lambda: saved.append(1), every=1)
+
+    assert store["1"].text == "repaired"
+    assert store["2"].text == "repaired"
+    assert saved, "the repairs made before the failure must be checkpointed, not discarded"
