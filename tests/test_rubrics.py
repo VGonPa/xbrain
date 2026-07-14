@@ -1,8 +1,22 @@
 # tests/test_rubrics.py
 from pathlib import Path
 
+import pytest
+
+from xbrain import rubrics as rubrics_module
 from xbrain.models import Topic
 from xbrain.rubrics import load_guardrails, load_rubric, load_vocab, save_vocab
+
+# Every rubric the package ships, by the short name `load_rubric` takes. Globbed
+# from the loader's OWN `_RUBRICS_DIR` — re-deriving the path here would let the
+# two drift apart silently, and a glob that collects nothing would parametrize to
+# an empty list: "1 skipped", exit 0, a guard that guards nothing. Assert
+# non-empty at COLLECTION time so that failure is loud.
+RUBRIC_NAMES = sorted(
+    path.name.removeprefix("rubric-").removesuffix(".md")
+    for path in rubrics_module._RUBRICS_DIR.glob("rubric-*.md")
+)
+assert RUBRIC_NAMES, f"no rubrics collected from {rubrics_module._RUBRICS_DIR}"
 
 
 def test_load_rubric_returns_file_text():
@@ -124,6 +138,74 @@ def test_video_digest_rubric_preserves_placeholder_when_language_none():
     assert "{language}" in text
 
 
+# --- Faithfulness rules (regression guards) ---------------------------------
+#
+# The digest rubric's generic "never invent facts, numbers, names or claims" did
+# not stop the model naming entities the source never names: it does not classify
+# recognising a famous speaker as invention. The explicit, mechanical rule below
+# is what closes that path, so it must survive a well-meaning "simplification".
+
+
+def test_video_digest_rubric_forbids_naming_entities_no_surface_names():
+    """The rule must enumerate the entity kinds that actually leaked, deny that
+    recognition counts as evidence, and offer the neutral-descriptor escape.
+
+    The enumeration IS the mechanism — the generic rule empirically failed — so
+    naming these kinds is load-bearing, not incidental phrasing.
+    """
+    text = load_rubric("video-digest").lower()
+    for entity in ("interviewer", "employer", "publication", "university", "course code"):
+        assert entity in text, f"digest rubric no longer forbids naming an unnamed {entity}"
+    # Recognising who someone probably is must be explicitly disqualified as evidence.
+    assert "world knowledge" in text
+    # Without an escape hatch the model names the entity anyway.
+    assert "neutral descriptor" in text
+
+
+def test_video_digest_rubric_admits_author_metadata_as_evidence():
+    """The evidence set must match what the generator is handed and the judge accepts.
+
+    A clip of a speaker posted by that speaker's own account attributes itself: the
+    author metadata is EVIDENCE (the verify rubric declares the `[Author]` block
+    supported, not world knowledge). A rule bound only to transcript+frames would
+    force "the speaker…" on a self-posted clip AND contradict the judge.
+    """
+    text = load_rubric("video-digest").lower()
+    assert "display name" in text, "digest rubric no longer admits the author metadata as evidence"
+    assert "tweet text" in text, "digest rubric no longer admits the tweet text as evidence"
+
+
+def test_video_digest_rubric_separates_attribution_evidence_from_summary_content():
+    """The tweet/author are evidence for WHO speaks — never content to summarise.
+    Without this the reader collapses "the caption is evidence" into "summarise the
+    caption", which the clickbait-caption rule exists to forbid."""
+    text = load_rubric("video-digest").lower()
+    assert "attribution" in text, "digest rubric no longer separates attribution from content"
+
+
+def test_video_digest_rubric_requires_verbatim_quotes():
+    """Quotes must be reproduced as the transcript renders them — ASR errors included."""
+    text = load_rubric("video-digest").lower()
+    assert "verbatim" in text
+    assert "asr" in text
+
+
+def test_video_digest_rubric_forbids_sharpening_the_source():
+    """No vague→specific resolution, and no specifics the source never states."""
+    text = load_rubric("video-digest").lower()
+    assert "sharpen" in text
+    assert "duration" in text
+    assert "affiliation" in text
+
+
+@pytest.mark.parametrize("name", RUBRIC_NAMES)
+def test_every_rubric_renders_with_its_placeholders_substituted(name: str):
+    """Every shipped rubric loads and leaves no `{language}` placeholder behind."""
+    text = load_rubric(name, language="English")
+    assert text.strip()
+    assert "{language}" not in text
+
+
 def test_verify_rubric_loads_and_substitutes_language():
     """The verify rubric ships a `{language}` placeholder + names its axes/verdicts."""
     text = load_rubric("verify", language="Spanish")
@@ -219,3 +301,24 @@ def test_summary_rubric_keeps_the_86_attribution_and_unfetched_guardrails():
     assert "posted" in text
     assert "not fetched" in text or "never fetched" in text
     assert "reconstruct" in text
+
+
+def test_video_digest_rubric_admits_the_video_title_as_evidence():
+    """The video title is evidence surface #5, and every other component already agreed.
+
+    The digest worksheet has shipped `title` all along (`video_digest.py`), and #86 made
+    the judge emit `[Video title]` — its own comment: "The title reaches the digest
+    generator, so the judge must see it too." Excluding it here left one field with FOUR
+    different rules (generator holds it, rubric forbids it, judge accepts it, checker
+    flags it) — and #91 admits it for the summary of the SAME item, so the two rubrics
+    would contradict each other on one field. 0/195 items carry a title today; this goes
+    live on the first backfill.
+
+    (The enumeration reads SIX surfaces since the rebase, not five: #98 added the quoted
+    post to the judge's `_source_text`, and 45 of the 235 video items are quote-tweets —
+    so the digest gained a sixth surface it must enumerate. Exactly the same argument as
+    the title, one PR later. See `test_video_digest.py::…admits_the_quoted_post…`.)
+    """
+    text = load_rubric("video-digest").lower()
+    assert "video title" in text, "digest rubric no longer admits the video title as evidence"
+    assert "six surfaces" in text

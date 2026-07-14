@@ -17,7 +17,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.executors.api import _video_frame_descriptions
+from xbrain.executors.api import _video_frame_descriptions, quoted_attribution, quoted_text
 from xbrain.models import ContentSourceSuccess, Item
 from xbrain.rubrics import load_rubric
 from xbrain.worksheet import _video_transcript
@@ -85,16 +85,41 @@ def export_video_digest_worksheet(
         "executor": executor,
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with keys "
-            "{item_id, digest}. Write the `digest` following `rubric` — grounded in "
-            "`video_transcript` (what the video says) and `video_frame_descriptions` "
-            "(what it shows), NOT the tweet `text`/caption. Then run: xbrain "
-            "video-digest --apply <this file>."
+            "{item_id, digest}. Write the `digest` following `rubric`. Ground the "
+            "SUBSTANCE in `video_transcript` (what the video says) and "
+            "`video_frame_descriptions` (what it shows) — never summarise the tweet "
+            "`text`, which is often a clickbait caption. `author`/`author_name`, `text` and "
+            "`quoted_text`/`quoted_attribution` (the post this one QUOTES) are evidence "
+            "for ATTRIBUTION only (who is speaking, what is being shown). On a quote-"
+            "tweet the clip is often the QUOTED account's — `quoted_attribution` names "
+            "them, and the poster is NOT its author. Name no entity that none of these "
+            "surfaces names. Then run: xbrain video-digest --apply <this file>."
         ),
         "rubric": load_rubric("video-digest", language=output_language),
         "items": [
             {
                 "item_id": item.id,
                 "author": item.author.handle,
+                # The display name travels WITH the handle: the digest rubric admits
+                # the author metadata as evidence for who is speaking, and the judge's
+                # `verification._source_text` holds `@handle (Display Name)`. Shipping
+                # the handle alone would have the generator de-abbreviate `@lexfridman`
+                # into a name it was never shown, while the judge checks against the
+                # display name it WAS shown — the two sides disagreeing on the evidence.
+                "author_name": item.author.name,
+                # The quoted post (#98), for the 45 of 235 video items that are ALSO
+                # quote-tweets. The judge's `_source_text` carries its
+                # `[Quoted post — @handle (Name)]` block, so the generator must hold it
+                # too — otherwise the rubric names a surface the running generator was
+                # never given, which is the bug this PR exists to fix.
+                #
+                # It is ATTRIBUTION evidence, not substance: on a quote-tweet the clip is
+                # very often the QUOTED account's, and "posted by the speaker's own
+                # account" then points at the wrong person. Read through the SAME shared
+                # helpers every other surface uses — one call each, so #94's
+                # `evidence_surfaces()` absorbs them without a second list to maintain.
+                "quoted_text": quoted_text(item),
+                "quoted_attribution": quoted_attribution(item),
                 "text": item.text,
                 "title": (source.title if (source := _video_source(item)) else None),
                 "video_transcript": _video_transcript(item),
