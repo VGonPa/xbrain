@@ -10,6 +10,18 @@ generates an Obsidian wiki.
 
 ## Architecture
 - Pipeline: `extract → import-archive → fetch → [enrich] → generate`.
+- Quoted posts (a quote-tweet's third-party content): X embeds the quoted post — body
+  AND author — in the same timeline payload as the tweet quoting it, so `extract`
+  parses it out as a `ContentSourceSuccess(kind="quoted_tweet", author=…)` at **no
+  extra network cost** (a `ContentSourceFailure` when X tombstones it / refuses it /
+  hydrates nothing). It then reaches every LLM surface under ONE shared label —
+  `executors.api.quoted_attribution` → `Quoted post — @handle (Name)` — read by the api
+  prompt, the enrich worksheet and the judge's `_source_text`, so the attribution rule
+  (**the poster is not the author of what they quote**) is enforceable. Backfill of
+  already-stored items: `xbrain refresh-quoted --from-store` (offline join on
+  `quoted_id`, repairs the 199 of 762 whose quoted post is already an item) then
+  `xbrain refresh-quoted` (re-capture, for the rest). Both bump `content.fetched_at`,
+  so `enrich` re-generates exactly the repaired summaries.
 - Media side-pipeline: `media` (download photos) → `describe` (vision LLM);
   `refresh-media` re-captures X to backfill the playable video URL + bitrate +
   duration onto already-stored items (video-only, preserves photos/enrichment;

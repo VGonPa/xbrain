@@ -11,7 +11,10 @@ Produce a `summary` for one X post (a bookmark or the user's own tweet).
   3. the poster's own **thread**,
   4. the **fetched article** body and its title,
   5. the **video** title, transcript and frame descriptions,
-  6. the **image descriptions**.
+  6. the **image descriptions**,
+  7. the **quoted post** — its body AND the `@handle (Name)` of the account that wrote
+     it, shown together under a `Quoted post — @handle (Name)` label. When that label
+     is present, the quoted body is evidence and so is that account's name.
 
   Nothing else is evidence. Not your world knowledge, not recognising the topic, the
   voice or the byline, and **not a link's URL or domain** — a domain is topic signal,
@@ -43,11 +46,17 @@ Produce a `summary` for one X post (a bookmark or the user's own tweet).
   post says. NEVER describe, reconstruct or guess the linked content from its
   URL, its domain or your own knowledge of it.
 - **Retweets / quotes:** summarise the shared content **when it is present** in the
-  item (a fetched article, a transcript, a quoted body). When it is not — the item
-  says `content NOT fetched`, or carries only a `quoted_content_note` — summarise
-  the post's own text instead. Never reconstruct the shared content you cannot see.
+  item (a fetched article, a transcript, a quoted body under its `Quoted post` label).
+  A quote-tweet's own text is often a bare reaction ("Read this", "This is huge") — the
+  substance is in the quoted post, so summarise THAT, and say what it actually says.
+  When it is not present — the item says `content NOT fetched`, or carries only a
+  `quoted_content_note` — summarise the post's own text instead. Never reconstruct the
+  shared content you cannot see: if the reaction does not say what it is reacting to,
+  neither do you.
 - **Attribution:** the post's author is who POSTED it. On a repost, a quote or a clip
   of someone else, the words are a third party's — do not name the poster as the
   speaker or author of that content, and do not name a speaker the item never names.
+  On a quote-tweet the quoted account is named for you in the `Quoted post — @handle
+  (Name)` label: THAT is the author of the quoted words, and the poster is not.
 - **Noise** (greetings, one-word posts): a short factual description is fine.
 - Output the summary text only. No markdown, no headings, no quotes.

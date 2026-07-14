@@ -373,35 +373,46 @@ def fetch_item(
 _TRANSIENT_FAILURES: frozenset[FailureReason] = frozenset({"timeout", "dns_error", "unknown_error"})
 
 
-def _should_refetch(content: Content | None, force: bool) -> bool:
+def _should_refetch(item: Item, force: bool) -> bool:
     """Return True if `fetch_pending` should (re)fetch this item.
 
-    - `content is None` (never fetched) → True.
+    - `item.content is None` (never fetched) → True.
     - `force=True` → True regardless of recorded state.
-    - Otherwise, True only if every `external_article` source on `content`
-      is a `ContentSourceFailure` whose `failure_reason` is in
-      `_TRANSIENT_FAILURES`. A single successful source (any
-      `ContentSourceSuccess`) or a categorised terminal failure (e.g.
-      `not_found`, `paywall`) skips. No `external_article` sources at all
-      → skip (there is nothing here for `fetch_pending`; the x.com sources
-      are handled by `fetch_x`).
+    - No `external_article` sources, but the item HAS a non-x link → True: the link
+      fetch never ran (see below).
+    - Otherwise, True only if every `external_article` source is a
+      `ContentSourceFailure` whose `failure_reason` is in `_TRANSIENT_FAILURES`. A
+      single successful source (any `ContentSourceSuccess`) or a categorised terminal
+      failure (e.g. `not_found`, `paywall`) skips.
 
-    The pre-#20 helper read `src.ok` / `src.failure_reason` as Optionals;
-    after the tagged-union refactor the variant `isinstance` check is the
-    single switch and `failure_reason` is required on the failure variant,
-    so no `is None` special-case is needed. Pre-#20 records that lacked a
-    categorised `failure_reason` are migrated to `timeout` by
-    `_normalise_legacy_content_source` (see `xbrain.models`) — they
-    therefore get one automatic retry under #19, matching the prior
-    behaviour without an extra branch here.
+    **Why "content exists" is NOT "the links were fetched".** Other stages attach
+    sources of their own kind — the `extract` stage now stamps the quoted post, and
+    `digest-video` / `expand_threads` attach transcripts and threads. Such an item
+    arrives here with `content` set and NO `external_article` source. Reading that as
+    "already fetched" would silently never download its article — for the 35% of the
+    corpus that quotes, plus every threaded or video item. So the question is asked of
+    the LINKS, not of the mere presence of content: `_build_external_sources` emits one
+    source per non-x link, so "has a non-x link but no `external_article` source" can
+    only mean the fetch has not run yet. Once it does, the sources exist and the
+    transient-failure rule below governs — no re-fetch loop.
+
+    The pre-#20 helper read `src.ok` / `src.failure_reason` as Optionals; after the
+    tagged-union refactor the variant `isinstance` check is the single switch and
+    `failure_reason` is required on the failure variant, so no `is None` special-case
+    is needed. Pre-#20 records that lacked a categorised `failure_reason` are migrated
+    to `timeout` by `_normalise_legacy_content_source` (see `xbrain.models`) — they
+    therefore get one automatic retry under #19, matching the prior behaviour without
+    an extra branch here.
     """
-    if content is None:
+    if item.content is None:
         return True
     if force:
         return True
-    external = [s for s in content.sources if s.kind == "external_article"]
+    external = [s for s in item.content.sources if s.kind == "external_article"]
     if not external:
-        return False
+        # No link body on the item: fetch iff there is a non-x link still to fetch.
+        # (x.com links are `fetch_x`'s job and must not drag the item in here.)
+        return any(not is_x_url(link.url) for link in item.links)
     return all(
         isinstance(src, ContentSourceFailure) and src.failure_reason in _TRANSIENT_FAILURES
         for src in external
@@ -431,7 +442,7 @@ def fetch_pending(
         # all links are x.com — handled by fetch_x
         if all(is_x_url(link.url) for link in item.links):
             continue
-        if not _should_refetch(item.content, force):
+        if not _should_refetch(item, force):
             continue
         if since and item.created_at < since:
             continue

@@ -64,6 +64,13 @@ ContentKind = Literal["external_article", "x_article", "thread", "quoted_tweet",
 # call site (api prompt, enrich worksheet, judge source) so the surfaces cannot drift.
 LINK_CONTENT_KINDS: frozenset[ContentKind] = frozenset({"external_article", "x_article"})
 
+# The kind whose body is the THIRD PARTY post a quote-tweet is sharing. Its own set,
+# for the same reason `LINK_CONTENT_KINDS` is one: every surface (api prompt, enrich
+# worksheet, judge source) must select it by the SAME predicate. A quoted post is not
+# a link body and not the poster's own words — it is someone else's post, and the
+# attribution guardrail depends on it keeping its own identity everywhere.
+QUOTED_CONTENT_KINDS: frozenset[ContentKind] = frozenset({"quoted_tweet"})
+
 
 class Author(BaseModel):
     """The X account that authored an item."""
@@ -636,6 +643,16 @@ class ContentSourceSuccess(BaseModel):
     title: str | None = None
     text: str
     http_status: int | None = None
+    # WHO wrote this body, when that is not the item's own author — set for
+    # `quoted_tweet` sources, whose text belongs to the THIRD PARTY being quoted
+    # (X embeds their handle + display name in the same timeline payload). This is
+    # the attribution evidence the generators were missing: without it the poster
+    # reads as the author of content they merely shared, which is the #86 bug.
+    # Optional + additive (defaults to None), so every EXISTING record LOADS
+    # unchanged — the same backward-compatible pattern as `has_speech`/`frames`/
+    # `blocks`. `None` = "the body is the item author's own, or the author is
+    # unknown"; it is never a licence to attribute the text to the poster.
+    author: Author | None = None
     # extraction attempts: 1 = single pass, 2 = + Firecrawl fallback;
     # 0 only on pre-Fase-2 records.
     attempts: int = 0

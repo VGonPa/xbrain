@@ -29,7 +29,9 @@ from xbrain.executors.api import (
     QUOTED_CONTENT_UNFETCHED_NOTE,
     _content_image_descriptions,
     _video_frame_descriptions,
+    quoted_attribution,
     quoted_content_unfetched,
+    quoted_text,
     thread_text,
     unfetched_links_note,
 )
@@ -139,6 +141,25 @@ def _article_parts(item: Item) -> list[str]:
     return [label, source.text[:ARTICLE_CHAR_LIMIT]]
 
 
+def _quoted_parts(item: Item) -> list[str]:
+    """The quoted post the item is sharing, under a label that NAMES ITS AUTHOR.
+
+    The judge must see every surface the generators see, or a summary correctly
+    grounded in the quoted body gets flagged unsupported (a false FAIL) — the mirror
+    of the bug that motivated this: the generator, shown nothing, invented instead.
+
+    The label carries the third party's `@handle (Name)` — built by the SAME
+    `quoted_attribution` the generators read — so the judge can enforce #86's
+    attribution rule: the poster is not the author of the content they quoted. Its own
+    label, never `[Linked article]`: a quoted post is not the content of any link.
+    """
+    label = quoted_attribution(item)
+    body = quoted_text(item)
+    if not (label and body):
+        return []
+    return [f"[{label}]", body]
+
+
 def _unfetched_parts(item: Item) -> list[str]:
     """The markers for content the pipeline never downloaded: links whose body is
     missing (all of them, or the remainder of a PARTIAL fetch) and a quoted post, which
@@ -163,8 +184,8 @@ def _source_text(item: Item) -> str:
     Concatenates the labelled evidence present on the item — the author metadata (WHO
     POSTED it, not who wrote its content), the video title + FULL transcript (what it
     says) + frame descriptions (what it shows), the image descriptions, the fetched
-    article body, the poster's own thread text, and the tweet text — so a claim in the
-    output can be traced to it. The judge must see everything the GENERATORS see: an
+    article body, the poster's own thread text, the QUOTED post (under its own author's
+    name), and the tweet text — so a claim in the output can be traced to it. The judge must see everything the GENERATORS see: an
     output grounded in a photo description or an article title would otherwise be
     judged against a source that never held it, and flagged unsupported (a false FAIL).
 
@@ -189,6 +210,7 @@ def _source_text(item: Item) -> str:
     thread = thread_text(item)
     if thread:
         parts += ["[Thread — full text, same author]", thread]
+    parts += _quoted_parts(item)
     parts += _unfetched_parts(item)
     if item.text:
         parts += ["[Tweet]", item.text]

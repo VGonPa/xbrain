@@ -24,9 +24,24 @@ eventual download size without fetching a byte.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from xbrain.models import Item, MediaEntry, MediaVideoPending
+from xbrain.models import (
+    QUOTED_CONTENT_KINDS,
+    Content,
+    ContentSource,
+    ContentSourceSuccess,
+    Item,
+    MediaEntry,
+    MediaVideoPending,
+)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 # bitrate is bits/second and duration is milliseconds, so
 # bytes = bitrate * (duration_millis / 1000) / 8 = bitrate * duration_millis / 8000.
@@ -179,3 +194,150 @@ def estimate_download_size(store: dict[str, Item]) -> tuple[int, int, int]:
             estimated_bytes += bitrate * duration // _BITS_PER_BYTE_TIMES_MILLIS_PER_SECOND
             n_estimable += 1
     return estimated_bytes, n_estimable, n_unknown
+
+
+@dataclass
+class QuotedBackfillReport:
+    """Counts emitted by `backfill_quoted_sources` for the CLI summary line.
+
+    - ``items_seen`` — fresh items whose id is already in the store.
+    - ``sources_attached`` — stored quote-tweets that GAINED a `quoted_tweet` source.
+    - ``readable`` / ``unreadable`` — of those, the ones that carry the quoted body
+      vs the ones X would not serve (deleted, protected, not hydrated). Both are
+      progress: an unreadable quote is recorded as a demonstrable failure, which is
+      what keeps the `content NOT fetched` marker honest.
+    - ``already_present`` — already had a readable quote; left untouched (idempotent).
+    - ``quoted_items_not_seen`` — stored quote-tweets STILL holding only a `quoted_id`
+      because X did not re-surface them in this capture. The honest diagnostic: how
+      much of the corpus this run could not repair.
+    """
+
+    items_seen: int = 0
+    sources_attached: int = 0
+    readable: int = 0
+    unreadable: int = 0
+    already_present: int = 0
+    quoted_items_not_seen: int = 0
+
+
+def _quoted_source(item: Item) -> ContentSource | None:
+    """The item's `quoted_tweet` source in either variant (readable or failed)."""
+    if item.content is None:
+        return None
+    return next((s for s in item.content.sources if s.kind in QUOTED_CONTENT_KINDS), None)
+
+
+def _has_readable_quote(item: Item) -> bool:
+    source = _quoted_source(item)
+    return isinstance(source, ContentSourceSuccess) and bool(source.text)
+
+
+def _attach_quoted(item: Item, source: ContentSource, now: datetime) -> None:
+    """Put `source` on `item`, replacing any prior `quoted_tweet` and keeping the rest.
+
+    `fetched_at` advances: the item just gained the evidence its summary was generated
+    without, so `enrich._needs_reenrichment` must see a material content change and
+    flow it back through generation. Otherwise the body lands in the store and the
+    defective summary stands — the fix would ship having repaired nothing.
+    """
+    kept = (
+        [s for s in item.content.sources if s.kind not in QUOTED_CONTENT_KINDS]
+        if item.content
+        else []
+    )
+    item.content = Content(fetched_at=now, sources=[*kept, source])
+
+
+def backfill_quoted_sources(
+    store: dict[str, Item], fresh_items: list[Item], *, now: Callable[[], datetime] = _utcnow
+) -> QuotedBackfillReport:
+    """Attach the quoted post — parsed from a fresh capture — onto already-stored items.
+
+    **No per-item fetch.** X embeds the quoted post in the same timeline payload as the
+    tweet quoting it, so one re-capture of the history (the `refresh-media` harness,
+    with no skip-known) carries every quoted body and author we need. This function is
+    the pure merge: `extract.graphql` already did the parsing.
+
+    Only `quoted_tweet` sources are touched — an article body, a transcript, a thread
+    and every enrichment/description field are preserved. Idempotent: an item that
+    already holds a READABLE quote is left alone (no needless re-enrichment), while a
+    recorded FAILURE is upgraded if X serves the post this time.
+    """
+    report = QuotedBackfillReport()
+    seen: set[str] = set()
+    for fresh in fresh_items:
+        stored = store.get(fresh.id)
+        if stored is None:
+            continue  # backfill only touches known ids; adding items is `extract`'s job
+        seen.add(fresh.id)
+        report.items_seen += 1
+        incoming = _quoted_source(fresh)
+        if incoming is None:
+            continue
+        if _has_readable_quote(stored):
+            report.already_present += 1
+            continue
+        _attach_quoted(stored, incoming, now())
+        report.sources_attached += 1
+        if isinstance(incoming, ContentSourceSuccess):
+            report.readable += 1
+        else:
+            report.unreadable += 1
+    report.quoted_items_not_seen = sum(
+        1
+        for item in store.values()
+        if item.quoted_id and item.id not in seen and not _has_readable_quote(item)
+    )
+    return report
+
+
+def quoted_source_from_item(quoted: Item) -> ContentSourceSuccess:
+    """The `quoted_tweet` source for a quoted post we ALREADY hold as an item.
+
+    Its body and its author come straight off the stored item — the same fields the
+    GraphQL parser would produce from a fresh capture, because they came from exactly
+    that parser when the quoted post was itself captured.
+    """
+    return ContentSourceSuccess(
+        kind="quoted_tweet",
+        url=quoted.url,
+        text=quoted.text,
+        author=quoted.author,
+        attempts=1,
+    )
+
+
+def backfill_quoted_from_store(
+    store: dict[str, Item], *, now: Callable[[], datetime] = _utcnow
+) -> QuotedBackfillReport:
+    """Attach the quoted post to every quote-tweet whose quoted post is ALREADY in the
+    store. Pure, offline, **zero network calls**.
+
+    A quote-tweet's `quoted_id` frequently names another item we captured in its own
+    right — measured on the real store: 199 of 762 (26.1%). For those the evidence has
+    been sitting in `items.json` the whole time, one dict lookup away, while the
+    generator was left to invent it. This is the free half of the repair; the remaining
+    quote-tweets need `refresh-quoted` (a re-capture) to reach their quoted post.
+
+    A `quoted_id` we do NOT hold is left untouched — NOT stamped as a failure. The post
+    is very likely alive; we simply never captured it, and a re-capture can still bring
+    it in. Stamping it `not_found` would be inventing a fact about X, which is the class
+    of bug this whole effort exists to kill.
+    """
+    report = QuotedBackfillReport()
+    for item in store.values():
+        if not item.quoted_id:
+            continue
+        if _has_readable_quote(item):
+            report.already_present += 1
+            continue
+        # `quoted_id == item.id` would make the item its own evidence — a self-quote is
+        # not a thing X produces, but a corrupt record must not become a citation loop.
+        quoted = store.get(item.quoted_id) if item.quoted_id != item.id else None
+        if quoted is None or not quoted.text:
+            report.quoted_items_not_seen += 1
+            continue
+        _attach_quoted(item, quoted_source_from_item(quoted), now())
+        report.sources_attached += 1
+        report.readable += 1
+    return report
