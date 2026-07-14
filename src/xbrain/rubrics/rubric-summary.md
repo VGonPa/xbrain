@@ -19,6 +19,12 @@ Produce a `summary` for one X post (a bookmark or the user's own tweet).
   post's own text. Do not write "article unavailable" — just describe what the
   post says. NEVER describe, reconstruct or guess the linked content from its
   URL, its domain or your own knowledge of it.
-- **Retweets / quotes:** summarise the substantive content being shared.
+- **Retweets / quotes:** summarise the shared content **when it is present** in the
+  item (a fetched article, a transcript, a quoted body). When it is not — the item
+  says `content NOT fetched`, or carries only a `quoted_content_note` — summarise
+  the post's own text instead. Never reconstruct the shared content you cannot see.
+- **Attribution:** the post's author is who POSTED it. On a repost, a quote or a clip
+  of someone else, the words are a third party's — do not name the poster as the
+  speaker or author of that content, and do not name a speaker the item never names.
 - **Noise** (greetings, one-word posts): a short factual description is fine.
 - Output the summary text only. No markdown, no headings, no quotes.

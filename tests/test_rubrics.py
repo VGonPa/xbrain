@@ -140,3 +140,30 @@ def test_verify_audit_rubric_loads_and_substitutes_language():
     assert "Spanish" in text
     assert "CONFIRM" in text
     assert "REVOKE" in text
+
+
+def test_verify_rubric_author_block_licenses_only_who_posted():
+    """F2: the `[Author]` block says who POSTED the item — nothing about who wrote or
+    spoke its CONTENT. The two come apart on a repost/quote/clip of someone else: a
+    digest naming the poster as the speaker of a clip is a MISATTRIBUTION the judge
+    caught before this rule existed. The rubric must grant only the true half.
+    """
+    text = load_rubric("verify", language="English").lower()
+    # The permissive wording that licensed attributing anyone's words to the poster.
+    assert "attributing the post to its own author is supported" not in text
+    # What the block DOES establish: who posted it.
+    assert "posted" in text
+    # What it does NOT establish: authorship/voice of the content, on a repost/quote/clip.
+    assert "repost" in text or "quote" in text or "clip" in text
+    assert "speaker" in text
+    assert "does not establish" in text or "not establish" in text
+
+
+def test_summary_rubric_only_summarises_shared_content_when_present():
+    """F3: no fetcher downloads a quoted post, so ordering the generator to
+    'summarise the substantive content being shared' orders it to invent. The rule
+    must be conditional on that content actually being in the source."""
+    text = load_rubric("summary", language="English").lower()
+    assert "summarise the substantive content being shared." not in text
+    assert "when it is present" in text or "when its content is present" in text
+    assert "post's own text" in text

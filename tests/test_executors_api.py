@@ -1,8 +1,10 @@
 # tests/test_executors_api.py
 from datetime import datetime, timezone
 
-from xbrain.executors.api import ApiExecutor, _user_prompt
-from xbrain.models import Author, Item, Link, Topic
+import pytest
+
+from xbrain.executors.api import ApiExecutor, _user_prompt, links_content_unfetched
+from xbrain.models import Author, Content, ContentSourceSuccess, Item, Link, Topic
 
 from tests.conftest import FakeAnthropic
 
@@ -480,34 +482,105 @@ def test_user_prompt_video_frames_sit_after_transcript_before_links():
     assert frames_idx < article_idx
 
 
-def test_user_prompt_flags_unfetched_links():
-    """When the linked content was never fetched, the prompt says so explicitly —
-    the model must not reconstruct the linked content from the URL/domain."""
-    from xbrain.models import Link
+# -------------------------------------------------- unfetched-content guardrails
 
-    item = _item("1", links=[Link(url="https://t.co/x", domain="time.com")])
-    prompt = _user_prompt(item, VOCAB)
+
+def _linked_item(*, links: int = 1, sources: list[ContentSourceSuccess] | None = None, **extra):
+    """An item with `links` outbound links and an optional content source list."""
+    return _item(
+        "1",
+        links=[Link(url=f"https://t.co/{i}", domain=f"site{i}.com") for i in range(links)],
+        content=(
+            Content(fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc), sources=list(sources))
+            if sources is not None
+            else None
+        ),
+        **extra,
+    )
+
+
+def _source(kind: str, text: str = "some body", **extra) -> ContentSourceSuccess:
+    return ContentSourceSuccess(kind=kind, url="https://x/1", text=text, **extra)
+
+
+# The predicate is the WHOLE guardrail: when it is False no surface is marked, so
+# every content shape it can meet is pinned here. Only a fetched LINKED page
+# (`external_article` / `x_article`) counts as "the link was fetched" — a `thread`
+# is the item's OWN text, a `quoted_tweet` is another post, an `x_video` is a
+# manufactured transcript. None of them is evidence an outbound link was read.
+@pytest.mark.parametrize(
+    ("links", "kinds", "expected"),
+    [
+        (0, [], False),  # no links → nothing to guard
+        (1, [], True),  # links, content is None → nothing fetched
+        (1, ["external_article"], False),  # the link WAS fetched
+        (1, ["x_article"], False),  # an X longform article counts too
+        (1, ["thread"], True),  # F1: a thread is the item's own text
+        (1, ["quoted_tweet"], True),  # a quoted post is not the linked page
+        (1, ["x_video"], True),  # a transcript is not the linked page
+        (1, ["thread", "x_video"], True),  # F1: still nothing linked was fetched
+        (2, ["external_article"], True),  # F5: 1 of 2 links fetched → still flagged
+        (2, ["external_article", "x_article"], False),  # both links fetched
+        (1, ["external_article", "thread"], False),  # article + own thread → fetched
+    ],
+)
+def test_links_content_unfetched_only_counts_fetched_linked_pages(links, kinds, expected):
+    item = _linked_item(links=links, sources=[_source(k) for k in kinds] if kinds else None)
+    assert links_content_unfetched(item) is expected
+
+
+def test_links_content_unfetched_ignores_a_textless_source():
+    """A success source with empty text (a no-speech video) is not fetched content."""
+    item = _linked_item(sources=[_source("x_video", text="", has_speech=False)])
+    assert links_content_unfetched(item) is True
+
+
+def test_user_prompt_flags_unfetched_links():
+    """When the linked content was never fetched, the prompt carries the guardrail
+    note — the model must not reconstruct the linked content from the URL/domain."""
+    prompt = _user_prompt(_linked_item(), VOCAB)
     assert "NOT fetched" in prompt
+    assert "never describe, reconstruct or guess" in prompt
 
 
 def test_user_prompt_does_not_flag_links_when_article_fetched():
-    from datetime import datetime, timezone
-
-    from xbrain.models import Content, ContentSourceSuccess
-
-    from xbrain.models import Link
-
-    item = _item("1", links=[Link(url="https://arxiv.org/abs/1", domain="arxiv.org")])
-    item.content = Content(
-        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
-        sources=[
-            ContentSourceSuccess(
-                kind="external_article",
-                url="https://arxiv.org/abs/1",
-                title="Paper",
-                text="the fetched body",
-            )
-        ],
-    )
+    item = _linked_item(sources=[_source("external_article", "the fetched body")])
     prompt = _user_prompt(item, VOCAB)
     assert "NOT fetched" not in prompt
+    assert "the fetched body" in prompt
+
+
+def test_user_prompt_labels_thread_text_as_thread_not_article():
+    """F1: a thread's own text is the item's own words, NOT a fetched linked page.
+    It must reach the model under its own label, and it must not suppress the
+    unfetched-links guardrail for a link nobody downloaded."""
+    item = _linked_item(sources=[_source("thread", "1/ my thread\n\n2/ about agents")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "1/ my thread" in prompt  # the thread text is NOT dropped — it is signal
+    thread_idx = prompt.index("Thread (full text by the same author):")
+    assert thread_idx < prompt.index("1/ my thread")
+    assert "Linked article" not in prompt  # …but it is not served as a fetched article
+    assert "NOT fetched" in prompt  # …and the unfetched link is still flagged
+
+
+def test_user_prompt_partial_fetch_flags_the_missing_link_with_counts():
+    """F5: 2 links, 1 fetched — the fetched body is present AND the note says how
+    many links were left unfetched, so a claim about the other one is checkable."""
+    item = _linked_item(links=2, sources=[_source("external_article", "the fetched body")])
+    prompt = _user_prompt(item, VOCAB)
+    assert "the fetched body" in prompt
+    assert "1 of 2" in prompt
+    assert "NOT fetched" in prompt
+
+
+def test_user_prompt_marks_an_unfetched_quoted_post():
+    """F3: the quoted post's content is never downloaded — say so, so the generator
+    does not invent the content it was told to summarise."""
+    item = _item("1", quoted_id="123")
+    prompt = _user_prompt(item, VOCAB)
+    assert "Quoted post" in prompt
+    assert "NOT fetched" in prompt
+
+
+def test_user_prompt_has_no_quoted_marker_without_a_quote():
+    assert "Quoted post" not in _user_prompt(_item("1"), VOCAB)

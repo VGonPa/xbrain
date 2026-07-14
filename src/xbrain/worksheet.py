@@ -13,31 +13,40 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.executors.api import (
-    UNFETCHED_LINKS_NOTE,
+    QUOTED_CONTENT_UNFETCHED_NOTE,
     _content_image_descriptions,
     _video_frame_descriptions,
-    links_content_unfetched,
+    first_source_text,
+    quoted_content_unfetched,
+    thread_text,
+    unfetched_links_note,
 )
-from xbrain.models import ContentSourceSuccess, Item, Topic
-from xbrain.rubrics import ARTICLE_CHAR_LIMIT, load_rubric
+from xbrain.models import LINK_CONTENT_KINDS, ContentSourceSuccess, Item, Topic
+from xbrain.rubrics import load_rubric
 
 
-def _article_text(item: Item) -> str | None:
-    """First successful fetched article body, truncated, or None.
+def _link_content_source(item: Item) -> ContentSourceSuccess | None:
+    """First successfully-fetched LINKED page source (`LINK_CONTENT_KINDS`), or None.
 
-    Only the success variant of `ContentSource` carries `text`. The
-    isinstance narrowing satisfies mypy and silently skips broken-link
-    sources, matching the pre-#20 ``src.ok and src.text`` behaviour.
-    `x_video` sources are skipped — the transcript rides in its own
-    `video_transcript` field so the enrich track sees it as a transcript,
-    not an article (#44).
+    Only the success variant of `ContentSource` carries `text`. The isinstance
+    narrowing satisfies mypy and silently skips broken-link sources, matching the
+    pre-#20 ``src.ok and src.text`` behaviour. Only a linked page counts: an
+    `x_video` transcript rides in `video_transcript`, a `thread` in `thread` and a
+    quoted post in its own marker — none of them is a fetched article, and serving
+    one as `article` would tell the reader (agent or judge) a link was downloaded
+    when none was.
     """
     if not item.content:
         return None
     for src in item.content.sources:
-        if isinstance(src, ContentSourceSuccess) and src.kind != "x_video" and src.text:
-            return src.text[:ARTICLE_CHAR_LIMIT]
+        if isinstance(src, ContentSourceSuccess) and src.kind in LINK_CONTENT_KINDS and src.text:
+            return src
     return None
+
+
+def _article_text(item: Item) -> str | None:
+    """First successfully-fetched LINKED article body, truncated, or None."""
+    return first_source_text(item, LINK_CONTENT_KINDS)
 
 
 def _video_transcript(item: Item) -> str | None:
@@ -80,12 +89,15 @@ def export_worksheet(
         "instructions": (
             "For each entry in `items`, append one object to `judgments` with "
             "keys {item_id, summary, primary_topic, topics}. Use only slugs from "
-            "`vocab`. An item may also carry `links`, `article`, `video_transcript` "
-            "(the full talk — what the video SAYS), `video_frame_descriptions` (what "
-            "the video SHOWS: slides/screens, present even when there is no "
-            "transcript) and `image_descriptions` (content-bearing photos) — weigh "
-            "them all as topic signal, not just `text`. Then run: xbrain enrich "
-            "--apply <this file>."
+            "`vocab`. An item may also carry `links`, `article` (a FETCHED linked "
+            "page), `thread` (the poster's own full thread text — not a linked "
+            "page), `video_transcript` (the full talk — what the video SAYS), "
+            "`video_frame_descriptions` (what the video SHOWS: slides/screens, "
+            "present even when there is no transcript) and `image_descriptions` "
+            "(content-bearing photos) — weigh them all as topic signal, not just "
+            "`text`. `unfetched_links_note` / `quoted_content_note` mark content "
+            "that was NEVER downloaded: obey them — never describe or guess it. "
+            "Then run: xbrain enrich --apply <this file>."
         ),
         "rubrics": {
             "summary": load_rubric("summary", language=output_language),
@@ -100,11 +112,21 @@ def export_worksheet(
                 "bookmark_folder": it.bookmark_folder,
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
-                # Guardrail: when the item links out but nothing was fetched, say so
-                # explicitly — the agent must not reconstruct the linked content
-                # from the URL/domain (see `links_content_unfetched`).
-                "unfetched_links_note": (
-                    UNFETCHED_LINKS_NOTE if links_content_unfetched(it) else None
+                # The poster's OWN expanded thread — real signal, but NOT a fetched
+                # linked page. It ships in its own field so the agent never reads the
+                # author's own words as the body of an article nobody downloaded.
+                "thread": thread_text(it),
+                # Guardrail: when the item links out and some link's content is
+                # missing, say so explicitly (with counts on a partial fetch) — the
+                # agent must not reconstruct the linked content from the URL/domain
+                # (see `links_content_unfetched`).
+                "unfetched_links_note": unfetched_links_note(it),
+                # Guardrail: `quoted_id` is captured but no fetcher downloads the
+                # quoted post, so the shared content is NOT in this worksheet. Without
+                # this note the summary rubric's "summarise the shared content" rule
+                # would be an order to invent it.
+                "quoted_content_note": (
+                    QUOTED_CONTENT_UNFETCHED_NOTE if quoted_content_unfetched(it) else None
                 ),
                 "video_transcript": _video_transcript(it),
                 # Content-bearing photo descriptions (#34): the same non-decorative

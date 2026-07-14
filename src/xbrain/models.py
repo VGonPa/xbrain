@@ -55,6 +55,15 @@ FailureReason = Literal[
 # generate pipeline consumes it exactly like an article body.
 ContentKind = Literal["external_article", "x_article", "thread", "quoted_tweet", "x_video"]
 
+# The kinds whose body IS the content of an outbound LINK — the only evidence that
+# a link in `item.links` was actually downloaded. The other kinds are not: a
+# `thread` is the poster's OWN text, a `quoted_tweet` is a different post, an
+# `x_video` transcript is manufactured from the video. Treating any of them as "the
+# link was fetched" both silences the unfetched-links guardrail AND serves the
+# item's own words to the LLM under a `Linked article` label. ONE set, used by every
+# call site (api prompt, enrich worksheet, judge source) so the surfaces cannot drift.
+LINK_CONTENT_KINDS: frozenset[ContentKind] = frozenset({"external_article", "x_article"})
+
 
 class Author(BaseModel):
     """The X account that authored an item."""
