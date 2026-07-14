@@ -34,6 +34,7 @@ from xbrain.fetch import (
     firecrawl_available,
     plan_retry_failed,
     retry_failed,
+    revalidate_stored_bodies,
 )
 from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
@@ -645,6 +646,31 @@ def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
     )
 
 
+def _run_revalidate(cfg: Config, *, dry_run: bool) -> None:
+    """`fetch --revalidate`: re-judge the article bodies ALREADY in the store and demote the walls.
+
+    Local only — no network. A wall that was accepted as a success is invisible to
+    `--retry-failed` (which selects failures), so without this the 28 measured walls in the real
+    corpus keep silencing the guardrail forever.
+    """
+    store = load_store(cfg.items_path)
+    demoted = revalidate_stored_bodies(store)
+    typer.echo(
+        f"Cuerpos revalidados: {len(demoted)} items cuyo 'artículo' era en realidad un muro "
+        "(cookies/login) o puro chrome de página. Pasan a fallo `blocked_interstitial`, "
+        "con lo que el guardarraíl vuelve a dispararse y el generador deja de recibirlos "
+        "como `[Linked article]`."
+    )
+    if dry_run:
+        typer.echo("--dry-run: no se ha tocado el store.")
+        return
+    if not demoted:
+        return
+    _auto_snapshot(cfg, "fetch-revalidate")
+    save_store(store, cfg.items_path)
+    typer.echo(f"Reescrito → {cfg.items_path}")
+
+
 @app.command()
 @_handle_cli_errors
 def fetch(
@@ -659,13 +685,29 @@ def fetch(
         "(transitorios, y js_required/empty_content si hay FIRECRAWL_API_KEY). No re-descarga "
         "lo que ya funcionó, a diferencia de --force.",
     ),
+    revalidate: bool = typer.Option(
+        False,
+        "--revalidate",
+        help="Re-juzga los cuerpos YA guardados y degrada los que son muros de cookies/login o "
+        "chrome de página (28 medidos en el corpus real). Local, sin red.",
+    ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Con --retry-failed: informa del plan sin tocar el store."
+        False,
+        "--dry-run",
+        help="Con --retry-failed / --revalidate: informa del plan sin tocar el store.",
     ),
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
-    if dry_run and not retry_failed:
-        raise typer.BadParameter("--dry-run requires --retry-failed.")
+    if dry_run and not (retry_failed or revalidate):
+        raise typer.BadParameter("--dry-run requires --retry-failed or --revalidate.")
+    if revalidate:
+        if retry_failed or force:
+            raise typer.BadParameter(
+                "--revalidate re-judges the bodies already in the store (no network); it does "
+                "not combine with --retry-failed or --force."
+            )
+        _run_revalidate(_config(), dry_run=dry_run)
+        return
     if retry_failed:
         if force:
             raise typer.BadParameter(

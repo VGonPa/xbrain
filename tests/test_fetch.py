@@ -15,6 +15,7 @@ from xbrain.fetch import (
     _should_refetch,
     plan_retry_failed,
     retry_failed,
+    revalidate_stored_bodies,
     should_retry_failed,
     _sources_materially_equal,
     extract_article,
@@ -1266,3 +1267,82 @@ def test_an_item_with_only_x_links_and_a_quote_is_not_fetched():
     """x.com links are `fetch_x`'s job — a quoted source must not drag them here."""
     item = _item_with([_QUOTED], urls=("https://x.com/b/status/2",))
     assert _should_refetch(item, force=False) is False
+
+
+# --- Walls ALREADY in the store: 28 of the corpus's 189 fetched "articles" are chrome ----------
+# Measured, not supposed: 17 YouTube footer blocks ("Información Prensa Derechos de autor…"),
+# `Loading...`, `Sign in`, bot checks, "You need to enable JavaScript to run this app." Each is
+# persisted as a SUCCESS, so `links_content_unfetched` is False and the guardrail never fires —
+# the generator was handed the footer under a `[Linked article]` label. `--retry-failed` cannot
+# reach them: it selects FAILURES. Revalidation is local and needs no network.
+
+
+def test_revalidate_demotes_a_stored_wall_and_the_guardrail_starts_firing():
+    """The exact YouTube-chrome body found 17 times in the real store."""
+    item = _item("7", ["https://youtu.be/kkXsDGmpLU4"])
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://youtu.be/kkXsDGmpLU4",
+                title="8 Inversores Top VC Reflexionan sobre 2024",
+                text="Información Prensa Derechos de autor Contactar Creadores Publicidad "
+                "Desarrolladores Términos Privacidad Política y seguridad Cómo funciona YouTube",
+            )
+        ],
+    )
+    store = {"7": item}
+    assert links_content_unfetched(item) is False  # today: the wall IS the evidence
+
+    demoted = revalidate_stored_bodies(store)
+
+    assert demoted == ["7"]
+    source = store["7"].content.sources[0]
+    assert isinstance(source, ContentSourceFailure)
+    assert source.failure_reason == "blocked_interstitial"
+    assert links_content_unfetched(store["7"]) is True  # the guardrail now fires
+    note = unfetched_links_note(store["7"])
+    assert note is not None and "cookie/login wall" in note
+
+
+def test_revalidate_leaves_a_real_article_alone():
+    """0 of the corpus's 189 fetched articles are wrongly rejected — this pins that direction."""
+    item = _item("7", ["https://example.com/a"])
+    body = "The piece argues that distribution beats technology. " * 20
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article", url="https://example.com/a", title="Real", text=body
+            )
+        ],
+    )
+    store = {"7": item}
+
+    assert revalidate_stored_bodies(store) == []
+    source = store["7"].content.sources[0]
+    assert isinstance(source, ContentSourceSuccess)
+    assert source.text == body  # byte-identical: revalidation never rewrites a good body
+
+
+def test_revalidate_keeps_a_real_article_that_merely_carries_one_cookie_line():
+    """Measured false-reject guard: the platform.claude.com docs page prepends a cookie banner to
+    genuine documentation. ONE chrome marker is page furniture, not a wall."""
+    item = _item("7", ["https://platform.claude.com/docs/x"])
+    body = (
+        "We use cookies to deliver and improve our services. You can read our Cookie Policy "
+        "here. " + "The outcome elevates a session from conversation to work. " * 20
+    )
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://platform.claude.com/docs/x",
+                title="Define outcomes",
+                text=body,
+            )
+        ],
+    )
+    assert revalidate_stored_bodies({"7": item}) == []

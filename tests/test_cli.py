@@ -3797,3 +3797,39 @@ def test_re_aggregating_the_judges_restores_the_full_fail_set_so_the_wash_cannot
         assert _stored_verdicts(items_path) == {
             i: ("PASS" if i == target_item else "FAIL") for i in ("7", "8", "9")
         }
+
+
+def test_fetch_revalidate_dry_run_reports_and_never_touches_the_store(tmp_path: Path, monkeypatch):
+    """`--revalidate` demotes walls ALREADY persisted as successes — invisible to --retry-failed,
+    which selects failures. Measured: 28 of the real corpus's 189 fetched "articles" are walls or
+    page chrome. The dry run must classify without mutating a byte."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    wall = _verify_video_item("7")
+    wall.links = [Link(url="https://youtu.be/x", domain="youtu.be")]
+    wall.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://youtu.be/x",
+                title="A talk",
+                text="Información Prensa Derechos de autor Contactar Creadores Publicidad "
+                "Desarrolladores Términos Privacidad Política y seguridad",
+            )
+        ],
+    )
+    save_store({"7": wall}, items_path)
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["fetch", "--revalidate", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "Cuerpos revalidados: 1 items" in _plain_output(result.output)
+    assert items_path.read_bytes() == before  # not a byte touched
+
+    # And the real run demotes it, so the guardrail starts firing on that item.
+    result = runner.invoke(app, ["fetch", "--revalidate"])
+    assert result.exit_code == 0, result.output
+    stored = json.loads(items_path.read_text(encoding="utf-8"))["7"]["content"]["sources"][0]
+    assert stored["outcome"] == "failure"
+    assert stored["failure_reason"] == "blocked_interstitial"

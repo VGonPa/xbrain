@@ -212,40 +212,70 @@ def _firecrawl_extract(
 # body becomes evidence the judge will trust.
 _MIN_ARTICLE_CHARS = 300
 
-# Phrases that only ever appear on a wall, never in the article behind it. Matched
-# case-insensitively against the extracted body.
-_INTERSTITIAL_MARKERS = (
-    # consent / login walls
+# WALL phrases: a page containing one of these IS a wall. Measured against the corpus's 189
+# successfully-fetched articles — none of them contains any of these. Rejecting on a single hit
+# is therefore safe.
+#
+# Deliberately specific. A bare "log in to" was the FIRST version of this list and it rejected
+# three genuinely good bodies — the `open-wearables` README ("Log in to the developer portal"),
+# this repo's own README ("log in to X in Chrome first") — because that phrase is ordinary
+# English prose. A marker that fires on prose is not a wall detector, it is a coin flip.
+_WALL_MARKERS = (
     "accept all cookies",
     "we value your privacy",
     "we and our partners store",
-    "log in to",
     "sign in to continue",
+    "log in to continue",
+    "log in to see",
+    "log in to view",
+    "log in or sign up",
+    "create an account to see",
     "subscribe to continue",
-    "create an account",
     "enable javascript",
     "turn on javascript",
     "verify you are human",
     "checking your browser",
     "are you a robot",
-    # PAGE CHROME. Observed on the real URLs this backfill would hit (nature.com et al). Their
-    # presence means we captured the whole page — nav, banner, footer — not the article. That is
-    # not evidence: it is a body a model can mine for claims the article never made. Firecrawl is
-    # asked for `onlyMainContent`, so a clean extraction should contain none of these; if one
-    # shows up, the extraction is not clean and we fail closed.
-    "skip to main content",
     "limited support for css",
     "turn off compatibility mode",
+    "doesn't work on your browser",
+    "does not work on your browser",
+)
+
+# CHROME phrases: page furniture — a footer, a cookie line. A REAL article page can legitimately
+# carry ONE (the Claude docs page prepends a cookie banner to genuine documentation; measured).
+# But when several co-occur we did not capture the article, we captured the page furniture — and
+# that body is not evidence, it is a surface a model can mine for claims the article never made.
+# So: one is tolerated, TWO OR MORE is a rejection.
+_CHROME_MARKERS = (
+    "skip to main content",
     "cookie policy",
     "privacy policy",
     "manage preferences",
+    "accept cookies",
+    "your privacy",
 )
+_MAX_TOLERATED_CHROME = 1
 
 
 def _interstitial_marker(text: str) -> str | None:
-    """The wall phrase this body contains, if any."""
+    """The wall evidence this body carries, if any — a wall phrase, or a pile-up of page chrome.
+
+    ASYMMETRIC ON PURPOSE, and the direction matters: rejecting a good article merely leaves the
+    honest failure we already had (the guardrail fires, the generator is told nothing is known,
+    nothing is lost but an opportunity). ACCEPTING a wall poisons the evidence — it silences the
+    guardrail, grounds an entity in a cookie banner, and hands the judge a `[Linked article]` it
+    will PASS. So when in doubt, reject. The thresholds below are nevertheless tuned against the
+    real corpus rather than guessed: they reject 0 of its 189 successfully-fetched articles.
+    """
     lowered = text.lower()
-    return next((m for m in _INTERSTITIAL_MARKERS if m in lowered), None)
+    wall = next((m for m in _WALL_MARKERS if m in lowered), None)
+    if wall:
+        return wall
+    chrome = [m for m in _CHROME_MARKERS if m in lowered]
+    if len(chrome) > _MAX_TOLERATED_CHROME:
+        return " + ".join(chrome)
+    return None
 
 
 def validate_body(url: str, result: FetchResult) -> FetchResult:
@@ -645,6 +675,47 @@ def plan_retry_failed(store: dict[str, Item], *, firecrawl_configured: bool) -> 
         else:
             plan.terminal.append(item.id)
     return plan
+
+
+def revalidate_stored_bodies(store: dict[str, Item]) -> list[str]:
+    """Re-run `validate_body` over the ALREADY-PERSISTED article bodies; demote the walls.
+
+    `--retry-failed` cannot reach these: it selects recorded FAILURES, and a wall that was
+    accepted is recorded as a success. Measured on the real corpus: 28 of the 189 fetched
+    "articles" are walls or page chrome — 17 YouTube footer blocks, `Loading...`, `Sign in`,
+    bot checks, "You need to enable JavaScript to run this app." Every one is persisted as a
+    SUCCESS, so `links_content_unfetched` is False, the `[Links — content NOT fetched]` block
+    never renders, and the generator was handed the footer under a `[Linked article]` label.
+    That is C1, already in the store, not hypothetical.
+
+    Purely local — no network, no extractor. It only re-judges bytes we already hold, so a
+    demotion cannot lose anything: the body was never evidence in the first place.
+
+    Returns the ids of the items whose evidence changed. Mutates `store`; the caller snapshots.
+    """
+    demoted: list[str] = []
+    for item in store.values():
+        content = item.content
+        if content is None:
+            continue
+        sources: list[ContentSource] = []
+        changed = False
+        for src in content.sources:
+            if not (isinstance(src, ContentSourceSuccess) and src.kind == "external_article"):
+                sources.append(src)
+                continue
+            verdict = validate_body(
+                src.url, FetchSuccess(title=src.title, text=src.text, http_status=200)
+            )
+            if isinstance(verdict, FetchSuccess):
+                sources.append(src)  # a good body is left byte-identical
+                continue
+            changed = True
+            sources.append(_content_source_from(src.url, verdict))
+        if changed:
+            item.content = Content(fetched_at=content.fetched_at, sources=sources)
+            demoted.append(item.id)
+    return demoted
 
 
 def _refetch_failed_sources(
