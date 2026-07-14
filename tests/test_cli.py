@@ -10,6 +10,7 @@ from xbrain.cli import app
 from xbrain.models import (
     Author,
     Content,
+    ContentSourceFailure,
     ContentSourceSuccess,
     Enrichment,
     Item,
@@ -3594,6 +3595,99 @@ def test_verify_audit_write_verdicts_drops_a_record_whose_worksheet_stamp_was_ta
     )
 
 
+# ---------------------------------------------- fetch --retry-failed (PR-I: repair the evidence)
+# The exposed set is items whose linked content is missing but whose summary describes it anyway.
+# `--force` would repair them, but re-fetches EVERY link in the store (400 in the real corpus),
+# re-downloading what already worked. This targets only the failures a retry can actually repair.
+
+
+def _item_with_failed_link(item_id: str, reason: str, attempts: int = 1) -> Item:
+    item = _verify_video_item(item_id)
+    item.links = [Link(url=f"https://example.com/{item_id}", domain="example.com")]
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url=f"https://example.com/{item_id}",
+                failure_reason=reason,
+                attempts=attempts,
+            )
+        ],
+    )
+    return item
+
+
+def test_fetch_retry_failed_dry_run_reports_the_plan_and_never_touches_the_store(
+    tmp_path: Path, monkeypatch
+):
+    """The dry run is the whole safety story: it must classify without mutating a byte."""
+    _setup_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    items_path = tmp_path / "data" / "items.json"
+    save_store(
+        {
+            "7": _item_with_failed_link("7", "unknown_error"),  # transient → retryable
+            "8": _item_with_failed_link("8", "js_required"),  # blocked on the key
+            "9": _item_with_failed_link("9", "not_found"),  # terminal
+        },
+        items_path,
+    )
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["fetch", "--retry-failed", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+
+    assert "Reintentables: 1 items" in out  # only the transient one
+    assert "BLOQUEADOS por falta de FIRECRAWL_API_KEY: 1 items" in out
+    assert "Terminales" in out and "1 items" in out
+    assert items_path.read_bytes() == before  # not a byte touched
+    assert not (tmp_path / "data" / "snapshots").exists()
+
+
+def test_fetch_retry_failed_without_the_key_does_not_replay_the_identical_failure(
+    tmp_path: Path, monkeypatch
+):
+    """A js_required failure at attempts=1 is recoverable ONLY with the JS extractor. Without
+    the key, re-fetching it runs the same extractor and reproduces the same failure — that is
+    not a repair, it is load on someone's server. It must be reported as BLOCKED, not retried."""
+    _setup_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"8": _item_with_failed_link("8", "js_required")}, items_path)
+
+    calls: list[str] = []
+    monkeypatch.setattr("xbrain.cli.retry_failed", lambda *a, **k: calls.append("ran") or 0)
+
+    result = runner.invoke(app, ["fetch", "--retry-failed"])
+    assert result.exit_code == 0, result.output
+    assert "BLOQUEADOS por falta de FIRECRAWL_API_KEY: 1 items" in _plain_output(result.output)
+    assert calls == []  # the fetch never ran — nothing to gain, so nothing was requested
+
+
+def test_fetch_retry_failed_rejects_force(tmp_path: Path, monkeypatch):
+    """`--force` re-fetches everything including what already succeeded; `--retry-failed` is the
+    targeted opposite. Combining them silently means `--force` — so it is refused."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {"7": _item_with_failed_link("7", "unknown_error")}, tmp_path / "data" / "items.json"
+    )
+    result = runner.invoke(app, ["fetch", "--retry-failed", "--force"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in _plain_output(result.output)
+
+
+def test_fetch_dry_run_requires_retry_failed(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {"7": _item_with_failed_link("7", "unknown_error")}, tmp_path / "data" / "items.json"
+    )
+    result = runner.invoke(app, ["fetch", "--dry-run"])
+    assert result.exit_code != 0
+    assert "--dry-run requires --retry-failed" in _plain_output(result.output)
+
+
 # ------------------------------ the mass-revocation guard cannot be split across runs (B1, e2e)
 # The reviewer's original repro: 3 confirmed FAILs, ONE revoke per run. `_mass_revocation_tripped`
 # needs >=2 FAILs dropping AND >50% of them (DEFAULT_MASS_REVOCATION_MAX), so a single revoke never
@@ -3703,3 +3797,42 @@ def test_re_aggregating_the_judges_restores_the_full_fail_set_so_the_wash_cannot
         assert _stored_verdicts(items_path) == {
             i: ("PASS" if i == target_item else "FAIL") for i in ("7", "8", "9")
         }
+
+
+def test_fetch_revalidate_is_report_only_until_write(tmp_path: Path, monkeypatch):
+    """`--revalidate` demotes walls ALREADY persisted as successes — invisible to --retry-failed,
+    which selects failures. Measured: 28 of the real corpus's 189 fetched "articles" are walls or
+    page chrome. The dry run must classify without mutating a byte."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    wall = _verify_video_item("7")
+    wall.links = [Link(url="https://youtu.be/x", domain="youtu.be")]
+    wall.content = Content(
+        fetched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(
+                kind="external_article",
+                url="https://youtu.be/x",
+                title="A talk",
+                text="Información Prensa Derechos de autor Contactar Creadores Publicidad "
+                "Desarrolladores Términos Privacidad Política y seguridad",
+            )
+        ],
+    )
+    save_store({"7": wall}, items_path)
+    before = items_path.read_bytes()
+
+    # REPORT-ONLY by default: this rewrites recorded evidence, so it must not act unasked.
+    result = runner.invoke(app, ["fetch", "--revalidate"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    assert "Cuerpos que NO son artículos: 1 items" in out
+    assert "youtu.be" in out  # the DOMAIN is reported, not just a count
+    assert items_path.read_bytes() == before  # not a byte touched without --write
+
+    # --write applies the demotion, so the guardrail starts firing on that item.
+    result = runner.invoke(app, ["fetch", "--revalidate", "--write"])
+    assert result.exit_code == 0, result.output
+    stored = json.loads(items_path.read_text(encoding="utf-8"))["7"]["content"]["sources"][0]
+    assert stored["outcome"] == "failure"
+    assert stored["failure_reason"] == "blocked_interstitial"

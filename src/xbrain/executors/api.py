@@ -17,7 +17,9 @@ from xbrain.llm_json import json_from_response
 from xbrain.models import (
     LINK_CONTENT_KINDS,
     QUOTED_CONTENT_KINDS,
+    ContentSourceFailure,
     ContentSourceSuccess,
+    FailureReason,
     Item,
     MediaPhotoDescribed,
     Topic,
@@ -200,11 +202,52 @@ def links_content_unfetched(item: Item) -> bool:
     return bool(item.links) and fetched_link_sources(item) < len(item.links)
 
 
+# Why the fetch produced nothing, in the generator's and the judge's language. Each clause
+# states a FACT about the page, recorded by the fetcher — never a guess.
+#
+# The distinction earns its keep: "the page is dead" and "our extractor could not render the
+# page" are different facts, and only the first says anything about the page itself. Collapsing
+# both to a bare "NOT fetched" leaves the generator unable to say anything true about a link it
+# can see, which is exactly the pressure that makes it invent from the slug.
+_FAILURE_CLAUSE: dict[FailureReason, str] = {
+    "not_found": "the page no longer exists (HTTP 404)",
+    "forbidden": "access was denied (paywall or block)",
+    "paywall": "the page is behind a paywall",
+    "blocked_interstitial": "the page served a cookie/login wall, not an article",
+    "js_required": "the page could not be extracted",
+    "empty_content": "the page could not be extracted",
+    "timeout": "the fetch failed",
+    "dns_error": "the fetch failed",
+    "unknown_error": "the fetch failed",
+}
+
+
+def _failure_clause(item: Item) -> str | None:
+    """The recorded reason(s) the linked content is missing, or None when the fetcher never
+    attempted the link (no failure source) — in which case there is no cause to name, and
+    inventing one would be the very sin the note exists to forbid."""
+    if item.content is None:
+        return None
+    reasons = [
+        _FAILURE_CLAUSE[src.failure_reason]
+        for src in item.content.sources
+        if isinstance(src, ContentSourceFailure)
+        and src.kind == "external_article"  # a failed thread/quoted_tweet is not a LINK failure
+        and src.failure_reason in _FAILURE_CLAUSE
+    ]
+    if not reasons:
+        return None
+    return "; ".join(dict.fromkeys(reasons))  # de-duped, order preserved
+
+
 def unfetched_links_note(item: Item) -> str | None:
     """The guardrail note for an item whose linked content is missing, or None.
 
     A PARTIAL fetch states the counts: a `Linked article` block IS present then, and
     would otherwise lend its credibility to a claim about the link nobody fetched.
+
+    When the fetcher recorded WHY, the note names it (`_failure_clause`). The rule is
+    unconditional — naming the cause never licenses describing the content.
     """
     if not links_content_unfetched(item):
         return None
@@ -217,6 +260,9 @@ def unfetched_links_note(item: Item) -> str | None:
         )
     else:
         headline = "The linked content was NOT fetched."
+    clause = _failure_clause(item)
+    if clause:
+        headline = f"{headline[:-1]} — {clause}."
     return f"{headline} {_UNFETCHED_RULE}"
 
 

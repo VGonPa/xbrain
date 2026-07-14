@@ -26,7 +26,15 @@ from xbrain.executors.api import (
     quoted_attribution,
     unfetched_links_note,
 )
-from xbrain.models import Author, Content, ContentSourceSuccess, Item, Link, Topic
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Item,
+    Link,
+    Topic,
+)
 from xbrain.rubrics import load_rubric
 from xbrain.verification import _source_text
 from xbrain.worksheet import export_worksheet
@@ -61,9 +69,14 @@ def _blocks(source_text: str) -> dict[str, str]:
 
 
 def _item(
-    *, links: int = 0, quoted: bool = False, article: bool = False, quoted_fetched: bool = False
+    *,
+    links: int = 0,
+    quoted: bool = False,
+    article: bool = False,
+    quoted_fetched: bool = False,
+    failure: str | None = None,
 ) -> Item:
-    sources = (
+    sources: list = (
         [
             ContentSourceSuccess(
                 kind="external_article",
@@ -75,6 +88,14 @@ def _item(
         if article
         else []
     )
+    if failure:
+        sources.append(
+            ContentSourceFailure(
+                kind="external_article",
+                url=f"https://example.com/{links - 1}",
+                failure_reason=failure,
+            )
+        )
     if quoted_fetched:
         sources = [*sources, QUOTED_SOURCE]
     return Item(
@@ -179,6 +200,54 @@ def test_the_partial_fetch_note_states_the_counts():
     note = unfetched_links_note(_item(links=2, article=True))
     assert note is not None
     assert "1 of 2" in note
+
+
+# ------------------------------------------------- the note names WHY (PR-I)
+# "We could not fetch this" and "this page is dead" are different facts, and the second is a
+# fact worth writing down. Without it the generator (and the judge) cannot tell a 404 from a
+# page our extractor merely failed to render — so neither can say anything true about it.
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_clause"),
+    [
+        ("not_found", "the page no longer exists (HTTP 404)"),
+        ("forbidden", "access was denied (paywall or block)"),
+        ("paywall", "the page is behind a paywall"),
+        ("js_required", "the page could not be extracted"),
+        ("empty_content", "the page could not be extracted"),
+        ("timeout", "the fetch failed"),
+    ],
+)
+def test_the_unfetched_note_names_the_recorded_failure_reason(failure, expected_clause):
+    """The note carries the RECORDED reason — never a guess, and never silence."""
+    note = unfetched_links_note(_item(links=1, failure=failure))
+    assert note is not None
+    assert expected_clause in note
+    # …and naming the reason must not weaken the rule that does the actual work.
+    for forbidden in ("describe", "reconstruct", "guess"):
+        assert forbidden in note
+
+
+def test_the_reason_reaches_every_surface_identically(tmp_path):
+    """Same contract as the note itself: the generator's two surfaces and the judge's source
+    all get the reason, VERBATIM, from the one builder. Asserted by identity, not substring."""
+    item = _item(links=1, failure="not_found")
+    note = unfetched_links_note(item)
+    assert note is not None and "no longer exists" in note
+    assert note in _user_prompt(item, VOCAB)  # generator: api prompt
+    assert _worksheet_entry(item, tmp_path)["unfetched_links_note"] == note  # generator: worksheet
+    assert note in _source_text(item)  # judge: verify source
+
+
+def test_an_unfetched_link_with_no_recorded_failure_still_gets_the_rule():
+    """A link the fetcher never even attempted has no reason to name. The note must degrade to
+    the plain form rather than inventing a cause — and must NOT drop the rule."""
+    note = unfetched_links_note(_item(links=1))
+    assert note is not None
+    assert "NOT fetched" in note
+    for forbidden in ("describe", "reconstruct", "guess"):
+        assert forbidden in note
 
 
 # ------------------------------------------- the FETCHED quote: same one contract

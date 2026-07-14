@@ -8,9 +8,11 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 
@@ -28,8 +30,15 @@ from xbrain.extract.browser import login as run_login
 from xbrain.extract.browser import x_context
 from xbrain.extract.extractor import RateLimitTruncated, extract_source
 from xbrain.extract.threads import expand_threads
-from xbrain.fetch import fetch_pending
 from xbrain.extract.graphql import items_needing_refetch
+from xbrain.fetch import (
+    RetryPlan,
+    fetch_pending,
+    firecrawl_available,
+    plan_retry_failed,
+    retry_failed,
+    revalidate_stored_bodies,
+)
 from xbrain.fetch_x import (
     browser_text_fetcher,
     fetch_x_articles,
@@ -589,6 +598,95 @@ def import_archive(zip_path: Path) -> None:
     typer.echo(f"Archivo importado: {added} tweets nuevos")
 
 
+def _echo_retry_plan(plan: RetryPlan, *, has_key: bool) -> None:
+    """Report the plan — including, loudly, what it will NOT attempt and why."""
+    reasons = ", ".join(f"{n} {reason}" for reason, n in sorted(plan.reasons.items()))
+    typer.echo(f"Reintentables: {len(plan.retryable)} items" + (f" ({reasons})" if reasons else ""))
+    if plan.blocked_on_firecrawl:
+        typer.echo(
+            f"BLOQUEADOS por falta de FIRECRAWL_API_KEY: {len(plan.blocked_on_firecrawl)} items "
+            "con fallos js_required/empty_content que NUNCA llegaron a pasar por el fallback "
+            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo. Configúrala y "
+            "vuelve a ejecutar."
+        )
+    elif has_key:
+        typer.echo("FIRECRAWL_API_KEY configurada — el fallback JS entra en los reintentos.")
+    typer.echo(
+        f"Terminales (ningún extractor los arregla): {len(plan.terminal)} items. "
+        "Su nota de guardarraíl ya nombra la causa."
+    )
+
+
+def _run_retry_failed(cfg: Config, *, dry_run: bool) -> None:
+    """`fetch --retry-failed`: re-fetch ONLY the link failures a retry could actually repair.
+
+    Distinct from `--force`, which re-hits every link in the store (400 items in the real
+    corpus) and re-downloads the ones that already succeeded. This targets the recorded
+    failures, so it is the safe way to pick up the Firecrawl fallback on the
+    `js_required`/`empty_content` bucket that `_should_refetch` calls terminal and therefore
+    never retries.
+    """
+    has_key = firecrawl_available()
+    store = load_store(cfg.items_path)
+    plan = plan_retry_failed(store, firecrawl_configured=has_key)
+    _echo_retry_plan(plan, has_key=has_key)
+    if dry_run:
+        typer.echo("--dry-run: no se ha tocado el store.")
+        return
+    if not plan.retryable:
+        return
+    _auto_snapshot(cfg, "fetch-retry-failed")
+    try:
+        refetched = retry_failed(store, plan, firecrawl_configured=has_key)
+    finally:
+        save_store(store, cfg.items_path)
+    # What actually LANDED. A retry that "succeeded" into a cookie wall is now recorded as a
+    # `blocked_interstitial` failure rather than evidence, so this tally is the operator's
+    # direct read on whether the run repaired anything or merely re-confirmed the walls.
+    after = plan_retry_failed(store, firecrawl_configured=has_key)
+    repaired = [i for i in plan.retryable if i not in set(after.retryable) | set(after.terminal)]
+    typer.echo(
+        f"Reintentados: {refetched} items → {cfg.items_path}\n"
+        f"  reparados (ya tienen artículo): {len(repaired)}\n"
+        f"  siguen sin contenido: {refetched - len(repaired)} "
+        "(su nota de guardarraíl sigue activa y nombra la causa)"
+    )
+
+
+def _run_revalidate(cfg: Config, *, write: bool) -> None:
+    """`fetch --revalidate`: re-judge the article bodies ALREADY in the store and demote the junk.
+
+    REPORT-ONLY unless `--write`. This one rewrites recorded evidence, so the safe default is to
+    show the operator exactly which items and which domains would change, and let them decide.
+
+    Local — no network, no extractor. A junk body that was accepted as a success is invisible to
+    `--retry-failed` (which selects FAILURES), so without this the 28 measured junk bodies in the
+    real corpus keep serving as `[Linked article]` evidence forever. Demoting cannot lose
+    anything: the body was never evidence in the first place.
+    """
+    store = load_store(cfg.items_path)
+    found = revalidate_stored_bodies(store)
+    domains = Counter(urlparse(u).hostname or u for u in found.urls)
+    typer.echo(
+        f"Cuerpos que NO son artículos: {len(found.items)} items. Su 'artículo' es en realidad un "
+        "muro (cookies/login), un reto anti-bot o puro chrome de página — hoy se le sirven al "
+        "juez como `[Linked article]` y el guardarraíl NO se dispara para ellos."
+    )
+    for domain, count in domains.most_common(12):
+        typer.echo(f"  {count:>3}  {domain}")
+    if not write:
+        typer.echo(
+            "\nInforme solamente — el store NO se ha tocado. Repite con --write para degradarlos "
+            "a fallo `blocked_interstitial` (se hace snapshot antes)."
+        )
+        return
+    if not found.items:
+        return
+    _auto_snapshot(cfg, "fetch-revalidate")
+    save_store(store, cfg.items_path)
+    typer.echo(f"\nDegradados a `blocked_interstitial` → {cfg.items_path}")
+
+
 @app.command()
 @_handle_cli_errors
 def fetch(
@@ -596,8 +694,50 @@ def fetch(
     until: str = typer.Option(None, help="ISO date; whole day inclusive, e.g. 2025-12-31"),
     force: bool = typer.Option(False, help="Volver a descargar lo ya descargado"),
     headless: bool = typer.Option(False, "--headless/--no-headless", help=_HEADLESS_HELP),
+    retry_failed: bool = typer.Option(
+        False,
+        "--retry-failed",
+        help="Reintenta SOLO los enlaces cuyo fallo registrado un reintento puede reparar "
+        "(transitorios, y js_required/empty_content si hay FIRECRAWL_API_KEY). No re-descarga "
+        "lo que ya funcionó, a diferencia de --force.",
+    ),
+    revalidate: bool = typer.Option(
+        False,
+        "--revalidate",
+        help="Re-juzga los cuerpos YA guardados y degrada los que son muros de cookies/login o "
+        "chrome de página (28 medidos en el corpus real). Local, sin red.",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Con --revalidate: aplica las degradaciones (por defecto solo informa).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Con --retry-failed: informa del plan sin tocar el store."
+    ),
 ) -> None:
     """Descarga el contenido de los artículos enlazados."""
+    if dry_run and not retry_failed:
+        raise typer.BadParameter("--dry-run requires --retry-failed.")
+    if write and not revalidate:
+        raise typer.BadParameter("--write requires --revalidate.")
+    if revalidate:
+        if retry_failed or force:
+            raise typer.BadParameter(
+                "--revalidate re-judges the bodies already in the store (no network); it does "
+                "not combine with --retry-failed or --force."
+            )
+        _run_revalidate(_config(), write=write)
+        return
+    if retry_failed:
+        if force:
+            raise typer.BadParameter(
+                "--retry-failed and --force are mutually exclusive: --force re-fetches EVERY "
+                "link (including the ones that already succeeded), --retry-failed targets only "
+                "the recorded failures a retry could repair."
+            )
+        _run_retry_failed(_config(), dry_run=dry_run)
+        return
     _run_fetch(
         _config(), _parse_date(since), _parse_date(until, end_of_day=True), force, headless=headless
     )

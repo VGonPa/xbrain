@@ -9,6 +9,28 @@ they are handled by `xbrain.fetch_x`.
 union (`FetchSuccess | FetchFailure`) so callers cannot accidentally read a
 success-only field off a failure record (or vice versa). The persisted
 `ContentSource` is itself a tagged union — see `xbrain.models`.
+
+**A non-empty body is not an article.** For a long time the only content check was
+`if not text` — non-empty ⇒ success — and that is how YouTube's footer menu, a Cloudflare
+challenge and a bare page title became `[Linked article]` evidence: 28 of the store's 189
+fetched "articles" (14.8%), measured. The guardrail cannot fire for them (they are recorded
+as successes), so the generator was ordered to "summarise the article's substance" while
+being handed a footer menu. `validate_body` is the fix, and it sits at the PERSISTENCE
+boundary (`_safe_extract`), so the ordinary `fetch` path is covered — not just the retry.
+
+The wall detector is a heuristic, and its bias is deliberate and MEASURED, not assumed:
+
+    Rejecting a good article merely leaves the honest failure we already had — the guardrail
+    fires, the generator is told nothing is known, and nothing is lost but an opportunity.
+    ACCEPTING a wall poisons the evidence: it silences the guardrail, grounds an entity in a
+    cookie banner, and hands the judge a `[Linked article]` it will PASS.
+
+The costs are asymmetric, so the bias is to over-reject. Tuned against the real corpus rather
+than guessed: over its 189 successfully-fetched articles it rejects 28, and all 28 are junk —
+**zero false rejects**. (An earlier list used a bare `"log in to"`, which is ordinary English
+prose, and it wrongly rejected three real bodies — two GitHub READMEs and a docs page. A marker
+that fires on prose is not a wall detector, it is a coin flip. Hence `_WALL_MARKERS` vs
+`_CHROME_MARKERS`.)
 """
 
 from __future__ import annotations
@@ -16,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -40,6 +63,10 @@ _UA = "Mozilla/5.0 (compatible; XBrain/1.0)"
 _TIMEOUT = 20
 _FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape"
 _FIRECRAWL_TIMEOUT = 60
+
+# Pacing between items in a `--retry-failed` run. These are other people's servers, and the
+# corpus's one transient failure is a recorded HTTP 429 — a host that already rate-limited us.
+_RETRY_DELAY_SECONDS = 1.0
 
 
 class FetchSuccess(BaseModel):
@@ -70,6 +97,10 @@ class FetchFailure(BaseModel):
     error: str | None = None
     http_status: int | None = None
     attempts: int = 1
+    # The extractor could not be REACHED at all (network error, 503, rate-limit) — as opposed
+    # to running and finding nothing. Never persisted; `extract_article` reads it to decide
+    # whether the attempt counts. A transient outage must not permanently burn an item's retry.
+    transport_error: bool = False
 
 
 # The in-memory FetchResult — internal to this module. Never persisted (the
@@ -178,11 +209,12 @@ def _firecrawl_extract(
         with opener(req, timeout=_FIRECRAWL_TIMEOUT) as resp:
             payload = json.loads(resp.read())
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        return FetchFailure(error=f"Firecrawl falló: {exc}", attempts=1)
+        return FetchFailure(error=f"Firecrawl falló: {exc}", attempts=1, transport_error=True)
     if payload.get("success") is False or payload.get("error"):
         return FetchFailure(
             error=f"Firecrawl falló: {payload.get('error') or 'respuesta de error'}",
             attempts=1,
+            transport_error=True,  # it refused (5xx / 429) — it did not judge the page
         )
     data = payload.get("data") or {}
     text = data.get("markdown")
@@ -196,6 +228,133 @@ def _firecrawl_extract(
     )
 
 
+# An article body shorter than this is not an article. Chrome, a paywall teaser or a consent
+# shell lands here; a real piece does not. Failing CLOSED is the safe direction — a rejected
+# body becomes a recorded failure, which keeps the guardrail firing, while a wrongly ACCEPTED
+# body becomes evidence the judge will trust.
+_MIN_ARTICLE_CHARS = 300
+
+# WALL phrases: a page containing one of these IS a wall. Measured against the corpus's 189
+# successfully-fetched articles — none of them contains any of these. Rejecting on a single hit
+# is therefore safe.
+#
+# Deliberately specific. A bare "log in to" was the FIRST version of this list and it rejected
+# three genuinely good bodies — the `open-wearables` README ("Log in to the developer portal"),
+# this repo's own README ("log in to X in Chrome first") — because that phrase is ordinary
+# English prose. A marker that fires on prose is not a wall detector, it is a coin flip.
+_WALL_MARKERS = (
+    "accept all cookies",
+    "we value your privacy",
+    "we and our partners store",
+    "sign in to continue",
+    "log in to continue",
+    "log in to see",
+    "log in to view",
+    "log in or sign up",
+    "create an account to see",
+    "subscribe to continue",
+    "enable javascript",
+    "turn on javascript",
+    "verify you are human",
+    "checking your browser",
+    "are you a robot",
+    "limited support for css",
+    "turn off compatibility mode",
+    "doesn't work on your browser",
+    "does not work on your browser",
+)
+
+# CHROME phrases: page furniture — a footer, a cookie line. A REAL article page can legitimately
+# carry ONE (the Claude docs page prepends a cookie banner to genuine documentation; measured).
+# But when several co-occur we did not capture the article, we captured the page furniture — and
+# that body is not evidence, it is a surface a model can mine for claims the article never made.
+# So: one is tolerated, TWO OR MORE is a rejection.
+_CHROME_MARKERS = (
+    "skip to main content",
+    "cookie policy",
+    "privacy policy",
+    "manage preferences",
+    "accept cookies",
+    "your privacy",
+)
+_MAX_TOLERATED_CHROME = 1
+
+
+def _interstitial_marker(text: str) -> str | None:
+    """The wall evidence this body carries, if any — a wall phrase, or a pile-up of page chrome.
+
+    ASYMMETRIC ON PURPOSE, and the direction matters: rejecting a good article merely leaves the
+    honest failure we already had (the guardrail fires, the generator is told nothing is known,
+    nothing is lost but an opportunity). ACCEPTING a wall poisons the evidence — it silences the
+    guardrail, grounds an entity in a cookie banner, and hands the judge a `[Linked article]` it
+    will PASS. So when in doubt, reject. The thresholds below are nevertheless tuned against the
+    real corpus rather than guessed: they reject 0 of its 189 successfully-fetched articles.
+    """
+    lowered = text.lower()
+    wall = next((m for m in _WALL_MARKERS if m in lowered), None)
+    if wall:
+        return wall
+    chrome = [m for m in _CHROME_MARKERS if m in lowered]
+    if len(chrome) > _MAX_TOLERATED_CHROME:
+        return " + ".join(chrome)
+    return None
+
+
+def validate_body(url: str, result: FetchResult) -> FetchResult:
+    """Refuse to call a cookie/login wall — or a body too thin to be an article — a SUCCESS.
+
+    The only content check used to be `if not text`: non-empty ⇒ success. Firecrawl RENDERS
+    JavaScript, and `js_required` means "downloadable but no extractable article" — the most
+    enriched population there is for consent shells and SPA login walls. So a retry would very
+    often "succeed" on exactly those pages and hand back the banner markdown.
+
+    That is strictly worse than the honest failure it replaces: flipping the source to success
+    makes `links_content_unfetched` False, which DELETES the `[Links — content NOT fetched]`
+    block from all three LLM surfaces, whereupon `rubric-summary` orders the generator to
+    summarise "the article's substance" and the judge sees a `[Linked article]` and trusts it.
+    A rendered Instagram login wall even contains the word "Instagram", so the entity checker
+    would call the entity GROUNDED. A wall is recorded as a failure, with a true cause.
+    """
+    if not isinstance(result, FetchSuccess):
+        return result
+    marker = _interstitial_marker(result.text)
+    if marker:
+        return FetchFailure(
+            failure_reason="blocked_interstitial",
+            error=f"La página devolvió un muro (cookies/login), no un artículo: {marker!r}.",
+            http_status=result.http_status,
+            attempts=result.attempts,
+        )
+    if len(result.text.strip()) < _MIN_ARTICLE_CHARS:
+        return FetchFailure(
+            failure_reason="blocked_interstitial",
+            error=(
+                f"El cuerpo extraído ({len(result.text.strip())} caracteres) es demasiado "
+                "corto para ser un artículo."
+            ),
+            http_status=result.http_status,
+            attempts=result.attempts,
+        )
+    if _title_is_bare_domain(url, result.title):
+        return FetchFailure(
+            failure_reason="blocked_interstitial",
+            error=f"El título extraído ({result.title!r}) es el dominio, no un artículo.",
+            http_status=result.http_status,
+            attempts=result.attempts,
+        )
+    return result
+
+
+def _title_is_bare_domain(url: str, title: str | None) -> bool:
+    """A page whose whole title is its own domain ("Instagram", "twitch.tv") is a wall or a
+    landing page, not an article."""
+    if not title:
+        return False
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    normalized = title.strip().lower()
+    return normalized in {host, host.split(".")[0], host.removesuffix(".com")}
+
+
 def extract_article(
     url: str,
     *,
@@ -205,19 +364,32 @@ def extract_article(
     """Default extractor: trafilatura, then Firecrawl for JS-rendered pages.
 
     Switches on the `FetchResult` variant: a `FetchSuccess` is returned
-    as-is. A `FetchFailure` whose `failure_reason` is in
-    ``{"js_required", "empty_content"}`` triggers the Firecrawl fallback;
-    anything else (404, dns, ...) is terminal and Firecrawl is not called.
+    as-is. A `FetchFailure` whose `failure_reason` is in `_FALLBACK_ELIGIBLE`
+    triggers the Firecrawl fallback; anything else (404, dns, ...) is terminal
+    and Firecrawl is not called.
+
+    Every accepted body passes `validate_body` first — a consent/login wall or a body too thin
+    to be an article is recorded as a `blocked_interstitial` FAILURE, never as evidence. A wall
+    seen by TRAFILATURA still escalates (Firecrawl may reach the article behind it); a wall
+    seen by FIRECRAWL is the end of the road, and `attempts=2` then keeps it there.
+
+    A Firecrawl TRANSPORT error (unreachable, 503, rate-limited) does NOT count as an attempt:
+    the fallback never ran, so burning the item's one retry on an outage would strand it
+    forever — `--retry-failed` would never select it again and the dry run would cheerfully
+    report "Reintentables: 0".
     """
-    result = primary(url)
+    result = validate_body(url, primary(url))
     if isinstance(result, FetchSuccess):
         return result
     # mypy now narrows `result` to FetchFailure for the rest of this function.
-    if result.failure_reason not in ("js_required", "empty_content"):
+    if result.failure_reason not in _FALLBACK_ELIGIBLE:
         return result  # hard failure (404, dns, ...) — Firecrawl will not help
     fallback = firecrawl(url)
     if fallback is None:
         return result  # Firecrawl not configured — keep the original evidence
+    if isinstance(fallback, FetchFailure) and fallback.transport_error:
+        return result  # Firecrawl never ran — do NOT burn the retry on an outage
+    fallback = validate_body(url, fallback)
     if isinstance(fallback, FetchSuccess):
         return fallback.model_copy(update={"attempts": result.attempts + 1})
     # Both attempts exhausted — merge evidence and bump the attempt counter.
@@ -306,25 +478,26 @@ def _build_external_sources(item: Item, extractor: ArticleExtractor) -> list[Con
     sources: list[ContentSource] = []
     non_x_urls = dict.fromkeys(link.url for link in item.links if not is_x_url(link.url))
     for url in non_x_urls:
-        try:
-            result = extractor(url)
-        except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
-            sources.append(
-                ContentSourceFailure(
-                    kind="external_article",
-                    url=url,
-                    # Transient bucket: an uncaught extractor exception is
-                    # almost always something that may succeed on the next
-                    # run (network blip, intermittent SSL, …). #19 relied on
-                    # this being retry-worthy; preserve that.
-                    failure_reason="unknown_error",
-                    error=f"Error al descargar el artículo: {exc}",
-                    attempts=1,
-                )
-            )
-            continue
-        sources.append(_content_source_from(url, result))
+        sources.append(_content_source_from(url, _safe_extract(url, extractor)))
     return sources
+
+
+def _safe_extract(url: str, extractor: ArticleExtractor) -> FetchResult:
+    """Extract one URL, VALIDATED, with a per-URL exception isolated as a transient failure.
+
+    Validation happens at this persistence boundary, not just inside `extract_article`: no
+    extractor — injected, custom, or future — may write a cookie/login wall into the store as
+    evidence. `validate_body` is idempotent on a failure, so the default path (which already
+    validated) passes straight through.
+    """
+    try:
+        return validate_body(url, extractor(url))
+    except Exception as exc:  # noqa: BLE001 - one bad URL must not abort the batch
+        return FetchFailure(
+            failure_reason="unknown_error",
+            error=f"Extractor falló: {exc}",
+            attempts=1,
+        )
 
 
 def fetch_item(
@@ -372,6 +545,66 @@ def fetch_item(
 # is anomalous; re-fetching gives it a chance to land on a known result").
 _TRANSIENT_FAILURES: frozenset[FailureReason] = frozenset({"timeout", "dns_error", "unknown_error"})
 
+# The two reasons `extract_article` escalates to the Firecrawl fallback. They are NOT in
+# `_TRANSIENT_FAILURES`, so `_should_refetch` treats them as terminal and never retries them.
+# That is right only while trafilatura is the whole pipeline — the moment a JS-capable
+# extractor is available they become the most recoverable bucket there is.
+_FALLBACK_ELIGIBLE: frozenset[FailureReason] = frozenset(
+    {"js_required", "empty_content", "blocked_interstitial"}
+)
+
+# trafilatura = 1 attempt, + Firecrawl = 2 (see `ContentSourceFailure.attempts`).
+_BOTH_EXTRACTORS_TRIED = 2
+
+
+def _retryable_now(src: ContentSourceFailure, *, firecrawl_configured: bool) -> bool:
+    """Could re-fetching this failed source plausibly produce a DIFFERENT outcome today?
+
+    Two ways it can, and one way it cannot:
+
+    - a TRANSIENT failure (timeout, dns, and the `unknown_error` bucket that catches HTTP 429)
+      may simply succeed on a retry — same extractor, better day;
+    - a FALLBACK-ELIGIBLE failure (`js_required`, `empty_content`) recorded at `attempts=1`
+      never actually got the Firecrawl pass: `_firecrawl_extract` returns None when
+      `FIRECRAWL_API_KEY` is unset, and `extract_article` then keeps the original failure. With
+      the key configured, the retry brings a genuinely different extractor;
+    - anything else (404, 403, paywall) is not an extraction problem, and a fallback-eligible
+      failure already at `attempts=2` has had both extractors. Retrying either one only
+      reproduces the recorded failure — that is not a repair, it is load on someone's server.
+    """
+    if src.failure_reason in _TRANSIENT_FAILURES:
+        return True
+    return (
+        firecrawl_configured
+        and src.failure_reason in _FALLBACK_ELIGIBLE
+        and src.attempts < _BOTH_EXTRACTORS_TRIED
+    )
+
+
+def firecrawl_available() -> bool:
+    """Is the JS-capable fallback extractor configured? (Mirrors `_firecrawl_extract`'s check —
+    one source of truth for "can a retry bring a different extractor".)"""
+    return bool(os.environ.get("FIRECRAWL_API_KEY"))
+
+
+def should_retry_failed(content: Content | None, *, firecrawl_configured: bool) -> bool:
+    """Select an item for `fetch --retry-failed`: does it carry a link failure a retry could
+    actually repair?
+
+    Unlike `_should_refetch` this is ANY, not ALL: a PARTIAL fetch (one link fetched, one
+    still failing) is still missing evidence for the failed link, and the fetched article is
+    no evidence for it. `content is None` is excluded — a never-fetched item is the plain
+    `fetch` path's job, and `--retry-failed` must not silently widen into a general backfill.
+    """
+    if content is None:
+        return False
+    return any(
+        isinstance(src, ContentSourceFailure)
+        and src.kind == "external_article"
+        and _retryable_now(src, firecrawl_configured=firecrawl_configured)
+        for src in content.sources
+    )
+
 
 def _should_refetch(item: Item, force: bool) -> bool:
     """Return True if `fetch_pending` should (re)fetch this item.
@@ -417,6 +650,168 @@ def _should_refetch(item: Item, force: bool) -> bool:
         isinstance(src, ContentSourceFailure) and src.failure_reason in _TRANSIENT_FAILURES
         for src in external
     )
+
+
+class RetryPlan(BaseModel):
+    """What `fetch --retry-failed` would do, and — just as important — what it would NOT.
+
+    `blocked_on_firecrawl` is the whole point of the dry run: those items are recoverable in
+    principle (a JS-capable extractor would very likely get them) but re-fetching them WITHOUT
+    the key just replays the identical failure. Reporting them as blocked, rather than silently
+    dropping them, is the difference between "nothing to do" and "set the key and run again".
+    """
+
+    retryable: list[str] = []  # item ids a retry could actually repair
+    reasons: dict[str, int] = {}  # failure_reason → count, over the retryable set
+    blocked_on_firecrawl: list[str] = []  # fallback-eligible, but no key configured
+    terminal: list[str] = []  # dead/blocked — no extractor will ever fix these
+
+
+def _link_failures(content: Content | None) -> list[ContentSourceFailure]:
+    """The recorded `external_article` failures on this item, if any."""
+    if content is None:
+        return []
+    return [
+        src
+        for src in content.sources
+        if isinstance(src, ContentSourceFailure) and src.kind == "external_article"
+    ]
+
+
+def plan_retry_failed(store: dict[str, Item], *, firecrawl_configured: bool) -> RetryPlan:
+    """Classify every item with a recorded link failure into: retryable now · blocked on the
+    Firecrawl key · terminal. Pure — it reads the store and mutates nothing."""
+    plan = RetryPlan()
+    for item in store.values():
+        failures = _link_failures(item.content) if item.links else []
+        if not failures:
+            continue
+        if should_retry_failed(item.content, firecrawl_configured=firecrawl_configured):
+            plan.retryable.append(item.id)
+            for src in failures:
+                if _retryable_now(src, firecrawl_configured=firecrawl_configured):
+                    plan.reasons[src.failure_reason] = plan.reasons.get(src.failure_reason, 0) + 1
+        # Would the SAME item be retryable if the key were set? Then the key is what blocks it.
+        elif should_retry_failed(item.content, firecrawl_configured=True):
+            plan.blocked_on_firecrawl.append(item.id)
+        else:
+            plan.terminal.append(item.id)
+    return plan
+
+
+class RevalidateResult(BaseModel):
+    """What a revalidation sweep found. `urls` are the DEMOTED SOURCES themselves — reporting the
+    item's link domains instead would blame a good link that happens to sit on the same item."""
+
+    items: list[str] = []  # item ids whose evidence changed
+    urls: list[str] = []  # the source URLs whose body is not an article
+
+
+def revalidate_stored_bodies(store: dict[str, Item]) -> RevalidateResult:
+    """Re-run `validate_body` over the ALREADY-PERSISTED article bodies; demote the walls.
+
+    `--retry-failed` cannot reach these: it selects recorded FAILURES, and a wall that was
+    accepted is recorded as a success. Measured on the real corpus: 28 of the 189 fetched
+    "articles" are walls or page chrome — 17 YouTube footer blocks, `Loading...`, `Sign in`,
+    bot checks, "You need to enable JavaScript to run this app." Every one is persisted as a
+    SUCCESS, so `links_content_unfetched` is False, the `[Links — content NOT fetched]` block
+    never renders, and the generator was handed the footer under a `[Linked article]` label.
+    That is C1, already in the store, not hypothetical.
+
+    Purely local — no network, no extractor. It only re-judges bytes we already hold, so a
+    demotion cannot lose anything: the body was never evidence in the first place.
+
+    Mutates `store`; the caller snapshots and saves.
+    """
+    result = RevalidateResult()
+    for item in store.values():
+        content = item.content
+        if content is None:
+            continue
+        sources: list[ContentSource] = []
+        changed = False
+        for src in content.sources:
+            if not (isinstance(src, ContentSourceSuccess) and src.kind == "external_article"):
+                sources.append(src)
+                continue
+            verdict = validate_body(
+                src.url, FetchSuccess(title=src.title, text=src.text, http_status=200)
+            )
+            if isinstance(verdict, FetchSuccess):
+                sources.append(src)  # a good body is left byte-identical
+                continue
+            changed = True
+            result.urls.append(src.url)
+            sources.append(_content_source_from(src.url, verdict))
+        if changed:
+            item.content = Content(fetched_at=content.fetched_at, sources=sources)
+            result.items.append(item.id)
+    return result
+
+
+def _refetch_failed_sources(
+    item: Item,
+    extractor: ArticleExtractor,
+    *,
+    firecrawl_configured: bool,
+    now: Callable[[], datetime],
+) -> Content:
+    """Re-extract ONLY the retryable failed link sources; carry everything else across untouched.
+
+    Deliberately NOT `fetch_item`, which re-extracts every non-x link on the item. Because
+    `should_retry_failed` uses ANY semantics, a PARTIAL item (one link fetched, one still
+    failing) is selected — and `fetch_item` would re-fetch the good article too. A 429 during
+    the retry would then replace a perfectly good body with a failure, destroying evidence that
+    exists nowhere else in the store. Repairing one link must never cost another one.
+
+    Non-link sources (`x_video` transcripts, frames, threads) are likewise carried across:
+    they are not this stage's business.
+    """
+    content = item.content
+    assert content is not None  # `plan_retry_failed` only selects items that have content
+    retry_urls = {
+        src.url
+        for src in content.sources
+        if isinstance(src, ContentSourceFailure)
+        and src.kind == "external_article"
+        and _retryable_now(src, firecrawl_configured=firecrawl_configured)
+    }
+    sources: list[ContentSource] = [
+        _content_source_from(src.url, _safe_extract(src.url, extractor))
+        if src.url in retry_urls and isinstance(src, ContentSourceFailure)
+        else src
+        for src in content.sources
+    ]
+    if _sources_materially_equal(content.sources, sources):
+        return content  # nothing changed — do not advance fetched_at (cf. `fetch_item`)
+    return Content(fetched_at=now(), sources=sources)
+
+
+def retry_failed(
+    store: dict[str, Item],
+    plan: RetryPlan,
+    extractor: ArticleExtractor = extract_article,
+    *,
+    firecrawl_configured: bool = False,
+    now: Callable[[], datetime] = _utcnow,
+    sleep: Callable[[float], None] = time.sleep,
+    delay: float = _RETRY_DELAY_SECONDS,
+) -> int:
+    """Re-fetch the failed link sources of exactly the items `plan` marked retryable.
+
+    Mutates `store`; the caller snapshots and saves. Paced by `delay` between items: these are
+    other people's servers, and the one `unknown_error` in the real corpus is a recorded HTTP
+    429 — hammering a host that already rate-limited us is the one place backoff is not
+    optional.
+    """
+    for index, item_id in enumerate(plan.retryable):
+        if index:
+            sleep(delay)
+        item = store[item_id]
+        item.content = _refetch_failed_sources(
+            item, extractor, firecrawl_configured=firecrawl_configured, now=now
+        )
+    return len(plan.retryable)
 
 
 def fetch_pending(
