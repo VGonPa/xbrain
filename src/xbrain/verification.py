@@ -19,6 +19,7 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -188,38 +189,92 @@ def import_verify_judgments(path: Path) -> list[dict]:
     return judgments
 
 
+def _fold_fingerprints(stamps: Iterable[tuple[tuple[str, str], str]]) -> dict[tuple[str, str], str]:
+    """Fold `((item_id, target), fingerprint)` stamps into one map — **conflict is fail-safe,
+    never silently first-seen**.
+
+    If two stamps for the same `(item, target)` disagree, the key is DROPPED entirely rather
+    than resolved to whichever came first. A dropped key becomes `fingerprint-missing` at
+    write, so no verdict is persisted and nothing is badged: we refuse to guess which stamp
+    was the judged one. The single conflict policy for every fingerprint source (judge
+    worksheets, report records, the audit worksheet).
+    """
+    fingerprints: dict[tuple[str, str], str] = {}
+    conflicting: set[tuple[str, str]] = set()
+    for key, fingerprint in stamps:
+        existing = fingerprints.get(key)
+        if existing is not None and existing != fingerprint:
+            logger.debug("conflicting output_fingerprint stamps for %s — dropping key", key)
+            conflicting.add(key)
+        fingerprints.setdefault(key, fingerprint)
+    for key in conflicting:
+        del fingerprints[key]
+    return fingerprints
+
+
+def _entry_stamps(entries: Iterable[object]) -> Iterator[tuple[tuple[str, str], str]]:
+    """Every valid judged-fingerprint stamp carried by `entries` (worksheet items or report
+    records — both key it the same way), skipping the missing/garbage ones."""
+    for entry in entries:
+        resolved = _entry_fingerprint(entry)
+        if resolved is not None:
+            yield resolved
+
+
 def import_verify_fingerprints(paths: list[Path]) -> dict[tuple[str, str], str]:
     """Map every `(item_id, target)` to the fingerprint of the output that was JUDGED, read
-    from the worksheet(s) `items` block (stamped by `export_verify_worksheet`).
+    from the worksheet(s) `items` block (stamped by `export_verify_worksheet`, and carried
+    through to the audit worksheet by `export_audit_worksheet`).
 
     This is the plumbing that lets the writer store the JUDGED fingerprint instead of a
     write-time recompute (#79): the N judge copies all derive from one export, so their
     `items` blocks carry IDENTICAL fingerprints for each `(item, target)`. A missing/garbage
     fingerprint (an old worksheet without the field, or a hand-edited hash) is skipped, so
     the writer treats that `(item, target)` as unfingerprintable and does not badge it.
-
-    **Conflict is fail-safe, never silently first-seen.** If two applied worksheets stamp
-    DIFFERENT valid fingerprints for the same `(item, target)` — off-workflow (judges did not
-    all copy one export) — the key is DROPPED entirely, not resolved to whichever came first.
-    A dropped key becomes `fingerprint-missing` at write, so no verdict is persisted and
-    nothing is badged: we refuse to guess which stamp was the judged one.
+    Conflicting stamps drop the key (see `_fold_fingerprints`).
     """
-    fingerprints: dict[tuple[str, str], str] = {}
-    conflicting: set[tuple[str, str]] = set()
-    for path in paths:
-        for entry in _worksheet_items(path):
-            resolved = _entry_fingerprint(entry)
-            if resolved is None:
-                continue
-            key, fingerprint = resolved
-            existing = fingerprints.get(key)
-            if existing is not None and existing != fingerprint:
-                logger.debug("conflicting output_fingerprint stamps for %s — dropping key", key)
-                conflicting.add(key)
-            fingerprints.setdefault(key, fingerprint)
-    for key in conflicting:
-        del fingerprints[key]
-    return fingerprints
+    return _fold_fingerprints(
+        stamp for path in paths for stamp in _entry_stamps(_worksheet_items(path))
+    )
+
+
+def record_fingerprints(records: Iterable[object]) -> dict[tuple[str, str], str]:
+    """The judged fingerprints carried BY the aggregated records themselves (stamped into
+    `verify-report.json` by `stamp_record_fingerprints`).
+
+    The audit stage reads the REPORT back — not the judge worksheets — so this is how the
+    judged fingerprint reaches the post-audit write for every record in the merged report,
+    including the ones the auditor never saw (the clean passes outside the consequential set).
+    A record with no stamp, or a hand-edited one, resolves to nothing → `fingerprint-missing`.
+    """
+    return _fold_fingerprints(_entry_stamps(records))
+
+
+def combine_fingerprints(*sources: dict[tuple[str, str], str]) -> dict[tuple[str, str], str]:
+    """Union of several judged-fingerprint maps under the one fail-safe conflict policy.
+
+    The post-audit write reads the fingerprint from TWO sources that agree by construction —
+    the report records and the applied audit worksheet, both descending from the same
+    judge-export stamp. If they DISAGREE (one of the two artifacts was hand-edited), the key
+    is dropped and the record is skipped, never resolved by precedence.
+    """
+    return _fold_fingerprints(stamp for source in sources for stamp in source.items())
+
+
+def stamp_record_fingerprints(
+    aggregated: list[dict], fingerprints: dict[tuple[str, str], str]
+) -> None:
+    """Stamp each aggregated record with the JUDGED fingerprint of its output, in place.
+
+    Carries the judge-export fingerprint into `verify-report.json`, which is what the audit
+    stage reads back — so the audited (authoritative) verdict can be persisted bound to the
+    output the judges actually saw, exactly like the plain apply path. A record with no judged
+    fingerprint is left UNSTAMPED (never a guessed value): the writer then skips it.
+    """
+    for record in aggregated:
+        fingerprint = fingerprints.get((str(record.get("item_id")), str(record.get("target"))))
+        if fingerprint is not None:
+            record["output_fingerprint"] = fingerprint
 
 
 def _worksheet_items(path: Path) -> list:

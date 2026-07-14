@@ -90,12 +90,15 @@ from xbrain.vocab import (
 from xbrain.verification import (
     aggregate_verify_judgments,
     apply_verdicts_to_store,
+    combine_fingerprints,
     export_verify_worksheet,
     import_verify_fingerprints,
     import_verify_judgments,
     items_for_verification,
     parse_targets,
+    record_fingerprints,
     render_verify_report,
+    stamp_record_fingerprints,
 )
 from xbrain.verification_audit import (
     consequential_records,
@@ -1429,11 +1432,16 @@ def _write_verify_report(cfg: Config, json_report: str, md_report: str) -> None:
 
 
 def _verify_write_verdicts(
-    cfg: Config, aggregated: list[dict], fingerprints: dict[tuple[str, str], str]
+    cfg: Config, records: list[dict], fingerprints: dict[tuple[str, str], str]
 ) -> None:
-    """Opt-in write path for `verify --apply --write-verdicts`: persist each aggregated
-    verdict onto its item with the JUDGED output fingerprint (`fingerprints`, stamped at
-    export), so `generate` can badge a still-current FAIL/REVIEW.
+    """Opt-in write path for `verify --apply --write-verdicts` (and its post-audit twin,
+    `verify --audit --apply --write-verdicts`): persist each FINAL verdict onto its item with
+    the JUDGED output fingerprint (`fingerprints`, stamped at judge-worksheet export), so
+    `generate` can badge a still-current FAIL/REVIEW.
+
+    `records` are the verdicts as rendered in the report — the aggregate on the plain path,
+    the MERGED post-audit records on the audit path. It never re-derives a verdict: it
+    consumes whatever the (guard-enforced) merge produced.
 
     Mutates `items.json`, so it auto-snapshots `data/` first (label
     `pre-verify-write-verdicts`) — undoable with `xbrain snapshot restore`. Echoes the
@@ -1441,21 +1449,40 @@ def _verify_write_verdicts(
     """
     _auto_snapshot(cfg, "verify-write-verdicts")
     store = load_store(cfg.items_path)
-    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+    result = apply_verdicts_to_store(store, records, fingerprints)
     save_store(store, cfg.items_path)
     typer.echo(f"{result.summary()} → {cfg.items_path}")
 
 
+def _audit_write_fingerprints(records: list[dict], apply: list[Path]) -> dict[tuple[str, str], str]:
+    """The JUDGED fingerprints for the post-audit write, from the two artifacts that carry
+    them: the merged report records and the applied audit worksheet's `items` block.
+
+    Both descend from the SAME stamp taken at judge-worksheet export, so they agree by
+    construction; a disagreement (a hand-edited artifact) drops the key, and the record is
+    skipped as `fingerprint-missing`. Nothing here recomputes a fingerprint from the live
+    store — that is the invariant the whole plumbing exists to protect (#79).
+    """
+    return combine_fingerprints(record_fingerprints(records), import_verify_fingerprints(apply))
+
+
 def _verify_audit_apply(
-    cfg: Config, aggregated: list[dict], apply: list[Path], force: bool
+    cfg: Config, aggregated: list[dict], apply: list[Path], force: bool, write_verdicts: bool
 ) -> None:
-    """Merge one auditor's worksheet onto the aggregate and re-render the report.
+    """Merge one auditor's worksheet onto the aggregate, re-render the report, and — with
+    `--write-verdicts` — persist the MERGED (post-audit) verdicts.
+
+    The audited verdict is the authoritative one: it is what `--write-verdicts` writes here,
+    so a FAIL the auditor REVOKED never badges a note, and a failure the auditor CONFIRMED (or
+    added) does. The write consumes `merge_audit`'s OUTPUT — the monotonic floor, confidence
+    gate, mass-revocation guard and anti-washing logic all still stand between the auditor and
+    the store.
 
     The audit is a SINGLE independent auditor (judge ≠ party) in ONE pass over the full
     consequential set. More than one `--apply` is rejected, and a second `--audit
     --apply` on an already-audited report is refused (unless `--force`): re-reading the
     already-shrunk FAIL set would let N single-revoke runs bypass the mass-revocation
-    guard by splitting revocations across runs. Report-only.
+    guard by splitting revocations across runs. Report-only unless `--write-verdicts`.
     """
     if len(apply) > 1:
         raise ValueError(
@@ -1483,19 +1510,23 @@ def _verify_audit_apply(
             else ""
         )
     )
+    if write_verdicts:
+        _verify_write_verdicts(cfg, records, _audit_write_fingerprints(records, apply))
 
 
-def _verify_audit(cfg: Config, executor: str | None, apply: list[Path], force: bool) -> None:
+def _verify_audit(
+    cfg: Config, executor: str | None, apply: list[Path], force: bool, write_verdicts: bool
+) -> None:
     """The judge≠party audit mode of `verify` (`--audit`): export or apply.
 
     Reads the aggregated records back from the `verify-report.json` PR-1 wrote.
     With `--apply` it merges the auditor's decisions onto them and re-renders the
-    report (report-only, store untouched); without it, it exports an audit
-    worksheet for the consequential (FAIL/divergent) subset.
+    report (and, with `--write-verdicts`, persists the merged post-audit verdicts);
+    without it, it exports an audit worksheet for the consequential (FAIL/divergent) subset.
     """
     aggregated = load_report_records(cfg.data_dir / "verify-report.json")
     if apply:
-        _verify_audit_apply(cfg, aggregated, apply, force)
+        _verify_audit_apply(cfg, aggregated, apply, force, write_verdicts)
         return
     chosen = _resolve_verify_executor(executor, cfg)
     records = consequential_records(aggregated)
@@ -1540,30 +1571,35 @@ def verify_command(
         False,
         "--write-verdicts",
         help="Opt-in: also persist each verdict + output fingerprint onto its item "
-        "(so `generate` can badge it). Requires --apply; snapshots data/ first.",
+        "(so `generate` can badge it). With --audit it writes the AUDITED verdicts. "
+        "Requires --apply; snapshots data/ first.",
     ),
 ) -> None:
     """Verifica los outputs de enriquecimiento (fidelidad + adherencia) con jueces LLM."""
     cfg = _config()
 
-    if write_verdicts and (audit or not apply):
+    if write_verdicts and not apply:
         raise typer.BadParameter(
-            "--write-verdicts requires --apply (the plain apply path), not --audit"
+            "--write-verdicts requires --apply — there is nothing judged to persist on a "
+            "bare export."
         )
 
     if audit:
-        _verify_audit(cfg, executor, apply, force)
+        _verify_audit(cfg, executor, apply, force, write_verdicts)
         return
 
     if apply:
         # Aggregate the N judges' passes and write the report. Default is report-only —
         # the store is untouched unless --write-verdicts opts into the additive write.
+        # The JUDGED fingerprints come from the worksheet `items` block (stamped at export),
+        # so a verdict binds to the output the judge saw — never a live recompute. They are
+        # stamped onto the records too, carrying them into verify-report.json → the audit.
+        fingerprints = import_verify_fingerprints(apply)
         aggregated = aggregate_verify_judgments([import_verify_judgments(path) for path in apply])
+        stamp_record_fingerprints(aggregated, fingerprints)
         _write_verify_report(cfg, *render_verify_report(aggregated))
         if write_verdicts:
-            # The JUDGED fingerprints come from the worksheet `items` block (stamped at
-            # export), so a verdict binds to the output the judge saw — never a live recompute.
-            _verify_write_verdicts(cfg, aggregated, import_verify_fingerprints(apply))
+            _verify_write_verdicts(cfg, aggregated, fingerprints)
         return
 
     chosen = _resolve_verify_executor(executor, cfg)

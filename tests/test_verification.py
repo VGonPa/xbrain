@@ -16,13 +16,16 @@ from xbrain.verification import (
     ALL_TARGETS,
     aggregate_verify_judgments,
     apply_verdicts_to_store,
+    combine_fingerprints,
     export_verify_worksheet,
     fingerprint_output,
     import_verify_fingerprints,
     import_verify_judgments,
     items_for_verification,
     parse_targets,
+    record_fingerprints,
     render_verify_report,
+    stamp_record_fingerprints,
 )
 
 
@@ -420,3 +423,41 @@ def test_apply_verdicts_tallies_skipped_records_with_reasons():
     assert reasons == {"item-gone", "fingerprint-missing", "malformed-record"}
     assert result.attempted == 4
     assert "1 de 4" in result.summary() and "item-gone" in result.summary()
+
+
+# ------------------------------------------- judged-fingerprint plumbing for the AUDIT write
+# (#79 follow-up: the AUDITED verdict is the one that reaches the store, so the judged
+# fingerprint must survive judge-worksheet → report record → audit worksheet → write.)
+
+
+def test_stamp_record_fingerprints_annotates_records_with_the_judged_fingerprint():
+    """The aggregated records carry the JUDGED fingerprint into `verify-report.json`, so the
+    audit stage (which reads the report back, not the judge worksheets) can bind its merged
+    verdicts to the very output the judges saw."""
+    aggregated = [_j("FAIL", target="summary"), _j("PASS", target="digest")]
+    stamp_record_fingerprints(aggregated, {("7", "summary"): "a" * 64})
+
+    assert aggregated[0]["output_fingerprint"] == "a" * 64
+    # No stamp for a key the worksheets did not fingerprint — never a guessed value.
+    assert "output_fingerprint" not in aggregated[1]
+
+
+def test_record_fingerprints_reads_stamps_back_and_rejects_garbage():
+    records = [
+        {"item_id": "7", "target": "summary", "output_fingerprint": "a" * 64},
+        {"item_id": "7", "target": "digest", "output_fingerprint": "nope"},  # hand-edited
+        {"item_id": "8", "target": "summary"},  # legacy report: no stamp
+        "not a dict",
+    ]
+    assert record_fingerprints(records) == {("7", "summary"): "a" * 64}
+
+
+def test_combine_fingerprints_unions_sources_and_drops_conflicts():
+    """The audit write reads the fingerprint from BOTH the report records and the applied
+    audit worksheet. They agree by construction; if they DISAGREE (a hand-edited artifact),
+    the key is dropped fail-safe — never resolved by precedence."""
+    from_records = {("7", "summary"): "a" * 64, ("7", "digest"): "b" * 64}
+    from_worksheet = {("7", "summary"): "a" * 64, ("7", "digest"): "c" * 64}
+
+    combined = combine_fingerprints(from_records, from_worksheet)
+    assert combined == {("7", "summary"): "a" * 64}  # agreement kept, conflict dropped

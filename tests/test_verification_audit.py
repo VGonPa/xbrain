@@ -20,7 +20,7 @@ from xbrain.models import (
     Item,
     VideoFrame,
 )
-from xbrain.verification import render_verify_report
+from xbrain.verification import fingerprint_output, render_verify_report
 from xbrain.verification_audit import (
     consequential_records,
     export_audit_worksheet,
@@ -606,3 +606,42 @@ def test_report_audit_section_renders_gated_and_unmatched_lines():
     assert "gated" in md
     assert "unmatched audit" in md
     assert "[404]" in md
+
+
+# ---------------------------------------------------------------- judged fingerprint (#79)
+
+
+def test_export_audit_worksheet_carries_the_judged_fingerprint_never_a_live_recompute(tmp_path):
+    """The audit does not change the judged output, so the audit worksheet must CARRY the
+    fingerprint stamped at judge-export (it rides on the report record) — NOT a recompute
+    against the live store, which may already hold a regenerated output."""
+    judged_fp = fingerprint_output(_item(summary="A — the judged summary."), "summary")
+    record = _record()
+    record["output_fingerprint"] = judged_fp
+
+    path = tmp_path / "audit-ws.json"
+    # The store's summary was REGENERATED after the judges ran ("B" ≠ the judged "A").
+    store = {"7": _item(summary="B — regenerated after the judges.")}
+    export_audit_worksheet([record], store, path, "claude-code", "English")
+
+    entry = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert entry["output_fingerprint"] == judged_fp  # the JUDGED output's stamp
+    assert entry["output_fingerprint"] != fingerprint_output(store["7"], "summary")  # not live
+
+
+def test_export_audit_worksheet_leaves_an_unstamped_record_without_a_fingerprint(tmp_path):
+    """A legacy report record with no stamp exports None — never a guessed/recomputed hash
+    (the writer then skips it as `fingerprint-missing` instead of badging the wrong output)."""
+    path = tmp_path / "audit-ws.json"
+    export_audit_worksheet([_record()], {"7": _item()}, path, "manual", "English")
+    assert json.loads(path.read_text(encoding="utf-8"))["items"][0]["output_fingerprint"] is None
+
+
+def test_merge_audit_preserves_the_judged_fingerprint_on_the_merged_record():
+    """The merged (post-audit) record keeps its judged fingerprint, so the write path can
+    persist the AUDITED verdict bound to the output the judges actually saw."""
+    record = _record()
+    record["output_fingerprint"] = "a" * 64
+    merged, _ = merge_audit([record], [_audit(flags=[_decision()])])
+    assert merged[0]["output_fingerprint"] == "a" * 64
+    assert merged[0]["audited"] is True

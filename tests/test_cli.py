@@ -3078,3 +3078,208 @@ def test_verify_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch)
     # Assert the code-controlled BadParameter message, normalized so the check survives
     # Rich's ANSI flag-styling and 80-col box wrapping (see _plain_output).
     assert "--write-verdicts requires --apply" in _plain_output(result.output)
+
+
+# ------------------------- verify --audit --apply --write-verdicts (the AUDITED verdict wins)
+# The pre-audit verdicts were the ONLY ones that could reach the store — precisely the set the
+# independent auditor overturns (our corpus run REVOKED 2 of them). These pin that the merged,
+# post-audit verdict is what lands, still bound to the fingerprint stamped at judge-export.
+
+
+def _aggregate_judged_report(tmp_path: Path, verdict: str = "FAIL") -> None:
+    """Run the REAL judge flow: export the worksheet (stamping the judged fingerprint), fill one
+    judge's verdict, and aggregate it into `verify-report.json` — what the audit stage reads back.
+    """
+    ws = _export_summary_worksheet(tmp_path)
+    _fill_summary_judgment(ws, verdict)
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+
+
+def _export_audit_worksheet(tmp_path: Path) -> Path:
+    result = runner.invoke(app, ["verify", "--audit", "--executor", "claude-code"])
+    assert result.exit_code == 0, result.output
+    return tmp_path / "data" / "verify-audit-worksheet.json"
+
+
+def _fill_audit(ws: Path, flags: list[dict], reverdict: str = "PASS") -> None:
+    """Fill the auditor's `audits` block, PRESERVING the `items` block (it carries the judged
+    fingerprints threaded from the judge export)."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["audits"] = [{"item_id": "7", "target": "summary", "reverdict": reverdict, "flags": flags}]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
+_REVOKED_FLAG = {
+    "claim": "€150M in revenue",
+    "issue": "unsupported",
+    "axis": "faithfulness",
+    "audit": "REVOKE",
+    "confidence": 0.9,
+    "reason": "stated verbatim in the transcript — the judge hallucinated the flag",
+}
+_CONFIRMED_FLAG = {
+    "claim": "€150M in revenue",
+    "issue": "unsupported",
+    "axis": "faithfulness",
+    "audit": "CONFIRM",
+    "confidence": 0.95,
+    "reason": "no such figure anywhere in the source",
+}
+_AUDITOR_ADDED_FLAG = {
+    "claim": "agents replace junior devs",
+    "issue": "hallucinated-claim",
+    "axis": "faithfulness",
+    "audit": "CONFIRM",
+    "confidence": 0.9,
+    "reason": "blind spot the judges missed — absent from the transcript",
+}
+
+
+def _stored_verdict(items_path: Path) -> dict:
+    return json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"]["summary"]
+
+
+def test_verify_audit_write_verdicts_persists_the_revoked_verdict_not_the_prejudged_fail(
+    tmp_path: Path, monkeypatch
+):
+    """THE feature: a FAIL the independent auditor REVOKED lands in the store as the LOWERED
+    verdict — never as the pre-audit FAIL that would badge the note with an overturned ❌."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)  # judges → FAIL
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_REVOKED_FLAG], reverdict="PASS")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    verdict = _stored_verdict(items_path)
+    assert verdict["verdict"] == "PASS"  # the AUDITED verdict, not the pre-audit FAIL
+    assert verdict["faithfulness"] == "PASS"
+    assert verdict["flags"] == []  # the revoked flag is gone with it
+    # Same safety envelope as the plain write path: auto-snapshot + an echoed tally.
+    snapshots = list((tmp_path / "data" / "snapshots").iterdir())
+    assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
+    assert "1 verdicts escritos" in _plain_output(result.output)
+
+
+def test_verify_audit_write_verdicts_persists_confirmed_fail_with_auditor_added_flags(
+    tmp_path: Path, monkeypatch
+):
+    """A CONFIRMED FAIL lands as FAIL — with the auditor's blind-spot flag the judges missed,
+    so the badge surfaces the audited evidence, not just the judges'."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    # The auditor tries to clear the record (reverdict PASS) but CONFIRMS the flag and adds one:
+    # the invariants hold — a confirmed faithfulness flag keeps the FAIL.
+    _fill_audit(ws, [_CONFIRMED_FLAG, _AUDITOR_ADDED_FLAG], reverdict="PASS")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    verdict = _stored_verdict(items_path)
+    assert verdict["verdict"] == "FAIL"
+    assert verdict["faithfulness"] == "FAIL"
+    assert verdict["flags"] == ["unsupported", "hallucinated-claim"]  # confirmed + auditor-added
+
+
+def test_verify_audit_write_verdicts_binds_to_the_judged_output_not_the_live_store(
+    tmp_path: Path, monkeypatch
+):
+    """Fingerprint integrity across the LONGER audit window: the summary is regenerated after the
+    judges ran, so the live store no longer holds the judged text. The persisted fingerprint must
+    still be the one stamped at JUDGE-export ("A") — never a recompute at audit-export or at write
+    ("B") — so `generate` sees a mismatch and paints NO badge on the regenerated output."""
+    import hashlib
+
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    judged, regenerated = "A - the judged summary.", "B - regenerated after the judges."
+    item = _verify_video_item("7")
+    item.enriched.summary = judged
+    save_store({"7": item}, items_path)
+    _aggregate_judged_report(tmp_path)  # stamps fp(A) through the report record
+
+    item.enriched.summary = regenerated  # the output changes BEFORE the audit export + write
+    save_store({"7": item}, items_path)
+
+    ws = _export_audit_worksheet(tmp_path)
+    assert json.loads(ws.read_text(encoding="utf-8"))["items"][0]["output"] == regenerated
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    fp = _stored_verdict(items_path)["output_fingerprint"]
+    assert fp == hashlib.sha256(judged.encode("utf-8")).hexdigest()  # the JUDGED output
+    assert fp != hashlib.sha256(regenerated.encode("utf-8")).hexdigest()  # never the live one
+
+
+def test_verify_audit_write_verdicts_skips_a_record_with_no_judged_fingerprint(
+    tmp_path: Path, monkeypatch
+):
+    """A record whose judged fingerprint is missing (a legacy report, written before the stamp)
+    is SKIPPED and reported — never written with a guessed/recomputed hash."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _write_fail_report(tmp_path)  # a report whose record carries NO output_fingerprint
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    assert json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"] == {}
+    assert "fingerprint-missing" in _plain_output(result.output)
+
+
+def test_verify_audit_write_verdicts_skips_a_record_with_a_malformed_fingerprint(
+    tmp_path: Path, monkeypatch
+):
+    """A hand-edited/garbage fingerprint is not trusted: the record is skipped, not written."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    report_path = tmp_path / "data" / "verify-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["records"][0]["output_fingerprint"] = "nope"  # tampered
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"] == {}
+    assert "fingerprint-missing" in _plain_output(result.output)
+
+
+def test_verify_audit_apply_default_stays_report_only(tmp_path: Path, monkeypatch):
+    """The audit write is OPT-IN: a plain `--audit --apply` still never touches the store."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _verify_video_item("7")}, items_path)
+    _aggregate_judged_report(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audit(ws, [_REVOKED_FLAG])
+    before = items_path.read_bytes()
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert items_path.read_bytes() == before  # items.json untouched
+    assert not (tmp_path / "data" / "snapshots").exists()
+
+
+def test_verify_audit_write_verdicts_without_apply_errors(tmp_path: Path, monkeypatch):
+    """`--write-verdicts` remains meaningless on a bare export — including the audit export."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"7": _verify_video_item("7")}, tmp_path / "data" / "items.json")
+    result = runner.invoke(app, ["verify", "--audit", "--write-verdicts"])
+    assert result.exit_code != 0
+    assert "--write-verdicts requires --apply" in _plain_output(result.output)
