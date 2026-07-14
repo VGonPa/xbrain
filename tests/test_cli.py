@@ -17,6 +17,7 @@ from xbrain.models import (
     VideoFrame,
 )
 from xbrain.store import save_store
+from xbrain.verification import VerdictWriteResult
 
 runner = CliRunner()
 
@@ -37,6 +38,23 @@ def _plain_output(output: str) -> str:
     terminal-width independent.
     """
     return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
+
+
+def _write_tally(output: str) -> str:
+    """The verdict-write tally the CLI echoed, without its ` → <path>` suffix — for EQUALITY
+    assertions against `VerdictWriteResult(...).summary()`, the very builder the CLI echoes.
+
+    A substring check is UNSAFE on this line. The success rendering (`1 verdicts escritos`) is a
+    literal substring of the failure rendering (`0 de 1 verdicts escritos (1 omitidos:
+    fingerprint-missing)`), so `assert "1 verdicts escritos" in output` is satisfied verbatim by
+    the message saying the exact opposite — zero written, one skipped. Comparing the whole line
+    to the builder's own output pins the test to the source of truth by reference, instead of to
+    a phrase a contradictory message also contains.
+    """
+    for line in _ANSI_RE.sub("", output).splitlines():
+        if "verdicts escritos" in line:
+            return line.split("→")[0].strip()
+    raise AssertionError(f"no verdict-write tally was echoed in: {output!r}")
 
 
 def _setup_repo(tmp_path: Path, monkeypatch) -> Path:
@@ -3162,7 +3180,10 @@ def test_verify_audit_write_verdicts_persists_the_revoked_verdict_not_the_prejud
     # Same safety envelope as the plain write path: auto-snapshot + an echoed tally.
     snapshots = list((tmp_path / "data" / "snapshots").iterdir())
     assert any("pre-verify-write-verdicts" in p.name for p in snapshots)
-    assert "1 verdicts escritos" in _plain_output(result.output)
+    # EQUALITY against the builder: `"1 verdicts escritos"` is a substring of the failure
+    # rendering `"0 de 1 verdicts escritos (1 omitidos: …)"`, so `in` would pass on a run
+    # that wrote NOTHING. See `_write_tally`.
+    assert _write_tally(result.output) == VerdictWriteResult(written=1, skipped=[]).summary()
 
 
 def test_verify_audit_write_verdicts_persists_confirmed_fail_with_auditor_added_flags(
@@ -3236,7 +3257,12 @@ def test_verify_audit_write_verdicts_skips_a_record_with_no_judged_fingerprint(
     assert result.exit_code == 0, result.output
 
     assert json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"] == {}
-    assert "fingerprint-missing" in _plain_output(result.output)
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=0, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )  # 0 written, and skipped for exactly that reason
 
 
 def test_verify_audit_write_verdicts_skips_a_record_with_a_malformed_fingerprint(
@@ -3257,7 +3283,12 @@ def test_verify_audit_write_verdicts_skips_a_record_with_a_malformed_fingerprint
     result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
     assert result.exit_code == 0, result.output
     assert json.loads(items_path.read_text(encoding="utf-8"))["7"]["verification"] == {}
-    assert "fingerprint-missing" in _plain_output(result.output)
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=0, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )  # 0 written, and skipped for exactly that reason
 
 
 def test_verify_audit_apply_default_stays_report_only(tmp_path: Path, monkeypatch):
@@ -3380,7 +3411,12 @@ def test_verify_audit_write_verdicts_never_takes_a_fingerprint_the_record_lacks(
     fp_a = hashlib.sha256(judged_a.encode("utf-8")).hexdigest()
     assert stored.get("summary", {}).get("output_fingerprint") != fp_a  # the worksheet's stamp
     assert stored == {}  # nothing written: the record carried no judged fingerprint
-    assert "fingerprint-missing" in _plain_output(result.output)
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=0, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )  # 0 written, and skipped for exactly that reason
 
 
 def test_verify_audit_apply_write_verdicts_refuses_a_worksheet_with_no_audits_key(
@@ -3399,7 +3435,9 @@ def test_verify_audit_apply_write_verdicts_refuses_a_worksheet_with_no_audits_ke
 
     result = runner.invoke(app, ["verify", "--audit", "--apply", str(judge_ws), "--write-verdicts"])
     assert result.exit_code != 0
-    assert "audits" in _plain_output(result.output)
+    # The specific diagnosis, not the bare word "audits" — which half the audit-path messages
+    # (including ones reporting the OPPOSITE) also contain.
+    assert "has no `audits` key" in _plain_output(result.output)
     assert items_path.read_bytes() == before  # the un-audited aggregate never reaches the store
 
 
@@ -3454,3 +3492,103 @@ def test_verify_audit_write_verdicts_leaves_the_report_unaudited_when_the_store_
     retry = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
     assert retry.exit_code == 0, retry.output
     assert _stored_verdict(items_path)["verdict"] == "FAIL"
+
+
+# --------------------------------- both arms of the audit-write fingerprint source must survive
+# `_audit_write_fingerprints` reads the judged fingerprint from the merged RECORDS (authority)
+# and cross-checks it against the applied audit worksheet. Mutation testing showed BOTH sources
+# are load-bearing, for opposite reasons — and that dropping either survived the suite. These
+# pin one arm each, so a future "simplification" of the combine turns red.
+
+
+def _judged_report_fail_and_clean_pass(tmp_path: Path) -> None:
+    """The REAL judge flow over TWO items: `7` → FAIL (consequential), `8` → PASS (clean)."""
+    ws = _export_summary_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": "7",
+            "target": "summary",
+            "verdict": "FAIL",
+            "faithfulness": "FAIL",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+        },
+        {
+            "item_id": "8",
+            "target": "summary",
+            "verdict": "PASS",
+            "faithfulness": "PASS",
+            "adherence": "PASS",
+            "flags": [],
+        },
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    result = runner.invoke(app, ["verify", "--apply", str(ws)])
+    assert result.exit_code == 0, result.output
+
+
+def _seed_fail_and_clean_pass(tmp_path: Path) -> Path:
+    items_path = tmp_path / "data" / "items.json"
+    clean = _verify_video_item("8")
+    clean.enriched.summary = "A clean, faithful summary of the talk."
+    save_store({"7": _verify_video_item("7"), "8": clean}, items_path)
+    _judged_report_fail_and_clean_pass(tmp_path)
+    return items_path
+
+
+def test_verify_audit_write_verdicts_persists_the_clean_pass_the_auditor_never_saw(
+    tmp_path: Path, monkeypatch
+):
+    """The audit worksheet only carries the CONSEQUENTIAL (FAIL/divergent) records — a clean PASS
+    is never exported to the auditor. Its judged fingerprint therefore reaches the write ONLY via
+    the report RECORD. Source the fingerprints from the worksheet alone and every clean PASS is
+    silently skipped as `fingerprint-missing`: no error, the verdicts just never land. Every other
+    audit CLI test uses a single FAIL item, so this path was unexercised."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _seed_fail_and_clean_pass(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+
+    # Only the FAIL is consequential, so only item 7 rides in the worksheet the auditor fills.
+    assert {e["item_id"] for e in json.loads(ws.read_text(encoding="utf-8"))["items"]} == {"7"}
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    assert stored["7"]["verification"]["summary"]["verdict"] == "FAIL"  # the audited FAIL
+    assert stored["8"]["verification"]["summary"]["verdict"] == "PASS"  # the UNAUDITED clean PASS
+    assert _write_tally(result.output) == VerdictWriteResult(written=2, skipped=[]).summary()
+
+
+def test_verify_audit_write_verdicts_drops_a_record_whose_worksheet_stamp_was_tampered(
+    tmp_path: Path, monkeypatch
+):
+    """The other arm: the worksheet stamp is the TAMPER cross-check. Hand-edit it to a different
+    well-formed hash and the two sources disagree — the key is dropped fail-safe and the record is
+    skipped, never resolved by precedence. Without the cross-check the record's own fingerprint
+    would simply win and the record would be written anyway.
+
+    The clean PASS (absent from the worksheet, so nothing to disagree with) still lands — proving
+    the drop is targeted at the tampered key, not a blanket failure."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _seed_fail_and_clean_pass(tmp_path)
+    ws = _export_audit_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["items"][0]["output_fingerprint"] = "b" * 64  # well-formed, but NOT the judged hash
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    _fill_audit(ws, [_CONFIRMED_FLAG], reverdict="FAIL")
+
+    result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert result.exit_code == 0, result.output
+
+    stored = json.loads(items_path.read_text(encoding="utf-8"))
+    assert stored["7"]["verification"] == {}  # the tampered stamp was NOT trusted
+    assert stored["8"]["verification"]["summary"]["verdict"] == "PASS"  # untouched key still lands
+    assert (
+        _write_tally(result.output)
+        == VerdictWriteResult(
+            written=1, skipped=[("7", "summary", "fingerprint-missing")]
+        ).summary()
+    )

@@ -406,23 +406,56 @@ def test_apply_verdicts_stores_judged_fingerprint_not_live_recompute():
     assert stored != live_fp  # never the live recompute
 
 
-def test_apply_verdicts_tallies_skipped_records_with_reasons():
-    """A dropped verdict is never silent — item-gone, unknown record, and a missing judged
-    fingerprint are each tallied on the result."""
-    store = {"7": _item(summary="S.")}
+def test_apply_verdicts_tallies_every_skip_reason_and_never_crashes_the_write():
+    """`apply_verdicts_to_store` promises in its docstring that a bad record is SKIPPED and
+    tallied — "never crashes the write, never silently dropped". All SIX reasons are exercised
+    here, because three of them were untested and one is a live hazard: drop the `bad-verdict`
+    guard and pydantic rejects the bogus verdict with a ValidationError that aborts the ENTIRE
+    write, taking the good records down with it. A test covering only half the reasons lets that
+    regression through green.
+
+    The tally is asserted by EQUALITY against the rendering itself — `"1 de 7"` as a substring
+    would also be satisfied by other counts sharing those digits."""
+    store = {"7": _item(summary="S."), "8": _item("8", summary="T.")}
     judged_fp = fingerprint_output(store["7"], "summary")
     aggregated = [
-        _j("FAIL", item_id="7", target="summary"),  # writes (has a judged fingerprint)
+        _j("FAIL", item_id="7", target="summary"),  # the only writable record
         _j("FAIL", item_id="ghost", target="summary"),  # item-gone
-        _j("FAIL", item_id="7", target="digest"),  # fingerprint-missing (not in the map)
+        _j("FAIL", item_id="7", target="bogus"),  # bad-target
+        _j("MAYBE", item_id="7", target="digest"),  # bad-verdict → would CRASH the write
+        _j("FAIL", item_id="7", target="topics"),  # fingerprint-missing (absent from the map)
+        _j("FAIL", item_id="8", target="summary"),  # fingerprint-invalid (garbage hash)
         "not a dict",  # malformed-record
     ]
-    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
-    assert result.written == 1
-    reasons = {reason for _, _, reason in result.skipped}
-    assert reasons == {"item-gone", "fingerprint-missing", "malformed-record"}
-    assert result.attempted == 4
-    assert "1 de 4" in result.summary() and "item-gone" in result.summary()
+    # The bad-verdict record is given a VALID fingerprint on purpose: the enum guard is then the
+    # only thing standing between `"MAYBE"` and pydantic. Without it the record reaches
+    # `VerificationVerdict(...)` and the ValidationError aborts the write — the good record
+    # included. (Leave it unfingerprinted and a later check masks the guard's removal.)
+    fingerprints = {
+        ("7", "summary"): judged_fp,
+        ("7", "digest"): fingerprint_output(store["7"], "digest"),
+        ("8", "summary"): "nope",
+    }
+
+    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+
+    assert result.written == 1 and result.attempted == 7
+    assert {reason for _, _, reason in result.skipped} == {
+        "item-gone",
+        "bad-target",
+        "bad-verdict",
+        "fingerprint-missing",
+        "fingerprint-invalid",
+        "malformed-record",
+    }
+    # The good record survived the six bad ones — the write did not abort.
+    assert set(store["7"].verification) == {"summary"}
+    assert store["7"].verification["summary"].verdict == "FAIL"
+    assert store["8"].verification == {}
+    assert result.summary() == (
+        "1 de 7 verdicts escritos (6 omitidos: 1 bad-target, 1 bad-verdict, "
+        "1 fingerprint-invalid, 1 fingerprint-missing, 1 item-gone, 1 malformed-record)"
+    )
 
 
 # ------------------------------------------- judged-fingerprint plumbing for the AUDIT write
