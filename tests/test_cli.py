@@ -3592,3 +3592,114 @@ def test_verify_audit_write_verdicts_drops_a_record_whose_worksheet_stamp_was_ta
             written=1, skipped=[("7", "summary", "fingerprint-missing")]
         ).summary()
     )
+
+
+# ------------------------------ the mass-revocation guard cannot be split across runs (B1, e2e)
+# The reviewer's original repro: 3 confirmed FAILs, ONE revoke per run. `_mass_revocation_tripped`
+# needs >=2 FAILs dropping AND >50% of them (DEFAULT_MASS_REVOCATION_MAX), so a single revoke never
+# trips it — and each `--audit --apply` re-renders the report from the MERGED records, shrinking
+# the FAIL set. Three forced runs therefore cleared all three FAILs and exited 0 every time.
+
+
+def _three_judged_fails(tmp_path: Path) -> Path:
+    """Items 7/8/9, all judged FAIL by the real judge flow → a report with three FAILs."""
+    items_path = tmp_path / "data" / "items.json"
+    save_store({i: _verify_video_item(i) for i in ("7", "8", "9")}, items_path)
+    ws = _export_summary_worksheet(tmp_path)
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["judgments"] = [
+        {
+            "item_id": i,
+            "target": "summary",
+            "verdict": "FAIL",
+            "faithfulness": "FAIL",
+            "adherence": "PASS",
+            "flags": [{"claim": "€150M in revenue", "issue": "unsupported"}],
+        }
+        for i in ("7", "8", "9")
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+    assert runner.invoke(app, ["verify", "--apply", str(ws)]).exit_code == 0
+    return items_path
+
+
+def _fill_audits(ws: Path, decisions: dict[str, dict]) -> None:
+    """`{item_id: flag}` → the auditor's `audits` block, preserving the judged `items` stamps."""
+    data = json.loads(ws.read_text(encoding="utf-8"))
+    data["audits"] = [
+        {
+            "item_id": i,
+            "target": "summary",
+            "reverdict": "PASS" if flag["audit"] == "REVOKE" else "FAIL",
+            "flags": [flag],
+        }
+        for i, flag in decisions.items()
+    ]
+    ws.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _stored_verdicts(items_path: Path) -> dict[str, str]:
+    store = json.loads(items_path.read_text(encoding="utf-8"))
+    return {
+        i: store[i]["verification"]["summary"]["verdict"]
+        for i in ("7", "8", "9")
+        if store[i]["verification"]
+    }
+
+
+def test_three_forced_runs_cannot_wash_three_confirmed_fails_into_the_store(
+    tmp_path: Path, monkeypatch
+):
+    """THE B1 exploit, end to end. Three FAILs are honestly persisted (three notes badge ❌); an
+    attacker then revokes ONE per forced run. Before the fix each run exited 0 and the store went
+    FAIL,FAIL,FAIL → PASS,PASS,PASS with the guard never tripping — three notes silently lost
+    their ❌. Every forced write is now rejected, and all three FAILs survive all three runs."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _three_judged_fails(tmp_path)
+
+    # An honest audit CONFIRMS all three → the store holds three FAILs (three ❌ badges).
+    ws = _export_audit_worksheet(tmp_path)
+    _fill_audits(ws, {i: _CONFIRMED_FLAG for i in ("7", "8", "9")})
+    first = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+    assert first.exit_code == 0, first.output
+    assert _stored_verdicts(items_path) == {"7": "FAIL", "8": "FAIL", "9": "FAIL"}
+
+    # Now the laundering loop: one REVOKE per forced run, exactly as the reviewer ran it.
+    for target_item in ("7", "8", "9"):
+        _fill_audits(ws, {target_item: _REVOKED_FLAG})
+        result = runner.invoke(
+            app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts", "--force"]
+        )
+        assert result.exit_code != 0, f"run on {target_item} was accepted: {result.output}"
+        assert "--write-verdicts cannot be combined with --force" in _plain_output(result.output)
+
+    assert _stored_verdicts(items_path) == {"7": "FAIL", "8": "FAIL", "9": "FAIL"}  # all ❌ survive
+
+
+def test_re_aggregating_the_judges_restores_the_full_fail_set_so_the_wash_cannot_accumulate(
+    tmp_path: Path, monkeypatch
+):
+    """Closing B1 by banning `--force` is only sufficient if the OTHER route to a second audit —
+    re-aggregating the judges (`verify --apply`), which is explicitly still allowed — cannot
+    accumulate revocations either.
+
+    It cannot, and this pins why: re-aggregation rebuilds the report from the JUDGES, so the FAIL
+    set is restored to all three every time (it never shrinks, which is what the forced path
+    exploited). The write then persists that whole merged set, so the previous run's PASS is
+    overwritten back to FAIL. The store never holds more than the ONE verdict the current auditor
+    actually revoked — the revocations do not compound across runs."""
+    _setup_repo(tmp_path, monkeypatch)
+    items_path = _three_judged_fails(tmp_path)
+
+    for target_item in ("7", "8", "9"):
+        _three_judged_fails(tmp_path)  # re-aggregate the judges: the report is 3 FAILs again
+        ws = _export_audit_worksheet(tmp_path)
+        assert len(json.loads(ws.read_text(encoding="utf-8"))["items"]) == 3  # never shrank
+        _fill_audits(ws, {target_item: _REVOKED_FLAG})  # revoke exactly one — never trips the guard
+        result = runner.invoke(app, ["verify", "--audit", "--apply", str(ws), "--write-verdicts"])
+        assert result.exit_code == 0, result.output  # this path stays open, by design
+
+        # Only the freshly-revoked one is PASS; the other two are back to FAIL.
+        assert _stored_verdicts(items_path) == {
+            i: ("PASS" if i == target_item else "FAIL") for i in ("7", "8", "9")
+        }
