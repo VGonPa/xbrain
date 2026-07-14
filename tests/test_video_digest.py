@@ -122,9 +122,33 @@ def test_export_worksheet_carries_transcript_frames_and_rubric(tmp_path):
     assert entry["title"] == "A great talk"
     assert data["executor"] == "claude-code"
     assert data["judgments"] == []
-    # The rubric ships with {language} already substituted.
+    # The rubric ships with {language} already substituted. NOTE: these two
+    # assertions hold for EVERY rubric in the package — they do not pin WHICH
+    # rubric was exported. `test_export_worksheet_rubric_carries_the_faithfulness_rules`
+    # does that.
     assert "{language}" not in data["rubric"]
     assert "English" in data["rubric"]
+
+
+def test_export_worksheet_rubric_carries_the_faithfulness_rules(tmp_path):
+    """The exported worksheet IS the digest model's prompt — the digest flow has no
+    other path to an LLM — so the payload's `rubric` is the closest a deterministic
+    test gets to "the model sees the anti-inference rule".
+
+    Guards a real, silent failure: wiring `load_rubric("summary", ...)` into
+    `export_video_digest_worksheet` would strip the hardening from the prompt while
+    every other assertion above stays green, since every rubric substitutes
+    `{language}`. One canary per rule — name-nothing-unnamed, quote-verbatim,
+    do-not-sharpen — so a deleted rule or a swapped rubric reds here.
+    """
+    path = tmp_path / "ws.json"
+    export_video_digest_worksheet([_video_item()], path, "claude-code", "English")
+    rubric = json.loads(path.read_text(encoding="utf-8"))["rubric"].lower()
+    assert "neutral descriptor" in rubric, (
+        "exported rubric lost the never-name-an-unnamed-entity rule"
+    )
+    assert "verbatim" in rubric, "exported rubric lost the quote-verbatim rule"
+    assert "sharpen" in rubric, "exported rubric lost the do-not-sharpen rule"
 
 
 def test_export_worksheet_carries_full_untruncated_transcript(tmp_path):
