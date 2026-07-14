@@ -85,7 +85,7 @@ def test_every_surface_carries_the_identical_unfetched_links_note(links, article
     assert note is not None
     assert note in _user_prompt(item, VOCAB)  # generator: api prompt
     assert _worksheet_entry(item, tmp_path)["unfetched_links_note"] == note  # generator: worksheet
-    assert note in _source_text(item)  # judge: verify source
+    assert note in _source_text(item, "summary")  # judge: verify source
 
 
 def test_every_surface_carries_the_identical_quoted_note(tmp_path):
@@ -93,7 +93,7 @@ def test_every_surface_carries_the_identical_quoted_note(tmp_path):
     item = _item(quoted=True)
     assert QUOTED_CONTENT_UNFETCHED_NOTE in _user_prompt(item, VOCAB)
     assert _worksheet_entry(item, tmp_path)["quoted_content_note"] == QUOTED_CONTENT_UNFETCHED_NOTE
-    assert QUOTED_CONTENT_UNFETCHED_NOTE in _source_text(item)
+    assert QUOTED_CONTENT_UNFETCHED_NOTE in _source_text(item, "summary")
 
 
 def test_the_judge_source_carries_the_note_not_merely_the_header():
@@ -101,7 +101,7 @@ def test_the_judge_source_carries_the_note_not_merely_the_header():
     NOT fetched]` heading. Deleting the note while keeping the header is the mutation
     that survived review: the header alone satisfies a `"NOT fetched"` substring."""
     item = _item(links=1)
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     header = "[Links — content NOT fetched]"
     assert header in text
     assert text.replace(header, "").count("NOT fetched") >= 1  # the note survives header removal
@@ -110,7 +110,7 @@ def test_the_judge_source_carries_the_note_not_merely_the_header():
 
 def test_the_judge_source_carries_the_quoted_note_not_merely_the_header():
     item = _item(quoted=True)
-    text = _source_text(item)
+    text = _source_text(item, "summary")
     header = "[Quoted post — content NOT fetched]"
     assert header in text
     assert QUOTED_CONTENT_UNFETCHED_NOTE in text.replace(header, "")

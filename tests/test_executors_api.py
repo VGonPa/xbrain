@@ -593,3 +593,14 @@ def test_user_prompt_marks_an_unfetched_quoted_post():
 
 def test_user_prompt_has_no_quoted_marker_without_a_quote():
     assert "Quoted post" not in _user_prompt(_item("1"), VOCAB)
+
+
+def test_user_prompt_ships_the_author_display_name(tmp_path):
+    """D6: the rubric promises the judge "@handle and display name" as author metadata,
+    but the api prompt only ever shipped the handle — so a summary naming the poster by
+    their display name was judged against evidence the generator never had."""
+    item = _item("1")
+    item.author = Author(handle="emollick", name="Ethan Mollick")
+    prompt = _user_prompt(item, VOCAB)
+    assert "@emollick" in prompt
+    assert "Ethan Mollick" in prompt

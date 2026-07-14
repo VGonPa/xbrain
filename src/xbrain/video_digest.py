@@ -20,17 +20,7 @@ from pathlib import Path
 from xbrain.executors.api import _video_frame_descriptions
 from xbrain.models import ContentSourceSuccess, Item
 from xbrain.rubrics import load_rubric
-from xbrain.worksheet import _video_transcript
-
-
-def _video_source(item: Item) -> ContentSourceSuccess | None:
-    """The item's first `x_video` content source, or None when it has none."""
-    if item.content is None:
-        return None
-    for source in item.content.sources:
-        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
-            return source
-    return None
+from xbrain.worksheet import _video_source, _video_transcript
 
 
 def _has_digestible_content(source: ContentSourceSuccess) -> bool:
@@ -95,6 +85,9 @@ def export_video_digest_worksheet(
             {
                 "item_id": item.id,
                 "author": item.author.handle,
+                # Evidence, not decoration: the rubric promises the judge "@handle +
+                # display name", so the generator must be handed it too (D6).
+                "author_name": item.author.name,
                 "text": item.text,
                 "title": (source.title if (source := _video_source(item)) else None),
                 "video_transcript": _video_transcript(item),

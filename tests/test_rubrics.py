@@ -219,3 +219,29 @@ def test_summary_rubric_keeps_the_86_attribution_and_unfetched_guardrails():
     assert "posted" in text
     assert "not fetched" in text or "never fetched" in text
     assert "reconstruct" in text
+
+
+def test_verify_rubric_treats_a_url_as_topic_signal_never_as_a_name():
+    """D1 — the deepest defect on the board. `rubric-verify` used to carve out the URL
+    ("unsupported ... beyond the URL/domain itself"), which made the domain EVIDENCE:
+    the judge was structurally unable to flag `Axios` reconstructed from
+    `axios.com/2025/05/28/ai-jobs...`, or `Nature` from `nature.com`. The generator's
+    rubric says the opposite — a domain is topic signal, never a name. Both must now say
+    the same thing, or the judge licenses exactly what the generator is forbidden."""
+    text = load_rubric("verify", language="English")
+    assert "beyond the URL/domain itself" not in text  # the carve-out that excused it
+    lowered = text.lower()
+    assert "topic signal" in lowered
+    # naming the publication/company a link belongs to is UNSUPPORTED
+    assert "publication" in lowered
+    assert "never a name" in lowered or "not a name" in lowered
+
+
+def test_verify_rubric_declares_the_evidence_surfaces_per_target():
+    """The judge must be told WHICH surfaces support a claim, and they differ by target:
+    a digest is judged against the video, a summary also against the article/thread/
+    images its generator was handed."""
+    text = load_rubric("verify", language="English")
+    assert "digest" in text and "summary" in text
+    assert "video transcript" in text.lower()
+    assert "fetched article body" in text.lower()
