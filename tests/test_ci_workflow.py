@@ -51,30 +51,101 @@ pushed to `develop` actually produce a check run named `quality` that actually e
 gate? Reformatting the YAML while preserving that behaviour stays green; any edit that
 breaks it goes red, and says why in the failure message.
 
-THE ASYMMETRY THAT SHAPES THIS WHOLE FILE
------------------------------------------
-A gate can die in two opposite directions, and they need opposite assertions. This is the
-single fact most worth knowing here, and it is not intuitive:
+WHY A PR CANNOT BE TRUSTED TO POLICE ITS OWN GATE
+-------------------------------------------------
+A `pull_request` run uses the **HEAD version of the workflow**, not the base's. So a PR that
+neuters the gate **is judged by the neutered gate**. It absolves itself. That is the whole
+reason this file exists as a *test* — something that runs INSIDE the suite, on the PR's own
+tree — rather than as a comment asking people to be careful.
 
-* **A skipped JOB reports SUCCESS.** GitHub, verbatim: *"if a job within a workflow is
-  skipped due to a conditional, it will report its status as 'Success.'"* So `if: false` on
-  the job, or `continue-on-error: true`, or a `steps:` block gutted down to `echo ok`, all
-  publish a **green** `quality` check having verified nothing. Branch protection is
-  satisfied and merges the lot. This is SILENT GREEN — false confidence, worse than having
-  no gate, because a decoration is trusted.
+NEVER TRUST A REPORTED CONCLUSION. ASSERT ON THE SOURCE.
+--------------------------------------------------------
+This is the rule that governs every assertion below, and here is the receipt that buys it.
+Measured on a throwaway PR (#129) with `continue-on-error: true` on the **gate step** and a
+test rigged to fail, so `scripts/check.sh` genuinely exited 1:
 
-* **A skipped WORKFLOW hangs PENDING.** GitHub, verbatim: *"When a workflow is skipped due
-  to path filtering, branch filtering or a commit message, checks associated with that
-  workflow will remain in a 'Pending' state."* So a `paths:` filter that matches nothing, a
-  `branches-ignore` glob, or an invalid workflow file means the required `quality` check is
-  **never published at all**. Every PR waits on a check that will never report, forever —
-  and with `enforce_admins` nobody can override, *including the PR that would fix it*. This
-  is HARD LOCKOUT.
+    the raw log        -> "FAILED ... Critical issues in: Format, Tests"   <- GROUND TRUTH
+    ---------------------------------------------------------------------------------
+    the STEP           -> conclusion = success        <- the step that ran `exit 1`
+    the JOB            -> conclusion = success
+    the CHECK RUN      -> conclusion = SUCCESS        <- what branch protection reads
+    the WORKFLOW RUN   -> conclusion = success
+    the PR             -> mergeable = MERGEABLE, mergeStateStatus = CLEAN
 
-Same intent ("stop this workflow running"), opposite consequences: one waves everything
-through, the other blocks everything permanently. Neither is detectable by asking "does the
-workflow declare a push trigger?", which is why the assertions here reach all the way down
-to the job's steps, its `continue-on-error`, its permissions, and its checkout `ref`.
+A step ran `exit 1` and reported `conclusion: success`. **Every machine-readable surface said
+green.** The failure existed nowhere but in log prose.
+
+So a guard built on "did every step conclude success?" is defeated by the exact attack it
+exists to catch — the conclusion field is the thing that lies. That is why every assertion in
+this file parses `quality.yml` (and the gate script it names) and asserts on what they SAY.
+Never on what a run REPORTS.
+
+THE TAXONOMY: FAIL-CLOSED vs FAIL-OPEN
+--------------------------------------
+Every way to kill this gate lands in one of two families, and they fail in OPPOSITE
+directions. Sorting an attack into the wrong family is worse than having no taxonomy at all,
+so every line below is MEASURED against the live API, not reasoned about.
+
+**FAIL-CLOSED (a bad day, not a disaster).** The check stops *reporting PASS*, so GitHub
+blocks the merge. It cannot ship a lie.
+
+  * delete the workflow / `jobs: {}` -> no run at all (measured: zero runs, PR `BLOCKED`)
+  * rename the job, or give it a `name:` -> the required check never appears; PRs hang
+    Pending forever, and with `enforce_admins` nobody can override — including the PR that
+    would fix it. A hard LOCKOUT, but never a false green.
+  * `branches-ignore`, `paths:` under `pull_request`, invalid `types:` under `push` -> the
+    workflow is skipped. GitHub, verbatim: *"When a workflow is skipped due to path
+    filtering, branch filtering or a commit message, checks associated with that workflow
+    will remain in a 'Pending' state."*
+  * `continue-on-error` **on the JOB** -> measured (#123): check run `FAILURE`, PR `BLOCKED`.
+    It suppresses the WORKFLOW RUN's conclusion, not the JOB's check run — and protection
+    keys off the check run. Banned anyway: it lies to every tool that reads runs rather than
+    checks (a dashboard, a `gh run list` in a script, a human glancing at the Actions tab).
+
+**FAIL-OPEN (lethal).** The check still says **PASS while testing less, or nothing**. It
+merges green and manufactures false confidence — worse than no gate, because a decoration
+is trusted.
+
+  * `continue-on-error` **on a STEP** -> measured (#129, above): `CLEAN`, `MERGEABLE`, check
+    run SUCCESS, while `check.sh` exited 1. **The worst attack in this repo.** Note what
+    separates it from its fail-closed twin one bullet up: *indentation*. Same directive, same
+    spelling, two lines apart — one blocks the merge, the other hands you a permanent
+    unconditional green. That is why the assertion below walks the ENTIRE job rather than
+    special-casing the gate step: any step can become load-bearing later.
+  * `paths-ignore` under `push` -> the merge-result run never happens; #103 reopens, silently.
+  * `steps:` gutted to `echo ok` -> a green `quality` check that ran nothing.
+  * `if: false` on the JOB -> GitHub, verbatim: *"if a job within a workflow is skipped due
+    to a conditional, it will report its status as 'Success.'"* A skipped job is a GREEN job.
+  * **`checkout` with an explicit `ref:`** -> the gate RUNS. All eleven checks PASS. The check
+    run reports a *truthful* ✅ `quality`. And it examined **the wrong tree** — it never looked
+    at the code being merged. Not a broken gate: a working gate pointed at the wrong thing,
+    with no visible symptom anywhere. `actions/checkout` defaults to `GITHUB_SHA`, which on a
+    push to a gated branch IS the merge commit. That default is the entire mechanism of this
+    workflow, and nothing but the test below pins it.
+
+THE BOUNDARY — the one sentence to remember if you remember nothing else:
+
+    Removing the guard fails CLOSED. Hollowing it out while leaving the sign on the door
+    fails OPEN — and GitHub will hand you a CLEAN merge state while it does.
+
+Everything in the fail-open column has that shape: the check still reports, it just no longer
+checks anything.
+
+AUDIT THE INSTRUMENT BEFORE YOU CITE IT
+---------------------------------------
+Four times in one PR an instrument lied, and each lie was believed until it was measured:
+
+  1. `gh run list` said `success` — for a STALE run. It produced a wrong published account
+     of #103.
+  2. Every GitHub issue LIST endpoint lags (only fetch-by-number is strongly consistent).
+     "No issue exists" was false; it filed duplicate issues #113 and #114.
+  3. The WORKFLOW RUN's conclusion said `success` where the CHECK RUN said `FAILURE`. Reading
+     the wrong one invented a lethal hole that does not exist (job-level `continue-on-error`).
+  4. And the reverse: the check run said `SUCCESS` where the LOG said the gate exited 1.
+     Reading the reported conclusion MISSED the lethal hole that does exist (step-level).
+
+(3) and (4) are the same directive, measured on the wrong placement. Being careful was not
+enough; only running the experiment on the exact thing under test was.
 """
 
 import fnmatch
@@ -359,24 +430,38 @@ def test_gate_step_actually_runs_and_is_not_conditional() -> None:
     )
 
 
-def test_gate_cannot_report_success_while_failing() -> None:
-    """`continue-on-error` must appear NOWHERE in the gate job. It manufactures a green lie.
+def test_gate_declares_no_continue_on_error() -> None:
+    """`continue-on-error` must appear NOWHERE in the gate job — not on it, not on any step.
 
-    This is the worst failure mode in this file's threat model, worse than any deadlock.
-    `continue-on-error: true` does not stop the gate running — it runs, it FAILS, and the
-    check run reports **success** anyway. Branch protection is satisfied, the merge sails
-    through, and the ✅ next to `quality` is now actively lying about code nobody verified.
-    A gate that cannot fail is not a gate; it is a decoration that costs 73 seconds.
+    The same directive, spelled the same way, does OPPOSITE things depending on how far it is
+    indented. Both were measured against the live API on PRs whose gate was genuinely failing:
 
-    Banned at BOTH levels, because either one alone produces the lie: on the job (its
-    conclusion is forced to success) and on any step (a failing step no longer fails the job).
+        on the JOB (#123)   -> check run FAILURE, PR BLOCKED         fail-CLOSED
+        on a STEP (#129)    -> check run SUCCESS, PR CLEAN,          fail-OPEN, LETHAL
+                               while `check.sh` exited 1
+
+    The step-level form is the worst attack in this repo. A step ran `exit 1` and reported
+    `conclusion: success`; the job, the check run, the workflow run and the PR ALL said green.
+    The failure existed nowhere but in the log text. Two words of YAML turn the gate into a
+    permanent, unconditional green that no machine-readable surface can distinguish from a
+    real pass.
+
+    The job-level form does not mask the check — protection keys off the check run, which
+    still reports failure — but it is banned too: it makes the WORKFLOW RUN's conclusion lie,
+    so every tool that reads runs rather than checks (a dashboard, a `gh run list` in a
+    script, a human glancing at the Actions tab) is told everything is fine.
+
+    Both bans walk the WHOLE job rather than special-casing the `Quality gate` step. A step
+    that is decorative today (installing uv, setting up Python) is load-bearing the moment the
+    gate depends on it, and a `continue-on-error` parked on it would be waiting.
     """
     job = _gate_job()
     assert "continue-on-error" not in job, (
         f"The `{_REQUIRED_CHECK}` job declares `continue-on-error: "
-        f"{job.get('continue-on-error')!r}`. The gate would still RUN, still FAIL — and the "
-        f"required check would report ✅ SUCCESS regardless. Every red merge sails through on "
-        f"a green light. Delete it."
+        f"{job.get('continue-on-error')!r}`. Measured: branch protection still BLOCKS the "
+        f"merge (the job's check run reports failure even though the workflow run reports "
+        f"success), so this is fail-closed rather than lethal — but every tool that reads "
+        f"workflow runs instead of check runs is now being lied to. Delete it."
     )
     offenders = [
         step.get("name", step.get("run", "?"))
@@ -385,18 +470,29 @@ def test_gate_cannot_report_success_while_failing() -> None:
     ]
     assert not offenders, (
         f"These steps in the `{_REQUIRED_CHECK}` job declare `continue-on-error`: "
-        f"{offenders}. A failing step with `continue-on-error: true` does not fail its job, "
-        f"so the required check reports ✅ SUCCESS while the gate is red underneath it."
+        f"{offenders}.\n"
+        f"\n"
+        f"STOP — this is the most dangerous edit in this repository, and it is one "
+        f"indentation level away from the harmless job-level form. MEASURED on a PR whose "
+        f"gate genuinely failed: the step ran `exit 1`, and the step, the job, the check run, "
+        f"the workflow run and the PR ALL reported success — mergeStateStatus CLEAN. The "
+        f"required `{_REQUIRED_CHECK}` check becomes a permanent unconditional green that no "
+        f"machine-readable surface can tell apart from a real pass. The failure survives only "
+        f"in the raw log text, where nothing is looking."
     )
 
 
 def test_push_trigger_declares_no_activity_types() -> None:
     """`types:` is not a valid key for `push` — it makes the whole workflow file invalid.
 
-    GitHub documents activity types as "Not applicable" to `push`. An invalid workflow does
-    not fail loudly; it simply never runs, so the required check is never published and every
-    PR hangs Pending. This is a typo away from a repo lockout — `pull_request` DOES take
-    `types:`, so copy-pasting the block up one event is an easy, silent mistake.
+    FAIL-CLOSED, and the least dangerous attack in this file: an invalid workflow never runs,
+    so the required check is never published and every PR hangs Pending. That is a hard
+    lockout — a thoroughly bad day — but it cannot ship a lie, which is the only thing that
+    would be worse. Ranked last for that reason, and closed anyway.
+
+    GitHub documents activity types as "Not applicable" to `push`. It is a typo away: the
+    `pull_request` block DOES take `types:`, so copy-pasting it up one event is easy and
+    silent.
     """
     config = _event("push") or {}
     assert "types" not in config, (
@@ -411,12 +507,19 @@ def test_push_trigger_declares_no_activity_types() -> None:
 def test_checkout_takes_no_explicit_ref() -> None:
     """The gate must test the commit that triggered it — the merge result — not a fixed ref.
 
-    `actions/checkout` defaults to `GITHUB_SHA`, which on a `push` to `develop` IS the merge
-    commit. That default is the entire mechanism of this PR. Pin `ref:` to anything fixed
-    (`main`, a tag, a branch name) and the gate still runs, still reports honestly, still goes
-    green — while testing a tree that has nothing to do with what was just merged. Everything
-    looks healthy and the merge result is never examined, which is #103 with a green light on
-    top.
+    THE LETHAL ONE. Every other attack in this file either blocks the merge (fail-closed) or
+    leaves a visible scar: a job that vanished, a check that never reports, a suite that runs
+    nothing. This one leaves NO symptom. The gate runs. All eleven checks execute and pass.
+    The check run reports a perfectly truthful ✅ `quality`. Branch protection is satisfied and
+    the merge goes through — and the gate examined **the wrong tree**. It never looked at the
+    code being merged at all.
+
+    It is not a broken gate. It is a working gate pointed at the wrong thing, which is the
+    hardest failure to see and the easiest to trust.
+
+    `actions/checkout` defaults to `GITHUB_SHA` — on a push to a gated branch, that IS the
+    merge commit. That default is the entire mechanism of this workflow, and nothing pins it
+    except this test.
     """
     checkout = [
         step
