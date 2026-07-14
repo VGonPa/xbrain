@@ -14,19 +14,20 @@ headline a reader sees instead of the raw transcript + frame dump.
     descriptions (what is shown on screen: slides, charts, code, UI). Capture the
     whole video's substance, not just its opening.
   - **Why it matters:** one OPTIONAL closing line. Drop it when it would be generic.
-- **Faithful — the evidence is exactly these four surfaces:**
-  1. the **video transcript** (what the video says),
-  2. the **frame descriptions** (what it shows on screen),
-  3. the **author metadata** of the account that posted it (its `@handle` and its
+- **Faithful — the evidence is exactly these five surfaces:**
+  1. the **video title**, when the item carries one,
+  2. the **video transcript** (what the video says),
+  3. the **frame descriptions** (what it shows on screen),
+  4. the **author metadata** of the account that posted it (its `@handle` and its
      display name),
-  4. the **tweet text** (the post's own words).
+  5. the **tweet text** (the post's own words).
 
   Nothing else is evidence. Not your world knowledge, not recognising the voice, the
-  setting or the topic. State only what these four surfaces say or show. Never invent
+  setting or the topic. State only what these five surfaces say or show. Never invent
   facts, numbers or claims. No hype. Four rules make this mechanical:
   - **Never name what no surface names.** Do not name the speaker, interviewer, host,
     company, employer, product, publication, podcast, university, course code, paper
-    or model unless that exact name appears in one of the four surfaces above.
+    or model unless that exact name appears in one of the five surfaces above.
     Recognising who someone probably is — from the topic, the voice, the setting, or
     your own world knowledge — is NOT evidence. When no surface names them, use a
     neutral descriptor: "the speaker", "the interviewer", "a cloud provider".

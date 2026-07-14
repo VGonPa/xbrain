@@ -301,3 +301,19 @@ def test_summary_rubric_keeps_the_86_attribution_and_unfetched_guardrails():
     assert "posted" in text
     assert "not fetched" in text or "never fetched" in text
     assert "reconstruct" in text
+
+
+def test_video_digest_rubric_admits_the_video_title_as_evidence():
+    """The video title is evidence surface #5, and every other component already agreed.
+
+    The digest worksheet has shipped `title` all along (`video_digest.py`), and #86 made
+    the judge emit `[Video title]` — its own comment: "The title reaches the digest
+    generator, so the judge must see it too." Excluding it here left one field with FOUR
+    different rules (generator holds it, rubric forbids it, judge accepts it, checker
+    flags it) — and #91 admits it for the summary of the SAME item, so the two rubrics
+    would contradict each other on one field. 0/195 items carry a title today; this goes
+    live on the first backfill.
+    """
+    text = load_rubric("video-digest").lower()
+    assert "video title" in text, "digest rubric no longer admits the video title as evidence"
+    assert "five surfaces" in text
