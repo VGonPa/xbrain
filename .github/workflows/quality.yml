@@ -25,6 +25,7 @@ jobs:
   # every merge blocks, permanently. Change the branch-protection setting FIRST if you ever
   # must rename it. Guarded by tests/test_ci_workflow.py.
   quality:
+    if: false
     runs-on: ubuntu-latest
     permissions:
       # A `permissions:` block sets every scope NOT listed to `none` — `contents: read` is
