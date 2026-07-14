@@ -33,6 +33,7 @@ from xbrain.fetch_x import fetch_x_articles
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
+from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.models import ArchiveImport, Author, Item, SourceName
 from xbrain.refresh import (
     backfill_quoted_from_store,
@@ -267,7 +268,9 @@ def _run_extract(
             cursor = state.bookmarks if src == "bookmark" else state.own_tweets
             first_run = cursor.last_seen_id is None
             try:
-                items = extract_source(context, src, targets[src], known_ids, since, until)
+                items = extract_source(
+                    context, src, targets[src], known_ids, since, until, cfg.payload_dir
+                )
             except RateLimitTruncated as exc:
                 # A truncated run is a partial, non-contiguous batch. Merging it
                 # (and advancing the cursor) would seal a permanent gap in the
@@ -368,7 +371,14 @@ def _recapture_history(
     fresh: list[Item] = []
     with x_context(cfg.storage_state_path, headless=headless) as context:
         for src in source_sets[source]:
-            fresh.extend(extract_source(context, src, targets[src], set()))
+            # Persist the raw payloads on the way past. This scroll has NO skip-known, so it
+            # re-sees the ENTIRE timeline — it is the cheapest payload backfill available for
+            # the items ingested before payload persistence existed, and every backfill
+            # (`refresh-media`, `refresh-quoted`) runs through here. A scroll that walked the
+            # whole history and stored nothing would have to be paid for twice.
+            fresh.extend(
+                extract_source(context, src, targets[src], set(), payload_dir=cfg.payload_dir)
+            )
     return fresh
 
 
@@ -2095,6 +2105,55 @@ def diff(
         typer.echo(f"  B: {b_label}")
         typer.echo("")
         typer.echo(format_text(report))
+
+
+@app.command(name="payload-stats")
+@_handle_cli_errors
+def payload_stats_command() -> None:
+    """Measure the raw payloads actually on disk (count, size, projection).
+
+    The disk figures first quoted for this feature were taken from an X *Article* fixture
+    that contains no tweets. This measures the real thing.
+    """
+    cfg = _config()
+    stats = payload_stats(cfg.payload_dir)
+    if not stats["count"]:
+        typer.echo("No hay payloads en disco todavía. Ejecuta `xbrain sync` primero.")
+        return
+    mean = stats["mean_gzipped_bytes"]
+    typer.echo(
+        f"{stats['count']} payloads · {stats['raw_bytes'] / 1e6:.1f} MB en crudo · "
+        f"{stats['gzipped_bytes'] / 1e6:.1f} MB comprimidos · media {mean:,} B/ítem"
+    )
+    for n in (10_000, 100_000):
+        typer.echo(f"  proyección a {n:,} ítems: {n * mean / 1e6:,.0f} MB")
+
+
+@app.command(name="reextract")
+@_handle_cli_errors
+def reextract_command(
+    apply: bool = typer.Option(False, "--apply", help="Write the re-parsed fields to the store"),
+) -> None:
+    """Re-run the parser over the STORED raw payloads — offline, no network.
+
+    This is how a parse fix gets validated before it is applied: the dry run prints exactly
+    what would change across the whole corpus. Items with no stored payload (everything
+    ingested before payload persistence) are listed explicitly — "cannot be re-extracted" is
+    never allowed to look like "re-extracted cleanly".
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    if apply:
+        _auto_snapshot(cfg, "reextract")
+    report = reextract_from_payloads(store, cfg.payload_dir, apply=apply)
+    typer.echo(report.summary())
+    for item_id, field_name, old, new in report.changed[:20]:
+        typer.echo(f"  {item_id} {field_name}: {str(old)[:40]!r} → {str(new)[:40]!r}")
+    if apply:
+        save_store(store, cfg.items_path)
+        typer.echo(f"{len(report.changed)} campo(s) actualizados → {cfg.items_path}")
+    else:
+        typer.echo("Dry run. Pass --apply to write.")
 
 
 if __name__ == "__main__":

@@ -72,6 +72,11 @@ class Config:
     frames_dedupe_distance: int
 
     @property
+    def payload_dir(self) -> Path:
+        """Where raw X payloads live, so `extract` is re-runnable offline (PR-J)."""
+        return self.data_dir / "payloads"
+
+    @property
     def items_path(self) -> Path:
         return self.data_dir / "items.json"
 
