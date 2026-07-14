@@ -44,6 +44,23 @@ def _link_content_source(item: Item) -> ContentSourceSuccess | None:
     return None
 
 
+def _article_title(item: Item) -> str | None:
+    """The FETCHED linked article's title, or None.
+
+    The summary rubric declares "the fetched article body and its title" as evidence, the
+    api prompt ships it and the judge's `_source_text` ships it — but the worksheet track,
+    the one that actually runs, shipped the body alone. The rubric was naming a surface the
+    running generator never received. Cost, measured: 8 summaries flagged ungrounded for a
+    name that sits in the article's TITLE.
+    """
+    if not item.content:
+        return None
+    for source in item.content.sources:
+        if isinstance(source, ContentSourceSuccess) and source.kind in LINK_CONTENT_KINDS:
+            return source.title
+    return None
+
+
 def _video_title(item: Item) -> str | None:
     """The `x_video` source's title, or None.
 
@@ -136,6 +153,7 @@ def export_worksheet(
                 "bookmark_folder": it.bookmark_folder,
                 "links": [{"url": ln.url, "domain": ln.domain} for ln in it.links],
                 "article": _article_text(it),
+                "article_title": _article_title(it),
                 # The poster's OWN expanded thread — real signal, but NOT a fetched
                 # linked page. It ships in its own field so the agent never reads the
                 # author's own words as the body of an article nobody downloaded.
