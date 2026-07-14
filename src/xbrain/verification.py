@@ -19,6 +19,7 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -260,38 +261,109 @@ def import_verify_judgments(path: Path) -> list[dict]:
     return judgments
 
 
+def _fold_fingerprints(stamps: Iterable[tuple[tuple[str, str], str]]) -> dict[tuple[str, str], str]:
+    """Fold `((item_id, target), fingerprint)` stamps into one map — **conflict is fail-safe,
+    never silently first-seen**.
+
+    If two stamps for the same `(item, target)` disagree, the key is DROPPED entirely rather
+    than resolved to whichever came first. A dropped key becomes `fingerprint-missing` at
+    write, so no verdict is persisted and nothing is badged: we refuse to guess which stamp
+    was the judged one. The single conflict policy for every fingerprint source (judge
+    worksheets, report records, the audit worksheet).
+    """
+    fingerprints: dict[tuple[str, str], str] = {}
+    conflicting: set[tuple[str, str]] = set()
+    for key, fingerprint in stamps:
+        existing = fingerprints.get(key)
+        if existing is not None and existing != fingerprint:
+            logger.debug("conflicting output_fingerprint stamps for %s — dropping key", key)
+            conflicting.add(key)
+        fingerprints.setdefault(key, fingerprint)
+    for key in conflicting:
+        del fingerprints[key]
+    return fingerprints
+
+
+def _entry_stamps(entries: Iterable[object]) -> Iterator[tuple[tuple[str, str], str]]:
+    """Every valid judged-fingerprint stamp carried by `entries` (worksheet items or report
+    records — both key it the same way), skipping the missing/garbage ones."""
+    for entry in entries:
+        resolved = _entry_fingerprint(entry)
+        if resolved is not None:
+            yield resolved
+
+
 def import_verify_fingerprints(paths: list[Path]) -> dict[tuple[str, str], str]:
     """Map every `(item_id, target)` to the fingerprint of the output that was JUDGED, read
-    from the worksheet(s) `items` block (stamped by `export_verify_worksheet`).
+    from the worksheet(s) `items` block (stamped by `export_verify_worksheet`, and carried
+    through to the audit worksheet by `export_audit_worksheet`).
 
     This is the plumbing that lets the writer store the JUDGED fingerprint instead of a
     write-time recompute (#79): the N judge copies all derive from one export, so their
     `items` blocks carry IDENTICAL fingerprints for each `(item, target)`. A missing/garbage
     fingerprint (an old worksheet without the field, or a hand-edited hash) is skipped, so
     the writer treats that `(item, target)` as unfingerprintable and does not badge it.
-
-    **Conflict is fail-safe, never silently first-seen.** If two applied worksheets stamp
-    DIFFERENT valid fingerprints for the same `(item, target)` — off-workflow (judges did not
-    all copy one export) — the key is DROPPED entirely, not resolved to whichever came first.
-    A dropped key becomes `fingerprint-missing` at write, so no verdict is persisted and
-    nothing is badged: we refuse to guess which stamp was the judged one.
+    Conflicting stamps drop the key (see `_fold_fingerprints`).
     """
-    fingerprints: dict[tuple[str, str], str] = {}
-    conflicting: set[tuple[str, str]] = set()
-    for path in paths:
-        for entry in _worksheet_items(path):
-            resolved = _entry_fingerprint(entry)
-            if resolved is None:
-                continue
-            key, fingerprint = resolved
-            existing = fingerprints.get(key)
+    return _fold_fingerprints(
+        stamp for path in paths for stamp in _entry_stamps(_worksheet_items(path))
+    )
+
+
+def record_fingerprints(records: Iterable[object]) -> dict[tuple[str, str], str]:
+    """The judged fingerprints carried BY the aggregated records themselves (stamped into
+    `verify-report.json` by `stamp_record_fingerprints`).
+
+    The audit stage reads the REPORT back — not the judge worksheets — so this is how the
+    judged fingerprint reaches the post-audit write for every record in the merged report,
+    including the ones the auditor never saw (the clean passes outside the consequential set).
+    A record with no stamp, or a hand-edited one, resolves to nothing → `fingerprint-missing`.
+    """
+    return _fold_fingerprints(_entry_stamps(records))
+
+
+def cross_check_fingerprints(
+    primary: dict[tuple[str, str], str], *cross_checks: dict[tuple[str, str], str]
+) -> dict[tuple[str, str], str]:
+    """`primary`, minus every key a cross-check DISAGREES with. Asymmetric on purpose: a
+    cross-check can only ever REMOVE a fingerprint, never introduce one.
+
+    On the audit write the authority is the merged RECORDS — they are what the report being
+    written describes. The applied audit worksheet is a second copy of the same judge-export
+    stamp, so it can catch a hand-edited record (disagreement → drop the key → the record is
+    skipped as `fingerprint-missing`, never resolved by precedence).
+
+    It must NOT be a union. Nothing binds a worksheet to the report it is applied against —
+    there is no run-id — so a union lets a STALE worksheet supply a fingerprint the record
+    never carried: re-aggregate the judges from a worksheet with no `items` block and the
+    records come back unstamped, whereupon an older worksheet's stamp would bind the new
+    verdict to a text those judges never read. Absence is not conflict; an unstamped record
+    stays unwritable.
+    """
+    checked = dict(primary)
+    for source in cross_checks:
+        for key, fingerprint in source.items():
+            existing = checked.get(key)
             if existing is not None and existing != fingerprint:
-                logger.debug("conflicting output_fingerprint stamps for %s — dropping key", key)
-                conflicting.add(key)
-            fingerprints.setdefault(key, fingerprint)
-    for key in conflicting:
-        del fingerprints[key]
-    return fingerprints
+                logger.debug("audit worksheet disagrees with the record for %s — dropping", key)
+                del checked[key]
+    return checked
+
+
+def stamp_record_fingerprints(
+    aggregated: list[dict], fingerprints: dict[tuple[str, str], str]
+) -> None:
+    """Stamp each aggregated record with the JUDGED fingerprint of its output, in place.
+
+    Carries the judge-export fingerprint into `verify-report.json`, which is what the audit
+    stage reads back — so the audited (authoritative) verdict can be persisted bound to the
+    output the judges actually saw, exactly like the plain apply path. A record with no judged
+    fingerprint is left UNSTAMPED (never a guessed value): the writer then skips it.
+    """
+    for record in aggregated:
+        fingerprint = fingerprints.get((str(record.get("item_id")), str(record.get("target"))))
+        if fingerprint is not None:
+            record["output_fingerprint"] = fingerprint
 
 
 def _worksheet_items(path: Path) -> list:
@@ -608,6 +680,22 @@ def _build_verdict(record: dict, output_fingerprint: str) -> VerificationVerdict
     )
 
 
+def _reject_duplicate_records(aggregated: list[dict]) -> None:
+    """Raise if two records claim the same `(item_id, target)` — see `apply_verdicts_to_store`."""
+    seen: set[tuple[str, str]] = set()
+    for record in aggregated:
+        if not isinstance(record, dict):
+            continue
+        key = (str(record.get("item_id")), str(record.get("target")))
+        if key in seen:
+            raise ValueError(
+                f"duplicate verdict record for {key[0]}/{key[1]} — one verdict per "
+                "(item, target). A report with duplicates would let the last one written win "
+                "(a PASS could overwrite a FAIL); refusing the write."
+            )
+        seen.add(key)
+
+
 def apply_verdicts_to_store(
     store: dict[str, Item],
     aggregated: list[dict],
@@ -625,7 +713,13 @@ def apply_verdicts_to_store(
     is unknown, its verdict is not PASS/REVIEW/FAIL, or it has no valid judged fingerprint —
     each reason is tallied on the returned `VerdictWriteResult`. Mutates `store` in place; the
     caller snapshots + saves.
+
+    A DUPLICATED `(item_id, target)` is the one thing it refuses outright, before touching the
+    store: assignment is by list order while `merge_audit` sorts worst-first, so a trailing PASS
+    would silently overwrite a leading FAIL and the note would lose its badge. That is a corrupt
+    report, not a per-record defect — there is no honest winner to pick.
     """
+    _reject_duplicate_records(aggregated)
     written = 0
     skipped: list[tuple[str, str, str]] = []
     for record in aggregated:

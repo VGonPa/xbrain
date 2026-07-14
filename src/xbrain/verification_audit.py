@@ -102,6 +102,13 @@ def export_audit_worksheet(
     """Write the audit worksheet: per consequential record, the source + output + the
     ensemble's current verdict + its flags, for the auditor to CONFIRM/REVOKE.
 
+    Each entry CARRIES the record's judged `output_fingerprint` — the one stamped at
+    judge-worksheet export and threaded through `verify-report.json` — so the post-audit
+    `--write-verdicts` binds the audited verdict to the output the JUDGES saw. It is
+    deliberately NOT recomputed from `store` here: the live output may already have been
+    regenerated, and re-fingerprinting it would silently rebind the verdict to text nobody
+    judged (#79). An unstamped (legacy) record exports `None` → the writer skips it.
+
     A record whose item is no longer in the store is skipped and its id reported.
     Returns `(exported_count, skipped_item_ids)` so the caller can print an honest
     count instead of the number of records passed in.
@@ -121,6 +128,7 @@ def export_audit_worksheet(
                 "target": target,
                 "author": item.author.handle,
                 "output": _output_for(item, target),
+                "output_fingerprint": record.get("output_fingerprint"),
                 "source": _source_text(item),
                 "current_verdict": record.get("verdict"),
                 "faithfulness": record.get("faithfulness"),
@@ -187,13 +195,25 @@ def import_audit_judgments(path: Path) -> list[dict]:
     Non-dict entries are tolerated (skipped later), but a dict with an invalid
     `audit`/`reverdict` enum is rejected loudly — a mistyped decision that would
     otherwise be coerced into a no-op could hide a real escalation or revocation.
+
+    An ABSENT `audits` key is not an EMPTY audit. Defaulting it to `[]` would make
+    `merge_audit` pass every record through untouched, so a caller with `--write-verdicts`
+    would persist the PRE-audit aggregate under the audit banner — the exact set this path
+    exists to keep out of the store. A judge worksheet fed here by mistake, or an audit
+    worksheet nobody filled in, must raise rather than exit 0 with `0/0 aplicados`.
     """
     if not path.exists():
         raise FileNotFoundError(f"Audit worksheet not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("audit worksheet must be a JSON object")
-    audits = data.get("audits", [])
+    if "audits" not in data:
+        raise ValueError(
+            f"audit worksheet has no `audits` key: {path.name} — is this a JUDGE worksheet? "
+            "An absent `audits` is not an empty audit: every record would pass through "
+            "un-audited."
+        )
+    audits = data["audits"]
     if not isinstance(audits, list):
         raise ValueError("audit worksheet `audits` must be a list")
     for audit in audits:

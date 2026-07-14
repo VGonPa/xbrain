@@ -16,13 +16,16 @@ from xbrain.verification import (
     ALL_TARGETS,
     aggregate_verify_judgments,
     apply_verdicts_to_store,
+    cross_check_fingerprints,
     export_verify_worksheet,
     fingerprint_output,
     import_verify_fingerprints,
     import_verify_judgments,
     items_for_verification,
     parse_targets,
+    record_fingerprints,
     render_verify_report,
+    stamp_record_fingerprints,
 )
 
 
@@ -403,23 +406,83 @@ def test_apply_verdicts_stores_judged_fingerprint_not_live_recompute():
     assert stored != live_fp  # never the live recompute
 
 
-def test_apply_verdicts_tallies_skipped_records_with_reasons():
-    """A dropped verdict is never silent — item-gone, unknown record, and a missing judged
-    fingerprint are each tallied on the result."""
-    store = {"7": _item(summary="S.")}
+def test_apply_verdicts_tallies_every_skip_reason_and_never_crashes_the_write():
+    """`apply_verdicts_to_store` promises in its docstring that a bad record is SKIPPED and
+    tallied — "never crashes the write, never silently dropped". All SIX reasons are exercised
+    here, because three of them were untested and one is a live hazard: drop the `bad-verdict`
+    guard and pydantic rejects the bogus verdict with a ValidationError that aborts the ENTIRE
+    write, taking the good records down with it. A test covering only half the reasons lets that
+    regression through green.
+
+    The tally is asserted by EQUALITY against the rendering itself — `"1 de 7"` as a substring
+    would also be satisfied by other counts sharing those digits."""
+    store = {"7": _item(summary="S."), "8": _item("8", summary="T.")}
     judged_fp = fingerprint_output(store["7"], "summary")
     aggregated = [
-        _j("FAIL", item_id="7", target="summary"),  # writes (has a judged fingerprint)
+        _j("FAIL", item_id="7", target="summary"),  # the only writable record
         _j("FAIL", item_id="ghost", target="summary"),  # item-gone
-        _j("FAIL", item_id="7", target="digest"),  # fingerprint-missing (not in the map)
+        _j("FAIL", item_id="7", target="bogus"),  # bad-target
+        _j("MAYBE", item_id="7", target="digest"),  # bad-verdict → would CRASH the write
+        _j("FAIL", item_id="7", target="topics"),  # fingerprint-missing (absent from the map)
+        _j("FAIL", item_id="8", target="summary"),  # fingerprint-invalid (garbage hash)
         "not a dict",  # malformed-record
     ]
-    result = apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
-    assert result.written == 1
-    reasons = {reason for _, _, reason in result.skipped}
-    assert reasons == {"item-gone", "fingerprint-missing", "malformed-record"}
-    assert result.attempted == 4
-    assert "1 de 4" in result.summary() and "item-gone" in result.summary()
+    # The bad-verdict record is given a VALID fingerprint on purpose: the enum guard is then the
+    # only thing standing between `"MAYBE"` and pydantic. Without it the record reaches
+    # `VerificationVerdict(...)` and the ValidationError aborts the write — the good record
+    # included. (Leave it unfingerprinted and a later check masks the guard's removal.)
+    fingerprints = {
+        ("7", "summary"): judged_fp,
+        ("7", "digest"): fingerprint_output(store["7"], "digest"),
+        ("8", "summary"): "nope",
+    }
+
+    result = apply_verdicts_to_store(store, aggregated, fingerprints)
+
+    assert result.written == 1 and result.attempted == 7
+    assert {reason for _, _, reason in result.skipped} == {
+        "item-gone",
+        "bad-target",
+        "bad-verdict",
+        "fingerprint-missing",
+        "fingerprint-invalid",
+        "malformed-record",
+    }
+    # The good record survived the six bad ones — the write did not abort.
+    assert set(store["7"].verification) == {"summary"}
+    assert store["7"].verification["summary"].verdict == "FAIL"
+    assert store["8"].verification == {}
+    assert result.summary() == (
+        "1 de 7 verdicts escritos (6 omitidos: 1 bad-target, 1 bad-verdict, "
+        "1 fingerprint-invalid, 1 fingerprint-missing, 1 item-gone, 1 malformed-record)"
+    )
+
+
+# ------------------------------------------- judged-fingerprint plumbing for the AUDIT write
+# (#79 follow-up: the AUDITED verdict is the one that reaches the store, so the judged
+# fingerprint must survive judge-worksheet → report record → audit worksheet → write.)
+
+
+def test_stamp_record_fingerprints_annotates_records_with_the_judged_fingerprint():
+    """The aggregated records carry the JUDGED fingerprint into `verify-report.json`, so the
+    audit stage (which reads the report back, not the judge worksheets) can bind its merged
+    verdicts to the very output the judges saw."""
+    aggregated = [_j("FAIL", target="summary"), _j("PASS", target="digest")]
+    stamp_record_fingerprints(aggregated, {("7", "summary"): "a" * 64})
+
+    assert aggregated[0]["output_fingerprint"] == "a" * 64
+    # No stamp for a key the worksheets did not fingerprint — never a guessed value.
+    assert "output_fingerprint" not in aggregated[1]
+
+
+def test_record_fingerprints_reads_stamps_back_and_rejects_garbage():
+    records = [
+        {"item_id": "7", "target": "summary", "output_fingerprint": "a" * 64},
+        {"item_id": "7", "target": "digest", "output_fingerprint": "nope"},  # hand-edited
+        {"item_id": "8", "target": "summary"},  # legacy report: no stamp
+        "not a dict",
+    ]
+    assert record_fingerprints(records) == {("7", "summary"): "a" * 64}
 
 
 # ---------------------------------------------------------------- source text
@@ -588,6 +651,41 @@ def test_source_text_omits_decorative_image_descriptions():
     from xbrain.verification import _source_text
 
     assert "[Images in the post]" not in _source_text(_item())
+
+
+def test_cross_check_fingerprints_never_introduces_a_key_the_primary_lacks():
+    """B2: the merged RECORDS are the authority on the audit write; the audit worksheet only
+    CROSS-CHECKS them. A union would let the worksheet SUPPLY a fingerprint the record never
+    carried — binding a verdict to a text those judges never read (nothing ties the worksheet to
+    the report being written: there is no run-id). Absence is not conflict: the cross-check may
+    DROP a key, never add one."""
+    primary = {("7", "summary"): "a" * 64, ("7", "digest"): "b" * 64}
+    cross_check = {
+        ("7", "summary"): "a" * 64,  # agrees → kept
+        ("7", "digest"): "c" * 64,  # disagrees → the key is DROPPED (fail-safe, no precedence)
+        ("9", "summary"): "d" * 64,  # the primary never had it → must NOT be introduced
+    }
+
+    assert cross_check_fingerprints(primary, cross_check) == {("7", "summary"): "a" * 64}
+    # The unstamped-report case the union got wrong: no records stamped ⇒ nothing writable.
+    assert cross_check_fingerprints({}, {("7", "summary"): "a" * 64}) == {}
+
+
+def test_apply_verdicts_refuses_duplicate_records_so_a_pass_cannot_overwrite_a_fail():
+    """B4: `apply_verdicts_to_store` assigns in list order, but `merge_audit` sorts worst-first —
+    so with two records for the same `(item, target)` a trailing PASS would silently overwrite the
+    leading FAIL and the note would lose its ❌. A duplicated key is a corrupt report, not a
+    per-record defect: refuse the whole write (store untouched) rather than pick a winner."""
+    store = {"7": _item(summary="S.")}
+    judged_fp = fingerprint_output(store["7"], "summary")
+    aggregated = [
+        _j("FAIL", item_id="7", target="summary", faithfulness="FAIL"),
+        _j("PASS", item_id="7", target="summary"),  # same key — would win by loop order
+    ]
+
+    with pytest.raises(ValueError, match="duplicate"):
+        apply_verdicts_to_store(store, aggregated, {("7", "summary"): judged_fp})
+    assert store["7"].verification == {}  # nothing partially written
 
 
 def test_source_text_omits_the_author_block_without_a_handle():
