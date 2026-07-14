@@ -52,6 +52,48 @@ and `pyproject.toml` and asserts on what they **say** — never on what a run
 **reports**. Where a stronger answer is available, it asks the *tool* (pytest's
 real collection), never the *verdict*.
 
+Two axes, not one: SCOPE and SENSITIVITY
+----------------------------------------
+Guarding what a tool LOOKS AT is half the job, and the weaker half. A tool aimed at the
+whole package but configured to report nothing is, from the gate's point of view,
+indistinguishable from a tool that found nothing:
+
+    [tool.ruff.lint.per-file-ignores]
+    "*" = ["ALL"]                  ->  ruff: "All checks passed!" on a file with unused imports
+
+    [tool.mypy]
+    ignore_errors = true           ->  mypy: "Success: no issues found in 48 source files"
+
+    [tool.coverage.report]
+    exclude_lines = ["."]          ->  coverage: TOTAL 0 statements, 100%
+
+Each is two lines of `pyproject.toml`. None touches `check.sh`. None touches the workflow.
+None narrows a directory — the targets still read `src tests scripts` — so every scope
+assertion in this module AND in `test_quality_gate_scope.py` stays green while the tool is
+switched off. The scope was guarded and the sensitivity was wide open; the coverage
+denominator (`--cov=src/xbrain/cli.py`) is the same bug one tool over.
+
+Enumerating config keys is a losing game against a surface this size. So each critical tool
+is asked the only question that settles it — *given this repo's configuration exactly as the
+gate loads it, do you still report an obviously broken file?* — with a canary built to be
+unmissable for that tool and nothing else. The static key-checks that accompany the canaries
+exist for their failure MESSAGES (they name the offending line); the canaries are what
+actually close the vector.
+
+Two lessons paid for while writing this, both from attacks that came back GREEN:
+
+* **Guard the tool's real configuration, not a clean one.** `bandit -r src/xbrain -ll -q` —
+  the way check.sh invokes it — does NOT read `[tool.bandit]` from pyproject (measured). An
+  earlier version of this module asserted that `exclude_dirs` must not touch the package,
+  and would have gone red, claiming "the security scan now skips part of the package", on an
+  edit that does *nothing at all*. A guard that lies about the damage is worse than no guard:
+  it teaches the next reader that the guard is noise. That assertion is now conditional on
+  the config actually being live.
+* **Patterns are not all globs.** ruff's `per-file-ignores` are globs, mypy's `exclude` is a
+  REGEX, bandit's `exclude_dirs` are directory prefixes. A matcher that knew only `fnmatch`
+  let two real attacks through — `fnmatch("src/xbrain/executors/api.py",
+  "src/xbrain/executors")` is False.
+
 What each fail-open edit costs, and where it is caught
 -----------------------------------------------------
 | Edit that keeps the check GREEN while testing less | Caught by |
@@ -68,6 +110,16 @@ What each fail-open edit costs, and where it is caught
 | `ignore_errors`/`exclude_dirs`/`-lll` → same narrowing, hidden in pyproject | `test_the_critical_tools_are_not_blinded_from_pyproject` |
 | gut the job's `steps:`; or `bash scripts/check.sh \|\| true` | `test_the_workflow_runs_the_gate_and_lets_it_fail_the_job` |
 | `continue-on-error` on the gate's **step** → red gate reported GREEN | `test_no_step_in_the_gate_job_may_continue_on_error` |
+| **SENSITIVITY** — `per-file-ignores "*" = ["ALL"]`, `select = []`, `ignore = ["ALL"]` | `test_ruff_still_reports_an_obvious_violation` |
+| `[tool.ruff.format] exclude` → linter still sees all; formatter sees 65 of 113 | `test_ruff_format_examines_every_file_ruff_check_does` |
+| `[tool.mypy] ignore_errors` / `disable_error_code` / `follow_imports = "skip"` | `test_mypy_still_reports_an_obvious_type_error` (+ the key check) |
+| `mypy exclude` (a REGEX; the canary cannot see it — explicit files bypass it) | `test_mypy_is_not_globally_silenced` |
+| bandit `-lll` / `-iii` / `--skip` / `-c pyproject.toml` + `skips` | `test_bandit_still_reports_an_obvious_finding` |
+| `exclude_lines = ["."]` → 100% coverage over ZERO statements | `test_coverage_excludes_no_ordinary_code` |
+| `coverage include = [one file]` → a whitelist; every `omit` still reads innocent | `test_coverage_measures_the_whole_package` |
+| `detect-secrets --exclude-files` → all three trees still named, none scanned | `test_the_detect_secrets_scan_is_not_narrowed_by_flags` |
+| radon's grade class `[D-F]` → `[F]` → grade-D complexity ships, `mark_failed` intact | `test_radon_still_fails_on_every_forbidden_complexity_grade` |
+| `# ruff: noqa` / `# mypy: ignore-errors` at the top of a source file | `test_no_package_file_blanket_suppresses_a_critical_tool` |
 
 Behaviour, not spelling
 -----------------------
@@ -99,20 +151,53 @@ GitHub to ignore. The test fails, `check.sh` exits 1, the step is forgiven, the
 check run reports SUCCESS. My alarm rings inside the soundproofed room. It still
 appears in the log and in the diff; it does **not** block the merge. On that one
 attack this assertion is documentation with a test's syntax, and it is the single
-most dangerous edit in the threat model. The only mechanical escape is a *second*
-required check in a *separate job* — a step-level `continue-on-error` in the gate
-job cannot mask a failure in a different job, and deleting that job outright is
-fail-closed (the required context never reports → BLOCKED). That is repo
-infrastructure, not a test, and it is not in this PR.
+most dangerous edit in the threat model.
 
-The principle that says where the regress *does* terminate:
+**A second required check in a separate job does NOT fix this.** An earlier draft
+of this docstring claimed it did — that a step-level `continue-on-error` in the
+gate job cannot mask a failure in a *different* job, so a second job terminates
+the regress. That is wrong, and the error is worth recording because it is the
+seductive one. The attacker writes **one diff**, and nothing stops that diff from
+adding `continue-on-error: true` to the second job's steps as well. Both jobs then
+report `success` while both fail. **A second job is defeated by the same attack
+applied twice.** Multiplication does not terminate a regress; it only raises its
+price by one line of YAML per copy.
+
+The reason is structural, and it generalises past `continue-on-error`: a PR's
+`pull_request` run evaluates the **HEAD** version of the workflow. **Anything
+defined in a file the PR can edit is a guard the PR can edit.** No arrangement of
+in-repo jobs, workflows or tests escapes that, because they are all in-repo. The
+only surfaces a PR cannot touch are server-side: branch-protection settings,
+rulesets, required workflows, merge queue — and on this repo those are
+unavailable (org/Enterprise-gated), while `pull_request_target` is declined as an
+RCE surface. The one exception is CODEOWNERS, which GitHub reads from the BASE
+branch — so a PR cannot edit its way out of a required code-owner review. But it
+needs a *second human* to approve, which is not a mechanism. It is a person.
+
+Which is the whole point, and the reason the principle below is stated the way it
+is rather than as a recipe:
 
 > The escape from "nothing catches itself" is not another catcher. It is making
 > the *absence* of the catcher fail closed. Where a guard's removal blocks the
 > merge, the regress terminates. Where it only removes a test, it does not — and
 > that residue is social, not mechanical.
 
-Branch protection sits on the terminating side. This file cannot.
+Branch protection sits on the terminating side. This file cannot, and neither can
+any file next to it.
+
+**3. What is deliberately NOT guarded here**, so nobody mistakes silence for
+coverage:
+* `.secrets.baseline` regenerated to allowlist a real committed secret. The
+  baseline is the audit trail by construction — the entry appears in the diff —
+  but no test distinguishes an audited false positive from a laundered key.
+* `# noqa: E501` / `# type: ignore[code]` / `# nosec` with a code. Allowed on
+  purpose: a named exemption at the line is a reviewable decision. Only the BARE,
+  uncoded, whole-file forms are rejected.
+* A `per-file-ignores` entry that blinds ruff for a TEST file only. It does not
+  reach the package, so no canary fires. It weakens the lint of the test suite.
+* A `conftest.py` hook that drops individual tests without calling
+  `pytest_deselected`. Whole files going dark is caught; a hook that quietly
+  removes a handful of items is not.
 
 So why write it? Because it converts a **silent** weakening into a **visible**
 one. Today `COVERAGE_MIN=0` is a one-character diff that nothing notices. After
@@ -129,6 +214,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -208,7 +294,81 @@ COVERAGE_FLOOR = 78
 
 # Flags that make pytest run FEWER tests than the suite contains. `-x` / `--maxfail` are
 # absent on purpose: they stop early on failure, which cannot turn a red gate green.
-TEST_NARROWING_FLAGS = ("-k", "-m", "--deselect", "--ignore", "--ignore-glob", "--collect-only")
+# `--co` is the alias for `--collect-only` and must be listed separately — a ban that
+# names only the long form is a ban on the spelling, not on the behaviour.
+TEST_NARROWING_FLAGS = (
+    "-k",
+    "-m",
+    "--deselect",
+    "--ignore",
+    "--ignore-glob",
+    "--collect-only",
+    "--co",
+)
+
+# Flags that shrink the detect-secrets scan without touching its positional paths, so
+# `test_the_critical_tools_still_scan_the_whole_package` would still see three trees.
+SECRETS_NARROWING_FLAGS = ("--exclude-files", "--exclude-lines", "--exclude-secrets", "--word-list")
+
+# ---------------------------------------------------------------------------
+# CANARIES — the SENSITIVITY axis
+#
+# Guarding a tool's SCOPE is only half the job, and the weaker half. A tool aimed at the
+# whole package but configured to report nothing is indistinguishable, from the gate's
+# point of view, from a tool that found nothing:
+#
+#     [tool.ruff.lint.per-file-ignores]
+#     "*" = ["ALL"]                      # ruff: "All checks passed!" — on a broken file
+#
+#     [tool.mypy]
+#     ignore_errors = true               # mypy: "Success: no issues found in 48 files"
+#
+#     [tool.coverage.report]
+#     exclude_lines = ["."]              # coverage: TOTAL 0 statements, 100%
+#
+# None of these touch check.sh. None narrow a directory. Every scope assertion above stays
+# green. This is the same defect as the coverage-denominator one, one tool over: the scope
+# is guarded and the sensitivity is wide open.
+#
+# The answer is not to enumerate config keys — that is a losing game against a config
+# surface this large. It is to ask each tool the only question that matters: *given this
+# repo's configuration exactly as the gate loads it, do you still report an obviously
+# broken file?* Each canary below is unambiguously broken for exactly one tool. If the tool
+# stays silent, it has been switched off, however that was spelled.
+#
+# The static checks that accompany them exist only for their FAILURE MESSAGES — they name
+# the offending key. The canaries are what actually close the vector.
+# ---------------------------------------------------------------------------
+
+# A path inside the package that no real file occupies. Wildcard config (`"*"`, `src/*`)
+# matches it; a legitimate, narrow per-file rule for some other file does not — which is
+# exactly the discrimination these tests need.
+CANARY_MODULE = f"{PACKAGE}/_gate_canary.py"
+
+# F401 (unused import) + E401 (multiple imports on one line) + E711 (comparison to None):
+# three rules spanning ruff's default E4/E7/F selection, so narrowing `select` to any one
+# of those families still leaves the canary screaming.
+RUFF_LINT_CANARY = "import os, sys\n\nx = 1 == None\n"
+RUFF_FORMAT_CANARY = "x   =   1\ndef  f( a ):\n  return  a\n"
+
+# Returning an `int` from a `-> str` function. If mypy cannot see this, mypy sees nothing.
+MYPY_CANARY = "def gate_canary(value: int) -> str:\n    return value\n"
+
+# B108 hardcoded_tmp_directory: MEDIUM severity, MEDIUM confidence — chosen deliberately.
+# A HIGH-severity canary would still be reported under `-lll`, so the gate could be
+# desensitised from MEDIUM to HIGH-only and the canary would never notice. A MEDIUM one
+# goes silent the moment the threshold is raised, which is the whole point.
+BANDIT_CANARY = 'GATE_CANARY_TMP = "/tmp/gate_canary"\n'
+
+# Perfectly ordinary code. No coverage exclusion pattern may match any of it: a pattern
+# that does is not excluding a special case, it is excluding the program.
+ORDINARY_CODE_LINES = (
+    "x = 1",
+    "def f():",
+    "    return value",
+    "class Thing:",
+    "    self.name = name",
+)
 
 # Shell fragments that discard a command's exit status. `bash scripts/check.sh || true`
 # runs all 11 checks, prints a red FAILED summary — and exits 0.
@@ -616,9 +776,16 @@ def test_coverage_measures_the_whole_package() -> None:
     This is the attack that makes `test_coverage_floor_is_never_lowered` insufficient on
     its own: you do not need to touch the floor if you can shrink what it is measured over.
     """
+    run, report = _table("tool", "coverage", "run"), _table("tool", "coverage", "report")
     targets, measures_everything = _coverage_targets()
-    source = set(_table("tool", "coverage", "run").get("source") or [])
-    omit = list(_table("tool", "coverage", "run").get("omit") or [])
+    source = set(run.get("source") or []) | set(run.get("source_pkgs") or [])
+
+    # BOTH tables can narrow, and BOTH are live (pytest-cov reads them from pyproject).
+    # `omit` was the only one guarded before; `include` is the sharper weapon, because it is
+    # a whitelist — `include = ["src/xbrain/cli.py"]` drops the other 47 modules in one line
+    # while every `omit` still reads as innocent.
+    omit = list(run.get("omit") or []) + list(report.get("omit") or [])
+    include = list(run.get("include") or []) + list(report.get("include") or [])
     package_files = _tracked_package_files()
 
     assert targets or measures_everything or source, (
@@ -627,15 +794,20 @@ def test_coverage_measures_the_whole_package() -> None:
         "report on whatever happened to get imported — or fail to parse at all."
     )
 
+    def _matches(relpath: str, patterns: list[str]) -> bool:
+        return any(
+            fnmatch.fnmatch(relpath, pattern) or fnmatch.fnmatch(f"/{relpath}", pattern)
+            for pattern in patterns
+        )
+
     def measured(relpath: str) -> bool:
         if targets and not _is_under(relpath, targets):
             return False
         if source and not _is_under(relpath, source):
             return False
-        return not any(
-            fnmatch.fnmatch(relpath, pattern) or fnmatch.fnmatch(f"/{relpath}", pattern)
-            for pattern in omit
-        )
+        if include and not _matches(relpath, include):
+            return False
+        return not _matches(relpath, omit)
 
     unmeasured = sorted(path for path in package_files if not measured(path))
     assert not unmeasured, (
@@ -649,8 +821,9 @@ def test_coverage_measures_the_whole_package() -> None:
         f"is a lower floor than lowering the floor, and it does not look like one in the "
         f"diff.\n\n"
         f"Sources of truth being read here: `--cov=` in the gate's pytest call "
-        f"({sorted(targets) or 'none'}), `[tool.coverage.run] source` "
-        f"({sorted(source) or 'none'}), `[tool.coverage.run] omit` ({omit or 'none'}).\n\n"
+        f"({sorted(targets) or 'none'}), coverage `source` ({sorted(source) or 'none'}), "
+        f"`omit` ({omit or 'none'}), `include` ({include or 'none'}) — the last two read from "
+        f"BOTH [tool.coverage.run] and [tool.coverage.report], because both are live.\n\n"
         f"If a module is genuinely untestable, exclude it with `# pragma: no cover` at the "
         f"line that needs it — visibly, where the code is — rather than deleting a whole tree "
         f"from the denominator."
@@ -845,50 +1018,558 @@ def test_the_critical_tools_still_scan_the_whole_package() -> None:
             )
 
 
-def test_the_critical_tools_are_not_blinded_from_pyproject() -> None:
-    """The same narrowing, hidden one file away from the command that looks correct.
+def _run_tool(tool: str, args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+    """Run a quality tool from the repo root, so it loads this repo's real configuration."""
+    pytest.importorskip(tool.replace("-", "_"), reason=f"{tool} not installed — install dev deps")
+    return subprocess.run(
+        [sys.executable, "-m", tool, *args],
+        cwd=REPO_ROOT,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
-    `check.sh` can keep reading `mypy src/xbrain`, word for word, while pyproject.toml
-    quietly says `ignore_errors = true` for half the package. The command in the diff looks
-    untouched; the tool reports success; the gate is blind. Same for bandit's
-    `exclude_dirs`, and for its severity threshold: `-lll` restricts it to HIGH-severity
-    findings only, so every MEDIUM one it used to block now passes.
+
+def test_ruff_still_reports_an_obvious_violation() -> None:
+    """Ruff, configured exactly as this repo configures it, must still fail a broken file.
+
+    THE cheapest attack found on this gate, and nothing caught it before this test:
+
+        [tool.ruff.lint.per-file-ignores]
+        "*" = ["ALL"]
+
+    Two lines in pyproject.toml. It does not touch check.sh. It does not touch the
+    workflow. It does not narrow a single directory — the targets stay `src tests scripts`,
+    so every scope assertion in this module and in test_quality_gate_scope.py stays green.
+    Ruff then prints `All checks passed!` over a file containing unused imports, and the
+    gate reports ✅ Ruff (linting) PASS on a tool that has been switched off.
+
+    Asking ruff itself is the only defence that generalises. The canary is fed on stdin
+    under a filename INSIDE the package, so ruff resolves it against this repo's real
+    config: wildcard per-file-ignores, `ignore = ["ALL"]`, `select = []`, an `exclude` that
+    swallows the package — all of them silence it, and it does not care which was used.
+
+    A legitimate narrow suppression (per-file-ignores for one real test file) does not
+    match the canary's path, so this stays green. A guard that fired on those would be
+    noise, and noise gets deleted.
     """
-    overrides = _pyproject().get("tool", {}).get("mypy", {}).get("overrides", []) or []
+    lint = _run_tool("ruff", ["check", "--stdin-filename", CANARY_MODULE, "-"], RUFF_LINT_CANARY)
+    assert lint.returncode != 0, (
+        f"RUFF IS BLIND. Handed a file with an unused import, two imports on one line and a "
+        f"`== None` comparison, ruff — loaded with this repo's configuration — reported "
+        f"nothing:\n\n  {RUFF_LINT_CANARY!r}\n  -> {lint.stdout.strip() or '(silence)'}\n"
+        f"\n"
+        f"The gate still runs ruff. Its targets still say `src tests scripts`. The summary "
+        f"still prints ✅ Ruff (linting) PASS. It is checking nothing, and every scope test "
+        f"in this repo is satisfied, because the scope is not what was broken — the "
+        f"SENSITIVITY was.\n"
+        f"\n"
+        f"Look in pyproject.toml under [tool.ruff]: a `per-file-ignores` entry whose pattern "
+        f'matches everything, `ignore = ["ALL"]`, an empty `select`, or an `exclude` that '
+        f"swallows the package. Any one of them does this, and none of them look like an "
+        f"attack in a diff.\n"
+        f"\n"
+        f"If a specific rule is genuinely unwanted, disable THAT RULE by name. If one file "
+        f"needs an exemption, give it a `# noqa: <code>` at the line, where the reviewer can "
+        f"see what is being excused."
+    )
+
+
+def _ruff_argv(subcommand: str) -> list[str]:
+    """The gate's own `ruff check` / `ruff format` argv, resolved through the poe tasks."""
+    for argv in _tool_invocations("ruff"):
+        if argv[:1] == [subcommand]:
+            return argv
+    raise AssertionError(
+        f"scripts/check.sh no longer runs `ruff {subcommand}` — neither directly nor via a poe "
+        f"task. That check cannot fail, while the gate's summary still lists it as CRITICAL."
+    )
+
+
+def test_ruff_format_examines_every_file_ruff_check_does() -> None:
+    """`ruff format` must open exactly as many files as `ruff check` does.
+
+    The formatter has its own exclusion list. `[tool.ruff.format] exclude = ["src/xbrain/*"]`
+    leaves `ruff check` — and therefore test_quality_gate_scope.py's `--show-files` audit —
+    completely untouched, and silently drops the package from the FORMAT check. Measured:
+    the gate goes from formatting 113 files to formatting 65, and `ruff format --check src
+    tests scripts` exits 0. The Format row prints ✅. Formatting is no longer enforced.
+
+    The stdin canary above cannot see this (ruff does not apply `format.exclude` to a file
+    handed to it on stdin, with or without `--force-exclude` — measured), so this test asks
+    the question the other way round: count the files each mode actually opens, and demand
+    they agree. Both numbers come from ruff; neither is hardcoded.
+
+    A TOP-LEVEL `exclude` shrinks both counts equally and slips past this — that one is
+    caught behaviourally by test_quality_gate_scope.py, which compares ruff's file list
+    against `git ls-files`. The two tests are complements: it owns "ruff opens every file",
+    this owns "the formatter opens the same files the linter does".
+    """
+    linted = _run_tool("ruff", [*_ruff_argv("check"), "--show-files"])
+    assert linted.returncode == 0, f"ruff --show-files failed:\n{linted.stderr}"
+    lint_count = len([line for line in linted.stdout.splitlines() if line.strip()])
+
+    formatted = _run_tool("ruff", _ruff_argv("format"))
+    # "113 files already formatted" / "1 file would be reformatted, 112 files already formatted"
+    format_count = sum(
+        int(number)
+        for number in re.findall(
+            r"(\d+) files? (?:would be reformatted|already formatted|reformatted)",
+            formatted.stdout,
+        )
+    )
+
+    assert format_count == lint_count, (
+        f"`ruff format` opens {format_count} files; `ruff check` opens {lint_count}. The "
+        f"formatter is examining {lint_count - format_count} fewer file(s) than the linter.\n"
+        f"\n"
+        f"Almost certainly `[tool.ruff.format] exclude` in pyproject.toml. It is invisible to "
+        f"every other guard in this repo: `ruff check` still opens everything, the poe targets "
+        f"still read `src tests scripts`, and test_quality_gate_scope.py — which audits ruff's "
+        f"file list — still passes, because it audits the LINTER. Meanwhile `ruff format "
+        f"--check` exits 0 over unformatted code and the gate prints ✅ Ruff (format) PASS.\n"
+        f"\n"
+        f"The formatter and the linter must examine the same tree. If they legitimately must "
+        f"not, that is a deliberate weakening of the gate and belongs in a PR that argues it."
+    )
+
+
+def _package_matching_patterns(patterns: list[str]) -> list[str]:
+    """Which of `patterns` reach a real file of the package?
+
+    Deliberately permissive, because the three tools that take exclusion patterns disagree
+    about what a pattern IS: ruff's `per-file-ignores` are globs, mypy's `exclude` is a
+    REGEX, and bandit's `exclude_dirs` are directory prefixes. A matcher that only knew
+    fnmatch — as the first version of this helper did — missed both of the others:
+    `fnmatch("src/xbrain/executors/api.py", "src/xbrain/executors")` is False, and so is
+    `fnmatch(..., "src/xbrain/executors/.*")`. Two real attacks walked straight through.
+
+    So a pattern "reaches the package" if it does so under ANY of the three semantics. The
+    cost of being permissive is a theoretical false positive on a pattern that accidentally
+    regex-matches; the cost of being precise-but-wrong is a guard that says PASS while the
+    tool is blind. That trade is not close.
+    """
+    package_files = _tracked_package_files() | {CANARY_MODULE}
+    reaching = []
+    for pattern in patterns:
+        text = str(pattern)
+        try:
+            regex = re.compile(text)
+        except re.error:
+            regex = None
+        if any(
+            fnmatch.fnmatch(path, text)
+            or fnmatch.fnmatch(path, f"{text.rstrip('/')}/*")
+            or path.startswith(f"{text.rstrip('/')}/")
+            or (regex is not None and regex.search(path))
+            for path in package_files
+        ):
+            reaching.append(text)
+    return reaching
+
+
+def test_ruff_is_not_blinded_by_wildcard_configuration() -> None:
+    """The named-key half of the ruff canary. Same vector, a message that points at the line.
+
+    The canary above already goes red for all of this. This test exists because
+    "RUFF IS BLIND" is a worse thing to read at 2am than "your per-file-ignores entry `*`
+    disables every rule for every file in the package".
+
+    Deliberately narrow: it fires only on the patterns that blind the PACKAGE, and only when
+    the codes include `ALL`. `"tests/test_cli.py" = ["E501"]` is a legitimate suppression and
+    stays green — a guard people are trained to edit is not a guard.
+    """
+    lint = _table("tool", "ruff", "lint")
+    top = _table("tool", "ruff")
+
+    select = lint.get("select", top.get("select"))
+    assert select is None or select, (
+        "`[tool.ruff.lint] select = []` selects NO rules. Ruff runs, opens every file, and "
+        "reports nothing it could possibly find, because nothing is enabled. The Ruff row "
+        "stays ✅ and stays CRITICAL. Omit `select` to keep ruff's defaults (E4, E7, E9, F)."
+    )
+
+    ignored = list(lint.get("ignore") or top.get("ignore") or [])
+    assert "ALL" not in ignored, (
+        '`ignore = ["ALL"]` under [tool.ruff.lint] switches off every rule in the ruleset. '
+        "Ruff still runs on every file in `src tests scripts` and still reports `All checks "
+        "passed!`, whatever is in them. Ignore the specific rules you mean, by code."
+    )
+
+    per_file: dict[str, list[str]] = {
+        **(top.get("per-file-ignores") or {}),
+        **(lint.get("per-file-ignores") or {}),
+        **(lint.get("extend-per-file-ignores") or {}),
+    }
+    blinding = {
+        pattern: codes
+        for pattern, codes in per_file.items()
+        if "ALL" in (codes or []) and _package_matching_patterns([pattern])
+    }
+    assert not blinding, (
+        f"These `per-file-ignores` patterns disable EVERY ruff rule for files inside "
+        f"{PACKAGE}: {blinding}.\n"
+        f"\n"
+        f'`"*" = ["ALL"]` is the whole attack. It is two lines, it touches neither '
+        f"check.sh nor the workflow, it narrows no directory — so every scope assertion in "
+        f"this repo stays green — and ruff reports `All checks passed!` on a file with unused "
+        f"imports. The gate keeps printing ✅ Ruff (linting) PASS over a tool that has been "
+        f"turned off.\n"
+        f"\n"
+        f"Per-file-ignores are for narrow, named exemptions on specific files: "
+        f'`"tests/conftest.py" = ["E402"]`. A pattern that matches the package plus the '
+        f"code `ALL` is not an exemption, it is a mute button."
+    )
+
+
+def test_mypy_still_reports_an_obvious_type_error() -> None:
+    """Mypy, configured exactly as this repo configures it, must still fail a broken file.
+
+    `[tool.mypy] ignore_errors = true` — three words — makes mypy print
+    `Success: no issues found in 48 source files`. The command in check.sh still reads
+    `mypy src/xbrain`, unchanged and reassuring, in a diff that does not mention it.
+
+    `--shadow-file` is what makes this honest: mypy type-checks the canary's CONTENT while
+    believing it lives at a REAL module path in the package, so every per-module override,
+    every `disable_error_code`, every global switch resolves exactly as it does in the real
+    run. A canary in a temp directory would inherit none of that and would pass while the
+    package was blind — a test that is green from birth, which is precisely the failure mode
+    this repo keeps paying for.
+    """
+    victim = sorted(path for path in _tracked_package_files() if not path.endswith("__init__.py"))
+    if not victim:
+        pytest.skip("no package module to shadow")
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+        handle.write(MYPY_CANARY)
+        canary = handle.name
+    try:
+        result = _run_tool("mypy", [victim[0], "--shadow-file", victim[0], canary])
+    finally:
+        Path(canary).unlink(missing_ok=True)
+
+    assert result.returncode != 0, (
+        f"MYPY IS BLIND. Asked to check a function that returns an `int` from a `-> str` "
+        f"signature, mypy — loaded with this repo's configuration, at the real module path "
+        f"`{victim[0]}` — found no problem:\n\n  {MYPY_CANARY!r}\n"
+        f"  -> {result.stdout.strip() or '(silence)'}\n"
+        f"\n"
+        f"check.sh still runs `mypy {PACKAGE}`. The Mypy row still prints ✅ and is still "
+        f"CRITICAL. It is type-checking nothing.\n"
+        f"\n"
+        f"Look in pyproject.toml under [tool.mypy]: `ignore_errors = true`, "
+        f'`follow_imports = "skip"`, a `disable_error_code` list, or a `[[tool.mypy.'
+        f"overrides]]` block covering the package. Each of them makes mypy report Success "
+        f"over code it has been told not to read."
+    )
+
+
+def test_mypy_is_not_globally_silenced() -> None:
+    """The named-key half of the mypy canary, plus the one vector the canary cannot see.
+
+    `exclude` is that vector: mypy ignores `exclude` for files passed explicitly on the
+    command line (so the shadow-file canary sails through) but honours it when crawling a
+    DIRECTORY — which is exactly how check.sh invokes it (`mypy src/xbrain`). So the canary
+    is blind here and this static check is the only thing standing in front of it. The two
+    tests are complements, not duplicates.
+    """
+    mypy = _table("tool", "mypy")
+
+    assert not mypy.get("ignore_errors"), (
+        "`[tool.mypy] ignore_errors = true` switches mypy off for the whole package. It still "
+        "runs, still reads all 48 files, and reports `Success: no issues found`. The Mypy row "
+        "stays ✅ and stays CRITICAL. This is not a configuration choice; it is a mute button."
+    )
+    assert mypy.get("follow_imports") != "skip", (
+        '`[tool.mypy] follow_imports = "skip"` makes mypy treat imported modules as `Any`, '
+        "so type errors that cross a module boundary — which is most of them in this package "
+        "— stop being detected. (`silent` is the safe setting and is allowed.)"
+    )
+    assert not mypy.get("disable_error_code"), (
+        f"`[tool.mypy] disable_error_code = {mypy.get('disable_error_code')}` turns off entire "
+        f"classes of type error for the whole package, silently, from a file nobody rereads. "
+        f"If one line genuinely needs an exemption, `# type: ignore[code]` it AT THAT LINE, "
+        f"where a reviewer sees what is being excused."
+    )
+
+    excluded = _package_matching_patterns([str(p) for p in (mypy.get("exclude") or [])])
+    assert not excluded, (
+        f"`[tool.mypy] exclude = {excluded}` removes part of {PACKAGE} from the type check.\n"
+        f"\n"
+        f"check.sh runs `mypy {PACKAGE}` — a DIRECTORY — and mypy honours `exclude` when it "
+        f"crawls a directory. Those modules are simply not checked, while the command in "
+        f"check.sh is untouched and the Mypy row still reports ✅."
+    )
+
     blinded = [
         override.get("module")
-        for override in overrides
+        for override in (_pyproject().get("tool", {}).get("mypy", {}).get("overrides", []) or [])
         if override.get("ignore_errors") or override.get("follow_imports") == "skip"
     ]
     assert not blinded, (
-        f"pyproject.toml turns mypy OFF for {blinded} via `[[tool.mypy.overrides]]`.\n"
-        f"\n"
-        f"`check.sh` still runs `mypy {PACKAGE}` and mypy still prints Success — over a "
-        f"package it has been told to stop reading. The Mypy row stays ✅ and stays CRITICAL. "
-        f"Fix the types, or add a `# type: ignore[code]` at the line that needs it, where the "
-        f"exemption is visible next to the code it excuses."
+        f"pyproject.toml turns mypy OFF for {blinded} via `[[tool.mypy.overrides]]`. check.sh "
+        f"still runs `mypy {PACKAGE}` and mypy still prints Success — over modules it has been "
+        f"told to stop reading."
     )
 
-    excluded = _table("tool", "bandit").get("exclude_dirs") or []
-    package_exclusions = [pattern for pattern in excluded if PACKAGE in pattern]
-    assert not package_exclusions, (
-        f"pyproject.toml excludes {package_exclusions} from bandit via `exclude_dirs`.\n"
-        f"\n"
-        f"The security scan of the package the gate exists to protect now skips part of it, "
-        f"while `check.sh` still reads `bandit -r {PACKAGE}` and the Bandit row still reports "
-        f"✅. Suppress the individual finding with `# nosec` and a reason, at the line."
-    )
+
+def _bandit_config_flags(argv: list[str]) -> list[str]:
+    """Config files the gate hands bandit via `-c` / `--configfile`, if any."""
+    return [
+        argv[index + 1]
+        for index, token in enumerate(argv[:-1])
+        if token in {"-c", "--configfile", "--ini"}
+    ]
+
+
+def test_bandit_still_reports_an_obvious_finding(tmp_path: Path) -> None:
+    """Bandit, run with the gate's OWN flags, must still report a MEDIUM-severity finding.
+
+    Run with the gate's real argv — not a clean invocation — because the flags ARE the
+    configuration here: `-lll` raises the threshold to HIGH-only, `-iii` to HIGH-confidence
+    only, `--skip B108` drops the rule outright. Each leaves `bandit -r src/xbrain` looking
+    correct and the Bandit row printing ✅ while most of what it used to block walks through.
+
+    The canary is deliberately MEDIUM/MEDIUM. A HIGH-severity canary would still be reported
+    under `-lll` and this test would have been green from birth against the very edit it is
+    written to catch.
+    """
+    canary = tmp_path / "gate_canary.py"
+    canary.write_text(BANDIT_CANARY)
 
     for argv in _tool_invocations("bandit"):
-        raised = [token for token in argv if re.fullmatch(r"-l{3,}", token)]
-        assert not raised, (
-            f"bandit's severity threshold has been raised to {raised}:\n"
-            f"  bandit {' '.join(argv)}\n"
+        # Swap the scan target for the canary; keep every other flag exactly as the gate has
+        # it, including any `-c` config file, so the tool is configured identically.
+        args = [str(canary) if token == PACKAGE else token for token in argv]
+        result = _run_tool("bandit", args)
+        assert result.returncode != 0, (
+            f"BANDIT IS DESENSITISED. Handed a hardcoded `/tmp` path (B108 — MEDIUM severity, "
+            f"MEDIUM confidence), bandit — run with the gate's own flags — reported nothing:\n"
+            f"  bandit {' '.join(args)}\n  -> {result.stdout.strip()[:400] or '(silence)'}\n"
             f"\n"
-            f"`-lll` reports HIGH-severity findings only. Every MEDIUM finding the gate used to "
-            f"block — the level it has run at all along — now passes silently. The check still "
-            f"runs, still says ✅, and has quietly stopped enforcing most of what it enforced."
+            f"The gate still scans {PACKAGE}. The Bandit row still prints ✅ and is still "
+            f"CRITICAL. It has stopped reporting the severity band it has enforced all along.\n"
+            f"\n"
+            f"Look at the invocation in scripts/check.sh: `-lll` (HIGH severity only), `-iii` "
+            f"(HIGH confidence only), a `--skip B…` list — or a `-c pyproject.toml` that pulls "
+            f"in a `[tool.bandit] skips`. Suppress the individual finding with `# nosec` and a "
+            f"reason, at the line, where the exemption is visible."
         )
+
+
+def _expand_grade_class(character_class: str) -> set[str]:
+    """Expand a shell bracket class of complexity grades: `D-F` -> {D,E,F}, `DEF` -> {D,E,F}."""
+    grades: set[str] = set()
+    index = 0
+    while index < len(character_class):
+        if index + 2 < len(character_class) and character_class[index + 1] == "-":
+            start, end = character_class[index], character_class[index + 2]
+            grades |= {chr(code) for code in range(ord(start), ord(end) + 1)}
+            index += 3
+        else:
+            grades.add(character_class[index])
+            index += 1
+    return grades
+
+
+def test_radon_still_fails_on_every_forbidden_complexity_grade() -> None:
+    """The radon threshold is a `grep` character class, and narrowing it is a one-key edit.
+
+    check.sh decides that a function is too complex by grepping its own radon output for a
+    grade in `[D-F]`. Change that class to `[F]` and grades D and E — the ones a real
+    refactor actually produces — sail through. Radon still runs. It still prints the offending
+    function. The Radon row still says ✅ and is still CRITICAL, and `mark_failed "Radon"` is
+    still right there in the source, never reached.
+
+    This is the severity-table attack (`test_every_critical_check_can_still_fail_the_gate`)
+    hiding one level down, inside the condition rather than the branch — and it is invisible
+    to a test that only checks the `mark_failed` call exists.
+
+    The class is expanded rather than string-matched, so `[D-F]` and `[DEF]` both pass: this
+    guards the RULE, not its spelling.
+    """
+    code = _check_sh_code()
+    radon_section = code[code.find("RADON_OUTPUT=$(") : code.find('mark_failed "Radon"')]
+    assert radon_section, (
+        "The radon section of scripts/check.sh no longer looks the way this test expects — it "
+        'could not find the radon invocation and the `mark_failed "Radon"` call that its '
+        "grade check guards. Radon is a CRITICAL check (grades D/E/F block the merge). If you "
+        "restructured it, re-point this test at the new condition in the same PR."
+    )
+
+    gate_line = next(
+        (line for line in radon_section.splitlines() if "grep -qE" in line and " - [" in line),
+        None,
+    )
+    assert gate_line, (
+        "scripts/check.sh no longer decides the radon FAILURE with a `grep -qE ' - [D-F] …'` "
+        "over radon's output. That grep is the entire D/E/F gate: without it, complexity is "
+        "reported and never blocks."
+    )
+
+    found = re.search(r" - \[([A-Z-]+)\]", gate_line)
+    grades = _expand_grade_class(found.group(1)) if found else set()
+    missing = sorted({"D", "E", "F"} - grades)
+    assert not missing, (
+        f"The radon complexity gate no longer fails on grade(s) {missing}:\n"
+        f"  {gate_line.strip()}\n"
+        f"\n"
+        f"check.sh's own header promises 'radon: D/E/F = critical (exit 1)'. This condition now "
+        f"only catches {sorted(grades)}. A function at grade {missing[0]} is reported in the "
+        f"log, printed in the summary — and merges, because the branch that calls "
+        f'`mark_failed "Radon"` is never reached. The call is still in the file, which is '
+        f"exactly what makes this invisible: every guard that checks 'is Radon critical?' by "
+        f"looking for that call still says yes.\n"
+        f"\n"
+        f"D and E are the grades a genuine complexity regression produces. Narrowing the class "
+        f"to F is not a tightening, it is a surrender."
+    )
+
+
+def test_bandit_config_file_if_loaded_does_not_narrow_the_scan() -> None:
+    """`[tool.bandit]` in pyproject.toml is DEAD CONFIG today — and must stay that way.
+
+    Measured: `bandit -r src/xbrain -ll -q`, which is exactly how check.sh invokes it, does
+    NOT read pyproject.toml. Bandit only loads it when handed `-c pyproject.toml`. So the
+    `exclude_dirs` and `skips` keys sitting in pyproject right now change nothing.
+
+    That matters for what this test may honestly assert. An earlier version of this module
+    asserted unconditionally that `exclude_dirs` must not touch the package — and would have
+    gone red, with a message claiming "the security scan now skips part of the package", on
+    an edit that in fact does nothing at all. A guard that lies about the damage is worse
+    than no guard: it teaches the next reader that the guard is noise.
+
+    So the assertion is conditional on the config actually being LIVE. The moment someone
+    adds `-c pyproject.toml` to the invocation, those keys wake up — and this fires.
+    """
+    for argv in _tool_invocations("bandit"):
+        if not _bandit_config_flags(argv):
+            continue  # pyproject's [tool.bandit] is inert for this invocation
+        bandit = _table("tool", "bandit")
+        assert not bandit.get("skips"), (
+            f"The gate now passes a config file to bandit (`{' '.join(argv)}`), which makes "
+            f"`[tool.bandit] skips = {bandit.get('skips')}` LIVE. Those checks are no longer "
+            f"run. Until this invocation changed, that key was inert — so the diff that "
+            f"switched it on may look like it changed nothing. It disabled security rules."
+        )
+        excluded = _package_matching_patterns([str(p) for p in (bandit.get("exclude_dirs") or [])])
+        assert not excluded, (
+            f"The gate now passes a config file to bandit, which makes `[tool.bandit] "
+            f"exclude_dirs = {excluded}` LIVE — and it removes part of {PACKAGE} from the "
+            f"security scan, while `bandit -r {PACKAGE}` still reads correctly in check.sh."
+        )
+
+
+def test_the_detect_secrets_scan_is_not_narrowed_by_flags() -> None:
+    """detect-secrets must not be handed an exclusion flag.
+
+    `--exclude-files 'src/.*'` shrinks the scan without touching a single positional path,
+    so the scope test above — which sees `src/xbrain tests scripts`, all three trees, intact
+    — stays perfectly green while the scan reads almost nothing.
+    """
+    offenders = [
+        f"{token} (in `detect-secrets {' '.join(argv)}`)"
+        for argv in _tool_invocations("detect-secrets")
+        for token in argv
+        if any(token == flag or token.startswith(f"{flag}=") for flag in SECRETS_NARROWING_FLAGS)
+    ]
+    assert not offenders, (
+        "The secrets scan is narrowed by an exclusion flag:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nThe positional paths still name all three trees, so every scope assertion stays "
+        "green — and the scan no longer reads them. A committed key in an excluded file is now "
+        "invisible to a gate that reports ✅ Detect-secrets PASS.\n\n"
+        "A known false positive belongs in `.secrets.baseline`, where it is audited, "
+        "attributable and visible in the diff — not behind a regex in the command line."
+    )
+
+
+def test_coverage_excludes_no_ordinary_code() -> None:
+    """No coverage exclusion pattern may match ordinary code.
+
+    Measured, and it is the worst of the lot:
+
+        [tool.coverage.report]
+        exclude_lines = ["."]          ->  TOTAL  0  0  100%
+
+    One character. Every line of the package matches `.`, so every line is excluded, so
+    coverage reports **100%** over **zero statements** — comfortably above the 78% floor,
+    which is still sitting there in check.sh reading exactly as it always did. Both of the
+    coverage tests above are satisfied: the floor was not lowered, and every file is still
+    "measured". There is simply nothing left in them to measure.
+
+    The check is behavioural: each pattern is compiled and run against perfectly ordinary
+    code. A pattern that matches `x = 1` is not excluding a special case, it is excluding the
+    program. Legitimate patterns (`pragma: no cover`, `if TYPE_CHECKING:`,
+    `raise NotImplementedError`, `\\.\\.\\.`) match none of it and stay green.
+    """
+    report = _table("tool", "coverage", "report")
+    patterns = list(report.get("exclude_lines") or []) + list(report.get("exclude_also") or [])
+
+    for pattern in patterns:
+        try:
+            compiled = re.compile(pattern)
+        except re.error as error:
+            pytest.fail(
+                f"`[tool.coverage.report]` has an uncompilable exclusion pattern {pattern!r}: "
+                f"{error}. Coverage will refuse to report, and check.sh will fail the gate on "
+                f"an unparseable TOTAL — loudly, at least."
+            )
+        swallowed = [line for line in ORDINARY_CODE_LINES if compiled.search(line)]
+        assert not swallowed, (
+            f"The coverage exclusion pattern {pattern!r} matches ORDINARY CODE — "
+            f"{swallowed} — so it does not exclude a special case, it excludes the program.\n"
+            f"\n"
+            f'`exclude_lines = ["."]` reports TOTAL 0 statements and 100% coverage. The 78% '
+            f"floor in check.sh is untouched and still reads as protection; the denominator "
+            f"underneath it is gone. Every other coverage test in this module passes, because "
+            f"the floor really was not lowered and every file really is still 'measured' — "
+            f"there is nothing left inside them to count.\n"
+            f"\n"
+            f"Exclusion patterns are for genuine special cases: `pragma: no cover`, "
+            f"`if TYPE_CHECKING:`, `raise NotImplementedError`. If a real module cannot be "
+            f"tested, say so at the line with `# pragma: no cover`, where a reviewer sees it."
+        )
+
+
+def test_no_package_file_blanket_suppresses_a_critical_tool() -> None:
+    """No source file may switch a critical tool off for itself, wholesale.
+
+    `# ruff: noqa` on line 1 disables every rule for that file. `# mypy: ignore-errors` does
+    the same for types. Both are file-local, so no canary and no config check sees them —
+    they are the in-source form of exactly the same attack, and they arrive in the diff of
+    the file they excuse, which is the one place a reviewer might not be looking for a gate
+    change.
+
+    Codes are required, not banned: `# ruff: noqa: E501` is a narrow, reviewable exemption
+    and stays green. It is the BARE, uncoded form — "ignore everything, forever, here" —
+    that this rejects.
+    """
+    bare_ruff = re.compile(r"^#\s*ruff:\s*noqa\s*$", re.MULTILINE)
+    bare_mypy = re.compile(r"^#\s*mypy:\s*ignore-errors\s*$", re.MULTILINE)
+
+    offenders = []
+    for relpath in sorted(_tracked_package_files()):
+        try:
+            text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+        except OSError:  # tracked but absent from the working tree
+            continue
+        if bare_ruff.search(text):
+            offenders.append(f"{relpath}: `# ruff: noqa` — every lint rule, off, for this file")
+        if bare_mypy.search(text):
+            offenders.append(f"{relpath}: `# mypy: ignore-errors` — all type checking, off")
+
+    assert not offenders, (
+        "These files switch a critical tool off for themselves:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nThe tool still runs. Its scope still covers the file. The gate still prints ✅ "
+        "and keeps its CRITICAL severity — and the file is exempt from all of it. This is the "
+        'per-file version of `per-file-ignores = {"*" = ["ALL"]}`, and it hides in the diff '
+        "of the file it excuses.\n\n"
+        "Name what you are suppressing: `# noqa: E501` at the line, `# type: ignore[arg-type]` "
+        "at the line. An exemption a reviewer can weigh is a different thing from a mute button."
+    )
 
 
 # ---------------------------------------------------------------------------
