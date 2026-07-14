@@ -48,6 +48,12 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Ruff only discovers *.py / *.pyi / *.ipynb when handed a directory, so the
+# two extensionless executables in scripts/ (`#!/usr/bin/env python3` wrappers
+# that users invoke directly) would be silently skipped by `ruff check scripts`
+# even though they are Python. Name them explicitly so the gate really covers
+# every Python file under scripts/ — the whole point of linting that directory.
+extend-include = ["scripts/xbrain-transcribe", "scripts/xbrain-vision"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -114,8 +120,8 @@ omit = ["*/tests/*"]
 fail_under = 78
 
 [tool.poe.tasks]
-lint       = "ruff check src tests"
-format     = "ruff format --check src tests"
+lint       = "ruff check src tests scripts"
+format     = "ruff format --check src tests scripts"
 types      = "mypy src/xbrain"
 complexity = "radon cc src/xbrain -s"
 security   = "bandit -r src/xbrain -ll -q"

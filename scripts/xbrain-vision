@@ -22,6 +22,7 @@ Cloud uses the Anthropic REST API via stdlib urllib (no SDK dependency). Local
 shells out to the mlx-vlm tool's python (env `XBRAIN_VISION_MLX_PYTHON`, else the
 uv-tool default `~/.local/share/uv/tools/mlx-vlm/bin/python`).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -59,7 +60,12 @@ _LOCAL_MARKER = "<<<XBRAIN_VISION>>>"
 # wedged model is reaped here (not left orphaned when the outer runner SIGKILLs us).
 _LOCAL_TIMEOUT = 240
 DEFAULT_MODEL = "qwen-3b"
-_MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 def _resolve(name: str) -> tuple[str, str]:
@@ -92,7 +98,10 @@ def _describe_cloud(model: str, image: Path) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": data},
+                        },
                         {"type": "text", "text": PROMPT},
                     ],
                 }
@@ -112,7 +121,9 @@ def _describe_cloud(model: str, image: Path) -> str:
         with urllib.request.urlopen(req, timeout=120) as resp:
             payload = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:  # surface the API error message, not a bare stack
-        raise SystemExit(f"xbrain-vision: Anthropic API error {exc.code}: {exc.read().decode()[:300]}")
+        raise SystemExit(
+            f"xbrain-vision: Anthropic API error {exc.code}: {exc.read().decode()[:300]}"
+        )
     except urllib.error.URLError as exc:  # DNS / connection / TLS / timeout — also clean, no stack
         raise SystemExit(f"xbrain-vision: network error reaching Anthropic API: {exc.reason}")
     blocks = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
@@ -161,14 +172,20 @@ def _describe_local(model: str, image: Path) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Multi-backend vision describe for xbrain digest-video.")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help="model NAME (alias, claude-* id, or hf/repo)")
+    ap = argparse.ArgumentParser(
+        description="Multi-backend vision describe for xbrain digest-video."
+    )
+    ap.add_argument(
+        "--model", default=DEFAULT_MODEL, help="model NAME (alias, claude-* id, or hf/repo)"
+    )
     ap.add_argument("image", help="path to the image to describe")
     args = ap.parse_args()
 
     backend, real_id = _resolve(args.model)
     image = Path(args.image)
-    text = _describe_cloud(real_id, image) if backend == "cloud" else _describe_local(real_id, image)
+    text = (
+        _describe_cloud(real_id, image) if backend == "cloud" else _describe_local(real_id, image)
+    )
     if not text:
         print("xbrain-vision: empty description", file=sys.stderr)
         return 1
