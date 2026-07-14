@@ -90,28 +90,60 @@ def test_the_fingerprint_changes_when_the_SOURCE_changes():
     assert before is not None and before != after
 
 
-def test_the_fingerprint_changes_when_the_RUBRIC_changes(tmp_path, monkeypatch):
-    """The rules the judge applied are part of the verdict. #86 rewrote them and every
-    stored verdict still matched — this is the arm that closes that."""
+def _shadow_rubrics(tmp_path, monkeypatch, edited: str) -> None:
+    """Copy the rubrics to a temp dir, append a line to `edited`, and point the loader there.
+
+    The digest is cached per run (the rubrics do not change mid-run), so an on-disk edit must
+    clear it — exactly what a test has to do and production never does.
+    """
     from xbrain import rubrics as rubrics_mod
 
-    before = contract_fingerprint(_item(), "summary", "English")
-
-    original = rubrics_mod._RUBRICS_DIR
     shadow = tmp_path / "rubrics"
     shadow.mkdir()
-    for rubric in original.glob("*.md"):
+    for rubric in rubrics_mod._RUBRICS_DIR.glob("*.md"):
         shadow.joinpath(rubric.name).write_text(
             rubric.read_text(encoding="utf-8"), encoding="utf-8"
         )
-    verify = shadow / "rubric-verify.md"
-    verify.write_text(verify.read_text(encoding="utf-8") + "\nA NEW RULE.\n", encoding="utf-8")
+    target = shadow / edited
+    target.write_text(target.read_text(encoding="utf-8") + "\nA NEW RULE.\n", encoding="utf-8")
     monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", shadow)
-    rubric_digest.cache_clear()  # the digest is cached per run; a rubric edit must invalidate
+    rubric_digest.cache_clear()
 
+
+def test_the_fingerprint_changes_when_the_JUDGE_RUBRIC_changes(tmp_path, monkeypatch):
+    """The rules the judge applied are part of the verdict. #86 rewrote `rubric-verify.md`
+    and every stored verdict still matched — this is the arm that closes that."""
+    before = contract_fingerprint(_item(), "summary", "English")
+    _shadow_rubrics(tmp_path, monkeypatch, "rubric-verify.md")
     after = contract_fingerprint(_item(), "summary", "English")
     rubric_digest.cache_clear()
     assert before is not None and before != after
+
+
+def test_the_fingerprint_changes_when_the_GENERATION_RUBRIC_changes(tmp_path, monkeypatch):
+    """The judge reads TWO rubrics: how to judge (`rubric-verify`) and what the output was
+    supposed to obey (the target's generation rubric — the adherence axis is judged against
+    it, and #91 rewrote exactly that one). Hashing only the judge's rubric would let a
+    generation-rubric rewrite leave every adherence verdict standing."""
+    before = contract_fingerprint(_item(), "summary", "English")
+    _shadow_rubrics(tmp_path, monkeypatch, "rubric-summary.md")
+    after = contract_fingerprint(_item(), "summary", "English")
+    rubric_digest.cache_clear()
+    assert before is not None and before != after
+
+
+def test_a_generation_rubric_only_invalidates_ITS_target(tmp_path, monkeypatch):
+    """A rewrite of `rubric-video-digest` retires the DIGEST verdicts, not the summaries —
+    or every rubric edit would invalidate the whole corpus and the badge would mean nothing."""
+    item = _item()
+    summary_before = contract_fingerprint(item, "summary", "English")
+    digest_before = contract_fingerprint(item, "digest", "English")
+    _shadow_rubrics(tmp_path, monkeypatch, "rubric-video-digest.md")
+    summary_after = contract_fingerprint(item, "summary", "English")
+    digest_after = contract_fingerprint(item, "digest", "English")
+    rubric_digest.cache_clear()
+    assert digest_before != digest_after  # the digest's rules changed
+    assert summary_before == summary_after  # the summary's did not
 
 
 def test_the_fingerprint_is_stable_when_NOTHING_changes():
@@ -129,6 +161,33 @@ def test_each_target_gets_its_own_contract():
     assert contract_fingerprint(item, "summary", "English") != contract_fingerprint(
         item, "digest", "English"
     )
+
+
+def test_the_target_itself_separates_two_otherwise_identical_contracts(monkeypatch):
+    """The TARGET is hashed in its own right, not merely implied by the generation rubric.
+
+    Today each target happens to have a distinct rubric and a distinct output, so the target
+    arm looks redundant — a mutation dropping it survives every other test. It is not
+    redundant: it is what stops a verdict crossing targets if two of them ever share a
+    generation rubric. Pinned by making that world exist — same output, same source, same
+    rubric — so ONLY the target differs.
+    """
+    from xbrain import verification
+
+    item = _item()
+    item.content.sources[0].digest = item.enriched.summary  # same OUTPUT for both targets
+    monkeypatch.setitem(verification._TARGET_RUBRIC, "digest", "summary")  # same RUBRIC
+    rubric_digest.cache_clear()
+    try:
+        # This item carries no article/thread/images, so the two targets' SOURCES coincide too.
+        assert verification._source_text(item, "summary") == verification._source_text(
+            item, "digest"
+        )
+        assert contract_fingerprint(item, "summary", "English") != contract_fingerprint(
+            item, "digest", "English"
+        )
+    finally:
+        rubric_digest.cache_clear()
 
 
 def test_the_language_is_part_of_the_contract():
