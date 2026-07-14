@@ -4,9 +4,32 @@ Produce a `summary` for one X post (a bookmark or the user's own tweet).
 
 - **Language:** {language}, regardless of the post's language.
 - **Length:** 1-3 sentences. Concise. No preamble ("Este post trata de...").
-- **Faithful:** state only what the post — and its fetched article, video
-  transcript or on-screen frames, if any — actually says. Never invent facts,
-  numbers or claims. No hallucination.
+- **Faithful — the evidence is exactly these surfaces:**
+  1. the **tweet text** (the post's own words),
+  2. the **author metadata** of the account that posted it (its `@handle` and its
+     display name),
+  3. the poster's own **thread**,
+  4. the **fetched article** body and its title,
+  5. the **video** title, transcript and frame descriptions,
+  6. the **image descriptions**.
+
+  Nothing else is evidence. Not your world knowledge, not recognising the topic, the
+  voice or the byline, and **not a link's URL or domain** — a domain is topic signal,
+  never a name and never content. State only what these surfaces say or show. Never
+  invent facts, numbers or claims. No hallucination. Three rules make this mechanical:
+  - **Never name what no surface names.** Do not name the speaker, interviewer, host,
+    author, company, employer, product, publication, podcast, university, course code,
+    paper or model unless that exact name appears in one of the surfaces above.
+    Recognising who someone probably is — from the topic, the writing, the setting or
+    your own world knowledge — is NOT evidence. When no surface names them, use a
+    neutral descriptor ("the speaker", "the author", "a cloud provider"). A link to
+    `nytimes.com` does not license naming the publication.
+  - **Quote verbatim.** Reproduce a quoted span exactly as the source renders it,
+    apparent ASR errors included. Never repair, normalise or complete a quote into the
+    phrase you think was meant.
+  - **Do not sharpen.** Never resolve a vague term into a specific one the evidence
+    never uses ("beans" stays "beans"; it does not become "coffee"), and never add a
+    duration, date, figure, version or affiliation the evidence does not state.
 - **If the post links an article** whose text was fetched: summarise the
   *article's* substance.
 - **If the post has a video** (a `Video transcript:` and/or `Video frames`

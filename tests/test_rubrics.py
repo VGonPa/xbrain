@@ -167,3 +167,55 @@ def test_summary_rubric_only_summarises_shared_content_when_present():
     assert "summarise the substantive content being shared." not in text
     assert "when it is present" in text or "when its content is present" in text
     assert "post's own text" in text
+
+
+# --- Summary faithfulness: the evidence contract (PR-E) ----------------------
+#
+# The summary rubric carried only "never invent facts, numbers or claims" — the same
+# abstraction that failed on digests, because the model does not classify recognising a
+# famous name as inventing. It produced 307 ungrounded names across 2,168 summaries.
+# These guards pin the mechanical rule that replaces it.
+
+
+def test_summary_rubric_declares_its_evidence_surfaces():
+    """The summary's evidence set is WIDER than the digest's: the enrich worksheet ships
+    the fetched article, the poster's own thread and the image descriptions. The rule must
+    ADMIT them — forbidding evidence the generator was correctly given would flag it for
+    doing its job (the exact bug found in the entity checker itself)."""
+    text = load_rubric("summary").lower()
+    for surface in ("display name", "tweet text", "thread", "article", "image descriptions"):
+        assert surface in text, f"summary rubric no longer admits {surface!r} as evidence"
+
+
+def test_summary_rubric_forbids_naming_entities_no_surface_names():
+    """Same mechanism as the digest rubric: the entity enumeration IS the mechanism,
+    since the generic rule empirically failed across 2,168 summaries."""
+    text = load_rubric("summary").lower()
+    for entity in ("interviewer", "employer", "publication", "university", "author"):
+        assert entity in text, f"summary rubric no longer forbids naming an unnamed {entity}"
+    assert "world knowledge" in text
+    assert "neutral descriptor" in text
+
+
+def test_summary_rubric_refuses_the_url_and_domain_as_a_source_of_names():
+    """A link to nytimes.com does not license naming "The New York Times". The generator
+    sees every link's URL+domain; the judge only sees them when the fetch FAILED. Reading a
+    publication's name off a domain is the "Financial Times" failure with extra steps."""
+    text = load_rubric("summary").lower()
+    assert "domain" in text
+    assert "topic signal" in text
+
+
+def test_summary_rubric_keeps_quote_verbatim_and_do_not_sharpen():
+    text = load_rubric("summary").lower()
+    assert "verbatim" in text
+    assert "sharpen" in text
+
+
+def test_summary_rubric_keeps_the_86_attribution_and_unfetched_guardrails():
+    """#86's constraints must survive intact and stay coherent with the new rule: the
+    author block licenses WHO POSTED only, and unfetched content is never reconstructed."""
+    text = load_rubric("summary").lower()
+    assert "posted" in text
+    assert "not fetched" in text or "never fetched" in text
+    assert "reconstruct" in text
