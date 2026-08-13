@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""xbrain `[transcribe].command` alternativo — OpenAI Whisper (multilingüe real).
+
+Mismo contrato que `xbrain-transcribe` (parakeet): xbrain invoca
+`<cmd> [--model M] --output-format json --output-dir <DIR> <media>` y lee el
+primer `*.json` no vacío de `<DIR>`. Este wrapper traduce esa invocación al CLI
+de `whisper` (brew openai-whisper) y normaliza su JSON al shape que espera
+xbrain ({text, language, segments, has_speech}).
+
+Motivo: parakeet-tdt (v2 y v3) decodifica mal el audio en ESPAÑOL (salida
+inglesa rota, verificado 17-jul-2026 con clip de TV es-ES); whisper `small` lo
+transcribe limpio. Para media en español usa este wrapper:
+
+  config.toml → [transcribe] command = "~/.local/bin/xbrain-transcribe-whisper"
+  o por entorno:  XBRAIN_PARAKEET="xbrain-transcribe-whisper" (multi-token OK)
+
+Idioma: WHISPER_LANGUAGE (default: Spanish). Modelo: `--model` de la invocación
+si es un modelo whisper válido, si no WHISPER_MODEL (default: small).
+Silencio: si whisper no produce texto y ffprobe confirma que no hay pista de
+audio → JSON de empty-speech (has_speech=false), igual que el wrapper parakeet.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+WHISPER_MODELS = {
+    "tiny", "base", "small", "medium", "large", "turbo",
+    "tiny.en", "base.en", "small.en", "medium.en",
+    "large-v1", "large-v2", "large-v3", "large-v3-turbo",
+}
+
+
+# Whisper's canned hallucinations on audio with NO speech (silence, music, room
+# tone). Its training data was subtitle files, so on empty audio it emits the
+# boilerplate those files end with. This is not a theory: item 2082467662735507767
+# in the store is a screen recording whose entire "transcript" is the Amara credit
+# line, recorded with has_speech=true and passed downstream as something said.
+#
+# `ffprobe` cannot catch these — the file HAS an audio stream, it just has no
+# speech in it. Matching is on the WHOLE stripped transcript, never a substring:
+# a real video that says nothing but a subtitle credit does not meaningfully
+# exist, whereas one that MENTIONS Amara or thanks its viewers certainly does.
+_NO_SPEECH_ARTEFACTS = {
+    "subtítulos realizados por la comunidad de amara.org",
+    "subtítulos por la comunidad de amara.org",
+    "subtitulos realizados por la comunidad de amara.org",
+    "más videos en amara.org",
+    "subtitles by the amara.org community",
+    "thanks for watching!",
+    "thank you for watching!",
+    "thank you.",
+    "you",
+    "♪♪♪",
+    "[música]",
+    "[music]",
+    "(music)",
+}
+
+
+def _is_hallucinated_silence(text: str) -> bool:
+    """True when the WHOLE transcript is one of whisper's no-speech artefacts."""
+    return text.strip().strip('"“”').lower() in _NO_SPEECH_ARTEFACTS
+
+
+def _confirmed_no_audio(media: str) -> bool:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not media:
+        return False
+    probe = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=codec_type", "-of", "csv=p=0", media],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        return False
+    return "audio" not in probe.stdout
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    out_dir, model, media = ".", None, ""
+    i = 0
+    positional = []
+    while i < len(args):
+        a = args[i]
+        if a == "--output-dir" and i + 1 < len(args):
+            out_dir = args[i + 1]; i += 2
+        elif a == "--model" and i + 1 < len(args):
+            model = args[i + 1]; i += 2
+        elif a == "--output-format" and i + 1 < len(args):
+            i += 2  # siempre emitimos json
+        elif a.startswith("--"):
+            i += 2 if i + 1 < len(args) and not args[i + 1].startswith("--") else 1
+        else:
+            positional.append(a); i += 1
+    if positional:
+        media = positional[-1]
+    if not media:
+        print("xbrain-transcribe-whisper: no media file given", file=sys.stderr)
+        return 2
+
+    # Un --model de parakeet (p.ej. mlx-community/...) no es un modelo whisper: se ignora.
+    if model not in WHISPER_MODELS:
+        model = os.environ.get("WHISPER_MODEL", "small")
+    language = os.environ.get("WHISPER_LANGUAGE", "Spanish")
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    # WHISPER_LANGUAGE="auto" (or empty) omits --language so whisper detects for
+    # itself. The default is Spanish because that is what this wrapper was written
+    # for, but forcing Spanish onto a clip whose language is UNKNOWN would just
+    # reproduce, in the other direction, the bug it exists to fix.
+    argv = ["whisper", media, "--model", model,
+            "--output_format", "json", "--output_dir", str(out), "--verbose", "False"]
+    if language and language.lower() != "auto":
+        argv += ["--language", language]
+    rc = subprocess.run(argv).returncode
+    if rc != 0:
+        return rc
+
+    src = out / f"{Path(media).stem}.json"
+    if not src.exists():
+        if _confirmed_no_audio(media):
+            src.write_text(json.dumps(
+                {"text": "", "language": None, "segments": [], "has_speech": False}))
+            return 0
+        print(f"xbrain-transcribe-whisper: whisper produced no output for {media}",
+              file=sys.stderr)
+        return 1
+
+    raw = json.loads(src.read_text())
+    text = (raw.get("text") or "").strip()
+    segments = [
+        {"start": s.get("start"), "end": s.get("end"), "text": (s.get("text") or "").strip()}
+        for s in raw.get("segments", [])
+    ]
+    if _is_hallucinated_silence(text):
+        print(f"xbrain-transcribe-whisper: discarding known no-speech artefact "
+              f"({text!r}) for {media}", file=sys.stderr)
+        text, segments = "", []
+    src.write_text(json.dumps({
+        "text": text,
+        "language": raw.get("language"),
+        "segments": segments,
+        "has_speech": bool(text),
+    }, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
