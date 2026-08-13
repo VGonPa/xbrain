@@ -212,7 +212,9 @@ def generate(
                 _mirror_item_article_images(item, media_root, vault_media_dir)
             _write_note(items_dir, item, strings, topic_style)
     try:
-        _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+        _write_dashboard(
+            items, output_dir, items_dir, topic_pages or {}, media_root, output_language
+        )
     except Exception:  # noqa: BLE001 - the dashboard is a best-effort secondary artifact
         logger.warning("Dashboard generation failed; item notes were written.", exc_info=True)
 
@@ -223,6 +225,7 @@ def _write_dashboard(
     items_dir: Path,
     topic_pages: dict[str, TopicPage],
     media_root: Path | None,
+    output_language: str,
 ) -> None:
     """Write the self-contained interactive `dashboard.html` from the store.
 
@@ -241,7 +244,7 @@ def _write_dashboard(
     thumbs = collect_thumbnails(items, media_root, id2note)
     now = datetime.now(timezone.utc)
     updated = f"{now:%b} {now.day}, {now.year}".upper()
-    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated)
+    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated, output_language)
     (output_dir / "dashboard.html").write_text(render_dashboard_html(data), encoding="utf-8")
 
 
