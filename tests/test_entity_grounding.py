@@ -502,3 +502,45 @@ def test_an_output_with_both_tiers_is_not_double_counted_as_uncertain_only():
     assert summary["uncertain_only_flagged"] == 0
     # ...but the tier's own entity count still sees it: nothing is hidden, only re-bucketed.
     assert summary["uncertain_entities"] == len(records[0].uncertain)
+
+
+def test_a_speech_disfluency_inside_a_name_no_longer_breaks_the_match():
+    """Measured on the store: the evidence for `Application Default Credentials` reads
+    "the application default uh credential". All three words are there and adjacent — one
+    ASR filler between them meant no window of the transcript ever spelled the name, and
+    the check reported a fabricated entity that the generator had recovered correctly."""
+    evidence = "the application default uh credential, which automatically finds credentials"
+
+    assert is_grounded("Application Default Credentials", evidence)
+
+
+def test_disfluencies_are_stripped_from_evidence_only():
+    """The output is written text: an "Ah" in it is a name or a word, never a filler.
+    Stripping there would silently ground `Ah Counting` off evidence about counting."""
+    assert not is_grounded("Uh Huh Industries", "a company that makes industrial widgets")
+
+
+def test_a_translated_name_matches_with_the_words_in_the_other_order():
+    """Spanish puts the adjective after the noun, English before it, so a translated name
+    arrives reversed: `Revolución Industrial` against "the industrial revolution". Needs no
+    lexicon entry, and generalises to pairs the corpus has not produced yet."""
+    assert is_grounded("Revolución Industrial", "kicked off by the industrial revolution")
+    # ...and the reversal is bounded: an unrelated long phrase sharing words stays flagged.
+    assert not is_grounded(
+        "Default Application Credentials Manager", "a manager for tokens and secrets"
+    )
+
+
+@pytest.mark.parametrize("evidence", ["rolled out in the USA", "across America", "United States"])
+def test_estados_unidos_grounds_on_the_forms_sources_actually_use(evidence):
+    """The most-flagged entity in the store (12 of 239 confident flags) and NOT ONE source
+    said "united states" — they said usa, u.s, america."""
+    assert is_grounded("Estados Unidos", evidence)
+
+
+def test_estados_unidos_is_not_grounded_by_the_english_pronoun():
+    """`us` is deliberately absent from the lexicon. Adding it would ground the country off
+    a pronoun present in nearly every transcript — that does not remove a false alarm, it
+    blinds the check to every invented mention of the US. 8 sources stay flagged because
+    of this, on purpose."""
+    assert not is_grounded("Estados Unidos", "this gives us a much better result")

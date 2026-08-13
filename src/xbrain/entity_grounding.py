@@ -181,6 +181,26 @@ _LEXICON = {
 }
 _LEXICON |= {v: k for k, v in _LEXICON.items()}  # both directions
 
+# Names the corpus renders with SEVERAL shapes on the other side, so a 1:1 pair cannot
+# carry them. `Estados Unidos` is the single most-flagged entity in the store (12 of 239
+# confident flags, 5%) and NOT ONE of those sources says "united states" — they say `usa`,
+# `u.s`, `america`, or bare `us`.
+#
+# `us` is deliberately absent. It would ground the name off the English pronoun, present in
+# almost every transcript, which does not fix a false alarm — it blinds the check to every
+# invented mention of the country. This module resolves ambiguity towards flagging, so the
+# 8 sources whose only evidence is bare `us` stay flagged and stay wrong. Grounding those
+# needs case-sensitive matching against the unfolded evidence, which ASR (all lowercase)
+# cannot support anyway.
+_LEXICON_MULTI: dict[str, frozenset[str]] = {
+    "estadosunidos": frozenset({"unitedstates", "usa", "america"}),
+    "corea": frozenset({"korea"}),
+    "alemania": frozenset({"germany"}),
+}
+_LEXICON_MULTI |= {  # both directions, same as the 1:1 table
+    form: frozenset({key}) for key, forms in dict(_LEXICON_MULTI).items() for form in forms
+}
+
 # Not names at all: units, currencies, file formats, quarters, generic acronyms. Flagging
 # them is pure noise, and a report drowned in noise stops being read — which is its own kind
 # of false negative. The other class no threshold touches.
@@ -203,10 +223,23 @@ def _norm_tokens(text: str) -> list[str]:
     return _WORD.findall(_POSSESSIVE.sub("", fold(text)))
 
 
+# Speech disfluencies the ASR transcribes literally. They land INSIDE names — the evidence
+# for `Application Default Credentials` reads "the application default uh credential" — and
+# a name is matched as a contiguous window, so one filler is enough to break it: no window
+# of the transcript ever spells the name. Dropped from the EVIDENCE side only. The output
+# is written text and has none of these; stripping them there would corrupt real names.
+_DISFLUENCIES = frozenset({"uh", "um", "erm", "eh", "hmm", "mmm", "ah", "er"})
+
+
+def _evidence_tokens(text: str) -> list[str]:
+    """Evidence tokens with speech disfluencies removed — see `_DISFLUENCIES`."""
+    return [t for t in _norm_tokens(_expand_compounds(text)) if t not in _DISFLUENCIES]
+
+
 def _translations(squashed: str) -> set[str]:
-    """The name as the OTHER language would render it, if we know the pair."""
+    """The name as the OTHER language would render it, if we know the pair(s)."""
     hit = _LEXICON.get(squashed)
-    return {hit} if hit else set()
+    return ({hit} if hit else set()) | set(_LEXICON_MULTI.get(squashed, ()))
 
 
 def _depluralise(token: str) -> str:
@@ -236,6 +269,14 @@ def _variants(tokens: list[str]) -> set[str]:
     plain = [_depluralise(t) for t in tokens]
     forms = {"".join(tokens), "".join(plain), "".join(t[0] for t in plain if t)}
     forms |= _translations("".join(plain)) | _translations("".join(tokens))
+    # Spanish puts the adjective after the noun and English before it, so a translated
+    # two-part name arrives REVERSED: `Revolución Industrial` against evidence that says
+    # "industrial revolution". Reversing the tokens is the whole rule — it needs no lexicon
+    # entry and generalises to every pair the corpus has not produced yet. Bounded to short
+    # names because beyond that the permutation stops being a translation and starts being
+    # a different phrase that happens to share words.
+    if 2 <= len(plain) <= 3:
+        forms |= {"".join(reversed(tokens)), "".join(reversed(plain))}
     if len(plain) <= 4:  # 2^4 shapes — bounded, and real handles are short
         for mask in range(1 << len(plain)):
             forms.add("".join(t if mask >> i & 1 else t[0] for i, t in enumerate(plain)))
@@ -286,13 +327,21 @@ def is_grounded(entity: str, evidence: str) -> bool:
     ent = _norm_tokens(entity)
     if not ent:
         return False
-    ev = _norm_tokens(_expand_compounds(evidence))
+    ev = _evidence_tokens(evidence)
     if not ev:
         return False
     forms = _variants(ent)
+    # A form of 1-3 characters may only match a SINGLE evidence token. Squashing erases
+    # word boundaries, so a short form collides with the joint of two ordinary words:
+    # "gives us a much better" contains the window `us`+`a` = "usa", which grounded
+    # `Estados Unidos` off a pronoun and an article. Same shape as `_FUZZY_MIN_LEN` —
+    # below a few characters, a match is coincidence rather than evidence.
+    short, long = {f for f in forms if len(f) <= 3}, {f for f in forms if len(f) > 3}
+    if short & _windows(ev, 1):
+        return True
     # Exact/variant: any squashed window of 1..len+1 tokens equal to any form of the name.
     for size in range(1, min(len(ent) + 2, len(ev) + 1)):
-        if forms & _windows(ev, size):
+        if long & _windows(ev, size):
             return True
     # Acronym→expansion: `HIIT` vs "high intensity interval training".
     squashed = "".join(_depluralise(t) for t in ent)
@@ -300,9 +349,16 @@ def is_grounded(entity: str, evidence: str) -> bool:
         acronyms = {"".join(w[0] for w in ev[i : i + size]) for i in range(len(ev) - size + 1)}
         if squashed in acronyms:
             return True
-    # ASR corruption: `Mustafa Suleyman` vs "mustafa sullivan".
-    raw = "".join(ent)
-    return _fuzzy_hit(raw, _windows(ev, len(ent)) | _windows(ev, max(1, len(ent) - 1)))
+    # ASR corruption: `Mustafa Suleyman` vs "mustafa sullivan". The REVERSED form is fuzzed
+    # too, and the two rules compose into the translated-name case that neither solves
+    # alone: reversal puts `Revolución Industrial` in the evidence's order, and the fuzzy
+    # threshold absorbs the one word that is actually a different language
+    # ("industrialrevolucion" vs "industrialrevolution").
+    windows = _windows(ev, len(ent)) | _windows(ev, max(1, len(ent) - 1))
+    raws = {"".join(ent)}
+    if 2 <= len(ent) <= 3:
+        raws.add("".join(reversed(ent)))
+    return any(_fuzzy_hit(raw, windows) for raw in raws)
 
 
 def _is_version_code(core: str) -> bool:
