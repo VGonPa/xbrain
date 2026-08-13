@@ -22,6 +22,7 @@ from xbrain.media import (
     _iter_eligible_article_images,
     _local_path,
     _url_with_name,
+    _write_bytes,
     download_all,
     emit_summary_line,
 )
@@ -777,6 +778,66 @@ def test_download_all_sweeps_part_orphans_on_entry(tmp_path: Path):
     )
     download_all({"123": item}, media_root=tmp_path, session=session, throttle_seconds=0)
     assert not orphan.exists()
+
+
+def test_write_bytes_leaves_an_identical_file_untouched(tmp_path: Path):
+    """Re-writing the same bytes must not replace the file on disk.
+
+    `os.replace` swaps a fresh inode into place even when the content is
+    byte-identical. On an iCloud-synced tree that reads as an overwrite, and
+    iCloud preserves the losing version as `name N.ext` rather than dropping
+    it. A full refresh re-downloads every photo, so ~3.2k such no-op
+    overwrites fired within minutes and forked the whole media tree — 8.41 GB
+    of conflict copies accumulated in the x-knowledge vault this way.
+
+    Skipping the write keeps the inode, so iCloud sees nothing to reconcile.
+    """
+    target = tmp_path / "0.jpg"
+    payload = _png_bytes()
+    _write_bytes(target, payload)
+    before = target.stat()
+
+    _write_bytes(target, payload)
+
+    after = target.stat()
+    assert after.st_ino == before.st_ino
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert target.read_bytes() == payload
+
+
+def test_write_bytes_replaces_a_file_whose_content_changed(tmp_path: Path):
+    """Differing bytes still overwrite — the skip must not mask a real update.
+
+    Guards the obvious failure mode of the identical-content check: a media
+    URL whose bytes legitimately changed (re-encode, corrected upload) has to
+    land on disk.
+    """
+    target = tmp_path / "0.jpg"
+    _write_bytes(target, b"old pixels")
+    before = target.stat()
+
+    _write_bytes(target, b"new and longer pixels")
+
+    assert target.read_bytes() == b"new and longer pixels"
+    assert target.stat().st_ino != before.st_ino
+
+
+def test_write_bytes_skips_without_reading_a_partial_sibling(tmp_path: Path):
+    """A leftover `.part` sibling must not confuse the identical-content skip.
+
+    `_write_bytes` writes through `<name>.part`; if the skip check ever looked
+    at the wrong path it would compare against stale junk and rewrite every
+    time, silently reinstating the conflict-copy problem.
+    """
+    target = tmp_path / "0.jpg"
+    payload = _png_bytes()
+    _write_bytes(target, payload)
+    (tmp_path / "0.jpg.part").write_bytes(b"stale junk")
+    before = target.stat()
+
+    _write_bytes(target, payload)
+
+    assert target.stat().st_ino == before.st_ino
 
 
 def test_download_all_partial_failure_summary_emits_line(capsys):

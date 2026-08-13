@@ -695,7 +695,7 @@ def _decode_image(data: bytes) -> tuple[int, int, str] | None:
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
-    """Write `data` to `path` atomically (tmp file + rename).
+    """Write `data` to `path` atomically (tmp file + rename), skipping no-ops.
 
     Atomic write mirrors `xbrain.store._atomic_write`: a Ctrl-C between
     `open` and `write_bytes` would leave a zero-byte partial file that the
@@ -705,7 +705,27 @@ def _write_bytes(path: Path, data: bytes) -> None:
     Orphan `.part` files left behind by a hard interruption (SIGKILL, OOM)
     that bypassed our `except BaseException` cleanup are swept on the next
     `download_all` entry — see `_sweep_part_orphans`.
+
+    A byte-identical rewrite returns early instead of replacing the file.
+    `os.replace` installs a fresh inode even when nothing changed, and on a
+    cloud-synced vault (iCloud Drive, and the same class of conflict handling
+    in Dropbox/OneDrive) that counts as an overwrite: the sync client keeps
+    the version it had not finished uploading as a `name N.ext` sibling.
+    `download_all` is idempotent at the item level, but a full refresh rebuilds
+    the item state and so re-downloads every photo — thousands of no-op
+    overwrites within minutes, one conflict copy each. The skip keeps the
+    inode, so the sync client sees nothing to reconcile.
+
+    The size check short-circuits the comparison, which matters on a synced
+    tree: it settles most calls from metadata alone instead of faulting in a
+    file whose bytes live only in the cloud. A stat/read failure is not fatal
+    here — we fall through and write, preserving the previous behaviour.
     """
+    try:
+        if path.stat().st_size == len(data) and path.read_bytes() == data:
+            return
+    except OSError:
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".part")
     try:

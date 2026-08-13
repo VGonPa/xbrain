@@ -1,8 +1,9 @@
 # tests/test_generate.py
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import generate
+from xbrain.generate import _mirror_file, generate
 from xbrain.models import (
     Author,
     Content,
@@ -1668,3 +1669,71 @@ def test_generate_does_not_badge_a_LEGACY_verdict_with_no_contract(tmp_path: Pat
     body = _note_body(tmp_path)
     assert "❌" not in body
     assert "Verification: FAIL" not in body
+
+
+def test_mirror_file_leaves_an_unchanged_destination_untouched(tmp_path: Path):
+    """Re-mirroring identical bytes must not rewrite the vault copy.
+
+    `generate` mirrors every photo, video and slide frame into the vault's
+    `_media/` tree on EVERY run, and the nightly job runs `generate` nightly.
+    `shutil.copy2` truncates and rewrites the destination even when nothing
+    changed, which a cloud-synced vault reads as a modification: iCloud keeps
+    the version it had not finished uploading as a `name N.ext` sibling. The
+    x-knowledge vault accumulated 8.41 GB of such conflict copies — 50,020
+    files, all byte-identical to the sibling they were forked from.
+
+    Asserted on `st_ctime_ns`, not mtime or inode: `copy2` truncates in place
+    (same inode) and `copystat` restores the source mtime, so both look
+    untouched after a rewrite. Only ctime records that the bytes were written
+    — which is exactly the "this file was modified" signal a sync client acts
+    on.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    _mirror_file("1", source, destination)
+    before = destination.stat()
+    time.sleep(0.01)
+
+    _mirror_file("1", source, destination)
+
+    after = destination.stat()
+    assert after.st_ctime_ns == before.st_ctime_ns
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_destination_that_drifted(tmp_path: Path):
+    """A destination whose bytes differ still gets overwritten.
+
+    The skip must not strand a stale vault copy: if the store's bytes changed,
+    or the vault copy was corrupted/edited, the mirror has to repair it.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresh pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"stale")
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresh pixels"
+
+
+def test_mirror_file_rewrites_when_sizes_match_but_bytes_differ(tmp_path: Path):
+    """Same-length but different content must still be repaired.
+
+    Guards the size short-circuit: comparing lengths alone would silently
+    leave a corrupted same-size vault copy in place forever.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"AAAA")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"BBBB")
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"AAAA"

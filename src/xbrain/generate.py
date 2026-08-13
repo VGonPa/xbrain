@@ -448,6 +448,16 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
     generator; the Obsidian embed then renders as a broken image, the right signal.
     Shared by the photo/video block and the `x_video` slide-frame embeds so the
     self-contained-vault mirroring has ONE implementation.
+
+    A destination that already holds the source bytes is left alone. `generate`
+    re-mirrors the WHOLE media tree on every run and the nightly job runs it
+    nightly, so without this the vault sees thousands of no-op rewrites a night.
+    On a cloud-synced vault that is not free: each rewrite is a modification the
+    sync client must reconcile, and iCloud resolves a clash with a not-yet-uploaded
+    version by keeping BOTH — the loser as a `name N.ext` sibling. The x-knowledge
+    vault accumulated 8.41 GB across 50,020 such copies, every one byte-identical
+    to the file beside it. Comparing before writing is far cheaper than the
+    rewrite it replaces.
     """
     if not source.exists():
         logger.warning(
@@ -456,8 +466,26 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
             source,
         )
         return
+    if _already_mirrored(source, destination):
+        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
+
+
+def _already_mirrored(source: Path, destination: Path) -> bool:
+    """True when `destination` already holds exactly `source`'s bytes.
+
+    Size is checked first so the common case settles from metadata alone,
+    without faulting in two files whose bytes may live only in the cloud. A
+    stat/read failure answers False: mirroring anyway is the safe direction —
+    it costs a redundant copy, never a stale or missing embed.
+    """
+    try:
+        if source.stat().st_size != destination.stat().st_size:
+            return False
+        return source.read_bytes() == destination.read_bytes()
+    except OSError:
+        return False
 
 
 def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> None:
