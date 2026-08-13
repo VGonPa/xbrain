@@ -1668,3 +1668,70 @@ def test_generate_does_not_badge_a_LEGACY_verdict_with_no_contract(tmp_path: Pat
     body = _note_body(tmp_path)
     assert "❌" not in body
     assert "Verification: FAIL" not in body
+
+
+def test_article_video_block_renders_a_playable_link(tmp_path: Path):
+    """A pending article video surfaces its stream — it must not render silently.
+
+    A pending IMAGE is silent because `xbrain media` will download it later. No
+    such pass exists for an article-embedded video, so silence here would
+    reproduce the very defect the video block was added to fix: a hole in the
+    prose where the author put a demo.
+    """
+    from xbrain.generate import _article_blocks_lines
+    from xbrain.i18n import strings_for
+    from xbrain.models import ArticleTextBlock, ArticleVideoBlock, MediaVideoPending
+
+    blocks = [
+        ArticleTextBlock(text="Watch this."),
+        ArticleVideoBlock(
+            media=MediaVideoPending(
+                url="https://video.twimg.com/amplify_video/1/vid/avc1/1920x1080/x.mp4",
+                thumbnail_url="https://pbs.twimg.com/amplify_video_thumb/1/img/y.jpg",
+                bitrate=10368000,
+                duration_millis=24016,
+            ),
+            alt="the demo",
+        ),
+    ]
+    source = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/99",
+        title="T",
+        text="".join(b.text for b in blocks if isinstance(b, ArticleTextBlock)),
+        blocks=blocks,
+    )
+    lines = _article_blocks_lines(source, strings_for("English"))
+    body = "\n".join(lines)
+
+    assert "https://video.twimg.com/amplify_video/1/vid/avc1/1920x1080/x.mp4" in body
+    assert "🎥" in body
+    assert "> the demo" in lines  # the alt becomes a caption
+    # The poster is NOT what we link: a still frame is not the video.
+    assert "amplify_video_thumb" not in body
+
+
+def test_article_markdown_code_block_renders_with_its_fences(tmp_path: Path):
+    """A recovered `MARKDOWN` block is multi-line by nature — its newlines survive.
+
+    Every other article text block is a single paragraph, so this is the first
+    one that spans lines. The fences have to reach the note intact or a code
+    listing renders as mangled prose.
+    """
+    from xbrain.generate import _article_blocks_lines
+    from xbrain.i18n import strings_for
+    from xbrain.models import ArticleTextBlock
+
+    code = "```python\nprint('hi')\nprint('bye')\n```"
+    blocks = [ArticleTextBlock(text="Before."), ArticleTextBlock(text=f"\n\n{code}")]
+    source = ContentSourceSuccess(
+        kind="x_article",
+        url="https://x.com/i/article/99",
+        title="T",
+        text="".join(b.text for b in blocks),
+        blocks=blocks,
+    )
+    body = "\n".join(_article_blocks_lines(source, strings_for("English")))
+
+    assert code in body
+    assert body.count("```") == 2  # opening and closing fence, both intact
