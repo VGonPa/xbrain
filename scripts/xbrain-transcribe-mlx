@@ -121,9 +121,20 @@ def confirmed_no_audio(media: str) -> bool:
     if not ffprobe or not media:
         return False
     probe = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "a",
-         "-show_entries", "stream=codec_type", "-of", "csv=p=0", media],
-        capture_output=True, text=True,
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            media,
+        ],
+        capture_output=True,
+        text=True,
     )
     if probe.returncode != 0:
         return False
@@ -144,23 +155,36 @@ def run_mlx(media: str, repo: str, language: str) -> dict | None:
         driver = Path(workdir) / "driver.py"
         driver.write_text(_DRIVER)
         completed = subprocess.run(
-            [uv, "run", "--no-project", "--with", "mlx-whisper",
-             # The private FITIZENS index in ~/.config/pip/pip.conf needs auth and
-             # would hang the resolve waiting on stdin; pin the public one.
-             "--index-url", "https://pypi.org/simple",
-             "python", str(driver), media, repo, language],
-            capture_output=True, text=True,
+            [
+                uv,
+                "run",
+                "--no-project",
+                "--with",
+                "mlx-whisper",
+                # The private FITIZENS index in ~/.config/pip/pip.conf needs auth and
+                # would hang the resolve waiting on stdin; pin the public one.
+                "--index-url",
+                "https://pypi.org/simple",
+                "python",
+                str(driver),
+                media,
+                repo,
+                language,
+            ],
+            capture_output=True,
+            text=True,
         )
         if completed.returncode != 0 or not completed.stdout.strip():
-            print(f"xbrain-transcribe-mlx: mlx-whisper unavailable or failed "
-                  f"(rc={completed.returncode}): {completed.stderr.strip()[-400:]}",
-                  file=sys.stderr)
+            print(
+                f"xbrain-transcribe-mlx: mlx-whisper unavailable or failed "
+                f"(rc={completed.returncode}): {completed.stderr.strip()[-400:]}",
+                file=sys.stderr,
+            )
             return None
         try:
             return json.loads(completed.stdout)
         except ValueError:
-            print("xbrain-transcribe-mlx: mlx-whisper produced unreadable output",
-                  file=sys.stderr)
+            print("xbrain-transcribe-mlx: mlx-whisper produced unreadable output", file=sys.stderr)
             return None
 
 
@@ -172,8 +196,10 @@ def normalise(raw: dict) -> dict:
         for s in raw.get("segments") or []
     ]
     if is_hallucinated_silence(text):
-        print(f"xbrain-transcribe-mlx: discarding known no-speech artefact ({text!r})",
-              file=sys.stderr)
+        print(
+            f"xbrain-transcribe-mlx: discarding known no-speech artefact ({text!r})",
+            file=sys.stderr,
+        )
         text, segments = "", []
     return {
         "text": text,

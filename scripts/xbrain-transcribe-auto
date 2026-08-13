@@ -104,9 +104,20 @@ def _confirmed_no_audio(media: str) -> bool:
     if not ffprobe or not media:
         return False
     probe = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "a",
-         "-show_entries", "stream=codec_type", "-of", "csv=p=0", media],
-        capture_output=True, text=True,
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            media,
+        ],
+        capture_output=True,
+        text=True,
     )
     if probe.returncode != 0:
         return False
@@ -140,17 +151,42 @@ def detect_language(media: str) -> str | None:
     try:
         clip = Path(workdir) / "probe.wav"
         sliced = subprocess.run(
-            [ffmpeg, "-v", "error", "-y", "-t", str(seconds), "-i", media,
-             "-ac", "1", "-ar", "16000", str(clip)],
-            capture_output=True, text=True,
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-y",
+                "-t",
+                str(seconds),
+                "-i",
+                media,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(clip),
+            ],
+            capture_output=True,
+            text=True,
         )
         if sliced.returncode != 0 or not clip.exists():
             return None
         # No `--language`: the omission IS the detection request.
         detected = subprocess.run(
-            [whisper, str(clip), "--model", model, "--output_format", "json",
-             "--output_dir", workdir, "--verbose", "False"],
-            capture_output=True, text=True,
+            [
+                whisper,
+                str(clip),
+                "--model",
+                model,
+                "--output_format",
+                "json",
+                "--output_dir",
+                workdir,
+                "--verbose",
+                "False",
+            ],
+            capture_output=True,
+            text=True,
         )
         if detected.returncode != 0:
             return None
@@ -166,7 +202,7 @@ def detect_language(media: str) -> str | None:
 
 
 def pick_backend(language: str | None) -> str:
-    """"parakeet" for a language parakeet is correct on, else "whisper".
+    """ "parakeet" for a language parakeet is correct on, else "whisper".
 
     `None` (undetected) deliberately lands on whisper: the failure modes are not
     symmetric, and only one of them produces a plausible transcript of something
@@ -218,8 +254,10 @@ def main() -> int:
         code = subprocess.run([sys.executable, command, *args], env=env).returncode
         if code == 0:
             return code
-        print(f"xbrain-transcribe-auto: {default_name} exited {code}; trying the next backend",
-              file=sys.stderr)
+        print(
+            f"xbrain-transcribe-auto: {default_name} exited {code}; trying the next backend",
+            file=sys.stderr,
+        )
     return code
 
 

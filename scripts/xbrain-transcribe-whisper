@@ -28,9 +28,20 @@ import sys
 from pathlib import Path
 
 WHISPER_MODELS = {
-    "tiny", "base", "small", "medium", "large", "turbo",
-    "tiny.en", "base.en", "small.en", "medium.en",
-    "large-v1", "large-v2", "large-v3", "large-v3-turbo",
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large",
+    "turbo",
+    "tiny.en",
+    "base.en",
+    "small.en",
+    "medium.en",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large-v3-turbo",
 }
 
 
@@ -71,9 +82,20 @@ def _confirmed_no_audio(media: str) -> bool:
     if not ffprobe or not media:
         return False
     probe = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "a",
-         "-show_entries", "stream=codec_type", "-of", "csv=p=0", media],
-        capture_output=True, text=True,
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            media,
+        ],
+        capture_output=True,
+        text=True,
     )
     if probe.returncode != 0:
         return False
@@ -88,15 +110,18 @@ def main() -> int:
     while i < len(args):
         a = args[i]
         if a == "--output-dir" and i + 1 < len(args):
-            out_dir = args[i + 1]; i += 2
+            out_dir = args[i + 1]
+            i += 2
         elif a == "--model" and i + 1 < len(args):
-            model = args[i + 1]; i += 2
+            model = args[i + 1]
+            i += 2
         elif a == "--output-format" and i + 1 < len(args):
             i += 2  # siempre emitimos json
         elif a.startswith("--"):
             i += 2 if i + 1 < len(args) and not args[i + 1].startswith("--") else 1
         else:
-            positional.append(a); i += 1
+            positional.append(a)
+            i += 1
     if positional:
         media = positional[-1]
     if not media:
@@ -114,8 +139,18 @@ def main() -> int:
     # itself. The default is Spanish because that is what this wrapper was written
     # for, but forcing Spanish onto a clip whose language is UNKNOWN would just
     # reproduce, in the other direction, the bug it exists to fix.
-    argv = ["whisper", media, "--model", model,
-            "--output_format", "json", "--output_dir", str(out), "--verbose", "False"]
+    argv = [
+        "whisper",
+        media,
+        "--model",
+        model,
+        "--output_format",
+        "json",
+        "--output_dir",
+        str(out),
+        "--verbose",
+        "False",
+    ]
     if language and language.lower() != "auto":
         argv += ["--language", language]
     rc = subprocess.run(argv).returncode
@@ -125,11 +160,11 @@ def main() -> int:
     src = out / f"{Path(media).stem}.json"
     if not src.exists():
         if _confirmed_no_audio(media):
-            src.write_text(json.dumps(
-                {"text": "", "language": None, "segments": [], "has_speech": False}))
+            src.write_text(
+                json.dumps({"text": "", "language": None, "segments": [], "has_speech": False})
+            )
             return 0
-        print(f"xbrain-transcribe-whisper: whisper produced no output for {media}",
-              file=sys.stderr)
+        print(f"xbrain-transcribe-whisper: whisper produced no output for {media}", file=sys.stderr)
         return 1
 
     raw = json.loads(src.read_text())
@@ -139,15 +174,23 @@ def main() -> int:
         for s in raw.get("segments", [])
     ]
     if _is_hallucinated_silence(text):
-        print(f"xbrain-transcribe-whisper: discarding known no-speech artefact "
-              f"({text!r}) for {media}", file=sys.stderr)
+        print(
+            f"xbrain-transcribe-whisper: discarding known no-speech artefact "
+            f"({text!r}) for {media}",
+            file=sys.stderr,
+        )
         text, segments = "", []
-    src.write_text(json.dumps({
-        "text": text,
-        "language": raw.get("language"),
-        "segments": segments,
-        "has_speech": bool(text),
-    }, ensure_ascii=False))
+    src.write_text(
+        json.dumps(
+            {
+                "text": text,
+                "language": raw.get("language"),
+                "segments": segments,
+                "has_speech": bool(text),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
