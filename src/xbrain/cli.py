@@ -2425,6 +2425,16 @@ def verify_entities_command(
         f"({summary['entities']} entidades); "
         f"{summary['unanimous_pass_but_ungrounded']} de ellas con PASS UNÁNIME de los jueces."
     )
+    # The uncertain tier gets its own line rather than being folded into the headline:
+    # it has lower precision, and merging it would let a reader quote one number for two
+    # instruments. Printed unconditionally when non-empty, because a finding the check
+    # made and the terminal never showed is the failure mode this exists to close.
+    if summary["uncertain_only_flagged"]:
+        typer.echo(
+            f"+ {summary['uncertain_only_flagged']} outputs cuyo ÚNICO indicio es del tier "
+            f"incierto (mayúscula ambigua, típicamente a principio de frase): menor "
+            f"precisión, y es donde se esconde un nombre inventado al abrir un resumen."
+        )
     typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
 
 

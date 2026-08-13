@@ -590,12 +590,26 @@ def _is_unanimous_pass(record: dict) -> bool:
 
 def summarise_scan(records: list[EntityRecord], verdicts: dict[str, dict]) -> dict:
     """The headline numbers, including the one the ensemble cannot see about itself."""
+    # The UNCERTAIN tier, counted before the headline filter narrows to confident flags.
+    # A candidate is uncertain when its position makes the capital ambiguous — chiefly
+    # sentence-initial, where Spanish orthography capitalises the first word whether or
+    # not it is a name. That is precisely where this corpus puts names: summaries open
+    # with them ("Suhail afirma…", "Ethan Mollick destaca…"). The one fabricated name the
+    # LLM judges caught lived in this tier, ungrounded, while the terminal line and the
+    # report table showed neither — so the check HAD the finding and no reader could see
+    # it. Reported separately rather than merged, because the tiers have different
+    # precision and averaging them would hide both.
+    uncertain_only = [r for r in records if r.uncertain and not r.ungrounded]
+    uncertain_total = sum(len(r.uncertain) for r in records)
+
     records = [r for r in records if r.ungrounded]  # headline counts CONFIDENT flags only
     judged = [r for r in records if r.item_id in verdicts]
     missed = [r for r in judged if _is_unanimous_pass(verdicts[r.item_id])]
     return {
         "flagged": len(records),
         "entities": sum(len(r.ungrounded) for r in records),
+        "uncertain_only_flagged": len(uncertain_only),
+        "uncertain_entities": uncertain_total,
         "judged_by_ensemble": len(judged),
         "unanimous_pass_but_ungrounded": len(missed),
         # NOT "false negatives": at the precision this check has been measured at, most of
@@ -645,4 +659,25 @@ def render_entity_report(
         for r in records
         if r.ungrounded
     ]
+    uncertain_only = [r for r in records if r.uncertain and not r.ungrounded]
+    if uncertain_only:
+        lines += [
+            "",
+            f"## Uncertain tier — {summary['uncertain_only_flagged']} outputs "
+            f"({summary['uncertain_entities']} candidates across all records)",
+            "",
+            "> A candidate lands here when its POSITION makes the capital ambiguous — "
+            "chiefly sentence-initial, where Spanish capitalises the first word whether or "
+            "not it is a name. Lower precision than the table above by construction, and "
+            "listed anyway: this corpus opens summaries with the subject's name, so the "
+            "tier is where fabricated names are most likely to hide. Judge these, do not "
+            "count them.",
+            "",
+            "| item | author | uncertain candidates |",
+            "| --- | --- | --- |",
+            *(
+                f"| `{r.item_id}` | @{r.handle} | {', '.join(r.uncertain)} |"
+                for r in uncertain_only
+            ),
+        ]
     return json.dumps(payload, indent=2, ensure_ascii=False), "\n".join(lines) + "\n"
