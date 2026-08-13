@@ -43,6 +43,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Union
 from urllib.parse import urlparse
 
@@ -63,6 +64,17 @@ _UA = "Mozilla/5.0 (compatible; XBrain/1.0)"
 _TIMEOUT = 20
 _FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape"
 _FIRECRAWL_TIMEOUT = 60
+# Where the official `firecrawl` CLI stores the key its `login` wrote. Reading it
+# is the difference between the fallback being ON and it being silently OFF: an
+# operator who authenticated the CLI has configured Firecrawl on this machine, and
+# a pipeline that ignores that key marks repairable failures terminal (measured:
+# 39 of 61 items were repairable but sat at `attempts=1`, never having met the
+# second extractor). Env still wins, so a key can always be overridden per-run.
+FIRECRAWL_CREDENTIAL_PATHS = (
+    Path("~/Library/Application Support/firecrawl-cli/credentials.json"),  # macOS
+    Path("~/.config/firecrawl-cli/credentials.json"),  # XDG / Linux
+    Path("~/.firecrawl/credentials.json"),
+)
 
 # Pacing between items in a `--retry-failed` run. These are other people's servers, and the
 # corpus's one transient failure is a recorded HTTP 429 — a host that already rate-limited us.
@@ -187,15 +199,54 @@ def trafilatura_extract(
     return FetchSuccess(title=title, text=text, http_status=200, attempts=1)
 
 
+def _firecrawl_credential_key() -> str | None:
+    """The `apiKey` the official `firecrawl` CLI stored on this machine, or None.
+
+    Tries each known credentials location in order and returns the first usable
+    key. Every failure mode is silent-and-None on purpose: an absent file is the
+    normal "no Firecrawl here" case, and an unreadable / malformed one must not
+    take down a fetch run over an OPTIONAL fallback. The caller distinguishes the
+    two states it actually cares about — key or no key.
+    """
+    for candidate in FIRECRAWL_CREDENTIAL_PATHS:
+        path = candidate.expanduser()
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        key = payload.get("apiKey") if isinstance(payload, dict) else None
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    return None
+
+
+def firecrawl_key() -> str | None:
+    """The Firecrawl API key for this run: `FIRECRAWL_API_KEY`, else the CLI's stored one.
+
+    ONE resolver for the whole module, because the alternative already bit us: a
+    key the `firecrawl` CLI held was invisible to xbrain, so `_retryable_now` read
+    "no fallback configured" and called 39 repairable items terminal.
+
+    Precedence: `XBRAIN_NO_FIRECRAWL` (a hard opt-out, for running deliberately
+    without the fallback even on a machine that has a key) → `FIRECRAWL_API_KEY`
+    (a per-run override) → the stored CLI credentials. A set-but-EMPTY
+    `FIRECRAWL_API_KEY` is not a key and falls through to the file; use the
+    opt-out to mean "no Firecrawl".
+    """
+    if os.environ.get("XBRAIN_NO_FIRECRAWL"):
+        return None
+    return os.environ.get("FIRECRAWL_API_KEY") or _firecrawl_credential_key()
+
+
 def _firecrawl_extract(
     url: str, *, opener: Callable = urllib.request.urlopen
 ) -> FetchResult | None:
     """Second-attempt extraction via Firecrawl (renders JavaScript).
 
-    Returns `None` when `FIRECRAWL_API_KEY` is unset — the fallback is optional,
-    so XBrain users without a key simply do not get it.
+    Returns `None` when no key is resolvable (`firecrawl_key`) — the fallback is
+    optional, so XBrain users without a key simply do not get it.
     """
-    key = os.environ.get("FIRECRAWL_API_KEY")
+    key = firecrawl_key()
     if not key:
         return None
     body = json.dumps({"url": url, "formats": ["markdown"], "onlyMainContent": True}).encode()
@@ -582,9 +633,9 @@ def _retryable_now(src: ContentSourceFailure, *, firecrawl_configured: bool) -> 
 
 
 def firecrawl_available() -> bool:
-    """Is the JS-capable fallback extractor configured? (Mirrors `_firecrawl_extract`'s check —
-    one source of truth for "can a retry bring a different extractor".)"""
-    return bool(os.environ.get("FIRECRAWL_API_KEY"))
+    """Is the JS-capable fallback extractor configured? (Shares `_firecrawl_extract`'s
+    resolver — one source of truth for "can a retry bring a different extractor".)"""
+    return bool(firecrawl_key())
 
 
 def should_retry_failed(content: Content | None, *, firecrawl_configured: bool) -> bool:

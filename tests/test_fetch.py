@@ -3,6 +3,8 @@ import socket
 import urllib.error
 from datetime import datetime, timezone
 
+import pytest
+
 from xbrain.enrich import items_pending_enrichment
 from xbrain.executors.api import links_content_unfetched, unfetched_links_note
 from xbrain.fetch import (
@@ -216,6 +218,133 @@ def test_firecrawl_extract_returns_none_without_api_key(monkeypatch):
 
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     assert _firecrawl_extract("https://e.com/a") is None
+
+
+def _write_credentials(tmp_path, payload: str):
+    """Write a `firecrawl` CLI credentials file and point the lookup at it."""
+    path = tmp_path / "credentials.json"
+    path.write_text(payload)
+    return path
+
+
+def test_firecrawl_key_falls_back_to_cli_credentials(monkeypatch, tmp_path):
+    """A key the `firecrawl` CLI stored counts as configured — the measured defect.
+
+    39 repairable items sat at `attempts=1` because a key that WAS on the machine
+    was invisible to xbrain, so `_retryable_now` read "no fallback" and called
+    them terminal.
+    """
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() == "fc-from-cli"
+    assert fetch.firecrawl_available() is True
+
+
+def test_firecrawl_key_env_wins_over_credentials_file(monkeypatch, tmp_path):
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-from-env")
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() == "fc-from-env"
+
+
+def test_firecrawl_key_opt_out_beats_every_source(monkeypatch, tmp_path):
+    """`XBRAIN_NO_FIRECRAWL` is the hard "run without the fallback" switch."""
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.setenv("XBRAIN_NO_FIRECRAWL", "1")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-from-env")
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() is None
+    assert fetch.firecrawl_available() is False
+
+
+def test_firecrawl_key_tries_each_location_in_order(monkeypatch, tmp_path):
+    """A missing first location must not stop the search at the first candidate."""
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    second = tmp_path / "second.json"
+    second.write_text(json.dumps({"apiKey": "fc-second"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (tmp_path / "absent.json", second))
+
+    assert fetch.firecrawl_key() == "fc-second"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["not json at all", "[]", "{}", '{"apiKey": ""}', '{"apiKey": "   "}', '{"apiKey": 42}'],
+)
+def test_firecrawl_key_survives_a_malformed_credentials_file(monkeypatch, tmp_path, payload):
+    """An unreadable / keyless credentials file yields None — it never raises.
+
+    The fallback is OPTIONAL; a corrupt file must not take down a fetch run.
+    """
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, payload)
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() is None
+
+
+def test_firecrawl_key_strips_surrounding_whitespace(monkeypatch, tmp_path):
+    """A key with a trailing newline is still a key (a hand-edited file)."""
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "  fc-padded\n"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+
+    assert fetch.firecrawl_key() == "fc-padded"
+
+
+def test_firecrawl_extract_uses_the_credentials_file_key(monkeypatch, tmp_path):
+    """End to end: the stored key actually reaches the Authorization header."""
+    import io
+    import json
+
+    from xbrain import fetch
+
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    path = _write_credentials(tmp_path, json.dumps({"apiKey": "fc-from-cli"}))
+    monkeypatch.setattr(fetch, "FIRECRAWL_CREDENTIAL_PATHS", (path,))
+    seen: dict = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _opener(req, timeout=None):
+        seen["auth"] = req.headers.get("Authorization")
+        return _Resp(json.dumps({"data": {"markdown": "cuerpo"}}).encode())
+
+    result = fetch._firecrawl_extract("https://e.com/a", opener=_opener)
+
+    assert seen["auth"] == "Bearer fc-from-cli"
+    assert result.text == "cuerpo"
 
 
 def test_firecrawl_extract_parses_markdown(monkeypatch):

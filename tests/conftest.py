@@ -14,6 +14,27 @@ fake can simulate a transient API failure mid-batch.
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_firecrawl_credentials(monkeypatch, tmp_path):
+    """Point the Firecrawl credentials lookup at an empty temp dir, for EVERY test.
+
+    `fetch.firecrawl_key` falls back to the `firecrawl` CLI's stored credentials
+    when `FIRECRAWL_API_KEY` is unset. Without this fixture, "no key configured"
+    would mean "no key on the machine RUNNING the tests" — the suite would pass
+    in CI and fail on a developer laptop that has run `firecrawl login` (or the
+    reverse), and a `monkeypatch.delenv("FIRECRAWL_API_KEY")` would quietly stop
+    meaning what it says. Autouse because the risk is exactly in the tests that
+    do not think about Firecrawl at all.
+    """
+    monkeypatch.setattr(
+        "xbrain.fetch.FIRECRAWL_CREDENTIAL_PATHS",
+        (Path(tmp_path) / "no-such-credentials.json",),
+    )
 
 
 class FakeBlock:
