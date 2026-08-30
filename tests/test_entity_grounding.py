@@ -155,15 +155,24 @@ def test_quotes_are_delimiters_not_letters():
     assert "O'Brien" in extract_entities("el ensayo de O'Brien sobre agentes")
 
 
-def test_quoted_transcription_still_grounds_the_entity():
-    """#90 has the caption QUOTE on-screen text ("Layer Norm"), and the digest cite
-    it unquoted. `_entities_in_sentence` strips quotes and `_norm_tokens` reduces to
-    [a-z0-9]+, so the two forms match — but nothing pinned it, and the whole point of
-    the change is that a correctly-cited label stops being reported as unfounded.
+def test_verbatim_caption_grounds_but_translated_caption_does_not():
+    """#90's caption-contract rubric bans translating on-screen labels, and the reason
+    is measurable right here: `is_grounded`'s fuzzy match is generous enough that a
+    translated COGNATE ("Proyección" for "Projection") still grounds — but
+    "Auto-Atención" / "Incrustación" do NOT match "Self-Attention" / "Embedding". A
+    caption that transcribes the labels verbatim (quoted, per the rubric) keeps a
+    downstream citation grounded; one that translates them makes a correct citation
+    get reported as unfounded — the exact failure the rubric exists to prevent. This
+    only pins the rule if it exercises BOTH halves: a checker loosened to let the
+    translated form ground too would still pass a test that asserted the positive
+    half alone.
     """
-    caption = 'Diapositiva con un diagrama que conecta "Embedding" y "Layer Norm".'
-    assert is_grounded("Layer Norm", caption)
-    assert is_grounded("Embedding", caption)
+    verbatim = 'Diapositiva con un diagrama que conecta "Embedding" y "Self-Attention".'
+    translated = 'Diapositiva con un diagrama que conecta "Incrustación" y "Auto-Atención".'
+    assert is_grounded("Self-Attention", verbatim)
+    assert is_grounded("Embedding", verbatim)
+    assert not is_grounded("Self-Attention", translated)
+    assert not is_grounded("Embedding", translated)
 
 
 def test_line_initial_common_word_is_demoted_but_never_dropped():

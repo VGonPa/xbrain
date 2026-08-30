@@ -13,9 +13,10 @@ boundary between your words and the screen's words is unambiguous.
 
 - **Right:** your sentence is in {language}, and the labels stay exactly as
   printed — "Embedding", "Layer Norm", "Self-Attention", "Projection".
-- **Wrong:** translating the labels at all — writing "Norma de Capa" where the
-  screen says "Layer Norm". Whoever later cites the label can no longer match it
-  against this description, and a correct citation gets reported as unfounded.
+- **Wrong:** translating the labels at all — writing "Auto-Atención" where the
+  screen says "Self-Attention". Whoever later cites the label can no longer
+  match it against this description, and a correct citation gets reported as
+  unfounded.
 
 If a string is too small, blurred or cut off to read WITH CERTAINTY, say so
 plainly — call it an unreadable label — and do NOT guess. A wrong
