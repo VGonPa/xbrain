@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import filecmp
 import logging
 import shutil
 from datetime import datetime, timezone
@@ -448,6 +449,16 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
     generator; the Obsidian embed then renders as a broken image, the right signal.
     Shared by the photo/video block and the `x_video` slide-frame embeds so the
     self-contained-vault mirroring has ONE implementation.
+
+    A destination that already holds the source bytes is left alone. `generate`
+    re-mirrors the WHOLE media tree on every run and the nightly job runs it
+    nightly, so without this the vault sees thousands of no-op rewrites a night.
+    On a cloud-synced vault that is not free: each rewrite is a modification the
+    sync client must reconcile, and iCloud resolves a clash with a not-yet-uploaded
+    version by keeping BOTH — the loser as a `name N.ext` sibling. The x-knowledge
+    vault accumulated 8.41 GB across 50,020 such copies, every one byte-identical
+    to the file beside it. Comparing before writing is far cheaper than the
+    rewrite it replaces.
     """
     if not source.exists():
         logger.warning(
@@ -456,8 +467,43 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
             source,
         )
         return
+    if _already_mirrored(source, destination):
+        return
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
+
+
+def _already_mirrored(source: Path, destination: Path) -> bool:
+    """True when `destination` already holds exactly `source`'s bytes.
+
+    `filecmp.cmp(shallow=False)` compares sizes from `stat` first and only then
+    reads, in 8 KB chunks with an early exit on the first differing byte. The
+    naive `source.read_bytes() == destination.read_bytes()` would hold BOTH
+    files in memory at once, and this walk mirrors `MediaVideoDownloaded` as
+    well as photos — one `download-videos` mp4 would be loaded twice over.
+
+    Do NOT read the size check as "the cloud-only case settles from metadata".
+    It settles the DIVERGENT case, which is the rare one; the common case here
+    is a destination that is already identical, whose size therefore matches
+    and whose bytes do get read. On an evicted iCloud file that read faults the
+    bytes back in. That is inherent to answering "are these the same bytes" —
+    the alternative (trusting size+mtime, rsync-style) would silently leave a
+    corrupted same-size copy in place, which the sibling test forbids. Reading
+    is still far cheaper than the rewrite it replaces, and it happens once per
+    run instead of writing every run.
+
+    `filecmp`'s result cache is keyed on both paths AND both stat signatures,
+    so a file that changed gets a new key. It cannot go stale here anyway: a
+    given (source, destination) pair is compared at most once per `generate`
+    run.
+
+    A stat/read failure answers False: mirroring anyway is the safe direction —
+    it costs a redundant copy, never a stale or missing embed.
+    """
+    try:
+        return filecmp.cmp(source, destination, shallow=False)
+    except OSError:
+        return False
 
 
 def _mirror_item_media(item: Item, media_root: Path, vault_media_dir: Path) -> None:
