@@ -49,11 +49,19 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py312"
 # Ruff only discovers *.py / *.pyi / *.ipynb when handed a directory, so the
-# two extensionless executables in scripts/ (`#!/usr/bin/env python3` wrappers
-# that users invoke directly) would be silently skipped by `ruff check scripts`
-# even though they are Python. Name them explicitly so the gate really covers
-# every Python file under scripts/ — the whole point of linting that directory.
-extend-include = ["scripts/xbrain-transcribe", "scripts/xbrain-vision"]
+# extensionless executables in scripts/ (`#!/usr/bin/env python3` wrappers that
+# users invoke directly) would be silently skipped by `ruff check scripts` even
+# though they are Python. Name them explicitly so the gate really covers every
+# Python file under scripts/ — the whole point of linting that directory.
+# `test_ruff_examines_every_python_file_in_the_repo` fails when a new one is
+# added and not listed here, which is how these three got caught.
+extend-include = [
+    "scripts/xbrain-transcribe",
+    "scripts/xbrain-transcribe-auto",
+    "scripts/xbrain-transcribe-mlx",
+    "scripts/xbrain-transcribe-whisper",
+    "scripts/xbrain-vision",
+]
 
 [tool.mypy]
 python_version = "3.12"

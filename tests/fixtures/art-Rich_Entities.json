@@ -1,0 +1,133 @@
+{
+  "content_state": {
+    "blocks": [
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "d14a5",
+        "text": "\"¿Podría Madrid transformarse en un hub tecnológico?\"",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 1,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "e92an",
+        "text": " ",
+        "type": "atomic"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "4utd3",
+        "text": "Unos meses después, tuve la idea de REFUGIO. Como vi que tuvo buena acogida y la gente tenía ganas de juntarse, me puse manos a la obra. Ya que he conseguido una audiencia y un alcance interesante a través de mi cuenta de tuiter, qué menos que usarlo para algo útil.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 2,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "fq4ef",
+        "text": " ",
+        "type": "atomic"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "7pd8f",
+        "text": "Una de mis motivaciones principales a la hora de montar REFUGIO venía de mi interés por conocer de primera mano cuál es el estado del ecosistema. Sabía que organizando una cosa de estas me iba a meter de lleno en las tripas de la industria. Creo que ha sido un éxito, gracias a la organización del evento, durante los últimos dos meses he podido conocer, charlar y colaborar con muchas de las personas con mayor influencia dentro del sector, he podido escuchar sus perspectivas y he trabajado con las empresas que están detrás de todo esto. En general, llevo dos meses empapándome de información sobre la situación actual del sector.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "3ecva",
+        "text": "Con el remoto, primo hermano del problema: una empresa extranjera sin entidad aquí que quiera contratar legalmente a un programador residente en España debe darse de alta como empleador en la Seguridad Social, sacar NIF, nombrar representante... la misma estructura para uno que para mil. El CEO de Vercel lo dijo tal cual: ",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 5,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "1s4gr",
+        "text": " ",
+        "type": "atomic"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "5r8jp",
+        "text": "Al final una política fiscal pensada para recaudar más acaba expulsando justo los empleos que más impuestos dejarían aquí: los de sueldos altos, los que forman a la siguiente generación. ",
+        "type": "unstyled"
+      }
+    ],
+    "entityMap": [
+      {
+        "key": "5",
+        "value": {
+          "data": {
+            "tweetId": "1977779569114665339"
+          },
+          "mutability": "Immutable",
+          "type": "TWEET"
+        }
+      },
+      {
+        "key": "1",
+        "value": {
+          "data": {
+            "tweetId": "2025163295317958842"
+          },
+          "mutability": "Immutable",
+          "type": "TWEET"
+        }
+      },
+      {
+        "key": "2",
+        "value": {
+          "data": {
+            "tweetId": "2036510702010061149"
+          },
+          "mutability": "Immutable",
+          "type": "TWEET"
+        }
+      }
+    ]
+  },
+  "id": "QXJ0aWNsZUVudGl0eToyMDczMDMzMzU5MzU4NDA2NjU2",
+  "is_grok_summary_eligible": true,
+  "lifecycle_state": {
+    "modified_at_secs": 1783090566
+  },
+  "media_entities": [],
+  "metadata": {
+    "first_published_at_secs": 1783090110
+  },
+  "preview_text": "El fin de semana pasado organicé REFUGIO. Para quien no sepa de qué iba la vaina: un sábado a finales de junio encerré en Madrid a 47 tíos (y una tía, pero más de eso luego) seleccionados por mí",
+  "rest_id": "2073033359358406656",
+  "summary_text": "- Organicé REFUGIO juntando 47 top talentos técnicos de Madrid con fundadores, inversores y recruiters. El evento superó expectativas, generó networking de 4,8/5 y lanzó colaboraciones, contrataciones y nuevas iniciativas.\n\n- Madrid tiene buen talento universitario pero sufre fuga de cerebros, falta de centros de excelencia y valle de la muerte entre investigación e industria. La IA abre una ventana histórica de oportunidad.\n\n- Soy Pareto-extremalist: concentrar talento excepcional genera colisiones y reacciones en cadena exponenciales. Dispersarlo impide alcanzar masa crítica y regala potencial a otros ecosistemas.\n\n- Problemas clave: fiscalidad ahuyenta Big Tech de contratar seniors en España, mercado pequeño y dificultad para escalar startups más allá de rondas iniciales. Falta de \"empleados ricos\" frena el ecosistema.\n\n- Hace falta fichajes estrella, reformas fiscales, incentivos a transferencia, eventos de colisión y voluntad para retener y atraer talento. El talento y ganas existen; hay que empujar.",
+  "title": "Reflexiones sobre REFUGIO"
+}

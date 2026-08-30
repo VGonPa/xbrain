@@ -36,6 +36,7 @@ from xbrain.extract.extractor import (
 from xbrain.extract.threads import expand_threads
 from xbrain.extract.graphql import items_needing_refetch
 from xbrain.fetch import (
+    FIRECRAWL_CREDENTIAL_PATHS,
     RetryPlan,
     fetch_pending,
     firecrawl_available,
@@ -624,14 +625,17 @@ def _echo_retry_plan(plan: RetryPlan, *, has_key: bool) -> None:
     reasons = ", ".join(f"{n} {reason}" for reason, n in sorted(plan.reasons.items()))
     typer.echo(f"Reintentables: {len(plan.retryable)} items" + (f" ({reasons})" if reasons else ""))
     if plan.blocked_on_firecrawl:
+        looked_in = "\n".join(f"    - {p}" for p in FIRECRAWL_CREDENTIAL_PATHS)
         typer.echo(
-            f"BLOQUEADOS por falta de FIRECRAWL_API_KEY: {len(plan.blocked_on_firecrawl)} items "
+            f"BLOQUEADOS por falta de clave Firecrawl: {len(plan.blocked_on_firecrawl)} items "
             "con fallos js_required/empty_content que NUNCA llegaron a pasar por el fallback "
-            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo. Configúrala y "
-            "vuelve a ejecutar."
+            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo.\n"
+            "  Se ha buscado en $FIRECRAWL_API_KEY y en las credenciales del CLI:\n"
+            f"{looked_in}\n"
+            "  Configúrala (o ejecuta `firecrawl login`) y vuelve a ejecutar."
         )
     elif has_key:
-        typer.echo("FIRECRAWL_API_KEY configurada — el fallback JS entra en los reintentos.")
+        typer.echo("Clave Firecrawl resuelta — el fallback JS entra en los reintentos.")
     typer.echo(
         f"Terminales (ningún extractor los arregla): {len(plan.terminal)} items. "
         "Su nota de guardarraíl ya nombra la causa."
@@ -2434,6 +2438,16 @@ def verify_entities_command(
         f"({summary['entities']} entidades); "
         f"{summary['unanimous_pass_but_ungrounded']} de ellas con PASS UNÁNIME de los jueces."
     )
+    # The uncertain tier gets its own line rather than being folded into the headline:
+    # it has lower precision, and merging it would let a reader quote one number for two
+    # instruments. Printed unconditionally when non-empty, because a finding the check
+    # made and the terminal never showed is the failure mode this exists to close.
+    if summary["uncertain_only_flagged"]:
+        typer.echo(
+            f"+ {summary['uncertain_only_flagged']} outputs cuyo ÚNICO indicio es del tier "
+            f"incierto (mayúscula ambigua, típicamente a principio de frase): menor "
+            f"precisión, y es donde se esconde un nombre inventado al abrir un resumen."
+        )
     typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
 
 
