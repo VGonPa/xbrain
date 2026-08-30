@@ -15,16 +15,19 @@ from xbrain.models import (
     FRAME_CAPTION_CONTRACT,
     Author,
     Content,
+    ContentSourceFailure,
     ContentSourceSuccess,
     Item,
     VideoFrame,
 )
 from xbrain.redescribe import (
     RedescribeReport,
+    _frame_bearing_sources,
     format_redescribe_summary,
     redescribe_frames,
     stale_video_sources,
 )
+from xbrain.vision import VisionFailed
 
 
 def _item(item_id: str, *, contract: str = "", descriptions: tuple[str, ...] = ("old",)) -> Item:
@@ -68,6 +71,65 @@ def _media(tmp_path: Path, item: Item) -> Path:
     return tmp_path
 
 
+def _bare_item(item_id: str, *, content: Content | None) -> Item:
+    """An item carrying an arbitrary (or absent) `content` block — for exercising
+    `_frame_bearing_sources`'s guards directly, bypassing `_item`'s fixed
+    single-`x_video`-source shape."""
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/a/status/{item_id}",
+        author=Author(handle="alice", name="Alice"),
+        text="tweet",
+        created_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        content=content,
+    )
+
+
+def test_frame_bearing_sources_returns_nothing_when_content_is_none():
+    """M1 (review): per CLAUDE.md rule 6, 1551/2168 real items carry no `content`
+    block at all — this is the module's most-executed guard in production, and
+    the mutation deleting the `content is None` early return left all 17 tests
+    green."""
+    item = _bare_item("1", content=None)
+    assert _frame_bearing_sources(item) == []
+
+
+def test_frame_bearing_sources_skips_a_content_source_failure():
+    """M1 (review): a `ContentSourceFailure` on `item.content.sources` must never
+    reach the vision engine — the `isinstance(ContentSourceSuccess)` narrowing
+    guards it. Deleting that narrowing left all 17 tests green."""
+    failure = ContentSourceFailure(
+        kind="x_video", url="https://x.com/a/status/1", failure_reason="not_found"
+    )
+    item = _bare_item(
+        "1",
+        content=Content(fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc), sources=[failure]),
+    )
+    assert _frame_bearing_sources(item) == []
+
+
+def test_frame_bearing_sources_skips_a_non_video_source_with_frames():
+    """M1 (review): only `kind == "x_video"` sources are frame-bearing in
+    practice, but nothing stops a differently-kinded `ContentSourceSuccess` from
+    carrying a (nonsensical) `frames` list — the `kind == "x_video"` filter guards
+    against treating it as one. Deleting that filter left all 17 tests green."""
+    article_with_frames = ContentSourceSuccess(
+        kind="external_article",
+        url="https://example.com/a",
+        text="article body",
+        frames=[VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description="old")],
+    )
+    item = _bare_item(
+        "1",
+        content=Content(
+            fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc), sources=[article_with_frames]
+        ),
+    )
+    assert _frame_bearing_sources(item) == []
+
+
 def test_a_source_without_the_current_contract_is_stale():
     store = {"1": _item("1", contract="")}
     assert [item_id for item_id, _ in stale_video_sources(store)] == ["1"]
@@ -102,7 +164,7 @@ def test_redescribe_replaces_every_caption_and_stamps_the_contract(tmp_path: Pat
     source = store["1"].content.sources[0]
     assert [f.description for f in source.frames] == ["new 0", "new 1"]
     assert source.caption_contract == FRAME_CAPTION_CONTRACT
-    assert report.videos_redescribed == 1
+    assert report.videos_selected == 1
     assert report.frames_described == 2
     assert report.frames_failed == 0
 
@@ -152,6 +214,42 @@ def test_a_missing_image_is_a_per_frame_failure_not_a_run_abort(tmp_path: Path):
     assert source.frames[1].description == "new"
 
 
+def test_a_vision_failure_is_a_per_frame_failure_not_a_run_abort(tmp_path: Path):
+    """C1 (review): `describe_fn` raises `VisionFailed` on non-zero exit, a
+    timeout, AND on an exit-0-but-empty-output run (`vision.py:147-151`) — exactly
+    the corrupt-frame case a 2077-frame backfill will meet. It must be handled the
+    same way a missing file is: logged, the frame keeps its old caption, the run
+    CONTINUES to the other frames (and other items), and the source is left
+    unstamped so a later run retries it."""
+    item = _item("1", descriptions=("a", "b"))
+    other = _item("2", descriptions=("c",))
+    store = {"1": item, "2": other}
+    _media(tmp_path, item)
+    _media(tmp_path, other)
+
+    corrupt_frame = tmp_path / "1/frames/0.png"
+
+    def _describe(path: Path) -> str:
+        if path == corrupt_frame:
+            raise VisionFailed("vision command exited 1: corrupt frame")
+        return f"new {path.stem}"
+
+    report = redescribe_frames(store, media_root=tmp_path, describe_fn=_describe)
+
+    source = store["1"].content.sources[0]
+    assert report.frames_failed == 1
+    assert report.frames_described == 2
+    # The frame whose vision call raised kept its old caption; the rest were
+    # actually re-described, INCLUDING the frame on a later item — the raise did
+    # not abort the run.
+    assert source.frames[0].description == "a"
+    assert source.frames[1].description == "new 1"
+    assert store["2"].content.sources[0].frames[0].description == "new 0"
+    # All-or-nothing stamping composes with per-frame failure: one failed frame
+    # means the source is NOT stamped, so a later run retries it.
+    assert source.caption_contract == ""
+
+
 def test_a_partial_failure_does_not_stamp_the_contract(tmp_path: Path):
     """Stamping is all-or-nothing: a source with one un-redescribed frame is still
     stale, so the next run retries it instead of declaring it done."""
@@ -177,7 +275,7 @@ def test_dry_run_mutates_nothing(tmp_path: Path):
     assert source.frames[0].description == "a"
     assert source.caption_contract == ""
     # It still reports what it WOULD do, which is the whole point of --dry-run.
-    assert report.videos_redescribed == 1
+    assert report.videos_selected == 1
     assert report.frames_described == 1
 
 
@@ -320,9 +418,102 @@ def test_dry_run_never_bumps_fetched_at(tmp_path: Path):
     assert store["1"].content.fetched_at == before
 
 
+def test_videos_current_is_counted_from_a_real_mixed_run(tmp_path: Path):
+    """I2 (review): `report.videos_current = 0` left all 17 tests green — nothing
+    exercised the counter substantiating the module's headline claim ("re-running
+    on a current corpus costs zero vision calls", rendered as "N ya al día"). Build
+    a store where a DIFFERENT answer was reachable: one stale source, one
+    already-current source, and one source with no frames at all (never counted
+    either way — a real corpus has audio-only videos)."""
+    stale = _item("1", contract="")
+    current = _item("2", contract=FRAME_CAPTION_CONTRACT)
+    no_frames = _item("3", contract="", descriptions=())
+    store = {"1": stale, "2": current, "3": no_frames}
+    _media(tmp_path, stale)
+    _media(tmp_path, current)
+
+    report = redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+
+    assert report.videos_current == 1
+    assert report.videos_selected == 1
+
+
 def test_summary_line_reports_the_counters():
+    """I1 (review): the old assertion (`"3" in line and "140" in line and "44" in
+    line and "1" in line`) is satisfied even if every counter is printed under the
+    wrong label, or if `items_repropagated` is dropped from the output entirely
+    (`"1"` is already a substring of `"140"`). Assert the EXACT formatted string,
+    with every counter distinct and non-zero (including `items_repropagated`, left
+    at 0 — and therefore unasserted — by the old fixture) so no counter's digits
+    can hide inside another's."""
     report = RedescribeReport(
-        videos_redescribed=3, videos_current=140, frames_described=44, frames_failed=1
+        videos_selected=3,
+        videos_current=140,
+        frames_described=44,
+        frames_failed=7,
+        items_repropagated=2,
     )
     line = format_redescribe_summary(report)
-    assert "3" in line and "140" in line and "44" in line and "1" in line
+    assert line == (
+        "Frames: 3 vídeos seleccionados, 140 ya al día. "
+        "Captions: 44 regeneradas, 7 fallidas. "
+        "Re-propagados: 2 items."
+    )
+
+
+def test_a_permanently_missing_frame_makes_the_source_a_tarpit(tmp_path: Path):
+    """I3 (review): retry is per-SOURCE, not per-frame, and this is deliberate
+    (see the module docstring + WHY-comment). PIN it as intentional: a second
+    consecutive run, with the missing PNG still missing, re-describes the
+    SURVIVING frame again (paying for it twice) and STILL does not stamp the
+    contract — this is the tarpit the design consciously accepts rather than
+    building a per-frame stamp (which would land inside `fetch._source_signature`'s
+    FLAT deny-list and re-introduce the spurious ~142-item re-enrichment this
+    design exists to avoid)."""
+    item = _item("1", descriptions=("a", "b"))
+    store = {"1": item}
+    _media(tmp_path, item)
+    (tmp_path / "1/frames/0.png").unlink()
+    calls: list[Path] = []
+
+    def _describe(path: Path) -> str:
+        calls.append(path)
+        return "new"
+
+    redescribe_frames(store, media_root=tmp_path, describe_fn=_describe)
+    redescribe_frames(store, media_root=tmp_path, describe_fn=_describe)
+
+    source = store["1"].content.sources[0]
+    # The surviving frame (index 1) was described on BOTH runs — paid for twice.
+    assert calls == [tmp_path / "1/frames/1.png", tmp_path / "1/frames/1.png"]
+    assert source.caption_contract == ""
+    assert source.frames[0].description == "a"  # missing frame: never touched
+    assert source.frames[1].description == "new"  # surviving frame: re-described
+
+
+def test_redescribe_imports_no_network_or_subprocess_machinery():
+    """M2 (review): the module's own docstring makes the STRONGEST offline claim
+    in the repo ('NO network, NO X and NO ffmpeg'), and nothing pinned it. Mirrors
+    the idiom in `test_vision.py`/`test_transcribe.py`/`test_video_frames.py`:
+    guard the module's OWN source against heavy/ML/network machinery pulled in at
+    import time.
+
+    Deliberately does NOT forbid `from xbrain.vision import VisionFailed` (or
+    `xbrain.vision` generally) — C1's fix imports it on purpose, to catch the
+    exact exception `vision.describe_image` raises, and `vision.py` itself spawns
+    no subprocess at import time (only when `describe_image` is called)."""
+    import xbrain.redescribe as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    for forbidden in (
+        "import subprocess",
+        "import socket",
+        "import requests",
+        "import urllib",
+        "import playwright",
+        "import ffmpeg",
+        "import torch",
+        "import mlx",
+        "import cv2",
+    ):
+        assert forbidden not in source

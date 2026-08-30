@@ -14,13 +14,33 @@ STALENESS IS A CONTRACT COMPARISON, NOT A TIMESTAMP. A source carries the
 CONTRACT`). Anything other than the current value is stale, so re-running the
 command on an up-to-date corpus costs zero vision calls. `force=True` ignores it.
 
-STAMPING IS ALL-OR-NOTHING. A source is stamped only when every one of its frames
-was re-described. A partial run leaves the old stamp, so the next run retries the
-frames it missed rather than declaring a half-fixed video done.
+STAMPING IS ALL-OR-NOTHING, PER SOURCE — AND THAT IS A DELIBERATE TARPIT. A
+source is stamped only when every one of its frames was re-described. A partial
+run leaves the old stamp, so the next run retries the WHOLE SOURCE — re-paying
+for frames that were already correctly re-described — not just the frames it
+missed. A source with a PERMANENTLY missing frame image (deleted, never
+downloaded, media root pruned) therefore never converges: every future run
+re-describes its surviving frames again and never stamps. This is accepted on
+purpose, not an oversight — the alternatives are worse:
+  - a per-frame stamp would have to live on `VideoFrame`, which sits INSIDE
+    `fetch._source_signature`'s fingerprint. That deny-list is FLAT (it excludes
+    top-level field names on the source, e.g. `caption_contract` itself) and does
+    not descend into nested models, so a per-frame stamp would read as a material
+    content change on every run and re-introduce the spurious ~142-item
+    re-enrichment this whole design exists to avoid;
+  - stamping the source as done despite the failed frame loses the retry
+    entirely — the permanently-missing frame's stale caption would never be
+    revisited even if the file later reappears;
+  - the module has no way to distinguish a PERMANENTLY-gone file from a
+    TEMPORARILY-unmounted media root, so it cannot special-case the former.
 
 The `describe_fn` seam (`vision.describe_image` pre-bound to the configured
 command/model/language) is injected, so tests run offline against a fake and no
-vision model is ever required by the suite.
+vision model is ever required by the suite. This module imports `VisionFailed`
+from `xbrain.vision` — a deliberate coupling, matching the sibling producer
+`digest.py`, purely to catch that one exception type; `vision.py` spawns no
+subprocess and touches no network at IMPORT time (only when `describe_image` is
+actually called), so this stays offline.
 """
 
 from __future__ import annotations
@@ -37,6 +57,7 @@ from xbrain.models import (
     Item,
     VideoFrame,
 )
+from xbrain.vision import VisionFailed
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +68,21 @@ DescribeFn = Callable[[Path], str]
 class RedescribeReport:
     """Structured outcome of a `redescribe_frames` run (drives the CLI summary).
 
-    `videos_redescribed` counts sources whose frames were (or, on a dry run, would
-    be) re-captioned; `videos_current` counts sources skipped because they already
-    carry the current contract; `frames_described` / `frames_failed` are frame-
-    granular; `items_repropagated` counts items whose `content.fetched_at` was
-    bumped because at least one caption actually changed.
+    `videos_selected` counts sources SELECTED for re-captioning (stale, or every
+    frame-bearing source under `force`) — NOT how many were actually
+    re-described; a per-frame `VisionFailed` can leave some (or, with the media
+    root gone, all) of a selected source's frames un-re-described while it still
+    counts as selected (#90 review M4 — the prior name `videos_redescribed`
+    claimed a past-tense outcome the field never verified, so a run against a
+    missing media root read as "N vídeos re-descritos … 0 regeneradas",
+    self-contradictory). `frames_described` / `frames_failed` are what actually
+    happened, frame-granular — read those for the real story.
+    `videos_current` counts sources skipped because they already carry the
+    current contract; `items_repropagated` counts items whose `content.fetched_at`
+    was bumped because at least one caption actually changed.
     """
 
-    videos_redescribed: int = 0
+    videos_selected: int = 0
     videos_current: int = 0
     frames_described: int = 0
     frames_failed: int = 0
@@ -111,11 +139,20 @@ def redescribe_frames(
 
     Mutates `store` in place (the CALLER persists and snapshots). `dry_run`
     reports what would happen and calls `describe_fn` ZERO times — a preview of a
-    2000-frame backfill must not cost what the backfill costs.
+    2000-frame backfill must not cost what the backfill costs. `dry_run` CANNOT
+    predict `items_repropagated`: whether a caption actually changes is only known
+    by calling the model, and a dry run never does — so the field stays at its
+    default (0) on every dry-run report, and is not a prediction of what the real
+    run will bump (#90 review M3).
 
-    A missing or unreadable image is a PER-FRAME failure: it is logged, the frame
-    keeps its old caption, and the run continues. That frame's source is then left
-    unstamped, so a later run retries it.
+    A missing image, or a `describe_fn` call that raises `vision.VisionFailed`
+    (non-zero exit, timeout, or an exit-0-but-empty-output run), is a PER-FRAME
+    failure: it is logged, the frame keeps its old caption, and the run continues
+    — to the source's other frames, and to the rest of the store. Retry is
+    per-SOURCE, not per-frame: that frame's WHOLE source is then left unstamped,
+    so a later run retries every one of the source's frames, not just the one(s)
+    it missed (see the module WHY-comment for why this is deliberate, and its
+    tarpit cost when a frame image is permanently gone).
     """
     report = RedescribeReport()
     now = datetime.now(timezone.utc)
@@ -134,7 +171,7 @@ def redescribe_frames(
     repropagated_items: set[str] = set()
 
     for item_id, source in stale:
-        report.videos_redescribed += 1
+        report.videos_selected += 1
         if dry_run:
             # A preview must not OVERSTATE the work a real run would do: stat
             # each frame (free, no vision model) so a corpus with deleted PNGs
@@ -178,7 +215,20 @@ def _preview_source(source: ContentSourceSuccess, media_root: Path) -> tuple[int
 def _redescribe_source(
     source: ContentSourceSuccess, media_root: Path, describe_fn: DescribeFn
 ) -> tuple[list[VideoFrame], int, int]:
-    """Re-caption one source's frames; return (frames, described, failed)."""
+    """Re-caption one source's frames; return (frames, described, failed).
+
+    Two DISTINCT per-frame failure modes are handled the same way — logged, the
+    frame keeps its old caption, `failed` incremented, the loop continues to the
+    source's remaining frames: a missing/unreadable image (never reaches
+    `describe_fn`), and a `describe_fn` call that raises `VisionFailed` — which
+    `vision.describe_image` does on a non-zero exit, a timeout, AND on an
+    exit-0-but-empty-output run (`vision.py`'s "a slide's content would be lost"
+    guard). Both are exactly the corrupt/unreadable-frame case a multi-thousand-
+    frame backfill will meet, and neither may abort the whole run (#90 review C1)
+    — `redescribe_frames`'s all-or-nothing stamping (per SOURCE, not per run)
+    already means `failed > 0` leaves this source unstamped for a later retry, so
+    the two mechanisms compose without double-bookkeeping.
+    """
     frames: list[VideoFrame] = []
     described = failed = 0
     for frame in source.frames:
@@ -190,15 +240,40 @@ def _redescribe_source(
             frames.append(frame)
             failed += 1
             continue
-        frames.append(frame.model_copy(update={"description": describe_fn(path)}))
+        try:
+            description = describe_fn(path)
+        except VisionFailed as exc:
+            logger.warning(
+                "redescribe-frames: vision call failed for %s (%s) — keeping the old caption",
+                path,
+                exc,
+            )
+            frames.append(frame)
+            failed += 1
+            continue
+        # `model_copy(update=...)` bypasses pydantic validation — a conscious,
+        # NOT-built defence-in-depth gap: `describe_fn` is typed `Callable[[Path],
+        # str]`, and the real `vision.describe_image` always returns a stripped
+        # non-empty `str` (empty output raises `VisionFailed`, caught above), so
+        # an invalid `description` reaching this line is unreachable via the real
+        # implementation — only a misbehaving injected fake could trigger it
+        # (#90 review M5).
+        frames.append(frame.model_copy(update={"description": description}))
         described += 1
     return frames, described, failed
 
 
 def format_redescribe_summary(report: RedescribeReport) -> str:
-    """One-line human SUMMARY of a re-description run."""
+    """One-line human SUMMARY of a re-description run.
+
+    "vídeos seleccionados" (not "re-descritos"): `videos_selected` counts sources
+    SELECTED for re-captioning, not sources actually finished — with the media
+    root gone, a run would otherwise print the self-contradictory "N vídeos
+    re-descritos … 0 regeneradas" (#90 review M4). `Captions:` carries the real
+    described/failed story.
+    """
     return (
-        f"Frames: {report.videos_redescribed} vídeos re-descritos, "
+        f"Frames: {report.videos_selected} vídeos seleccionados, "
         f"{report.videos_current} ya al día. "
         f"Captions: {report.frames_described} regeneradas, "
         f"{report.frames_failed} fallidas. "
