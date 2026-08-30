@@ -290,14 +290,25 @@ Two things follow. First, `items_needing_refetch` flags on the **stored text alo
 |---|---|---|---|
 | Repairable offline | payload holds a **longer** body than the store | **214** | `reextract` — free, no network |
 | Already complete | payload's `note_tweet` body **is** what is stored | **358** | nothing |
-| Plausibly truncated | **no `note_tweet`**, so the text is the capped `full_text` | **122** | `refetch-truncated --apply` |
-| Undetermined | text changed but not lengthened (8); no payload at all (5) | **13** | inspect, then re-fetch |
+| Undetermined | **no `note_tweet`**, so the text is the capped `full_text` | **122** | a re-fetch, *if* they are truncated at all |
+| Changed, not lengthened | a re-parse rewrites the text without adding to it | **8** | inspect |
+| No payload | nothing on disk to compare against | **5** | a re-fetch |
 
-So `reextract` clears 214 for free, the largest group — **358** — needs nothing at all, and the network population is at most ~135, not the ~485 an earlier draft of this section claimed.
+So `reextract` clears 214 for free; the largest group — **358** — needs nothing at all; and **at most ~127** items (the 122 plus the 5) could need the network, against the ~485 an earlier draft of this section claimed. "At most" is doing real work in that sentence: see the ceiling below.
 
 **Why the "already complete" group is a real finding and not the detector agreeing with itself.** The stored text of all 358 is byte-identical to the `note_tweet` body in their payloads: X served the whole post and we stored the whole post, and they are flagged only because a long post is long (median 725 characters, up to 13,173). This is read off a **different field** from the one the flag is computed on, which is what makes it evidence. The `arrives TRUNCATED` warning the re-parse emits is **not** evidence here, and an earlier draft of this section wrongly cited it: `_tweet_to_item` raises that warning by calling `looks_truncated` on the freshly-parsed text, so for an item whose text did not change it re-runs the same predicate over the same string and returns what it returned the first time. A perfect 480-of-480 agreement there is a tautology, not a measurement.
 
-**And the honest edge of the triage.** "No `note_tweet`" is consistent with truncation but does not prove it: X omits the field for a post that genuinely fits in 280 characters, and such a post can still trip the 265-273 band. The 122 are clustered exactly where the cap would put them (prose length 265-292, median 277), which is the signature of the cut — so treat 122 as an **upper bound** on what needs re-fetching, not a count. In the other direction, 14 of the 358 have a `note_tweet` body under 290 characters and 52 end in a `t.co`, which is usually a link the author included rather than a cut, but neither has been checked one by one. **214 is the only hard number in this table**: it is the store disagreeing with its own stored evidence, item by item, and it needs no heuristic at all.
+**The ceiling on the 122 cannot be tightened, and the reason is the strongest evidence in this section.** "No `note_tweet`" is consistent with truncation but does not establish it: X omits the field for a post that genuinely fits in 280 characters, and such a post can still trip the 265-273 band. The obvious way to settle it is to ask whether the 122 look like the 214 we *know* were truncated. They do — on both signatures a reader would reach for, at a slightly higher rate:
+
+| | the 214 (known truncated) | the 122 (no `note_tweet`) |
+|---|---|---|
+| stored prose length, median | 277 | 277 |
+| inside the 265-292 band | 212 of 214 | 122 of 122 |
+| ends in a trailing `t.co` | 124 of 214 (58%) | 86 of 122 (70%) |
+
+That is a test that **could** have separated them and did not. If the 122 were ordinary complete posts that merely tripped a length band, they should have looked different somewhere — shorter, or without the appended link. So two readings survive and nothing in the store chooses between them: they are truncations whose payload never carried the body (a gap at capture time, not a fact about post length), or they are complete ~277-character posts that happen to end in the author's own link. Treat the 122 as **genuinely undetermined**, not as probably-truncated and not as probably-complete, and read ~127 as a ceiling whose real size nothing we hold can measure.
+
+In the other direction the 358 have their own soft edge: 14 carry a `note_tweet` body under 290 characters, and 52 end in a `t.co` — usually a link the author included rather than a cut, but not checked one by one. **214 remains the only hard number here**: the store disagreeing with its own stored evidence, item by item, on no heuristic at all.
 
 **Reads.** `data/items.json`; with `--apply`, live X through the logged-in Playwright session.
 
@@ -743,7 +754,7 @@ The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain
 | Topics | slugs in `vocab.yaml` | 45 |
 | Stored verdicts | items carrying at least one `VerificationVerdict` | 118 items, 121 verdict records (70 `summary`, 39 `digest`, 12 `topics`); 53 carry a `contract_fingerprint`, so 70 of the 121 are invalidated |
 | Raw payloads | `*.json.gz` under `data/payloads/` | 3,423, covering 2,360 of the 2,404 items |
-| Text truncated at ingest | items `items_needing_refetch` flags (a length heuristic) | 707 flagged, triaged against the payloads as **214** repairable offline, **358** already complete, **122** plausibly truncated, 13 undetermined |
+| Text truncated at ingest | items `items_needing_refetch` flags (a length heuristic) | 707 flagged, triaged against the payloads as **214** repairable offline, **358** already complete, **122** undetermined, 8 changed-not-lengthened, 5 with no payload |
 
 ---
 
