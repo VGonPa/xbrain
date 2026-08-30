@@ -133,6 +133,46 @@ generates an Obsidian wiki.
   downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
   videos are detected and the visual layer is skipped + logged (never a silent
   drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
+- Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
+  channel through which on-screen text (slide labels, code, chart axes) reaches
+  the digest, and translating a NON-COGNATE label broke that channel — measured:
+  `is_grounded("Self-Attention", 'una caja de "Auto-Atención"')` is `False`, so a
+  digest correctly naming the label got reported as ungrounded by the #89
+  checker. (A cognate pair like `Layer Norm` → `Norma de Capa` does NOT reproduce
+  this — the checker's fuzzy match still grounds "Norm" against "Norma" — so
+  don't cite that pair as the failure mode.) The rule now lives in ONE place —
+  `rubrics/fragment-onscreen-text.md`, spliced by `load_rubric`'s
+  `{onscreen_text_rule}` into BOTH `rubric-describe-frame.md` (video frames) and
+  `rubric-describe-image.md` (tweet photos) — and reaches the video-frame path's
+  EXTERNAL vision subprocess via the `XBRAIN_VISION_PROMPT` env var (the photo
+  path calls the Anthropic API in-process, so it just gets the rubric text
+  directly), so the documented argv contract `<command> [--model M] <image>`
+  stays frozen and a third-party vision command keeps working — it just gets no
+  caption discipline. Captions are stamped with
+  `ContentSourceSuccess.caption_contract` (`models.FRAME_CAPTION_CONTRACT` =
+  `"xbrain-frame-caption/v1"`) — at SOURCE level, and listed in
+  `fetch._BOOKKEEPING_FIELDS`, because a stamp nested on `VideoFrame` would land
+  INSIDE `_source_signature`'s flat top-level `exclude` (it does not descend into
+  nested models) and make every re-stamp read as a material content change.
+  `xbrain redescribe-frames` re-captions the frames ALREADY on disk
+  (`data/media/<id>/frames/`) with zero network, zero ffmpeg and zero X: it
+  skips any source whose `caption_contract` already matches (`--force` overrides),
+  stamps a source current only when EVERY one of its frames re-described cleanly
+  (a single un-re-described frame — e.g. a permanently missing image — leaves the
+  WHOLE source stale forever, so every future run re-pays for its surviving
+  frames too, and because a real vision model is non-deterministic that also
+  keeps re-bumping `content.fetched_at` and re-triggering `enrich`/`video-digest`
+  on that item), and bumps `content.fetched_at` only when a caption actually
+  changed. A per-frame `VisionFailed` (bad exit / timeout / empty stdout) is
+  logged and the old caption is kept, without aborting the run; a `VisionNotFound`
+  (unconfigured `[vision].command`) is a config error and IS allowed to abort the
+  run; and a run where every attempted frame failed raises `RuntimeError` instead
+  of completing silently (dry runs never raise). **The photo half of this
+  contract is not self-enforcing:** `describe._is_stale` keys staleness on the
+  hand-set `[describe].version` tag (`config.py`), never on rubric content, so
+  upgrading requires an explicit `[describe].version` bump + `xbrain describe`
+  re-run, or every already-described photo keeps its old, mistranslated prose
+  forever.
 - Video digest — long-form synthesis (`video-digest`, #44 / PR #78): a **separate**
   worksheet stage (not folded into `digest-video`) that reads the transcript + frame
   descriptions and writes a readable long-form digest ("what it is · key points · why
