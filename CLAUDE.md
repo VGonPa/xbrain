@@ -310,33 +310,49 @@ generates an Obsidian wiki.
   by LENGTH: ≥274 chars unconditionally, plus 265–273 when the text does not end on a real
   terminator (`:` and `;` are not terminators). `--apply` is a REAL browser re-fetch —
   headful, human-paced, hours of it — checkpointing after every item (a session expiry on
-  item 400 of 674 must not discard the first 400 repairs) and auto-snapshotting first;
+  item 400 of 707 must not discard the first 400 repairs) and auto-snapshotting first;
   without `--apply` it only reports and writes `data/truncated-items.json`. **Reach for
-  `reextract` first** — it is free and offline, and the payload layer now covers most of the
-  corpus (measured 2026-08-30: 2,281 of 2,325 items have a stored payload), so the
-  "payloads are NOT persisted" premise holds only for what predates persistence. **And the
-  flag count is an upper bound, not a truncation census:** same measurement, 674 of 2,325
-  items are flagged, but 530 of those are LONGER than 290 chars — full `note_tweet` bodies
-  that the ≥274 length rule flags anyway. The detector is deliberately biased towards
-  flagging (a missed truncation is a fabrication kept forever; a false flag costs one
-  re-fetch), so the number measures the flag, not the defect.
+  `reextract` first, and for nearly all of them it IS the answer:** measured 2026-08-30 on the
+  live store (2,404 items), of the **707** items the detector flags only **5** have no stored
+  payload — the other **702 re-parse offline, for free, with no network at all**. Corpus-wide
+  the payload layer covers 2,360 of 2,404, so the "payloads are NOT persisted" premise (still
+  asserted in `items_needing_refetch`'s own docstring — issue #142) survives only for what predates
+  persistence. **And 707 is a work list, not a census:** `looks_truncated` decides on LENGTH
+  ALONE (≥274 chars unconditionally), so **561 of the 707 are LONGER than 290 chars** — full
+  `note_tweet` bodies the length rule flags anyway. The detector is deliberately biased
+  towards flagging (a missed truncation is a fabrication kept forever; a false flag costs one
+  re-fetch), so the number measures the flag, never the defect.
 - **`verify-entities` / `entity_grounding.py` — the deterministic checker, and READ WHAT IT
   IS BLIND TO BEFORE QUOTING ANY NUMBER FROM IT.** Token-free, no model, so it cannot inherit
   the judge ensemble's blind spot (three judges sharing one model and one rubric are ONE
   sample drawn three times; unanimity there measures agreement, not truth), and it sweeps the
-  whole corpus instead of sampling. With `--verdicts <verify-report.json>` it reports how many
-  flagged outputs the judges passed UNANIMOUSLY — the ensemble's false-negative floor, the one
-  number it cannot produce about itself. It checks ONE thing: that every proper noun in a
-  generated output appears on an evidence surface its rubric declares (matching is
+  whole corpus instead of sampling. With `--verdicts <verify-report.json>` it joins the
+  flagged outputs against the judges' records and reports how many of them the ensemble passed
+  UNANIMOUSLY. **That is a LOWER BOUND, and today it is structurally zero — because the two
+  sets do not overlap.** Measured 2026-08-30 on the live data: `data/entity-report.md` carries
+  **1,614** flagged rows (140 confident + 1,474 uncertain) while `data/verify-report.json`
+  holds **14** records in total, 7 of them `summary`; the intersection with the 140 confident
+  flags is **0**. The store is barely better — 70 stored `summary` verdicts across 2,404
+  items, and exactly **1** of the 140 confident flags carries one. So the printed number
+  measures COVERAGE of the judged population, not the ensemble's quality, and no other answer
+  can come out until the two populations are made to overlap. Quoting it as a recall claim
+  about the judges is the error rule 2 exists to stop. It checks ONE thing: that every proper
+  noun in a generated output appears on an evidence surface its rubric declares (matching is
   variant-aware, because ASR mangles proper nouns and an exact matcher flagged exactly the
   names the generator got RIGHT — ~0% digest precision before that was fixed). **It never
   checks what is ASSERTED about an entity, and it never looks at a single NUMBER.** The
   module's own example: "Sam Altman dijo que despedirá a la mitad", against evidence where he
-  discusses *hiring*, extracts `Sam Altman`, finds it grounded, and passes CLEAN — every false attribution, invented mechanism and
-  fabricated causal link is of that shape, found in ~8% of the outputs this module called
-  clean. An invented "92% en MMLU", a false date, a fabricated funding round: invisible,
-  always. Lowercase and two-letter names are not extracted at all. **A clean verdict means
-  "no unknown proper nouns". It does NOT mean "not hallucinated"** — no statement of the form
+  discusses *hiring*, extracts `Sam Altman`, finds it grounded, and passes CLEAN. Every false
+  attribution, invented mechanism and fabricated causal link has that shape, and **nothing in
+  this repo has ever measured how often it happens** — the check that would find them is the
+  one that cannot see them. Do NOT reach for the ~7-8% in `data/entity-precision.md` to fill
+  the hole: that is the corrected rate of flagged **digests** that are genuinely ungrounded
+  (24.9% of digests flagged × ~30% sampled precision), a statement about the outputs this
+  check called DIRTY, digests only — and that file says so itself, *"es el suelo de un
+  problema, no su medida"*. The blind spot has no number. An invented "92% en MMLU", a false
+  date, a fabricated funding round: invisible, always. Lowercase and two-letter names are not
+  extracted at all. **A clean verdict means "no unknown proper nouns". It does NOT mean "not
+  hallucinated"** — no statement of the form
   "N% of the corpus is hallucination-free" is supported by this tool, and the most damaging
   hallucination for a knowledge base, a confident false claim about a real, correctly-named
   entity, is precisely the one it cannot see. Report-only: writes `entity-report.{json,md}`,
@@ -364,12 +380,12 @@ generates an Obsidian wiki.
   validator (`validate.validate_judgment`, against `guardrails.yaml` and the closed
   `vocab.yaml`), the re-enrichment trigger `_needs_reenrichment`
   (`content.fetched_at > enriched.enriched_at`), and video-transcript + image-description
-  splicing on both tracks. Measured 2026-08-30 on the live `data/items.json` (2,325 items,
-  `sum(1 for i in store.values() if i.enriched is not None)`): **2,325 of 2,325 carry an
-  `enriched` block.** A different answer does come out — an item extracted since the last
-  `enrich` run has `enriched: None`; there was exactly one 30 minutes before this
-  measurement, and the next run cleared it — so read the number as "the corpus is enriched
-  to the last run", not as an invariant. The line this replaces ("`enrich` is a stub — the
+  splicing on both tracks. Measured 2026-08-30 on the live `data/items.json` with
+  `sum(1 for i in store.values() if i.enriched is not None)`: **2,325 of 2,404 items carry an
+  `enriched` block.** The 79 that do not ARE how a different answer comes out — they were
+  extracted since the last `enrich` run, so read the number as "the corpus is enriched to the
+  last run", never as an invariant. An earlier reading the same day was 2,325 of 2,325: the
+  enriched count did not move, `extract` did. The line this replaces ("`enrich` is a stub — the
   LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
   life of the corpus it described, and it is the worst kind of wrong in this file, because
   this file is read first and acted on.
