@@ -21,6 +21,10 @@ pick per run with `digest-video --vision-model NAME` or set `[vision].model`:
 Cloud uses the Anthropic REST API via stdlib urllib (no SDK dependency). Local
 shells out to the mlx-vlm tool's python (env `XBRAIN_VISION_MLX_PYTHON`, else the
 uv-tool default `~/.local/share/uv/tools/mlx-vlm/bin/python`).
+
+xbrain passes the frame-caption rubric in the XBRAIN_VISION_PROMPT environment
+variable; run bare (outside xbrain) the script falls back to a built-in prompt.
+The argv contract is unchanged either way.
 """
 
 from __future__ import annotations
@@ -35,12 +39,25 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-PROMPT = (
+# xbrain injects the frame-caption rubric here (`xbrain.vision.PROMPT_ENV_VAR`).
+# The variable is the delivery channel precisely so the argv contract stays
+# frozen. This constant is the fallback for a BARE run outside xbrain — it must
+# never be empty, because an empty prompt would silently produce a useless
+# caption rather than an error.
+_PROMPT_ENV_VAR = "XBRAIN_VISION_PROMPT"
+_FALLBACK_PROMPT = (
     "Describe this video key-frame for a personal knowledge wiki in one or two "
-    "dense, factual Spanish sentences. If it is a slide, chart, code, diagram or "
-    "screenshot, state its content faithfully; never invent text or numbers. "
-    "No preamble, no markdown — reply with only the description."
+    "dense, factual sentences. Transcribe any on-screen text VERBATIM, in its "
+    "original language and exact spelling — slide titles, code identifiers, UI "
+    "labels, chart axes. Never invent text or numbers; if something is unreadable, "
+    "say so. No preamble, no markdown — reply with only the description."
 )
+
+
+def _prompt() -> str:
+    """The injected rubric, or the bare-run fallback."""
+    return os.environ.get(_PROMPT_ENV_VAR, "").strip() or _FALLBACK_PROMPT
+
 
 LOCAL_ALIASES = {
     "qwen-3b": "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
@@ -102,7 +119,7 @@ def _describe_cloud(model: str, image: Path) -> str:
                             "type": "image",
                             "source": {"type": "base64", "media_type": media_type, "data": data},
                         },
-                        {"type": "text", "text": PROMPT},
+                        {"type": "text", "text": _prompt()},
                     ],
                 }
             ],
@@ -155,7 +172,7 @@ def _describe_local(model: str, image: Path) -> str:
     )
     try:
         out = subprocess.run(
-            [mlx_python, "-c", script, model, str(image), PROMPT],
+            [mlx_python, "-c", script, model, str(image), _prompt()],
             capture_output=True,
             text=True,
             timeout=_LOCAL_TIMEOUT,

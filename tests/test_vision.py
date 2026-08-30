@@ -210,3 +210,26 @@ def test_a_runner_that_ignores_env_still_works(tmp_path: Path):
         tmp_path / "f.png", command="vlm", language="English", runner=_runner("plain caption")
     )
     assert result == "plain caption"
+
+
+def test_bundled_wrapper_reads_the_prompt_from_the_environment():
+    """`scripts/xbrain-vision` is the reference implementation of the contract, so
+    it must prefer the injected rubric over its own fallback constant. It is
+    stdlib-only by design (it runs under the system python, which has no xbrain),
+    so this is asserted on the source text rather than by importing it."""
+    from pathlib import Path
+
+    from xbrain.vision import PROMPT_ENV_VAR
+
+    source = Path(__file__).resolve().parents[1].joinpath("scripts/xbrain-vision").read_text()
+    assert PROMPT_ENV_VAR in source
+    assert "import xbrain" not in source
+
+
+def test_bundled_wrapper_keeps_a_fallback_prompt():
+    """Run outside xbrain (a bare `xbrain-vision photo.png`), the wrapper must
+    still have a prompt rather than sending the model an empty string."""
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1].joinpath("scripts/xbrain-vision").read_text()
+    assert "_FALLBACK_PROMPT" in source
