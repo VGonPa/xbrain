@@ -308,6 +308,29 @@ of truth is `data/items.json`.
 > the rubrics in `src/xbrain/rubrics/` — Spanish on the live system; a config
 > parameter to switch languages is on the roadmap ([#16](https://github.com/VGonPa/xbrain/issues/16)).
 
+### Plus — the dashboard
+
+`generate` also writes a self-contained interactive `dashboard.html` next to the
+notes, and links it from `_index.md` by an absolute `file://` URI so one click in
+Obsidian opens it in your browser (Obsidian neither lists nor renders a raw
+`.html`).
+
+Nine panels over the same `items.json`: corpus growth over time, monthly cadence,
+the bookmarks-vs-own-posts split, posts per topic, long-form captured (saved vs.
+failed), photo and video counts, your most-bookmarked authors, your top linked
+domains, and `verify` coverage — outputs judged vs. unjudged, with stale verdicts
+in their own bucket so "judged" is never read as "verified". Every chart is
+clickable: the drawer behind it lists the posts underneath, each with a link to
+the tweet and an `obsidian://open` deep link back to its note.
+
+It is **one file** — ECharts is vendored into it and the photo thumbnails are
+inlined as data URIs (~1.8 MB on a 2,300-item corpus). Only two things still come
+off the network when you open it, the Google Fonts stylesheet and the X video
+posters; both degrade to a plain-font, no-poster page offline.
+
+It is a secondary artefact and `generate` treats it as one: if building it
+raises, the failure is logged and every note is still written.
+
 ---
 
 ## Quick start
@@ -448,7 +471,7 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
 | `[describe]` | `model` | `claude-sonnet-4-6` | Vision model for `xbrain describe`. Override per run with `--model`. |
 | `[describe]` | `version` | `v1` | Tag persisted on every described photo. Bumping invalidates existing descriptions so the next `xbrain describe` re-describes stale entries. |
-| `[transcribe]` | `command` | `parakeet-mlx` | External transcriber `xbrain digest-video` shells out to (the ASR lives outside xbrain core). May be a multi-token wrapper; whisper / faster-whisper is the portable fallback. |
+| `[transcribe]` | `command` | `parakeet-mlx` | External transcriber `xbrain digest-video` shells out to (the ASR lives outside xbrain core). May be a multi-token wrapper. **On a multilingual corpus point it at `scripts/xbrain-transcribe-auto`**, which detects the language and routes English to parakeet and everything else to whisper — parakeet-mlx does not fail on non-English audio, it fabricates fluent English. |
 | `[transcribe]` | `model` | — | Optional model id passed to the transcriber (`--model`). Omit for the tool default. |
 | `[vision]` | `command` | — (unset) | External vision model `xbrain digest-video --frames` shells out to (describes key-frame slides; lives outside xbrain core). No bundled default — `--frames` errors until it is set. May be a multi-token wrapper. |
 | `[vision]` | `model` | — | Optional model id passed to the vision command (`--model`). Omit for the tool default. |
@@ -477,12 +500,19 @@ brew install ffmpeg                    # gives ffmpeg + ffprobe on your PATH
 # 2. ASR (always needed for digest-video) — Parakeet TDT via mlx, isolated tool:
 uv tool install parakeet-mlx           # gives `parakeet-mlx` on your PATH
 
+# 2b. If ANY of your bookmarked videos is not in English, you also need whisper.
+#     The router (step 4) detects the language and dispatches — see below for WHY.
+brew install openai-whisper            # detection + the portable CPU fallback
+#     (the GPU backend, mlx-whisper, is pulled on demand by `uv run --with`:
+#      nothing to install, first call downloads the wheel and the model.)
+
 # 3. Vision (only for --frames) — mlx-vlm powers the local backend of the selector:
 uv tool install mlx-vlm
 
 # 4. Point config.toml at the wrappers (absolute paths survive any PATH):
 #    [transcribe]
-#    command = "/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
+#    command = "/path/to/xbrain/scripts/xbrain-transcribe-auto"  # multilingual (recommended)
+#    # command = "/path/to/xbrain/scripts/xbrain-transcribe"     # English-only corpus
 #    [vision]
 #    command = "/path/to/xbrain/scripts/xbrain-vision"
 #    model   = "qwen-7b"
@@ -502,6 +532,33 @@ count as a failure. The wrapper checks with `ffprobe` and emits the empty-speech
 JSON so such videos attach as `has_speech=false` ("silent video"), while a real
 parakeet failure on an audio-bearing file still surfaces. You can point
 `[transcribe].command` straight at `parakeet-mlx` if you don't need this.
+
+**Language router — `scripts/xbrain-transcribe-auto`.** Point `[transcribe]` here
+instead if your bookmarks are not all in English. It samples the first 30 seconds
+of audio, has whisper report the language, and dispatches: English to parakeet
+(fast), **anything else — or any uncertainty at all — to whisper**. It prefers
+`xbrain-transcribe-mlx` (mlx-whisper on the Apple GPU) and falls back to
+`xbrain-transcribe-whisper` (the brew whisper CLI, CPU, portable) when the GPU
+path cannot run; the two were verified character-identical on a real clip, so the
+fallback costs time and nothing else.
+
+This changes what you install, so it is worth knowing why. parakeet-mlx is
+English-only, and on Spanish audio it does not **fail** — it **fabricates**. It
+exits 0 and emits fluent, broken English that never reproduces what was said.
+A noisy failure shows up in a log; this one passes the whole pipeline, feeds the
+digest and every summary downstream, and lands in a note as a quotation. By the
+time you read the transcript you can no longer tell "the video said that" from
+"parakeet made it up" — so the backend has to be chosen *before* transcription,
+not after. Every uncertain path in the router therefore lands on whisper: a
+missing ffmpeg, a whisper that fails, an unreadable result. Whisper on English is
+slower than it needed to be; parakeet on non-English is a transcript of something
+nobody said.
+
+Tuning, all optional env vars: `XBRAIN_ASR_DETECT_MODEL` (default `base`;
+`tiny` roughly halves detection time on a large backlog),
+`XBRAIN_ASR_DETECT_SECONDS` (30), `XBRAIN_ASR_FORCE` (`parakeet` | `whisper`, to
+pin one backend and skip detection) and `XBRAIN_TRANSCRIBE_{PARAKEET,MLX,WHISPER}`
+to override each binary's path.
 
 **Vision model selector — `scripts/xbrain-vision`.** One `[vision].command`
 serves both local and cloud models; the `--model` name is routed by a registry:
@@ -604,7 +661,7 @@ bit-for-bit from `data/`.
 | ③ | `vocab` | **LLM** | `vocab.yaml` | Induces the controlled topic taxonomy from the whole corpus. |
 | ④ | `enrich` | **LLM** | `items.json` | Per item: a summary + a primary topic + 1-4 topics, all from the taxonomy. |
 | ⑤ | `topics` | **LLM** | `topics.json` | Synthesises each topic page's overview; builds the mechanical post lists. |
-| ⑥ | `generate` | mechanical | the Obsidian vault | Renders the three-layer wiki: `items/*.md`, `topics/*.md`, `_index.md`. |
+| ⑥ | `generate` | mechanical | the Obsidian vault | Renders the three-layer wiki: `items/*.md`, `topics/*.md`, `_index.md` — plus the interactive `dashboard.html`. |
 
 Every stage is **idempotent and incremental** — re-running it only processes
 what is new. `vocab --regenerate` is the deliberate exception: it re-induces the
@@ -633,9 +690,13 @@ uv run xbrain <command> [options]
 |---------|-------------|
 | `extract` | Extract bookmarks and/or own tweets from X. `--source bookmarks\|tweets\|all`. |
 | `import-archive <zip>` | Backfill the full own-tweet history from the official X data archive. |
-| `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state.  **`--retry-failed`** re-fetches ONLY the links whose *recorded* failure a retry could actually repair — transient ones, plus `js_required`/`empty_content` when `FIRECRAWL_API_KEY` is set (those two are exactly what `extract_article` escalates to the Firecrawl fallback, and a failure still at `attempts=1` never got that pass). Unlike `--force` it does not re-download the links that already succeeded. `--dry-run` reports the plan — retryable · blocked-on-the-key · terminal — without touching the store. Mutating runs auto-snapshot (`pre-fetch-retry-failed`). Mutually exclusive with `--force`.  ||
+| `fetch` | Download linked article content, expand threads, fetch linked X content. By default, items whose only previous failures were transient (`timeout`, `dns_error`) are re-fetched automatically; terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`. `--force` re-fetches every external_article source regardless of state.  **`--retry-failed`** re-fetches ONLY the links whose *recorded* failure a retry could actually repair — transient ones, plus `js_required`/`empty_content` when `FIRECRAWL_API_KEY` is set (those two are exactly what `extract_article` escalates to the Firecrawl fallback, and a failure still at `attempts=1` never got that pass). Unlike `--force` it does not re-download the links that already succeeded. `--dry-run` reports the plan — retryable · blocked-on-the-key · terminal — without touching the store. Mutating runs auto-snapshot (`pre-fetch-retry-failed`). Mutually exclusive with `--force`.  **`--revalidate`** re-judges the article bodies **already in the store** and demotes the ones that are not articles — a cookie/login wall, an anti-bot challenge, pure page chrome — to a `blocked_interstitial` failure. Local, no network. A junk body accepted as a *success* is invisible to `--retry-failed` (which selects recorded FAILURES), so without this it keeps being served to the judge as `[Linked article]` evidence forever; demoting loses nothing, because it was never evidence. Report-only by default — it prints the count and the offending domains, worst first, and does not touch the store. **`--write`** applies the demotions (auto-snapshot `pre-fetch-revalidate`). Not combinable with `--force` or `--retry-failed`.  ||
 | `media` | Download X-post photos referenced in `Item.media` **and the inline images of a bookmarked X Article** (stored under `data/media/<id>/article/<n>`, separate from the item's own photos), reusing the one photo-download engine for both. `--limit` is a combined budget; the SUMMARY reports article images separately. Item photos and the downloaded Article images both render inline in the wiki — `generate` embeds each Article image in the author's order (see the blogpost render). `--force`, `--limit N`, `--items <a,b,c>`, `--verbose`. See [Local media storage](#local-media-storage). |
 | `describe` | Describe downloaded photos with a vision LLM (Claude Sonnet 4.6 by default) and feed the prose into `enrich` + `topics`. `--force`, `--limit N`, `--items <a,b,c>`, `--model`, `--batch-size`, `--verbose`. Idempotent — re-runs skip already-described photos unless `[describe].version` is bumped in `config.toml`. |
+| `refresh-quoted` | Backfill the **quoted post** — its body *and* its author — onto the quote-tweets already in the store. They were saved carrying nothing but a `quoted_id`, so the generator saw a bare reaction ("Read this and you'll understand") with nothing to summarise, and filled the hole by inventing. **Start with `--from-store`**: an offline join of `quoted_id` against the store itself — no browser, no network, instant, re-runnable — which reaches every quoted post you happen to have captured in its own right (measured on the corpus this was built against: 222 of 816 quote-tweets, 27%). Without the flag it re-captures the full X history for the rest, at **no extra request per item**: X embeds the quoted post in the *same* timeline payload as the tweet quoting it, so this walks the whole timeline (no stopping at known ids) and re-parses. The scroll is human-paced and takes minutes. Touches only `quoted_tweet` sources — articles, transcripts, threads and every enrichment are preserved; idempotent (a readable quoted post is left alone, a failed one retried). Items that gain evidence bump `content.fetched_at`, so the next `enrich` re-generates exactly those summaries and no others. Destructive → auto-snapshot; on the network path, re-seeing 0 known items (expired session / GraphQL drift) aborts without saving unless `--force`. `--source bookmarks\|tweets\|all`, `--from-store`, `--force`. |
+| `reextract` | Re-run the parser over the **raw GraphQL payloads already on disk** — offline, no network, no rate limits, no dependence on the tweet still existing. This is how a parse fix gets validated before it is applied: the **dry run is the default** and prints exactly what would change across the whole corpus, field by field, before anything is written. `--apply` writes and auto-snapshots. Items ingested before payload persistence have no payload and are listed **explicitly**, so "cannot be re-extracted" is never allowed to look like "re-extracted cleanly". |
+| `refetch-truncated` | List — or with `--apply`, repair — the items whose tweet text was **truncated at ingest**. `legacy.full_text` is capped at 280 chars: X cuts a long post mid-word and appends a t.co self-link, and the generator, told to summarise half a sentence, finishes the sentence itself. Unlike `reextract` this is **not** a free re-parse — those payloads predate persistence, so `--apply` re-fetches each affected tweet from X through a logged-in browser: deliberately human-paced work, hours of it, checkpointed as it goes so a session that expires three quarters of the way through does not discard the three quarters already repaired. The id list is written to `data/truncated-items.json` on every run, `--apply` or not. Destructive → auto-snapshot; a repaired text invalidates its summary, so re-run `enrich` afterwards. |
+| `payload-stats` | **Read-only** answer to "what does keeping every raw payload cost me?", measured on the payloads actually on disk rather than on a fixture: how many there are, their raw and gzipped size, the mean bytes per item, and that mean projected to 10k and 100k items. They are stored gzipped and they are small — measured on the corpus this was built against, 3,344 payloads are 25.9 MB raw / 7.8 MB on disk, a mean of 2.3 KB an item, which projects to roughly 232 MB at 100k items. Writes nothing, takes no snapshot. |
 | `refresh-media` | Re-capture X and backfill the **playable video URL + bitrate + duration** onto items whose video is still poster-era (incremental `extract` + non-overwriting merge never refresh existing videos). Video-only — photos and enrichment/description state are preserved, and a good video is never degraded back to its poster if X drifts. Scrolls the full history (slow); destructive → auto-snapshot; prints a download-size estimate. Does **not** download video (that is `download-videos`). Re-seeing 0 known items on a non-empty store (likely expired session / GraphQL drift) aborts without saving unless `--force`. `--source bookmarks\|tweets\|all`, `--force`. |
 | `download-videos` | Download the actual **mp4 bytes** for backfilled videos and embed them inline in the wiki — the video counterpart to `media`. mp4 only: HLS (`.m3u8`) needs ffmpeg and is a deferred follow-up (skipped + counted); poster-era entries (run `refresh-media` first) are skipped too. Prints a `~X.X GB` size estimate and asks for confirmation **unless `--yes`**. `--max-size 500MB\|2GB` skips videos whose estimated size exceeds the cap. Validates the response is really a video (rejects HTML/JSON interstitials served as 200). Destructive → auto-snapshot; idempotent (re-runs skip downloaded videos unless `--force`). `--source bookmarks\|tweets\|all`, `--limit N`, `--items <a,b,c>`, `--max-size <size>`, `--force`, `--yes`. See [Local media storage](#local-media-storage). |
 | `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
@@ -646,6 +707,7 @@ uv run xbrain <command> [options]
 | `enrich` | Enrich items with a summary + topics. `--executor`, `--apply <file>`. |
 | `topics` | Synthesise topic pages. `--executor`, `--apply <file>`, `--resynth`. |
 | `verify` | **Semantic verification** of the generated enrichment (an LLM-as-judge ensemble, mirroring `cv-guardrail`): scores each `summary` / `digest` / `topics` output for **faithfulness** (does it invent facts/numbers the source does not support?) and **rubric-adherence**, emitting a per-output verdict **PASS / REVIEW / FAIL** + cited flags (each tagged with its `axis`). **Report-only by default** — writes `data/verify-report.{json,md}`, worst-first, and never mutates the store. **Opt-in `--write-verdicts`** (valid only alongside `--apply`) additionally persists each verdict onto its item as a `VerificationVerdict` (keyed by target) together with a **sha256 fingerprint of the exact judged output** + `verified_at`, so `generate` can badge it. The fingerprint is **stamped at worksheet export** and threaded through the filled worksheet — and, on the audit path, through the report record and the audit worksheet — to the writer, never a recompute against the live store, so a regeneration in the export→judge→(audit)→write window can't bind a verdict to output it never judged. This mutates `items.json`, auto-snapshots `data/` first (label `pre-verify-write-verdicts`), and echoes a written/skipped tally (a dropped verdict is never silent). Keyless worksheet flow: `xbrain verify --target summary\|digest\|topics\|all` exports `data/verify-worksheet.json` → copy it once per judge, fill `judgments` → `xbrain verify --apply ws1.json --apply ws2.json …` aggregates (worst-faithfulness wins, divergence flagged) into the report. **`--audit`** runs the judge≠party second pass over ONLY the consequential (FAIL/divergent) verdicts: `xbrain verify --audit` exports an audit worksheet (source + output + the judges' flags) for a single independent auditor to CONFIRM/REVOKE each flag with a `confidence` (0–1) and cited `reason`; `xbrain verify --audit --apply audit.json` merges it back and **deterministically re-verdicts** under one invariant — *a verdict lowers only when the specific cited evidence that produced it is explicitly revoked; guards only escalate*. Three code-enforced backstops: a **confidence gate** (a REVOKE applies only at `confidence ≥ 0.7`, else it is kept and surfaced), **axis scoping** (revoking an adherence note never clears a faithfulness FAIL), and a **mass-revocation guard** (if one run would clear a suspiciously high share of the FAILs, all such revocations are suppressed and kept FAIL). So a confirmed flag keeps the FAIL, an all-faithfulness-flags-revoked record drops to REVIEW (or PASS if no adherence issue remains), an added confirmed flag re-establishes a FAIL the auditor tried to clear, and a divergent tie is resolved by the auditor — with an `## Audit` report section listing every washed/gated/unmatched decision (and any invariant anomaly). The audit is a **single pass** over the full consequential set: a second `--audit --apply` on an already-audited report is refused (it would let split revocations bypass the mass-revocation guard) unless `--force`. **`--force` may not be combined with `--write-verdicts`**: a forced re-audit re-renders the report from the merged records, so the FAIL set shrinks and N single-revoke runs would launder every FAIL into the store without ever tripping the mass-revocation guard (it needs ≥2 FAILs) — forced re-audits stay available report-only. An **absent `audits` key is rejected** (a judge worksheet fed to the audit path would otherwise persist the un-audited aggregate), as is a `--write-verdicts` run whose audit matched **no** record while consequential verdicts remain. The store is written **before** the report, so a failed write never leaves the report marked `audited`. **The audited verdict is the one that reaches the store**: `xbrain verify --audit --apply audit.json --write-verdicts` persists the MERGED, post-audit verdicts (a revoked FAIL lands lowered and badges nothing; a confirmed — or auditor-added — failure lands as FAIL with its confirmed flags), consuming the merge's guarded output rather than re-deriving anything. `--executor manual\|claude-code`. Defaults to `[enrich].executor`; worksheet tracks only (no `api`). |
+| `verify-entities` | **Deterministic and token-free** sweep of every generated output for named entities that no evidence surface supports. There is no LLM in it, so it cannot inherit the judge ensemble's blind spot, and it sweeps the **whole corpus** rather than a sample. Matching is variant-aware (squashed spacing, acronym↔expansion, handle abbreviation, bounded fuzzy) because the evidence is often ASR output — an exact-string matcher flags precisely the names the generator got *right* (`open ai` → `OpenAI`). **Read what it is blind to before quoting any number from it:** it checks that PROPER NOUNS APPEAR somewhere on the evidence. It never checks what is asserted about them and never looks at a single number, so "Sam Altman said he will fire half the staff" against a source where he discusses hiring extracts `Sam Altman`, finds it grounded and passes clean. **A clean verdict means "no unknown proper nouns", not "not hallucinated".** `--verdicts data/verify-report.json` cross-references a `verify` run and reports how many flagged outputs the judges passed **unanimously** — the ensemble's false-negative floor, the one number it cannot produce about itself. Outputs whose only evidence is the low-precision uncertain tier (ambiguous capitalisation, typically sentence-initial) get their own line rather than being folded into the headline. Read-only: writes `data/entity-report.{json,md}` and never touches the store. `--target digest\|summary\|topics` (default `digest`). |
 | `generate` | Render the wiki into the vault. Renders a localized **verification badge** (❌ FAIL / ⚠️ REVIEW; a PASS is left unbadged) under a summary / topics / video-digest **only when its stored verdict is still current** — it recomputes the sha256 fingerprint of the item's current output and badges only on a match, silently skipping a **stale** verdict (the output was re-generated since it was judged). So a FAIL whose output was fixed afterwards never shows a ❌. |
 | `sync` | `extract` + `fetch` + `generate`, in order. |
 | `status` | Counts and last-run timestamps. |
@@ -1166,6 +1228,10 @@ xbrain/
 │   ├── config.py         # config.toml loading
 │   ├── models.py         # pydantic data models (Item, Enrichment, Topic, ...)
 │   ├── store.py          # JSON load/save for items + topic pages
+│   ├── snapshot.py       # the data/ snapshot lifecycle — the auto-snapshot recovery boundary
+│   ├── diff.py           # `diff`: structured comparison of two snapshots
+│   ├── media.py          # `media`: photo + X-Article-image download (CDN size fallback)
+│   ├── describe.py       # `describe`: vision-LLM photo descriptions, fed into enrich
 │   ├── refresh.py        # refresh-media backfill: video media swap + size estimate
 │   ├── video_media.py    # download-videos: mp4 byte download (reuses media.py)
 │   ├── video_select.py   # list-videos: read-only video catalog (VideoRow)
@@ -1174,11 +1240,15 @@ xbrain/
 │   ├── video_frames.py   # digest-video --frames: ffmpeg key-frame extraction + classify (no ML)
 │   ├── vision.py         # digest-video --frames: external vision subprocess (no ML in core)
 │   ├── digest.py         # digest-video: fetch → transcribe (+ optional frames) → attach x_video
+│   ├── video_digest.py   # video-digest: the long-form per-video digest worksheet hand-off
 │   ├── extract/          # X extraction (Playwright + GraphQL interception)
 │   │   ├── browser.py    #   session / browser context
 │   │   ├── graphql.py    #   parse X's internal GraphQL responses
 │   │   ├── extractor.py  #   scroll + capture loop
+│   │   ├── article.py    #   parse an X Article body (Draft.js blocks + entityMap)
+│   │   ├── video.py      #   build a playable video entry (live parser + archive)
 │   │   └── threads.py    #   expand own-tweet threads
+│   ├── payloads.py       # persist the raw X payload so `reextract` can re-parse it offline
 │   ├── fetch.py          # external article fetch + Firecrawl fallback
 │   ├── fetch_x.py        # fetch linked X tweets / articles
 │   ├── archive.py        # import the official X data archive
@@ -1186,14 +1256,34 @@ xbrain/
 │   ├── enrich.py         # the `enrich` stage
 │   ├── executors/        # the `api` executor (the LLM-judgment seam)
 │   ├── worksheet.py      # the enrich worksheet hand-off
+│   ├── llm_json.py       # shared helper: pull a JSON object out of an LLM reply
 │   ├── topic_synth.py    # topic-overview synthesis (api + worksheet)
 │   ├── topics.py         # topic-page computation + rendering
+│   ├── evidence.py       # ONE definition of what counts as evidence for a generated output
+│   ├── verification.py   # the `verify` stage: the LLM-as-judge ensemble
+│   ├── verification_audit.py  # `verify --audit`: the judge≠party second pass
+│   ├── entity_grounding.py    # `verify-entities`: the deterministic, token-free check
 │   ├── validate.py       # the mechanical validator (guardrails)
 │   ├── rubrics.py        # load the declarative rubrics + guardrails
-│   ├── rubrics/          # rubric-*.md + guardrails.yaml (the processing rules)
-│   ├── generate.py       # render item notes + index + log
-│   └── notes_io.py       # shared markdown helpers
-├── scripts/              # import_chrome_session.py / import_safari_session.py
+│   ├── rubrics/          # rubric-*.md (the processing rules)
+│   ├── guardrails.yaml   # the declarative guardrails the validator enforces
+│   ├── i18n.py           # the wiki's own UI strings, keyed by output language
+│   ├── generate.py       # render item notes + topic notes + index + log + dashboard.html
+│   ├── dashboard.py      # build the self-contained interactive dashboard.html
+│   ├── resources/        # dashboard.template.html + the vendored echarts.min.js
+│   ├── notes_io.py       # shared markdown helpers
+│   └── gate_audit.py     # does the `quality` gate DO what it reports? (pure; called by CI)
+├── scripts/
+│   ├── import_chrome_session.py    # cookie import — Chrome
+│   ├── import_safari_session.py    # cookie import — Safari
+│   ├── xbrain-transcribe           # [transcribe].command → parakeet-mlx (English only)
+│   ├── xbrain-transcribe-auto      # [transcribe].command → language router (multilingual)
+│   ├── xbrain-transcribe-mlx       #   router backend: mlx-whisper on the Apple GPU
+│   ├── xbrain-transcribe-whisper   #   router backend: the whisper CLI, CPU, portable
+│   ├── xbrain-vision               # [vision].command → local mlx-vlm or cloud Claude
+│   ├── check.sh                    # the ten-check quality gate (same script locally and in CI)
+│   ├── audit_gate_issue.sh         # raise/stand down the alarm when the gate is caught lying
+│   └── announce_red_branch.sh      # file/resolve the issue for a RED gated branch
 ├── tests/                # pytest suite (test-first; one test file per module)
 ├── config.toml.example   # configuration template
 └── pyproject.toml        # deps, tooling, `poe` tasks
