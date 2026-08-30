@@ -1355,12 +1355,32 @@ def test_caption_contract_is_bookkeeping_not_material_content():
     Stamping the contract on a source whose captions are byte-identical must NOT
     read as a material change. If it does, every `redescribe-frames` run bumps
     `content.fetched_at` on every source it touches and re-enriches the whole
-    video corpus for nothing. A `caption_contract` nested on `VideoFrame` would
-    have failed this, because `_source_signature`'s `exclude` is a FLAT set of
-    top-level fields and does not descend into `frames`.
+    video corpus for nothing.
+
+    The equality assertion at the end, BY ITSELF, is VACUOUS: pydantic v2
+    defaults to `extra="ignore"` at runtime, so if `caption_contract` were
+    nested on `VideoFrame` instead of on `ContentSourceSuccess`, the
+    `caption_contract=...` kwarg below would be silently DROPPED by the
+    constructor, `before` and `after` would come out byte-identical for
+    entirely the WRONG reason, and the equality would pass regardless of
+    whether the design is actually correct. The three structural assertions
+    below are what actually pin the design (field on the right model, absent
+    from the wrong one, deny-listed); do not "simplify" them away as redundant
+    with the equality — they are the only thing that makes the equality mean
+    anything.
     """
-    from xbrain.fetch import _sources_materially_equal
+    from xbrain.fetch import _BOOKKEEPING_FIELDS, _sources_materially_equal
     from xbrain.models import FRAME_CAPTION_CONTRACT, ContentSourceSuccess, VideoFrame
+
+    # PLACEMENT IS THE POINT, and the behavioural assertion below cannot see it:
+    # pydantic v2 ignores unknown kwargs at runtime, so with `caption_contract`
+    # nested on `VideoFrame` the constructor call below would silently DROP it,
+    # both sources would come out identical, and the equality would pass for
+    # entirely the wrong reason. These three assertions are what actually pin the
+    # design; the equality then pins the behaviour that design buys.
+    assert "caption_contract" in ContentSourceSuccess.model_fields
+    assert "caption_contract" not in VideoFrame.model_fields
+    assert "caption_contract" in _BOOKKEEPING_FIELDS
 
     frames = [VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description="same")]
     before = ContentSourceSuccess(
