@@ -70,8 +70,22 @@ version = "v1"
 # audio track (silent clips, GIFs) attach as has_speech=false instead of failing
 # (parakeet writes no file for them). Point at the wrapper, or straight at
 # `parakeet-mlx` if you don't need silent-video handling.
+#
+# ON A MULTILINGUAL CORPUS, USE `scripts/xbrain-transcribe-auto` INSTEAD.
+# parakeet-mlx is English-only and does not fail on other languages — it
+# FABRICATES fluent English from Spanish audio, which is the worst failure mode
+# available: a confident transcript nobody can tell is invented, feeding the
+# digest and every downstream summary. The router detects the language on the
+# first 30s and dispatches: English → parakeet (fast), anything else or any
+# uncertainty → whisper. It prefers `xbrain-transcribe-mlx` (mlx-whisper on the
+# Apple GPU, ~25x faster than CPU whisper on the same clip and byte-identical
+# output) and falls back to `xbrain-transcribe-whisper` (brew whisper, CPU,
+# portable). Tuning knobs (all optional env vars): XBRAIN_ASR_DETECT_MODEL
+# (default `base`), XBRAIN_ASR_DETECT_SECONDS (30), XBRAIN_ASR_FORCE to pin one
+# backend, and XBRAIN_TRANSCRIBE_{PARAKEET,MLX,WHISPER} to override each binary.
 command = "parakeet-mlx"
 # command = "/absolute/path/to/scripts/xbrain-transcribe"
+# command = "/absolute/path/to/scripts/xbrain-transcribe-auto"   # multilingual
 # Optional model id passed through to the transcriber. Omit for the tool default.
 # model = "parakeet-tdt-0.6b-v2"
 

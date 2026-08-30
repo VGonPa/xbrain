@@ -3640,7 +3640,12 @@ def test_fetch_retry_failed_dry_run_reports_the_plan_and_never_touches_the_store
     out = _plain_output(result.output)
 
     assert "Reintentables: 1 items" in out  # only the transient one
-    assert "BLOQUEADOS por falta de FIRECRAWL_API_KEY: 1 items" in out
+    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in out
+    # It must say WHERE it looked: the key already existed on this machine once,
+    # stored by the `firecrawl` CLI, and a message naming only the env var sent
+    # the operator hunting for a key they already had.
+    assert "$FIRECRAWL_API_KEY" in out
+    assert "credentials.json" in out
     assert "Terminales" in out and "1 items" in out
     assert items_path.read_bytes() == before  # not a byte touched
     assert not (tmp_path / "data" / "snapshots").exists()
@@ -3662,7 +3667,7 @@ def test_fetch_retry_failed_without_the_key_does_not_replay_the_identical_failur
 
     result = runner.invoke(app, ["fetch", "--retry-failed"])
     assert result.exit_code == 0, result.output
-    assert "BLOQUEADOS por falta de FIRECRAWL_API_KEY: 1 items" in _plain_output(result.output)
+    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in _plain_output(result.output)
     assert calls == []  # the fetch never ran — nothing to gain, so nothing was requested
 
 

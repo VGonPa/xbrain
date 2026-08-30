@@ -1,0 +1,259 @@
+{
+  "content_state": {
+    "blocks": [
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [
+          {
+            "length": 14,
+            "offset": 0,
+            "style": "Bold"
+          }
+        ],
+        "key": "d5893",
+        "text": "Users complain -- ask for things, find bugs, file feature requests → back to the team to add to the tracker",
+        "type": "unordered-list-item"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 32,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "c0efq",
+        "text": " ",
+        "type": "atomic"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "acnlq",
+        "text": "And on and on. We haven't even hit AI yet, and there are already several loops in this picture.",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 64,
+            "length": 18,
+            "offset": 138
+          },
+          {
+            "key": 65,
+            "length": 10,
+            "offset": 215
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "3ocu6",
+        "text": "I did a bunch of research on this topic and cooked up a bunch of visualizations to try to explain the parts that matter, but I found that Calvin French-Owen (MTS on the codex team, founder of Segment) did a talk at AI Council that did a much better and cleaner job, so I'm just gonna drop this animation here inspired by his slides:",
+        "type": "unstyled"
+      },
+      {
+        "data": {},
+        "entityRanges": [
+          {
+            "key": 66,
+            "length": 1,
+            "offset": 0
+          }
+        ],
+        "inlineStyleRanges": [],
+        "key": "2bv6i",
+        "text": " ",
+        "type": "atomic"
+      },
+      {
+        "data": {},
+        "entityRanges": [],
+        "inlineStyleRanges": [],
+        "key": "f96v5",
+        "text": "To make a model better at coding, you're gonna:",
+        "type": "unstyled"
+      }
+    ],
+    "entityMap": [
+      {
+        "key": "66",
+        "value": {
+          "data": {
+            "entityKey": "b383536d-b470-40cf-9d11-fffa01b3b97a",
+            "mediaItems": [
+              {
+                "localMediaId": "43",
+                "mediaCategory": "AmplifyVideo",
+                "mediaId": "2080401322218758144"
+              }
+            ]
+          },
+          "mutability": "Immutable",
+          "type": "MEDIA"
+        }
+      },
+      {
+        "key": "32",
+        "value": {
+          "data": {
+            "entityKey": "bb5eff3d-8190-417f-bc2f-824ede7aaf09",
+            "mediaItems": [
+              {
+                "localMediaId": "13",
+                "mediaCategory": "AmplifyVideo",
+                "mediaId": "2080400367033217024"
+              }
+            ]
+          },
+          "mutability": "Immutable",
+          "type": "MEDIA"
+        }
+      },
+      {
+        "key": "64",
+        "value": {
+          "data": {
+            "entityKey": "b7b49284-8499-4329-89c7-00ed32b342e4",
+            "url": "https://x.com/calvinfo"
+          },
+          "mutability": "Mutable",
+          "type": "LINK"
+        }
+      }
+    ]
+  },
+  "id": "QXJ0aWNsZUVudGl0eToyMDc4NzEwNDEzMzQ1NDAyODgw",
+  "is_grok_summary_eligible": true,
+  "lifecycle_state": {
+    "modified_at_secs": 1785184178
+  },
+  "media_entities": [
+    {
+      "id": "QXBpTWVkaWE6DAAECgABHN8R+ukaIAAKAAIAAAAAAAAAAAAA",
+      "media_id": "2080401322218758144",
+      "media_info": {
+        "__typename": "ApiVideo",
+        "aspect_ratio": {
+          "denominator": 9,
+          "numerator": 16
+        },
+        "duration_millis": 24016,
+        "preview_image": {
+          "color_info": {
+            "palette": [
+              {
+                "percentage": 98.96,
+                "rgb": {
+                  "blue": 255,
+                  "green": 255,
+                  "red": 255
+                }
+              },
+              {
+                "percentage": 1.04,
+                "rgb": {
+                  "blue": 222,
+                  "green": 193,
+                  "red": 104
+                }
+              }
+            ]
+          },
+          "original_img_height": 1080,
+          "original_img_url": "https://pbs.twimg.com/amplify_video_thumb/2080401322218758144/img/f7ow19XebOIFqSPf.jpg",
+          "original_img_width": 1920
+        },
+        "variants": [
+          {
+            "bit_rate": 832000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080401322218758144/vid/avc1/640x360/ieMny60NfIFpFCnY.mp4?tag=29"
+          },
+          {
+            "bit_rate": 256000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080401322218758144/vid/avc1/480x270/U8clvtz68MBDyeqc.mp4?tag=29"
+          },
+          {
+            "content_type": "application/x-mpegURL",
+            "url": "https://video.twimg.com/amplify_video/2080401322218758144/pl/HEuqqVaAUiRalZOb.m3u8?tag=29"
+          },
+          {
+            "bit_rate": 10368000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080401322218758144/vid/avc1/1920x1080/TAmphZindte_e56f.mp4?tag=29"
+          },
+          {
+            "bit_rate": 2176000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080401322218758144/vid/avc1/1280x720/O7DfVZoV5MnpknSq.mp4?tag=29"
+          }
+        ]
+      },
+      "media_key": "13_2080401322218758144"
+    },
+    {
+      "id": "QXBpTWVkaWE6DAAECgABHN8RHIObcAAKAAIAAAAAAAAAAAAA",
+      "media_id": "2080400367033217024",
+      "media_info": {
+        "__typename": "ApiVideo",
+        "aspect_ratio": {
+          "denominator": 9,
+          "numerator": 16
+        },
+        "duration_millis": 41520,
+        "preview_image": {
+          "color_info": {
+            "palette": [
+              {
+                "percentage": 100,
+                "rgb": {
+                  "blue": 255,
+                  "green": 255,
+                  "red": 255
+                }
+              }
+            ]
+          },
+          "original_img_height": 720,
+          "original_img_url": "https://pbs.twimg.com/amplify_video_thumb/2080400367033217024/img/fzKh_OaEyf3OqYzU.jpg",
+          "original_img_width": 1280
+        },
+        "variants": [
+          {
+            "bit_rate": 256000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080400367033217024/vid/avc1/480x270/AoeZ2rE0NMo1hWiL.mp4?tag=29"
+          },
+          {
+            "bit_rate": 832000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080400367033217024/vid/avc1/640x360/sA5abyY6xyWcnyKI.mp4?tag=29"
+          },
+          {
+            "bit_rate": 2176000,
+            "content_type": "video/mp4",
+            "url": "https://video.twimg.com/amplify_video/2080400367033217024/vid/avc1/1280x720/ZCzXM0TiRECKMZwi.mp4?tag=29"
+          },
+          {
+            "content_type": "application/x-mpegURL",
+            "url": "https://video.twimg.com/amplify_video/2080400367033217024/pl/Wvsenc7q_7n4kQ5d.m3u8?tag=29"
+          }
+        ]
+      },
+      "media_key": "13_2080400367033217024"
+    }
+  ],
+  "metadata": {
+    "first_published_at_secs": 1784911887
+  },
+  "preview_text": "or: the harness is not enough\nUpdate - the talk version of this post is live on youtube: https://www.youtube.com/watch?v=Ib5GBkD555M \nPart 1 in a series. \nPart 2 is here: https://x.com/dexhorthy/status/2081058573556306030 \nPart 3 is here:",
+  "rest_id": "2078710413345402880",
+  "summary_text": "- We're racing to lights-off AI software factories but they fail: codebases degrade, bugs and incidents rise, maintainability collapses.\n- Models ace benchmarks yet produce slop because RL training penalizes nothing for bad design or shotgun surgery.\n- No amount of harness engineering, loops, or token-maxxing fixes this core model-training limitation.\n- I tried full lights-off and ended up rewriting after repeated outages and claude spaghetti.\n- Human steering remains essential for complex production codebases to avoid setting them on fire.",
+  "title": "Why Software Factories Fail"
+}

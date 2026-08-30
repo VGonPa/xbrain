@@ -29,6 +29,7 @@ from xbrain.models import (
     ArticleBlock,
     ArticleImageBlock,
     ArticleTextBlock,
+    ArticleVideoBlock,
     Content,
     ContentSource,
     ContentSourceFailure,
@@ -216,10 +217,12 @@ def _structured_article(captured: list[dict], url: str) -> ContentSourceSuccess 
         )
     title, blocks = max(parsed, key=lambda item: len(item[1]))
     n_images = sum(1 for b in blocks if isinstance(b, ArticleImageBlock))
+    n_videos = sum(1 for b in blocks if isinstance(b, ArticleVideoBlock))
     logger.info(
-        "article: built structured body (%d blocks, %d images) for %s",
+        "article: built structured body (%d blocks, %d images, %d videos) for %s",
         len(blocks),
         n_images,
+        n_videos,
         url,
     )
     return ContentSourceSuccess(

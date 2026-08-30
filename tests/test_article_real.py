@@ -26,7 +26,9 @@ from xbrain.models import (
     ARTICLE_PARAGRAPH_SEP,
     ArticleImageBlock,
     ArticleTextBlock,
+    ArticleVideoBlock,
     ContentSourceSuccess,
+    MediaVideoPending,
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -204,3 +206,111 @@ def test_missing_media_entities_drops_image_but_keeps_text() -> None:
 def test_foreign_payload_degrades_to_none_empty(payload: Any) -> None:
     """Any non-Article / empty-body shape degrades to `(None, [])`, never a crash."""
     assert parse_article_content_state(payload) == (None, [])
+
+
+# --------------------------------------------------------------------------
+# Embedded VIDEO and entity-borne text — real payloads for the block-drop fix.
+#
+# `art-Video_Embed` is trimmed from an Article whose body embeds two native X
+# videos; `art-Rich_Entities` from one whose body carries `MARKDOWN` code blocks,
+# `DIVIDER` rules and `TWEET` embeds. Both used to lose that content entirely:
+# the parser resolved a photo URL or nothing, and every non-photo atomic block
+# went to the drop log.
+# --------------------------------------------------------------------------
+
+
+def test_video_embed_resolves_native_videos_not_their_posters() -> None:
+    """An article `MEDIA` entity can be an `ApiVideo` — it must stay a video.
+
+    Its poster lives one level deeper than a photo's URL
+    (`media_info.preview_image.original_img_url`), which is why the lookup
+    returned None and the block was dropped. Resolving it as a PHOTO would be
+    just as wrong: a demo clip silently demoted to a still frame.
+    """
+    _title, blocks = parse_article_content_state(_load("Video_Embed"))
+    videos = [b for b in blocks if isinstance(b, ArticleVideoBlock)]
+
+    assert len(videos) == 2
+    assert _image_urls(blocks) == []  # the posters must NOT become image blocks
+    for video in videos:
+        assert isinstance(video.media, MediaVideoPending)
+        # The playable stream, never the poster.
+        assert video.media.url.startswith("https://video.twimg.com/")
+        assert video.media.url.endswith(".mp4") or ".mp4?" in video.media.url
+        assert (video.media.thumbnail_url or "").startswith("https://pbs.twimg.com/")
+        assert video.media.duration_millis
+
+
+def test_video_embed_picks_the_highest_bitrate_variant() -> None:
+    """X spells it `bit_rate` here and `bitrate` on a tweet — one character apart.
+
+    Reading the tweet key against an article payload made every bitrate compare
+    as 0, so `max()` returned the FIRST mp4: a 480x270 stream where a 1920x1080
+    one was on offer. It kept working, just badly.
+    """
+    _title, blocks = parse_article_content_state(_load("Video_Embed"))
+    videos = [b for b in blocks if isinstance(b, ArticleVideoBlock)]
+
+    best = max(videos, key=lambda b: b.media.bitrate or 0)
+    assert best.media.bitrate == 10368000
+    assert "1920x1080" in best.media.url
+
+
+def test_video_blocks_sit_in_document_order_between_text() -> None:
+    """The clip stays where the author put it, not appended at the end."""
+    _title, blocks = parse_article_content_state(_load("Video_Embed"))
+    first_video = next(i for i, b in enumerate(blocks) if isinstance(b, ArticleVideoBlock))
+
+    assert any(isinstance(b, ArticleTextBlock) for b in blocks[:first_video])
+    assert any(isinstance(b, ArticleTextBlock) for b in blocks[first_video + 1 :])
+
+
+def test_rich_entities_recovers_markdown_dividers_and_tweets() -> None:
+    """Entity-borne content survives: code blocks, rules and embedded posts."""
+    _title, blocks = parse_article_content_state(_load("Rich_Entities"))
+    texts = [b.text for b in blocks if isinstance(b, ArticleTextBlock)]
+    body = "".join(texts)
+
+    # Three embedded posts, each kept as its canonical handle-less URL.
+    assert body.count("https://x.com/i/status/") == 3
+    # And the article's own prose is still there, in order, around them.
+    assert texts[0].startswith('"¿Podría Madrid')
+    assert len(texts) == len(blocks)  # this fixture is text-only once recovered
+
+
+def test_recovered_blocks_keep_the_flattened_text_invariant() -> None:
+    """`text` must still equal the concatenation of the text blocks.
+
+    The recovery adds NEW `ArticleTextBlock`s mid-body, so the `\\n\\n` separator
+    bookkeeping has to hold for them too — otherwise the flattened body that
+    `enrich`/`topics` read drifts from what the note renders.
+    """
+    for name in ("Rich_Entities", "Video_Embed"):
+        _title, blocks = parse_article_content_state(_load(name))
+        source = ContentSourceSuccess(
+            kind="x_article",
+            url="https://x.com/i/article/1",
+            text=_flatten_blocks(blocks),
+            blocks=blocks,
+            http_status=200,
+            attempts=1,
+        )
+        assert source.text == "".join(
+            b.text for b in source.blocks if isinstance(b, ArticleTextBlock)
+        )
+        # The first text run never carries a leading separator.
+        first = next(b for b in blocks if isinstance(b, ArticleTextBlock))
+        assert not first.text.startswith(ARTICLE_PARAGRAPH_SEP)
+
+
+def test_entity_borne_text_does_not_trip_the_media_warning(caplog) -> None:
+    """`MARKDOWN`/`DIVIDER`/`TWEET` blocks are atomic but are NOT media.
+
+    Counting any atomic block as "had media" made every prose-and-code article
+    log a media-drift warning, and a warning that cries wolf on ordinary input
+    is one nobody reads when it is real.
+    """
+    with caplog.at_level("WARNING", logger="xbrain.extract.article"):
+        _title, blocks = parse_article_content_state(_load("Rich_Entities"))
+    assert blocks
+    assert not any("resolved 0 images" in r.message for r in caplog.records)

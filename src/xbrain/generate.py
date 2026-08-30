@@ -18,6 +18,7 @@ from xbrain.models import (
     QUOTED_CONTENT_KINDS,
     ArticleImageBlock,
     ArticleTextBlock,
+    ArticleVideoBlock,
     ContentSourceFailure,
     ContentSourceSuccess,
     FailureReason,
@@ -212,7 +213,9 @@ def generate(
                 _mirror_item_article_images(item, media_root, vault_media_dir)
             _write_note(items_dir, item, strings, topic_style)
     try:
-        _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+        _write_dashboard(
+            items, output_dir, items_dir, topic_pages or {}, media_root, output_language
+        )
     except Exception:  # noqa: BLE001 - the dashboard is a best-effort secondary artifact
         logger.warning("Dashboard generation failed; item notes were written.", exc_info=True)
 
@@ -223,6 +226,7 @@ def _write_dashboard(
     items_dir: Path,
     topic_pages: dict[str, TopicPage],
     media_root: Path | None,
+    output_language: str,
 ) -> None:
     """Write the self-contained interactive `dashboard.html` from the store.
 
@@ -241,7 +245,7 @@ def _write_dashboard(
     thumbs = collect_thumbnails(items, media_root, id2note)
     now = datetime.now(timezone.utc)
     updated = f"{now:%b} {now.day}, {now.year}".upper()
-    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated)
+    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated, output_language)
     (output_dir / "dashboard.html").write_text(render_dashboard_html(data), encoding="utf-8")
 
 
@@ -674,6 +678,36 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
     return []
 
 
+def _article_video_lines(block: ArticleVideoBlock) -> list[str]:
+    """Render one inline Article VIDEO block — embed or clickable stream link.
+
+    Mirrors the video convention in `_render_media_lines` so an article-embedded
+    clip reads the same as a tweet's: a downloaded video embeds its local mp4, a
+    failed one leaves a visible ⚠ line, and a still-pending one surfaces the
+    playable stream as a link rather than vanishing. `alt` (when X carried any)
+    becomes a `> …` caption, one `>` per physical line.
+
+    Pending is NOT silent here, unlike a pending image: an article video has no
+    later pass that advances it (`xbrain media` downloads photos), so staying
+    silent would reproduce exactly the defect this block exists to fix — the
+    video invisible in the note.
+    """
+    entry = block.media
+    caption = [f"> {line}" for line in block.alt.splitlines()] if block.alt else []
+    if isinstance(entry, MediaVideoDownloaded):
+        return [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]", *caption]
+    if isinstance(entry, MediaVideoFailed):
+        reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
+        return [f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>", *caption]
+    if isinstance(entry, MediaVideoPending):
+        return [f"> 🎥 [Ver vídeo]({entry.url}) (pendiente de descarga)", *caption]
+    logger.warning(
+        "Article video carries an unexpected %s media variant; skipping its embed.",
+        type(entry).__name__,
+    )
+    return []
+
+
 def _article_caption_lines(
     block: ArticleImageBlock, entry: MediaPhotoDownloaded | MediaPhotoDescribed
 ) -> list[str]:
@@ -705,15 +739,23 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
     """
     body: list[str] = []
     for block in source.blocks:
+        # Dispatch on EVERY variant explicitly, with `assert_never` closing it:
+        # an `else` catch-all would have quietly routed the new video block into
+        # the image renderer and produced wrong output instead of a type error.
         if isinstance(block, ArticleTextBlock):
             text = block.text.removeprefix(ARTICLE_PARAGRAPH_SEP)
             if text:
                 body += [text, ""]
+            continue
+        if isinstance(block, ArticleImageBlock):
+            media_lines = _article_image_lines(block)
+        elif isinstance(block, ArticleVideoBlock):
+            media_lines = _article_video_lines(block)
         else:
-            image_lines = _article_image_lines(block)
-            if image_lines:
-                body += image_lines
-                body.append("")
+            assert_never(block)
+        if media_lines:
+            body += media_lines
+            body.append("")
     if not body:
         return []
     heading = source.title or source.url
