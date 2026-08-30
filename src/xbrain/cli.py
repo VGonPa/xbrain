@@ -1481,7 +1481,16 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
         )
 
     def _describe(path: Path) -> str:
-        return describe_image(path, command=cfg.vision_command, model=model)
+        # `cfg.output_language` — the WIKI's language, which is what the frame
+        # rubric's `{language}` means. NOT `digest-video --language`, which is the
+        # AUDIO language passed to the transcriber. `language` became required on
+        # `describe_image` in #90 (a default would silently ship an unresolved
+        # `{language}`); wiring it here is the minimal fix this call site needs to
+        # keep working — the dedicated pinning test for it lives in a later PR3
+        # step (`test_frames_render_the_rubric_in_the_output_language`).
+        return describe_image(
+            path, command=cfg.vision_command, model=model, language=cfg.output_language
+        )
 
     return VisualConfig(
         media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe, reduce_fn=_reduce

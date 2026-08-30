@@ -27,20 +27,36 @@ transcriber — aborts the run), a **non-zero exit / timeout / empty output**
 (`VisionFailed`, which the digest treats as a per-video visual-layer failure and
 records). The `runner` (a `subprocess.run` stand-in) is injectable so tests run
 offline against a fake — no real vision model, ever.
+
+- The frame-caption rubric is delivered in the environment as
+  ``XBRAIN_VISION_PROMPT``. The argv contract is unchanged, so a command that
+  ignores the variable still works — it just receives no caption discipline.
 """
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess  # nosec B404 - the vision model is an external subprocess by design (#44)
 from collections.abc import Callable
 from pathlib import Path
+
+from xbrain.rubrics import load_rubric
 
 # A generous wall-clock cap: describing a single downscaled frame is quick, but a
 # wedged VLM process must not hang the run forever.
 _DEFAULT_TIMEOUT_SECONDS = 300
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+# The environment variable carrying the frame-caption rubric to the vision
+# subprocess (#90). It is delivered OUT OF BAND, in the environment, precisely so
+# the documented argv contract `<command> [--model M] <image-path>` stays frozen:
+# a third-party or older command simply never reads the variable and keeps
+# working. The trade-off is accepted and documented — such a command receives no
+# caption discipline, which is why the bundled `scripts/xbrain-vision` is the
+# reference implementation.
+PROMPT_ENV_VAR = "XBRAIN_VISION_PROMPT"
 
 
 class VisionError(RuntimeError):
@@ -64,10 +80,10 @@ def _build_argv(command: str, model: str | None, path: Path) -> list[str]:
     return argv
 
 
-def _run_vision(argv: list[str], runner: Runner, timeout_seconds: int) -> str:
+def _run_vision(argv: list[str], runner: Runner, timeout_seconds: int, env: dict[str, str]) -> str:
     """Run the vision command; return its stdout, or raise a clear operator error."""
     try:
-        completed = runner(argv, capture_output=True, text=True, timeout=timeout_seconds)
+        completed = runner(argv, capture_output=True, text=True, timeout=timeout_seconds, env=env)
     except FileNotFoundError as exc:
         raise VisionNotFound(
             f"vision command {argv[0]!r} not found — install it or set a valid "
@@ -96,6 +112,7 @@ def describe_image(
     path: Path | str,
     *,
     command: str,
+    language: str,
     model: str | None = None,
     runner: Runner | None = None,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
@@ -109,6 +126,11 @@ def describe_image(
     abort the run. A non-zero exit, timeout, or **empty output** raises
     `VisionFailed` (never a silent empty description). `runner` defaults to
     `subprocess.run`, resolved at call time so it stays monkeypatchable.
+
+    `language` is the wiki's OUTPUT language (`[output].language`), used to render
+    the frame rubric's `{language}`. It is NOT `digest-video --language`, which is
+    the AUDIO language handed to the transcriber. It is required, with no default,
+    because a default would ship an unresolved `{language}` to the model.
     """
     if not command.strip():
         raise VisionNotFound(
@@ -117,7 +139,10 @@ def describe_image(
         )
     active_runner: Runner = runner if runner is not None else subprocess.run
     argv = _build_argv(command, model, Path(path))
-    stdout = _run_vision(argv, active_runner, timeout_seconds)
+    # The rubric is loaded HERE, not passed in, so every caller (digest-video and
+    # redescribe-frames) inherits the same discipline from the same file.
+    env = {**os.environ, PROMPT_ENV_VAR: load_rubric("describe-frame", language=language)}
+    stdout = _run_vision(argv, active_runner, timeout_seconds, env)
     description = stdout.strip()
     if not description:
         raise VisionFailed(

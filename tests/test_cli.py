@@ -2630,7 +2630,7 @@ def test_digest_video_vision_model_override(tmp_path: Path, monkeypatch):
     _wire_frames(monkeypatch)  # extract → slide frames; real classify_visual runs
     seen: list = []
 
-    def _capture(path, *, command, model):
+    def _capture(path, *, command, model, language=None):
         seen.append(model)
         return "slide"
 
@@ -2665,7 +2665,7 @@ def test_digest_video_vision_model_defaults_to_config(tmp_path: Path, monkeypatc
     _wire_frames(monkeypatch)
     seen: list = []
 
-    def _capture(path, *, command, model):
+    def _capture(path, *, command, model, language=None):
         seen.append(model)
         return "slide"
 
