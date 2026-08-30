@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""xbrain `[transcribe].command` backend — mlx-whisper (multilingual, Apple GPU).
+
+Same contract as the other wrappers: xbrain invokes
+`<cmd> [--model M] --output-format json --output-dir <DIR> <media>` and reads the
+first NON-EMPTY `*.json` in `<DIR>`. This one emits `{text, language, segments,
+has_speech}` directly.
+
+WHY, measured on this machine (M-series, 12-ago-2026) over a 68-second Spanish
+clip from the store: the brew `whisper` CLI took **7 min 25 s** — it warns
+`FP16 is not supported on CPU` and runs there — while mlx-whisper produced a
+character-identical transcript in **17.7 s**. Six times slower than realtime is
+not a backend you can point a nightly at; a backlog of a couple hundred videos
+turns a fixed pipeline back into a broken one. Hence a GPU path.
+
+mlx-whisper is pulled on demand through `uv run --with`, so nothing has to be
+installed into the environment ahead of time and no global state is touched. The
+first call downloads the wheel and the model; warm start is ~0.2 s. If `uv` or
+`mlx_whisper` is unavailable (a non-Apple machine, no network on first use) this
+script exits non-zero WITHOUT writing anything, and the router falls back to
+`xbrain-transcribe-whisper` — a missing accelerator degrades to slow, never to
+wrong.
+
+ENV
+  WHISPER_LANGUAGE  language to force, or "auto"/empty to let the model detect
+  WHISPER_MODEL     model name or an mlx-community repo id (default: small)
+  XBRAIN_UV         path to the `uv` binary (default: looked up on PATH)
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# Short names → the mlx-community repo that serves them. An id containing "/" is
+# passed through untouched, so any HF repo works without this map having to know it.
+MLX_REPOS = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large": "mlx-community/whisper-large-v3-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
+# Whisper's canned hallucinations on audio with NO speech. Kept in step with the
+# same list in `xbrain-transcribe-whisper`: both wrap the same model family, so
+# both inherit the same artefact, and a guard on only one backend would mean the
+# vault's protection depended on which machine ran the nightly.
+NO_SPEECH_ARTEFACTS = {
+    "subtítulos realizados por la comunidad de amara.org",
+    "subtítulos por la comunidad de amara.org",
+    "subtitulos realizados por la comunidad de amara.org",
+    "más videos en amara.org",
+    "subtitles by the amara.org community",
+    "thanks for watching!",
+    "thank you for watching!",
+    "thank you.",
+    "you",
+    "♪♪♪",
+    "[música]",
+    "[music]",
+    "(music)",
+}
+
+_DRIVER = """
+import json, sys
+import mlx_whisper
+media, repo, language = sys.argv[1], sys.argv[2], sys.argv[3]
+kwargs = {"path_or_hf_repo": repo}
+if language:
+    kwargs["language"] = language
+result = mlx_whisper.transcribe(media, **kwargs)
+json.dump(result, sys.stdout)
+"""
+
+
+def is_hallucinated_silence(text: str) -> bool:
+    """True when the WHOLE transcript is one of whisper's no-speech artefacts.
+
+    Whole-transcript match only: a video that MENTIONS Amara, or thanks its
+    viewers mid-sentence, is a real video with real speech.
+    """
+    return text.strip().strip('"“”').lower() in NO_SPEECH_ARTEFACTS
+
+
+def resolve_repo(model: str | None) -> str:
+    """The mlx repo id for a model name (an explicit `owner/repo` passes through)."""
+    name = (model or os.environ.get("WHISPER_MODEL") or "small").strip()
+    if "/" in name:
+        return name
+    return MLX_REPOS.get(name.lower(), MLX_REPOS["small"])
+
+
+def parse_args(args: list[str]) -> tuple[str, str | None, str]:
+    """Extract `(output_dir, model, media)` from xbrain's invocation."""
+    out_dir, model, positional = ".", None, []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--output-dir" and i + 1 < len(args):
+            out_dir, i = args[i + 1], i + 2
+        elif arg == "--model" and i + 1 < len(args):
+            model, i = args[i + 1], i + 2
+        elif arg.startswith("--"):
+            i += 2 if i + 1 < len(args) and not args[i + 1].startswith("--") else 1
+        else:
+            positional.append(arg)
+            i += 1
+    return out_dir, model, (positional[-1] if positional else "")
+
+
+def confirmed_no_audio(media: str) -> bool:
+    """True ONLY if ffprobe positively confirms `media` has no audio stream."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not media:
+        return False
+    probe = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            media,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return False
+    return "audio" not in probe.stdout
+
+
+def run_mlx(media: str, repo: str, language: str) -> dict | None:
+    """Transcribe via mlx-whisper inside a `uv run --with` environment, or None.
+
+    None means "this backend is not usable here" — no uv, no wheel, no model, a
+    crash. The caller exits non-zero without writing, so the router can fall back
+    to the CPU wrapper rather than the pipeline recording a failure.
+    """
+    uv = os.environ.get("XBRAIN_UV") or shutil.which("uv")
+    if not uv:
+        return None
+    with tempfile.TemporaryDirectory(prefix="xbrain-mlx-") as workdir:
+        driver = Path(workdir) / "driver.py"
+        driver.write_text(_DRIVER)
+        completed = subprocess.run(
+            [
+                uv,
+                "run",
+                "--no-project",
+                "--with",
+                "mlx-whisper",
+                # The private FITIZENS index in ~/.config/pip/pip.conf needs auth and
+                # would hang the resolve waiting on stdin; pin the public one.
+                "--index-url",
+                "https://pypi.org/simple",
+                "python",
+                str(driver),
+                media,
+                repo,
+                language,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            print(
+                f"xbrain-transcribe-mlx: mlx-whisper unavailable or failed "
+                f"(rc={completed.returncode}): {completed.stderr.strip()[-400:]}",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            return json.loads(completed.stdout)
+        except ValueError:
+            print("xbrain-transcribe-mlx: mlx-whisper produced unreadable output", file=sys.stderr)
+            return None
+
+
+def normalise(raw: dict) -> dict:
+    """mlx-whisper's result → the `{text, language, segments, has_speech}` xbrain reads."""
+    text = (raw.get("text") or "").strip()
+    segments = [
+        {"start": s.get("start"), "end": s.get("end"), "text": (s.get("text") or "").strip()}
+        for s in raw.get("segments") or []
+    ]
+    if is_hallucinated_silence(text):
+        print(
+            f"xbrain-transcribe-mlx: discarding known no-speech artefact ({text!r})",
+            file=sys.stderr,
+        )
+        text, segments = "", []
+    return {
+        "text": text,
+        "language": raw.get("language"),
+        "segments": segments,
+        "has_speech": bool(text),
+    }
+
+
+def main() -> int:
+    out_dir, model, media = parse_args(sys.argv[1:])
+    if not media:
+        print("xbrain-transcribe-mlx: no media file given", file=sys.stderr)
+        return 2
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / f"{Path(media).stem}.json"
+
+    if confirmed_no_audio(media):
+        target.write_text(
+            json.dumps({"text": "", "language": None, "segments": [], "has_speech": False})
+        )
+        return 0
+
+    language = (os.environ.get("WHISPER_LANGUAGE") or "").strip()
+    if language.lower() in ("auto", ""):
+        language = ""  # let the model detect
+    raw = run_mlx(media, resolve_repo(model), language)
+    if raw is None:
+        return 1  # NOT a transcription failure — an unusable backend. The router falls back.
+
+    target.write_text(json.dumps(normalise(raw), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

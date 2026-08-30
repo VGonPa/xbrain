@@ -2023,6 +2023,57 @@ def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, m
     assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id is None
 
 
+def test_extract_empty_capture_fails_loud_and_freezes_the_cursor(tmp_path: Path, monkeypatch):
+    """Capturing NOTHING must never read as "0 nuevos items" with exit 0.
+
+    The X operation rename (30-ago-2026) made every response fall through the
+    capture filter. The run reported success, the cursor kept its old value, and
+    four posts stayed out of the store for 18 days with no signal anywhere.
+    """
+    from xbrain.extract.extractor import OperationNotCaptured
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _nothing_captured(*_a, **_k):
+        raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline/UserTweets")
+
+    _mock_browser(monkeypatch, _nothing_captured)
+
+    result = runner.invoke(app, ["extract", "--source", "tweets"])
+
+    assert result.exit_code == 1, result.output
+    assert "0 respuestas" in result.output
+    assert "0 nuevos items" not in result.output
+    assert load_store(tmp_path / "data" / "items.json") == {}
+    # The cursor must be untouched: advancing it would make the next run look
+    # fresh and bury the breakage under a second false negative.
+    assert load_state(tmp_path / "data" / "state.json").own_tweets.last_seen_id is None
+
+
+def test_extract_one_broken_source_still_saves_the_healthy_one(tmp_path: Path, monkeypatch):
+    """A rename hits ONE operation, so `--source all` must not lose the other."""
+    from xbrain.extract.extractor import OperationNotCaptured
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _by_source(_context, source, *_a, **_k):
+        if source == "own_tweet":
+            raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline")
+        return [_linked_item("100")]
+
+    _mock_browser(monkeypatch, _by_source)
+
+    result = runner.invoke(app, ["extract", "--source", "all"])
+
+    assert result.exit_code == 1, result.output
+    state = load_state(tmp_path / "data" / "state.json")
+    assert list(load_store(tmp_path / "data" / "items.json")) == ["100"]
+    assert state.bookmarks.last_seen_id == "100"
+    assert state.own_tweets.last_seen_id is None
+
+
 # ------------------------------------------------------ list-videos / fetch-video
 
 
@@ -3668,7 +3719,12 @@ def test_fetch_retry_failed_dry_run_reports_the_plan_and_never_touches_the_store
     out = _plain_output(result.output)
 
     assert "Reintentables: 1 items" in out  # only the transient one
-    assert "BLOQUEADOS por falta de FIRECRAWL_API_KEY: 1 items" in out
+    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in out
+    # It must say WHERE it looked: the key already existed on this machine once,
+    # stored by the `firecrawl` CLI, and a message naming only the env var sent
+    # the operator hunting for a key they already had.
+    assert "$FIRECRAWL_API_KEY" in out
+    assert "credentials.json" in out
     assert "Terminales" in out and "1 items" in out
     assert items_path.read_bytes() == before  # not a byte touched
     assert not (tmp_path / "data" / "snapshots").exists()
@@ -3690,7 +3746,7 @@ def test_fetch_retry_failed_without_the_key_does_not_replay_the_identical_failur
 
     result = runner.invoke(app, ["fetch", "--retry-failed"])
     assert result.exit_code == 0, result.output
-    assert "BLOQUEADOS por falta de FIRECRAWL_API_KEY: 1 items" in _plain_output(result.output)
+    assert "BLOQUEADOS por falta de clave Firecrawl: 1 items" in _plain_output(result.output)
     assert calls == []  # the fetch never ran — nothing to gain, so nothing was requested
 
 

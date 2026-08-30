@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import filecmp
 import logging
+import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import assert_never, cast
@@ -18,6 +20,7 @@ from xbrain.models import (
     QUOTED_CONTENT_KINDS,
     ArticleImageBlock,
     ArticleTextBlock,
+    ArticleVideoBlock,
     ContentSourceFailure,
     ContentSourceSuccess,
     FailureReason,
@@ -212,7 +215,9 @@ def generate(
                 _mirror_item_article_images(item, media_root, vault_media_dir)
             _write_note(items_dir, item, strings, topic_style)
     try:
-        _write_dashboard(items, output_dir, items_dir, topic_pages or {}, media_root)
+        _write_dashboard(
+            items, output_dir, items_dir, topic_pages or {}, media_root, output_language
+        )
     except Exception:  # noqa: BLE001 - the dashboard is a best-effort secondary artifact
         logger.warning("Dashboard generation failed; item notes were written.", exc_info=True)
 
@@ -223,6 +228,7 @@ def _write_dashboard(
     items_dir: Path,
     topic_pages: dict[str, TopicPage],
     media_root: Path | None,
+    output_language: str,
 ) -> None:
     """Write the self-contained interactive `dashboard.html` from the store.
 
@@ -241,7 +247,7 @@ def _write_dashboard(
     thumbs = collect_thumbnails(items, media_root, id2note)
     now = datetime.now(timezone.utc)
     updated = f"{now:%b} {now.day}, {now.year}".upper()
-    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated)
+    data = compute_dashboard_data(items, topic_pages, id2note, thumbs, updated, output_language)
     (output_dir / "dashboard.html").write_text(render_dashboard_html(data), encoding="utf-8")
 
 
@@ -473,6 +479,30 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
+# The BSD/macOS flag marking a cloud file whose bytes are not on disk. Read from
+# the stdlib rather than hardcoded, and behind a `getattr` because Linux does not
+# define it — there, `os.stat_result` carries no `st_flags` at all, `_is_dataless`
+# is always False, and the byte comparison stays the ONLY path, exactly as before
+# this guard existed.
+_SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)
+
+# Granularity for the metadata-only comparison below. One second is not a tuned
+# tolerance measured on one volume: it is the coarsest timestamp resolution POSIX
+# guarantees, and the granularity every archive format preserves. A copy onto a
+# filesystem with a different resolution comes back rounded, so comparing
+# `st_mtime_ns` for equality would call an already-correct mirror stale.
+_MTIME_GRANULARITY_NS = 1_000_000_000
+
+
+def _is_dataless(st: os.stat_result) -> bool:
+    """True when the platform reports `st` as a cloud file with no local bytes.
+
+    Duck-typed on purpose: anything exposing `st_flags` answers, and anything
+    without it (every Linux stat result) answers False.
+    """
+    return bool(getattr(st, "st_flags", 0) & _SF_DATALESS)
+
+
 def _already_mirrored(source: Path, destination: Path) -> bool:
     """True when `destination` already holds exactly `source`'s bytes.
 
@@ -482,15 +512,23 @@ def _already_mirrored(source: Path, destination: Path) -> bool:
     files in memory at once, and this walk mirrors `MediaVideoDownloaded` as
     well as photos — one `download-videos` mp4 would be loaded twice over.
 
-    Do NOT read the size check as "the cloud-only case settles from metadata".
-    It settles the DIVERGENT case, which is the rare one; the common case here
-    is a destination that is already identical, whose size therefore matches
-    and whose bytes do get read. On an evicted iCloud file that read faults the
-    bytes back in. That is inherent to answering "are these the same bytes" —
-    the alternative (trusting size+mtime, rsync-style) would silently leave a
-    corrupted same-size copy in place, which the sibling test forbids. Reading
-    is still far cheaper than the rewrite it replaces, and it happens once per
-    run instead of writing every run.
+    Reading is the DEFAULT, and it is what every platform that can read without
+    consequence does: a same-size destination whose bytes rotted is repaired,
+    which a metadata comparison could never notice.
+
+    The exception is a file the platform reports as `dataless` — a cloud
+    placeholder whose bytes are not on disk. Opening one blocks until the sync
+    daemon fetches them, and when it cannot, it blocks with no timeout: a
+    `generate` run sat there 22 minutes at 0.0% CPU. That is not an iCloud
+    quirk; OneDrive, Dropbox and any FUSE/NFS placeholder behave the same way.
+    So when either side is dataless the answer comes from size + mtime, the
+    metadata the placeholder already carries, and NOTHING is opened.
+
+    That is a real, named trade: on those files a same-size, same-second
+    corruption goes unrepaired. It buys the guarantee that mirroring cannot
+    hang the run, and it is confined to the case where the strong check is
+    impossible — everywhere else, including all of Linux and every
+    materialised file on macOS, the byte comparison is unchanged.
 
     `filecmp`'s result cache is keyed on both paths AND both stat signatures,
     so a file that changed gets a new key. It cannot go stale here anyway: a
@@ -500,6 +538,14 @@ def _already_mirrored(source: Path, destination: Path) -> bool:
     A stat/read failure answers False: mirroring anyway is the safe direction —
     it costs a redundant copy, never a stale or missing embed.
     """
+    try:
+        src, dst = source.stat(), destination.stat()
+    except OSError:
+        return False
+    if src.st_size != dst.st_size:
+        return False
+    if _is_dataless(src) or _is_dataless(dst):
+        return src.st_mtime_ns // _MTIME_GRANULARITY_NS == dst.st_mtime_ns // _MTIME_GRANULARITY_NS
     try:
         return filecmp.cmp(source, destination, shallow=False)
     except OSError:
@@ -674,6 +720,36 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
     return []
 
 
+def _article_video_lines(block: ArticleVideoBlock) -> list[str]:
+    """Render one inline Article VIDEO block — embed or clickable stream link.
+
+    Mirrors the video convention in `_render_media_lines` so an article-embedded
+    clip reads the same as a tweet's: a downloaded video embeds its local mp4, a
+    failed one leaves a visible ⚠ line, and a still-pending one surfaces the
+    playable stream as a link rather than vanishing. `alt` (when X carried any)
+    becomes a `> …` caption, one `>` per physical line.
+
+    Pending is NOT silent here, unlike a pending image: an article video has no
+    later pass that advances it (`xbrain media` downloads photos), so staying
+    silent would reproduce exactly the defect this block exists to fix — the
+    video invisible in the note.
+    """
+    entry = block.media
+    caption = [f"> {line}" for line in block.alt.splitlines()] if block.alt else []
+    if isinstance(entry, MediaVideoDownloaded):
+        return [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]", *caption]
+    if isinstance(entry, MediaVideoFailed):
+        reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
+        return [f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>", *caption]
+    if isinstance(entry, MediaVideoPending):
+        return [f"> 🎥 [Ver vídeo]({entry.url}) (pendiente de descarga)", *caption]
+    logger.warning(
+        "Article video carries an unexpected %s media variant; skipping its embed.",
+        type(entry).__name__,
+    )
+    return []
+
+
 def _article_caption_lines(
     block: ArticleImageBlock, entry: MediaPhotoDownloaded | MediaPhotoDescribed
 ) -> list[str]:
@@ -705,15 +781,23 @@ def _article_blocks_lines(source: ContentSourceSuccess, strings: Strings) -> lis
     """
     body: list[str] = []
     for block in source.blocks:
+        # Dispatch on EVERY variant explicitly, with `assert_never` closing it:
+        # an `else` catch-all would have quietly routed the new video block into
+        # the image renderer and produced wrong output instead of a type error.
         if isinstance(block, ArticleTextBlock):
             text = block.text.removeprefix(ARTICLE_PARAGRAPH_SEP)
             if text:
                 body += [text, ""]
+            continue
+        if isinstance(block, ArticleImageBlock):
+            media_lines = _article_image_lines(block)
+        elif isinstance(block, ArticleVideoBlock):
+            media_lines = _article_video_lines(block)
         else:
-            image_lines = _article_image_lines(block)
-            if image_lines:
-                body += image_lines
-                body.append("")
+            assert_never(block)
+        if media_lines:
+            body += media_lines
+            body.append("")
     if not body:
         return []
     heading = source.title or source.url

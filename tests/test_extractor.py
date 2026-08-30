@@ -178,3 +178,54 @@ def test_a_rate_limited_run_keeps_the_payloads_it_already_captured(tmp_path):
 
     persist_payloads([_tweet_response("77"), _tweet_response("78")], tmp_path)
     assert stored_ids(tmp_path) == {"77", "78"}
+
+
+# --- Operation-name drift: X renames timeline operations without notice -------
+# Measured 30-ago-2026: the own-tweets timeline stopped answering to `UserTweets`
+# and now answers to `UserOriginalsTimeline`. The parser survived the rename (it
+# anchors on the `tweet_results` KEY, not on a path); the capture filter did not,
+# and a single stale literal turned the rename into silent data loss.
+
+
+def test_matches_operation_accepts_every_alias_for_a_source():
+    from xbrain.extract.extractor import _OPERATIONS, matches_operation
+
+    base = "https://x.com/i/api/graphql/abc123/"
+    assert matches_operation(base + "UserOriginalsTimeline", _OPERATIONS["own_tweet"])
+    # The pre-rename name must keep working: X A/B-tests these and rolls back.
+    assert matches_operation(base + "UserTweets", _OPERATIONS["own_tweet"])
+    assert matches_operation(base + "Bookmarks", _OPERATIONS["bookmark"])
+
+
+def test_matches_operation_rejects_other_operations_and_non_graphql_urls():
+    from xbrain.extract.extractor import _OPERATIONS, matches_operation
+
+    base = "https://x.com/i/api/graphql/abc123/"
+    # A background poll on the same page must not be mistaken for the timeline.
+    assert not matches_operation(base + "ProfileSpotlightsQuery", _OPERATIONS["own_tweet"])
+    assert not matches_operation(base + "Bookmarks", _OPERATIONS["own_tweet"])
+    # Scope stays on /graphql/: a REST endpoint whose path happens to contain the
+    # operation name is not a GraphQL body.
+    assert not matches_operation(
+        "https://x.com/i/api/1.1/UserTweets.json", _OPERATIONS["own_tweet"]
+    )
+
+
+def test_operations_table_maps_every_source_to_a_tuple_of_aliases():
+    from xbrain.extract.extractor import _OPERATIONS
+
+    assert set(_OPERATIONS) == {"bookmark", "own_tweet"}
+    for source, aliases in _OPERATIONS.items():
+        assert isinstance(aliases, tuple), source
+        assert aliases, source
+
+
+def test_operation_not_captured_is_not_a_rate_limit_error():
+    # The caller handles them the same way (never advance the cursor) but the
+    # cause differs, so an operator reading the log must be able to tell a rename
+    # from a block. Distinct types, both fatal for that source.
+    from xbrain.extract.extractor import OperationNotCaptured, RateLimitTruncated
+
+    assert issubclass(OperationNotCaptured, RuntimeError)
+    assert not issubclass(OperationNotCaptured, RateLimitTruncated)
+    assert not issubclass(RateLimitTruncated, OperationNotCaptured)

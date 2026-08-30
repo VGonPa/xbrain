@@ -11,15 +11,32 @@
 - [The shape of the system](#the-shape-of-the-system)
 - [The pipeline](#the-pipeline)
   - [extract](#extract)
+  - [payloads](#payloads)
+  - [refetch-truncated](#refetch-truncated)
   - [fetch](#fetch)
+  - [fetch: retry-failed and revalidate](#fetch-retry-failed-and-revalidate)
+  - [media](#media)
+  - [describe](#describe)
+  - [refresh-quoted](#refresh-quoted)
+  - [refresh-media](#refresh-media)
+  - [download-videos](#download-videos)
+  - [list-videos / fetch-video](#list-videos--fetch-video)
+  - [digest-video](#digest-video)
+  - [video-digest](#video-digest)
   - [vocab](#vocab)
   - [enrich](#enrich)
   - [topics](#topics)
   - [generate](#generate)
+  - [dashboard](#dashboard)
+  - [evidence](#evidence)
+  - [verify](#verify)
+  - [verify-entities](#verify-entities)
 - [Artifacts: the data layer](#artifacts-the-data-layer)
 - [Rubrics: the prompt layer](#rubrics-the-prompt-layer)
 - [Validator and guardrails](#validator-and-guardrails)
+- [The CI gate auditor](#the-ci-gate-auditor)
 - [Executors: where the LLM call actually happens](#executors-where-the-llm-call-actually-happens)
+- [Snapshot diffing](#snapshot-diffing)
 - [Invariants](#invariants)
 - [Where things live](#where-things-live)
 
@@ -148,7 +165,7 @@ optional Firecrawl fallback, Playwright for x.com).
 - **Reads:** `items.json`
 - **Writes:** `items.json` — each item's `content` + `content_source[]`
 - **Cached** — already-fetched items are skipped (use `--force` to refetch).
-- **Transient retries** — items whose only previous failures were `timeout` / `dns_error` are re-fetched on the next run without `--force`. Terminal failures (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`) stay skipped until `--force`.
+- **Transient retries** — items whose only previous failures were `timeout`, `dns_error` or `unknown_error` are re-fetched on the next run without `--force`. `unknown_error` is the uncategorised bucket (an extractor exception, an HTTP 429) and it is **transient by default**: silently classifying every uncaught failure as terminal is the failure mode that rule exists to avoid. The other six reasons (`not_found`, `paywall`, `forbidden`, `js_required`, `empty_content`, `blocked_interstitial`) are terminal and stay skipped until `--force` — or until `fetch --retry-failed`, which targets exactly the ones a retry could repair. Three plus six is the whole of `FailureReason`; nothing falls between the buckets.
 - **Failures recorded as evidence** — `http_status` + `failure_reason`, never silently dropped.
 - **Snapshots `data/` before `--force`** — recovery path if a forced refetch makes things worse.
 
@@ -215,6 +232,8 @@ Three extra ops sit outside the main loop:
 - **`xbrain sync`** — convenience: runs `extract → fetch → generate` back-to-back. No enrichment (which is the expensive LLM step you run on your own cadence).
 - **`xbrain status`** — read-only diagnostics: item counts, how many have links / content / enrichment, last extraction time per source.
 
+A further set of **repair and audit surfaces** also sits outside the loop: they read or rewrite what the loop already produced rather than advancing it. Each has its own section below — [`payloads`](#payloads) (`payload-stats`, `reextract`), [`refetch-truncated`](#refetch-truncated), [`fetch --retry-failed` / `--revalidate`](#fetch-retry-failed-and-revalidate), [`refresh-quoted`](#refresh-quoted), [`verify`](#verify) and [`verify-entities`](#verify-entities).
+
 ### Per-stage detail
 
 The numbered stages above are summarised; the sections below cover each one in depth.
@@ -225,20 +244,88 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 **Reads.** `data/state.json` (the last-seen item id per source) — so re-running is incremental.
 
-**Writes.** `data/items.json` (new `Item` records, merged with existing ones by `id`); `data/state.json` (updated cursors).
+**Writes.** `data/items.json` (new `Item` records, merged with existing ones by `id`); `data/state.json` (updated cursors); `data/payloads/<shard>/<id>.json.gz` — each tweet's raw GraphQL subtree, persisted **before** anything is parsed (see [`payloads`](#payloads)).
 
 **Media capture.** Photo entries become pending URLs. Video and animated-GIF entries capture the **playable stream** — the highest-bitrate progressive `video/mp4` from `video_info.variants`, falling back to the HLS (`.m3u8`) manifest when no mp4 is offered — plus the poster image as `thumbnail_url` and the chosen `bitrate` + `duration_millis` (so a later download can estimate size without fetching bytes). The video URL is the stream, never the poster. The same media parser (`extract/video.py`) is shared by the archive importer, so `import-archive` captures video identically.
 
 **Article-entity detection (#39 PR 2).** A long-form **Article** is an *entity* on the tweet result, not a text URL in `entities.urls`, so a **directly-bookmarked** Article was previously never captured. `graphql._extract_article_link` detects it — anchoring on the stable keys `article` → `article_results` → `result` → `rest_id` via the null-safe `_dig` walk (a shape drift degrades to *no link*, never a wrong one) — and synthesizes the canonical `https://x.com/i/article/<rest_id>` link onto the item (deduped against `entities.urls`). That URL is shaped so the **existing** `fetch` x.com path (`is_x_url` + `_classify_x_url` → the rendered-article branch) fires for it with no routing change. Extract only *synthesizes the link*: fetching the ordered article body (fetch → PR 3), downloading its inline images (media → PR 4) and rendering it as a blogpost (generate → PR 5) complete the chain end-to-end. *Fixture note:* the Article key path is pinned against a **constructed** fixture (`tests/test_graphql.py`), not a recorded live payload — validate it against a real bookmarked-Article GraphQL response before production reliance. X may **also** surface an Article via a `card`/`unified_card` variant; PR 2 does not parse that path (it degrades safely to *no link*) — a conscious deferral folded into the same real-payload validation step.
 
-**Why it is shaped like this.** The extractor anchors to **operation names** (`Bookmarks`, `UserTweets`) rather than query identifiers, because X rotates the identifiers constantly and anything that depends on them breaks within weeks. It scrolls slowly with randomized 5-12s pauses — fast scripts get rate-limited or banned.
+**Why it is shaped like this.** The extractor anchors to **operation names** rather than query identifiers, because X rotates the identifiers constantly and anything that depends on them breaks within weeks. It scrolls slowly with randomized 5-12s pauses — fast scripts get rate-limited or banned.
+
+**Operation names are aliases, not literals, and an empty capture fails closed.** X renames the operations too: the own-tweets timeline answered to `UserTweets` until X switched it to `UserOriginalsTimeline` (measured 2026-08-30). `_OPERATIONS` therefore holds a **tuple of aliases per source**, newest first, keeping the old names because X A/B-tests these and rolls them back: `bookmark → ("Bookmarks",)`, `own_tweet → ("UserOriginalsTimeline", "UserTweets")`. The *parser* survives such a rename on its own, since it anchors on the `tweet_results` key rather than a path; the **capture filter** did not, and a stale literal turned a rename into silent data loss — every response filtered out, `captured` empty, and the run reporting `0 nuevos items` with exit 0. So `extract_source` now **raises `OperationNotCaptured`** when it saw zero responses for the operation across a whole scroll. A healthy timeline always answers at least once (an account with zero posts still gets an empty instruction list), so capturing nothing means we were not listening for the right name. The CLI leaves that source's cursor untouched, reports the source as incomplete and exits non-zero; the other source still saves, because a rename hits one operation at a time.
+
+### payloads
+
+**What it does.** `extract` persists each tweet's whole raw GraphQL subtree under `data/payloads/` before it parses anything, so parsing becomes a re-runnable transformation over data we own instead of a one-shot read of a stream that is gone the moment it is consumed (`payloads.py`, wired in `extract/extractor.py:persist_payloads`). Two commands read the store back: `xbrain reextract` re-runs the parser offline, `xbrain payload-stats` measures what it costs.
+
+**Why it exists.** `extract` used to capture X's response in flight, pull an `Item` out of it and throw the original away. When a parse bug surfaced months later — the parser read `legacy.full_text`, which X caps at 280 characters, and never read `note_tweet`, which was present in every payload — the fix was not a re-parse. It was a network round-trip to X: a logged-in browser, rate limits, and tweets that may since have been deleted or protected. Disk is cheap; going back to the source is not. With the payload on disk, a field we misread — or a field nobody read — is fixed offline, with no dependency on the post still existing.
+
+**Reads.** X's GraphQL responses, as `extract` intercepts them.
+
+**Writes.** `data/payloads/<shard>/<item-id>.json.gz` — one gzipped file per item, sharded by the id's last two characters. Per-item files rather than an append-only log: the access pattern is "re-parse item X" and "re-parse everything", both of which a log makes O(n) and needs compaction for. A per-item file is idempotent on re-sync (the same tweet overwrites itself) and lets one item be repaired in isolation; the shard keeps any one directory from holding 100k entries.
+
+**Credential keys are scrubbed at the seam.** `save_payload` runs `scrub` over the subtree before it writes, dropping a fixed deny-list of credential key names (`auth_token`, `authorization`, `cookie`, `ct0`, `session_id`, …). The scrub lives inside the writer, never in the caller — a caller that forgets is exactly how a token reaches disk. It matches **whole key names, never substrings**: the first version matched substrings and `auth` ate `author` / `author_id` / `authors`, deleting the author block on write with the original already discarded.
+
+**`reextract` shows the diff before it applies it.** `reextract_from_payloads` re-parses every stored payload and reports what *would* change across the whole corpus; `--apply` writes it. Only five fields are re-parsed: `text`, `links`, `quoted_id`, `thread`, `author`. **`media` is deliberately excluded** — the store holds enriched media (photos with a vision description, videos with a downloaded `local_path`) while a fresh parse emits pending states, so overwriting would destroy an evidence surface the summary was written from, and nothing would bump `fetched_at`, so it would never be re-enriched. `captured_at` is when *we* saw the tweet, so a re-parse never touches it. Items with no stored payload, and payloads that are present but unparseable, are reported in their own buckets: "cannot be re-extracted" is never allowed to look like "re-extracted cleanly". A dry run on the live store on 2026-08-30 covers 2,360 of 2,404 items, parses all of them, and finds 308 fields it would change: 253 `text`, 51 `author`, 4 `quoted_id` — 214 of those text rewrites are a truncated body becoming a longer one, at zero network cost (see [`refetch-truncated`](#refetch-truncated) for what the rest of that work list turns out to be).
+
+**`payload-stats` measures the store and projects it.** Count, raw bytes, gzipped bytes, per-item mean, and the projection to 10k and 100k items. Re-derived on the live store on **2026-08-30**: 3,423 payloads, 26.5 MB raw, 7.9 MB gzipped, mean **2,320 B/item** — so 10k items project to ~23 MB and 100k to ~232 MB. Of the 2,404 stored items, **2,360 have a payload on disk**; the other 44 predate persistence and are not re-extractable. Coverage grows on its own: every sync re-sees tweets already in the store and overwrites their payload, which is why the pre-persistence backlog keeps shrinking without anyone running a backfill. (The disk figures first quoted for this feature were taken from an X *Article* fixture that contains no tweets at all. This command exists so the number is measured on the real thing.)
+
+**Snapshot trigger.** `reextract --apply` snapshots `data/` first (label `pre-reextract`). The dry run and `payload-stats` write nothing and take no snapshot.
+
+### refetch-truncated
+
+**What it does.** Repairs the items whose tweet text was truncated at ingest. `items_needing_refetch` (`extract/graphql.py`) selects them; `--apply` re-fetches each one from X through a logged-in browser and writes the full text back.
+
+**Why the payloads mostly *do* help here, now — and three docstrings still say they do not.** This repair was written when the flagged items were all pre-persistence captures with nothing on disk to re-parse, so the only path was a network round-trip. That has stopped being true: `extract` re-sees these tweets on later syncs and `save_payload` overwrites, so the payload store has caught up with the backlog. Re-derived on the live store on 2026-08-30: of **707** flagged items, **702 have a stored payload**, and an offline `reextract` dry run (no network at all) rewrites the `text` of **222** of them, **214** to a longer body. **Run [`reextract`](#payloads) first**, because it is free. A payload is not automatically a repair, though — it carries the long-form body only if X sent one at capture time — so see the triage below for what the rest of the list actually is.
+
+Two things follow. First, `items_needing_refetch` flags on the **stored text alone** — it never consults the payload store — so the count is a work list, not a network bill: an item can be flagged while the evidence to repair it is already on disk. Second, the docstrings on `extract/graphql.py:items_needing_refetch`, `cli.py:refetch_truncated_command` and `payloads.py` all still assert that the payloads are not on disk for this population and that a re-fetch is therefore required. That was true when each was written and is false now; this section reflects the measurement, not those docstrings.
+
+**Why it matters.** `legacy.full_text` is capped at 280 characters: X cuts a long post mid-word and appends a `t.co` self-link. An item carrying half a sentence is handed to the generator with an instruction to summarise it, and the generator finishes the sentence itself.
+
+**707 is a work list, not a defect count.** Re-derived on 2026-08-30: **707 of 2,404 items are flagged**. `looks_truncated` decides on **length alone** — ≥274 characters of prose unconditionally, 265-273 only when the text does not end on a terminator, with `:` and `;` deliberately not counting as terminators — and it is biased towards flagging on purpose. Its docstring says why: a missed truncation reproduces the very fabrication the detector exists to catch, while a false flag costs one re-fetch.
+
+**The payloads triage the list into four groups, and only one of them needs the network.** The discriminating field is `note_tweet` — the long-form body, which X sends only when a post exceeds the 280-character `legacy.full_text` cap, and which `_tweet_text` prefers whenever it is present. Reading it off the stored payload settles what the length heuristic cannot:
+
+| Group | What the payload shows | Count | What it needs |
+|---|---|---|---|
+| Repairable offline | payload holds a **longer** body than the store | **214** | `reextract` — free, no network |
+| Already complete | payload's `note_tweet` body **is** what is stored | **358** | nothing |
+| Undetermined | **no `note_tweet`**, so the text is the capped `full_text` | **122** | a re-fetch, *if* they are truncated at all |
+| Changed, not lengthened | a re-parse rewrites the text without adding to it | **8** | inspect |
+| No payload | nothing on disk to compare against | **5** | a re-fetch |
+
+So `reextract` clears 214 for free; the largest group — **358** — needs nothing at all; and **at most ~127** items (the 122 plus the 5) could need the network, against the ~485 an earlier draft of this section claimed. "At most" is doing real work in that sentence: see the ceiling below.
+
+**Why the "already complete" group is a real finding and not the detector agreeing with itself.** The stored text of all 358 is byte-identical to the `note_tweet` body in their payloads: X served the whole post and we stored the whole post, and they are flagged only because a long post is long (median 725 characters, up to 13,173). This is read off a **different field** from the one the flag is computed on, which is what makes it evidence. The `arrives TRUNCATED` warning the re-parse emits is **not** evidence here, and an earlier draft of this section wrongly cited it: `_tweet_to_item` raises that warning by calling `looks_truncated` on the freshly-parsed text, so for an item whose text did not change it re-runs the same predicate over the same string and returns what it returned the first time. A perfect 480-of-480 agreement there is a tautology, not a measurement.
+
+**The ceiling on the 122 cannot be tightened, and the reason is the strongest evidence in this section.** "No `note_tweet`" is consistent with truncation but does not establish it: X omits the field for a post that genuinely fits in 280 characters, and such a post can still trip the 265-273 band. The obvious way to settle it is to ask whether the 122 look like the 214 we *know* were truncated. They do — on both signatures a reader would reach for, at a slightly higher rate:
+
+| | the 214 (known truncated) | the 122 (no `note_tweet`) |
+|---|---|---|
+| stored prose length, median | 277 | 277 |
+| inside the 265-292 band | 212 of 214 | 122 of 122 |
+| ends in a trailing `t.co` | 124 of 214 (58%) | 86 of 122 (70%) |
+
+That is a test that **could** have separated them and did not. If the 122 were ordinary complete posts that merely tripped a length band, they should have looked different somewhere — shorter, or without the appended link. So two readings survive and nothing in the store chooses between them: they are truncations whose payload never carried the body (a gap at capture time, not a fact about post length), or they are complete ~277-character posts that happen to end in the author's own link. Treat the 122 as **genuinely undetermined**, not as probably-truncated and not as probably-complete, and read ~127 as a ceiling whose real size nothing we hold can measure.
+
+In the other direction the 358 have their own soft edge: 14 carry a `note_tweet` body under 290 characters, and 52 end in a `t.co` — usually a link the author included rather than a cut, but not checked one by one. **214 remains the only hard number here**: the store disagreeing with its own stored evidence, item by item, on no heuristic at all.
+
+**Reads.** `data/items.json`; with `--apply`, live X through the logged-in Playwright session.
+
+**Writes.** `data/truncated-items.json` — id, url and current text for every affected item, written on every run, dry or not — and, with `--apply`, `data/items.json`.
+
+**Dry run by default, checkpointed on apply.** Without `--apply` it only reports. With it, `refetch_full_texts` (`fetch_x.py`) checkpoints the store every 25 items and again in a `finally`: this is deliberately human-paced browser work, hours of it, and a session expiry partway through must not discard the repairs already made. A failed or empty re-fetch leaves the truncated text alone — half a tweet is bad, blanking the item is worse, and for these items that text is the only evidence there is.
+
+**A repaired text nulls its enrichment.** The summary was written from half a sentence, so a repair sets `item.enriched = None` and the next `xbrain enrich` regenerates it. The normal re-enrichment trigger (`enrich._needs_reenrichment`, `content.fetched_at > enriched.enriched_at`) cannot reach this population: it requires `item.content is not None`, and these items typically have no content block at all. Any stored verification verdict follows automatically — the tweet is part of the source the judge read, so a repaired text changes the item's `contract_fingerprint` and the verdict stops being current (see [`verify`](#verify)).
+
+**Snapshot trigger.** `--apply` snapshots `data/` first (label `pre-refetch-truncated`), before the first repair lands. The dry run writes only the report file and takes no snapshot.
 
 ### fetch
 
 **What it does.** For every item with external links, downloads the full article text behind the URL so a saved link becomes a saved article. Handles four kinds of content sources:
 
 - `external_article` — a regular web page, fetched via HTTP + Trafilatura extraction, optional Firecrawl fallback.
-- `x_article` — an `x.com/i/article/...` long-form post. `fetch` first tries the **structured path** (#39 PR 3): it intercepts the article-content GraphQL response (the same `page.on("response", …)` interception `_fetch_tweet` uses for `TweetDetail`, matching a GraphQL URL whose op name contains `article`) and parses its Draft.js `content_state` (`extract/article.py`, a pure `parse_article_content_state`) into an **ordered** `blocks` body — `ArticleTextBlock` text runs and `ArticleImageBlock` inline images (each a `MediaPhotoPending`, downloaded later by [`media`](#media)) IN DOCUMENT ORDER. The flattened `text` is set to the exact `"".join` of the text-run texts (data-model invariant #12), so `enrich`/`topics` consume it unchanged. **Fallback:** on any interception/parse miss the fetch degrades to the retained `trafilatura.extract(html)` text-only path (`blocks == []`) — never a crash, never a partial/wrong block set masquerading as complete; a genuinely empty article still records the `empty_content` failure. The parser anchors only on stable Draft.js key names and the article op name is UNCONFIRMED against a live payload — validate before production reliance (RFC #39 open-Q #4). The media download of those images is #39 PR 4 ([media](#media)); the blogpost render — the ordered text+image note — is #39 PR 5 ([generate](#generate)).
+- `x_article` — an `x.com/i/article/...` long-form post. `fetch` first tries the **structured path** (#39 PR 3): it intercepts the article-content GraphQL response (the same `page.on("response", …)` interception `_fetch_tweet` uses for `TweetDetail`, matching a GraphQL URL whose op name contains `article`) and parses its Draft.js `content_state` (`extract/article.py`, a pure `parse_article_content_state`) into an **ordered** `blocks` body IN DOCUMENT ORDER: `ArticleTextBlock` text runs, `ArticleImageBlock` inline images (each a `MediaPhotoPending`, downloaded later by [`media`](#media)) and `ArticleVideoBlock` inline videos (a `MediaVideoPending` carrying the playable stream, the poster and the bitrate/duration). **Nothing is dropped silently, and two whole classes used to be** — an `ApiVideo` keeps its poster one level deeper and its bitrate under `bit_rate` rather than `bitrate`, so the photo-shaped lookup returned nothing and the block went to the drop log; and entity-borne text (`MARKDOWN` code listings, `DIVIDER` rules, an embedded `TWEET`) lives in an `atomic` block whose `text` is a single space, which the "no text run means no content" assumption deleted. `_entity_text` recovers those and sweeps unknown entity types carrying `markdown`/`text`/`html` for the same reason the wall detector over-rejects: surfacing something skippable costs a line, dropping content is permanent and invisible. The lead `cover_media` (image or video) is prepended as the first block. The flattened `text` is set to the exact `"".join` of the text-run texts (data-model invariant #12), so `enrich`/`topics` consume it unchanged. **Fallback:** on any interception/parse miss the fetch degrades to the retained `trafilatura.extract(html)` text-only path (`blocks == []`) — never a crash, never a partial/wrong block set masquerading as complete; a genuinely empty article still records the `empty_content` failure. The parser anchors only on stable Draft.js key names and the article op name is UNCONFIRMED against a live payload — validate before production reliance (RFC #39 open-Q #4). The media download of those images is #39 PR 4 ([media](#media)); the blogpost render — the ordered text+image note — is #39 PR 5 ([generate](#generate)).
 - `thread` — a `x.com/<user>/status/...` link, fetched by reusing the GraphQL `TweetDetail` interception proven in the extractor.
 - `quoted_tweet` — embedded from the parent post's content.
 
@@ -248,11 +335,27 @@ A fifth `ContentKind`, `x_video`, exists on the same `ContentSource` union but i
 
 **Writes.** `data/items.json` — each `Item.content` is populated with one or more `ContentSource` records.
 
-**On failure, the failure is recorded as evidence, not silently dropped.** Every `ContentSource` carries `ok`, `http_status`, `failure_reason` (one of: `not_found`, `forbidden`, `paywall`, `timeout`, `dns_error`, `js_required`, `empty_content`) and `attempts`. The wiki later renders `⚠ Enlace roto` for failed sources rather than pretending they were never there.
+**On failure, the failure is recorded as evidence, not silently dropped.** Every `ContentSource` carries `ok`, `http_status`, `failure_reason` (one of: `not_found`, `forbidden`, `paywall`, `timeout`, `dns_error`, `js_required`, `empty_content`, `blocked_interstitial`, `unknown_error`) and `attempts`. The wiki later renders `⚠ Enlace roto` for failed sources rather than pretending they were never there.
 
-**Caching.** `fetch` is cached per item id — it does not re-fetch items that already have a `ContentSource` (success or recorded failure). Use `--force` to re-fetch everything. (Selective retry of transient failures is a planned improvement — issue #19.)
+**Caching.** `fetch` is cached per item id — it does not re-fetch items that already have a `ContentSource` (success or recorded failure). Use `--force` to re-fetch everything. Selective retry (issue #19) shipped as `fetch --retry-failed`, and `fetch --revalidate` re-judges bodies already in the store — see [fetch: retry-failed and revalidate](#fetch-retry-failed-and-revalidate).
 
 **`content.fetched_at` = last *material* change, not last attempt.** When `fetch_item` re-fetches an item, it stamps a fresh `fetched_at` only if the new source set differs materially from the existing one. The material fingerprint (`_source_signature`) is the whole source model minus fetch bookkeeping (`attempts`/`error`) — a model-derived deny-list, so every content-bearing field (`title`, `text`, `failure_reason`, `http_status`, the `x_video` transcript/`frames`, the `x_article` `blocks`, …) is compared automatically and a future field is not silently dropped. This keeps the [`enrich` re-enrichment trigger](#enrich) honest for a persistently-failing transient link that `_should_refetch` retries every run — see the invariant note there. **The x.com-link path applies the same rule (#39 PR 3):** `fetch_x._attach_x_sources` reuses `_sources_materially_equal` to bump `fetched_at` only when the replaced `x_article` source set changed materially — so an Article that gains a richer structured `blocks` body re-triggers enrich, while an idempotent re-fetch does not churn.
+
+### fetch: retry-failed and revalidate
+
+Two repair modes on the `fetch` command, neither of which re-hits a link that already worked. Both exist because of one rule.
+
+**A wall is never evidence.** For a long time the only content check was `if not text` — non-empty implied success — and that is how a YouTube footer menu, a Cloudflare challenge and a bare page title became `[Linked article]` evidence: **28 of the store's 189 fetched "articles" (14.8%), measured**. The guardrail cannot fire for them, because they are recorded as successes: `links_content_unfetched` goes False, the `[Links — content NOT fetched]` marker disappears from every LLM surface, `rubric-summary` orders the generator to summarise "the article's substance", and the judge is handed a `[Linked article]` it will pass. A rendered Instagram login wall even contains the word "Instagram", so the entity checker calls that name grounded.
+
+`validate_body` is the fix, and it sits at the **persistence boundary** (`_safe_extract`), so no extractor can write a wall into the store as a success — the ordinary `fetch` path is covered, not just the retry. It rejects on three tests: a **length floor** (a body under 300 characters is not an article), **wall and page-chrome markers** (one wall phrase such as `accept all cookies` or `verify you are human` rejects outright; page chrome such as `cookie policy` is tolerated once and rejected from two markers up, because a real article page can legitimately carry one), and a **title that is the bare domain** ("Instagram", "twitch.tv"). A rejected body becomes a `blocked_interstitial` failure with its evidence named.
+
+The bias is deliberate and asymmetric. Rejecting a good article leaves the honest failure we already had, the guardrail keeps firing and nothing is lost but an opportunity; accepting a wall poisons the evidence. It is tuned against the real corpus rather than guessed — over those 189 successfully-fetched articles it rejects 28, and all 28 are junk. (An earlier list used a bare `log in to`, which is ordinary English prose, and it wrongly rejected three real bodies. A marker that fires on prose is not a wall detector.)
+
+**`fetch --retry-failed`** re-fetches **only the recorded failures a retry could plausibly repair**, which is what makes it different from `--force` (that one re-hits every link in the store, including the ones that already succeeded). `_retryable_now` admits two populations: a **transient** failure (`timeout`, `dns_error`, and the `unknown_error` bucket that catches HTTP 429), which may simply succeed on a better day; and a **fallback-eligible** failure (`js_required`, `empty_content`, `blocked_interstitial`) still at `attempts < 2`, which never actually got the Firecrawl pass, because `_firecrawl_extract` returns `None` with no key configured and the original failure then stands. With a key, the retry brings a genuinely different extractor. Everything else — 404, 403, paywall, or a fallback-eligible failure already at `attempts == 2` — is left alone: retrying reproduces the recorded failure, which is not a repair, it is load on someone's server. The key is resolved once, in one place (`XBRAIN_NO_FIRECRAWL` as a hard opt-out, then `FIRECRAWL_API_KEY`, then the `firecrawl` CLI's own stored credentials), and `--dry-run` prints the plan — including, by name, the items **blocked on a missing key**, which become recoverable the moment one is configured. The end-of-run tally reports what actually landed rather than what was attempted: a retry that "succeeded" into a cookie wall is now recorded as `blocked_interstitial`, not as evidence.
+
+**`fetch --revalidate`** re-judges the bodies **already in the store** and demotes the junk. `--retry-failed` cannot reach these — it selects failures, and an accepted wall is recorded as a success — so without this pass the measured 28 junk bodies keep serving as `[Linked article]` evidence forever. It is purely local: no network, no extractor, it only re-runs `validate_body` over bytes we already hold, so a demotion cannot lose anything (the body was never evidence in the first place). **Report-only by default**, listing the affected items and their domains; `--write` applies the demotions. The rebuilt `Content` keeps the same `content.fetched_at`, so a demotion does not by itself re-trigger enrichment.
+
+**Reads + writes.** `data/items.json`. Both modes are destructive when they write and auto-snapshot first (labels `pre-fetch-retry-failed`, `pre-fetch-revalidate`); `--dry-run` and a report-only `--revalidate` write nothing and take no snapshot. The two modes are mutually exclusive with each other and with `--force`, and the CLI rejects the combination rather than guessing which one was meant.
 
 ### media
 
@@ -311,6 +414,29 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 **Propagating onto already-enriched items.** This is *wiring*: the descriptions flow whenever `enrich` / `topics` next run for an item. Items already enriched before the describe pass are skipped by the normal idempotency guard, so a one-time forced re-run (real LLM cost, run deliberately) is what back-fills them: `xbrain vocab --regenerate` (clears enrichments) then `xbrain enrich` re-enriches every item with its image descriptions, and `xbrain topics --resynth` re-synthesizes the overviews with the image (and video-transcript) evidence.
 
+### refresh-quoted
+
+**Why it exists.** A quote-tweet stored only its `quoted_id`. The quoted post's body and its author were dropped, so the generator saw a bare reaction ("Read this and you'll understand") with nothing to summarise, and filled the gap by inventing. It also broke attribution: without knowing who wrote the quoted words, neither the judge nor the entity checker can tell a correct third-party attribution from a wrong one. `refresh-quoted` backfills the quoted post onto quote-tweets already in the store.
+
+**Two modes, cheapest first.**
+
+- **`--from-store`** — no browser, no network. A quote-tweet's `quoted_id` often names a post we captured in its own right, so the evidence is one lookup away (`refresh.backfill_quoted_from_store`). Instant, free and re-runnable. Start here; then re-capture for what it could not reach.
+- **The full re-capture** — scrolls the whole X history with an empty `known_ids` set through the shared `_recapture_history` harness (the same one [`refresh-media`](#refresh-media) uses, so a second backfill cannot drift into its own subtly different ingest path) and re-parses. **It makes no extra request per item:** X embeds the quoted post — body *and* author — in the same timeline payload as the tweet quoting it. The `state.json` cursors are deliberately not advanced; this is a backfill, not an incremental extract.
+
+**Only `quoted_tweet` sources are touched.** Article bodies, transcripts, threads and every enrichment, description and media state are preserved. It is idempotent: a readable quoted post already on the item is left alone, a failed one is retried.
+
+**`fetched_at` moves only on new evidence.** `_attach_quoted` compares exactly what the LLM surfaces read from the quoted post — `quoted_source(item)`, i.e. the body plus the author, the same selector every surface asks — and bumps `content.fetched_at` **only when that pair actually changed**. So the next `xbrain enrich` regenerates exactly the summaries that gained evidence, and a quoted post recorded as unreadable is stored as evidence of the gap without re-triggering enrichment.
+
+**Reads.** `data/items.json`, plus live X on the re-capture path.
+
+**Writes.** `data/items.json` — `quoted_tweet` content sources only.
+
+**Empty-capture guard.** Re-seeing **0 known items** against a non-empty store is a likely-broken run rather than success, so the re-capture path warns loudly and aborts non-zero without saving; `--force` downgrades it to a warning and proceeds. That is the *items-re-seen* guard. A scroll that captured no GraphQL response at all now raises `OperationNotCaptured` inside `extract_source` before this point — see [`extract`](#extract).
+
+**Snapshot trigger.** Both modes rewrite `items.json` in place, so both auto-snapshot `data/` first (labels `pre-refresh-quoted-from-store` and `pre-refresh-quoted`), before any capture or write.
+
+**Measured on the live store (2026-08-30).** 831 items carry a `quoted_id`; 826 now carry a `quoted_tweet` content source.
+
 ### refresh-media
 
 **Why it exists.** `extract` is incremental — `extract_source` stops at the first known id, and `store.merge_items` "adds, never overwrites". The playable-video capture (`extract/video.py`: highest-bitrate mp4 / HLS fallback + poster + bitrate + duration) only runs at *capture* time, so every video already in the store before that capability landed is **poster-era**: its `MediaVideoPending.url` is the poster image and `bitrate` / `duration_millis` are unset. A normal `extract` will never revisit those items, so they would stay poster-era forever. `refresh-media` is the backfill that fixes them.
@@ -319,7 +445,7 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 **Upgrade-only, never degrade.** This is the repo's first *overwriting* store path, so the swap is guarded. `build_video_media` falls back to the poster image (`url == thumbnail_url`, no metadata) when X serves no usable `video_info.variants` — a drift symptom. `refresh.refresh_video_media` replaces a stored video **only** when the fresh entry is a real stream (`url != thumbnail_url`); a poster-fallback fresh entry keeps the existing record and is not counted as refreshed. Without this, a second run during a drift window would silently downgrade an already-good playable URL back to a poster.
 
-**Empty-capture guard.** `extract_source` returns `[]` (it does **not** raise) when the session is logged in but the GraphQL parser drifts or the scroll is interrupted. Re-seeing **0** known items against a non-empty store is therefore a likely-broken run, not success: `refresh-media` warns loudly and aborts **non-zero without saving** (the merge was a no-op, so `items.json` is byte-identical and the pre-snapshot already fired). `--force` downgrades this to a warning and proceeds. An empty store (fresh project) and any non-zero capture (monotonic, re-runnable progress) save normally — the guard is specifically `items_seen == 0` on a non-empty store.
+**Empty-capture guard.** A scroll can come back having captured responses but nothing we already hold — the GraphQL parser drifts, or the scroll is interrupted. Re-seeing **0** known items against a non-empty store is therefore a likely-broken run, not success: `refresh-media` warns loudly and aborts **non-zero without saving** (the merge was a no-op, so `items.json` is byte-identical and the pre-snapshot already fired). `--force` downgrades this to a warning and proceeds. An empty store (fresh project) and any non-zero capture (monotonic, re-runnable progress) save normally — the guard is specifically `items_seen == 0` on a non-empty store. The *other* empty case, a scroll that saw no response for the operation at all, is caught earlier and harder: `extract_source` raises `OperationNotCaptured` and never returns (see [`extract`](#extract)).
 
 **Reads.** `data/items.json` + live X (via the logged-in Playwright session).
 
@@ -371,6 +497,10 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 **External transcriber, no ML in core (locked #44 architecture).** `transcribe.py` shells out to the operator-configured `[transcribe].command` (default `parakeet-mlx`; whisper / faster-whisper is the portable fallback) as a **subprocess**: `<command> [--model M] --output-format json --output-dir <TMPDIR> <mediapath>`. The real `parakeet-mlx` writes its transcript to a **file** at `<TMPDIR>/<stem>.json` (it does NOT emit JSON on stdout and does NOT accept `--language`), so `transcribe.py` reads the produced file (stdout is a fallback for a wrapper) and parses it into a `Transcript` (`text`, `segments` of `start/end/text`, `language`, `has_speech`, and an optional `title` passed through to the `x_video` source when the ASR surfaces one). It imports **no** MLX/CoreML/torch/whisper library — a test asserts it. The command is `shlex`-split (a multi-token wrapper works) and run **without** a shell. A **missing / non-executable binary** raises a clear operator error (`TranscriberNotFound`, clean CLI exit-1), never a crash. **No-speech is a JSON signal, never an absence of output:** `{"text": ""}` / empty segments / `has_speech: false` → graceful no-speech, but exit-0-with-no-output raises `TranscriberFailed` (inferring silence there would silently lose the transcript).
 
+**The transcriber can be a language router (`scripts/xbrain-transcribe-auto`).** `[transcribe].command` still defaults to the bare `parakeet-mlx`, and on a **multilingual corpus that default is wrong** — point the setting at `xbrain-transcribe-auto` instead. It is a wrapper honouring the same contract, which detects the language on the first 30 s and dispatches. **English goes to parakeet** (`xbrain-transcribe`, parakeet-mlx — fast on Apple Silicon). **Anything else, and any uncertainty at all, goes to whisper** — `xbrain-transcribe-mlx` (mlx-whisper, on the Apple GPU) first, falling back to `xbrain-transcribe-whisper` (the portable Whisper CLI on CPU, ~25× slower) when the GPU backend cannot run. The two were verified to produce a character-identical transcript on a real clip, so the fallback trades only time. All three honour the same `--output-dir` / JSON-file contract `transcribe.py` expects, so xbrain's side is unchanged.
+
+**Why route at all: parakeet-tdt does not fail on Spanish, it fabricates.** Verified 2026-07-17 against an es-ES clip — it exits 0 and emits fluent, broken English that never reproduces what was said. A noisy failure is visible in a log; this one passes the whole pipeline and lands in a note as a quotation, and by then you can no longer tell "the video said that" from "parakeet made it up". So the backend has to be chosen *before* transcription, not judged after it. Detection slices the first `XBRAIN_ASR_DETECT_SECONDS` (default 30) with `ffmpeg` and asks `whisper` with no `--language`, so it reports what it detected; the detection model defaults to `base` (~19 s per clip, measured on an M-series machine over one real es-ES and one real en-US clip — `tiny` halves that and identified both correctly, but two samples are not enough evidence to trade accuracy on the axis where being wrong means a fabricated transcript). **Everything fails toward whisper:** no ffmpeg, no whisper, a non-zero exit, an unreadable result, an undetected language. A genuinely silent clip short-circuits before any of it (`ffprobe` positively confirms no audio stream — unknown is never treated as silent) and yields the empty-speech JSON both wrappers already agree on. `XBRAIN_ASR_FORCE=parakeet|whisper` skips detection entirely.
+
 **The `x_video` ContentKind.** The transcript is attached as a `ContentSourceSuccess(kind="x_video")` — the fifth `ContentKind`, additive to the union so existing `items.json` and every existing `ContentSource` variant load unchanged. `text` carries the transcript; the optional `has_speech` / `language` fields are the video markers (`None` on a non-video source), and the optional `frames` list carries the key-frame slides (empty on every non-`--frames` source — see the visual layer below). The optional `digest: str = ""` field carries the **long-form readable synthesis** of the transcript + frames written by [`video-digest`](#video-digest) — optional + additive (`""` = "no digest yet"), so every pre-digest `x_video` source (and every article source) loads unchanged. It sits on `Item.content.sources` exactly like an `external_article` body, so `generate`/`enrich` consume it via the existing machinery.
 
 **Visual layer — content-type-aware key-frame slides (`--frames`, opt-in, PR4).** For a slide/screen/demo-heavy talk the visual carries as much as the audio; for an interview the scene frames are camera cuts = noise. So the layer is **content-aware** and **fully opt-in** (`--frames`, default off; a normal run never touches ffmpeg/vision and is byte-unchanged). When enabled, per fetched video `digest`:
@@ -380,6 +510,18 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 - **Describes** each kept slide via the **external** vision model (`vision.describe_image`, a subprocess on `[vision].command`; mirrors `transcribe.py` — no bundled default, `VisionNotFound` on a missing/unconfigured binary aborts the run, exit-0-empty is a `VisionFailed` not a silent empty). The descriptions are recorded on the `x_video` source's `frames` list; the slide **images** are persisted under `data/media/<id>/frames/<n>.png` so `generate` mirrors them into the vault's `_media/` tree and embeds them exactly like downloaded photos. All non-kept frames are discarded (ephemeral, reclaimed by the enclosing `TemporaryDirectory`).
 
 A per-video `FrameExtractionFailed` (bad mp4) or `VisionFailed` drops the visual layer for that video (logged) while the transcript still attaches — the audio digest is independent of the visual layer. A missing ffmpeg (`FrameExtractionToolNotFound`) or missing/unconfigured vision binary (`VisionNotFound`) is a global config error that aborts the run, exactly like a missing transcriber. A silent slide deck (no speech) still gets its slides — that is where a screen-only video carries its content.
+
+**Frame-extraction config (`[frames]`).** The visual layer's knobs live in `config.toml`; the defaults live in `video_frames.py` and `config.py` validates every one of them at load:
+
+| Key | Default | What it does |
+|-----|---------|--------------|
+| `max_frames` | 60 | Safety ceiling applied **after** dedup, for a pathological continuous-motion clip. Must be ≥ 1 |
+| `scene_threshold` | 0.4 | ffmpeg scene-change sensitivity; higher means fewer cuts. Must be in `[0.0, 1.0]` |
+| `interval_seconds` | 15 | Also keep a frame every N seconds — this is what covers a long static tail. Must be > 0 |
+| `dedupe` | `true` | Perceptual-hash near-duplicate removal |
+| `dedupe_distance` | 6 | Max dHash Hamming distance (0-64) at which two frames count as the same slide |
+
+The pipeline is **extract → dedupe → cap**, and **dedupe is the real reducer**: it drops the near-identical frames a held slide produces, so the budget is spent on *distinct* slides. `max_frames` is a ceiling, not the selection mechanism.
 
 **Dedup by video identity.** The full mp4 URL is unstable (`?tag=` + rotating signing/filename), so the dedup **`VideoKey`** is the stable id parsed from the URL *path* — `amplify_video/<id>` (or `ext_tw_video`/`tweet_video`), with a query-stripped `<netloc><path>` fallback for an unrecognised pattern. `digest.group_items_by_video` groups the selection by that key; each video is fetched + transcribed **once** and the resulting source is attached to **every** referencing item (`digest.attach_transcript` returns the count). N bookmarks of the same video → one transcript linked to all.
 
@@ -454,7 +596,9 @@ A per-video `FrameExtractionFailed` (bad mp4) or `VisionFailed` drops the visual
 
 **Article blogpost render (#39 PR5).** An `x_article` content source with a non-empty structured `blocks` body renders as an ordered blogpost under a `## Content: <title>` heading (`generate._article_blocks_lines`): it walks `source.blocks` IN AUTHORED ORDER, emitting each `ArticleTextBlock` as a body paragraph and each `ArticleImageBlock` as an inline `![[_media/<id>/article/<n>.<ext>]]` embed exactly where the author placed it — text and images interleaved, reading as a blogpost. Each text block's baked `\n\n` inter-paragraph separator (PR3 bakes it into every non-first text run so the flattened `text` == the ordered concatenation, invariant #12) is **stripped** at render (`str.removeprefix(_ARTICLE_PARAGRAPH_SEP)`) so block-by-block rendering re-supplies its own paragraph spacing and the separator never leaks as a stray blank line. Inline images follow the **same** photo convention as `_render_media_lines`: a `MediaPhotoDownloaded`/`MediaPhotoDescribed` renders the embed (plus the author's `alt` and a described image's vision description as `> …` caption lines), a `MediaPhotoFailed` renders a one-line `> ⚠ Imagen no disponible (<reason>): <url>` blockquote (visible evidence, never a silent drop), a `MediaPhotoPending` is silent (a future `xbrain media` run advances it). When every block renders to nothing — e.g. an image-only Article whose sole image is still `MediaPhotoPending`, the normal post-`fetch`/pre-`media` state — the bare `## Content:` heading is suppressed (no empty section), the same way `_video_digest_lines` avoids an empty digest block. The image bytes are mirrored into the self-contained vault by `_mirror_item_article_images` — the **same** `_mirror_file` the photo/frame blocks use, keyed by the STORED `local_path` (`<id>/article/<n>.<ext>`, no per-source index recompute) — so a missing byte renders a broken embed, never a crash. An `x_article` with **empty** `blocks` (the trafilatura text-only fallback, or a pre-#39 record) renders the plain `source.text` block exactly as before — byte-unchanged, no regression. Rendering is deterministic — a regen produces the byte-identical note and the user tail below the marker is untouched.
 
-**Staleness-aware verification badge (#79, follow-up of the verification layer).** When `verify --apply --write-verdicts` has stamped a verdict onto an item, `generate` may render a **badge** line right under the judged output — `> ❌ **Verification: FAIL** — <top flag>` for a FAIL, `> ⚠️ **Verification: REVIEW**` for a REVIEW (a **PASS is never badged** — the note stays clean). The verdict lives on the **additive, back-compatible** `Item.verification` field: `dict[str, VerificationVerdict]` keyed by target (`summary` | `topics` | `digest`), defaulting to `{}` so every legacy `items.json` loads unchanged. Each `VerificationVerdict` carries `verdict`, `faithfulness`/`adherence` (all three `Literal["PASS","REVIEW","FAIL"]` via a shared `Verdict` alias), `flags`, `verified_at`, and — the staleness key — an **`output_fingerprint`: the sha256 hex of the exact output text that was judged** (`Field(pattern=r"^[0-9a-f]{64}$")`, so a hand-edited/garbage hash is rejected at load). The correctness rule is the **fingerprint recompute**: `generate._verdict_badge` calls `verification.fingerprint_output(item, target)` on the item's CURRENT summary/topics/digest and badges **only when it equals the stored fingerprint**. A verdict whose output was re-generated since (a different fingerprint) is **silently STALE and never badged** — so an output that was fixed after a FAIL never shows a ❌.
+**Staleness-aware verification badge (#79, follow-up of the verification layer).** When `verify --apply --write-verdicts` has stamped a verdict onto an item, `generate` may render a **badge** line right under the judged output — `> ❌ **Verification: FAIL** — <top flag>` for a FAIL, `> ⚠️ **Verification: REVIEW**` for a REVIEW (a **PASS is never badged** — the note stays clean). The verdict lives on the **additive, back-compatible** `Item.verification` field: `dict[str, VerificationVerdict]` keyed by target (`summary` | `topics` | `digest`), defaulting to `{}` so every legacy `items.json` loads unchanged. Each `VerificationVerdict` carries `verdict`, `faithfulness`/`adherence` (all three `Literal["PASS","REVIEW","FAIL"]` via a shared `Verdict` alias), `flags`, `verified_at`, and two fingerprints: **`output_fingerprint`**, the sha256 hex of the exact output text that was judged, and **`contract_fingerprint`**, the sha256 of the whole contract the verdict was reached under (both `Field(pattern=r"^[0-9a-f]{64}$")`, so a hand-edited/garbage hash is rejected at load). **`contract_fingerprint` is the staleness key.** The correctness rule is the recompute: `generate._verdict_badge` calls `verification.verdict_is_current(item, target, language)`, which rebuilds the CURRENT contract fingerprint and badges **only when it equals the stored one**. A verdict whose output, source or rubrics changed since is **silently STALE and never badged** — so an output that was fixed after a FAIL never shows a ❌.
+
+**Why the contract and not the output alone.** A verdict is not a property of the output: it is the result of judging *that* output, against *that* source, under *those* rubrics. `contract_fingerprint` hashes all three arms — the output text (`_output_for`); the source the judge actually read **for this target** (`_source_text`, i.e. [`evidence_surfaces`](#evidence) plus the not-fetched markers, so a digest and a summary hash different sources); and the rubrics applied (`rubric_digest`, the verify rubric plus the target's generation rubric, cached per `(target, language)` because `generate` runs this check once per item over thousands of notes). Hashing only the output is what let #86 rewrite what the judge reads **and** rewrite the rubrics without touching one output character, while every stored verdict still matched, still looked current and still painted its badge — including verdicts issued under the contract that was measured letting a false attribution through 8 times out of 8. `output_fingerprint` survives as what it always was, the **export-time stamp** of the exact text the judge saw (see the paragraph below); it is no longer what decides the badge. A verdict carrying **`contract_fingerprint: None`** — stored before the field existed — is **permanently stale**: we cannot reconstruct what it was judged against, so it is retired, never grandfathered in. `count_invalidated_verdicts` reports the size of that retirement, because the number is the point. Measured on the live store on 2026-08-30 under the configured output language: **70 of the 121 stored verdicts are invalidated**, 68 of them because they carry no `contract_fingerprint` at all.
 
 **The fingerprint is captured at worksheet EXPORT, not at write.** `export_verify_worksheet` stamps each entry with `fingerprint_output(item, target)` — the fingerprint of the output the judge actually sees — and the filled worksheet carries it through; on `--write-verdicts`, `import_verify_fingerprints` reads it back (keyed by `item_id`+`target`) and `apply_verdicts_to_store` stores THAT, never a recompute against the live store. This closes the export→judge→write window: if the summary/digest/topics is regenerated while judges fill the worksheet, the stored fingerprint is still the JUDGED one, so `generate`'s current-fingerprint compare detects the change in EITHER window (a fixed output never gets a bogus ❌, and a stale FAIL is never shown as current). So `fingerprint_output` is the *single* canonicalization shared by the export stamp and the reader (`generate`); the writer only passes the export-time value through. **The same stamp survives the longer audit window.** `stamp_record_fingerprints` carries it onto the aggregated records into `verify-report.json`; `export_audit_worksheet` copies it from the record (it deliberately does NOT re-fingerprint the live store, which may already hold a regenerated output); `merge_audit` preserves it on the merged record; and the post-audit write reads it off the merged RECORDS (`record_fingerprints`) — they are what the report being written describes — using the applied audit worksheet only as a CROSS-CHECK (`cross_check_fingerprints`): a disagreeing stamp DROPS the key fail-safe (hand-edited artifact → the record is skipped), but it can never SUPPLY one. It is deliberately **not a union**: nothing binds a worksheet to the report it is applied against (there is no run-id), so a union would let a stale worksheet introduce a fingerprint the record never carried — binding the verdict to a text those judges never read. An unstamped record simply stays unwritable. The write path is defensive: a record with no item, unknown target, bad verdict, or missing/garbage judged fingerprint is skipped with a tallied reason (surfaced in the CLI's written/skipped echo), never silently dropped. The badge label is localised via `i18n.Strings` (`verify_badge_fail` / `verify_badge_review`); a multi-line flag issue has its newlines collapsed so it can't break out of the single-line `> …` blockquote; the digest badge sits directly under the `## Video digest` heading, the summary/topics badge under their respective lines. A verdict under an unknown target, or one whose output has vanished, is defensively ignored.
 - `_index.md` — the map.
@@ -472,6 +616,58 @@ A per-video `FrameExtractionFailed` (bad mp4) or `VisionFailed` drops the visual
 
 You can annotate, link, and write below the marker — `generate` never touches your tail.
 
+### dashboard
+
+**What it does.** `generate` writes a self-contained interactive `dashboard.html` into the vault alongside the notes, and `_index.md` links it. Everything is inlined — the data as a JSON blob, ECharts vendored from `src/xbrain/resources/echarts.min.js` (1.0 MB) into the page. **No network, no CDN, no build step:** the file opens in a browser with the machine offline. Measured on the current vault render: 1,825,197 bytes, about 1.8 MB.
+
+**The split is pure computation vs IO.** `compute_dashboard_data` is pure — store, topic overviews and an id→note map in, JSON blob out, no file or network access. `collect_thumbnails` does the photo IO. `render_dashboard_html` injects the blob and the vendored library into the template. `generate` wires the three together; nothing here touches a browser.
+
+**What it reports.** Corpus growth by month; topics (frequency, overview, drill-down to the posts); authors; linked domains; the long-form population; media counts (photos downloaded and pending, videos, thumbnails); the bookmark vs own-tweet split; and **verification coverage**. That last block counts **outputs, not items** — one post can carry a summary, a topics assignment and a video digest, each judged separately against its own source — and it reports `outputs`, `judged`, `unjudged`, `stale` and `coverage_pct` side by side. A stored verdict counts as coverage **only while it is current** under [`contract_fingerprint`](#verify); a stale one gets its own bucket instead of being folded into the verdict mix, because reading `judged` as "verified" without `unjudged` beside it is exactly the misreading the block exists to prevent.
+
+**Reads.** `data/items.json`, `data/topics.json`, and the photo bytes under `data/media/` for thumbnails.
+
+**Writes.** `<output_subdir>/dashboard.html` in the vault. The `_index.md` link is an **absolute `file://` URI**: Obsidian hides `.html` from the explorer and will not render its JS inline, so a relative link is unreliable, and the absolute URI is what makes the link open in the external browser. The cost is that it pins to the machine that ran `generate`; it self-heals on that machine's next run.
+
+**Failure is swallowed on purpose.** The dashboard is a best-effort secondary artifact, written after every note. A failure is logged with its traceback and the run continues — the notes, which are the product, are already on disk. It takes no snapshot and never touches the store.
+
+### evidence
+
+Not a stage: the **single definition of what may support a claim** in a generated output, in `evidence.py`. Every other section that says "the source" means this.
+
+**The problem it kills.** Four components each need to know what counts as evidence for a `summary` / `digest` / `topics`: the **generator** (what the worksheet, or the `api` prompt, actually hands the agent), the **rubric** (what the judge is told may support a claim), the **judge** (what `verification._source_text` puts in front of it), and the **checker** (what [`verify-entities`](#verify-entities) searches when it asks whether a name is grounded). Each kept its own hand-written list and nothing bound them, so the suite stayed green while the four contradicted one another — every change tested only its own side. The contradictions were real and measured: the judge was handed the linked article for a **digest** whose generator never receives it, so it excused inventions the generator had no way to source; and neither generator shipped the author display name that the rubric promised the judge.
+
+**The invariant.**
+
+```
+generator fields  ⊇  evidence_surfaces(item, target)
+judge source      ==  evidence_surfaces(item, target)
+verify rubric     declares every surface it admits
+checker evidence  ==  evidence_text(item, target)
+```
+
+`tests/test_evidence_contract.py` asserts the first three per target and per generator, **by identity against the shared function** — never a substring, and never a hand-written list repeated in the test, because a list repeated in the test is a fifth copy of the bug. The fourth is bound separately in `tests/test_checker_evidence_binding.py`, and **behaviourally**: the checker imports the same `evidence_text`, so an identity assertion would be a tautology. That file drives the checker's public scan with an output whose only grounding is one specific surface, and asserts what it flags — which no re-exported name and no copied implementation can satisfy.
+
+**The ten surfaces.** Each is a `Surface(key, label, values)`. A surface with no values is never built: an empty labelled block would tell the judge that evidence exists where there is none.
+
+| key | judge label | what it is |
+|-----|-------------|------------|
+| `author` | `[Author]` | the poster's handle and display name |
+| `video_title` | `[Video title]` | the title the transcriber surfaced |
+| `video_transcript` | `[Video transcript]` | the transcript |
+| `video_frames` | `[Video frames shown]` | the slide descriptions |
+| `images` | `[Images in the post]` | the non-decorative photo descriptions |
+| `article_title` | `[Linked article title]` | the fetched article's title |
+| `article` | `[Linked article]` | the fetched article's body |
+| `thread` | `[Thread — full text, same author]` | the poster's own thread |
+| `quoted` | `[Quoted post — @handle (Name)]` | the quoted post's author and body |
+| `tweet` | `[Tweet]` | the post's own words, verbatim |
+
+**Evidence is target-dependent, and getting it wrong is a bug in both directions.** `_DIGEST_KEYS` admits six — the video and the post it arrived in: `author`, `video_title`, `video_transcript`, `video_frames`, `quoted`, `tweet`. `_ENRICH_KEYS` admits all ten, adding what the enrich worksheet also ships. Judge a **digest** against the linked article and you excuse an invention the generator could not have sourced. Judge a **summary** against the digest's narrower set and you flag the generator for using evidence it was correctly given — that is where 36+ false author-attribution flags came from. The quoted post is admitted for the digest too: a substantial share of video items are quote-tweets, and on one of those the clip is very often the *quoted* account's, which makes the quoted author the attribution evidence that keeps a digest from naming the wrong person.
+
+**A link is not a surface.** Nothing is derived from `item.links`: a URL or a domain is topic signal, never a name and never content. Not pedantry — a summary in the corpus reconstructed a whole article, its publication and a named company, out of the slug of a link that was never fetched, and the judge could not flag it because its own rubric carved the URL out of "unsupported". That does **not** mean no surface contains a URL: many items carry one inside their own tweet text, and `[Tweet]` is the post's words verbatim, URLs and all. The component that does the substring search is the one that has to strip them.
+
+**`values` vs `text`, and why the contract compares `values`.** `values` are the **atomic** pieces of evidence: the handle and the display name as two separate values, each frame description as its own entry, the article body. `text` is only how the *judge* renders them — `@handle (Name)`, bullets for a list, the body alone for a surface whose attribution rides in its label. A generator ships the handle and the display name as two JSON fields; the judge renders them as one string. Comparing the two by rendered text would make the contract check blind to exactly the surfaces that are shipped as parts, which is how the missing display name survived. So the contract compares `values`. `evidence_text` — what the checker searches — is built from `values` for the same reason: the quoted post's author is rendered into the judge's **label**, and the checker strips labels, so a text-based blob would omit the quoted author and the checker would flag a correctly-attributed name on the very item that grounds it.
+
 ### verify
 
 **Why it exists.** The enrichment stages emit LLM judgment — a summary, a video `digest`, a topics assignment — and nothing checks it. `verify` is a **report-only** QA layer: an ensemble of LLM judges scores each output for **faithfulness** (is it grounded in its source?) and **adherence** (does it follow its generation rubric?), so a hallucinated summary or an off-rubric digest is surfaced for a human before it misleads ([#79](https://github.com/VGonPa/xbrain/issues/79), PR [#80](https://github.com/VGonPa/xbrain/pull/80)). It mirrors the `cv-guardrail` judges → aggregate → report shape.
@@ -480,36 +676,91 @@ You can annotate, link, and write below the marker — `generate` never touches 
 
 **Audit (`--audit`, verifier-audit).** An opt-in judge≠party second pass over ONLY the consequential (FAIL/divergent) verdicts (`verification_audit.py`): `verify --audit` exports an audit worksheet for a single independent auditor to CONFIRM/REVOKE each flag with a `confidence` + cited `reason`, and `verify --audit --apply audit.json` **deterministically re-verdicts** — a verdict lowers only when the specific cited evidence that produced it is explicitly revoked; guards only escalate. Three code-enforced backstops hold: a confidence gate (a REVOKE applies only at `confidence ≥ 0.7`), axis scoping (revoking an adherence note never clears a faithfulness FAIL), and a mass-revocation guard (a run clearing a suspiciously high share of the FAILs is suppressed). Single pass; a second `--audit --apply` on an already-audited report is refused without `--force` — and **`--force` cannot be combined with `--write-verdicts`**, because a forced re-audit re-renders the report from the merged records, shrinking the FAIL set until N single-revoke runs launder every FAIL into the store without the mass-revocation guard (which needs ≥2 FAILs) ever tripping. Forced re-audits remain available report-only. An **absent `audits` key raises** (ABSENT ≠ EMPTY: it would pass every record through un-audited, persisting the PRE-audit aggregate), and a `--write-verdicts` run whose audit matched no record while consequential verdicts remain is refused. The store is written **before** the report, so a failed store write never leaves the report marked `audited` — which would strand the retry behind the now-forbidden `--force`. **The AUDITED verdict is the one that reaches the store**: `verify --audit --apply audit.json --write-verdicts` persists the MERGED post-audit records (a REVOKED FAIL lands as the lowered verdict and badges nothing; a CONFIRMED — or auditor-ADDED — failure lands as FAIL with its confirmed flags). The write consumes `merge_audit`'s output, so the monotonic floor, the confidence gate, the mass-revocation guard and the anti-washing logic all still stand between the auditor and the store — it never re-derives a verdict. Before this, only the PRE-audit verdicts could be persisted: exactly the set the auditor overturns.
 
+**What the judge reads is `evidence_surfaces`, not a list kept here.** `_source_text(item, target)` is exactly [`evidence_surfaces(item, target)`](#evidence) — each surface with its own label, so a thread is never read as a fetched page and a transcript never as an article — plus the markers for content nobody downloaded: `[Links — content NOT fetched]` (enrich targets only, because the digest generator is never handed the links, and a marker listing URLs would put a domain in front of a judge whose generator never saw one) and `[Quoted post — content NOT fetched]` (every target, digest included). An output describing content that was never fetched is then checkable as unsupported, instead of being waved through against evidence that is not there.
+
+**A verdict binds to its whole contract.** Each stored `VerificationVerdict` carries `contract_fingerprint` — the sha256 of the output text, the source the judge read for that target, and the rubrics applied — and **that**, not `output_fingerprint`, is what decides whether the badge may paint. A verdict with no `contract_fingerprint` is permanently stale. `xbrain verify` echoes `count_invalidated_verdicts` for the reason the number exists: it says how much of the stored verification a contract change has just retired, rather than letting stale verdicts keep badging something nobody re-earned. The full rule is in the [staleness-aware verification badge](#generate).
+
 **Executor.** `--executor manual|claude-code`, defaulting to `[enrich].executor`; **no** config section of its own, worksheet tracks only (no `api`), same as [`video-digest`](#video-digest).
 
 **Reads + writes.** Reads `data/items.json`; writes `data/verify-report.json` + `data/verify-report.md` (the markdown leads with the FAIL/REVIEW verdicts + their flagged claims; clean passes stay in the JSON). **Report-only by default — it does not mutate the store and takes no snapshot** (the report is derived output, nothing reads it back). **Opt-in `--write-verdicts`** (valid only alongside `--apply`, on either the plain or the `--audit` path) additionally persists each FINAL verdict onto its item as `Item.verification` so `generate` can badge it — the aggregate on the plain path, the **merged post-audit records** on the audit path (the authoritative ones). That path *does* mutate `items.json` and auto-snapshots `data/` first (label `pre-verify-write-verdicts`); see the [staleness-aware verification badge](#generate) above.
+
+### verify-entities
+
+**What it does.** Sweeps every generated output for named entities that no evidence surface supports — deterministically, with no LLM and no tokens (`entity_grounding.py`; `xbrain verify-entities --target digest|summary|topics`).
+
+**Why it exists.** The verification ensemble is three judges sharing one model and one rubric: that is one sample drawn three times, not three independent samples. Its errors correlate by construction, so unanimity measures agreement, not truth. The judge≠party [audit](#verify) then inspects only the **consequential** set (FAIL plus divergent), which makes a **unanimous false negative invisible by design** — the ensemble's most likely error is the one the audit is guaranteed never to look at. That failure mode is not hypothetical: digests in this corpus name a company on no evidence and were passed unanimously by all three judges. Take the class as demonstrated and the count as unsettled — the module docstring puts it at two, the cross-reference below reports 39 against the July verdict set, and this check's own precision means only a fraction of those are genuine. This check catches the class with no model and no judgment at all. The division of labour is deliberate: recall comes from here, because a mechanical check cannot inherit an LLM's blind spot, and precision stays with the judge, which adjudicates what this raises. So every ambiguous call in the module resolves **towards flagging** — a false positive costs one human dismissal, a false negative is what has been shipping silently.
+
+**Read this before quoting any number from it.** The instrument checks that **proper nouns appear somewhere on the evidence**. It never checks whether anything asserted *about* them is true, and it never looks at a single number.
+
+- Claims about entities are invisible. "X said he will fire half the staff", against evidence where he discusses hiring, extracts the name, finds it grounded, and passes clean. Every false attribution, invented mechanism and fabricated causal link has that shape, and **nothing in this repo has ever measured how often it occurs** — the check that would have to find them is the one that cannot see them. (The module's own docstring puts a percentage on it. That figure is the repo's only measurement of a *different* population, the outputs this check called **dirty**, and it does not transfer; the docstring needs correcting.)
+- Numbers are never examined: an invented benchmark score, a false date, a fabricated funding round.
+- Lowercase and two-letter names are not extracted at all.
+
+**A clean verdict means "no unknown proper nouns". It does not mean "not hallucinated".** No statement of the form "N% of the corpus is hallucination-free" is supported by this tool, and the most damaging hallucination for a knowledge base — a confident false claim about a real, correctly-named entity — is precisely the one it cannot see.
+
+**Matching is variant-aware because the evidence is ASR output.** The transcript says "open ai", "cloud code sdk"; the generator correctly recovers `OpenAI`, `Claude Code SDK`. An exact-string matcher flags exactly the names the system got **right** — measured at ~0% digest precision before this was fixed. So `is_grounded` handles squashed spacing, acronym↔expansion, handle abbreviation and a bounded fuzzy match. That is not leniency; it is the difference between measuring the generator and measuring the transcriber. There is no NLP dependency either: a statistical NER model would add a heavyweight dependency and its own probabilistic blind spot to a check whose entire value is being non-probabilistic, so the heuristics are plain `re` + `unicodedata` + `difflib`, pinned by tests.
+
+**The evidence it searches is `evidence_text(item, target)`** — the same [`evidence_surfaces`](#evidence) the generator, the rubric and the judge resolve, projected to their atomic values with the labels stripped.
+
+**Two tiers, reported separately.** Confident candidates are the headline; the **uncertain** tier (ambiguous capitalisation, typically sentence-initial) has lower precision and gets its own line, printed whenever it is non-empty, because merging the two would let a reader quote one number for two instruments.
+
+**`--verdicts` cross-references a verify run.** Point it at a `verify-report.json` and it counts how many flagged outputs those judges had passed **unanimously** — raised here, waved through there. That is a lower bound, and **only over the outputs that carry a verdict at all**, which is what actually limits it. Measured on 2026-08-30: 1 of the 140 flagged summaries has a stored `summary` verdict, and 14 of the 51 flagged digests have a `digest` one. The report file you pass decides what joins — the current `verify-report.json` carries **no digest verdicts**, so that cross-reference joins nothing and reports `0`, which measures coverage and not the judges; against `verify-report-2026-07-09.json` (193 digest verdicts) the same scan joins 50 and reports **39**.
+
+So the count is not a floor on the ensemble's false negatives, and an earlier draft of this file called it one. Coverage bounds it from one side and this check's ~30% confident-tier precision from the other. What it honestly produces is a **worked list**: these outputs were flagged here and passed there, and someone should read them. The digests known to have been passed unanimously on no evidence are the reason the flag exists.
+
+**Reads.** `data/items.json`, and optionally a `verify-report.json`.
+
+**Writes.** `data/entity-report.json` + `data/entity-report.md`. **Read-only with respect to the store:** it never mutates `items.json`, nothing reads the report back, and it takes no snapshot.
+
+**Measured on the live store, 2026-08-30.** `summary`: 2,325 outputs, **140** with at least one confident ungrounded candidate (160 entities), plus 1,475 whose only candidates are in the uncertain tier. `digest`: 205 outputs, **51** flagged (64 entities), plus 116 uncertain-only. These are **candidates to verify, not confirmed hallucinations**: the one precision measurement in the repo (`data/entity-precision.md`, 13-ago-2026, a 70-flag sample) puts the confident tier at ~30% and the uncertain tier at ~0%, which is why the two are never added together and why no share of the corpus should be quoted as "hallucination-free" off the back of either.
 
 ---
 
 ## Artifacts: the data layer
 
-Everything XBrain knows lives in four files inside `data/` (gitignored). They are JSON or YAML, plain text, human-readable, and small enough that you can `jq` them. Binary assets (photo bytes from `xbrain media`) live alongside under `data/media/<id>/`.
+Everything XBrain knows lives in a handful of files inside `data/` (gitignored). The four that are the store proper — `items.json`, `state.json`, `vocab.yaml`, `topics.json` — are JSON or YAML, plain text, human-readable, and small enough that you can `jq` them. Binary assets (photo bytes from `xbrain media`) live alongside under `data/media/<id>/`, the raw capture under `data/payloads/`, and the report-only artifacts beside them.
 
 | File | Format | What it is | Mutated by |
 |------|--------|------------|------------|
 | `items.json` | JSON array of `Item` | The source of truth — every post XBrain has ever seen, with all fetched content, enrichment, per-photo vision descriptions, video transcripts, (with `digest-video --frames`) key-frame slide descriptions, and (with `video-digest`) the long-form per-video `digest`, and (with `verify --write-verdicts`) per-target `Item.verification` verdicts | `extract`, `fetch`, `enrich`, `media`, `describe`, `refresh-media`, `download-videos`, `digest-video`, `video-digest`, `verify --write-verdicts` |
 | `state.json` | JSON | Extractor cursors (`last_seen_id`, `last_run`) per source, archive-import marker | `extract`, `import-archive` |
+| `payloads/<shard>/<id>.json.gz` | gzipped JSON | The raw X GraphQL subtree for each item, credential keys scrubbed, sharded by the id's last two characters. Nothing in the pipeline reads it back except `reextract` / `payload-stats`; deleting it costs re-parseability, never a note | `extract` (write), `reextract` (read) |
 | `vocab.yaml` | YAML list of `Topic` | The controlled topic taxonomy — closed list of slugs + descriptions | `vocab` |
 | `topics.json` | JSON dict of `TopicPage` | The synthesized topic-page overviews and notes, keyed by slug | `topics` |
 | `media/<id>/<n>.<ext>` | binary (jpg/png/webp) | Downloaded photo bytes for each `MediaPhotoDownloaded` entry in `items.json` | `media` |
 | `media/<id>/article/<n>.<ext>` | binary (jpg/png/webp) | Downloaded inline-image bytes for each `MediaPhotoDownloaded` `ArticleImageBlock` on an `x_article` source (#39 PR4) — namespaced under `article/` so it never collides with the item's own photos | `media` |
 | `media/<id>/<n>.mp4` | binary (mp4) | Downloaded video bytes for each `MediaVideoDownloaded` entry in `items.json` | `download-videos` |
-| `verify-report.{json,md}` | JSON + Markdown | The LLM-as-judge verification report — one aggregated verdict (PASS/REVIEW/FAIL + faithfulness + adherence) per `(item, target)`, with flagged claims and the judged `output_fingerprint`. **Report only** (never part of the store), but it IS read back — by `verify --audit`, which re-verdicts on top of it and, with `--write-verdicts`, persists the merged result | `verify` |
+| `verify-report.{json,md}` | JSON + Markdown | The LLM-as-judge verification report — one aggregated verdict (PASS/REVIEW/FAIL + faithfulness + adherence) per `(item, target)`, with flagged claims, the judged `output_fingerprint` and the `contract_fingerprint` the verdict was reached under. **Report only** (never part of the store), but it IS read back — by `verify --audit`, which re-verdicts on top of it and, with `--write-verdicts`, persists the merged result; and by `verify-entities --verdicts` | `verify` |
+| `entity-report.{json,md}` | JSON + Markdown | The deterministic entity-grounding sweep — per output, the proper nouns no evidence surface supports, split into a confident and an uncertain tier. **Report only, and nothing reads it back** | `verify-entities` |
+| `truncated-items.json` | JSON | The items whose tweet text was truncated at ingest (id, url, current text) — the work list `refetch-truncated` writes on every run, dry or not | `refetch-truncated` |
 
 The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain/models.py). Reading those is the fastest way to understand the data layer in full.
 
-**Why JSON instead of a database.** The corpus is small (a few MB total for ~2k items with full article text). Plain files are diff-able, snapshot-able with `cp`, and survive a tool rewrite. A database would buy nothing here and cost transparency.
+**Why JSON instead of a database.** The corpus is small — measured 2026-08-30, `items.json` is 17.3 MB for 2,404 items (1,557 bookmarks, 847 own tweets) with full article text, transcripts and image descriptions. Plain files are diff-able, snapshot-able with `cp`, and survive a tool rewrite. A database would buy nothing here and cost transparency.
+
+**The corpus this describes.** Every figure below was re-derived from the live store on 2026-08-30, with the definition it was measured under. They are here so the shapes above have a scale, and so a future reader can tell a stale number from a current one.
+
+| Measure | Definition | Value |
+|---------|-----------|-------|
+| Items | records in `items.json` | 2,404 (1,557 `bookmark`, 847 `own_tweet`) |
+| Enriched | items with an `Enrichment` | 2,325 |
+| With content | items with a non-null `content` block | 1,436 |
+| Content sources by kind | `ContentSource` records across the store | 826 `quoted_tweet`, 274 `external_article`, 246 `x_video`, 212 `x_article`, 0 `thread` |
+| Video digests | `x_video` sources carrying a non-empty `digest` | 205 of 246 |
+| Structured article bodies | `x_article` sources with a non-empty `blocks` | 41 of 212 (2,710 text blocks, 250 image blocks, **0 video blocks** — the video variant landed after these bodies were fetched, so materialising one needs a re-fetch; the model supports it, the corpus does not exercise it yet) |
+| Photos described | `MediaPhotoDescribed` media entries | 903 (plus 33 `MediaPhotoPending`, 1 `MediaPhotoFailed`) |
+| Videos not yet downloaded | `MediaVideoPending` media entries | 268 |
+| Frame slides | `VideoFrame` records across every source | 2,077 |
+| Topics | slugs in `vocab.yaml` | 45 |
+| Stored verdicts | items carrying at least one `VerificationVerdict` | 118 items, 121 verdict records (70 `summary`, 39 `digest`, 12 `topics`); 53 carry a `contract_fingerprint`, so 70 of the 121 are invalidated |
+| Raw payloads | `*.json.gz` under `data/payloads/` | 3,423, covering 2,360 of the 2,404 items |
+| Text truncated at ingest | items `items_needing_refetch` flags (a length heuristic) | 707 flagged, triaged against the payloads as **214** repairable offline, **358** already complete, **122** undetermined, 8 changed-not-lengthened, 5 with no payload |
 
 ---
 
 ## Rubrics: the prompt layer
 
-The LLM-driven stages (`vocab`, `enrich`, `topics`, `describe`, `video-digest`, `verify`) do not have their instructions buried in Python strings. They live in declarative markdown files under [`src/xbrain/rubrics/`](src/xbrain/rubrics/), one per task:
+The LLM-driven stages (`vocab`, `enrich`, `topics`, `describe`, `video-digest`, `verify`) do not have their instructions buried in Python strings. They live in declarative markdown files under [`src/xbrain/rubrics/`](src/xbrain/rubrics/) — eight of them, one per task:
 
 | Rubric | Used by | What it instructs |
 |--------|---------|-------------------|
@@ -519,7 +770,8 @@ The LLM-driven stages (`vocab`, `enrich`, `topics`, `describe`, `video-digest`, 
 | `rubric-topic-page.md` | `topics` | Synthesize 1-3 paragraphs of plain prose + up to 15 short notes per topic, zero wikilinks |
 | `rubric-describe-image.md` | `describe` | Classify each photo as decorative vs content-bearing and describe content-bearing ones in 1-3 sentences. Refusals fall through as decorative with empty description |
 | `rubric-video-digest.md` | `video-digest` | Synthesize the long-form per-video `digest` (What it is · Key points · Why it matters) from the transcript + frame descriptions — faithful, no hype; build from frames alone for a mute video |
-| `rubric-verify.md` | `verify` | Judge one enrichment output against its source + generation rubric on two axes — faithfulness (every claim grounded; one unsupported claim FAILs) and adherence (obeys its own rubric); default skeptical |
+| `rubric-verify.md` | `verify` | Judge one enrichment output against its source + generation rubric on two axes — faithfulness (every claim grounded; one unsupported claim FAILs) and adherence (obeys its own rubric); default skeptical. It also **declares the evidence surfaces it admits**, per target, and `tests/test_evidence_contract.py` binds that declaration to [`evidence_surfaces`](#evidence) |
+| `rubric-verify-audit.md` | `verify --audit` | The judge≠party second pass: CONFIRM or REVOKE each flag on a consequential verdict, with a `confidence` and a cited reason. Never re-judges from scratch |
 
 **Why a separate file per rubric.** Changing how XBrain summarizes posts is editing one markdown file, not chasing a string through the codebase. The rubric is the *contract* between code and LLM; the code only handles structure, transport and validation.
 
@@ -550,6 +802,36 @@ topic_overview:
 **[`validate.py`](src/xbrain/validate.py) — the per-run gate.** Every LLM output passes through the validator before it is written to the store. Invalid outputs are rejected, not silently saved. The validator is the line between "LLM emitted JSON" and "the store accepted the judgment".
 
 **Why this is not the same as evaluation.** The validator is per-run, pass/fail, structural. It does not judge whether a summary is *good* — only whether it is structurally legal (non-empty, topics from the vocab, primary_topic in topics, etc.). Quality measurement is a separate concern — see WS3 (issue #8).
+
+## The CI gate auditor
+
+`quality` is a required status check on `develop` and `main` (strict, enforce_admins). Two one-line edits to `quality.yml` make it report green while testing nothing, and both were measured against the live API on this repo:
+
+1. **`continue-on-error: true` on the gate STEP.** `check.sh` genuinely exits 1. The step reports `success`. The job reports `success`. The check run reports `SUCCESS`. `mergeStateStatus` is `CLEAN`. Every API surface says green, and the failure survives only as text in a log nobody opens. (At *job* level the same key is harmless — the check reports failure and the merge is blocked. The difference is one indent, which is why both are banned.)
+2. **`checkout` with an explicit `ref:`.** The gate runs, everything passes, the check reports `SUCCESS` and `CLEAN` — against the wrong tree. What gave it away was the test count, which nobody reads on a green run.
+
+**No in-repo test can catch the first one.** A PR's CI runs the PR's own HEAD copy of the workflow, and our guards (`tests/test_ci_workflow.py`) run inside `scripts/check.sh`, which is what the gate runs. On a PR that adds `continue-on-error: true` those guards fire correctly and `check.sh` exits 1 — and the same `continue-on-error` swallows *that* failure too. The alarm is inside the soundproofed room. Something outside the room has to listen.
+
+**And it is not only an attack.** `continue-on-error: true` on a failing step is the canonical "make flaky CI stop blocking merges" edit. An agent told *"the build keeps failing, make it pass"* reaches for it in good faith and produces a permanently dead gate wearing a green badge. That is the likelier way this happens.
+
+**The auditor.** [`gate_audit.py`](src/xbrain/gate_audit.py), driven by [`.github/workflows/gate-audit.yml`](.github/workflows/gate-audit.yml) on a daily `schedule` (06:17 UTC) plus `workflow_dispatch`. The module is **pure**: it parses JSON that `gh` already fetched and YAML already on disk, decides, and writes a verdict. No network, no shelling out — which is what makes it unit-testable, and a workflow is not.
+
+**The one fact the whole thing rests on:** a `schedule`-triggered workflow runs from the **default branch's** copy of the file. The default branch is `main`, so the auditor's definition lives on `main` and a pull request into `develop` cannot edit it. The thing being audited has no reach over the thing auditing it. That is the same fail-closed property `pull_request_target` would give, without its cost — `pull_request_target` hands a base-scoped write token to a workflow running in a fork PR's context on a public repo, and it was considered and declined. Moving this workflow onto `push` or `pull_request`, or moving its logic onto `develop`, destroys the only thing it has; `tests/test_gate_audit_workflow.py` fails loudly if you try.
+
+**Two halves, and both are needed.**
+
+- **Execution (`classify`)** asks the outcome question: GitHub says the gate concluded `success` for `develop@SHA`; an honest re-run of that same gate on that same commit failed; therefore the gate is lying. It names no keyword, so it catches whatever disarm is invented next — but only once the trap has actually gone off. `NON_BLOCKING_CONCLUSIONS` is the subtle part: the question is never "did the check say the literal string `success`", it is "would this have stopped a merge", and GitHub treats `neutral` and `skipped` as satisfying a required check, so a job killed with `if: false` walks straight past a bare `== "success"` comparison.
+- **Static (`audit_workflow_source`)** asks the syntax question, from outside. It catches a disarmed gate on a day when `develop` happens to be green, which execution cannot see: reported green, audit green, no discrepancy — and the gate already dead, waiting for the next red commit to wave through.
+
+Execution proves *that* something is wrong; static says *what*.
+
+**It convicts on the gate STEP, not on the job.** `needs.execute-gate.result` aggregates the checkout, the `uv` install and the dependency sync too, so reading it would make a bad morning at PyPI indistinguishable from a gate that lies — and against a `quality` check that honestly reported SUCCESS the verdict would be *lying*, so the auditor would file a public issue accusing the repository of merging unverified code. The gate step records its own outcome into an artifact (`if: always()` — an artifact and not a job output, deliberately: outputs are not published when a job fails, and this job is designed to fail). A job that broke before reaching the gate is `inconclusive`: it files nothing, and it turns the run red, because silent non-observation is how an auditor goes deaf — months of "no issue filed" reads exactly like months of good news.
+
+**Honest limits.**
+
+- **Detection, not prevention.** A weakened gate can merge and live on `develop` until the next audit run, up to 24 h. That is an accepted trade: every mechanical prevention was checked against the live API and is unavailable on this public, user-owned repo (merge queue is org-only; required-workflows and file-path rulesets are Enterprise; required approvals need a second collaborator). The one remaining preventive option would have cost an RCE surface.
+- **It cannot catch a gate that lies from inside `check.sh`.** The audit executes `develop`'s `check.sh` — that *is* the gate under audit — so a `check.sh` neutered to exit 0 would be executed honestly and agree with a green report. The static audit and `tests/test_quality_gate_scope.py` cover that flank.
+- **It is not armed until `develop` reaches `main`.** A workflow must exist on the default branch to be scheduled at all, and this one lands on `develop` first, so it does nothing until that promotion.
 
 ---
 
@@ -599,15 +881,21 @@ These are the rules the rest of the architecture rests on. Breaking any of them 
 3. **The LLM emits only judgment.** No identifiers, no filenames, no wikilinks. The code adds those, post-hoc. The validator enforces it.
 4. **User content below `<!-- xbrain:generated:end -->` is preserved across regeneration.** `generate` only rewrites the block above the marker.
 5. **Failed fetches are recorded as structured evidence**, not silently dropped. A broken link is demonstrable (`http_status`, `failure_reason`), not assumed.
-6. **`fetch` is cached per item id.** Re-runs do not re-hit the network without `--force` (or, in the future, transient-retry — issue #19).
-7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break.
-8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact (`vocab --regenerate`, `topics --resynth`, `fetch --force`, `media`, `describe`, `refresh-media`, `download-videos`, `digest-video`, `video-digest --apply`) snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/` via `_auto_snapshot`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op (never `try/except`-swallowed). `download-videos` takes its snapshot *after* the interactive size-gate confirmation — a declined run writes nothing and leaves no snapshot — but always before the first byte lands; `digest-video` snapshots *only when it is about to write* the transcript (a pure already-digested / no-fetchable-video run attaches nothing and takes no snapshot) — but always before the first store write; `video-digest` snapshots on the **`--apply`** branch (the one that writes each `source.digest`), never on plain worksheet export. (`verify` writes only its report and is **not** destructive — no snapshot.)
+6. **`fetch` is cached per item id.** Re-runs do not re-hit the network without `--force`, or `--retry-failed`, which re-hits only the recorded failures a retry could repair (issue #19, shipped).
+7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break. X renames the *names* too, so each source holds a **tuple of aliases** (newest first, old names kept) and an empty capture fails closed rather than reporting zero new items — see invariant 15.
+8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/` via `_auto_snapshot`. The full set today: `vocab --regenerate`, `topics --resynth`, `fetch --force`, `fetch --retry-failed`, `fetch --revalidate --write`, `media`, `describe`, `describe --apply`, `refresh-quoted` (both modes, under distinct labels), `refresh-media`, `download-videos`, `digest-video`, `video-digest --apply`, `verify --write-verdicts`, `reextract --apply` and `refetch-truncated --apply`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op (never `try/except`-swallowed). `download-videos` takes its snapshot *after* the interactive size-gate confirmation — a declined run writes nothing and leaves no snapshot — but always before the first byte lands; `digest-video` snapshots *only when it is about to write* the transcript (a pure already-digested / no-fetchable-video run attaches nothing and takes no snapshot) — but always before the first store write; `video-digest` snapshots on the **`--apply`** branch (the one that writes each `source.digest`), never on plain worksheet export. The read-only commands take none, because there is nothing to protect: `payload-stats`, `list-videos`, `fetch-video`, `verify` on its default report-only path, `verify-entities`, `diff`, `status`, `generate`, and the dry-run branch of every command that has one.
 9. **Fetch records are tagged unions.** A `ContentSource` on `items.json` is either a `Success` (with required `text`) or a `Failure` (with required `failure_reason`). Mixed shapes are not representable — pydantic rejects them at construction, and mypy rejects them statically (via the `pydantic.mypy` plugin). Legacy records with `ok: bool` (pre-#20) are normalised on read by a `BeforeValidator` on the union, so existing `data/items.json` files keep working without a manual migration. The static contract is pinned by `tests/type_probes/illegal_states.py`.
 10. **The heavy ML lives outside xbrain core.** xbrain stays **mechanical**: it carries **no** MLX / CoreML / torch / vision-model dependency. The transcriber (`digest-video`), the frame extractor (`digest-video --frames` → `ffmpeg`) and the vision model (`digest-video --frames` → `[vision].command`) are all invoked as **external subprocesses** (argv `shlex`-split, run without a shell), located via config/PATH. `transcribe.py`, `video_frames.py` and `vision.py` each import no ML/vision library — tests assert it (`video_frames.py` uses Pillow only for classic edge-density image processing, not a model). A missing/unconfigured external tool is a clear operator error that aborts the run; a per-video tool failure is recorded and the batch continues. This is the locked #44 architecture — the `--frames` visual layer is **fully opt-in** and never runs on the default path.
 
 11. **Media variants are mutually exclusive states.** A `MediaEntry` on `items.json` is one of the four photo states (`MediaPhotoPending` / `MediaPhotoDownloaded` / `MediaPhotoFailed` / `MediaPhotoDescribed`) or the three video states (`MediaVideoPending` / `MediaVideoDownloaded` / `MediaVideoFailed`), discriminated by `kind`. The photo states form a linear pipeline: `Pending → Downloaded → Described` (with `Failed` as the off-ramp from `Pending`); the video states mirror it: `VideoPending → VideoDownloaded` (with `VideoFailed` as the off-ramp). State transitions happen only via `xbrain media` (advances photo `Pending`, retries photo `Failed`), `xbrain describe` (advances photo `Downloaded` to `Described`), `xbrain refresh-media` (replaces a poster-era `MediaVideoPending` with the freshly-captured playable one, in place — video entries only, photo states untouched), and `xbrain download-videos` (advances a real-mp4 `MediaVideoPending` to `MediaVideoDownloaded` / `MediaVideoFailed`; HLS and poster-era entries are skipped, never advanced). `MediaVideoPending` carries the **playable** stream URL (highest-bitrate mp4, or the HLS manifest) plus the poster as `thumbnail_url` and the chosen `bitrate` + `duration_millis` — populated at extract/import-archive time by the shared `extract/video.py` helper, never the poster stored as the URL; `MediaVideoDownloaded` / `MediaVideoFailed` carry those same fields forward so a record stays self-describing. Items captured before that helper existed stay poster-era until `refresh-media` backfills them (see the `### refresh-media` section above). The variants are a tagged union, **not** a Liskov hierarchy — `isinstance` checks mean "exactly this state", so the new video variants re-declare their carried fields rather than subclassing `MediaVideoPending`. Legacy records with the flat `{type, url}` shape are normalised on read by a `BeforeValidator` on the union — no manual migration needed. (See the `### media`, `### describe`, `### refresh-media` and `### download-videos` sections above for the per-stage contracts.)
 
-12. **An `x_article` source carries an ordered body as additive `blocks` (#39).** A `ContentSourceSuccess` for `kind="x_article"` may carry `blocks: list[ArticleBlock]` — the article's body as an **ordered** sequence so a long-form Article renders as a blogpost with inline images where the author placed them. `ArticleBlock` is a `kind`-discriminated union (same tagged-union style as `MediaEntry` / `ContentSource`): `ArticleTextBlock` (`kind="text"`, a flattened text run) and `ArticleImageBlock` (`kind="image"`, an optional `alt`, and a `media` that **wraps the existing `MediaEntry` photo-state union**). Wrapping `MediaEntry` — rather than a new image type — means the photo download engine, the `_reject_local_path_traversal` / `_require_utc_aware` validators, the `_media/` mirror and a future `describe` path all apply to article images with **no new plumbing**; the producer only ever emits `MediaPhotoPending`, and the existing `xbrain media` engine drives pending → downloaded/failed. **`text` stays the source of truth for the flattened body:** when `blocks` is non-empty, `text` equals the concatenation of the `ArticleTextBlock` texts (in order), so `enrich`/`topics`/`generate`'s fallback consume `text` **unchanged** — #39 adds no enrich/topics change. This invariant is **enforced at the type boundary** by a `ContentSourceSuccess` `model_validator(mode="after")` (`_text_matches_blocks`, #39 PR 3, mirroring `MediaPhotoDescribed._decorative_implies_empty_description`): a non-empty `blocks` whose text runs do not `"".join` to `text` is rejected at construction AND on load, so a producer bug or a hand-edited store cannot silently ship an inconsistent body; empty `blocks` imposes no constraint (back-compat). The field is **optional + additive** (`default_factory=list`): every existing `items.json` loads unchanged (no `blocks` key → `[]`), and a re-dump's `blocks: []` is the same one-time backward-compatible churn as `frames`/`has_speech`/`language`. The model seam lands in [#39](https://github.com/VGonPa/xbrain/issues/39) PR 1; the producer (`fetch` — GraphQL interception + Draft.js `content_state` parse, trafilatura fallback) and the `text`==concat validator land in PR 3; the download walk (`media` — advances each `ArticleImageBlock.media` `Pending → Downloaded/Failed` to `data/media/<id>/article/<n>.<ext>`, reusing the photo engine) lands in PR 4; the blogpost renderer (`generate._article_blocks_lines` — walks the ordered `blocks`, emitting text paragraphs and inline `![[_media/<id>/article/<n>]]` embeds, mirroring the bytes via `_mirror_item_article_images`) lands in PR 5, closing the chain end-to-end.
+12. **An `x_article` source carries an ordered body as additive `blocks` (#39).** A `ContentSourceSuccess` for `kind="x_article"` may carry `blocks: list[ArticleBlock]` — the article's body as an **ordered** sequence so a long-form Article renders as a blogpost with inline images where the author placed them. `ArticleBlock` is a `kind`-discriminated union over **three** variants (same tagged-union style as `MediaEntry` / `ContentSource`): `ArticleTextBlock` (`kind="text"`, a flattened text run), `ArticleImageBlock` (`kind="image"`, an optional `alt`, and a `media` that **wraps the existing `MediaEntry` photo-state union**), and `ArticleVideoBlock` (`kind="video"`, wrapping the SAME `MediaEntry` union, here a `MediaVideoPending`). **An article's `MEDIA` entity is not always a photo:** X embeds native video (`media_info.__typename == "ApiVideo"`) the same way, with its poster one level deeper (`media_info.preview_image.original_img_url`) and its bitrate under `bit_rate` rather than the `bitrate` a tweet uses — so the parser's lookup returned nothing and every embedded video went to the drop log, leaving a hole in the note exactly where the author had put a demo. The video variant does not download bytes or transcribe speech (`digest-video` selects from item-level media, not from article bodies); what it guarantees is that the video is recorded, positioned and rendered where the author placed it. The same pass recovered the other silently-dropped class, **entity-borne text**: `MARKDOWN` code listings, `DIVIDER` rules and an embedded `TWEET` live in an `atomic` block whose `text` is a single space, so the "no text run means no content" assumption deleted them. Wrapping `MediaEntry` — rather than a new image type — means the photo download engine, the `_reject_local_path_traversal` / `_require_utc_aware` validators, the `_media/` mirror and a future `describe` path all apply to article images with **no new plumbing**; the producer only ever emits `MediaPhotoPending`, and the existing `xbrain media` engine drives pending → downloaded/failed. **`text` stays the source of truth for the flattened body:** when `blocks` is non-empty, `text` equals the concatenation of the `ArticleTextBlock` texts (in order), so `enrich`/`topics`/`generate`'s fallback consume `text` **unchanged** — #39 adds no enrich/topics change. This invariant is **enforced at the type boundary** by a `ContentSourceSuccess` `model_validator(mode="after")` (`_text_matches_blocks`, #39 PR 3, mirroring `MediaPhotoDescribed._decorative_implies_empty_description`): a non-empty `blocks` whose text runs do not `"".join` to `text` is rejected at construction AND on load, so a producer bug or a hand-edited store cannot silently ship an inconsistent body; empty `blocks` imposes no constraint (back-compat). The field is **optional + additive** (`default_factory=list`): every existing `items.json` loads unchanged (no `blocks` key → `[]`), and a re-dump's `blocks: []` is the same one-time backward-compatible churn as `frames`/`has_speech`/`language`. The model seam lands in [#39](https://github.com/VGonPa/xbrain/issues/39) PR 1; the producer (`fetch` — GraphQL interception + Draft.js `content_state` parse, trafilatura fallback) and the `text`==concat validator land in PR 3; the download walk (`media` — advances each `ArticleImageBlock.media` `Pending → Downloaded/Failed` to `data/media/<id>/article/<n>.<ext>`, reusing the photo engine) lands in PR 4; the blogpost renderer (`generate._article_blocks_lines` — walks the ordered `blocks`, emitting text paragraphs and inline `![[_media/<id>/article/<n>]]` embeds, mirroring the bytes via `_mirror_item_article_images`) lands in PR 5, closing the chain end-to-end.
+
+13. **The raw payload is kept, so `extract` is a re-runnable transformation over data we own.** Every tweet's whole GraphQL subtree is written to `data/payloads/<shard>/<id>.json.gz` **before** it is parsed, with credential keys scrubbed inside the writer (whole key names, never substrings). A parse bug is therefore fixed **offline** — `reextract` re-runs the parser and shows the diff across the whole corpus before `--apply` writes it — instead of by a network round-trip to X for posts that may since have been deleted or protected. Only the five re-derivable fields are re-parsed (`text`, `links`, `quoted_id`, `thread`, `author`); `media` never is, because the store holds enriched media a fresh parse would overwrite with pending states, destroying an evidence surface a summary was already written from. What has no payload is reported as having none: **"cannot be re-extracted" must never look like "re-extracted cleanly"**. The payload store is per-item and idempotent on re-sync, nothing in the pipeline reads it back, and deleting it costs re-parseability, never a note.
+
+14. **One definition of evidence, shared by every component that needs it.** `evidence.evidence_surfaces(item, target)` is the single source of truth for what may support a claim in a generated output, and it is **target-scoped**. The generator ships at least those surfaces, the judge's source is exactly them, `rubric-verify.md` declares every one of them, and the entity checker searches `evidence_text` — the same surfaces' atomic values, labels stripped. No component keeps its own list: `tests/test_evidence_contract.py` binds the first three by identity against the shared function, and `tests/test_checker_evidence_binding.py` binds the fourth through the checker's public scan. A link is never a surface. Four hand-written lists is how the judge came to be handed the linked article for a digest whose generator never saw it, excusing inventions it could not have sourced, while a green suite reported agreement.
+
+15. **Capture fails closed: an empty result is never reported as success, and a wall is never evidence.** Two places where "nothing came back" used to be indistinguishable from "nothing to do". `extract_source` **raises `OperationNotCaptured`** when it saw zero responses for its GraphQL operation across a whole scroll: a healthy timeline always answers at least once, so an empty capture means X renamed the operation, and reporting `0 nuevos items` with exit 0 silently freezes the store. (For the same reason the operation names are held as **aliases**, newest first, rather than as one literal.) `validate_body` runs at the **persistence boundary** (`_safe_extract`), so no extractor can write a consent or login wall into the store as a success: a body under the length floor, one carrying wall or page-chrome markers, or one whose title is its bare domain is recorded as a `blocked_interstitial` **failure**. The bias is asymmetric on purpose — a wrongly rejected article leaves the honest failure we already had, while an accepted wall silences the unfetched-links guardrail, grounds a name in boilerplate and hands the judge a `[Linked article]` it will trust. The re-capture backfills carry the same rule: re-seeing zero known items against a non-empty store aborts without saving unless `--force`.
 
 ---
 
@@ -623,6 +911,15 @@ xbrain/
 ├── config.toml.example      ← config template (copy to config.toml)
 ├── pyproject.toml           ← deps, ruff, mypy, pytest config
 │
+├── .github/workflows/
+│   ├── quality.yml          ← the required `quality` gate (runs scripts/check.sh)
+│   └── gate-audit.yml       ← scheduled auditor of that gate; runs from `main`
+│
+├── docs/                    ← user-facing guides
+│   ├── tutorial.md
+│   ├── troubleshooting.md
+│   └── digest-video.md
+│
 ├── src/xbrain/              ← the package
 │   ├── cli.py               ← typer CLI — one command per stage
 │   ├── models.py            ← pydantic data models — the shapes
@@ -630,31 +927,42 @@ xbrain/
 │   │
 │   ├── extract/             ← X traffic interception
 │   │   ├── browser.py       ← Playwright session + login
-│   │   ├── extractor.py     ← GraphQL operation interception
+│   │   ├── extractor.py     ← GraphQL operation interception (alias list, fail-closed)
 │   │   ├── threads.py       ← TweetDetail thread expansion
-│   │   ├── graphql.py       ← response parsers
+│   │   ├── graphql.py       ← response parsers + truncated-item selection
 │   │   ├── article.py       ← Draft.js content_state → ordered ArticleBlocks (#39)
 │   │   └── video.py         ← video-variant selection (shared w/ archive)
 │   │
-│   ├── fetch.py             ← article fetch (HTTP + Trafilatura + Firecrawl)
-│   ├── fetch_x.py           ← x.com article (structured blocks + trafilatura fallback) + status fetch
+│   ├── payloads.py          ← raw GraphQL payload store; reextract + payload-stats
+│   ├── fetch.py             ← article fetch (HTTP + Trafilatura + Firecrawl) + validate_body
+│   ├── fetch_x.py           ← x.com article + status fetch; truncated-text repair
 │   ├── archive.py           ← X data archive (ZIP) import
+│   ├── media.py             ← photo + inline-article-image download engine
+│   ├── describe.py          ← vision descriptions for downloaded photos
 │   │
 │   ├── vocab.py             ← vocab induction + worksheet export/import
 │   ├── enrich.py            ← per-item enrichment orchestration
 │   ├── topics.py            ← topic-page assembly + post lists
 │   ├── topic_synth.py       ← topic overview synthesis (api + worksheet)
 │   ├── generate.py          ← wiki rendering
+│   ├── dashboard.py         ← the self-contained interactive dashboard.html
+│   ├── i18n.py              ← per-language wiki strings
 │   ├── notes_io.py          ← per-note read/write + user-tail preservation
 │   ├── store.py             ← items.json / topics.json / state.json I/O
-│   ├── refresh.py           ← refresh-media backfill: video media swap + size estimate
+│   ├── refresh.py           ← refresh-media + refresh-quoted backfills, size estimate
 │   ├── video_media.py       ← download-videos: mp4 byte download (reuses media.py)
 │   ├── video_select.py      ← list-videos: read-only video catalog (VideoRow)
-│   ├── video_fetch.py       ← fetch-video: ephemeral mp4 fetch, non-persisting (reuses video_media.py)
+│   ├── video_fetch.py       ← fetch-video: ephemeral mp4 fetch, non-persisting
 │   ├── transcribe.py        ← digest-video: external transcriber subprocess (no ML in core)
-│   ├── video_frames.py      ← digest-video --frames: ffmpeg key-frame extraction + classify (no ML)
+│   ├── video_frames.py      ← digest-video --frames: ffmpeg key-frame extraction + classify
 │   ├── vision.py            ← digest-video --frames: external vision subprocess (no ML in core)
-│   ├── digest.py            ← digest-video: fetch → transcribe (+ optional --frames) → attach x_video
+│   ├── digest.py            ← digest-video: fetch → transcribe (+ --frames) → attach x_video
+│   ├── video_digest.py      ← video-digest: long-form per-video digest worksheet
+│   ├── evidence.py          ← THE definition of evidence per (item, target)
+│   ├── verification.py      ← verify: worksheet, aggregate, contract fingerprint
+│   ├── verification_audit.py ← verify --audit: the judge≠party second pass
+│   ├── entity_grounding.py  ← verify-entities: deterministic, token-free entity check
+│   ├── gate_audit.py        ← CI gate auditor (pure; driven by gate-audit.yml)
 │   ├── snapshot.py          ← data/ snapshot lifecycle (create/list/restore/prune)
 │   ├── diff.py              ← structured diff between two snapshot data dirs
 │   ├── worksheet.py         ← enrich worksheet export/import
@@ -663,11 +971,19 @@ xbrain/
 │   │
 │   ├── guardrails.yaml      ← declarative validation rules
 │   ├── rubrics.py           ← rubric loader
-│   ├── rubrics/             ← LLM prompts, one per task
+│   ├── rubrics/             ← LLM prompts, one per task (8 files)
 │   │   ├── rubric-vocab.md
 │   │   ├── rubric-topics.md
 │   │   ├── rubric-summary.md
-│   │   └── rubric-topic-page.md
+│   │   ├── rubric-topic-page.md
+│   │   ├── rubric-describe-image.md
+│   │   ├── rubric-video-digest.md
+│   │   ├── rubric-verify.md
+│   │   └── rubric-verify-audit.md
+│   │
+│   ├── resources/           ← vendored dashboard assets (no CDN, no build step)
+│   │   ├── dashboard.template.html
+│   │   └── echarts.min.js
 │   │
 │   └── executors/           ← LLM-call backends
 │       ├── base.py          ← EnrichmentExecutor protocol
@@ -680,12 +996,22 @@ xbrain/
 │   ├── items.json
 │   ├── state.json
 │   ├── vocab.yaml
-│   └── topics.json
+│   ├── topics.json
+│   ├── payloads/            ← raw GraphQL subtrees, sharded + gzipped
+│   ├── media/               ← downloaded photo / video / article-image / frame bytes
+│   └── snapshots/           ← pre-<command> recovery copies
 │
-├── scripts/                 ← one-off helpers
+├── scripts/                 ← one-off helpers + external-tool wrappers
 │   ├── import_chrome_session.py
 │   ├── import_safari_session.py
-│   └── check.sh             ← quality gate
+│   ├── xbrain-transcribe-auto      ← language router: English → parakeet, else whisper
+│   ├── xbrain-transcribe           ← parakeet-mlx wrapper
+│   ├── xbrain-transcribe-mlx       ← mlx-whisper wrapper (Apple GPU)
+│   ├── xbrain-transcribe-whisper   ← Whisper CLI wrapper (portable CPU fallback)
+│   ├── xbrain-vision               ← external vision-model wrapper
+│   ├── check.sh                    ← quality gate
+│   ├── audit_gate_issue.sh
+│   └── announce_red_branch.sh
 │
 └── tests/                   ← pytest suite
 ```

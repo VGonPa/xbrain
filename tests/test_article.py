@@ -18,7 +18,13 @@ from __future__ import annotations
 import json
 
 from xbrain.extract.article import parse_article_content_state
-from xbrain.models import ArticleImageBlock, ArticleTextBlock, MediaPhotoPending
+from xbrain.models import (
+    ArticleImageBlock,
+    ArticleTextBlock,
+    ArticleVideoBlock,
+    MediaPhotoPending,
+    MediaVideoPending,
+)
 
 _IMAGE_URL = "https://pbs.twimg.com/media/ABC123.jpg"
 
@@ -130,7 +136,14 @@ def test_image_url_resolves_from_nested_media_items():
     assert blocks[0].alt == "nested alt"
 
 
-def test_non_image_atomic_entity_is_skipped_and_inline_link_text_kept():
+def test_embedded_tweet_keeps_its_url_and_inline_link_text_kept():
+    """An embedded TWEET is not an image — but it is not nothing either.
+
+    This used to assert the tweet was DROPPED. That was the defect: the atomic
+    block carries `text: " "`, which fails `.strip()`, so the only pointer to the
+    embedded post (`data.tweetId`) went in the bin. The article said "look at
+    this post" and the note showed a hole.
+    """
     content_state = {
         "blocks": [
             {
@@ -152,9 +165,92 @@ def test_non_image_atomic_entity_is_skipped_and_inline_link_text_kept():
         },
     }
     _title, blocks = parse_article_content_state(_payload(content_state))
-    # The embedded tweet is not an image (dropped); the link paragraph's text
-    # is kept as a text run (a LINK entity is never mistaken for an image).
-    assert blocks == [ArticleTextBlock(text="see this link")]
+    # The tweet survives as its canonical handle-less URL; the link paragraph's
+    # text is kept as a text run (a LINK entity is never mistaken for an image).
+    assert blocks == [
+        ArticleTextBlock(text="https://x.com/i/status/123"),
+        ArticleTextBlock(text="\n\nsee this link"),
+    ]
+
+
+def test_markdown_entity_recovers_its_code_block():
+    """A `MARKDOWN` entity holds real prose/code on `data.markdown`, not in `text`.
+
+    Measured on the real corpus: 20 such blocks across 23 Articles, ~3.9 KB of
+    code listings in the 9 captured payloads alone — deleted from articles that
+    are largely ABOUT their code.
+    """
+    code = "```python\nprint('hi')\n```"
+    content_state = {
+        "blocks": [
+            {"key": "p", "text": "before", "type": "unstyled"},
+            {
+                "key": "md",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            },
+        ],
+        "entityMap": {"0": {"type": "MARKDOWN", "data": {"markdown": code}}},
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [
+        ArticleTextBlock(text="before"),
+        ArticleTextBlock(text=f"\n\n{code}"),
+    ]
+
+
+def test_divider_entity_becomes_a_horizontal_rule():
+    """A `DIVIDER` carries an empty `data` — it IS the author's section break."""
+    content_state = {
+        "blocks": [
+            {"key": "p", "text": "before", "type": "unstyled"},
+            {
+                "key": "hr",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            },
+            {"key": "q", "text": "after", "type": "unstyled"},
+        ],
+        "entityMap": {"0": {"type": "DIVIDER", "data": {}}},
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert [b.text for b in blocks] == ["before", "\n\n---", "\n\nafter"]
+
+
+def test_unknown_entity_carrying_text_is_recovered_not_dropped():
+    """Drift tolerance: an entity type we have never seen still yields its text."""
+    content_state = {
+        "blocks": [
+            {
+                "key": "x",
+                "text": " ",
+                "type": "atomic",
+                "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+            },
+        ],
+        "entityMap": {"0": {"type": "SOME_FUTURE_THING", "data": {"text": "kept anyway"}}},
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [ArticleTextBlock(text="kept anyway")]
+
+
+def test_entity_text_never_overrides_a_real_text_run():
+    """A block WITH text uses its own run — the entity is not a second source."""
+    content_state = {
+        "blocks": [
+            {
+                "key": "x",
+                "text": "the real paragraph",
+                "type": "unstyled",
+                "entityRanges": [{"offset": 0, "length": 3, "key": 0}],
+            },
+        ],
+        "entityMap": {"0": {"type": "MARKDOWN", "data": {"markdown": "SHOULD NOT APPEAR"}}},
+    }
+    _title, blocks = parse_article_content_state(_payload(content_state))
+    assert blocks == [ArticleTextBlock(text="the real paragraph")]
 
 
 def test_image_only_article_yields_blocks_with_empty_flattened_text():
@@ -491,3 +587,89 @@ def test_heading_list_and_quote_block_prefixes_are_baked_in():
     _title, blocks = parse_article_content_state(_payload(content_state))
     texts = [b.text for b in blocks if isinstance(b, ArticleTextBlock)]
     assert texts == ["# H1", "\n\n### H3", "\n\n1. step", "\n\n> quote"]
+
+
+def test_a_video_entry_with_no_variants_falls_back_to_its_poster_image():
+    """No playable stream ⇒ it is an IMAGE block, never a video linking to a JPEG.
+
+    `build_video_media` falls back to `media_url_https` when it finds no variant,
+    and on the article shape that key holds the poster — so treating a
+    variant-less entry as a video would render `🎥 Ver vídeo` pointing at a still.
+    """
+    poster = "https://pbs.twimg.com/amplify_video_thumb/1/img/p.jpg"
+    payload = _payload(
+        {
+            "blocks": [
+                {
+                    "key": "v",
+                    "text": " ",
+                    "type": "atomic",
+                    "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+                }
+            ],
+            "entityMap": [
+                {"key": 0, "value": {"type": "MEDIA", "data": {"mediaItems": [{"mediaId": "77"}]}}}
+            ],
+        }
+    )
+    container = payload["data"]["article"]["article_results"]["result"]
+    container["media_entities"] = [
+        {
+            "media_id": "77",
+            "media_info": {
+                "__typename": "ApiVideo",
+                "variants": [],
+                "preview_image": {"original_img_url": poster},
+            },
+        }
+    ]
+
+    _title, blocks = parse_article_content_state(payload)
+    assert len(blocks) == 1
+    assert isinstance(blocks[0], ArticleImageBlock)
+    assert blocks[0].media.url == poster
+
+
+def test_a_real_video_entry_becomes_a_video_block_pointing_at_the_stream():
+    """The positive counterpart: with variants present it IS a video."""
+    poster = "https://pbs.twimg.com/amplify_video_thumb/1/img/p.jpg"
+    stream = "https://video.twimg.com/amplify_video/1/vid/avc1/1920x1080/s.mp4"
+    payload = _payload(
+        {
+            "blocks": [
+                {
+                    "key": "v",
+                    "text": " ",
+                    "type": "atomic",
+                    "entityRanges": [{"offset": 0, "length": 1, "key": 0}],
+                }
+            ],
+            "entityMap": [
+                {"key": 0, "value": {"type": "MEDIA", "data": {"mediaItems": [{"mediaId": "77"}]}}}
+            ],
+        }
+    )
+    container = payload["data"]["article"]["article_results"]["result"]
+    container["media_entities"] = [
+        {
+            "media_id": "77",
+            "media_info": {
+                "__typename": "ApiVideo",
+                "duration_millis": 24016,
+                "preview_image": {"original_img_url": poster},
+                "variants": [
+                    {"content_type": "video/mp4", "bit_rate": 256000, "url": "https://v/low.mp4"},
+                    {"content_type": "video/mp4", "bit_rate": 10368000, "url": stream},
+                    {"content_type": "application/x-mpegURL", "url": "https://v/x.m3u8"},
+                ],
+            },
+        }
+    ]
+
+    _title, blocks = parse_article_content_state(payload)
+    assert len(blocks) == 1
+    assert isinstance(blocks[0], ArticleVideoBlock)
+    assert isinstance(blocks[0].media, MediaVideoPending)
+    assert blocks[0].media.url == stream  # the HIGHEST bit_rate mp4, not the first
+    assert blocks[0].media.thumbnail_url == poster
+    assert blocks[0].media.duration_millis == 24016

@@ -459,3 +459,99 @@ def test_the_gate_counts_only_the_confident_bucket():
     records = scan_store(store, "digest")
     assert {r.item_id for r in records} == {"1", "2"}, "both are still REPORTED"
     assert [r.item_id for r in gate_failures(records)] == ["1"], "only the confident one GATES"
+
+
+def test_summarise_scan_reports_the_uncertain_tier_it_sets_aside():
+    """`scan_store` was fixed to KEEP uncertain-only records; the summary then dropped them
+    again, so the terminal line and the report table showed neither. The one fabricated
+    name the LLM judges caught ("Suhail", opening a summary) lives in exactly this tier —
+    the check had the finding and no reader could reach it."""
+    from xbrain.entity_grounding import summarise_scan
+
+    confident = _item(digest="Clip de entrevista a Anthropic sobre software.")
+    uncertain = _item("2", digest="- Arranca con una pantalla en blanco.")
+
+    summary = summarise_scan(scan_store({"1": confident, "2": uncertain}, "digest"), {})
+
+    # The headline stays CONFIDENT-only — the tiers have different precision and one
+    # number for two instruments is how a reader ends up quoting the wrong one.
+    assert summary["flagged"] == 1 and summary["entities"] == 1
+    assert summary["uncertain_only_flagged"] == 1
+    assert summary["uncertain_entities"] == 1
+
+
+def test_report_lists_the_uncertain_candidates_instead_of_only_counting_them():
+    """A count with no rows cannot be judged, and judging is the only thing this tier is
+    good for at its precision."""
+    from xbrain.entity_grounding import render_entity_report, summarise_scan
+
+    records = scan_store(
+        {"2": _item("2", digest="- Arranca con una pantalla en blanco.")}, "digest"
+    )
+    summary = summarise_scan(records, {})
+
+    _, md = render_entity_report(records, summary, 1, "digest")
+
+    assert "## Uncertain tier" in md
+    assert "Arranca" in md, "the candidate itself must be listed, not just tallied"
+    assert "Judge these, do not count them." in md
+
+
+def test_an_output_with_both_tiers_is_not_double_counted_as_uncertain_only():
+    """`uncertain_only` means the uncertain tier is the ONLY signal. An output already
+    visible through a confident flag needs no second entry — it would inflate the tally
+    of findings a reader cannot otherwise see, which is the number's whole purpose."""
+    from xbrain.entity_grounding import summarise_scan
+
+    both = _item(digest="Arranca el clip de entrevista a Anthropic sobre software.")
+    records = scan_store({"1": both}, "digest")
+    assert records[0].ungrounded and records[0].uncertain, "fixture must carry both tiers"
+
+    summary = summarise_scan(records, {})
+
+    assert summary["flagged"] == 1
+    assert summary["uncertain_only_flagged"] == 0
+    # ...but the tier's own entity count still sees it: nothing is hidden, only re-bucketed.
+    assert summary["uncertain_entities"] == len(records[0].uncertain)
+
+
+def test_a_speech_disfluency_inside_a_name_no_longer_breaks_the_match():
+    """Measured on the store: the evidence for `Application Default Credentials` reads
+    "the application default uh credential". All three words are there and adjacent — one
+    ASR filler between them meant no window of the transcript ever spelled the name, and
+    the check reported a fabricated entity that the generator had recovered correctly."""
+    evidence = "the application default uh credential, which automatically finds credentials"
+
+    assert is_grounded("Application Default Credentials", evidence)
+
+
+def test_disfluencies_are_stripped_from_evidence_only():
+    """The output is written text: an "Ah" in it is a name or a word, never a filler.
+    Stripping there would silently ground `Ah Counting` off evidence about counting."""
+    assert not is_grounded("Uh Huh Industries", "a company that makes industrial widgets")
+
+
+def test_a_translated_name_matches_with_the_words_in_the_other_order():
+    """Spanish puts the adjective after the noun, English before it, so a translated name
+    arrives reversed: `Revolución Industrial` against "the industrial revolution". Needs no
+    lexicon entry, and generalises to pairs the corpus has not produced yet."""
+    assert is_grounded("Revolución Industrial", "kicked off by the industrial revolution")
+    # ...and the reversal is bounded: an unrelated long phrase sharing words stays flagged.
+    assert not is_grounded(
+        "Default Application Credentials Manager", "a manager for tokens and secrets"
+    )
+
+
+@pytest.mark.parametrize("evidence", ["rolled out in the USA", "across America", "United States"])
+def test_estados_unidos_grounds_on_the_forms_sources_actually_use(evidence):
+    """The most-flagged entity in the store (12 of 239 confident flags) and NOT ONE source
+    said "united states" — they said usa, u.s, america."""
+    assert is_grounded("Estados Unidos", evidence)
+
+
+def test_estados_unidos_is_not_grounded_by_the_english_pronoun():
+    """`us` is deliberately absent from the lexicon. Adding it would ground the country off
+    a pronoun present in nearly every transcript — that does not remove a false alarm, it
+    blinds the check to every invented mention of the US. 8 sources stay flagged because
+    of this, on purpose."""
+    assert not is_grounded("Estados Unidos", "this gives us a much better result")

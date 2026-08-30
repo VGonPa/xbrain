@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""xbrain `[transcribe].command` router — detects the language, then picks the ASR.
+
+xbrain invokes `<cmd> [--model M] --output-format json --output-dir <DIR> <media>`
+and reads the transcript from the first NON-EMPTY `*.json` in `<DIR>`. This script
+honours that contract and delegates to one of two backends that already do:
+
+  - `xbrain-transcribe`         → parakeet-mlx. Fast on Apple Silicon. ENGLISH ONLY.
+  - `xbrain-transcribe-mlx`     → mlx-whisper. Multilingual, runs on the Apple GPU.
+  - `xbrain-transcribe-whisper` → OpenAI Whisper CLI. Multilingual, CPU, ~25x slower.
+
+Non-English tries the GPU backend and falls back to the CPU one if it cannot run
+(no uv, no wheel, not an Apple machine). The two were verified to produce a
+character-identical transcript on a real clip, so the fallback trades only time.
+
+WHY THIS EXISTS. parakeet-tdt (v2 and v3) does not fail on Spanish audio — it
+INVENTS. Verified 17-jul-2026 against an es-ES TV clip: it exits 0 and emits
+fluent, broken English that never reproduces what was said. A noisy failure is
+visible in a log; this one passes the whole pipeline and lands in a note as a
+quotation. By the time you read the transcript you can no longer tell "the video
+said that" from "parakeet made it up", so the choice of backend HAS to be made
+before transcription, not after.
+
+HOW. `ffmpeg` slices the first `XBRAIN_ASR_DETECT_SECONDS` (default 30) of audio;
+`whisper` transcribes that slice with no `--language`, so it reports what it
+detected; the full media then goes to parakeet for English and to whisper for
+anything else. Detection costs one small-model pass over 30 seconds — the whole
+point of routing is to keep the fast backend for the case it is correct on.
+
+COST, measured on this machine (M-series, 12-ago-2026) over one real es-ES and
+one real en-US clip from the store: `base` ~19 s per clip, `tiny` ~10 s, and both
+identified both clips correctly. The default stays `base`: two samples are not
+enough evidence to trade accuracy for 9 seconds on the axis where being wrong
+means a fabricated transcript. `XBRAIN_ASR_DETECT_MODEL=tiny` is there for a
+large backlog where the halving matters.
+
+FAILING SAFE. Any uncertainty — ffmpeg missing, whisper failing, an unreadable
+result — routes to WHISPER, never to parakeet. The costs are asymmetric in
+exactly one direction: whisper on English is slower than it needed to be, while
+parakeet on non-English is a fabricated transcript. A silent video short-circuits
+before any of this (`ffprobe` confirms no audio) and yields the empty-speech JSON
+the two wrappers already agree on.
+
+ENV
+  XBRAIN_ASR_DETECT_MODEL    whisper model used for detection  (default: base)
+  XBRAIN_ASR_DETECT_SECONDS  seconds of audio sampled          (default: 30)
+  XBRAIN_ASR_FORCE           "parakeet" | "whisper" — skip detection entirely
+  XBRAIN_TRANSCRIBE_PARAKEET path to the parakeet wrapper      (default: alongside this file)
+  XBRAIN_TRANSCRIBE_WHISPER  path to the whisper wrapper       (default: alongside this file)
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+# parakeet is correct for these and materially faster; everything else — including
+# an undetected language — goes to whisper. Kept as a set so the "English family"
+# can grow (whisper reports plain "en", but a future detector may be finer-grained)
+# without turning the routing rule into a chain of string comparisons.
+PARAKEET_LANGUAGES = {"en", "english"}
+
+DEFAULT_DETECT_MODEL = "base"
+DEFAULT_DETECT_SECONDS = 30
+_HERE = Path(__file__).resolve().parent
+
+
+def _wrapper(env_var: str, default_name: str) -> str:
+    """Resolve a backend wrapper: the env override, else a sibling of this script.
+
+    Defaulting to a sibling keeps the three scripts deployable as one directory
+    (repo `scripts/` or `~/.local/bin`) with no absolute paths baked in.
+    """
+    override = os.environ.get(env_var)
+    if override:
+        return override
+    sibling = _HERE / default_name
+    return str(sibling) if sibling.exists() else default_name
+
+
+def _parse_args(args: list[str]) -> tuple[str, str]:
+    """Extract `(output_dir, media)` from xbrain's invocation.
+
+    Mirrors the parakeet wrapper's own parsing so the three scripts agree on what
+    the contract is; every other flag is passed through untouched to the backend.
+    """
+    out_dir = "."
+    for i, arg in enumerate(args):
+        if arg == "--output-dir" and i + 1 < len(args):
+            out_dir = args[i + 1]
+    return out_dir, (args[-1] if args else "")
+
+
+def _confirmed_no_audio(media: str) -> bool:
+    """True ONLY if ffprobe positively confirms `media` has no audio stream.
+
+    Unknown (ffprobe absent / errors / empty path) → False, so a real failure is
+    never MASKED as "silent". Same rule, same reason, as in both wrappers.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not media:
+        return False
+    probe = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            media,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return False
+    return "audio" not in probe.stdout
+
+
+def _write_silent(out_dir: str, media: str) -> None:
+    """Emit the empty-speech JSON both wrappers use for a genuinely silent clip."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{Path(media).stem}.json").write_text(
+        json.dumps({"text": "", "language": None, "segments": [], "has_speech": False})
+    )
+
+
+def detect_language(media: str) -> str | None:
+    """The language whisper detects in the first N seconds of `media`, or None.
+
+    None means "could not tell" — from a missing ffmpeg/whisper, a non-zero exit,
+    or output we could not read. Every one of those routes to whisper (see
+    `pick_backend`), so an undetectable clip is never handed to the backend that
+    fabricates.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    whisper = shutil.which("whisper")
+    if not ffmpeg or not whisper or not media:
+        return None
+    seconds = os.environ.get("XBRAIN_ASR_DETECT_SECONDS", DEFAULT_DETECT_SECONDS)
+    model = os.environ.get("XBRAIN_ASR_DETECT_MODEL", DEFAULT_DETECT_MODEL)
+    workdir = tempfile.mkdtemp(prefix="xbrain-lang-")
+    try:
+        clip = Path(workdir) / "probe.wav"
+        sliced = subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-y",
+                "-t",
+                str(seconds),
+                "-i",
+                media,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(clip),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if sliced.returncode != 0 or not clip.exists():
+            return None
+        # No `--language`: the omission IS the detection request.
+        detected = subprocess.run(
+            [
+                whisper,
+                str(clip),
+                "--model",
+                model,
+                "--output_format",
+                "json",
+                "--output_dir",
+                workdir,
+                "--verbose",
+                "False",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if detected.returncode != 0:
+            return None
+        result = Path(workdir) / "probe.json"
+        if not result.exists():
+            return None
+        language = json.loads(result.read_text()).get("language")
+        return language.strip().lower() if isinstance(language, str) and language.strip() else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def pick_backend(language: str | None) -> str:
+    """ "parakeet" for a language parakeet is correct on, else "whisper".
+
+    `None` (undetected) deliberately lands on whisper: the failure modes are not
+    symmetric, and only one of them produces a plausible transcript of something
+    that was never said.
+    """
+    return "parakeet" if language in PARAKEET_LANGUAGES else "whisper"
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    out_dir, media = _parse_args(args)
+    if not media:
+        print("xbrain-transcribe-auto: no media file given", file=sys.stderr)
+        return 2
+
+    if _confirmed_no_audio(media):
+        _write_silent(out_dir, media)
+        return 0
+
+    forced = (os.environ.get("XBRAIN_ASR_FORCE") or "").strip().lower()
+    if forced in ("parakeet", "whisper"):
+        backend, language = forced, None
+    else:
+        language = detect_language(media)
+        backend = pick_backend(language)
+
+    print(
+        f"xbrain-transcribe-auto: language={language or 'undetected'} -> {backend}",
+        file=sys.stderr,
+    )
+    env = dict(os.environ)
+    if backend == "parakeet":
+        command = _wrapper("XBRAIN_TRANSCRIBE_PARAKEET", "xbrain-transcribe")
+        return subprocess.run([sys.executable, command, *args], env=env).returncode
+
+    # Pass the detected language through; "auto" tells the backend to detect for
+    # itself rather than force a wrapper's default onto a clip we could not
+    # identify — the same class of error as sending it to parakeet.
+    env["WHISPER_LANGUAGE"] = language or "auto"
+    # GPU first, CPU second: the two produce the same transcript (verified
+    # character-identical on a real clip) and differ only by 25x in wall time, so
+    # the fallback costs correctness nothing. `xbrain-transcribe-mlx` exits
+    # non-zero WITHOUT writing when it cannot run, which is what makes this safe.
+    for env_var, default_name in (
+        ("XBRAIN_TRANSCRIBE_MLX", "xbrain-transcribe-mlx"),
+        ("XBRAIN_TRANSCRIBE_WHISPER", "xbrain-transcribe-whisper"),
+    ):
+        command = _wrapper(env_var, default_name)
+        code = subprocess.run([sys.executable, command, *args], env=env).returncode
+        if code == 0:
+            return code
+        print(
+            f"xbrain-transcribe-auto: {default_name} exited {code}; trying the next backend",
+            file=sys.stderr,
+        )
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

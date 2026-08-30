@@ -28,10 +28,15 @@ from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
 from xbrain.extract.browser import x_context
-from xbrain.extract.extractor import RateLimitTruncated, extract_source
+from xbrain.extract.extractor import (
+    OperationNotCaptured,
+    RateLimitTruncated,
+    extract_source,
+)
 from xbrain.extract.threads import expand_threads
 from xbrain.extract.graphql import items_needing_refetch
 from xbrain.fetch import (
+    FIRECRAWL_CREDENTIAL_PATHS,
     RetryPlan,
     fetch_pending,
     firecrawl_available,
@@ -301,6 +306,14 @@ def _run_extract(
                 typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
                 truncated.append(src)
                 continue
+            except OperationNotCaptured as exc:
+                # Nothing was captured at all — the run learned NOTHING about this
+                # source. Advancing `last_run` would make the next run look fresh
+                # and hide the breakage, so leave the cursor untouched and fail
+                # loud. Other sources still save: a rename hits one operation.
+                typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
+                truncated.append(src)
+                continue
             if not items and first_run:
                 typer.echo(
                     f"AVISO: {src} devolvió 0 items en una extracción inicial — "
@@ -316,7 +329,8 @@ def _run_extract(
     save_state(state, cfg.state_path)
     if truncated:
         raise RuntimeError(
-            f"Extracción truncada por rate-limit/bloqueo de X en: {', '.join(truncated)}. "
+            f"Extracción incompleta en: {', '.join(truncated)} (rate-limit, bloqueo, o "
+            "la operación GraphQL de X cambió de nombre — el mensaje de arriba lo dice). "
             "Las fuentes completadas se guardaron; reanuda más tarde para el resto."
         )
 
@@ -611,14 +625,17 @@ def _echo_retry_plan(plan: RetryPlan, *, has_key: bool) -> None:
     reasons = ", ".join(f"{n} {reason}" for reason, n in sorted(plan.reasons.items()))
     typer.echo(f"Reintentables: {len(plan.retryable)} items" + (f" ({reasons})" if reasons else ""))
     if plan.blocked_on_firecrawl:
+        looked_in = "\n".join(f"    - {p}" for p in FIRECRAWL_CREDENTIAL_PATHS)
         typer.echo(
-            f"BLOQUEADOS por falta de FIRECRAWL_API_KEY: {len(plan.blocked_on_firecrawl)} items "
+            f"BLOQUEADOS por falta de clave Firecrawl: {len(plan.blocked_on_firecrawl)} items "
             "con fallos js_required/empty_content que NUNCA llegaron a pasar por el fallback "
-            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo. Configúrala y "
-            "vuelve a ejecutar."
+            "(attempts=1). Sin la clave, reintentarlos repite el mismo fallo.\n"
+            "  Se ha buscado en $FIRECRAWL_API_KEY y en las credenciales del CLI:\n"
+            f"{looked_in}\n"
+            "  Configúrala (o ejecuta `firecrawl login`) y vuelve a ejecutar."
         )
     elif has_key:
-        typer.echo("FIRECRAWL_API_KEY configurada — el fallback JS entra en los reintentos.")
+        typer.echo("Clave Firecrawl resuelta — el fallback JS entra en los reintentos.")
     typer.echo(
         f"Terminales (ningún extractor los arregla): {len(plan.terminal)} items. "
         "Su nota de guardarraíl ya nombra la causa."
@@ -2434,6 +2451,16 @@ def verify_entities_command(
         f"({summary['entities']} entidades); "
         f"{summary['unanimous_pass_but_ungrounded']} de ellas con PASS UNÁNIME de los jueces."
     )
+    # The uncertain tier gets its own line rather than being folded into the headline:
+    # it has lower precision, and merging it would let a reader quote one number for two
+    # instruments. Printed unconditionally when non-empty, because a finding the check
+    # made and the terminal never showed is the failure mode this exists to close.
+    if summary["uncertain_only_flagged"]:
+        typer.echo(
+            f"+ {summary['uncertain_only_flagged']} outputs cuyo ÚNICO indicio es del tier "
+            f"incierto (mayúscula ambigua, típicamente a principio de frase): menor "
+            f"precisión, y es donde se esconde un nombre inventado al abrir un resumen."
+        )
     typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
 
 

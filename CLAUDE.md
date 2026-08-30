@@ -9,7 +9,13 @@ generates an Obsidian wiki.
   machine-wide private FITIZENS pip index.
 
 ## Architecture
-- Pipeline: `extract → import-archive → fetch → [enrich] → generate`.
+- Pipeline — **six ordered stages**: `extract → fetch → vocab → enrich → topics → generate`,
+  with `data/items.json` as the hub every stage reads and writes back. `sync` runs only the
+  mechanical three (`extract → fetch → generate`); `vocab`/`enrich`/`topics` are the LLM
+  stages and are run explicitly, on your own cadence. `media → describe` is a side-pipeline
+  that feeds enrich/topics (below). `import-archive` and the backfill family
+  (`refresh-quoted`, `refresh-media`, `download-videos`, `reextract`, `refetch-truncated`)
+  sit OUTSIDE the pipeline — one-off repairs, never steps in it.
 - Quoted posts (a quote-tweet's third-party content): X embeds the quoted post — body
   AND author — in the same timeline payload as the tweet quoting it, so `extract`
   parses it out as a `ContentSourceSuccess(kind="quoted_tweet", author=…)` at **no
@@ -58,7 +64,18 @@ generates an Obsidian wiki.
   from the mp4 URL path, not the signed URL): N bookmarks of one video → one
   fetch+transcribe, all get the source. No-speech videos attach with empty text +
   `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
-  `x_video` source unless `--force`); destructive → auto-snapshot.
+  `x_video` source unless `--force`); destructive → auto-snapshot. **On a multilingual
+  corpus point `[transcribe].command` at `scripts/xbrain-transcribe-auto` (#133), never
+  straight at parakeet.** That wrapper is a LANGUAGE ROUTER: `ffmpeg` slices the first 30 s
+  (`XBRAIN_ASR_DETECT_SECONDS`), a small whisper pass (`base`, ~19 s/clip, measured) reports
+  the language it detected, then English goes to parakeet and EVERYTHING ELSE — including
+  every uncertainty: ffmpeg missing, whisper failing, an unreadable result — goes to whisper.
+  The costs are asymmetric in exactly one direction: **parakeet-tdt does not FAIL on Spanish
+  audio, it INVENTS** — verified 17-jul-2026 against a real es-ES clip, it exits 0 and emits
+  fluent English that never reproduces what was said. A noisy failure shows up in a log; this
+  one passes the whole pipeline and lands in a note as a quotation, and by then you can no
+  longer tell "the video said that" from "parakeet made it up". The backend has to be chosen
+  BEFORE transcription, because it cannot be diagnosed after.
 - **Unfetched links carry their REASON (PR-I).** The shared `unfetched_links_note` builder now
   names WHY the content is missing ("the page no longer exists (HTTP 404)" vs "the page could not
   be extracted") — one builder, so all three LLM surfaces (api prompt · enrich worksheet · verify
@@ -156,9 +173,19 @@ generates an Obsidian wiki.
   behind the now-forbidden `--force`).
 - X Articles as blogposts — model seam (#39 PR1): an `x_article`
   `ContentSourceSuccess` carries an additive, ordered `blocks: list[ArticleBlock]`
-  body — `ArticleTextBlock` (`kind="text"`) + `ArticleImageBlock` (`kind="image"`,
-  optional `alt`, `media` **wrapping the existing `MediaEntry` photo-state union**),
-  discriminated on `kind`. Reusing `MediaEntry` means the photo download engine +
+  body — a **three-variant** discriminated union on `kind`: `ArticleTextBlock`
+  (`kind="text"`) + `ArticleImageBlock` (`kind="image"`, optional `alt`, `media` **wrapping
+  the existing `MediaEntry` photo-state union**) + `ArticleVideoBlock` (`kind="video"`,
+  #133). The video variant exists because **an article's `MEDIA` entity is not always a
+  photo**: X embeds native video (`media_info.__typename == "ApiVideo"`) the same way, the
+  parser resolved a photo URL or nothing, and every embedded video was therefore DROPPED from
+  the body — invisible in the note, where the reader saw prose with a hole exactly where the
+  author had put a demo. It wraps the SAME `MediaEntry` union (a `MediaVideoPending`), so the
+  playable stream, the poster thumbnail, the bitrate and the duration all ride in the shape
+  the rest of the pipeline already understands; the bytes are NOT downloaded and the speech is
+  NOT transcribed by this variant (`digest-video` selects from item-level media, never from
+  article bodies) — what it guarantees is that the video is no longer lost. Reusing
+  `MediaEntry` means the photo download engine +
   path/timestamp validators + `_media/` mirror apply to article images with no new
   plumbing. `text` stays the flattened body (= concatenation of the text blocks) so
   `enrich`/`topics`/`generate`'s fallback consume it unchanged. Optional + additive
@@ -176,8 +203,12 @@ generates an Obsidian wiki.
 - X Articles — structured fetch (#39 PR3): `fetch_x._fetch_rendered` intercepts the
   article-content GraphQL (URL op-name contains `article`; same `page.on("response")`
   pattern as `_fetch_tweet`/`TweetDetail`) and `extract/article.parse_article_content_state`
-  maps the Draft.js `content_state` into ordered `ArticleBlock`s (text runs +
-  `MediaPhotoPending` inline images, in document order). `text` is set to the exact
+  maps the Draft.js `content_state` into ordered `ArticleBlock`s — text runs +
+  `MediaPhotoPending` inline images + `MediaVideoPending` inline videos (#133), in document
+  order, with the lead `cover_media` prepended as the first block. Photo-or-video is decided
+  ONCE, at the media index (`_item_media`), and the video branch is checked FIRST because a
+  video entry also carries a poster image: resolving that first is what dropped every embedded
+  video. `text` is set to the exact
   `"".join` of the text runs (enforced by a `ContentSourceSuccess` `model_validator`).
   On any interception/parse miss it degrades to the retained `trafilatura.extract`
   text-only path (`blocks=[]`); a truly empty article still records `empty_content`.
@@ -206,7 +237,11 @@ generates an Obsidian wiki.
   paragraph (the baked `\n\n` separator stripped via `removeprefix` so it never leaks
   as a stray blank line), `ArticleImageBlock` → an inline `![[_media/<id>/article/<n>]]`
   embed (alt + a described image's caption as `> …` lines; failed → `⚠ Imagen no
-  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`.
+  disponible`; pending → silent), the SAME photo convention as `_render_media_lines`, and
+  `ArticleVideoBlock` → `_article_video_lines`, mirroring the video convention (downloaded →
+  local mp4 embed; failed → a visible `⚠`; **pending → a `🎥 Ver vídeo` link, deliberately NOT
+  silent**, because no later pass advances an article video — `xbrain media` downloads photos
+  — so silence would reproduce the very defect the variant exists to fix).
   `_mirror_item_article_images` copies the bytes into the vault via the shared
   `_mirror_file`, keyed by the STORED `local_path` (no per-source index recompute). An
   `x_article` with empty `blocks` (trafilatura fallback / pre-#39) renders the plain
@@ -236,9 +271,124 @@ generates an Obsidian wiki.
   shows a ❌. `fingerprint_output` is the single canonicalization shared by the export stamp + the
   reader; `verdict`/`faithfulness`/`adherence` are a shared `Verdict` Literal and
   `output_fingerprint` is `Field(pattern=...)`-hardened; labels via `i18n.Strings`.
+  **`contract_fingerprint` (`verification.py`) is the second, stronger stamp, and the one
+  that decides whether a badge may paint at all** — the gate in `_verdict_badge` is
+  `verdict_is_current`, i.e. THIS fingerprint, not `output_fingerprint` alone. A verdict is
+  not a property of the output
+  alone — it is the result of judging THAT output, against THAT source, under THOSE rubrics —
+  so it hashes **three arms**: the OUTPUT text; the SOURCE the judge actually read *for that
+  target* (`_source_text` = `evidence_surfaces` + the not-fetched markers, so a digest and a
+  summary fingerprint different evidence); and the RUBRICS applied (`rubric_digest` =
+  `rubric-verify` **plus** the target's generation rubric, since the adherence axis is judged
+  against it). `output_fingerprint` hashed only the first, so what the judge reads and the
+  rules it reads by could BOTH be rewritten without touching one output character, and every
+  stored verdict still matched, still looked current, and still painted its badge — including
+  verdicts issued under the contract measured letting a false attribution through 8 times out
+  of 8. Now any change to any arm retires every affected verdict automatically, with nobody
+  having to remember. And a verdict whose `contract_fingerprint` is `None` (stored before the
+  stamp existed) is **permanently stale**: we cannot reconstruct what it was judged against,
+  so it is retired, never grandfathered in.
+- **The raw-payload layer (`payloads.py`, `payload-stats`, `reextract`) — `extract` is a
+  re-runnable transformation over data we own.** Every tweet's raw GraphQL subtree is
+  persisted gzipped at `data/payloads/<last-2-of-id>/<id>.json.gz`, scrubbed AT THE SEAM
+  (inside `save_payload`, never left to a caller) against a frozenset of WHOLE credential key
+  names — never substrings: the first version matched substrings and `auth` ate
+  `author`/`author_id`/`authorship`, deleting an author block on write with the original
+  already discarded. The failure this removes is exactly the shape of rule 6 (*repair the
+  evidence, invalidate the derivative*): we read `legacy.full_text`, capped at 280 chars,
+  while `note_tweet` sat unread in EVERY payload — and the fix was not a re-parse, it was a
+  network round-trip to X: a logged-in browser, rate limits, and tweets that may since have
+  been deleted or protected. With the payload on disk, a parse bug is repaired offline —
+  `reextract` re-runs the parser over the whole corpus and PRINTS THE DIFF; only `--apply`
+  writes it (auto-snapshot first). It refuses to let "cannot be re-extracted" look like
+  "re-extracted cleanly": missing files, corrupt files and payloads that parse to NOTHING are
+  each counted apart from coverage. `payload-stats` measures what is actually on disk,
+  because the first disk figures quoted for this feature were computed on an X *Article*
+  fixture that contains no tweets (rule 2).
+- **`refetch-truncated` — the repair that costs a network round-trip, and a count you must
+  not quote as a census.** `looks_truncated` (`extract/graphql.py`) detects X's 280-char cut
+  by LENGTH: ≥274 chars unconditionally, plus 265–273 when the text does not end on a real
+  terminator (`:` and `;` are not terminators). `--apply` is a REAL browser re-fetch —
+  headful, human-paced, hours of it — checkpointing after every item (a session expiry on
+  item 400 of 707 must not discard the first 400 repairs) and auto-snapshotting first;
+  without `--apply` it only reports and writes `data/truncated-items.json`. **Reach for
+  `reextract` first, and for nearly all of them it IS the answer:** measured 2026-08-30 on the
+  live store (2,404 items), of the **707** items the detector flags only **5** have no stored
+  payload — the other **702 re-parse offline, for free, with no network at all**. Corpus-wide
+  the payload layer covers 2,360 of 2,404, so the "payloads are NOT persisted" premise (still
+  asserted in `items_needing_refetch`'s own docstring — issue #142) survives only for what predates
+  persistence. **And 707 is a work list, not a census:** `looks_truncated` decides on LENGTH
+  ALONE (≥274 chars unconditionally), so **561 of the 707 are LONGER than 290 chars** — full
+  `note_tweet` bodies the length rule flags anyway. The detector is deliberately biased
+  towards flagging (a missed truncation is a fabrication kept forever; a false flag costs one
+  re-fetch), so the number measures the flag, never the defect.
+- **`verify-entities` / `entity_grounding.py` — the deterministic checker, and READ WHAT IT
+  IS BLIND TO BEFORE QUOTING ANY NUMBER FROM IT.** Token-free, no model, so it cannot inherit
+  the judge ensemble's blind spot (three judges sharing one model and one rubric are ONE
+  sample drawn three times; unanimity there measures agreement, not truth), and it sweeps the
+  whole corpus instead of sampling. With `--verdicts <verify-report.json>` it joins the
+  flagged outputs against the judges' records and reports how many of them the ensemble passed
+  UNANIMOUSLY. **That is a LOWER BOUND, and today it is structurally zero — because the two
+  sets do not overlap.** Measured 2026-08-30 on the live data: `data/entity-report.md` carries
+  **1,614** flagged rows (140 confident + 1,474 uncertain) while `data/verify-report.json`
+  holds **14** records in total, 7 of them `summary`; the intersection with the 140 confident
+  flags is **0**. The store is barely better — 70 stored `summary` verdicts across 2,404
+  items, and exactly **1** of the 140 confident flags carries one. So the printed number
+  measures COVERAGE of the judged population, not the ensemble's quality, and no other answer
+  can come out until the two populations are made to overlap. Quoting it as a recall claim
+  about the judges is the error rule 2 exists to stop. It checks ONE thing: that every proper
+  noun in a generated output appears on an evidence surface its rubric declares (matching is
+  variant-aware, because ASR mangles proper nouns and an exact matcher flagged exactly the
+  names the generator got RIGHT — ~0% digest precision before that was fixed). **It never
+  checks what is ASSERTED about an entity, and it never looks at a single NUMBER.** The
+  module's own example: "Sam Altman dijo que despedirá a la mitad", against evidence where he
+  discusses *hiring*, extracts `Sam Altman`, finds it grounded, and passes CLEAN. Every false
+  attribution, invented mechanism and fabricated causal link has that shape, and **nothing in
+  this repo has ever measured how often it happens** — the check that would find them is the
+  one that cannot see them. Do NOT reach for the ~7-8% in `data/entity-precision.md` to fill
+  the hole: that is the corrected rate of flagged **digests** that are genuinely ungrounded
+  (24.9% of digests flagged × ~30% sampled precision), a statement about the outputs this
+  check called DIRTY, digests only — and that file says so itself, *"es el suelo de un
+  problema, no su medida"*. The blind spot has no number. An invented "92% en MMLU", a false
+  date, a fabricated funding round: invisible, always. Lowercase and two-letter names are not
+  extracted at all. **A clean verdict means "no unknown proper nouns". It does NOT mean "not
+  hallucinated"** — no statement of the form
+  "N% of the corpus is hallucination-free" is supported by this tool, and the most damaging
+  hallucination for a knowledge base, a confident false claim about a real, correctly-named
+  entity, is precisely the one it cannot see. Report-only: writes `entity-report.{json,md}`,
+  never touches the store.
+- **`evidence.py` is where rule 5's binding actually lives.** `evidence_surfaces(item,
+  target)` is the single definition of what may support a claim, and it is
+  TARGET-DEPENDENT — `digest` gets the video and the post it arrived in (author metadata ·
+  tweet text · video title · transcript · frame descriptions); `summary`/`topics` get those
+  PLUS the poster's own thread, the fetched article's title and body, and the image
+  descriptions. Getting it wrong is a bug in both directions: judge a digest against the
+  linked article and you excuse an invention its generator could never have sourced; judge a
+  summary against the digest's narrower set and you flag the generator for using evidence it
+  was correctly given. `evidence_text(item, target)` is the flattened string the deterministic
+  checker consumes. **A LINK IS NEVER A SURFACE** — nothing derives from `item.links`, because
+  a URL is topic signal and never a name: a summary in the corpus reconstructed a publication
+  ("Axios") and a company ("Anthropic") out of the SLUG of a link that was never fetched.
+  `tests/test_evidence_contract.py` asserts the generator, the rubric and the judge against
+  this module BY IDENTITY, per target — add a surface to one consumer and forget the others
+  and it goes red.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
-- `enrich` is a stub — the LLM executor is intentionally in pause (spec §9).
+- `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·
+  `primary_topic`), and it is **fully live** — three executor tracks (`api` in-process;
+  `claude-code`/`manual` through the worksheet — the `ExecutorName` literal), ONE shared
+  validator (`validate.validate_judgment`, against `guardrails.yaml` and the closed
+  `vocab.yaml`), the re-enrichment trigger `_needs_reenrichment`
+  (`content.fetched_at > enriched.enriched_at`), and video-transcript + image-description
+  splicing on both tracks. Measured 2026-08-30 on the live `data/items.json` with
+  `sum(1 for i in store.values() if i.enriched is not None)`: **2,325 of 2,404 items carry an
+  `enriched` block.** The 79 that do not ARE how a different answer comes out — they were
+  extracted since the last `enrich` run, so read the number as "the corpus is enriched to the
+  last run", never as an invariant. An earlier reading the same day was 2,325 of 2,325: the
+  enriched count did not move, `extract` did. The line this replaces ("`enrich` is a stub — the
+  LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
+  life of the corpus it described, and it is the worst kind of wrong in this file, because
+  this file is read first and acted on.
 
 ## Conventions
 - TDD: every module has a `tests/test_*.py`. Run `uv run pytest -v`.

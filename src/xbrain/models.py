@@ -616,21 +616,48 @@ class ArticleImageBlock(BaseModel):
     alt: str | None = None
 
 
-# The ordered-block type — a discriminated union over the text and image
+class ArticleVideoBlock(BaseModel):
+    """One inline VIDEO of an X long-form Article body.
+
+    An article's `MEDIA` entity is not always a photo: X embeds native video
+    (`media_info.__typename == "ApiVideo"`, `mediaCategory: "AmplifyVideo"`) the
+    same way. The parser used to resolve a photo URL or nothing, so every
+    embedded video was dropped from the body — measured on the real corpus, and
+    invisible in the note: the reader saw prose with a hole where the author had
+    put a demo.
+
+    Wraps the SAME `MediaEntry` union as `ArticleImageBlock` (here a
+    `MediaVideoPending`), so the playable stream, the poster `thumbnail_url`, the
+    bitrate and the duration are all carried in the shape the rest of the
+    pipeline already understands. The discriminator is `kind` (`"video"`).
+
+    The video's bytes are NOT downloaded and its speech is NOT transcribed by
+    this block alone — `digest-video` selects from item-level media, not from
+    article bodies. What this variant guarantees is that the video is no longer
+    LOST: it is recorded, positioned and rendered where the author placed it.
+    """
+
+    kind: Literal["video"] = "video"
+    media: MediaEntry
+    alt: str | None = None
+
+
+# The ordered-block type — a discriminated union over the text, image and video
 # variants, tagged on `kind`. Same style as `_MediaTagged` /
 # `_ContentSourceTagged`. No `BeforeValidator` legacy shim is needed: `blocks`
 # is a brand-new field (#39), so there is no pre-existing on-wire shape to
-# migrate — a legacy record simply has no `blocks` key and defaults to `[]`.
+# migrate — a legacy record simply has no `blocks` key and defaults to `[]`,
+# and a legacy record with blocks simply has no `"video"`-tagged entry.
 ArticleBlock = Annotated[
-    Union[ArticleTextBlock, ArticleImageBlock],
+    Union[ArticleTextBlock, ArticleImageBlock, ArticleVideoBlock],
     Field(discriminator="kind"),
 ]
 
 
 # TypeAdapter for tests / ad-hoc validation of a single block outside an
 # `Item` context (mirrors `MediaEntryAdapter` / `ContentSourceAdapter`).
-ArticleBlockAdapter: TypeAdapter[Union[ArticleTextBlock, ArticleImageBlock]] = TypeAdapter(
-    ArticleBlock
+ArticleBlockAdapter: TypeAdapter[Union[ArticleTextBlock, ArticleImageBlock, ArticleVideoBlock]] = (
+    TypeAdapter(ArticleBlock)
 )
 
 
