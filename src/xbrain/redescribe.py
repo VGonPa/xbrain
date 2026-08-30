@@ -20,8 +20,21 @@ run leaves the old stamp, so the next run retries the WHOLE SOURCE — re-paying
 for frames that were already correctly re-described — not just the frames it
 missed. A source with a PERMANENTLY missing frame image (deleted, never
 downloaded, media root pruned) therefore never converges: every future run
-re-describes its surviving frames again and never stamps. This is accepted on
-purpose, not an oversight — the alternatives are worse:
+re-describes its surviving frames again and never stamps.
+
+THE TRUE COST IS NOT JUST RE-PAYING VISION CALLS (re-review, #90). A real
+vision model is NON-deterministic: the surviving frames come back reworded
+slightly differently on every run even though the pixels never changed. That
+reads as a genuine caption change (`changed` is True), so `content.fetched_at`
+is bumped and downstream `enrich` (and `video-digest`) re-run for that item —
+not once, but on EVERY future run, forever, for as long as the tarpit persists.
+This module's OWN test suite hides that cost: every `describe_fn` fake in
+`tests/test_redescribe.py` is deterministic (same path in, same string out), so
+`items_repropagated` drops to 0 after the first run there — that is an artifact
+of the test fake, not evidence the real tarpit is cheap. Do not read the green
+suite as proof of the cheaper story.
+
+This is accepted on purpose, not an oversight — the alternatives are worse:
   - a per-frame stamp would have to live on `VideoFrame`, which sits INSIDE
     `fetch._source_signature`'s fingerprint. That deny-list is FLAT (it excludes
     top-level field names on the source, e.g. `caption_contract` itself) and does
@@ -153,6 +166,10 @@ def redescribe_frames(
     so a later run retries every one of the source's frames, not just the one(s)
     it missed (see the module WHY-comment for why this is deliberate, and its
     tarpit cost when a frame image is permanently gone).
+
+    A TOTAL failure — every attempted frame failed — is a different case from a
+    per-frame one and is NOT swallowed: see `_raise_on_total_failure`, called
+    unconditionally at the end of a real (non-dry) run.
     """
     report = RedescribeReport()
     now = datetime.now(timezone.utc)
@@ -198,15 +215,49 @@ def redescribe_frames(
                 item.content.fetched_at = now
                 repropagated_items.add(item_id)
     report.items_repropagated = len(repropagated_items)
+    _raise_on_total_failure(report, dry_run=dry_run)
     return report
 
 
+def _raise_on_total_failure(report: RedescribeReport, *, dry_run: bool) -> None:
+    """Circuit breaker (#90 re-review item 2): raise when EVERY attempted frame
+    failed, mirroring `media.py`'s total-failure short-circuit (`media.py:245-256`)
+    exactly — same shape, same "nothing landed" test, same operator-facing tone.
+
+    Without this, 9 of 9 frames failing completes silently and returns a report
+    the caller reads as success. That is not hypothetical: `VisionFailed` also
+    covers a TIMEOUT (`vision._DEFAULT_TIMEOUT_SECONDS = 300`), so a wedged vision
+    model now costs 300s × N frames before this raises — on the real 2077-frame
+    corpus, ~173 hours reported as a successful run instead of failing fast.
+
+    REAL RUNS ONLY: `dry_run` must still report its counts rather than raise — a
+    preview that raises is not a preview. A PARTIAL failure (some frames really
+    described) is real progress, not a total failure, so it does not raise
+    either — only `total_attempted > 0 and frames_described == 0` does. Zero
+    attempted (nothing stale) is not a failure. `RuntimeError` is already in
+    `cli._OPERATOR_ERRORS`, so this surfaces as a clean exit-1, not a traceback.
+    """
+    total_attempted = report.frames_described + report.frames_failed
+    if dry_run or total_attempted == 0 or report.frames_described > 0:
+        return
+    raise RuntimeError(
+        f"All {total_attempted} frame re-caption attempts failed; "
+        "check [vision].command / the vision model, and the per-frame "
+        "warnings above."
+    )
+
+
 def _preview_source(source: ContentSourceSuccess, media_root: Path) -> tuple[int, int]:
-    """Predict `_redescribe_source`'s described/failed split WITHOUT describing.
+    """A best-effort PREDICTION of `_redescribe_source`'s described/failed split
+    WITHOUT describing — not a guaranteed match (#90 re-review item 3).
 
     Stats each frame's file — free, and calls `describe_fn` zero times — so a
     `--dry-run` preview reports a frame whose PNG is already gone as a FAILURE,
-    the same way the real run would, rather than as work still to be done.
+    the same way the real run would, rather than as work still to be done. It
+    CANNOT see a frame whose PNG EXISTS but is corrupt/unreadable: that previews
+    here as "described", yet the real run can still fail it with `VisionFailed`
+    once `describe_fn` actually opens the bytes — a free stat can only confirm a
+    file is present, not that its content is decodable.
     """
     failed = sum(1 for frame in source.frames if not (media_root / frame.local_path).is_file())
     return len(source.frames) - failed, failed
@@ -228,6 +279,15 @@ def _redescribe_source(
     — `redescribe_frames`'s all-or-nothing stamping (per SOURCE, not per run)
     already means `failed > 0` leaves this source unstamped for a later retry, so
     the two mechanisms compose without double-bookkeeping.
+
+    The catch is deliberately `VisionFailed`, NOT its base `VisionError` (and
+    NOT bare `Exception`) — `VisionNotFound` (an unconfigured / missing
+    `[vision].command`) is a global CONFIG error, not a per-frame data problem,
+    exactly like `digest._extract_described_slides`'s comment on the same split:
+    it must ABORT the run, not become a spurious `frames_failed` count (#90
+    re-review item 1). Widening this catch would turn a 2077-frame backfill
+    against an unconfigured vision command into `frames_failed=2077`, exit 0,
+    having changed nothing — instead of failing fast on an operator error.
     """
     frames: list[VideoFrame] = []
     described = failed = 0

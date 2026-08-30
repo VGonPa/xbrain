@@ -8,8 +8,11 @@ at the current contract costs nothing to re-run.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from xbrain.models import (
     FRAME_CAPTION_CONTRACT,
@@ -27,7 +30,7 @@ from xbrain.redescribe import (
     redescribe_frames,
     stale_video_sources,
 )
-from xbrain.vision import VisionFailed
+from xbrain.vision import VisionFailed, VisionNotFound
 
 
 def _item(item_id: str, *, contract: str = "", descriptions: tuple[str, ...] = ("old",)) -> Item:
@@ -517,3 +520,167 @@ def test_redescribe_imports_no_network_or_subprocess_machinery():
         "import cv2",
     ):
         assert forbidden not in source
+
+
+# ---------------------------------------------------------------------------
+# Re-review item 1: the `VisionFailed` catch is NARROW — `VisionNotFound`
+# (missing/unconfigured `[vision].command`) is a CONFIG error and must ABORT
+# the run, never become a per-frame failure.
+# ---------------------------------------------------------------------------
+
+
+def test_vision_not_found_propagates_instead_of_becoming_a_per_frame_failure(tmp_path: Path):
+    """Re-review item 1: `VisionNotFound` is what an unconfigured or missing
+    `[vision].command` raises (`vision.describe_image`). It must PROPAGATE out of
+    `redescribe_frames`, not be swallowed as a per-frame failure — mirroring
+    `digest._extract_described_slides`'s comment on the identical split. Widening
+    the catch to `except VisionError` (its own base class) or `except Exception`
+    both leave this red: a 2077-frame backfill against an unconfigured vision
+    command would otherwise report `frames_failed=2077`, exit 0, and have changed
+    nothing, instead of failing fast on what is plainly an operator error."""
+    item = _item("1", descriptions=("a",))
+    store = {"1": item}
+    _media(tmp_path, item)
+
+    def _describe(path: Path) -> str:
+        raise VisionNotFound("no [vision].command configured")
+
+    with pytest.raises(VisionNotFound):
+        redescribe_frames(store, media_root=tmp_path, describe_fn=_describe)
+
+
+# ---------------------------------------------------------------------------
+# Re-review item 2: a total-failure circuit breaker.
+# ---------------------------------------------------------------------------
+
+
+def test_total_frame_failure_raises_runtime_error(tmp_path: Path):
+    """Re-review item 2: 9 of 9 (here, 1 of 1) frames failing must not complete
+    silently — the caller would read the returned report as success. Mirrors
+    `media.py:245-256`'s total-failure short-circuit."""
+    item = _item("1", descriptions=("a",))
+    store = {"1": item}
+    _media(tmp_path, item)
+    (tmp_path / "1/frames/0.png").unlink()
+
+    with pytest.raises(RuntimeError, match="All 1 frame re-caption attempts failed"):
+        redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+
+
+def test_partial_frame_failure_does_not_raise(tmp_path: Path):
+    """A PARTIAL failure (some frames really described) is real progress, not a
+    total failure — it must not raise, unlike the all-failed case above."""
+    item = _item("1", descriptions=("a", "b"))
+    store = {"1": item}
+    _media(tmp_path, item)
+    (tmp_path / "1/frames/0.png").unlink()
+
+    report = redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+    assert report.frames_described == 1
+    assert report.frames_failed == 1
+
+
+def test_nothing_stale_does_not_raise(tmp_path: Path):
+    """Zero attempted is not a failure: a run against an up-to-date corpus must
+    not trip the total-failure breaker just because nothing was selected."""
+    item = _item("1", contract=FRAME_CAPTION_CONTRACT)
+    store = {"1": item}
+    _media(tmp_path, item)
+
+    report = redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+    assert report.videos_selected == 0
+    assert report.frames_described == 0
+    assert report.frames_failed == 0
+
+
+def test_dry_run_with_everything_failing_does_not_raise(tmp_path: Path):
+    """REAL RUNS ONLY: a `--dry-run` preview must still report its counts rather
+    than raise — a preview that fails is not a preview."""
+    item = _item("1", descriptions=("a",))
+    store = {"1": item}
+    _media(tmp_path, item)
+    (tmp_path / "1/frames/0.png").unlink()
+
+    report = redescribe_frames(
+        store, media_root=tmp_path, describe_fn=lambda path: "new", dry_run=True
+    )
+    assert report.frames_failed == 1
+    assert report.frames_described == 0
+
+
+# ---------------------------------------------------------------------------
+# Re-review item 5: two pre-existing behaviours that are correct but were
+# unasserted — each is now live via the CLI's `--ids` wiring.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_video_sources_ignores_an_unknown_id_instead_of_raising():
+    """Re-review item 5: `_warn_missing_ids` (cli.py) only WARNS about an unknown
+    `--ids` entry — it never removes it from the list handed to
+    `stale_video_sources`. Dropping the `if i in store` membership filter there
+    would raise `KeyError` on the very first unknown id, turning a typo into a
+    crash instead of a warning + "nothing found for it"."""
+    store = {"1": _item("1", contract="")}
+    result = stale_video_sources(store, item_ids=["1", "does-not-exist"])
+    assert [item_id for item_id, _ in result] == ["1"]
+
+
+def test_videos_current_is_scoped_to_the_item_ids_selection(tmp_path: Path):
+    """Re-review item 5: `--ids 1` against a corpus that also has OTHER
+    already-current videos must not count those others as "ya al día" — the
+    counter is user-visible (`format_redescribe_summary`) and must be scoped to
+    the SELECTION, not the whole store. Computing it over the whole store would
+    make `--ids 1` print "1 ya al día" here (and "141 ya al día" on the real
+    142-video corpus) instead of "0"."""
+    stale = _item("1", contract="")
+    current = _item("2", contract=FRAME_CAPTION_CONTRACT)
+    store = {"1": stale, "2": current}
+    _media(tmp_path, stale)
+    _media(tmp_path, current)
+
+    report = redescribe_frames(
+        store, media_root=tmp_path, describe_fn=lambda path: "new", item_ids=["1"]
+    )
+
+    assert report.videos_current == 0
+    assert report.videos_selected == 1
+
+
+# ---------------------------------------------------------------------------
+# Re-review item 6: the per-frame warning must name the failed frame — it is
+# the only thing telling an operator WHICH frame failed in a 2077-frame run.
+# ---------------------------------------------------------------------------
+
+
+def test_missing_image_warning_names_the_frame_path(tmp_path: Path, caplog):
+    # A second, surviving frame keeps this a PARTIAL failure — not a total one —
+    # so the item-2 circuit breaker does not also fire here.
+    item = _item("1", descriptions=("a", "b"))
+    store = {"1": item}
+    _media(tmp_path, item)
+    frame_path = tmp_path / "1/frames/0.png"
+    frame_path.unlink()
+
+    with caplog.at_level(logging.WARNING):
+        redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+
+    assert str(frame_path) in caplog.text
+
+
+def test_vision_failure_warning_names_the_frame_path(tmp_path: Path, caplog):
+    # A second, surviving frame keeps this a PARTIAL failure — not a total one —
+    # so the item-2 circuit breaker does not also fire here.
+    item = _item("1", descriptions=("a", "b"))
+    store = {"1": item}
+    _media(tmp_path, item)
+    frame_path = tmp_path / "1/frames/0.png"
+
+    def _describe(path: Path) -> str:
+        if path == frame_path:
+            raise VisionFailed("vision command exited 1: corrupt frame")
+        return "new"
+
+    with caplog.at_level(logging.WARNING):
+        redescribe_frames(store, media_root=tmp_path, describe_fn=_describe)
+
+    assert str(frame_path) in caplog.text
