@@ -266,9 +266,9 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 **Credential keys are scrubbed at the seam.** `save_payload` runs `scrub` over the subtree before it writes, dropping a fixed deny-list of credential key names (`auth_token`, `authorization`, `cookie`, `ct0`, `session_id`, …). The scrub lives inside the writer, never in the caller — a caller that forgets is exactly how a token reaches disk. It matches **whole key names, never substrings**: the first version matched substrings and `auth` ate `author` / `author_id` / `authors`, deleting the author block on write with the original already discarded.
 
-**`reextract` shows the diff before it applies it.** `reextract_from_payloads` re-parses every stored payload and reports what *would* change across the whole corpus; `--apply` writes it. Only five fields are re-parsed: `text`, `links`, `quoted_id`, `thread`, `author`. **`media` is deliberately excluded** — the store holds enriched media (photos with a vision description, videos with a downloaded `local_path`) while a fresh parse emits pending states, so overwriting would destroy an evidence surface the summary was written from, and nothing would bump `fetched_at`, so it would never be re-enriched. `captured_at` is when *we* saw the tweet, so a re-parse never touches it. Items with no stored payload, and payloads that are present but unparseable, are reported in their own buckets: "cannot be re-extracted" is never allowed to look like "re-extracted cleanly".
+**`reextract` shows the diff before it applies it.** `reextract_from_payloads` re-parses every stored payload and reports what *would* change across the whole corpus; `--apply` writes it. Only five fields are re-parsed: `text`, `links`, `quoted_id`, `thread`, `author`. **`media` is deliberately excluded** — the store holds enriched media (photos with a vision description, videos with a downloaded `local_path`) while a fresh parse emits pending states, so overwriting would destroy an evidence surface the summary was written from, and nothing would bump `fetched_at`, so it would never be re-enriched. `captured_at` is when *we* saw the tweet, so a re-parse never touches it. Items with no stored payload, and payloads that are present but unparseable, are reported in their own buckets: "cannot be re-extracted" is never allowed to look like "re-extracted cleanly". A dry run on the live store on 2026-08-30 covers 2,360 of 2,404 items, parses all of them, and finds 308 fields it would change: 253 `text`, 51 `author`, 4 `quoted_id` — 214 of those text rewrites are a truncated body becoming a longer one, at zero network cost (see [`refetch-truncated`](#refetch-truncated)).
 
-**`payload-stats` measures the store and projects it.** Count, raw bytes, gzipped bytes, per-item mean, and the projection to 10k and 100k items. Re-derived on the live store on **2026-08-30**: 3,344 payloads, 25.9 MB raw, 7.8 MB gzipped, mean **2,318 B/item** — so 10k items project to ~23 MB and 100k to ~232 MB. Of the 2,324 stored items, **2,280 have a payload on disk**; the other 44 predate persistence and are not re-extractable. (The disk figures first quoted for this feature were taken from an X *Article* fixture that contains no tweets at all. This command exists so the number is measured on the real thing.)
+**`payload-stats` measures the store and projects it.** Count, raw bytes, gzipped bytes, per-item mean, and the projection to 10k and 100k items. Re-derived on the live store on **2026-08-30**: 3,423 payloads, 26.5 MB raw, 7.9 MB gzipped, mean **2,320 B/item** — so 10k items project to ~23 MB and 100k to ~232 MB. Of the 2,404 stored items, **2,360 have a payload on disk**; the other 44 predate persistence and are not re-extractable. Coverage grows on its own: every sync re-sees tweets already in the store and overwrites their payload, which is why the pre-persistence backlog keeps shrinking without anyone running a backfill. (The disk figures first quoted for this feature were taken from an X *Article* fixture that contains no tweets at all. This command exists so the number is measured on the real thing.)
 
 **Snapshot trigger.** `reextract --apply` snapshots `data/` first (label `pre-reextract`). The dry run and `payload-stats` write nothing and take no snapshot.
 
@@ -276,15 +276,17 @@ The numbered stages above are summarised; the sections below cover each one in d
 
 **What it does.** Repairs the items whose tweet text was truncated at ingest. `items_needing_refetch` (`extract/graphql.py`) selects them; `--apply` re-fetches each one from X through a logged-in browser and writes the full text back.
 
-**Why the payloads do not help here.** These items were captured in flight, before payload persistence existed, so there is nothing on disk to re-parse. This is the one repair that must go back to the network — which is exactly the cost [`payloads`](#payloads) exists to stop us paying again.
+**Most of them no longer need the network, and three docstrings still say they do.** `refetch-truncated` was written when the flagged items were all pre-payload-persistence captures with nothing on disk to re-parse. That has stopped being true: `extract` re-sees these tweets on later syncs and `save_payload` overwrites, so the payload store has caught up with the backlog. Re-derived on the live store on 2026-08-30: of **707** flagged items, **702 have a stored payload** and only 5 do not — and an offline `reextract` dry run (no network at all) would rewrite the `text` of **222** of them, **214** of those to a longer body. So roughly a third of the flagged population is repairable by [`reextract`](#payloads) today, and the correct order is **`reextract` first, `refetch-truncated --apply` for the remainder**.
 
-**Why it matters.** `legacy.full_text` is capped at 280 characters: X cuts a long post mid-word and appends a `t.co` self-link. An item carrying half a sentence is handed to the generator with an instruction to summarise it, and the generator finishes the sentence itself. Re-derived on the live store on **2026-08-30: 674 of 2,324 items**.
+Two things follow. First, `items_needing_refetch` flags on the **stored text alone** — it never consults the payload store — so the count is a work list, not a network bill: an item can be flagged while the evidence to repair it is already on disk. Second, the docstrings on `extract/graphql.py:items_needing_refetch`, `cli.py:refetch_truncated_command` and `payloads.py` all still assert that the payloads are not on disk for this population and that a re-fetch is therefore required. That was true when each was written and is false now; this section reflects the measurement, not those docstrings.
+
+**Why it matters.** `legacy.full_text` is capped at 280 characters: X cuts a long post mid-word and appends a `t.co` self-link. An item carrying half a sentence is handed to the generator with an instruction to summarise it, and the generator finishes the sentence itself. Re-derived on the live store on **2026-08-30: 707 of 2,404 items** carry text that looks truncated at ingest.
 
 **Reads.** `data/items.json`; with `--apply`, live X through the logged-in Playwright session.
 
 **Writes.** `data/truncated-items.json` — id, url and current text for every affected item, written on every run, dry or not — and, with `--apply`, `data/items.json`.
 
-**Dry run by default, checkpointed on apply.** Without `--apply` it only reports. With it, `refetch_full_texts` (`fetch_x.py`) checkpoints the store every 25 items and again in a `finally`: this is deliberately human-paced browser work, hours of it, and a session expiry on item 400 of 674 must not discard the first 400 repairs. A failed or empty re-fetch leaves the truncated text alone — half a tweet is bad, blanking the item is worse, and for these items that text is the only evidence there is.
+**Dry run by default, checkpointed on apply.** Without `--apply` it only reports. With it, `refetch_full_texts` (`fetch_x.py`) checkpoints the store every 25 items and again in a `finally`: this is deliberately human-paced browser work, hours of it, and a session expiry partway through must not discard the repairs already made. A failed or empty re-fetch leaves the truncated text alone — half a tweet is bad, blanking the item is worse, and for these items that text is the only evidence there is.
 
 **A repaired text nulls its enrichment.** The summary was written from half a sentence, so a repair sets `item.enriched = None` and the next `xbrain enrich` regenerates it. The normal re-enrichment trigger (`enrich._needs_reenrichment`, `content.fetched_at > enriched.enriched_at`) cannot reach this population: it requires `item.content is not None`, and these items typically have no content block at all. Any stored verification verdict follows automatically — the tweet is part of the source the judge read, so a repaired text changes the item's `contract_fingerprint` and the verdict stops being current (see [`verify`](#verify)).
 
@@ -405,7 +407,7 @@ This is how a tweet that is mostly a screenshot of a paper becomes searchable by
 
 **Snapshot trigger.** Both modes rewrite `items.json` in place, so both auto-snapshot `data/` first (labels `pre-refresh-quoted-from-store` and `pre-refresh-quoted`), before any capture or write.
 
-**Measured on the live store (2026-08-30).** 816 items carry a `quoted_id`; 811 now carry a `quoted_tweet` content source.
+**Measured on the live store (2026-08-30).** 831 items carry a `quoted_id`; 826 now carry a `quoted_tweet` content source.
 
 ### refresh-media
 
@@ -658,11 +660,11 @@ checker evidence  ==  evidence_text(item, target)
 
 **What it does.** Sweeps every generated output for named entities that no evidence surface supports — deterministically, with no LLM and no tokens (`entity_grounding.py`; `xbrain verify-entities --target digest|summary|topics`).
 
-**Why it exists.** The verification ensemble is three judges sharing one model and one rubric: that is one sample drawn three times, not three independent samples. Its errors correlate by construction, so unanimity measures agreement, not truth. The judge≠party [audit](#verify) then inspects only the **consequential** set (FAIL plus divergent), which makes a **unanimous false negative invisible by design** — the ensemble's most likely error is the one the audit is guaranteed never to look at. Two digests in the corpus name a company on no evidence and were passed unanimously by all three judges. This check catches that class with no model and no judgment at all. The division of labour is deliberate: recall comes from here, because a mechanical check cannot inherit an LLM's blind spot, and precision stays with the judge, which adjudicates what this raises. So every ambiguous call in the module resolves **towards flagging** — a false positive costs one human dismissal, a false negative is what has been shipping silently.
+**Why it exists.** The verification ensemble is three judges sharing one model and one rubric: that is one sample drawn three times, not three independent samples. Its errors correlate by construction, so unanimity measures agreement, not truth. The judge≠party [audit](#verify) then inspects only the **consequential** set (FAIL plus divergent), which makes a **unanimous false negative invisible by design** — the ensemble's most likely error is the one the audit is guaranteed never to look at. That failure mode is not hypothetical: digests in this corpus name a company on no evidence and were passed unanimously by all three judges. (The module docstring puts the figure at two; the cross-reference described below reports 39 flagged digests unanimously passed against the July verdict set, and this check's measured precision means only a fraction of those are genuine. Take the class as demonstrated and the count as unsettled.) This check catches that class with no model and no judgment at all. The division of labour is deliberate: recall comes from here, because a mechanical check cannot inherit an LLM's blind spot, and precision stays with the judge, which adjudicates what this raises. So every ambiguous call in the module resolves **towards flagging** — a false positive costs one human dismissal, a false negative is what has been shipping silently.
 
 **Read this before quoting any number from it.** The instrument checks that **proper nouns appear somewhere on the evidence**. It never checks whether anything asserted *about* them is true, and it never looks at a single number.
 
-- Claims about entities are invisible. "X said he will fire half the staff", against evidence where he discusses hiring, extracts the name, finds it grounded, and passes clean. Every false attribution, invented mechanism and fabricated causal link has that shape, and an independent audit found them in ~8% of the outputs this check called clean.
+- Claims about entities are invisible. "X said he will fire half the staff", against evidence where he discusses hiring, extracts the name, finds it grounded, and passes clean. Every false attribution, invented mechanism and fabricated causal link has that shape, and **no measurement in this repo bounds how many of them there are**. (The module's own docstring cites "~8% of the outputs this check called clean". The only 7-8% on record, in `data/entity-precision.md`, is a different quantity entirely: the corrected share of **flagged digests** — the outputs this check called *dirty* — whose entity really is unsupported, obtained by multiplying a 24.9% flag rate by a ~30% sampled precision. That file calls the figure "el suelo de un problema, no su medida". It says nothing about the clean population, and neither does anything else here.)
 - Numbers are never examined: an invented benchmark score, a false date, a fabricated funding round.
 - Lowercase and two-letter names are not extracted at all.
 
@@ -674,13 +676,15 @@ checker evidence  ==  evidence_text(item, target)
 
 **Two tiers, reported separately.** Confident candidates are the headline; the **uncertain** tier (ambiguous capitalisation, typically sentence-initial) has lower precision and gets its own line, printed whenever it is non-empty, because merging the two would let a reader quote one number for two instruments.
 
-**`--verdicts` measures the ensemble's floor.** Point it at a `verify-report.json` and it cross-references: how many flagged outputs the judges passed **unanimously**. That count is the ensemble's false-negative floor — the one number it cannot produce about itself.
+**`--verdicts` cross-references the judges, and the join is the limiting factor.** Point it at a `verify-report.json` and it counts the flagged outputs those judges passed **unanimously** — an output this check raised and the ensemble waved through. **Read the denominator before the number.** The count lives on the intersection of two populations, and the intersection is usually the smaller one by a wide margin: only 121 verdicts exist across the whole store, against 2,325 judged-able summary outputs. Measured on 2026-08-30, the current `verify-report.json` carries **no digest verdicts at all**, so the digest cross-reference joins nothing and reports `0` — that `0` says the corpus is unjudged, not that the judges are sound. Against the older `verify-report-2026-07-09.json` (193 digest verdicts) the same scan joins 50 flagged digests and reports **39** unanimous passes.
+
+So this is **not** a floor on the ensemble's false negatives, and the file previously said it was. Two things stand between the count and that claim: this check's own precision on confident digest flags was measured at roughly a third (`data/entity-precision.md`), so most of a raw count is this instrument's noise rather than the judges' error; and the count scales with how much of the corpus has verdicts, which is a coverage decision, not a property of the judges. What the number honestly supports is a **worked list**: these specific outputs were flagged here and passed there, and someone should read them.
 
 **Reads.** `data/items.json`, and optionally a `verify-report.json`.
 
 **Writes.** `data/entity-report.json` + `data/entity-report.md`. **Read-only with respect to the store:** it never mutates `items.json`, nothing reads the report back, and it takes no snapshot.
 
-**Measured on the live store** (report of 2026-08-30, target `summary`): 2,324 outputs scanned; **140** carry at least one confident ungrounded candidate (160 entities); a further 1,474 have candidates only in the uncertain tier. Those are **candidates to verify, not confirmed hallucinations** — precision has not been independently re-measured since matching became variant-aware.
+**Measured on the live store, 2026-08-30.** `summary`: 2,325 outputs, **140** with at least one confident ungrounded candidate (160 entities), plus 1,475 whose only candidates are in the uncertain tier. `digest`: 205 outputs, **51** flagged (64 entities), plus 116 uncertain-only. These are **candidates to verify, not confirmed hallucinations**: the one precision measurement in the repo (`data/entity-precision.md`, 13-ago-2026, a 70-flag sample) puts the confident tier at ~30% and the uncertain tier at ~0%, which is why the two are never added together and why no share of the corpus should be quoted as "hallucination-free" off the back of either.
 
 ---
 
@@ -704,24 +708,25 @@ Everything XBrain knows lives in a handful of files inside `data/` (gitignored).
 
 The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain/models.py). Reading those is the fastest way to understand the data layer in full.
 
-**Why JSON instead of a database.** The corpus is small — measured 2026-08-30, `items.json` is 16.5 MB for 2,324 items (1,478 bookmarks, 846 own tweets) with full article text, transcripts and image descriptions. Plain files are diff-able, snapshot-able with `cp`, and survive a tool rewrite. A database would buy nothing here and cost transparency.
+**Why JSON instead of a database.** The corpus is small — measured 2026-08-30, `items.json` is 17.3 MB for 2,404 items (1,557 bookmarks, 847 own tweets) with full article text, transcripts and image descriptions. Plain files are diff-able, snapshot-able with `cp`, and survive a tool rewrite. A database would buy nothing here and cost transparency.
 
 **The corpus this describes.** Every figure below was re-derived from the live store on 2026-08-30, with the definition it was measured under. They are here so the shapes above have a scale, and so a future reader can tell a stale number from a current one.
 
 | Measure | Definition | Value |
 |---------|-----------|-------|
-| Items | records in `items.json` | 2,324 (1,478 `bookmark`, 846 `own_tweet`) |
-| Enriched | items with an `Enrichment` | 2,324 |
-| With content | items with a non-null `content` block | 1,395 |
-| Content sources by kind | `ContentSource` records across the store | 811 `quoted_tweet`, 255 `external_article`, 246 `x_video`, 201 `x_article`, 0 `thread` |
+| Items | records in `items.json` | 2,404 (1,557 `bookmark`, 847 `own_tweet`) |
+| Enriched | items with an `Enrichment` | 2,325 |
+| With content | items with a non-null `content` block | 1,436 |
+| Content sources by kind | `ContentSource` records across the store | 826 `quoted_tweet`, 274 `external_article`, 246 `x_video`, 212 `x_article`, 0 `thread` |
 | Video digests | `x_video` sources carrying a non-empty `digest` | 205 of 246 |
-| Structured article bodies | `x_article` sources with a non-empty `blocks` | 30 of 201 (2,089 text blocks, 204 image blocks, 0 video blocks — the video variant landed after these were fetched, so materialising them needs a re-fetch) |
-| Photos described | `MediaPhotoDescribed` media entries | 903 (plus 1 `MediaPhotoFailed`) |
-| Videos not yet downloaded | `MediaVideoPending` media entries | 254 |
+| Structured article bodies | `x_article` sources with a non-empty `blocks` | 41 of 212 (2,710 text blocks, 250 image blocks, **0 video blocks** — the video variant landed after these bodies were fetched, so materialising one needs a re-fetch; the model supports it, the corpus does not exercise it yet) |
+| Photos described | `MediaPhotoDescribed` media entries | 903 (plus 33 `MediaPhotoPending`, 1 `MediaPhotoFailed`) |
+| Videos not yet downloaded | `MediaVideoPending` media entries | 268 |
 | Frame slides | `VideoFrame` records across every source | 2,077 |
 | Topics | slugs in `vocab.yaml` | 45 |
-| Stored verdicts | items carrying at least one `VerificationVerdict` | 118 items, 121 verdict records (70 `summary`, 39 `digest`, 12 `topics`) |
-| Raw payloads | `*.json.gz` under `data/payloads/` | 3,344, covering 2,280 of the 2,324 items |
+| Stored verdicts | items carrying at least one `VerificationVerdict` | 118 items, 121 verdict records (70 `summary`, 39 `digest`, 12 `topics`); 53 carry a `contract_fingerprint`, so 70 of the 121 are invalidated |
+| Raw payloads | `*.json.gz` under `data/payloads/` | 3,423, covering 2,360 of the 2,404 items |
+| Text truncated at ingest | items `items_needing_refetch` flags | 707, of which 702 have a stored payload and 214 are repairable offline by `reextract` |
 
 ---
 
