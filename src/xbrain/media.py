@@ -707,19 +707,29 @@ def _write_bytes(path: Path, data: bytes) -> None:
     `download_all` entry — see `_sweep_part_orphans`.
 
     A byte-identical rewrite returns early instead of replacing the file.
-    `os.replace` installs a fresh inode even when nothing changed, and on a
-    cloud-synced vault (iCloud Drive, and the same class of conflict handling
-    in Dropbox/OneDrive) that counts as an overwrite: the sync client keeps
-    the version it had not finished uploading as a `name N.ext` sibling.
-    `download_all` is idempotent at the item level, but a full refresh rebuilds
-    the item state and so re-downloads every photo — thousands of no-op
-    overwrites within minutes, one conflict copy each. The skip keeps the
-    inode, so the sync client sees nothing to reconcile.
+    `os.replace` installs a fresh inode even when nothing changed, and
+    `download_all` — idempotent at the item level — re-downloads every photo
+    on a full refresh, because the refresh rebuilds the item state. That is
+    thousands of no-op overwrites within minutes.
 
-    The size check short-circuits the comparison, which matters on a synced
-    tree: it settles most calls from metadata alone instead of faulting in a
-    file whose bytes live only in the cloud. A stat/read failure is not fatal
-    here — we fall through and write, preserving the previous behaviour.
+    What this skip is NOT: the cause of the conflict copies that filled the
+    Obsidian vault. That damage is `generate._mirror_file`'s alone, and the
+    measurement separates them cleanly — `data/media/`, the tree THIS function
+    writes, held 0 files matching iCloud's `name N.ext` conflict pattern, while
+    the vault's `_media/` held 43,791. `data_dir` is a path under the repo, not
+    under the synced vault, so no sync client has ever watched these writes.
+
+    It is still worth skipping. The writes are pure waste either way, and the
+    function makes no assumption about where `data_dir` points: someone whose
+    store DOES live in a synced or backed-up tree gets the same protection
+    `_mirror_file` gets, for free.
+
+    The size check short-circuits before the read, so a differing payload is
+    rejected from metadata alone. It does not spare the common case, which is
+    an identical file whose size matches and whose bytes are therefore read —
+    cheap here, because `data` is already in memory and only the on-disk side
+    is read. A stat/read failure is not fatal: we fall through and write,
+    preserving the previous behaviour.
     """
     try:
         if path.stat().st_size == len(data) and path.read_bytes() == data:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import filecmp
 import logging
 import shutil
 from datetime import datetime, timezone
@@ -475,15 +476,32 @@ def _mirror_file(item_id: str, source: Path, destination: Path) -> None:
 def _already_mirrored(source: Path, destination: Path) -> bool:
     """True when `destination` already holds exactly `source`'s bytes.
 
-    Size is checked first so the common case settles from metadata alone,
-    without faulting in two files whose bytes may live only in the cloud. A
-    stat/read failure answers False: mirroring anyway is the safe direction —
+    `filecmp.cmp(shallow=False)` compares sizes from `stat` first and only then
+    reads, in 8 KB chunks with an early exit on the first differing byte. The
+    naive `source.read_bytes() == destination.read_bytes()` would hold BOTH
+    files in memory at once, and this walk mirrors `MediaVideoDownloaded` as
+    well as photos — one `download-videos` mp4 would be loaded twice over.
+
+    Do NOT read the size check as "the cloud-only case settles from metadata".
+    It settles the DIVERGENT case, which is the rare one; the common case here
+    is a destination that is already identical, whose size therefore matches
+    and whose bytes do get read. On an evicted iCloud file that read faults the
+    bytes back in. That is inherent to answering "are these the same bytes" —
+    the alternative (trusting size+mtime, rsync-style) would silently leave a
+    corrupted same-size copy in place, which the sibling test forbids. Reading
+    is still far cheaper than the rewrite it replaces, and it happens once per
+    run instead of writing every run.
+
+    `filecmp`'s result cache is keyed on both paths AND both stat signatures,
+    so a file that changed gets a new key. It cannot go stale here anyway: a
+    given (source, destination) pair is compared at most once per `generate`
+    run.
+
+    A stat/read failure answers False: mirroring anyway is the safe direction —
     it costs a redundant copy, never a stale or missing embed.
     """
     try:
-        if source.stat().st_size != destination.stat().st_size:
-            return False
-        return source.read_bytes() == destination.read_bytes()
+        return filecmp.cmp(source, destination, shallow=False)
     except OSError:
         return False
 

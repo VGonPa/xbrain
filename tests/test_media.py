@@ -784,13 +784,17 @@ def test_write_bytes_leaves_an_identical_file_untouched(tmp_path: Path):
     """Re-writing the same bytes must not replace the file on disk.
 
     `os.replace` swaps a fresh inode into place even when the content is
-    byte-identical. On an iCloud-synced tree that reads as an overwrite, and
-    iCloud preserves the losing version as `name N.ext` rather than dropping
-    it. A full refresh re-downloads every photo, so ~3.2k such no-op
-    overwrites fired within minutes and forked the whole media tree — 8.41 GB
-    of conflict copies accumulated in the x-knowledge vault this way.
+    byte-identical, and a full refresh rebuilds the item state and so
+    re-downloads every photo — ~3.2k no-op overwrites within minutes, every
+    one of them pure waste.
 
-    Skipping the write keeps the inode, so iCloud sees nothing to reconcile.
+    Deliberately NOT claiming this is what forked the vault. It is not: the
+    8.41 GB of `name N.ext` conflict copies came through
+    `generate._mirror_file`, and the two paths separate cleanly when measured
+    — `data/media/`, which this function writes, held 0 files matching the
+    conflict pattern against the vault's 43,791. `data_dir` is under the repo,
+    not under the synced vault. The skip is here because the writes are waste,
+    and because nothing in this function assumes `data_dir` stays unsynced.
     """
     target = tmp_path / "0.jpg"
     payload = _png_bytes()

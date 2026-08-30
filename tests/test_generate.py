@@ -1,4 +1,5 @@
 # tests/test_generate.py
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1721,11 +1722,22 @@ def test_mirror_file_rewrites_a_destination_that_drifted(tmp_path: Path):
     assert destination.read_bytes() == b"fresh pixels"
 
 
-def test_mirror_file_rewrites_when_sizes_match_but_bytes_differ(tmp_path: Path):
-    """Same-length but different content must still be repaired.
+def test_mirror_file_rewrites_when_the_whole_stat_matches_but_bytes_differ(tmp_path: Path):
+    """Identical size AND identical mtime, different content — still repaired.
 
-    Guards the size short-circuit: comparing lengths alone would silently
-    leave a corrupted same-size vault copy in place forever.
+    Guards the comparison against being satisfied by METADATA. An earlier
+    version of this test wrote the two files at different moments, so their
+    mtimes differed and any stat-only comparison already answered "different";
+    it passed against a `filecmp.cmp(..., shallow=True)` mutant that skips the
+    repair entirely. Measured: mutate the comparison to `shallow=True` and this
+    file's three tests all stayed green.
+
+    Copying the source's timestamps onto the destination makes the two stat
+    signatures identical, so nothing but reading the bytes can tell them apart.
+    That is the corrupted-vault-copy case: `copy2` restores the source's mtime
+    on every mirror, so a copy damaged in place — a truncating sync client, a
+    half-written file, bit rot — really can carry the source's timestamp and a
+    matching length while holding the wrong bytes.
     """
     source = tmp_path / "store" / "0.jpg"
     source.parent.mkdir(parents=True)
@@ -1733,6 +1745,10 @@ def test_mirror_file_rewrites_when_sizes_match_but_bytes_differ(tmp_path: Path):
     destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
     destination.parent.mkdir(parents=True)
     destination.write_bytes(b"BBBB")
+    stat = source.stat()
+    os.utime(destination, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert destination.stat().st_size == stat.st_size
+    assert destination.stat().st_mtime_ns == stat.st_mtime_ns
 
     _mirror_file("1", source, destination)
 
