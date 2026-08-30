@@ -1,12 +1,11 @@
 # tests/test_generate.py
 import os
 import shutil
-import stat as stat_module
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import _is_dataless, _mirror_file, generate
+from xbrain.generate import _SF_DATALESS, _is_dataless, _mirror_file, generate
 from xbrain.models import (
     Author,
     Content,
@@ -1856,14 +1855,20 @@ class _StatWithFlags:
 
 
 def _dataless_stat(monkeypatch, *targets: Path) -> None:
-    """Make `os.stat` report `targets` as evicted cloud placeholders."""
+    """Make `os.stat` report `targets` as evicted cloud placeholders.
+
+    Injects `_SF_DATALESS` imported from the production module, never a
+    re-derived `stat.SF_DATALESS`. The bare attribute does not exist on Linux —
+    an earlier version of this helper used it and these tests failed on CI while
+    passing on macOS. One definition, shared, so the two cannot diverge again.
+    """
     real_stat = os.stat
     wanted = {str(t) for t in targets}
 
     def fake_stat(path, *args, **kwargs):
         result = real_stat(path, *args, **kwargs)
         if str(path) in wanted:
-            return _StatWithFlags(result, stat_module.SF_DATALESS)
+            return _StatWithFlags(result, _SF_DATALESS)
         return result
 
     monkeypatch.setattr(os, "stat", fake_stat)
