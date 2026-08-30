@@ -1,8 +1,10 @@
 # tests/test_generate.py
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import generate
+from xbrain.generate import _mirror_file, generate
 from xbrain.models import (
     Author,
     Content,
@@ -1735,3 +1737,86 @@ def test_article_markdown_code_block_renders_with_its_fences(tmp_path: Path):
 
     assert code in body
     assert body.count("```") == 2  # opening and closing fence, both intact
+
+
+def test_mirror_file_leaves_an_unchanged_destination_untouched(tmp_path: Path):
+    """Re-mirroring identical bytes must not rewrite the vault copy.
+
+    `generate` mirrors every photo, video and slide frame into the vault's
+    `_media/` tree on EVERY run, and the nightly job runs `generate` nightly.
+    `shutil.copy2` truncates and rewrites the destination even when nothing
+    changed, which a cloud-synced vault reads as a modification: iCloud keeps
+    the version it had not finished uploading as a `name N.ext` sibling. The
+    x-knowledge vault accumulated 8.41 GB of such conflict copies — 50,020
+    files, all byte-identical to the sibling they were forked from.
+
+    Asserted on `st_ctime_ns`, not mtime or inode: `copy2` truncates in place
+    (same inode) and `copystat` restores the source mtime, so both look
+    untouched after a rewrite. Only ctime records that the bytes were written
+    — which is exactly the "this file was modified" signal a sync client acts
+    on.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    _mirror_file("1", source, destination)
+    before = destination.stat()
+    time.sleep(0.01)
+
+    _mirror_file("1", source, destination)
+
+    after = destination.stat()
+    assert after.st_ctime_ns == before.st_ctime_ns
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_destination_that_drifted(tmp_path: Path):
+    """A destination whose bytes differ still gets overwritten.
+
+    The skip must not strand a stale vault copy: if the store's bytes changed,
+    or the vault copy was corrupted/edited, the mirror has to repair it.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresh pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"stale")
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresh pixels"
+
+
+def test_mirror_file_rewrites_when_the_whole_stat_matches_but_bytes_differ(tmp_path: Path):
+    """Identical size AND identical mtime, different content — still repaired.
+
+    Guards the comparison against being satisfied by METADATA. An earlier
+    version of this test wrote the two files at different moments, so their
+    mtimes differed and any stat-only comparison already answered "different";
+    it passed against a `filecmp.cmp(..., shallow=True)` mutant that skips the
+    repair entirely. Measured: mutate the comparison to `shallow=True` and this
+    file's three tests all stayed green.
+
+    Copying the source's timestamps onto the destination makes the two stat
+    signatures identical, so nothing but reading the bytes can tell them apart.
+    That is the corrupted-vault-copy case: `copy2` restores the source's mtime
+    on every mirror, so a copy damaged in place — a truncating sync client, a
+    half-written file, bit rot — really can carry the source's timestamp and a
+    matching length while holding the wrong bytes.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"AAAA")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"BBBB")
+    stat = source.stat()
+    os.utime(destination, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert destination.stat().st_size == stat.st_size
+    assert destination.stat().st_mtime_ns == stat.st_mtime_ns
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"AAAA"
