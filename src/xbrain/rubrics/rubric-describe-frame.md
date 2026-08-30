@@ -8,8 +8,14 @@ Nothing downstream ever sees the pixels. What you leave out is lost.
 
 - **Language:** {language}, for your own prose. The rule below overrides this
   for text you transcribe.
-- **Length:** at most 5 sentences / 600 characters. No preamble ("This frame
-  shows..."). No markdown, no bullet characters.
+- **Length:** at most 5 sentences / 600 characters **of your own prose**.
+  Transcribed on-screen text does not count against that budget, and is never
+  dropped to fit it: a long caption is cheap, a dropped label is the failure this
+  rubric exists to prevent. If a frame carries more text than you can transcribe,
+  keep it in this order — title and headings, then axis and legend labels, then
+  code identifiers and commands, then body prose — and say plainly that you
+  stopped. No preamble ("This frame shows..."). No markdown, no bullet
+  characters.
 
 {onscreen_text_rule}
 

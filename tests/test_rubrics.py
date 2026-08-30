@@ -422,6 +422,7 @@ def test_describe_frame_rubric_states_the_verbatim_rule():
     assert "{language}" not in text
     assert "{onscreen_text_rule}" not in text
     assert "Spanish" in text
+    # The rule must enforce exact transcription without translation or normalization.
     assert "VERBATIM" in text
     # The rule must forbid translation explicitly — this is the #90 defect.
     assert "Never translate" in text
