@@ -348,3 +348,69 @@ def test_verify_rubric_declares_the_evidence_surfaces_per_target():
     assert "digest" in text and "summary" in text
     assert "video transcript" in text.lower()
     assert "fetched article body" in text.lower()
+
+
+def test_load_rubric_splices_the_shared_onscreen_fragment(tmp_path, monkeypatch):
+    """`{onscreen_text_rule}` is replaced by the shared fragment file, and the
+    fragment's OWN `{language}` is substituted in the same call — the fragment
+    must be spliced BEFORE the language pass, not after."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "fragment-onscreen-text.md").write_text(
+        "Transcribe VERBATIM; your prose is in {language}.\n", encoding="utf-8"
+    )
+    (rubric_dir / "rubric-probe.md").write_text(
+        "**Language:** {language}\n\n{onscreen_text_rule}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    text = load_rubric("probe", language="Spanish")
+    assert "{onscreen_text_rule}" not in text
+    assert "Transcribe VERBATIM" in text
+    # The fragment's own placeholder resolved too — proves the splice ran first.
+    assert "your prose is in Spanish" in text
+    assert "{language}" not in text
+
+
+def test_load_rubric_without_the_placeholder_is_unchanged(tmp_path, monkeypatch):
+    """A rubric that does not opt in is returned byte-for-byte — the splice is
+    opt-in, so the six rubrics that carry no on-screen text are untouched."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "rubric-plain.md").write_text("No placeholders here.\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    assert load_rubric("plain", language="English") == "No placeholders here.\n"
+
+
+def test_load_rubric_catches_a_misspelt_onscreen_placeholder(tmp_path, monkeypatch):
+    """`{onscreen_text_rules}` (plural) survives str.replace and would ship the
+    literal placeholder to the vision model. Same defence as `{Language}`."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "fragment-onscreen-text.md").write_text("rule\n", encoding="utf-8")
+    (rubric_dir / "rubric-typo.md").write_text("{onscreen_text_rules}\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    with pytest.raises(ValueError, match=r"onscreen_text_rules"):
+        load_rubric("typo", language="English")
+
+
+def test_load_rubric_missing_fragment_is_a_loud_error(tmp_path, monkeypatch):
+    """A rubric asking for a fragment that is not packaged must fail loudly, not
+    ship a half-rendered prompt."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "rubric-orphan.md").write_text("{onscreen_text_rule}\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    with pytest.raises(FileNotFoundError, match="fragment-onscreen-text.md"):
+        load_rubric("orphan", language="English")

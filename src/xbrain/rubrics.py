@@ -18,6 +18,22 @@ from xbrain.models import Topic
 # str.replace("{language}", ...) would silently miss.
 _LEFTOVER_PLACEHOLDER = re.compile(r"\{[^}]*language[^}]*\}", re.IGNORECASE)
 
+# The shared on-screen-text rule (#90). It lives in ONE fragment file spliced
+# into every rubric that describes an image, because the frame rubric and the
+# photo rubric must state the SAME rule — two copies drift, and a drifted rule
+# is worse than no rule (one surface silently keeps translating).
+#
+# The fragment is named `fragment-*.md`, NOT `rubric-*.md`, so `load_rubric`
+# cannot load it as a rubric and `tests/test_rubrics.py`'s `rubric-*.md` glob
+# does not parametrize over it.
+_ONSCREEN_FRAGMENT = "fragment-onscreen-text.md"
+_ONSCREEN_PLACEHOLDER = "{onscreen_text_rule}"
+# Same defensive idea as `_LEFTOVER_PLACEHOLDER`: a near-miss spelling
+# (`{onscreen_text_rules}`) survives str.replace and would ship the literal
+# placeholder to the vision model. Deliberately NOT a generic `\{[^}]*\}` scan —
+# `rubric-describe-image.md` embeds a JSON example that such a pattern would flag.
+_LEFTOVER_ONSCREEN = re.compile(r"\{[^}]*onscreen[^}]*\}", re.IGNORECASE)
+
 _PKG = Path(__file__).resolve().parent
 _RUBRICS_DIR = _PKG / "rubrics"
 _GUARDRAILS = _PKG / "guardrails.yaml"
@@ -66,6 +82,18 @@ def truncate_transcript(text: str, limit: int) -> str:
     return text[:limit].rstrip() + "\n[… transcript truncated …]"
 
 
+def _load_fragment(filename: str) -> str:
+    """Return the text of a shared rubric fragment (`rubrics/<filename>`).
+
+    Fragments are composed INTO rubrics by `load_rubric`; they are never a
+    prompt on their own, which is why they carry no `rubric-` prefix.
+    """
+    path = _RUBRICS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Rubric fragment not found: {path}")
+    return path.read_text(encoding="utf-8").strip()
+
+
 def load_rubric(name: str, *, language: str | None = None) -> str:
     """Return the text of `rubrics/rubric-<name>.md`.
 
@@ -79,11 +107,26 @@ def load_rubric(name: str, *, language: str | None = None) -> str:
     Defensive check: when `language` is provided, the returned text must not
     contain a literal `{language}` (catches typos like `{Language}` that
     would silently survive substitution and ship the placeholder to the LLM).
+
+    A `{onscreen_text_rule}` placeholder is replaced with the shared
+    `fragment-onscreen-text.md` before the language pass, so the rule is stated
+    once and both image rubrics inherit it verbatim.
     """
     path = _RUBRICS_DIR / f"rubric-{name}.md"
     if not path.exists():
         raise FileNotFoundError(f"Rubric not found: {path}")
     text = path.read_text(encoding="utf-8")
+    # Splice shared fragments FIRST, so a fragment's own `{language}` is
+    # substituted by the language pass below rather than shipped literally.
+    if _ONSCREEN_PLACEHOLDER in text:
+        text = text.replace(_ONSCREEN_PLACEHOLDER, _load_fragment(_ONSCREEN_FRAGMENT))
+    leftover_rule = _LEFTOVER_ONSCREEN.search(text)
+    if leftover_rule is not None:
+        raise ValueError(
+            f"Rubric {name!r} contains an unresolved placeholder "
+            f"{leftover_rule.group()!r}. The supported form is "
+            f"`{{onscreen_text_rule}}` (lowercase, singular)."
+        )
     if language is not None:
         text = text.replace("{language}", language)
         leftover = _LEFTOVER_PLACEHOLDER.search(text)
