@@ -1454,6 +1454,9 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
     `vision_model` overrides `[vision].model` for this run (the `--vision-model`
     flag): the model name is passed to `[vision].command` as `--model`, so a
     multi-backend wrapper can route it (e.g. `opus` → cloud, `qwen-7b` → local).
+
+    The frame rubric is rendered in `cfg.output_language` (the wiki's language),
+    deliberately not in `digest-video --language` (the audio language).
     """
     if not cfg.vision_command.strip():
         raise ValueError(

@@ -2740,6 +2740,34 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
     assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()
 
 
+def test_frames_render_the_rubric_in_the_output_language(tmp_path: Path, monkeypatch):
+    """The frame rubric renders in the WIKI's language (`[output].language`).
+    `digest-video --language` is the AUDIO language handed to the transcriber;
+    wiring that one here would render the rubric in the language of the SPEECH,
+    which is a different thing that happens to look right in the common case."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        cfg.read_text(encoding="utf-8") + '[output]\nlanguage = "Spanish"\n', encoding="utf-8"
+    )
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, tmp_path / "data" / "items.json")
+    _wire_digest(monkeypatch, _speech_transcript("the talk"))
+    _wire_frames(monkeypatch)
+    seen: list = []
+
+    def _capture(path, *, command, model, language):
+        seen.append(language)
+        return "slide"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
+    # --language English is the AUDIO language and must NOT reach the rubric.
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "42", "--frames", "--language", "English"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen and set(seen) == {"Spanish"}
+
+
 def _verify_video_item(item_id: str = "7") -> Item:
     """An enriched item with an x_video source — the shape `verify` audits."""
     return Item(
