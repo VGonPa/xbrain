@@ -413,9 +413,18 @@ def test_the_issue_body_carries_the_evidence() -> None:
 
 
 def _invoke(
-    tmp_path: Path, workflow_src: str, check_runs: Any, audit_result: str
+    tmp_path: Path,
+    workflow_src: str,
+    check_runs: Any,
+    audit_result: str,
+    gate_outcome: str | None = None,
 ) -> dict[str, str]:
-    """Drive `main()` exactly as the workflow does, and return the outputs it emitted."""
+    """Drive `main()` exactly as the workflow does, and return the outputs it emitted.
+
+    `gate_outcome` is what the gate STEP itself reported, carried out of the execution job
+    as an artifact. `None` means no artifact arrived — the execution job never got as far as
+    the gate, which is what a setup failure looks like from here.
+    """
     import json
 
     from xbrain.gate_audit import main
@@ -427,12 +436,20 @@ def _invoke(
     body = tmp_path / "body.md"
     outputs = tmp_path / "outputs.txt"
     outputs.touch()
+    # Written when the gate ran, and REMOVED otherwise — several tests call this helper more
+    # than once with the same `tmp_path`, and a file left behind by an earlier call would
+    # make "the gate was never observed" silently mean "observed, with the previous answer".
+    outcome_file = tmp_path / "gate-outcome.txt"
+    outcome_file.unlink(missing_ok=True)
+    if gate_outcome is not None:
+        outcome_file.write_text(f"{gate_outcome}\n", encoding="utf-8")
 
     main(
         [
             "--check-runs", str(runs),
             "--workflow", str(workflow),
             "--audit-result", audit_result,
+            "--gate-outcome", str(outcome_file),
             "--sha", _SHA,
             "--repo", "VGonPa/xbrain",
             "--run-url", "https://github.com/VGonPa/xbrain/actions/runs/1",
@@ -453,7 +470,13 @@ def _invoke(
 
 def test_main_reports_a_lying_gate(tmp_path: Path) -> None:
     """End to end: gate said success, honest execution failed -> file the issue."""
-    out = _invoke(tmp_path, _HEALTHY, {"check_runs": [_run("quality", "success")]}, "failure")
+    out = _invoke(
+        tmp_path,
+        _HEALTHY,
+        {"check_runs": [_run("quality", "success")]},
+        "failure",
+        gate_outcome="failure",
+    )
     assert out["verdict"] == "lying"
     assert out["file_issue"] == "true"
     assert "9e9a5c02" in out["body"]
@@ -461,14 +484,26 @@ def test_main_reports_a_lying_gate(tmp_path: Path) -> None:
 
 def test_main_is_quiet_on_a_healthy_repo(tmp_path: Path) -> None:
     """The everyday case must produce no issue and no noise."""
-    out = _invoke(tmp_path, _HEALTHY, {"check_runs": [_run("quality", "success")]}, "success")
+    out = _invoke(
+        tmp_path,
+        _HEALTHY,
+        {"check_runs": [_run("quality", "success")]},
+        "success",
+        gate_outcome="success",
+    )
     assert out["verdict"] == "clean"
     assert out["file_issue"] == "false"
 
 
 def test_main_is_quiet_when_develop_is_merely_red(tmp_path: Path) -> None:
     """Consistent red belongs to the push-triggered alert, not to this one."""
-    out = _invoke(tmp_path, _HEALTHY, {"check_runs": [_run("quality", "failure")]}, "failure")
+    out = _invoke(
+        tmp_path,
+        _HEALTHY,
+        {"check_runs": [_run("quality", "failure")]},
+        "failure",
+        gate_outcome="failure",
+    )
     assert out["verdict"] == "consistent_red"
     assert out["file_issue"] == "false"
 
@@ -479,7 +514,13 @@ def test_main_files_a_disarmed_gate_that_still_passes(tmp_path: Path) -> None:
         "        run: bash scripts/check.sh",
         "        run: bash scripts/check.sh\n        continue-on-error: true",
     )
-    out = _invoke(tmp_path, gagged, {"check_runs": [_run("quality", "success")]}, "success")
+    out = _invoke(
+        tmp_path,
+        gagged,
+        {"check_runs": [_run("quality", "success")]},
+        "success",
+        gate_outcome="success",
+    )
     assert out["file_issue"] == "true"
     assert "step-continue-on-error" in out["body"]
 
@@ -511,14 +552,101 @@ def test_only_a_positively_clean_audit_stands_down_the_alarm(tmp_path: Path) -> 
     runner silently retract a live, correct accusation — the alarm would disarm itself the
     moment CI got flaky. Only a verdict of CLEAN with zero violations may stand it down.
     """
-    clean = _invoke(tmp_path, _HEALTHY, {"check_runs": [_run("quality", "success")]}, "success")
+    clean = _invoke(
+        tmp_path,
+        _HEALTHY,
+        {"check_runs": [_run("quality", "success")]},
+        "success",
+        gate_outcome="success",
+    )
     assert clean["clean"] == "true"
 
-    for result, runs in (
-        ("cancelled", [_run("quality", "success")]),  # never observed
-        ("failure", [_run("quality", "failure")]),  # merely red
-        ("success", []),  # gate never reported
+    for result, gate, runs in (
+        ("cancelled", None, [_run("quality", "success")]),  # never observed
+        ("failure", "failure", [_run("quality", "failure")]),  # merely red
+        ("success", "success", []),  # gate never reported
     ):
-        out = _invoke(tmp_path, _HEALTHY, {"check_runs": runs}, result)
+        out = _invoke(tmp_path, _HEALTHY, {"check_runs": runs}, result, gate_outcome=gate)
         assert out["file_issue"] == "false", "must not accuse"
         assert out["clean"] == "false", "and must not exonerate either"
+
+
+# ---------------------------------------------------------------------------
+# Which STEP failed. `needs.<job>.result` cannot tell you, and the difference is an
+# accusation.
+# ---------------------------------------------------------------------------
+
+
+def test_observe_gate_reads_the_step_not_the_job() -> None:
+    """The gate step's own outcome is the only thing that convicts."""
+    from xbrain.gate_audit import observe_gate
+
+    assert observe_gate("success", "success").passed is True
+    assert observe_gate("failure", "failure").passed is False
+
+
+@pytest.mark.parametrize("job_result", ["failure", "cancelled", "skipped", ""])
+def test_a_gate_step_we_never_reached_is_never_a_verdict(job_result: str) -> None:
+    """No outcome for the gate step means the gate was never run. That convicts nobody.
+
+    `needs.<job>.result` aggregates every step of `execute-gate` — the checkout, the uv
+    install, the Python install, the dependency sync — and reports a single `failure` for all
+    of them. Reading it as "the gate failed" means a dependency resolution that broke at
+    06:17 is indistinguishable from a gate that lies, and the auditor files a public issue
+    accusing the repository of merging unverified code because PyPI had a bad morning.
+    """
+    from xbrain.gate_audit import observe_gate
+
+    assert observe_gate(None, job_result).passed is None
+
+
+def test_a_setup_failure_names_itself() -> None:
+    """`inconclusive` is the right verdict, but silence about WHY is how an auditor goes deaf.
+
+    A job that failed before reaching the gate is not the same event as a cancelled runner:
+    the first says the auditor is broken and needs a human, the second says nothing happened.
+    Both are inconclusive; only one is worth a red run.
+    """
+    from xbrain.gate_audit import observe_gate
+
+    broken = observe_gate(None, "failure")
+    assert broken.passed is None
+    assert "before" in broken.reason.lower()
+
+    quiet = observe_gate(None, "cancelled")
+    assert quiet.passed is None
+    assert quiet.reason != broken.reason
+
+
+def test_a_setup_failure_is_not_a_lying_gate(tmp_path: Path) -> None:
+    """End to end, the regression this exists to prevent.
+
+    `execute-gate` fails because `uv sync` could not resolve; the gate step never ran. The
+    `quality` check honestly reported SUCCESS. Reading the JOB result, that is `lying` and a
+    public issue gets filed. Reading the STEP, it is what it actually is: we did not look.
+    """
+    out = _invoke(
+        tmp_path,
+        _HEALTHY,
+        {"check_runs": [_run("quality", "success")]},
+        "failure",
+        gate_outcome=None,
+    )
+    assert out["verdict"] == "inconclusive"
+    assert out["file_issue"] == "false", "must not accuse the gate of a setup failure"
+    assert out["clean"] == "false", "and must not exonerate it either"
+    assert out["observed"] == "false", "the workflow needs to know it must go red"
+
+
+def test_a_gate_that_really_failed_is_still_convicted(tmp_path: Path) -> None:
+    """The other half. Narrowing the signal must not blunt it: a real lie still lands."""
+    out = _invoke(
+        tmp_path,
+        _HEALTHY,
+        {"check_runs": [_run("quality", "success")]},
+        "failure",
+        gate_outcome="failure",
+    )
+    assert out["verdict"] == "lying"
+    assert out["file_issue"] == "true"
+    assert out["observed"] == "true"

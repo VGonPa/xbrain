@@ -195,7 +195,36 @@ jobs:
 
       # The whole point. If this disagrees with what GitHub published, the gate is lying.
       - name: Run the real quality gate, honestly
+        id: gate
         run: bash scripts/check.sh
+
+      # Carry out of this job what THE GATE STEP did — not what the job did.
+      #
+      # `needs.execute-gate.result` aggregates every step above: the checkout, the uv install,
+      # the Python install, the dependency sync. All of them collapse into a single `failure`,
+      # so a runner with no network at 06:17 is indistinguishable from a gate that lies. Read
+      # that way, a bad morning at PyPI files a public issue accusing this repository of
+      # merging unverified code.
+      #
+      # An ARTIFACT rather than a job output, deliberately: job outputs are not published when
+      # the job fails, and this job is DESIGNED to fail — the output would be missing in
+      # exactly the case that must convict. `if: always()` so it is written whether the gate
+      # passed or failed; if an earlier step broke, the gate step is `skipped` and that is
+      # recorded faithfully as "we never looked".
+      - name: Record what the gate step actually did
+        if: always()
+        env:
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        run: echo "$GATE_OUTCOME" > gate-outcome.txt
+
+      - name: Hand the gate's own outcome to the audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-outcome
+          path: gate-outcome.txt
+          if-no-files-found: error
+          retention-days: 1
 
   # ------------------------------------------------------------------------------------------
   # 3. COMPARE, and raise the alarm.
@@ -224,6 +253,7 @@ jobs:
     permissions:
       contents: read # clone this repo
       checks: read # ask what the `quality` check run concluded
+      actions: read # download the gate-outcome artifact from `execute-gate`
       issues: write # raise the alarm. The only write scope in this file.
     steps:
       - name: Check out the AUDITOR's own tree (default branch — not the audited branch)
@@ -267,10 +297,30 @@ jobs:
           echo "--- check runs GitHub published for this commit ---"
           jq -r '.check_runs[] | "  \(.name): \(.status)/\(.conclusion)"' check-runs.json
 
+      # What the GATE STEP itself did, as recorded inside `execute-gate`. A missing artifact
+      # is DATA, not an error: it means that job was cancelled before it could record
+      # anything, and it must read as "the gate was never observed" — never as "the gate
+      # failed". So absence is handled here, in a conditional, rather than by letting the
+      # download fail the step. This is not `continue-on-error`: nothing that reports a
+      # verdict is being suppressed, and a missing outcome can only ever make the audit say
+      # LESS, never wrongly accuse.
+      - name: Fetch what the gate step actually did
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          if gh run download "$RUN_ID" --repo "$REPO" --name gate-outcome --dir gate-outcome; then
+            echo "The gate step reported: $(cat gate-outcome/gate-outcome.txt)"
+          else
+            echo "No gate-outcome artifact. execute-gate never recorded an outcome, so the"
+            echo "gate was not observed and nothing will be concluded about it."
+          fi
+
       # The comparison. Reported vs. actually-executed, plus a static read of develop's
-      # quality.yml for the known banned patterns. Writes `verdict`, `file_issue`, `clean`
-      # and `title` to $GITHUB_OUTPUT, and always exits 0 — the alarm must be raised BEFORE
-      # anything is allowed to fail.
+      # quality.yml for the known banned patterns. Writes `verdict`, `file_issue`, `clean`,
+      # `observed` and `title` to $GITHUB_OUTPUT, and always exits 0 — the alarm must be
+      # raised BEFORE anything is allowed to fail.
       - name: Compare what the gate REPORTED with what it actually DOES
         id: audit
         env:
@@ -283,6 +333,7 @@ jobs:
             --check-runs check-runs.json \
             --workflow audited/.github/workflows/quality.yml \
             --audit-result "$GATE_RESULT" \
+            --gate-outcome gate-outcome/gate-outcome.txt \
             --sha "$SHA" \
             --repo "$REPO" \
             --run-url "$RUN_URL" \
@@ -309,6 +360,18 @@ jobs:
           SHA: ${{ needs.resolve.outputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash scripts/audit_gate_issue.sh close
+
+      # An auditor that cannot RUN the gate files nothing — correctly, it has no evidence.
+      # But silence is how it then goes deaf: months of "no issue filed" reads exactly like
+      # months of good news. So the run goes red, loudly, without ever making the accusation
+      # it cannot support. This is the broken-instrument signal, not the lying-gate one.
+      - name: Fail when the gate could never be executed
+        if: needs.execute-gate.result == 'failure' && steps.audit.outputs.observed == 'false'
+        run: |
+          echo "::error::The gate-execution job failed BEFORE reaching the gate, so this"
+          echo "::error::audit observed nothing. The auditor is broken, not the gate — fix"
+          echo "::error::the setup steps in gate-audit.yml, then re-run via workflow_dispatch."
+          exit 1
 
       # Turn the run red, AFTER the issue is filed. An audit that catches a lying gate and
       # still shows a green tick would be the very thing it exists to detect.

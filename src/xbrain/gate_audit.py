@@ -167,20 +167,62 @@ def should_stand_down(verdict: Verdict, violations: Sequence[Violation]) -> bool
     return verdict is Verdict.CLEAN and not violations
 
 
-def audit_observed(job_result: str) -> bool | None:
-    """Did the gate-execution job actually RUN? None when we cannot say.
+@dataclass(frozen=True)
+class GateExecution:
+    """What the honest re-run of the gate DID — and whether we watched it at all.
+
+    `passed is None` means the gate was never observed. That is not a soft `False`: the
+    difference between "the gate failed" and "we never saw the gate" is the difference
+    between an accusation and silence.
+    """
+
+    passed: bool | None
+    reason: str
+
+
+def read_gate_outcome(path: Path | None) -> str | None:
+    """The gate STEP's own outcome, carried out of the execution job. None if it never came.
+
+    Absence is the load-bearing case, and it is why this is a FILE rather than a job output.
+    A job output is not published when its job fails, and the execution job is designed to
+    fail — so an output would be missing exactly when the gate genuinely failed, which is the
+    one case that must convict. An artifact written by a step with `if: always()` is present
+    whenever the gate ran, and absent only when the job died before reaching it.
+    """
+    if path is None or not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8").strip() or None
+
+
+def observe_gate(step_outcome: str | None, job_result: str) -> GateExecution:
+    """Did the GATE fail, or did the job fail before the gate ever ran? Not the same event.
 
     `needs.<job>.result` is one of `success`, `failure`, `cancelled`, `skipped` — NOT a
-    boolean. Collapsing it with `passed = (result == "success")` silently reads `cancelled`
-    as *the gate failed*, which against a healthy green gate yields the verdict LYING. The
-    auditor would then file a public issue accusing the repository of merging unverified code
-    because a runner was evicted. We report only what we observed.
+    boolean, and not a statement about the gate. It aggregates every step of `execute-gate`:
+    the checkout, the uv install, the Python install, the dependency sync, and only then the
+    gate. Collapsing it with `passed = (result == "success")` reads a runner eviction, a
+    GitHub outage or a bad morning at PyPI as *the gate failed* — which against a healthy
+    green gate yields the verdict LYING, and files a public issue accusing the repository of
+    shipping unverified code because a dependency would not resolve.
+
+    So the conviction is drawn from the gate STEP's own outcome, and the job result is used
+    only to tell two silences apart: a job that BROKE on the way to the gate (the auditor
+    needs a human) from one that was simply never delivered (nothing happened).
     """
-    if job_result == "success":
-        return True
+    if step_outcome in ("success", "failure"):
+        passed = step_outcome == "success"
+        return GateExecution(passed, f"the gate step reported `{step_outcome}`")
     if job_result == "failure":
-        return False
-    return None
+        return GateExecution(
+            None,
+            "the execution job FAILED before the gate step ran — the environment could not "
+            "be built, so nothing at all was observed about the gate",
+        )
+    return GateExecution(
+        None,
+        f"the execution job delivered no verdict (`{job_result or 'unknown'}`), so the gate "
+        f"was never observed",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +545,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--check-runs", required=True, type=Path, help="check-runs API JSON")
     parser.add_argument("--workflow", required=True, type=Path, help="audited quality.yml")
     parser.add_argument("--audit-result", required=True, help="result of the gate-execution job")
+    parser.add_argument(
+        "--gate-outcome",
+        type=Path,
+        help="file holding the gate STEP's own outcome; absent when the gate never ran",
+    )
     parser.add_argument("--sha", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--run-url", required=True)
@@ -522,19 +569,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     payload = json.loads(args.check_runs.read_text(encoding="utf-8"))
     reported = reported_gate(payload)
-    observed = audit_observed(args.audit_result)
+    execution = observe_gate(read_gate_outcome(args.gate_outcome), args.audit_result)
+    observed = execution.passed
 
-    # A gate we never watched run cannot be caught lying. `cancelled`/`skipped` means the
-    # execution job never delivered a verdict, so neither do we.
+    # A gate we never watched run cannot be caught lying. A missing gate outcome means the
+    # execution job never reached the gate, so we say nothing about it.
     verdict = Verdict.INCONCLUSIVE if observed is None else classify(reported, observed)
     violations = audit_workflow_source(args.workflow)
     file_issue = should_file_issue(verdict, violations)
 
+    found = "pass" if observed else "FAIL" if observed is False else "(not observed)"
     print(f"commit          : {args.sha}")
     print(f"gate REPORTED   : {reported.conclusion or '(no completed run)'}")
-    print(
-        f"audit FOUND     : {'pass' if observed else 'FAIL' if observed is False else '(not observed: ' + args.audit_result + ')'}"
-    )  # noqa: E501
+    print(f"audit FOUND     : {found}")
+    print(f"because         : {execution.reason}")
     print(f"verdict         : {verdict.value}")
     for violation in violations:
         print(f"violation       : {violation.code} — {violation.detail}")
@@ -561,6 +609,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         verdict=verdict.value,
         file_issue="true" if file_issue else "false",
         clean="true" if should_stand_down(verdict, violations) else "false",
+        # Whether the gate was watched running AT ALL. The workflow turns a run red when the
+        # execution job failed without ever reaching the gate: that is the auditor being
+        # broken, and an auditor that is quietly unable to look is worse than none, because
+        # its silence is indistinguishable from a clean bill of health.
+        observed="true" if observed is not None else "false",
         title=issue_title(verdict),
     )
     return 0

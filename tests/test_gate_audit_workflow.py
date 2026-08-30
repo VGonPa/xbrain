@@ -486,3 +486,88 @@ def test_the_auditor_never_installs_outside_the_lockfile() -> None:
         f"auditor's own environment drifts with the release train. Use `uv sync --locked` "
         f"(add `--extra dev` only where the gate itself does)."
     )
+
+
+def test_the_audit_judges_the_gate_STEP_not_the_whole_job() -> None:
+    """`needs.<job>.result` aggregates the setup steps too. Convicting on it accuses wrongly.
+
+    `execute-gate` checks out, installs uv, installs Python and syncs dependencies before it
+    ever reaches `check.sh`. All five steps collapse into one `failure`, so a dependency that
+    would not resolve at 06:17 is indistinguishable from a gate that lies — and the auditor
+    files a public issue accusing the repository of merging unverified code because PyPI had
+    a bad morning.
+
+    The gate step therefore carries an `id`, its own outcome is recorded by a step that runs
+    `if: always()` (so it survives the failure it is reporting), and the comparator is handed
+    that outcome rather than the job result.
+    """
+    job = _jobs()[_EXECUTE_GATE_JOB]
+    steps = job.get("steps") or []
+
+    gate = next((s for s in steps if _GATE_SCRIPT in str(s.get("run", ""))), None)
+    assert gate is not None, f"`{_EXECUTE_GATE_JOB}` no longer runs {_GATE_SCRIPT}."
+    gate_id = gate.get("id")
+    assert gate_id, (
+        f"The step running {_GATE_SCRIPT} declares no `id:`, so `steps.<id>.outcome` cannot "
+        f"be read and the only signal left is the job result — which is exactly the one that "
+        f"cannot tell a broken setup from a lying gate."
+    )
+
+    reference = f"steps.{gate_id}.outcome"
+    recorders = [
+        step
+        for step in steps
+        if reference in str(step.get("env", "")) or reference in str(step.get("run", ""))
+    ]
+    assert recorders, (
+        f"No step reads `{reference}`. The gate's own outcome never leaves the job, so the "
+        f"audit has nothing to judge but `needs.{_EXECUTE_GATE_JOB}.result`."
+    )
+    for step in recorders:
+        assert str(step.get("if", "")).strip() == "always()", (
+            f"Step {step.get('name')!r} reads `{reference}` but is not `if: always()`. It "
+            f"would be skipped by the very gate failure it exists to report, and the audit "
+            f"would see no outcome precisely when the gate did fail."
+        )
+
+    assert "--gate-outcome" in _runs(), (
+        "The comparator is never handed `--gate-outcome`, so it falls back to the job result "
+        "and the whole distinction is decorative."
+    )
+
+
+def test_a_broken_auditor_does_not_pass_for_a_clean_bill_of_health() -> None:
+    """Not observing the gate is safe. Not observing it SILENTLY, every day, is not.
+
+    A setup failure yields `inconclusive`, which correctly files nothing. But an auditor
+    permanently unable to run the gate would then be indistinguishable from an auditor that
+    keeps finding everything in order — it would go quietly deaf. The run must go red so the
+    failure is visible, without ever filing the accusation it has no evidence for.
+    """
+    steps = _jobs()["audit"].get("steps") or []
+    guards = [
+        step
+        for step in steps
+        if "observed" in str(step.get("if", "")) and "exit 1" in str(step.get("run", ""))
+    ]
+    assert guards, (
+        "No step turns the run red when the gate could not be executed. The auditor can then "
+        "fail to look for months and report nothing, which reads exactly like good news."
+    )
+
+
+def test_the_audit_may_read_the_artifact_it_depends_on() -> None:
+    """A `permissions:` block sets every scope it does NOT list to `none`.
+
+    The gate's own outcome crosses jobs as an artifact, and `gh run download` reads it
+    through the Actions API — which needs `actions: read`. Without it the download fails
+    every single day, the audit reads "gate not observed" every single day, and the layer is
+    permanently unable to look while its `inconclusive` verdict quietly files nothing.
+    """
+    audit = _jobs()["audit"]
+    perms = audit.get("permissions") or {}
+    assert perms.get("actions") == "read", (
+        f"The `audit` job declares `permissions: {perms}`, so `actions` is `none` and "
+        f"`gh run download` cannot fetch the gate-outcome artifact. The audit would observe "
+        f"nothing, for ever."
+    )
