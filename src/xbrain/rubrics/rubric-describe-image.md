@@ -8,8 +8,11 @@ factual, dense, and short.
 - **Language:** {language} for your own prose. The on-screen-text rule below
   overrides this for text you transcribe.
 - **Length per description:** 1 to 3 sentences, or up to 5 when the image is
-  dense with text. No preamble ("This image shows..."). No markdown, no
-  wikilinks, no bullet characters.
+  dense with text — **of your own prose.** Transcribed on-screen text does not
+  count against that budget, and is never dropped to fit it: a long caption is
+  cheap, a dropped label is the failure the on-screen-text rule exists to
+  prevent. No preamble ("This image shows..."). No markdown, no wikilinks, no
+  bullet characters.
 - **Faithful:** describe only what is visible. Never invent text, numbers
   or names. If a chart's labels are unreadable, say so plainly rather
   than guessing.

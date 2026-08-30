@@ -89,3 +89,15 @@ def test_fallback_prompt_still_demands_verbatim_transcription():
     discipline #90 exists to enforce, or the caption silently paraphrases again."""
     assert "VERBATIM" in xv._FALLBACK_PROMPT
     assert xv._FALLBACK_PROMPT.strip()
+
+
+def test_wrapper_and_xbrain_agree_on_the_env_var_name():
+    """The two halves of the injection contract spell this string INDEPENDENTLY —
+    the wrapper cannot import xbrain (it runs under the system python), so the
+    duplication is deliberate. Nothing else pins them equal: rename either side and
+    every test still passes while production silently falls back to the weaker
+    built-in prompt, reverting this whole change with no failure anywhere.
+    """
+    from xbrain.vision import PROMPT_ENV_VAR
+
+    assert xv._PROMPT_ENV_VAR == PROMPT_ENV_VAR

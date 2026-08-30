@@ -155,6 +155,17 @@ def test_quotes_are_delimiters_not_letters():
     assert "O'Brien" in extract_entities("el ensayo de O'Brien sobre agentes")
 
 
+def test_quoted_transcription_still_grounds_the_entity():
+    """#90 has the caption QUOTE on-screen text ("Layer Norm"), and the digest cite
+    it unquoted. `_entities_in_sentence` strips quotes and `_norm_tokens` reduces to
+    [a-z0-9]+, so the two forms match — but nothing pinned it, and the whole point of
+    the change is that a correctly-cited label stops being reported as unfounded.
+    """
+    caption = 'Diapositiva con un diagrama que conecta "Embedding" y "Layer Norm".'
+    assert is_grounded("Layer Norm", caption)
+    assert is_grounded("Embedding", caption)
+
+
 def test_line_initial_common_word_is_demoted_but_never_dropped():
     """Every Spanish bullet opens with a capitalised verb ("Muestra…", "Aparece…"). Their
     capital proves nothing, so they must not reach the headline — but they are NOT

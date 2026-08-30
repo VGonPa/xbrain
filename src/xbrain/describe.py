@@ -45,11 +45,27 @@ logger = logging.getLogger(__name__)
 # saving vs per-image, modest added complexity).
 _DEFAULT_BATCH_SIZE = 5
 
-# Token ceiling for the JSON list response. Per-image average is ~3
-# sentences ≈ 80 tokens of prose + 20 of JSON scaffolding = ~100 tokens.
-# A batch of 5 fits comfortably under 600; the cap is set high enough to
-# survive an over-eager model that emits long descriptions.
-_MAX_TOKENS = 1200
+# Token ceiling for the JSON list response.
+#
+# #90's rubric raised the per-image budget to up to 5 sentences (~600 chars,
+# ~150 tokens) of prose PLUS every visible on-screen label transcribed verbatim
+# and quoted — explicitly unbounded, because a dense screenshot (a terminal, a
+# slide, a table) can carry dozens of short quoted strings that do not count
+# against the sentence budget. Call it ~150 tokens of prose + ~300 tokens of
+# labels + ~20 of JSON scaffolding on a genuinely dense image — ~470 tokens —
+# and a batch of 5 images can land comfortably over 2000. The old "~100 tokens
+# per image" arithmetic (1200 total) was sized for the pre-#90 "one or two
+# dense sentences" prompt and is stale.
+#
+# The ceiling matters more here than it does for a single-image call: a
+# `max_tokens` cutoff lands mid-JSON, `_parse_batch_response` raises
+# `json.JSONDecodeError`, and the WHOLE BATCH of 5 is marked failed — not just
+# the one dense image that pushed the response long. Batching is deterministic
+# (`itertools.batched` over the same ordered candidate list), so an
+# under-sized ceiling does not recover on retry: the same 5 photos re-form the
+# same batch and fail again on the next run, forever, until the ceiling is
+# raised.
+_MAX_TOKENS = 3000
 
 # Map file extensions to the Anthropic vision media-type strings. The
 # downloader writes one of these four (`.jpg` is mapped twice — once for

@@ -1489,8 +1489,9 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
         # AUDIO language passed to the transcriber. `language` became required on
         # `describe_image` in #90 (a default would silently ship an unresolved
         # `{language}`); wiring it here is the minimal fix this call site needs to
-        # keep working — the dedicated pinning test for it lives in a later PR3
-        # step (`test_frames_render_the_rubric_in_the_output_language`).
+        # keep working — the dedicated pinning test for it is
+        # `test_frames_render_the_rubric_in_the_output_language` in
+        # `tests/test_cli.py`, shipped in this same branch.
         return describe_image(
             path, command=cfg.vision_command, model=model, language=cfg.output_language
         )

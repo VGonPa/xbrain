@@ -292,6 +292,12 @@ def attach_transcript(
     video enriched from its tweet BEFORE the transcript landed must re-enrich, and
     that hinges on `fetched_at` moving past the earlier `enriched_at`. Without the
     bump the new transcript would look already-processed and the video keeps "—".
+
+    When this run actually described frames, the source is also stamped with
+    `FRAME_CAPTION_CONTRACT` (`caption_contract`, #90) — which rubric produced
+    those captions, so `redescribe-frames` can tell a current caption from a
+    stale pre-#90 one and skip it. An audio-only digest attaches `""`: it made
+    no captions, so it has nothing to vouch for.
     """
     now = datetime.now(timezone.utc)
     frames_map = frames_by_item or {}

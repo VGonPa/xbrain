@@ -1006,7 +1006,7 @@ def test_describe_all_sends_payload_with_expected_kwarg_shape(tmp_path: Path):
     )
     kwargs = client.messages.calls[0]
     assert kwargs["model"] == "claude-sonnet-4-6"
-    assert kwargs["max_tokens"] == 1200
+    assert kwargs["max_tokens"] == 3000
     assert isinstance(kwargs["system"], str) and kwargs["system"]
     messages = kwargs["messages"]
     assert isinstance(messages, list) and len(messages) == 1

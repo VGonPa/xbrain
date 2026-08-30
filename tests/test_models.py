@@ -1437,3 +1437,22 @@ def test_caption_contract_defaults_to_empty_so_legacy_records_load():
 
     source = ContentSourceSuccess(kind="x_video", url="https://x.com/a/status/1", text="hi")
     assert source.caption_contract == ""
+
+
+def test_caption_contract_round_trips_through_json():
+    """The design's testing section asks for round-trip coverage of the stamp, and
+    only the default-empty case (above) was covered — a stamped value must survive
+    a dump → re-parse too, or `redescribe-frames`' skip-if-current-contract check
+    (#90 PR2) would silently forget which rubric produced a video's captions.
+    """
+    from xbrain.models import FRAME_CAPTION_CONTRACT, ContentSourceAdapter, ContentSourceSuccess
+
+    src = ContentSourceSuccess(
+        kind="x_video",
+        url="https://video.twimg.com/amplify_video/123/vid/720/A.mp4?tag=16",
+        text="hello, this is the transcript",
+        caption_contract=FRAME_CAPTION_CONTRACT,
+    )
+    restored = ContentSourceAdapter.validate_python(src.model_dump(mode="json"))
+    assert isinstance(restored, ContentSourceSuccess)
+    assert restored.caption_contract == FRAME_CAPTION_CONTRACT
