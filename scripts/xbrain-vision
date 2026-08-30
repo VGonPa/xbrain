@@ -40,11 +40,11 @@ import urllib.request
 from pathlib import Path
 
 # xbrain injects the frame-caption rubric here (`xbrain.vision.PROMPT_ENV_VAR`).
-# The variable is the delivery channel precisely so the argv contract stays
-# frozen. This constant is the fallback for a BARE run outside xbrain — it must
-# never be empty, because an empty prompt would silently produce a useless
-# caption rather than an error.
+# The variable is the delivery channel precisely so the argv contract stays frozen.
 _PROMPT_ENV_VAR = "XBRAIN_VISION_PROMPT"
+# This constant is the fallback for a BARE run outside xbrain — it must never be
+# empty, because an empty prompt would silently produce a useless caption rather
+# than an error.
 _FALLBACK_PROMPT = (
     "Describe this video key-frame for a personal knowledge wiki in one or two "
     "dense, factual sentences. Transcribe any on-screen text VERBATIM, in its "

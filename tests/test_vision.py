@@ -212,24 +212,14 @@ def test_a_runner_that_ignores_env_still_works(tmp_path: Path):
     assert result == "plain caption"
 
 
-def test_bundled_wrapper_reads_the_prompt_from_the_environment():
-    """`scripts/xbrain-vision` is the reference implementation of the contract, so
-    it must prefer the injected rubric over its own fallback constant. It is
-    stdlib-only by design (it runs under the system python, which has no xbrain),
-    so this is asserted on the source text rather than by importing it."""
-    from pathlib import Path
-
-    from xbrain.vision import PROMPT_ENV_VAR
-
-    source = Path(__file__).resolve().parents[1].joinpath("scripts/xbrain-vision").read_text()
-    assert PROMPT_ENV_VAR in source
-    assert "import xbrain" not in source
-
-
-def test_bundled_wrapper_keeps_a_fallback_prompt():
-    """Run outside xbrain (a bare `xbrain-vision photo.png`), the wrapper must
-    still have a prompt rather than sending the model an empty string."""
+def test_bundled_wrapper_imports_no_xbrain_module():
+    """`scripts/xbrain-vision` runs under the SYSTEM python, which has no xbrain
+    installed, so it must stay stdlib-only. The tempting regression is
+    `from xbrain.vision import PROMPT_ENV_VAR` to stop repeating the env-var name
+    — which a plain `"import xbrain" not in source` check would NOT catch, because
+    the word order is reversed. Match both forms."""
+    import re
     from pathlib import Path
 
     source = Path(__file__).resolve().parents[1].joinpath("scripts/xbrain-vision").read_text()
-    assert "_FALLBACK_PROMPT" in source
+    assert not re.search(r"^\s*(?:import|from)\s+xbrain\b", source, re.MULTILINE)

@@ -82,14 +82,15 @@ command = "parakeet-mlx"
 # this command as a subprocess. There is NO bundled default: leave it unset and
 # `--frames` errors clearly until you configure a local VLM. xbrain invokes:
 #   <command> [--model M] <image-path>
+# and reads the frame's text description from stdout. May be a multi-token wrapper
+# (split with shlex, run without a shell). `--frames` is fully opt-in: a normal
+# `digest-video` run never touches ffmpeg or this command.
+#
 # xbrain also sets XBRAIN_VISION_PROMPT in the command's environment, carrying the
 # frame-caption rubric (transcribe on-screen text verbatim, never translated). The
 # argv is unchanged, so a command that ignores the variable still works — it just
 # gets no caption discipline, and its captions will not ground what the digest
 # says about the screen. A custom command SHOULD read it and use it as the prompt.
-# and reads the frame's text description from stdout. May be a multi-token wrapper
-# (split with shlex, run without a shell). `--frames` is fully opt-in: a normal
-# `digest-video` run never touches ffmpeg or this command.
 #
 # The bundled `scripts/xbrain-vision` wrapper is a MULTI-BACKEND SELECTOR: the
 # `--model` name routes to a local mlx-vlm model OR a cloud Claude model, so one
