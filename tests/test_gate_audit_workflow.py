@@ -368,3 +368,121 @@ def test_the_audit_uses_no_secret_beyond_the_builtin_token() -> None:
         f"credential with nobody watching it. The built-in GITHUB_TOKEN is scoped to this "
         f"run and dies with it."
     )
+
+
+# ---------------------------------------------------------------------------
+# The auditor must run THE SAME GATE — not merely a gate
+#
+# `execute-gate` is the honest control the reported verdict is measured against. That only
+# means anything if it builds the SAME environment `quality.yml` builds. If it does not, the
+# two can disagree for a reason that has nothing to do with the gate being disarmed, and the
+# auditor files a public issue accusing the repository of merging unverified code because the
+# two jobs resolved a dependency differently.
+#
+# This is not hypothetical, and it is why these tests exist. `quality.yml` originally ran
+# `uv venv && uv pip install -e ".[dev]"`; PR #135 changed it to `uv sync --extra dev
+# --locked` precisely because the pip-compatibility path ignores `uv.lock` and installs
+# whatever the release train shipped that morning. The auditor kept the old command, and the
+# equivalence was asserted only in a PROSE comment (`# Match quality.yml exactly`). Prose has
+# nobody to enforce it. These bind the two files in code, so the PR that changes one and not
+# the other goes red.
+# ---------------------------------------------------------------------------
+
+_QUALITY_WORKFLOW = _WORKFLOW.parent / "quality.yml"
+
+#: The job in `gate-audit.yml` that runs the gate honestly, and the job in `quality.yml`
+#: whose check run branch protection requires. These two must agree about the environment.
+_EXECUTE_GATE_JOB = "execute-gate"
+_QUALITY_JOB = "quality"
+
+
+def _quality_workflow() -> dict[Any, Any]:
+    """Parse the gate's own workflow — the thing the auditor has to reproduce."""
+    assert _QUALITY_WORKFLOW.is_file(), f"{_QUALITY_WORKFLOW.name} does not exist."
+    parsed = yaml.safe_load(_QUALITY_WORKFLOW.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict), f"{_QUALITY_WORKFLOW.name} is not a YAML mapping."
+    return parsed
+
+
+def _setup_steps(job: dict[str, Any]) -> list[str]:
+    """The commands that BUILD the environment the gate then runs in.
+
+    Everything before the step that runs `check.sh`, minus `actions/checkout` — the one step
+    that is legitimately different, because the auditor pins the commit under audit while the
+    gate checks out the commit that triggered it. Everything else must be identical.
+    """
+    out: list[str] = []
+    for step in job.get("steps") or []:
+        if _GATE_SCRIPT in str(step.get("run", "")):
+            break
+        if "actions/checkout" in str(step.get("uses", "")):
+            continue
+        out.append(str(step.get("uses") or step.get("run") or "").strip())
+    return out
+
+
+def test_the_auditor_builds_the_SAME_environment_as_the_gate() -> None:
+    """An honest re-run in a DIFFERENT environment is not a control — it is a second opinion.
+
+    Measured on this repo the day the drift appeared: `uv pip install -e ".[dev]"` resolves
+    fresh from `pyproject.toml` (`ruff>=0.5`) and never reads `uv.lock`, so it installed ruff
+    0.16.5 while the gate, installing from the lockfile, ran 0.15.13. ruff 0.16 enables UP017
+    by default and this tree has 429 of them. The auditor would have run `check.sh`, seen it
+    exit 1, compared that against a `quality` check that legitimately reported SUCCESS, and
+    concluded the gate was LYING — on its very first scheduled run.
+    """
+    auditor = _setup_steps(_jobs()[_EXECUTE_GATE_JOB])
+    gate = _setup_steps((_quality_workflow().get("jobs") or {})[_QUALITY_JOB])
+
+    assert auditor == gate, (
+        f"`{_EXECUTE_GATE_JOB}` in {_WORKFLOW.name} does not build the same environment as "
+        f"the `{_QUALITY_JOB}` job in {_QUALITY_WORKFLOW.name}.\n"
+        f"\n"
+        f"  auditor : {auditor}\n"
+        f"  gate    : {gate}\n"
+        f"\n"
+        f"The audit compares an honest execution against what the gate reported. If the two "
+        f"install differently, they can disagree for a reason that is not a disarmed gate — "
+        f"and the auditor files a PUBLIC issue accusing the repo of shipping unverified "
+        f"code. Change both files together, or the auditor cries wolf."
+    )
+
+
+def test_the_auditor_runs_the_gate_under_the_same_env() -> None:
+    """`PYTHONHASHSEED` is pinned so the gate is byte-reproducible. Both sides, or neither.
+
+    A gate run under a different hash seed is not the same gate, and a spurious difference
+    reads as a lie. This was asserted in a comment saying "Match quality.yml exactly"; a
+    comment cannot fail a build.
+    """
+    auditor = _jobs()[_EXECUTE_GATE_JOB].get("env") or {}
+    gate = ((_quality_workflow().get("jobs") or {})[_QUALITY_JOB]).get("env") or {}
+
+    assert auditor == gate, (
+        f"`{_EXECUTE_GATE_JOB}` declares `env: {auditor}` but the `{_QUALITY_JOB}` job "
+        f"declares `env: {gate}`. The honest control must run under the gate's own "
+        f"environment or its result is not comparable."
+    )
+
+
+def test_the_auditor_never_installs_outside_the_lockfile() -> None:
+    """`uv pip install` is uv's pip-COMPATIBILITY mode. It does not read `uv.lock`.
+
+    Every dependency the auditor resolves fresh is a dependency that can change under it
+    between one scheduled run and the next, with no commit anywhere in the repository. The
+    auditor's whole job is to be the stable thing a drifting gate is measured against, so it
+    is the last place that may float.
+    """
+    offenders = [
+        f"{name}: {str(step.get('run', '')).strip()}"
+        for name, job in _jobs().items()
+        for step in (job.get("steps") or [])
+        if "uv pip install" in str(step.get("run", ""))
+    ]
+    assert not offenders, (
+        f"These steps install outside the lockfile: {offenders}.\n"
+        f"\n"
+        f"`uv pip install` resolves fresh from pyproject.toml and ignores `uv.lock`, so the "
+        f"auditor's own environment drifts with the release train. Use `uv sync --locked` "
+        f"(add `--extra dev` only where the gate itself does)."
+    )

@@ -177,10 +177,21 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Create venv and install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
+      # MUST be byte-identical to the install step in `quality.yml`, and
+      # `tests/test_gate_audit_workflow.py` fails the build if it drifts. An honest re-run in
+      # a DIFFERENT environment is not a control — it is a second opinion, and the auditor
+      # would report the disagreement as a LIE.
+      #
+      # This is exactly how it went wrong once already. This job ran `uv venv && uv pip
+      # install -e ".[dev]"` while `quality.yml` moved to the lockfile (PR #135). `uv pip
+      # install` is uv's pip-COMPATIBILITY mode: it resolves fresh from pyproject.toml
+      # (`ruff>=0.5`) and never reads uv.lock. Measured on this tree: it installs ruff 0.16.5
+      # where the lock pins 0.15.13 — and ruff 0.16 enables UP017 by default, which this tree
+      # trips 429 times. The auditor would have run `check.sh`, watched it exit 1, compared
+      # that against a `quality` check that had honestly reported SUCCESS, and filed a public
+      # issue accusing the repository of merging unverified code. On its first run.
+      - name: Install dependencies from the lockfile
+        run: uv sync --extra dev --locked
 
       # The whole point. If this disagrees with what GitHub published, the gate is lying.
       - name: Run the real quality gate, honestly
@@ -232,10 +243,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      # From the lockfile, for the same reason `execute-gate` does: the auditor is the stable
+      # thing a drifting gate is measured against, so it is the last place that may float.
+      # No `--extra dev` — the comparator needs the package and PyYAML, nothing else.
       - name: Install the auditor
-        run: |
-          uv venv
-          uv pip install -e .
+        run: uv sync --locked
 
       # What the gate CLAIMED for this exact commit. Pinned to the resolved SHA, never to
       # `develop`, so it cannot drift onto a different commit than the one we executed.
