@@ -650,3 +650,164 @@ def test_a_gate_that_really_failed_is_still_convicted(tmp_path: Path) -> None:
     assert out["verdict"] == "lying"
     assert out["file_issue"] == "true"
     assert out["observed"] == "true"
+
+
+# ---------------------------------------------------------------------------
+# Every known disarm, applied to the REAL workflow — not only to a fixture
+#
+# `_HEALTHY` is fifteen lines. The workflow it stands in for has an `env:` block, a
+# permissions block, and four more steps. Mutating only the fixture proves the auditor
+# catches an attack on a workflow nobody has, and the claim "mutation-tested against the real
+# quality.yml" was carried by a control test that never mutated anything.
+#
+# These mutate the PARSED workflow rather than its text, so one attack definition applies to
+# any shape either file grows into.
+# ---------------------------------------------------------------------------
+
+_REAL_QUALITY = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "quality.yml"
+
+
+def _quality_job(workflow: dict[str, Any]) -> dict[str, Any]:
+    """The job whose check run branch protection requires."""
+    return workflow["jobs"]["quality"]
+
+
+def _gate_step_in(workflow: dict[str, Any]) -> dict[str, Any]:
+    """The step that runs the gate — the one every attack here is aimed at."""
+    steps = _quality_job(workflow)["steps"]
+    return next(s for s in steps if "scripts/check.sh" in str(s.get("run", "")))
+
+
+def _checkout_in(workflow: dict[str, Any]) -> dict[str, Any]:
+    """The checkout step, whose `ref:` decides which tree the gate examines."""
+    steps = _quality_job(workflow)["steps"]
+    return next(s for s in steps if "actions/checkout" in str(s.get("uses", "")))
+
+
+def _gag_the_gate_step(workflow: dict[str, Any]) -> None:
+    _gate_step_in(workflow)["continue-on-error"] = True
+
+
+def _pin_the_checkout_to_another_tree(workflow: dict[str, Any]) -> None:
+    checkout = _checkout_in(workflow)
+    checkout["with"] = {**(checkout.get("with") or {}), "ref": "main"}
+
+
+def _gag_the_job(workflow: dict[str, Any]) -> None:
+    _quality_job(workflow)["continue-on-error"] = True
+
+
+def _skip_the_job(workflow: dict[str, Any]) -> None:
+    _quality_job(workflow)["if"] = "false"
+
+
+def _rename_the_check(workflow: dict[str, Any]) -> None:
+    _quality_job(workflow)["name"] = "Tests"
+
+
+def _skip_the_gate_step(workflow: dict[str, Any]) -> None:
+    _gate_step_in(workflow)["if"] = "false"
+
+
+def _delete_the_gate_step(workflow: dict[str, Any]) -> None:
+    _quality_job(workflow)["steps"].remove(_gate_step_in(workflow))
+
+
+def _delete_the_gate_job(workflow: dict[str, Any]) -> None:
+    del workflow["jobs"]["quality"]
+
+
+def _filter_the_trigger_by_path(workflow: dict[str, Any]) -> None:
+    for key in (True, "on"):
+        if key in workflow:
+            workflow[key]["pull_request"]["paths"] = ["src/**"]
+            return
+    raise AssertionError("workflow declares no trigger block")
+
+
+#: Every way the gate is known to be disarmable, and the violation code it must raise.
+_ATTACKS = [
+    ("step-continue-on-error", _gag_the_gate_step),
+    ("checkout-ref", _pin_the_checkout_to_another_tree),
+    ("job-continue-on-error", _gag_the_job),
+    ("job-conditional", _skip_the_job),
+    ("check-renamed", _rename_the_check),
+    ("gate-step-conditional", _skip_the_gate_step),
+    ("gate-step-missing", _delete_the_gate_step),
+    ("gate-job-missing", _delete_the_gate_job),
+    ("path-filter", _filter_the_trigger_by_path),
+]
+
+#: The fixture AND the file the auditor will really read on develop.
+_SOURCES = {
+    "fixture": _HEALTHY,
+    "real": _REAL_QUALITY.read_text(encoding="utf-8"),
+}
+
+
+def _apply(source: str, attack: Any, tmp_path: Path) -> set[str]:
+    """Parse, mutate, re-serialise, and ask the auditor what it sees."""
+    import yaml
+
+    workflow = yaml.safe_load(source)
+    attack(workflow)
+    path = tmp_path / "quality.yml"
+    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
+    return {v.code for v in audit_workflow_source(path)}
+
+
+@pytest.mark.parametrize("source_name", sorted(_SOURCES))
+def test_the_real_and_fixture_workflows_are_both_clean_undisturbed(
+    source_name: str, tmp_path: Path
+) -> None:
+    """The control. Without it, an auditor that flags everything would score a perfect run."""
+    assert _apply(_SOURCES[source_name], lambda _w: None, tmp_path) == set()
+
+
+@pytest.mark.parametrize("source_name", sorted(_SOURCES))
+@pytest.mark.parametrize("code,attack", _ATTACKS, ids=[code for code, _ in _ATTACKS])
+def test_every_known_disarm_is_caught_on_both_workflows(
+    code: str, attack: Any, source_name: str, tmp_path: Path
+) -> None:
+    """Each attack, on the fixture AND on the workflow that is actually deployed.
+
+    Probes #121/#125 (gag the step) and #124 (wrong tree) are the two measured against the
+    live API; the rest are the fail-open shapes catalogued alongside them. Running each
+    against the real file is what stops this suite from certifying an auditor that only
+    works on a workflow nobody has.
+    """
+    assert code in _apply(_SOURCES[source_name], attack, tmp_path)
+
+
+def test_the_gag_message_does_not_claim_the_gate_failed_when_it_did_not(tmp_path: Path) -> None:
+    """`continue-on-error` is banned on EVERY step of the gate job — but not for one reason.
+
+    On the gate step it is the gag: the gate runs, fails, and the check reports SUCCESS
+    (probes #121/#125). On a bystander step — the red-branch announcer, say — it is a
+    legitimate-looking edit that this repo bans anyway, because nobody should have to work
+    out which step they are looking at. Flagging both is right. Telling the reader that the
+    gate "still runs, still FAILS" when the flagged step is the announcer is not: the alarm
+    would be describing something that did not happen, and an alarm that misstates its
+    evidence is how people learn to disbelieve it.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(_SOURCES["real"])
+    announcer = next(
+        step
+        for step in _quality_job(workflow)["steps"]
+        if "announce_red_branch" in str(step.get("run", ""))
+    )
+    announcer["continue-on-error"] = True
+    path = tmp_path / "quality.yml"
+    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
+
+    violations = audit_workflow_source(path)
+    codes = {v.code for v in violations}
+    assert "step-continue-on-error" in codes, "a banned key on any step of the job must flag"
+
+    detail = next(v.detail for v in violations if v.code == "step-continue-on-error")
+    assert "still FAILS" not in detail, (
+        f"The violation says the gate 'still runs, still FAILS', but the flagged step is the "
+        f"red-branch announcer, not the gate. Detail was: {detail!r}"
+    )

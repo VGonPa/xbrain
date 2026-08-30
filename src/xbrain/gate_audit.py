@@ -344,18 +344,35 @@ def _label(step: dict[str, Any]) -> str:
 
 
 def _check_step_gag(steps: list[dict[str, Any]]) -> list[Violation]:
-    """`continue-on-error` on a step: THE gag. The gate runs, fails, and reports SUCCESS."""
-    return [
-        Violation(
-            "step-continue-on-error",
-            f"Step `{_label(step)}` declares `continue-on-error`. THE gag (probes "
-            f"#121/#125): the gate still runs, still FAILS — and the check run reports "
-            f"SUCCESS anyway. `mergeStateStatus` reads CLEAN. Every API surface says green "
-            f"while nothing was verified.",
-        )
-        for step in steps
-        if "continue-on-error" in step
-    ]
+    """`continue-on-error` on a step: THE gag. The gate runs, fails, and reports SUCCESS.
+
+    Banned on EVERY step of the gate job, but not for the same reason, and the message says
+    which. On the gate step it is the gag itself. On a bystander step it is banned because
+    the two are one indent apart and no reviewer should have to work out which they are
+    looking at — but claiming the gate "still FAILS" there would describe something that did
+    not happen, and an alarm that misstates its own evidence teaches people to disbelieve it.
+    """
+    out = []
+    for step in steps:
+        if "continue-on-error" not in step:
+            continue
+        if GATE_SCRIPT in str(step.get("run", "")):
+            detail = (
+                f"Step `{_label(step)}` runs the gate AND declares `continue-on-error`. THE "
+                f"gag (probes #121/#125): the gate still runs, still FAILS — and the check "
+                f"run reports SUCCESS anyway. `mergeStateStatus` reads CLEAN. Every API "
+                f"surface says green while nothing was verified."
+            )
+        else:
+            detail = (
+                f"Step `{_label(step)}` declares `continue-on-error`. This step does not run "
+                f"the gate, so it is not the gag itself — it is banned because it sits ONE "
+                f"INDENT from the form that is (probes #121/#125), and a reviewer should "
+                f"never have to count indents to tell a live gate from a dead one. Remove "
+                f"it, and let the step fail honestly."
+            )
+        out.append(Violation("step-continue-on-error", detail))
+    return out
 
 
 def _check_checkout_ref(steps: list[dict[str, Any]]) -> list[Violation]:
