@@ -156,6 +156,20 @@ uv run xbrain verify-entities --target digest
 # → Report: data/entity-report.md
 ```
 
+Counts come from one corpus (205 digests across 2,404 items, read 30-ago-2026);
+yours will differ.
+
+**That trailing zero is not a finding**, and it is the easiest number in this
+tool to misread. The clause counts flagged outputs the judges had already passed
+*unanimously* — the ensemble's false-negative floor. It can only be non-zero when
+you pass `--verdicts`; without that flag there is no ensemble to join against and
+the count is structurally `0`. Even *with* it this corpus still reports `0`, for
+a second reason: only 39 digest verdicts exist across 205 digests, and none of
+them lands on a flagged output. So the zero here measures **coverage, not
+agreement** — it says the judges never looked at these, not that they cleared
+them. Read it as a finding only when your verdict coverage is high enough for
+the join to mean something.
+
 Read the caveat before you read the report, because it is narrower than it
 sounds. **It checks only that proper nouns appear somewhere on the evidence. It
 never checks what is asserted about them, and it never looks at a number.** A
@@ -168,9 +182,10 @@ confident false claim about a correctly-named real entity, is exactly the shape
 it cannot see.
 
 That is why the two passes are both here: the judges can read a claim but share
-one blind spot, and this one cannot share it but cannot read a claim. Pass
-`--verdicts data/verify-report.json` to cross-reference them — it reports how
-many flagged outputs the judges passed *unanimously*.
+one blind spot, and this one cannot share it but cannot read a claim.
+`--verdicts data/verify-report.json` is what actually joins them, and it is worth
+running only once enough of the corpus carries verdicts — otherwise, as above,
+you are measuring your own coverage.
 
 ## 7. See the whole corpus at a glance
 
