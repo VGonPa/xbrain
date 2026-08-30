@@ -1,10 +1,12 @@
 # tests/test_generate.py
 import os
+import shutil
+import stat as stat_module
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xbrain.generate import _mirror_file, generate
+from xbrain.generate import _is_dataless, _mirror_file, generate
 from xbrain.models import (
     Author,
     Content,
@@ -1820,3 +1822,173 @@ def test_mirror_file_rewrites_when_the_whole_stat_matches_but_bytes_differ(tmp_p
     _mirror_file("1", source, destination)
 
     assert destination.read_bytes() == b"AAAA"
+
+
+# --- The mirror must never force a cloud file to materialise -------------------
+#
+# `_already_mirrored` answers "are these the same bytes?" by READING both files.
+# On a cloud-synced vault the destination may be a placeholder whose bytes are
+# not on disk ("dataless"/evicted). `open()` on one blocks until the sync daemon
+# fetches them, and when it cannot, it blocks with no timeout: a `generate` run
+# sat there for 22 minutes at 0.0% CPU. That is not iCloud-specific — OneDrive,
+# Dropbox and any FUSE/NFS placeholder behave the same way.
+#
+# These tests inject the platform's dataless flag through `os.stat` and make the
+# destination genuinely unreadable, so a comparison that reads is caught by the
+# operating system rather than by a mock.
+
+
+class _StatWithFlags:
+    """A real `os.stat_result` with `st_flags` overridden.
+
+    `os.stat_result` is immutable and cannot be constructed with a chosen
+    `st_flags`, so this delegates every other attribute to the real one. The
+    production code therefore reads REAL sizes and REAL timestamps; only the
+    platform flag is injected.
+    """
+
+    def __init__(self, real: os.stat_result, flags: int) -> None:
+        self._real = real
+        self.st_flags = flags
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def _dataless_stat(monkeypatch, *targets: Path) -> None:
+    """Make `os.stat` report `targets` as evicted cloud placeholders."""
+    real_stat = os.stat
+    wanted = {str(t) for t in targets}
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path) in wanted:
+            return _StatWithFlags(result, stat_module.SF_DATALESS)
+        return result
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+
+
+def test_mirror_file_does_not_read_a_dataless_destination(tmp_path: Path, monkeypatch):
+    """An evicted vault copy must be compared from metadata, never opened.
+
+    The destination is `chmod 000`: any attempt to read it raises
+    `PermissionError`, and any attempt to rewrite it raises too. So the test
+    needs no mock assertion — if the mirror reads or writes, the OS fails the
+    call and the test errors. Passing proves the bytes were never touched.
+
+    The flag is the trigger, the unreadable file is the detector. Both are
+    needed: without the flag the code has no reason to skip, without the
+    unreadable file a skip and a successful read look identical.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    shutil.copy2(source, destination)
+    destination.chmod(0o000)
+    _dataless_stat(monkeypatch, destination)
+
+    try:
+        _mirror_file("1", source, destination)
+    finally:
+        destination.chmod(0o644)
+
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_dataless_destination_whose_size_differs(
+    tmp_path: Path, monkeypatch
+):
+    """Skipping the read must not strand a copy that is visibly wrong.
+
+    Size comes from the placeholder's metadata, so it is known without
+    materialising anything. A mismatch is decisive: repair it.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresh pixels")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"short")
+    _dataless_stat(monkeypatch, destination)
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresh pixels"
+
+
+def test_mirror_file_tolerates_sub_second_mtime_drift_on_a_dataless_destination(
+    tmp_path: Path, monkeypatch
+):
+    """Timestamps are compared at 1-second granularity, not nanoseconds.
+
+    `copy2` restores mtime with nanosecond precision, but the two filesystems
+    need not agree on it: a copy onto a cloud-backed volume comes back rounded.
+    Comparing `st_mtime_ns` for equality would call an already-correct mirror
+    stale and re-copy — the rewrite this guard exists to prevent.
+
+    One second is not a tuned tolerance: it is the coarsest resolution POSIX
+    guarantees for a timestamp, and the granularity every archive format
+    preserves. It is pinned here at 100 ns, the drift a real APFS/iCloud pair
+    shows, and 2 s below, which must still repair.
+    """
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"pixels")
+    # Pinned mid-second: +100 ns can then never straddle a second boundary,
+    # which would make this test flaky roughly once in ten million runs.
+    pinned = int(source.stat().st_mtime) * 1_000_000_000 + 500_000_000
+    os.utime(source, ns=(pinned, pinned))
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    shutil.copy2(source, destination)
+    src_stat = source.stat()
+    os.utime(destination, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns + 100))
+    destination.chmod(0o000)
+    _dataless_stat(monkeypatch, destination)
+
+    try:
+        _mirror_file("1", source, destination)
+    finally:
+        destination.chmod(0o644)
+
+    assert destination.read_bytes() == b"pixels"
+
+
+def test_mirror_file_rewrites_a_dataless_destination_a_second_out_of_date(
+    tmp_path: Path, monkeypatch
+):
+    """Drift beyond the 1-second granularity is a real difference: repair it."""
+    source = tmp_path / "store" / "0.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fresher")
+    destination = tmp_path / "vault" / "_media" / "1" / "0.jpg"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"staler!")
+    src_stat = source.stat()
+    assert source.stat().st_size == destination.stat().st_size
+    os.utime(destination, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns - 2_000_000_000))
+    _dataless_stat(monkeypatch, destination)
+
+    _mirror_file("1", source, destination)
+
+    assert destination.read_bytes() == b"fresher"
+
+
+def test_dataless_detection_is_false_where_the_platform_has_no_flags():
+    """On Linux there is no `st_flags`, so the new branch is unreachable there.
+
+    This is the portability contract, asserted rather than assumed: every
+    platform that does not report the flag keeps the byte comparison as its
+    ONLY path, exactly as before this guard existed. CI runs on Linux, so
+    without this assertion the whole dataless branch would be untested there
+    in a way nothing would notice.
+    """
+
+    class _NoFlags:
+        st_size = 1
+        st_mtime_ns = 0
+
+    assert _is_dataless(_NoFlags()) is False
