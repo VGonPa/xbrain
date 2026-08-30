@@ -54,6 +54,7 @@ from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.models import ArchiveImport, Author, Item, SourceName
+from xbrain.redescribe import format_redescribe_summary, redescribe_frames
 from xbrain.refresh import (
     backfill_quoted_from_store,
     backfill_quoted_sources,
@@ -1460,27 +1461,42 @@ def _resolve_digest_ids(
     return unique[:limit] if limit is not None else unique
 
 
-def _build_visual_config(cfg: Config, vision_model: str | None = None) -> VisualConfig:
-    """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
+def _build_describe_frame_fn(cfg: Config, vision_model: str | None = None) -> Callable[[Path], str]:
+    """Bind the EXTERNAL vision command into a `path -> caption` callable (#90).
 
-    Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and
-    `describe_image` (the EXTERNAL `[vision].command` / model) so `digest_videos`
-    calls them with just a path. An unconfigured `[vision].command` is a clear
-    operator error BEFORE any work — there is no bundled default vision model.
+    Shared by `digest-video --frames` and `redescribe-frames` so the two can never
+    drift on which model, which command or which rubric language they use. An
+    unconfigured `[vision].command` is a clear operator error raised BEFORE any
+    work — there is no bundled default vision model.
 
-    `vision_model` overrides `[vision].model` for this run (the `--vision-model`
-    flag): the model name is passed to `[vision].command` as `--model`, so a
-    multi-backend wrapper can route it (e.g. `opus` → cloud, `qwen-7b` → local).
-
-    The frame rubric is rendered in `cfg.output_language` (the wiki's language),
-    deliberately not in `digest-video --language` (the audio language).
+    The rubric renders in `cfg.output_language` (the wiki's language), NOT in
+    `digest-video --language` (the audio language handed to the transcriber).
     """
     if not cfg.vision_command.strip():
         raise ValueError(
-            "digest-video --frames requires an external vision model: set "
-            "[vision].command in config.toml (there is no bundled default)."
+            "esta operación necesita un modelo de visión externo: configura "
+            "[vision].command en config.toml (no hay default incorporado)."
         )
     model = vision_model or cfg.vision_model
+
+    def _describe(path: Path) -> str:
+        return describe_image(
+            path, command=cfg.vision_command, model=model, language=cfg.output_language
+        )
+
+    return _describe
+
+
+def _build_visual_config(cfg: Config, vision_model: str | None = None) -> VisualConfig:
+    """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
+
+    Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and the
+    shared `_build_describe_frame_fn` seam so `digest_videos` calls them with just
+    a path. The vision guard, the model override and the rubric language all live
+    in that shared helper, so `digest-video --frames` and `redescribe-frames`
+    cannot drift apart on any of the three.
+    """
+    describe_fn = _build_describe_frame_fn(cfg, vision_model)
 
     def _extract(path: Path) -> list[KeyFrame]:
         # RAW frames (cap=False): classification runs on the full distribution; the
@@ -1500,21 +1516,8 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
             max_frames=cfg.frames_max_frames,
         )
 
-    def _describe(path: Path) -> str:
-        # `cfg.output_language` — the WIKI's language, which is what the frame
-        # rubric's `{language}` means. NOT `digest-video --language`, which is the
-        # AUDIO language passed to the transcriber. `language` became required on
-        # `describe_image` in #90 (a default would silently ship an unresolved
-        # `{language}`); wiring it here is the minimal fix this call site needs to
-        # keep working — the dedicated pinning test for it is
-        # `test_frames_render_the_rubric_in_the_output_language` in
-        # `tests/test_cli.py`, shipped in this same branch.
-        return describe_image(
-            path, command=cfg.vision_command, model=model, language=cfg.output_language
-        )
-
     return VisualConfig(
-        media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe, reduce_fn=_reduce
+        media_root=cfg.media_dir, extract_fn=_extract, describe_fn=describe_fn, reduce_fn=_reduce
     )
 
 
@@ -1635,6 +1638,153 @@ def digest_video(
         frames=frames,
         vision_model=vision_model,
     )
+
+
+def _redescribe_wants_whole_corpus(
+    ids: str | None, topic: str | None, source: str, limit: int | None
+) -> bool:
+    """True when NOTHING narrows the `redescribe-frames` selection (#90 finding A).
+
+    Extracted so `_resolve_redescribe_ids` reads as one decision, not four ANDed
+    conditions: the "every stale video" shortcut is safe ONLY when no selector
+    (`--ids`/`--topic`) AND no cap/scope (`--limit`/`--source`) is set — otherwise
+    `--limit 10` or `--source bookmarks` would be silently ignored.
+    """
+    return not ids and not topic and limit is None and source == "all"
+
+
+def _warn_missing_ids(store: dict[str, Item], explicit_ids: list[str]) -> None:
+    """Echo which of an explicit `--ids` list are absent from the store.
+
+    A warning, not an error (#90 pre-flight finding C): the whole-corpus repair
+    must keep working even when one id in an `--ids` list is a typo. Without
+    this, an unknown id silently vanishes inside `stale_video_sources`'s
+    store-membership filter (`{i: store[i] for i in item_ids if i in store}`),
+    and "no such item" reads identically to "already at the contract".
+    """
+    missing = list(dict.fromkeys(i for i in explicit_ids if i not in store))
+    if missing:
+        typer.echo(
+            f"redescribe-frames: aviso, id(s) no encontrados en el store: {', '.join(missing)}",
+            err=True,
+        )
+
+
+def _resolve_redescribe_ids(
+    store: dict[str, Item], ids: str | None, topic: str | None, source: str, limit: int | None
+) -> list[str] | None:
+    """Resolve the re-description selection, or `None` for "every stale video".
+
+    Unlike `digest-video`, NO selector means "the whole backfill" rather than an
+    error: this is a corpus-wide repair, it is idempotent by contract version, and
+    `--dry-run` previews it for free — BUT ONLY when NOTHING narrows the run.
+    `--limit`/`--source` must still apply on the whole-corpus path (#90 pre-flight
+    finding A): returning `None` the instant `--ids`/`--topic` are both absent —
+    without checking `limit`/`source` — would silently ignore `--limit 10`, the
+    obvious way to test the waters before a multi-thousand-frame backfill, and
+    `--source bookmarks`, describing the WHOLE corpus (every source) at full
+    vision cost instead. So the "every stale video" shortcut fires only when
+    `limit is None` and `source == "all"` too; otherwise the selection is
+    expanded via the read-only catalog exactly like `--topic` already does
+    (`list_video_entries` accepts `topic=None` — it just filters by `source`).
+
+    `--ids` stay verbatim, never re-scoped by `--source` (matching the sibling
+    `_resolve_digest_ids`) — but an id absent from the store is now ECHOED, not
+    silently dropped (#90 pre-flight finding C): `stale_video_sources` filters
+    `{i: store[i] for i in item_ids if i in store}`, so a typo'd `--ids 999`
+    would otherwise report zero videos and the operator could not tell "no such
+    item" from "already at the contract". This stays a WARNING, not a hard
+    error — unlike `_resolve_fetch_ids`'s all-selectors-empty case — because the
+    whole-corpus repair must keep working even when one id in an `--ids` list is
+    bad. `--topic` expands via the catalog, scoped by `--source`.
+    """
+    if _redescribe_wants_whole_corpus(ids, topic, source, limit):
+        return None
+    id_list: list[str] = []
+    if ids:
+        explicit = [part.strip() for part in ids.split(",") if part.strip()]
+        _warn_missing_ids(store, explicit)
+        id_list.extend(explicit)
+    if topic or not ids:
+        # Either an explicit `--topic` filter, or NOTHING selected explicitly at
+        # all (the whole-corpus-but-scoped-by-limit/source path from finding A
+        # above) — either way, expand via the catalog. `topic=None` here just
+        # means "no topic filter", still scoped by `source`.
+        id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
+    unique = list(dict.fromkeys(id_list))
+    return unique[:limit] if limit is not None else unique
+
+
+def _dry_run_describe_fn(path: Path) -> str:
+    """Sentinel `describe_fn` for `redescribe-frames --dry-run` (#90 pre-flight
+    finding B).
+
+    `--dry-run` must preview a run WITHOUT `[vision].command` being configured at
+    all: `_build_describe_frame_fn` raises the moment it is CALLED when that is
+    unset, so building the real `describe_fn` eagerly — above the dry-run branch,
+    as the initial plan did — would make the FREE preview demand the same
+    configuration as the real run, contradicting this command's own docstring
+    promise that `--dry-run` costs nothing. `redescribe_frames`'s dry-run branch
+    (`_preview_source`) never calls `describe_fn`, so passing this sentinel is
+    also a live regression guard: if a future change ever makes the dry-run path
+    call the model after all, it fails loudly here instead of silently spending
+    one vision call per frame — 2077 of them, on the corpus that motivated this
+    module — on every "free" preview.
+    """
+    raise RuntimeError(f"redescribe-frames --dry-run must not call the vision model (got {path})")
+
+
+@app.command(name="redescribe-frames")
+@_handle_cli_errors
+def redescribe_frames_command(
+    ids: str | None = typer.Option(None, "--ids", help="IDs separados por comas."),
+    topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
+    source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
+    limit: int | None = typer.Option(None, "--limit", help="Máximo número de vídeos."),
+    force: bool = typer.Option(False, "--force", help="Re-describe también los frames ya al día."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Muestra qué se re-describiría sin escribir nada."
+    ),
+    vision_model: str | None = typer.Option(
+        None, "--vision-model", help="Modelo de visión para este run (ver scripts/xbrain-vision)."
+    ),
+) -> None:
+    """Re-describe los key frames YA guardados con el rubric de captions vigente.
+
+    Lee los píxeles de `data/media/<id>/frames/`: NO descarga vídeos, NO llama a
+    X y NO usa ffmpeg. Salta los vídeos cuyas captions ya se generaron con el
+    contrato actual (`--force` las regenera igualmente), así que re-ejecutarlo
+    sobre un corpus al día no cuesta ni una llamada al modelo.
+
+    Cuando alguna caption cambia de verdad, sube `content.fetched_at` del item,
+    que es el disparador que hace que `enrich`, `video-digest` y `generate`
+    vuelvan a correr con la evidencia nueva. Si ninguna cambia, no toca nada.
+
+    Es destructivo (reescribe `items.json`), así que auto-snapshota ANTES de
+    guardar — pero sólo cuando hay algo que guardar.
+
+    `--dry-run` NO requiere `[vision].command` configurado: previsualiza el
+    backfill (vídeos seleccionados, captions que se regenerarían/fallarían) sin
+    llamar al modelo ni una sola vez.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    selected = _resolve_redescribe_ids(store, ids, topic, source.value, limit)
+    # A dry run must not demand `[vision].command` at all — see `_dry_run_
+    # describe_fn` for why this can't just be the real describe_fn built eagerly.
+    describe_fn = _dry_run_describe_fn if dry_run else _build_describe_frame_fn(cfg, vision_model)
+    report = redescribe_frames(
+        store,
+        media_root=cfg.media_dir,
+        describe_fn=describe_fn,
+        item_ids=selected,
+        force=force,
+        dry_run=dry_run,
+    )
+    if not dry_run and report.frames_described > 0:
+        _auto_snapshot(cfg, "redescribe-frames")
+        save_store(store, cfg.items_path)
+    typer.echo(format_redescribe_summary(report))
 
 
 @app.command()
