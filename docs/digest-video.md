@@ -13,8 +13,9 @@ The heavy lifting is **external** — xbrain core carries no ML/ffmpeg dependenc
 Install once (see [Local models for `digest-video`](../README.md#local-models-for-digest-video-apple-silicon)):
 
 ```bash
-brew install ffmpeg                # frame extraction + audio probe
-uv tool install parakeet-mlx       # ASR (Apple Silicon)
+brew install ffmpeg                # frame extraction, audio probe, language detection
+brew install openai-whisper        # multilingual ASR + the router's language detector
+uv tool install parakeet-mlx       # fast English-only ASR (Apple Silicon)
 uv tool install mlx-vlm            # vision, only for --frames
 ```
 
@@ -22,12 +23,115 @@ and point `config.toml` at the wrappers:
 
 ```toml
 [transcribe]
-command = "/abs/path/to/xbrain/scripts/xbrain-transcribe"   # wraps parakeet-mlx
+# Detects the language, then picks the ASR. See "Picking the transcriber" below.
+command = "/abs/path/to/xbrain/scripts/xbrain-transcribe-auto"
 
 [vision]
 command = "/abs/path/to/xbrain/scripts/xbrain-vision"       # local + cloud selector
 model   = "qwen-7b"
 ```
+
+Leave `[transcribe].model` unset unless you know which backend will run: the
+router picks the backend, and each one resolves its own default model.
+
+If your corpus is **English only**, you can skip `openai-whisper` and point
+`[transcribe].command` straight at `scripts/xbrain-transcribe` (the parakeet
+wrapper). It is the faster path. On anything else, read the next section before
+you run: the wrong choice here does not fail, it fabricates.
+
+## Picking the transcriber
+
+xbrain never transcribes anything itself: it shells out to whatever
+`[transcribe].command` names. The repo ships three backends and a router to
+choose between them, and the choice matters more than it looks.
+
+### Why `parakeet-mlx` on its own is a data-loss path
+
+`parakeet-tdt` (v2 and v3) is **English-only, and it does not fail on other
+languages.** Handed Spanish audio it exits 0 and emits fluent, broken English
+that never reproduces what was said — verified 17-jul-2026 against an es-ES TV
+clip, and the reason `scripts/xbrain-transcribe-auto` exists.
+
+This is the worst failure mode available here. A crash shows up in a log; this
+one passes the entire pipeline. The invented transcript attaches as an `x_video`
+source, `enrich` summarises it, `topics` files it, `video-digest` writes a
+readable digest *of* it, and it lands in your vault rendered as a quotation of
+the speaker. By the time you read it, nothing on the page distinguishes "the
+video said that" from "the ASR made it up".
+
+So the backend has to be chosen **before** transcription, not audited after.
+
+### The router — `scripts/xbrain-transcribe-auto`
+
+Point `[transcribe].command` at it and it decides per video:
+
+1. `ffprobe` short-circuits a genuinely **silent** clip (no audio stream) into
+   the empty-speech JSON — `has_speech=false`, not a failure — before anything
+   else runs.
+2. `ffmpeg` slices the first **30 s** of audio; `whisper` transcribes that slice
+   with **no** `--language`, so it reports the language it detected.
+3. **English** (`en`) goes to `xbrain-transcribe` → parakeet-mlx, the fast path.
+   **Anything else, and anything it could not identify**, goes to whisper: it
+   tries `xbrain-transcribe-mlx` (mlx-whisper on the Apple GPU, pulled on demand
+   through `uv run --with`) and falls back to `xbrain-transcribe-whisper` (the
+   brew `whisper` CLI, CPU, portable) when the GPU backend cannot run.
+
+| Backend | Wrapper | Languages | Notes |
+|---------|---------|-----------|-------|
+| parakeet-mlx | `xbrain-transcribe` | **English only** | fastest; fabricates on anything else |
+| mlx-whisper | `xbrain-transcribe-mlx` | multilingual | Apple GPU; needs `uv` |
+| whisper (brew) | `xbrain-transcribe-whisper` | multilingual | CPU; works anywhere, slow |
+
+The two whisper backends were verified to produce a **character-identical**
+transcript on a real clip, so the GPU→CPU fallback costs accuracy nothing and
+only costs time. The wrapper records the measurement behind that ordering: on
+one 68-second Spanish clip (M-series Mac, 12-ago-2026) the CPU CLI took
+**7 min 25 s** and mlx-whisper **17.7 s**.
+
+**It fails towards whisper, always.** Missing `ffmpeg`, a `whisper` that errors,
+an unreadable result — every one of those returns "undetected", and undetected
+routes to whisper. The costs are asymmetric in exactly one direction: whisper on
+English is slower than it needed to be, while parakeet on non-English is a
+fabricated transcript.
+
+One consequence worth knowing: **detection needs the `whisper` CLI on `PATH`.**
+Without it nothing can ever be detected, so every video takes the multilingual
+path — you lose the parakeet fast path silently rather than noisily. That still
+transcribes correctly *provided the mlx backend can run*, because the CPU
+fallback is that same missing `whisper` binary: with neither `uv`/mlx-whisper nor
+`whisper` available the run fails outright. Which is the right direction to fail
+in, but it is a failure, not a slow success.
+
+Both whisper wrappers also discard whisper's canned **no-speech artefacts** —
+when the *whole* transcript is one of the subtitle-boilerplate lines the model
+emits on silence (`Subtítulos realizados por la comunidad de Amara.org`,
+`Thanks for watching!`, `[Música]`), it is recorded as no speech instead of as
+something a person said. Matching is on the entire transcript, so a video that
+merely *mentions* Amara or thanks its viewers mid-sentence is untouched.
+
+### Tuning
+
+All optional environment variables, all read by the router:
+
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `XBRAIN_ASR_DETECT_MODEL` | `base` | whisper model used for the detection pass |
+| `XBRAIN_ASR_DETECT_SECONDS` | `30` | seconds of audio sampled to detect |
+| `XBRAIN_ASR_FORCE` | *(unset)* | `parakeet` or `whisper` — skip detection entirely |
+| `XBRAIN_TRANSCRIBE_PARAKEET` | sibling script | path to the parakeet wrapper |
+| `XBRAIN_TRANSCRIBE_MLX` | sibling script | path to the mlx-whisper wrapper |
+| `XBRAIN_TRANSCRIBE_WHISPER` | sibling script | path to the CPU whisper wrapper |
+
+Detection costs one small-model pass over 30 seconds per video. The wrapper's
+own timing (M-series, 12-ago-2026, one es-ES and one en-US clip) puts `base` at
+~19 s per clip and `tiny` at ~10 s, with both models identifying both clips
+correctly. `base` stays the default: two clips are not enough evidence to trade
+accuracy for nine seconds on the one axis where being wrong means a fabricated
+transcript. Reach for `XBRAIN_ASR_DETECT_MODEL=tiny` on a large backlog, where
+the halving actually adds up.
+
+`XBRAIN_ASR_FORCE=parakeet` skips detection for a run you *know* is English —
+and re-introduces the fabrication risk for every clip in it that isn't.
 
 ## Run it
 
@@ -129,3 +233,5 @@ uv run xbrain digest-video --topic ai-coding      --frames --vision-model qwen-7
 Re-running skips videos already carrying an `x_video` source unless `--force`.
 
 Slow? See [Troubleshooting → digest-video](troubleshooting.md#digest-video-is-slow-or-times-out).
+Digest reads fluently but doesn't match the video? →
+[Troubleshooting](troubleshooting.md#a-digest-reads-perfectly-but-says-nothing-that-was-said).

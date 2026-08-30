@@ -31,6 +31,50 @@ always means an **expired session** or an X GraphQL change, not that your
 bookmarks vanished. It aborts rather than overwrite good data. Re-authenticate
 (above) and re-run. If you're sure the store is stale, `--force` overrides it.
 
+## `extract` captured nothing — "0 respuestas de … en toda la timeline"
+
+Symptom: `extract --source tweets` (or `sync`) aborts with
+
+```
+own_tweet: 0 respuestas de UserOriginalsTimeline/UserTweets en toda la timeline —
+no es que no haya items nuevos, es que no se capturó NADA. Lo normal es que X haya
+renombrado la operación: mira las operaciones GraphQL reales de la página y añade
+el nombre nuevo a `_OPERATIONS`.
+```
+
+Cause: X renames its internal GraphQL timeline operations without notice. The
+own-tweets timeline answered to `UserTweets` until X moved it to
+`UserOriginalsTimeline` (measured 30-ago-2026). The *parser* survives a rename —
+it anchors on the `tweet_results` key, not on a path — but the **capture filter**
+matches by operation name, so a name it doesn't know means every response is
+filtered out and nothing is ever collected.
+
+**This is not "no new posts", and the difference is not a judgement call.** A
+healthy timeline always answers its operation at least once; even an account with
+zero posts gets one response carrying an empty instruction list. Zero responses
+therefore has exactly one meaning: the filter matched nothing. That is why the run
+now fails closed instead of reporting a total.
+
+Fix — find the name X is using and add it:
+
+1. Open `x.com` in a browser, DevTools → Network, filter on `graphql`.
+2. Scroll the timeline that's failing (your profile for `tweets`, `/i/bookmarks`
+   for `bookmarks`) and read the operation name out of the request path.
+3. Add it to `_OPERATIONS` in `src/xbrain/extract/extractor.py`, **newest first**,
+   keeping the old names — X A/B-tests these and rolls them back:
+
+   ```python
+   _OPERATIONS: dict[str, tuple[str, ...]] = {
+       "bookmark": ("Bookmarks",),
+       "own_tweet": ("UserOriginalsTimeline", "UserTweets"),
+   }
+   ```
+
+If instead the run reports **"0 nuevos items" and exits 0**, you are on a build
+from before this was fixed, where the filter held a single literal per source and
+a rename was silent — indistinguishable from an empty timeline, with the cursor
+advancing over the gap. Update, then re-run.
+
 ## Getting rate-limited / the browser stalls
 
 `extract` runs **headful** (visible Chromium) by default to look human, paces
@@ -45,7 +89,7 @@ transcriber '.../xbrain-transcribe' exited 1: FileNotFoundError: 'parakeet-mlx'
 
 The external tools aren't on `PATH`. Two cases:
 
-- **Interactive shell:** install them (`brew install ffmpeg`,
+- **Interactive shell:** install them (`brew install ffmpeg openai-whisper`,
   `uv tool install parakeet-mlx mlx-vlm`) and make sure `~/.local/bin` +
   `/opt/homebrew/bin` are on your `PATH`.
 - **cron / launchd / a scheduled job:** these run with a **minimal PATH** that
@@ -61,6 +105,13 @@ The external tools aren't on `PATH`. Two cases:
 
   When testing a job, reproduce its env (`env -i HOME=$HOME PATH=... your-cmd`),
   not your shell — your shell's full PATH hides the bug.
+
+If you use `scripts/xbrain-transcribe-auto`, it needs `ffmpeg` **and** `whisper`
+on `PATH` to detect the language at all, plus `uv` for the GPU backend. A minimal
+job environment that hides them makes the run fail outright rather than fall
+through to parakeet — which is the safe direction, but it does mean a cron job
+that used to "work" on an English corpus starts erroring once you switch to the
+router.
 
 ## `digest-video` is slow or times out
 
@@ -84,6 +135,44 @@ Local vision (`--frames`) is the bottleneck: a slide-heavy talk can have up to
   (errors = no audio exists).
 - `fallidos` (real failures): usually `parakeet-mlx` not found (see the PATH
   section above) — the fix is almost always the environment, not the video.
+
+## A digest reads perfectly but says nothing that was said
+
+Symptom: a video note's transcript and digest are fluent, confident English —
+and bear no relation to the video. Nothing failed: `digest-video` reported the
+video under **transcritos**, `enrich` summarised it, `video-digest` wrote a
+readable digest of it, and every stage exited 0.
+
+Cause: `parakeet-mlx` transcribed non-English audio. `parakeet-tdt` (v2 and v3)
+is English-only and **does not fail** on other languages — handed Spanish audio
+it invents fluent English and exits 0. There is no error anywhere in the run,
+and by the time the text reaches your vault it is rendered as a quotation of the
+speaker.
+
+Fix: switch `[transcribe].command` to the router, then re-transcribe the affected
+videos with `--force`:
+
+```toml
+[transcribe]
+command = "/abs/path/to/xbrain/scripts/xbrain-transcribe-auto"
+```
+
+```bash
+brew install openai-whisper       # the router's detector + its multilingual backend
+uv run xbrain digest-video --ids <affected-ids> --force
+uv run xbrain video-digest --executor claude-code    # re-digest against the real transcript
+uv run xbrain enrich                                 # re-summarise it
+```
+
+The router detects the language on the first 30 s and sends English to parakeet,
+everything else — and anything it cannot identify — to whisper. See
+[Picking the transcriber](digest-video.md#picking-the-transcriber) for the
+backends, the tuning env vars, and why it fails towards whisper.
+
+There is no way to detect this after the fact from the transcript alone: a
+fabricated transcript is well-formed. If you have run `digest-video` over a
+multilingual corpus with plain `parakeet-mlx`, treat every non-English video's
+text as unverified rather than trying to spot the bad ones.
 
 ## `generate` hangs or takes very long
 
@@ -122,6 +211,42 @@ you fill it, and a second `--apply` run consumes it. Common cases:
 
 Both default to `[enrich].executor` and support only `--executor claude-code|manual`
 (no `api` track).
+
+## A note shows no verification badge, but I know it was judged
+
+Symptom: you ran `verify … --write-verdicts`, the verdict is in `items.json`, and
+`generate` renders the note with no ❌ / ⚠️ line under it.
+
+Two causes, both deliberate:
+
+- **The verdict was PASS.** A PASS is never badged — it would put a green line
+  under most of the corpus and train you to ignore all of them. Only FAIL and
+  REVIEW paint.
+- **The verdict went stale.** A badge paints only while the stored
+  `contract_fingerprint` still matches what would be computed today, and that
+  fingerprint hashes **three arms**: the *output* under judgment, the *source the
+  judge actually read* for that target (the evidence surfaces plus the
+  not-fetched markers), and the *rubrics* it was judged by. Change any one and
+  the verdict is retired silently.
+
+The staleness rule is the point, not a bug: a verdict is not a property of the
+output alone, it is the result of judging *that* output against *that* source
+under *those* rules. So **an output fixed after a FAIL never shows a ❌** — which
+is exactly what you want — but so does a FAIL whose article body arrived later,
+or whose frame descriptions landed, or that was judged before the rubrics were
+rewritten. A verdict stored before contract fingerprinting existed carries no
+fingerprint at all and is stale by construction: it is retired, not
+grandfathered.
+
+Fix: nothing is broken, so there is nothing to repair — re-run `verify` to judge
+the output under the contract in force now. When it exports a worksheet it tells
+you how much of the layer has been retired, which is the number to watch after a
+rubric change:
+
+```
+⚠️  N de M verdicts almacenados quedaron OBSOLETOS: se juzgaron bajo otro contrato
+(otro output, otra fuente u otra rúbrica). No pintan badge; hay que re-verificarlos.
+```
 
 ## Where's the source of truth? Can I delete the vault notes?
 
