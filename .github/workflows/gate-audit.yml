@@ -81,11 +81,19 @@
 #   would be executed, honestly, and agree with a green report. The static audit and
 #   `tests/test_quality_gate_scope.py` cover that flank; this one covers the workflow.
 #
+# * IT CONVICTS ON THE GATE STEP, NOT ON THE JOB. `needs.execute-gate.result` aggregates the
+#   checkout, the uv install and the dependency sync too, so reading it would make a bad
+#   morning at PyPI indistinguishable from a gate that lies. The gate step records its own
+#   outcome into an artifact (`if: always()`), and a job that broke before reaching the gate
+#   is `inconclusive` — it files nothing, and turns the run red so the auditor cannot go
+#   quietly deaf.
+#
 # * To disarm THIS file you must weaken `main`, which is a `develop -> main` PR: a separate,
 #   visible, deliberate act. That asymmetry is the point.
 #
-# Permissions: read-only on code everywhere, `issues: write` only where the alarm is raised.
-# No PAT, no secrets beyond the built-in GITHUB_TOKEN, no second identity to rotate or leak.
+# Permissions: read-only on code everywhere (`contents: read`, `checks: read`, `actions: read`
+# to fetch the gate-outcome artifact), `issues: write` only where the alarm is raised. No PAT,
+# no secrets beyond the built-in GITHUB_TOKEN, no second identity to rotate or leak.
 # ============================================================================================
 
 name: Gate audit
