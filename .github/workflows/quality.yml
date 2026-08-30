@@ -43,10 +43,29 @@ jobs:
         uses: astral-sh/setup-uv@v3
       - name: Set up Python
         run: uv python install 3.12
-      - name: Create venv and install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
+      # `uv pip install` is uv's pip-COMPATIBILITY mode: it resolves fresh from
+      # pyproject.toml and never reads uv.lock. With `ruff>=0.5` declared, every run
+      # installed whatever ruff had shipped that morning, and the lockfile committed in
+      # this repo — pinning 0.15.13 — was decorative.
+      #
+      # Measured, this repo, same tree: `uv venv` + `uv pip install -e ".[dev]"` gives
+      # `uv run ruff` == 0.16.5 today (0.16.2 on 2026-08-13); `uv sync --extra dev
+      # --locked` gives 0.15.13. And `uv run` inside check.sh does NOT rescue it: ruff
+      # lives in `optional-dependencies.dev`, an EXTRA, which is not in uv run's default
+      # sync set, so it leaves the pip-installed build exactly where it is.
+      #
+      # The cost was not hypothetical. ruff 0.16 turned UP017 on by default and taught the
+      # formatter to open Markdown, so `develop` went red without a single commit landing
+      # on it: 618 lint errors, plus a gate-integrity test failing on a file-count skew it
+      # was never written to police. develop's last green push run is 2026-07-14 and
+      # nothing had run since, so the drift stayed invisible until the next PR inherited
+      # it and looked like its own fault.
+      #
+      # `--locked` fails the build if uv.lock is stale against pyproject.toml, so the lock
+      # cannot silently rot either. Upgrading stays deliberate and is one command:
+      # `uv lock --upgrade-package ruff`.
+      - name: Install dependencies from the lockfile
+        run: uv sync --extra dev --locked
       - name: Quality gate
         run: bash scripts/check.sh
 

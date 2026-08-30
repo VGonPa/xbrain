@@ -1088,7 +1088,7 @@ def _ruff_argv(subcommand: str) -> list[str]:
 
 
 def test_ruff_format_examines_every_file_ruff_check_does() -> None:
-    """`ruff format` must open exactly as many files as `ruff check` does.
+    """`ruff format` must open exactly the files `ruff check` opens.
 
     The formatter has its own exclusion list. `[tool.ruff.format] exclude = ["src/xbrain/*"]`
     leaves `ruff check` — and therefore test_quality_gate_scope.py's `--show-files` audit —
@@ -1101,6 +1101,36 @@ def test_ruff_format_examines_every_file_ruff_check_does() -> None:
     the question the other way round: count the files each mode actually opens, and demand
     they agree. Both numbers come from ruff; neither is hardcoded.
 
+    Why the file LIST and not the two trees
+    ---------------------------------------
+    An earlier version handed both modes the same three directories and compared the counts.
+    That silently assumed the two modes discover the same LANGUAGES, and ruff 0.16 broke the
+    assumption: `ruff format` learned to format Python inside Markdown, so it began opening
+    the 8 `src/xbrain/rubrics/*.md` files that `ruff check` does not. Measured on ruff 0.16.5:
+    format 122 vs check 114, all 8 of the skew in `src/` (tests 62==62, scripts 4==4). The
+    gate went red over a feature addition, in the OPPOSITE direction from the attack it
+    guards — the assertion could not tell "the formatter sees less" from "the formatter
+    learned a new language" — and its message blamed a `[tool.ruff.format] exclude` that does
+    not exist in this repo.
+
+    So the formatter is now handed the linter's OWN file list rather than re-discovering the
+    trees. The population is identical by construction, no matter what ruff learns to open
+    next; a future non-Python language is simply never in the list.
+
+    `--force-exclude` is load-bearing, not decorative. Ruff does not apply `exclude` to paths
+    named explicitly on the command line unless it is passed, so WITHOUT it this test would
+    hand ruff 114 files, ruff would format all 114 regardless of `format.exclude`, and the
+    exact attack the test exists to catch would report a clean 114 == 114. Measured, with a
+    `format.exclude` hiding the 3 files in `src/xbrain/executors/`:
+
+        ruff 0.15.13   without --force-exclude: 114  (attack MISSED)
+                       with    --force-exclude: 111  (attack caught)
+        ruff 0.16.5    without --force-exclude: 114  (attack MISSED)
+                       with    --force-exclude: 111  (attack caught)
+
+    Same verdict on both versions, in both directions — the check is now version-independent
+    and strictly no weaker than the one it replaces.
+
     A TOP-LEVEL `exclude` shrinks both counts equally and slips past this — that one is
     caught behaviourally by test_quality_gate_scope.py, which compares ruff's file list
     against `git ls-files`. The two tests are complements: it owns "ruff opens every file",
@@ -1108,9 +1138,18 @@ def test_ruff_format_examines_every_file_ruff_check_does() -> None:
     """
     linted = _run_tool("ruff", [*_ruff_argv("check"), "--show-files"])
     assert linted.returncode == 0, f"ruff --show-files failed:\n{linted.stderr}"
-    lint_count = len([line for line in linted.stdout.splitlines() if line.strip()])
+    lint_files = [line.strip() for line in linted.stdout.splitlines() if line.strip()]
+    lint_count = len(lint_files)
 
-    formatted = _run_tool("ruff", _ruff_argv("format"))
+    format_argv = _ruff_argv("format")
+    flags = [arg for arg in format_argv[1:] if arg.startswith("-")]
+    assert flags == ["--check"], (
+        f"`ruff format` is invoked as {format_argv!r}. This test rebuilds that invocation "
+        f"with an explicit file list, and only knows how to do so for a bare `--check` — a "
+        f"flag that takes a separate value would be silently dropped along with the paths. "
+        f"Teach this test the new flag rather than relaxing the assertion below."
+    )
+    formatted = _run_tool("ruff", ["format", *flags, "--force-exclude", *lint_files])
     # "113 files already formatted" / "1 file would be reformatted, 112 files already formatted"
     format_count = sum(
         int(number)
@@ -1121,14 +1160,17 @@ def test_ruff_format_examines_every_file_ruff_check_does() -> None:
     )
 
     assert format_count == lint_count, (
-        f"`ruff format` opens {format_count} files; `ruff check` opens {lint_count}. The "
-        f"formatter is examining {lint_count - format_count} fewer file(s) than the linter.\n"
+        f"`ruff format` opens {format_count} of the {lint_count} files `ruff check` opens — "
+        f"{lint_count - format_count} of the linter's own files are invisible to the "
+        f"formatter.\n"
         f"\n"
-        f"Almost certainly `[tool.ruff.format] exclude` in pyproject.toml. It is invisible to "
-        f"every other guard in this repo: `ruff check` still opens everything, the poe targets "
-        f"still read `src tests scripts`, and test_quality_gate_scope.py — which audits ruff's "
-        f"file list — still passes, because it audits the LINTER. Meanwhile `ruff format "
-        f"--check` exits 0 over unformatted code and the gate prints ✅ Ruff (format) PASS.\n"
+        f"Both modes were handed the SAME explicit file list, so discovery cannot explain "
+        f"this: something is excluding files from the formatter alone. Almost certainly "
+        f"`[tool.ruff.format] exclude` in pyproject.toml. It is invisible to every other "
+        f"guard in this repo: `ruff check` still opens everything, the poe targets still read "
+        f"`src tests scripts`, and test_quality_gate_scope.py — which audits ruff's file list "
+        f"— still passes, because it audits the LINTER. Meanwhile `ruff format --check` exits "
+        f"0 over unformatted code and the gate prints ✅ Ruff (format) PASS.\n"
         f"\n"
         f"The formatter and the linter must examine the same tree. If they legitimately must "
         f"not, that is a deliberate weakening of the gate and belongs in a PR that argues it."
