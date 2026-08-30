@@ -448,3 +448,33 @@ def test_describe_frame_rubric_carries_the_shared_fragment():
         "{language}", "English"
     )
     assert fragment in frame
+
+
+def test_describe_image_and_describe_frame_share_one_rule():
+    """The anti-drift assertion, now that BOTH rubrics opt in: they must carry the
+    SAME rule text, because both are spliced from the same fragment. If someone
+    re-inlines the paragraph into either one, this fails."""
+    frame = load_rubric("describe-frame", language="English")
+    photo = load_rubric("describe-image", language="English")
+    fragment = rubrics_module._load_fragment(rubrics_module._ONSCREEN_FRAGMENT).replace(
+        "{language}", "English"
+    )
+    assert fragment in frame
+    assert fragment in photo
+
+
+def test_describe_image_rubric_no_longer_orders_paraphrase_or_bans_quotes():
+    """Two clauses actively caused #90 on the photo surface:
+    'paraphrase the substance in your own words' discarded on-screen text, and
+    'no quotes' removed the only device for marking a verbatim string."""
+    text = load_rubric("describe-image", language="English")
+    assert "paraphrase the substance in your own words" not in text
+    assert "no quotes" not in text
+
+
+def test_describe_image_rubric_keeps_its_json_contract():
+    """The photo path is a BATCH JSON contract and must stay one — the new rule
+    changes what goes in `description`, never the response shape."""
+    text = load_rubric("describe-image", language="English")
+    assert "is_decorative" in text
+    assert "index" in text
