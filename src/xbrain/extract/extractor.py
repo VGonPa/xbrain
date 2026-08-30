@@ -18,7 +18,18 @@ from xbrain.models import Item, SourceName
 
 logger = logging.getLogger(__name__)
 
-_OPERATIONS = {"bookmark": "Bookmarks", "own_tweet": "UserTweets"}
+# X renames its internal timeline operations without notice: the own-tweets
+# timeline answered to `UserTweets` until X switched it to
+# `UserOriginalsTimeline` (measured 30-ago-2026). The PARSER survives such a
+# rename — it anchors on the `tweet_results` key, not on a path — but this
+# capture filter used to be a single literal, and a stale literal turns a rename
+# into SILENT data loss: every response is filtered out, `captured` stays empty,
+# and the run reports "0 nuevos items" with exit 0. So: a TUPLE of aliases per
+# source, newest first, keeping the old names (X A/B-tests these and rolls back).
+_OPERATIONS: dict[str, tuple[str, ...]] = {
+    "bookmark": ("Bookmarks",),
+    "own_tweet": ("UserOriginalsTimeline", "UserTweets"),
+}
 # Deliberately slow, human-paced scrolling — avoids X rate-limiting / account bans.
 _SETTLE_MS = 6000
 _SCROLL_PAUSE_MIN_MS = 5000
@@ -41,6 +52,28 @@ class RateLimitTruncated(RuntimeError):
     to the un-fetched middle. The caller must NOT merge or advance the cursor for a
     truncated source; re-run later to capture the window cleanly.
     """
+
+
+class OperationNotCaptured(RuntimeError):
+    """The scroll finished without ever seeing the source's timeline operation.
+
+    A healthy timeline ALWAYS answers its operation at least once — an account
+    with zero posts still gets an empty instruction list — so capturing nothing
+    means we were not listening for the right name (X renamed the operation) or
+    the page never served it. Either way the run learned nothing, and reporting
+    "0 nuevos items" would be a false negative that silently freezes the store.
+    Fail closed: the caller must not advance the cursor, and must say so loudly.
+    """
+
+
+def matches_operation(url: str, operations: tuple[str, ...]) -> bool:
+    """True when `url` is a GraphQL call for one of `operations`.
+
+    Pure helper — the unit-tested core of the capture filter. Scoped to
+    `/graphql/` so a REST path that happens to contain the operation name is
+    never mistaken for a GraphQL body.
+    """
+    return "/graphql/" in url and any(operation in url for operation in operations)
 
 
 def rate_limit_decision(
@@ -123,7 +156,7 @@ def extract_source(
     backoff budget, or 401/403) — a partial, non-contiguous batch must never be
     returned, since the caller would merge it and seal a permanent gap.
     """
-    operation = _OPERATIONS[source]
+    operations = _OPERATIONS[source]
     captured: list[dict] = []
     # Mutable counters shared with the response callback (a dict sidesteps
     # `nonlocal` in the hook). `hits` = 429s on the target operation; `blocked` =
@@ -135,7 +168,7 @@ def extract_source(
         # Scope every signal to the target operation: a 429 on a background poll
         # (notifications, typeahead) must not spuriously back off / abort an
         # otherwise-healthy scroll, and only the operation's body is a payload.
-        if "/graphql/" not in response.url or operation not in response.url:
+        if not matches_operation(response.url, operations):
             return
         if response.status == 429:
             rate_limit["hits"] += 1
@@ -165,7 +198,8 @@ def extract_source(
                 break
             if rate_limit["blocked"]:
                 raise RateLimitTruncated(
-                    f"{source}: X respondió {rate_limit['blocked']} en {operation} — "
+                    f"{source}: X respondió {rate_limit['blocked']} en "
+                    f"{'/'.join(operations)} — "
                     "extracción truncada a media timeline; reanuda más tarde."
                 )
             action = rate_limit_decision(
@@ -204,6 +238,20 @@ def extract_source(
         # discarding the PAYLOADS is not — they are id-addressable and idempotent.
         persist_payloads(captured, payload_dir)
         page.close()
+
+    # Fail CLOSED on an empty capture. Everything above this line reports success
+    # by saying nothing, so a filter that matched zero responses is
+    # indistinguishable from a timeline with no new posts — and the caller would
+    # print "0 nuevos items", advance nothing, and exit 0. That is how a rename of
+    # the X operation went unnoticed. An empty capture is never a valid outcome:
+    # even a zero-post account gets one response with an empty instruction list.
+    if not captured:
+        raise OperationNotCaptured(
+            f"{source}: 0 respuestas de {'/'.join(operations)} en toda la timeline — "
+            "no es que no haya items nuevos, es que no se capturó NADA. "
+            "Lo normal es que X haya renombrado la operación: mira las operaciones "
+            "GraphQL reales de la página y añade el nombre nuevo a `_OPERATIONS`."
+        )
 
     new_items, _ = collect_new_items(captured, source, known_ids)
     return _filter_in_range(new_items, since, until)

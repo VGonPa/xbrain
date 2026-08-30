@@ -28,7 +28,11 @@ from xbrain.enrich import apply_worksheet_judgments, enrich_with_executor, items
 from xbrain.executors.api import ApiExecutor
 from xbrain.extract.browser import login as run_login
 from xbrain.extract.browser import x_context
-from xbrain.extract.extractor import RateLimitTruncated, extract_source
+from xbrain.extract.extractor import (
+    OperationNotCaptured,
+    RateLimitTruncated,
+    extract_source,
+)
 from xbrain.extract.threads import expand_threads
 from xbrain.extract.graphql import items_needing_refetch
 from xbrain.fetch import (
@@ -301,6 +305,14 @@ def _run_extract(
                 typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
                 truncated.append(src)
                 continue
+            except OperationNotCaptured as exc:
+                # Nothing was captured at all — the run learned NOTHING about this
+                # source. Advancing `last_run` would make the next run look fresh
+                # and hide the breakage, so leave the cursor untouched and fail
+                # loud. Other sources still save: a rename hits one operation.
+                typer.echo(f"ERROR: {exc} (no se guardó nada de {src})", err=True)
+                truncated.append(src)
+                continue
             if not items and first_run:
                 typer.echo(
                     f"AVISO: {src} devolvió 0 items en una extracción inicial — "
@@ -316,7 +328,8 @@ def _run_extract(
     save_state(state, cfg.state_path)
     if truncated:
         raise RuntimeError(
-            f"Extracción truncada por rate-limit/bloqueo de X en: {', '.join(truncated)}. "
+            f"Extracción incompleta en: {', '.join(truncated)} (rate-limit, bloqueo, o "
+            "la operación GraphQL de X cambió de nombre — el mensaje de arriba lo dice). "
             "Las fuentes completadas se guardaron; reanuda más tarde para el resto."
         )
 

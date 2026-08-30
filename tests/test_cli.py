@@ -2023,6 +2023,57 @@ def test_extract_truncation_persists_nothing_and_exits_nonzero(tmp_path: Path, m
     assert load_state(tmp_path / "data" / "state.json").bookmarks.last_seen_id is None
 
 
+def test_extract_empty_capture_fails_loud_and_freezes_the_cursor(tmp_path: Path, monkeypatch):
+    """Capturing NOTHING must never read as "0 nuevos items" with exit 0.
+
+    The X operation rename (30-ago-2026) made every response fall through the
+    capture filter. The run reported success, the cursor kept its old value, and
+    four posts stayed out of the store for 18 days with no signal anywhere.
+    """
+    from xbrain.extract.extractor import OperationNotCaptured
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _nothing_captured(*_a, **_k):
+        raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline/UserTweets")
+
+    _mock_browser(monkeypatch, _nothing_captured)
+
+    result = runner.invoke(app, ["extract", "--source", "tweets"])
+
+    assert result.exit_code == 1, result.output
+    assert "0 respuestas" in result.output
+    assert "0 nuevos items" not in result.output
+    assert load_store(tmp_path / "data" / "items.json") == {}
+    # The cursor must be untouched: advancing it would make the next run look
+    # fresh and bury the breakage under a second false negative.
+    assert load_state(tmp_path / "data" / "state.json").own_tweets.last_seen_id is None
+
+
+def test_extract_one_broken_source_still_saves_the_healthy_one(tmp_path: Path, monkeypatch):
+    """A rename hits ONE operation, so `--source all` must not lose the other."""
+    from xbrain.extract.extractor import OperationNotCaptured
+    from xbrain.store import load_state, load_store
+
+    _setup_repo(tmp_path, monkeypatch)
+
+    def _by_source(_context, source, *_a, **_k):
+        if source == "own_tweet":
+            raise OperationNotCaptured("own_tweet: 0 respuestas de UserOriginalsTimeline")
+        return [_linked_item("100")]
+
+    _mock_browser(monkeypatch, _by_source)
+
+    result = runner.invoke(app, ["extract", "--source", "all"])
+
+    assert result.exit_code == 1, result.output
+    state = load_state(tmp_path / "data" / "state.json")
+    assert list(load_store(tmp_path / "data" / "items.json")) == ["100"]
+    assert state.bookmarks.last_seen_id == "100"
+    assert state.own_tweets.last_seen_id is None
+
+
 # ------------------------------------------------------ list-videos / fetch-video
 
 
