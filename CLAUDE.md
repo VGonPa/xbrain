@@ -310,18 +310,33 @@ generates an Obsidian wiki.
   by LENGTH: ≥274 chars unconditionally, plus 265–273 when the text does not end on a real
   terminator (`:` and `;` are not terminators). `--apply` is a REAL browser re-fetch —
   headful, human-paced, hours of it — checkpointing after every item (a session expiry on
-  item 400 of 707 must not discard the first 400 repairs) and auto-snapshotting first;
+  item 90 of ~127 must not discard the first 89 repairs) and auto-snapshotting first;
   without `--apply` it only reports and writes `data/truncated-items.json`. **Reach for
-  `reextract` first, and for nearly all of them it IS the answer:** measured 2026-08-30 on the
-  live store (2,404 items), of the **707** items the detector flags only **5** have no stored
-  payload — the other **702 re-parse offline, for free, with no network at all**. Corpus-wide
-  the payload layer covers 2,360 of 2,404, so the "payloads are NOT persisted" premise (still
-  asserted in `items_needing_refetch`'s own docstring — issue #142) survives only for what predates
-  persistence. **And 707 is a work list, not a census:** `looks_truncated` decides on LENGTH
-  ALONE (≥274 chars unconditionally), so **561 of the 707 are LONGER than 290 chars** — full
-  `note_tweet` bodies the length rule flags anyway. The detector is deliberately biased
-  towards flagging (a missed truncation is a fabrication kept forever; a false flag costs one
-  re-fetch), so the number measures the flag, never the defect.
+  `reextract` first:** measured 2026-08-30 on the live store (2,404 items), of the **707**
+  items the detector flags only **5** have no stored payload — the other **702 re-parse
+  offline, for free, with no network at all**. Corpus-wide the payload layer covers 2,360 of
+  2,404, so the "payloads are NOT persisted" premise (still asserted in
+  `items_needing_refetch`'s own docstring — issue #142) survives only for what predates
+  persistence. **But 702 re-parses is a fact about where the BYTES live, not a count of
+  repairs.** Compare `note_tweet.note_tweet_results.result.text` in each payload against the
+  stored text and the work list splits four ways: **214 truncated** — the payload holds a
+  longer body, and these are the real repairs, offline and free; **358 complete** — the
+  long-form body is byte-identical to what is stored (358 of 358, median 721 chars, max
+  13,173), flagged on length alone, more than half the list; **122 undetermined** — no
+  long-form body in the payload, so the store cannot decide them either way; **13 other** —
+  8 rewritten without lengthening, 5 with no payload. The network job is therefore **at most
+  ~127 items**, and its real size is not determined by anything we hold. **Do not tidy the
+  122 away** by arguing they fitted inside 280 chars: tested against the 214 KNOWN
+  truncations on both signatures a reader reaches for, they are indistinguishable — median
+  stored prose 277 against 277, all 122 inside the 265–292 band against 212 of the 214, a
+  trailing self-link on 70% of them against 58%. A discriminating test that fails to
+  discriminate is a result, not a dead end. **And the re-parse log is not confirmation:** a
+  dry `reextract` warns `tweet ... arrives TRUNCATED` for 702 of the 707, and for the **480**
+  whose text it does not change that warning is guaranteed before it runs — same string in,
+  same `looks_truncated` out, 480 of 480. Rule 2, tripped inside the repo that wrote it. The
+  detector is deliberately biased towards flagging (a missed truncation is a fabrication kept
+  forever; a false flag costs one re-fetch), so the number measures the flag, never the
+  defect.
 - **`verify-entities` / `entity_grounding.py` — the deterministic checker, and READ WHAT IT
   IS BLIND TO BEFORE QUOTING ANY NUMBER FROM IT.** Token-free, no model, so it cannot inherit
   the judge ensemble's blind spot (three judges sharing one model and one rubric are ONE
