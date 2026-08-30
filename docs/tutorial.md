@@ -227,8 +227,9 @@ uv run xbrain reextract
 uv run xbrain reextract --apply
 
 # Posts whose text was cut at 280 chars on ingest (the generator then "finished"
-# the sentence for them). The raw payloads aren't on disk for these, so applying
-# re-fetches each one from X — slow, human-paced browser work.
+# the sentence for them). Run `reextract` FIRST: payloads are persisted now, and
+# roughly a third of these re-parse offline for free. Only what that leaves needs
+# this, and applying it re-fetches each from X — slow, human-paced browser work.
 uv run xbrain refetch-truncated
 # → Dry run. Re-fetching requires the network: pass --apply.
 
@@ -242,6 +243,17 @@ uv run xbrain refresh-quoted --from-store
 uv run xbrain fetch --retry-failed --dry-run
 uv run xbrain fetch --retry-failed
 ```
+
+Two things about `refetch-truncated`'s count before you plan a session around
+it. Its detector decides on **length alone** — 274 characters or more is
+truncated unconditionally — so the total is a work list biased towards flagging,
+not a census: on one corpus (2,404 items, read 30-ago-2026) it flags 707, of
+which only 146 are 290 characters or shorter. And a stored payload is not
+automatically a free repair: 702 of those 707 have one, but a payload only helps
+when X included the long-form body at capture time, so on that same corpus
+`reextract` recovers the text of 222 of them and the remaining ~480 still need
+the network. Run the `reextract` dry pass and read its count — that is the number
+you actually get for free.
 
 The applying form of each rewrites `items.json`, and auto-snapshots `data/`
 before it does, so a bad run is undoable with `xbrain snapshot restore`.
