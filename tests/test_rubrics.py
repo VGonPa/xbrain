@@ -414,3 +414,36 @@ def test_load_rubric_missing_fragment_is_a_loud_error(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="fragment-onscreen-text.md"):
         load_rubric("orphan", language="English")
+
+
+def test_describe_frame_rubric_states_the_verbatim_rule():
+    """The frame rubric must carry the shared rule and resolve both placeholders."""
+    text = load_rubric("describe-frame", language="Spanish")
+    assert "{language}" not in text
+    assert "{onscreen_text_rule}" not in text
+    assert "Spanish" in text
+    assert "VERBATIM" in text
+    # The rule must forbid translation explicitly — this is the #90 defect.
+    assert "Never translate" in text
+    # And must license an honest gap rather than a guess.
+    assert "do NOT guess" in text
+
+
+def test_describe_frame_rubric_asks_for_plain_text_not_json():
+    """`vision.describe_image` reads raw stdout, so the frame contract is prose.
+    Asking for JSON here would make every caption unparseable."""
+    text = load_rubric("describe-frame", language="English")
+    assert "is_decorative" not in text
+    assert "JSON" in text  # ...only to forbid it
+    assert "no JSON" in text
+
+
+def test_describe_frame_rubric_carries_the_shared_fragment():
+    """The frame half of the anti-drift assertion: the rule reaches the rubric from
+    the fragment file, not from a paragraph pasted into it. (The photo half lands
+    in Task 3, once that rubric opts in.)"""
+    frame = load_rubric("describe-frame", language="English")
+    fragment = rubrics_module._load_fragment(rubrics_module._ONSCREEN_FRAGMENT).replace(
+        "{language}", "English"
+    )
+    assert fragment in frame
