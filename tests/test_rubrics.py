@@ -478,3 +478,18 @@ def test_describe_image_rubric_keeps_its_json_contract():
     text = load_rubric("describe-image", language="English")
     assert "is_decorative" in text
     assert "index" in text
+
+
+def test_both_image_rubrics_defer_language_to_the_onscreen_rule():
+    """The negative assertions above only catch the two exact strings #90 deleted;
+    they pass forever once those are gone. This is the positive half: BOTH image
+    rubrics must keep saying that `{language}` governs the model's own prose and
+    that the on-screen-text rule overrides it. Restoring an unconditional
+    "write in {language} regardless of any text visible" — the wording that
+    caused #90 — deletes these phrases, so this test fails where the negative
+    ones would not.
+    """
+    for name in ("describe-image", "describe-frame"):
+        text = load_rubric(name, language="English")
+        assert "for your own prose" in text, f"{name} no longer scopes {{language}} to prose"
+        assert "overrides this" in text, f"{name} no longer defers to the on-screen rule"
