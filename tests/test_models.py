@@ -1429,3 +1429,11 @@ def test_verification_verdict_rejects_unknown_verdict():
             output_fingerprint="a" * 64,
             verified_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
         )
+
+
+def test_caption_contract_defaults_to_empty_so_legacy_records_load():
+    """Additive default — an `items.json` written before #90 must load unchanged."""
+    from xbrain.models import ContentSourceSuccess
+
+    source = ContentSourceSuccess(kind="x_video", url="https://x.com/a/status/1", text="hi")
+    assert source.caption_contract == ""

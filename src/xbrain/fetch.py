@@ -447,7 +447,12 @@ def _utcnow() -> datetime:
 # fingerprinted automatically instead of being silently dropped by a stale
 # allow-list. It fails safe: forgetting to exclude a bookkeeping field costs at
 # most one redundant re-enrichment, never a lost (stale-content) one.
-_BOOKKEEPING_FIELDS = {"attempts", "error"}
+#
+# `caption_contract` (#90) is bookkeeping too: it records WHICH rubric produced a
+# source's frame captions, not what those captions say. Re-stamping unchanged
+# captions must not read as a content change — see the field's own comment in
+# `models.py` for why it sits at source level rather than on `VideoFrame`.
+_BOOKKEEPING_FIELDS = {"attempts", "error", "caption_contract"}
 
 
 def _source_signature(source: ContentSource) -> str:

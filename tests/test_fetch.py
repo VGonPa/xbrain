@@ -1347,3 +1347,48 @@ def test_revalidate_keeps_a_real_article_that_merely_carries_one_cookie_line():
         ],
     )
     assert revalidate_stored_bodies({"7": item}).items == []
+
+
+def test_caption_contract_is_bookkeeping_not_material_content():
+    """THE REGRESSION THIS DESIGN NEARLY SHIPPED.
+
+    Stamping the contract on a source whose captions are byte-identical must NOT
+    read as a material change. If it does, every `redescribe-frames` run bumps
+    `content.fetched_at` on every source it touches and re-enriches the whole
+    video corpus for nothing. A `caption_contract` nested on `VideoFrame` would
+    have failed this, because `_source_signature`'s `exclude` is a FLAT set of
+    top-level fields and does not descend into `frames`.
+    """
+    from xbrain.fetch import _sources_materially_equal
+    from xbrain.models import FRAME_CAPTION_CONTRACT, ContentSourceSuccess, VideoFrame
+
+    frames = [VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description="same")]
+    before = ContentSourceSuccess(
+        kind="x_video", url="https://x.com/a/status/1", text="t", frames=frames
+    )
+    after = ContentSourceSuccess(
+        kind="x_video",
+        url="https://x.com/a/status/1",
+        text="t",
+        frames=frames,
+        caption_contract=FRAME_CAPTION_CONTRACT,
+    )
+    assert _sources_materially_equal([before], [after])
+
+
+def test_a_changed_caption_IS_material_content():
+    """The other half: the stamp is excluded, the caption text is not."""
+    from xbrain.fetch import _sources_materially_equal
+    from xbrain.models import ContentSourceSuccess, VideoFrame
+
+    def _source(description: str) -> ContentSourceSuccess:
+        return ContentSourceSuccess(
+            kind="x_video",
+            url="https://x.com/a/status/1",
+            text="t",
+            frames=[
+                VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description=description)
+            ],
+        )
+
+    assert not _sources_materially_equal([_source("old")], [_source("new")])
