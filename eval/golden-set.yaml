@@ -1,0 +1,591 @@
+# eval/golden-set.yaml — v3, 2026-08-31
+#
+# THE GROUND TRUTH OF THE RETRIEVAL EVALUATION, AND IT IS VERSIONED IN GIT (B1).
+#
+# v1/v2 lived in `data/golden-set.yaml`, which `.gitignore` excludes. That had three
+# consequences, and none of them is acceptable for the ground truth of a merge gate:
+# the v3 migration would appear in no diff and nobody could review it; `xbrain eval`
+# could never run in CI, because the runner has no `data/`; and a case edited to turn
+# a gate green would leave no history. What is versioned here is QUESTIONS, IDS and
+# SHORT identifying fragments — never a body from the corpus.
+#
+# WHAT COUNTS AS A CASE (spec §8.1, B2). Only a case whose ground truth is ENUMERATED
+# id by id and verified scores. A case that describes its population in prose ("the 12
+# items about context rot") does not score until those ids are listed: with
+# `relevant_items: []` the recall@k is 0/0, which comes out as 1.0 or 0.0 depending on
+# the implementation and measures nothing either way (CLAUDE.md rule 2). Such cases are
+# archived under `scenarios:` with their reason, and come back to `cases:` when someone
+# enumerates them. The loader REJECTS a scorable case with an empty relevant set.
+#
+# THE VERIFICATION RULE EVERY CASE OBEYS (spec anexo A.3): the fact must be present on
+# the surface named AND absent from every other reachable surface. A leak disqualifies
+# the question.
+#
+# EVERY WINDOW IS ABSOLUTE. A relative window expires and rots the ground truth.
+#
+# NUMBERS RE-DERIVED 2026-08-31 against a 2,404-item store. They were re-measured, not
+# copied: v2 recorded 5 items for P1 and this run finds 6, and recorded 20 for U3 where
+# this run finds 22. The corpus grew; the prose did not. Re-derive before quoting.
+
+schema_version: "1"
+
+cases:
+
+  # ---------------------------------------------------------------------------
+  # enterrado — the answer is inside a long source
+  # ---------------------------------------------------------------------------
+
+  - id: S1
+    query: "¿Qué modelo de Gemini tenía búsqueda web integrada y cuál no, en la demo de Karpathy?"
+    provenance: construido
+    strata: [enterrado, cruzado_idioma]
+    filters: {}
+    relevant_items:
+      - "2063321324605280569"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "2063321324605280569", surface_type: video_transcript}
+    expected_text: "2.0 Flash tenía la herramienta de búsqueda; 2.0 Pro Experimental no."
+    notes: >-
+      Verificado v1: presente en la transcripción de 130.005 chars, ausente del resumen
+      (que no menciona ni Gemini ni Flash). Compresión 0,48 %.
+
+  - id: S2
+    query: "¿Cuántos chips Hopper tenía DeepSeek y cuánto costaban, según Dario Amodei?"
+    provenance: construido
+    strata: [enterrado, cruzado_idioma]
+    filters: {}
+    relevant_items:
+      - "1884636410839535967"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1884636410839535967", surface_type: external_article}
+    expected_text: "50.000 chips Hopper, del orden de ~1.000 M$."
+    notes: >-
+      Verificado v1: presente en el artículo de 20.147 chars; ausente del tweet y del
+      resumen, que hablan de leyes de escalado y no de la cifra. Es el caso que fija que
+      el emisor NO puede truncar a ARTICLE_CHAR_LIMIT: la cifra vive más allá de 4.000.
+
+  # ---------------------------------------------------------------------------
+  # multimodal — the answer exists only because a VLM read an image
+  # ---------------------------------------------------------------------------
+
+  - id: S3
+    query: "¿Qué ritmo de envejecimiento medido con DunedinPACE aparecía en la comparativa de Bryan Johnson?"
+    provenance: construido
+    strata: [multimodal]
+    filters: {}
+    relevant_items:
+      - "1874382656751771697"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1874382656751771697", surface_type: image_description}
+    expected_text: "0,69 años por año; una reducción del 9,2 % frente al 0,76 previo."
+    notes: >-
+      Verificado v1: sólo en la descripción VLM de la infografía. 'DunedinPACE' no aparece
+      ni en el tweet ni en el resumen — re-verificado hoy: el término está en 1 solo item
+      de los 2.404. Sin la capa VLM el item es inalcanzable por esa cifra.
+
+  - id: S4
+    query: "¿Cuáles son los seis patrones de arquitectura de agentes que tengo guardados?"
+    provenance: construido
+    strata: [multimodal, semantico]
+    filters: {}
+    relevant_items:
+      - "1877056342692663411"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1877056342692663411", surface_type: image_description}
+    expected_text: "Prompt Chaining, Routing, Parallelization, Orchestrator-workers, Evaluator-optimizer y Autonomous Agent."
+    notes: >-
+      Verificado v1: sólo en la descripción VLM de la captura. El tweet dice únicamente que
+      está trabajando en algo basado en el artículo de Anthropic, y el resumen lo parafrasea;
+      los seis nombres no están en ninguna superficie de texto.
+
+  - id: S5
+    query: "¿En qué revista se publicó el estudio de resistencia cognitiva y con cuántos alumnos se hizo?"
+    provenance: construido
+    strata: [multimodal]
+    filters: {}
+    relevant_items:
+      - "1877372503087006039"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1877372503087006039", surface_type: image_description}
+    expected_text: "The Quarterly Journal of Economics; experimento de campo con 1.600 alumnos en India."
+    notes: >-
+      Verificado v1: sólo en la descripción VLM de la captura del abstract. El tweet y el
+      resumen mencionan el hallazgo pero no la revista, ni los autores, ni el tamaño de muestra.
+
+  - id: S6
+    query: "¿Qué grasas saludables recomienda la guía de alimentación de Bryan Johnson?"
+    provenance: construido
+    strata: [multimodal]
+    filters: {}
+    relevant_items:
+      - "1877129049945886936"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1877129049945886936", surface_type: image_description}
+    expected_text: "Aceite de oliva virgen extra, aguacate, macadamia y almendra."
+    notes: >-
+      Verificado v1: sólo en la descripción VLM de la infografía. Ningún alimento concreto
+      aparece en texto.
+
+  # ---------------------------------------------------------------------------
+  # topic — the answer lives on a synthesized topic page
+  #
+  # MIGRATED (spec §8.1): v1 wrote `items_relevantes: ["topic:agency-and-mindset"]`. A
+  # topic pseudo-id is not a retrievable item, so it moves to `relevant_topics` plus the
+  # `topic_note` surface that actually holds the text, and `relevant_items` is empty —
+  # which is legal here precisely because the topic ground truth is enumerated instead.
+  # ---------------------------------------------------------------------------
+
+  - id: S7
+    query: "¿Qué dato tengo guardado que contradiga el discurso del reemplazo de programadores por IA?"
+    provenance: construido
+    strata: [topic, resumen]
+    filters: {}
+    relevant_items: []
+    relevant_topics: [agency-and-mindset]
+    relevant_surfaces:
+      - {owner_type: topic, owner_id: "agency-and-mindset", surface_type: topic_note}
+    expected_text: "Los empleos de desarrollo han subido alrededor de un 10 %."
+    notes: "Verificado v1: literal en las notas del overview de agency-and-mindset."
+
+  - id: S8
+    query: "¿Cuál era ese sistema antiprocrastinación del reloj?"
+    provenance: construido
+    strata: [topic, semantico]
+    filters: {}
+    relevant_items: []
+    relevant_topics: [agency-and-mindset]
+    relevant_surfaces:
+      - {owner_type: topic, owner_id: "agency-and-mindset", surface_type: topic_note}
+    expected_text: "El reloj de ajedrez de Tim Urban: cuatro horas al día que sólo corren cuando trabajas."
+    notes: >-
+      Formulada a propósito sin 'ajedrez' ni 'Tim Urban': es la forma D1, no recuerdas los
+      términos. Verificado v1 como literal en las notas.
+
+  - id: S9
+    query: "¿Qué anécdota tengo sobre Edison y el número de experimentos?"
+    provenance: construido
+    strata: [topic]
+    filters: {}
+    relevant_items: []
+    relevant_topics: [agency-and-mindset]
+    relevant_surfaces:
+      - {owner_type: topic, owner_id: "agency-and-mindset", surface_type: topic_note}
+    expected_text: "Los avances llegan después del experimento 2999, no después de una diapositiva."
+    notes: "Verificado v1: literal en las notas del overview de agency-and-mindset."
+
+  # ---------------------------------------------------------------------------
+  # semantico / cruzado de idioma — the D1 shape: you do not recall the words
+  # ---------------------------------------------------------------------------
+
+  - id: D1a
+    query: >-
+      ¿En qué artículo sobre IA y trabajo se dice que hacen falta tres cosas a la vez:
+      dirección desde arriba, un equipo interno que experimente y la gente de base
+      descubriendo usos por su cuenta?
+    provenance: construido
+    strata: [semantico, cruzado_idioma, enterrado]
+    filters: {}
+    relevant_items:
+      - "1958350546831630810"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1958350546831630810", surface_type: external_article}
+    expected_text: "Making AI Work: Leadership, Lab, and Crowd."
+    notes: >-
+      Verificado v1: en el artículo de 19.518 chars. La pregunta parafrasea los tres términos
+      EN ESPAÑOL y el artículo está EN INGLÉS: cero solape léxico. Prueba D1 y salto de idioma
+      a la vez. Sigue siendo `construido` — Víctor no la ha formulado.
+
+  - id: D1b
+    query: >-
+      ¿Cuándo comparaba Karpathy la interfaz de los chatbots con la informática de hace
+      décadas, diciendo que su equivalente a la interfaz gráfica todavía no se ha inventado?
+    provenance: construido
+    strata: [semantico, cruzado_idioma]
+    filters: {}
+    relevant_items:
+      - "1917920257257459899"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1917920257257459899", surface_type: post}
+    expected_text: "Mayo de 2025."
+    notes: >-
+      ENUMERADO EN ESTE PR. v1/v2 no tenía `items_relevantes`. Re-derivado hoy: la frase
+      ('80s computer terminal' / 'GUI hasn't been invented') aparece en 1 solo item de los
+      2.404, en su `post`, sin fugas a ninguna otra superficie. Más de 20 items mencionan a
+      Karpathy en la ventana, así que filtrar por autor no discrimina: hay que llegar por
+      semántica. Pregunta en español, fuente en inglés.
+
+  - id: D1c
+    query: "¿Tengo algo guardado sobre que la calidad de un modelo se degrada cuando el contexto se alarga mucho?"
+    provenance: construido
+    strata: [semantico, enterrado]
+    filters: {}
+    relevant_items:
+      - "2012280466024407047"
+      - "2015031262692753449"
+      - "2031408954517971368"
+      - "2041146899319971922"
+      - "2044548257058328723"
+      - "2053231239721885918"
+      - "2054942057429438970"
+      - "2069075857629409378"
+      - "2072885435312042327"
+      - "2073492320159510869"
+      - "2075234683202531403"
+      - "2087124365582241923"
+    relevant_surfaces: []
+    expected_text: "Sí — los items que tratan 'context rot'."
+    notes: >-
+      ENUMERADO EN ESTE PR, y es el caso decisorio del bake-off del Plan 03. Re-derivado hoy:
+      'context rot' aparece en 12 items, la misma cifra que v2 afirmaba en prosa. Verificado
+      id a id, con la superficie de cada uno: 6 en `x_article`, 3 en `external_article`,
+      1 en `video_transcript`, 1 en `video_digest` + `video_transcript`, y 3 de ellos también
+      en `summary`. 'context rot' NO es ninguno de los 45 topics, así que la taxonomía no
+      llega; y la pregunta NO usa el término, así que el léxico tampoco. Es el test limpio de
+      si la capa semántica aporta por encima de lo que ya existe.
+
+  - id: D1d
+    query: >-
+      ¿Dónde tengo el argumento de que un modelo chino barato refuerza, en vez de debilitar,
+      la necesidad de controlar la venta de chips?
+    provenance: construido
+    strata: [semantico, enterrado]
+    filters: {}
+    relevant_items:
+      - "1884636410839535967"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1884636410839535967", surface_type: external_article}
+    expected_text: "El ensayo de Dario Amodei sobre DeepSeek y los controles de exportación."
+    notes: >-
+      El discriminador más fuerte del set, medido en v2: Dario Amodei se menciona en 29 items
+      y es autor de sólo 2 (ratio 14x). Un filtro por `author.handle` devuelve 2; la respuesta
+      correcta vive entre los 29. Esa diferencia ES la métrica.
+
+  # ---------------------------------------------------------------------------
+  # atribución — the poster is not the author of what they quote
+  # ---------------------------------------------------------------------------
+
+  - id: P2
+    query: "¿Quién escribió eso que compartí sobre qué pasaría si Mythos tuviera los pesos abiertos?"
+    provenance: construido
+    strata: [semantico]
+    filters: {}
+    relevant_items:
+      - "2041860998689132948"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "2041860998689132948", surface_type: quoted_post}
+    expected_text: "@JosephJacks_ — el item lo publicó Víctor, pero el texto es de JJ."
+    notes: >-
+      Verificado v2 y re-verificado hoy: '@JosephJacks_' aparece en 1 solo item de los 2.404,
+      y sólo en el autor del quoted_tweet. Prueba la regla de atribución: el que publica no es
+      el autor de lo que cita. El cuerpo citado mide 3.943 chars, casi el doble de MAX_CHARS —
+      es también el caso que fija que una superficie atómica no se ventanea.
+
+  - id: P1
+    query: "¿Qué tengo guardado de Simon Willison?"
+    provenance: construido
+    strata: [semantico, enterrado]
+    filters: {}
+    relevant_items:
+      - "1940440271126438118"
+      - "2014328488002535521"
+      - "2039781609755521232"
+      - "2061573150719021542"
+      - "2063865685558903149"
+      - "2080697380379427275"
+    relevant_surfaces: []
+    expected_text: "Ninguno escrito por él; la mayoría lo mencionan dentro de fuentes largas."
+    notes: >-
+      ENUMERADO EN ESTE PR. v2 decía '5 items' en prosa; re-derivado hoy sobre 2.404 items
+      son 6 — la cifra se movió porque el corpus creció, que es exactamente por qué no se
+      copia (CLAUDE.md regla 2). Verificado id a id: 1 en `external_article`, 1 en
+      `quoted_post`, 3 en `x_article`, 1 en `post`+`summary`. Autor de 0 y autor citado en 0,
+      así que un filtro por `author.handle` devuelve CERO y ningún metadato llega a la
+      respuesta. El caso puro que planteó Víctor: encontrarle aunque no le haya bookmarkeado.
+
+  - id: U3
+    query: "¿Qué tengo sobre la metáfora de las riendas para controlar al modelo, esa disciplina nueva de ingeniería?"
+    provenance: construido
+    strata: [semantico, cruzado_idioma]
+    filters: {}
+    relevant_items:
+      - "2031408954517971368"
+      - "2036266930290696599"
+      - "2041146899319971922"
+      - "2043427918127513836"
+      - "2043545596699750791"
+      - "2043870915059236966"
+      - "2047145274200768969"
+      - "2048825022031302661"
+      - "2052333620652847425"
+      - "2053231239721885918"
+      - "2053365928604176474"
+      - "2055751665345798628"
+      - "2055973031181168656"
+      - "2061104052818108476"
+      - "2063544956158185927"
+      - "2063609922667815064"
+      - "2078892237287801283"
+      - "2080697380379427275"
+      - "2082616135170555984"
+      - "2082821641097126127"
+      - "2092314144598814909"
+      - "2093801030223867919"
+    relevant_surfaces: []
+    expected_text: "Harness Engineering."
+    notes: >-
+      ENUMERADO EN ESTE PR. v2 decía '20 items' en prosa; re-derivado hoy son 22. Población
+      definida por la aparición literal de 'harness engineering' en alguna superficie; la
+      PREGUNTA no usa el término y está en español, así que el léxico no la resuelve. Mide la
+      GRANULARIDAD: su topic padre `agentic-engineering` tiene cientos de items, y aquí se
+      quieren estos 22 — la taxonomía no falla por no cubrir, falla por ser demasiado gruesa.
+
+  # ---------------------------------------------------------------------------
+  # relleno de superficies que v1 no tocaba (v2)
+  # ---------------------------------------------------------------------------
+
+  - id: V1
+    query: "¿Qué papers de arXiv se citaban en las diapositivas de aquella charla del fundador de una empresa china de IA?"
+    provenance: construido
+    strata: [multimodal, exacto]
+    filters: {}
+    relevant_items:
+      - "2057528102368977328"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "2057528102368977328", surface_type: video_frame}
+    expected_text: "arXiv 2502.16982 y 2507.20534."
+    notes: >-
+      Verificado v2 y re-verificado hoy: los dos identificadores aparecen cada uno en 1 solo
+      item de los 2.404, y sólo en descripciones de frame — sin fugas a tweet, resumen,
+      transcripción ni artículo. Cubre la superficie más grande que v1 no tocaba. Un número
+      que existe únicamente porque un VLM leyó una diapositiva.
+
+  - id: V2
+    query: "¿Quién acuñó el término Harness Engineering?"
+    provenance: construido
+    strata: [enterrado, exacto]
+    filters: {}
+    relevant_items:
+      - "2047145274200768969"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "2047145274200768969", surface_type: x_article}
+    expected_text: "Mitchell Hashimoto."
+    notes: >-
+      Verificado v2: 'Hashimoto' sólo en el x_article de 22.797 chars, sin fugas. Y EL TWEET
+      ES LITERALMENTE UN ENLACE, nada más: sin indexar el cuerpo del X Article el item es
+      100 % inalcanzable. Es el caso que justifica indexar `x_article` — re-derivado hoy con
+      la definición 'item.text es exactamente una URL y nada más': 210 items están en esa
+      situación y 200 de ellos sí tienen un cuerpo recuperado.
+
+  # ---------------------------------------------------------------------------
+  # exacto — handles, acronyms and literal figures (v1/v2 had NO case here)
+  # ---------------------------------------------------------------------------
+
+  - id: X1
+    query: "@simonw"
+    provenance: construido
+    strata: [exacto]
+    filters: {}
+    relevant_items:
+      - "2014328488002535521"
+      - "2039781609755521232"
+      - "2061573150719021542"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "2014328488002535521", surface_type: quoted_post}
+      - {owner_type: item, owner_id: "2039781609755521232", surface_type: post}
+      - {owner_type: item, owner_id: "2061573150719021542", surface_type: x_article}
+    expected_text: "@simonw"
+    notes: >-
+      NUEVO EN ESTE PR — el estrato `exacto` no tenía ni un caso. Re-derivado hoy: el handle
+      literal aparece en 3 items de los 2.404, y en TRES superficies distintas — un
+      quoted_post, un post y el cuerpo de un X Article. Un sistema que sólo indexe tweets
+      encuentra 1 de 3, y eso es exactamente lo que el caso mide. Ninguno de los tres lo
+      lleva en metadatos de autor.
+
+  - id: X2
+    query: "HumanEval"
+    provenance: construido
+    strata: [exacto, multimodal]
+    filters: {}
+    relevant_items:
+      - "1882600399657705725"
+      - "2057528102368977328"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1882600399657705725", surface_type: image_description}
+      - {owner_type: item, owner_id: "2057528102368977328", surface_type: video_frame}
+    expected_text: "HumanEval"
+    notes: >-
+      NUEVO EN ESTE PR. Re-derivado hoy: la sigla aparece en 2 items, y en los dos SÓLO en una
+      superficie VLM — una descripción de foto y una descripción de frame. Es exacto y
+      multimodal a la vez: la cadena existe únicamente porque un modelo de visión leyó una
+      imagen, así que sin esa capa el término no es buscable en el corpus.
+
+  - id: X3
+    query: "11.37%"
+    provenance: construido
+    strata: [exacto, enterrado]
+    filters: {}
+    relevant_items:
+      - "1876681640505901266"
+    relevant_surfaces:
+      - {owner_type: item, owner_id: "1876681640505901266", surface_type: external_article}
+    expected_text: "11.37%"
+    notes: >-
+      NUEVO EN ESTE PR. Re-derivado hoy: la cifra literal aparece en 1 solo item de los 2.404
+      y en una sola superficie, el cuerpo de un artículo externo. Es el caso que protege lo
+      que la capa vectorial NO puede hacer: una cifra no tiene vecinos semánticos.
+
+  # ---------------------------------------------------------------------------
+  # filtros — dates, source and content kind (v1/v2 had NO case here either)
+  #
+  # These score by construction IF the filter is applied, and score badly if it is
+  # ignored — which is the regression they exist to catch. The ground truth is the
+  # filter's own definition, so they measure PLUMBING, not ranking, and the report
+  # must read them that way (CLAUDE.md rule 2).
+  # ---------------------------------------------------------------------------
+
+  - id: F1
+    query: "mis propios tweets de octubre de 2025"
+    provenance: construido
+    strata: [filtros]
+    filters:
+      source: own_tweet
+      created_from: 2025-10-01
+      created_to: 2025-10-31
+    relevant_items:
+      - "1974567332451340442"
+      - "1976174427630076192"
+    relevant_surfaces: []
+    expected_text: "Los 2 tweets propios de esa ventana."
+    notes: >-
+      NUEVO EN ESTE PR. Población re-derivada hoy: exactamente 2 items con
+      `source == own_tweet` en la ventana. Ventana ABSOLUTA y deliberadamente estrecha, para
+      que un fallo de filtrado se vea como un recall bajo y no se diluya en una población
+      grande. Mide que `created_from`/`created_to` y `source` llegan al backend, no ranking.
+
+  - id: F2
+    query: "vídeos guardados en diciembre de 2025"
+    provenance: construido
+    strata: [filtros]
+    filters:
+      content_kinds: [x_video]
+      created_from: 2025-12-01
+      created_to: 2025-12-31
+    relevant_items:
+      - "1996263985985769976"
+      - "2001306445262823431"
+      - "2005451225119015382"
+    relevant_surfaces: []
+    expected_text: "Los 3 items con vídeo de esa ventana."
+    notes: >-
+      NUEVO EN ESTE PR. Población re-derivada hoy: exactamente 3 items con una fuente
+      `x_video` correcta en la ventana. Es el caso que ejerce `content_kinds`, uno de los dos
+      filtros del spec §7.2 que no salen de ninguna columna existente y que el Plan 02 tiene
+      que construir a mano.
+
+# ═════════════════════════════════════════════════════════════════════════════
+# scenarios — ARCHIVED, NOT SCORED (spec §8.1)
+#
+# None of these has an enumerable ground truth today. They are kept, with the reason,
+# because spec §8.1 forbids dropping them silently — and each returns to `cases:` the
+# day someone enumerates and verifies its population.
+# ═════════════════════════════════════════════════════════════════════════════
+
+scenarios:
+
+  - id: C1
+    question: "¿Qué evolución ha tenido el SDLC en los últimos tres meses?"
+    provenance: real
+    reason: >-
+      'Qué ha EVOLUCIONADO' es juicio, no recuperación: no tiene verdad de terreno y se
+      evalúa con rúbrica o con el ojo de Víctor, jamás con recall. Además el subconjunto
+      SDLC cruza 7 de los 45 topics y habría que etiquetarlo a mano.
+
+  - id: C2
+    question: "¿Qué es lo más importante que ha ocurrido en AI/agents en la primera semana de julio de 2026?"
+    provenance: real
+    reason: >-
+      'Lo más importante' no tiene verdad de terreno. La ventana sí es enumerable (45 items
+      medidos en v1), así que el día que se decida una definición operativa de 'importante'
+      este escenario puede descomponerse en un caso de filtros más una rúbrica aparte.
+
+  - id: C3
+    question: "¿Qué vídeos no debo perderme de la semana del 29 de junio al 5 de julio de 2026?"
+    provenance: real
+    reason: >-
+      'No debo perderme' es juicio puro. La parte recuperable — vídeos en una ventana — ya
+      está cubierta, y mejor, por el caso F2, que la mide sin mezclarla con una valoración.
+
+  - id: C4
+    question: "¿Qué ha ocurrido en la semana del 2 al 8 de febrero de 2026 que deba saber?"
+    provenance: real
+    reason: "'Que deba saber' es juicio. Misma forma que C2."
+
+  - id: C5
+    question: "¿Cuál era mi opinión sobre la IA a principios de 2026?"
+    provenance: real
+    reason: >-
+      El filtro `source != bookmark` acierta al 100 % por construcción, así que como pregunta
+      de RECUPERACIÓN no mide nada; lo que mide de verdad es la síntesis, que está fuera del
+      alcance del spec (§1.4). F1 cubre la parte de filtrado con una población pequeña.
+
+  - id: P3
+    question: "¿Dónde tengo argumentos de Dario Amodei sobre controles de exportación de chips?"
+    provenance: construido
+    reason: >-
+      La población ('argumentos de X sobre Y') exige juicio sobre qué cuenta como argumento;
+      no hay regla mecánica que la reproduzca, así que enumerarla la ataría a la lectura de
+      quien la enumeró. v2 la midió en 30 items sin dejar los ids. D1d cubre el mismo
+      discriminador (mención vs autoría) con verdad de terreno enumerada.
+
+  - id: U1
+    question: "¿Tengo algo sobre gestión del conocimiento personal?"
+    provenance: construido
+    reason: >-
+      La población es AMBIGUA entre dos lecturas defendibles y nada en el store elige: hoy
+      `knowledge-management` es primary_topic de 47 items y aparece en `topics` de 77. v2
+      decía 73, que ya no es ninguna de las dos. Enumerar una de las dos lecturas sería
+      elegir por decreto. Además su verdad de terreno sería la propia asignación de topic,
+      así que el caso mediría un lookup de taxonomía contra sí mismo.
+
+  - id: U2
+    question: "¿Tengo algo guardado sobre que la calidad se degrada cuando el contexto se alarga?"
+    provenance: construido
+    reason: >-
+      MISMA PREGUNTA que D1c, que sí está enumerada arriba con sus 12 ids. Se conserva como
+      escenario para no perder el rastro de la duplicación de v2 (U2 y D1c eran la misma
+      pregunta con dos `unidad:` distintas); no se puntúa dos veces la misma población.
+
+# ═════════════════════════════════════════════════════════════════════════════
+# HUECOS DECLARADOS — sin cobertura, y por qué (spec §8.6.8)
+#
+# 1. PREGUNTAS D1 REALES. Siguen faltando 2-3 preguntas que Víctor haya hecho de verdad
+#    ('sé que lo tengo y no lo encontré porque no recordaba las palabras'). Las cinco D1
+#    de este fichero son `construido`. Ningún plan las inventa como `real`.
+#
+# 2. LA SUPERFICIE `video_digest` SIGUE SIN COBERTURA, y ahora se sabe POR QUÉ. v1 anotó
+#    un intento fallido (el hecho se filtraba a la transcripción). Medido hoy sobre el
+#    corpus completo: de los 36 nombres propios que aparecen SÓLO en un digest y en
+#    ninguna otra superficie del item, 22 son FUGAS — una variante difusa del nombre está
+#    en la transcripción, a veces mal transcrita por el ASR ('Johannes Trithemius' en el
+#    digest contra 'johannes tritemius' en la transcripción, ratio 0,97) — y los otros 14
+#    no tienen apoyo en ninguna superficie. Los primeros incumplen la regla A.3; los
+#    segundos son candidatos a INVENCIÓN, y fundar un caso en uno consagraría una posible
+#    alucinación como verdad de terreno. Conclusión: cero candidatos utilizables entre los
+#    nombres propios. La población medida son nombres propios, NO todos los hechos: un
+#    número exclusivo del digest o una afirmación parafraseada no entran en esa medición.
+#    (Nota: al menos 2 de los 14 — 'Self-Attention', 'Layer Norm' — son el artefacto de
+#    traducción de captions que arregló #90, no invenciones.)
+#
+# 3. ESTRATO `expansión`: sin cobertura hasta el Plan 04, que es donde existe el grafo.
+#    No se inventa un caso para un mecanismo que todavía no existe.
+#
+# 4. SUPERFICIES `thread` y `user_note`: CERO instancias en el corpus (medido 2026-08-31).
+#    El emisor las soporta; la evaluación no puede tener casos y no se inventa ninguno.
+#
+# 5. IMÁGENES INLINE DE X ARTICLE: 250 bloques, 0 descritos. Sin texto que indexar, así
+#    que sin caso posible hasta que `describe` empiece a describirlas.
+#
+# 6. D1e ('¿Cuál es el recurso más completo que tengo sobre <X>?') NO está en este fichero.
+#    Es una plantilla sin rellenar, no una pregunta: no es un caso ni un escenario. Si una
+#    plantilla así vuelve a aparecer en un fichero de entrada, `load_cases` lo rechaza con
+#    GoldenSetError en vez de omitirla en silencio.
