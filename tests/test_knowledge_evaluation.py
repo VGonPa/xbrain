@@ -573,3 +573,77 @@ def test_a_chunk_the_index_refuses_is_counted_not_silently_dropped() -> None:
     index = InMemoryLexicalIndex()
     assert index.add(chunks) == len(chunks)
     assert index.add(chunks) == 0, "a duplicate chunk_id must be refused, and countable"
+
+
+# ---------------------------------------------------------------------------
+# M3 — an empty result set is not a precision of 0.0, and it is COUNTED
+# ---------------------------------------------------------------------------
+
+
+def test_precision_over_an_empty_result_set_is_unmeasured_not_zero(corpus) -> None:
+    """The last instance of B1, and it is the one that reached the published table.
+
+    `precision@k = found / len(top)` with `top` empty is a hard 0/0. Its numerator is 0 by
+    construction, so the number restates the empty set instead of measuring the retriever —
+    the same argument 3006c0c used two lines above for `recall` and `mrr`.
+
+    `recall@k` is DIFFERENT and must stay 0.0: its denominator is the case's known relevant
+    set, so "we retrieved none of the two items that exist" is a real measurement of a real
+    failure. Asserting both here is what stops the fix from over-reaching.
+    """
+    item_id, _ = _some_item(corpus)
+    case = _case(
+        id="NOTHING-MATCHES",
+        query="Zzyzxquorumbleflange",
+        strata=("exacto",),
+        relevant_items=(item_id,),
+    )
+    result = evaluate([case], corpus, ks=(10,)).cases[0]
+    assert result.retrieved == (), "the fixture query must match nothing for this to discriminate"
+    assert result.metrics["precision@10"] is None, "0/0 reached the report as a measurement"
+    assert result.metrics["recall@10"] == 0.0, "recall over a known relevant set IS measured"
+
+
+def test_a_case_that_retrieved_nothing_is_counted_as_such(corpus) -> None:
+    """A 0.0 recall has two causes and the report must tell them apart.
+
+    "The right item ranked below k" is a ranking failure; "the query matched no chunk at
+    all" is a failure of the query, and on the real corpus it was the cause in 18 of 21
+    cases while the report read all of them as the first. One number cannot say which, so
+    the count of empty result sets ships beside `measured`.
+    """
+    item_id, query = _some_item(corpus)
+    empty = _case(
+        id="NOTHING-MATCHES",
+        query="Zzyzxquorumbleflange",
+        strata=("exacto",),
+        relevant_items=(item_id,),
+    )
+    found = _case(id="MATCHES", query=query, strata=("exacto",), relevant_items=(item_id,))
+
+    report = evaluate([empty, found], corpus, ks=(10,))
+
+    assert report.cases[0].no_results is True
+    assert report.cases[1].no_results is False
+    assert report.by_stratum["exacto"]["no_results"] == 1
+    assert report.by_stratum["exacto"]["cases"] == 2
+    assert report.to_dict()["cases"][0]["no_results"] is True
+
+
+def test_the_markdown_publishes_how_many_cases_retrieved_nothing(corpus) -> None:
+    """The markdown is the surface that gets quoted, so the count has to reach it.
+
+    Without it, a stratum reading 0.0 across the board is indistinguishable from a stratum
+    whose retriever was never given a chance to rank anything.
+    """
+    item_id, _ = _some_item(corpus)
+    case = _case(
+        id="NOTHING-MATCHES",
+        query="Zzyzxquorumbleflange",
+        strata=("exacto",),
+        relevant_items=(item_id,),
+    )
+    rendered = render_markdown(evaluate([case], corpus, ks=(1, 10)))
+    row = next(line for line in rendered.splitlines() if line.startswith("| exacto |"))
+    assert "vacíos" in rendered, "the column must be labelled where it is read"
+    assert row.split("|")[3].strip() == "1", f"the empty-result count is missing from: {row}"

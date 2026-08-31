@@ -153,6 +153,12 @@ class CaseResult:
     # `None` = NOT MEASURED for this case, never "scored zero" (B1). A case that names no
     # surface did not fail surface recall; a case with no relevant OWNER has a 0/0 recall.
     metrics: dict[str, float | None]
+    # The retriever returned NO CHUNK AT ALL (M3). A 0.0 recall has two causes — the right
+    # item ranked below k, or nothing matched — and one number cannot say which. On the real
+    # corpus the second was the cause in 18 of 21 cases while the report read every one of
+    # them as the first, which is how a query-construction defect got published as a semantic
+    # result. Carried per case and counted per bucket so the two are never confused again.
+    no_results: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +200,7 @@ class EvaluationReport:
                     "strata": list(case.strata),
                     "retrieved": list(case.retrieved),
                     "metrics": case.metrics,
+                    "no_results": case.no_results,
                 }
                 for case in self.cases
             ],
@@ -408,7 +415,17 @@ def _score(case: GoldenCase, hits: Sequence[LexicalHit], ks: tuple[int, ...]) ->
         # goes with it: with no relevant owner its numerator is 0 by construction, so the
         # number would restate the empty set rather than measure the retriever (rule 2).
         metrics[f"recall@{k}"] = found / len(relevant) if relevant else None
-        metrics[f"precision@{k}"] = (found / len(top) if top else 0.0) if relevant else None
+        # `top` EMPTY IS 0/0, not a precision of zero (M3) — the last instance of B1, and
+        # the one that reached the published table: 18 of 21 cases on the real corpus, 86 %
+        # of the `precision` column. Its numerator is 0 by construction, so the number
+        # restates the empty set instead of measuring the retriever, which is exactly the
+        # argument 3006c0c used one line above for `recall` and `mrr`.
+        #
+        # `recall@k` deliberately does NOT follow: its denominator is the case's known
+        # relevant set, so "none of the two items that exist came back" is a real
+        # measurement of a real failure. Different denominators, different answers.
+        precision = None if not top else found / len(top)
+        metrics[f"precision@{k}"] = precision if relevant else None
         metrics[f"surface_recall@{k}"] = _surface_recall(case, hits, k)
     metrics["mrr"] = _mrr(ranked, relevant) if relevant else None
     return CaseResult(
@@ -417,6 +434,7 @@ def _score(case: GoldenCase, hits: Sequence[LexicalHit], ks: tuple[int, ...]) ->
         strata=case.strata,
         retrieved=tuple(ranked[: max(ks)]),
         metrics=metrics,
+        no_results=not hits,
     )
 
 
@@ -504,6 +522,10 @@ def _bucket_means(members: Sequence[CaseResult], ks: tuple[int, ...]) -> dict[st
         metrics[name] = round(sum(values) / len(values), 4) if values else NO_COVERAGE
     metrics["cases"] = len(members)
     metrics["measured"] = measured
+    # Beside `measured`, and for the same reason (rule 2): `measured` says how many members
+    # carried a metric, this says how many were handed nothing to rank. A bucket reading 0.0
+    # with `no_results == cases` is not a retriever that ranked badly.
+    metrics["no_results"] = sum(1 for m in members if m.no_results)
     return metrics
 
 
@@ -591,6 +613,11 @@ def render_markdown(report: EvaluationReport) -> str:
         "> Una celda `sin cobertura` NO es un cero: ningún caso del bucket pudo medir esa",
         "> métrica (spec §8.6.8). `measured` en el JSON lleva el denominador de cada media.",
         "",
+        "> `vacíos` cuenta los casos del bucket cuya consulta no recuperó NI UN CHUNK. Un 0,0",
+        "> con `vacíos = casos` no dice que el recuperador ordenase mal: dice que no llegó a",
+        "> ordenar nada. Sobre esos casos `precision@k` sale *no medida*, nunca 0,0 — su",
+        "> numerador es 0 por construcción y repetiría el conjunto vacío (M3).",
+        "",
     ]
     lines += _table("Por estrato", report.by_stratum)
     lines += _table("Por procedencia", report.by_provenance)
@@ -632,12 +659,14 @@ def _table(title: str, buckets: dict[str, Any]) -> list[str]:
     lines = [
         f"## {title}",
         "",
-        "| bucket | casos | recall@1 | recall@10 | precision@10 | MRR |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| bucket | casos | vacíos | recall@1 | recall@10 | precision@10 | MRR |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for name, values in buckets.items():
         if values == NO_COVERAGE:
-            lines.append(f"| {name} | — | sin cobertura | sin cobertura | sin cobertura | — |")
+            lines.append(
+                f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — |"
+            )
             continue
         cells = [
             _cell(values, "recall@1"),
@@ -645,7 +674,11 @@ def _table(title: str, buckets: dict[str, Any]) -> list[str]:
             _cell(values, "precision@10"),
             _cell(values, "mrr"),
         ]
-        lines.append(f"| {name} | {values['cases']} | " + " | ".join(cells) + " |")
+        lines.append(
+            f"| {name} | {values['cases']} | {values['no_results']} | "
+            + " | ".join(cells)
+            + " |"
+        )
     lines.append("")
     return lines
 
