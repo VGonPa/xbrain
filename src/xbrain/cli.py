@@ -1618,7 +1618,7 @@ def digest_video(
     vision_model: str | None = typer.Option(
         None,
         "--vision-model",
-        help="Sobrescribe `[vision].model` para este run: el nombre se pasa como "
+        help="Sobrescribe `\\[vision].model` para este run: el nombre se pasa como "
         "--model al comando de visión. Con un wrapper multi-backend permite elegir "
         "modelo por run (p.ej. opus → nube, qwen-7b → local). Requiere --frames.",
     ),
