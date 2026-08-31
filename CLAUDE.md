@@ -475,10 +475,15 @@ generates an Obsidian wiki.
   words they are. `target` is a SOFT ceiling that paragraphs are PACKED into, and this was
   found by MEASURING, not by reading: one chunk per paragraph gave **30,449** chunks
   (`x_article` averaging 194 chars) against the plan's predicted 18–25k, and packing gives
-  **18,328** (9,294 atomic + 9,034 splittable) — a 194-char chunk is bad retrieval before it
+  **18,319** (9,294 atomic + 9,025 splittable) — a 194-char chunk is bad retrieval before it
   is bad arithmetic, too small to judge a match and scattering one argument across a dozen ids.
-  The chunker's parameters are ARGUMENTS, so the Plan-02 sweep cannot move the ranking fixture
-  that pins today's behaviour.
+  (The figure was **18,328 / 9,034** until `_absorb_scraps` merged the 9 chunks that sat below
+  the floor; the commit that removed them said so and this line was not re-derived — rule 6 in
+  miniature, in the file the repo says is read first and acted on. Re-derived 2026-08-31 on the
+  same 2,404-item corpus, md5 `5aaf62f4…`. **30,449 is NOT re-derivable**: it measured the
+  pre-packing implementation, which no longer exists, so read it as history, never as a figure
+  you could reproduce today.) The chunker's parameters are ARGUMENTS, so the Plan-02 sweep
+  cannot move the ranking fixture that pins today's behaviour.
 - **`eval/golden-set.yaml` is TRACKED — the single exception to "nothing personal in Git" —
   and the loader has two stages because of it.** Untracked (it lived under `data/*`), the v3
   migration would have appeared in no diff, `xbrain eval` could never run in CI, and a case
@@ -506,7 +511,25 @@ generates an Obsidian wiki.
   index will use, on `sqlite3(":memory:")` — same DDL, same `unicode61 remove_diacritics 2`
   (no stemming: FTS5 has none multilingual, and the English one would wreck the Spanish half),
   same `bm25()`, same explicit `chunk_id` tie-break — so what dies later is where the database
-  lives, not how it scores.
+  lives, not how it scores. **And that last clause was FALSE while the terms were ANDed.** The
+  FTS5 default conjunction requires every word of a question inside ONE chunk: measured on the
+  real corpus, 18 of the 21 scorable cases got back NOT ONE ROW, and the only three that
+  retrieved anything were single-term `exacto` queries. So bm25 ranked nothing in 18 of 21
+  cases, and the published `semantico: 0.0` / `cruzado_idioma: 0.0` / `topic: 0.0` measured the
+  QUERY BUILDER while the execution report read them as an absence of vocabulary overlap. The
+  connective is now a **disjunction** (`FTS_CONNECTIVE`, recorded in the ranking fixture beside
+  the tokenizer): empty result sets 18/21 → 0/21, recall@10 0.1429 → 0.8099, MRR 0.1429 →
+  0.7206, `exacto` unchanged and **no stratum regressed**, at p50 0.23 → 9.75 ms. A conjunction
+  in front of bm25 is two retrieval models stacked: bm25 wants a wide candidate set and
+  discriminates by IDF, and requiring every term does that by brute force *before* the scorer
+  runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
+  as a function word can still be rare to the index and go undiscounted — `el` is 1 of 43
+  fixture chunks (2.3 %) and 5,748 of 18,319 real ones (31.4 %), which is why a fixture query
+  ranks it high and the real corpus does not. That, and no stemming, is what Plan 03's vector
+  layer has to beat. Picking between `OR`, minimum-should-match and per-term weighting is Plan
+  02's sweep. **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
+  counts the comparisons it made and fails closed at zero, because `passed = not failures` let
+  `--min-recall 1.0` exit 0 having scored nothing.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·

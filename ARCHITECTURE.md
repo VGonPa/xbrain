@@ -863,7 +863,7 @@ chunk count is unchanged (512 → 512) and every one of the 512 fingerprints mov
 
 `target` is a SOFT ceiling that paragraphs are PACKED into, not "one chunk per paragraph".
 Measured on the real corpus: one chunk per paragraph gave 30,449 chunks (`x_article`
-averaging 194 chars), and packing gives **18,328** — 9,294 atomic + 9,034 splittable. A
+averaging 194 chars), and packing gives **18,319** — 9,294 atomic + 9,025 splittable. A
 194-character chunk is bad retrieval before it is bad arithmetic: too little context to judge
 a match, and one argument scattered across a dozen ids so bm25 sees a dozen weak documents
 instead of one strong one.
@@ -896,6 +896,31 @@ DDL, same tokenizer (`unicode61 remove_diacritics 2`, no stemming — FTS5 has n
 stemmer and an English one would wreck the Spanish half), same `bm25()`, same explicit
 tie-break on `chunk_id`. So what changes later is where the database lives, not how it
 scores, and the fixture pins one scorer against itself over time.
+
+**The query terms are joined by a DISJUNCTION, and that is a retrieval decision.** FTS5's
+default is a conjunction, which requires every word of a question to appear inside ONE chunk;
+measured on the real corpus it returned not one row for 18 of the 21 scorable golden-set
+cases, so the published `semantico: 0.0` measured the query builder rather than the corpus.
+A conjunction in front of `bm25()` is two retrieval models stacked on each other: bm25 is a
+ranking function over a bag of words, it wants a wide candidate set and discriminates inside
+it by inverse document frequency, and requiring every term does that discrimination by brute
+force before the scorer ever runs. With the disjunction, empty result sets went 18/21 → 0/21
+and mean `recall@10` 0.1429 → 0.8099 with no stratum regressing, at a latency cost of p50
+0.23 → 9.75 ms. The connective is exported as `FTS_CONNECTIVE` and recorded in the ranking
+fixture beside the tokenizer, because it decides the candidate set and therefore every recall
+number downstream — and because the six original fixture queries could not tell the two
+connectives apart, so the change would otherwise have passed the fixture in silence.
+
+The remaining known limits, both declared rather than discovered later: there is **no
+stemming**, and **IDF is relative to this corpus**, so a word that reads as a function word
+can still be rare to the index and go undiscounted (`el` is 1 of 43 fixture chunks and 5,748
+of 18,319 real ones). Those are what the vector layer of Plan 03 has to beat.
+
+**A threshold that reached no bucket fails closed.** `--min-recall` counts the
+`(bucket, metric)` comparisons it actually made; at zero it reports an explicit failure
+naming the count — never a bucket, which would invent a verdict for a population nobody
+measured. Before that, `passed` was literally "no failures recorded", so a threshold of 1.0
+over a golden set the baseline could not score exited 0.
 
 ---
 
