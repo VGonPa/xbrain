@@ -297,7 +297,13 @@ frame itself is illegible, the fix is re-extracting the frame — `digest-video
 --force --frames` — not `redescribe-frames`.
 
 It is destructive (rewrites `items.json`) → auto-snapshots first, but only
-when at least one caption actually changed.
+when at least one frame was actually re-described. That is a lower bar than
+"a caption changed": a frame whose new caption comes back byte-identical to
+the old one still counts, because writing the `caption_contract` stamp is
+itself a real store change — persisting it is what makes the corpus converge,
+so the *next* run costs zero vision calls instead of re-paying for the same
+frame forever. A run that re-describes nothing (already-current corpus, or an
+empty selection) skips the snapshot and the write entirely.
 
 ### The photo half needs a manual step
 

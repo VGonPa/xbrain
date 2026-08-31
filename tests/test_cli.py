@@ -4333,6 +4333,82 @@ def test_redescribe_frames_persists_partial_work_on_a_mid_run_abort(tmp_path: Pa
 
 
 # ---------------------------------------------------------------------------
+# #90 re-review item 4: a failure INSIDE the `finally` (the snapshot/save
+# step) must never replace an in-flight original error, or swallow the
+# always-prints-the-summary promise.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_save_failure_during_abort_surfaces_both_errors(
+    tmp_path: Path, monkeypatch
+):
+    """Measured by the re-reviewer: with `save_store` raising `OSError("DISK
+    FULL")` while a `VisionNotFound` is already propagating, Python's default
+    `finally` semantics would let the save failure REPLACE the original error
+    — the operator would see only "Error: DISK FULL during save" and never
+    learn the vision command vanished. Both must surface: the ORIGINAL cause
+    (why the run aborted) stays the one `_handle_cli_errors` reports and exits
+    on, and the save failure is reported alongside it, not silently dropped.
+    The summary must also still print — it is now echoed FIRST in the
+    `finally`, before the snapshot/save step that just blew up."""
+    from xbrain.vision import VisionNotFound
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {
+            "1": _video_item_with_frames("1", data_dir),
+            "2": _video_item_with_frames("2", data_dir),
+        },
+        data_dir / "items.json",
+    )
+
+    def _describe(path, **kwargs):
+        if "2/frames" in str(path):
+            raise VisionNotFound("vision command vanished")
+        return "nueva"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _describe)
+    monkeypatch.setattr(
+        "xbrain.cli.save_store",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("DISK FULL")),
+    )
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    # The ORIGINAL cause is still what's reported and exited on — NOT the
+    # save failure that happened afterward while unwinding it.
+    assert "Error: vision command vanished" in result.output
+    # ...but the save failure must ALSO be visible, not silently dropped.
+    assert "DISK FULL" in result.output
+    # The summary — reflecting item 1's completed work — still printed.
+    assert "2 regeneradas" in result.output
+
+
+def test_redescribe_frames_save_failure_on_a_clean_run_propagates(tmp_path: Path, monkeypatch):
+    """The other half of item 4: with NOTHING already in flight, a
+    `save_store` failure IS the error — it must propagate normally, exactly
+    as it did before this fix, rather than being swallowed just because it
+    happens inside a `finally`."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+    monkeypatch.setattr(
+        "xbrain.cli.save_store",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("DISK FULL")),
+    )
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "Error: DISK FULL" in result.output
+    # The summary still printed even though the save blew up right after.
+    assert "2 regeneradas" in result.output
+
+
+# ---------------------------------------------------------------------------
 # #90 review I3 (CLI level): dry-run vs. real-run output must be unmistakable.
 # ---------------------------------------------------------------------------
 
@@ -4576,3 +4652,56 @@ def test_redescribe_frames_missing_vision_command_names_the_operation(tmp_path: 
 
     assert result.exit_code == 1
     assert "redescribe-frames" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 PR2 re-review M3 + M6: two defects the whole-branch fix wave reinstated
+# and re-fixed, pinned by NOTHING — a future edit could re-break either one
+# and the suite would stay green. Both must assert on the RENDERED --help
+# output (via CliRunner), never on the source string: `[vision]` looks like a
+# valid Rich markup tag, so rich's markup parser silently EATS `[vision]` and
+# everything up to the next `]` at render time — a source-text `assert
+# "[vision]" in <docstring>` would stay green even after the escaping
+# backslash is deleted, because the backslash lives in the source either way.
+# Only rendering reproduces the actual eaten-markup failure mode.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_help_renders_vision_config_key_literally():
+    """M3: `redescribe-frames --help` must show `[vision].command` literally.
+
+    Unescaped, Rich's markup parser treats `[vision]` as a (bogus) style tag,
+    strips it, and renders `.command` on its own — the operator loses the one
+    clue telling them which config section to set."""
+    result = runner.invoke(app, ["redescribe-frames", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "[vision].command" in _plain_output(result.output)
+
+
+def test_digest_video_help_renders_vision_config_keys_literally():
+    """M3, the sibling surface: `digest-video --help` mentions `[vision]` twice
+    — once in `--frames`'s help (`[vision].command`) and once in
+    `--vision-model`'s (`[vision].model`) — and both must survive rendering."""
+    result = runner.invoke(app, ["digest-video", "--help"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    assert "[vision].command" in out
+    assert "[vision].model" in out
+
+
+def test_redescribe_frames_limit_help_says_items_not_videos():
+    """M6: one bookmark can carry two frame-bearing `x_video` sources, so
+    `--limit` capping ITEMS is a materially different promise than capping
+    videos — the rendered help for `--limit` (and only `--limit`; the
+    docstring body legitimately says "vídeos" elsewhere) must say "items"."""
+    result = runner.invoke(app, ["redescribe-frames", "--help"])
+    assert result.exit_code == 0, result.output
+    out = _plain_output(result.output)
+    # Isolate the --limit row itself (up to the next option flag) so a "vídeos"
+    # elsewhere in the help text (the command docstring says "vídeos" freely)
+    # can't satisfy this assertion by accident.
+    match = re.search(r"--limit\b.*?(?=--force\b)", out)
+    assert match, out
+    limit_help = match.group(0)
+    assert "items" in limit_help
+    assert "vídeos" not in limit_help

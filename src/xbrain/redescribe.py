@@ -93,6 +93,17 @@ class RedescribeReport:
     `videos_current` counts sources skipped because they already carry the
     current contract; `items_repropagated` counts items whose `content.fetched_at`
     was bumped because at least one caption actually changed.
+
+    EVERY counter on this dataclass ACCUMULATES when the same `report=` instance
+    is reused across more than one `redescribe_frames` call — none of them are
+    reset or overwritten (#90 re-review item 3: `videos_current` and
+    `items_repropagated` used to be plain assignments, silently DISCARDING an
+    earlier call's count the moment a second call ran against the same report,
+    while every other field here already accumulated — an inconsistent contract
+    on a seam that is otherwise uniform). A fresh `RedescribeReport()` naturally
+    starts every field at 0, so this only matters to a caller that deliberately
+    shares one report across multiple calls (e.g. a staged, multi-batch backfill
+    that wants a running total).
     """
 
     videos_selected: int = 0
@@ -198,7 +209,15 @@ def redescribe_frames(
     all_frame_sources = stale_video_sources(store, item_ids, force=True)
     stale = stale_video_sources(store, item_ids, force=force)
     stale_keys = {(item_id, id(source)) for item_id, source in stale}
-    report.videos_current = sum(
+    # `+=`, not `=` (#90 re-review item 3): every OTHER counter on this report
+    # already accumulates across repeated calls sharing one `report=` instance
+    # (`videos_selected`, `frames_described`, `frames_failed`) — an assignment
+    # here would silently RESET this one counter to the current call's count,
+    # discarding whatever an earlier call already recorded. Uniform accumulate
+    # is also the meaningful choice for an operator running a staged backfill
+    # in batches: they want the TOTAL already-current count across the run, not
+    # just the last batch's.
+    report.videos_current += sum(
         1 for item_id, source in all_frame_sources if (item_id, id(source)) not in stale_keys
     )
 
@@ -233,7 +252,10 @@ def redescribe_frames(
             now=now,
             repropagated_items=repropagated_items,
         )
-    report.items_repropagated = len(repropagated_items)
+    # `+=`, matching `videos_current` above: this call's newly-repropagated
+    # items add to whatever an earlier call on the same `report=` already
+    # counted, rather than replacing it (#90 re-review item 3).
+    report.items_repropagated += len(repropagated_items)
     _raise_on_total_failure(report, dry_run=dry_run)
     return report
 

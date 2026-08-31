@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -1910,17 +1911,51 @@ def redescribe_frames_command(
             report=report,
         )
     finally:
-        # Snapshot strictly BEFORE the write — the operator's only undo for a
-        # 2077-caption rewrite — and the summary always prints, success or
-        # failure, so a run that dies partway through still tells the operator
-        # what landed. The exception (if any) propagates unmodified past this
-        # block: `finally` never swallows it.
-        if dry_run:
-            typer.echo("--dry-run: no se ha tocado el store.")
-        elif report.frames_described > 0:
-            _auto_snapshot(cfg, "redescribe-frames")
-            save_store(store, cfg.items_path)
-        typer.echo(format_redescribe_summary(report, dry_run=dry_run))
+        _finish_redescribe_run(cfg, store, report, dry_run=dry_run)
+
+
+def _finish_redescribe_run(
+    cfg: Config, store: dict[str, Item], report: RedescribeReport, *, dry_run: bool
+) -> None:
+    """The `redescribe-frames` `finally` body (#90 re-review item 4).
+
+    Two invariants must hold even when the snapshot/save step below RAISES:
+
+    1. The summary always prints — it is the FIRST thing this does, before
+       anything that can fail — so an abort (in the engine call above, OR
+       right here) still tells the operator what landed. Measured bug: with
+       the summary echoed AFTER the save, a `save_store` failure meant it
+       never ran at all, even though the run's actual counters were sitting
+       right there on `report`.
+    2. A save/snapshot failure must never REPLACE an exception already
+       propagating. That is Python's DEFAULT `finally` behaviour — a new
+       exception raised while one is in flight silently becomes the
+       reported one (the original demoted to `__context__` and never
+       surfaced to the operator) — so this checks `sys.exc_info()`
+       explicitly: with an original error in flight, the save failure is
+       reported (not swallowed) but the ORIGINAL keeps propagating
+       unmodified. With nothing in flight, the save/snapshot failure IS the
+       error, and propagates exactly as it did before this fix.
+    """
+    typer.echo(format_redescribe_summary(report, dry_run=dry_run))
+    if dry_run:
+        typer.echo("--dry-run: no se ha tocado el store.")
+        return
+    if report.frames_described == 0:
+        return
+    # Snapshot strictly BEFORE the write — the operator's only undo for a
+    # 2077-caption rewrite.
+    original_error = sys.exc_info()[1]
+    try:
+        _auto_snapshot(cfg, "redescribe-frames")
+        save_store(store, cfg.items_path)
+    except Exception as save_exc:
+        if original_error is None:
+            raise
+        typer.echo(
+            f"AVISO: además del error anterior, falló guardar el store: {save_exc}",
+            err=True,
+        )
 
 
 @app.command()

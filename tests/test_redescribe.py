@@ -821,6 +821,65 @@ def test_report_defaults_to_a_fresh_instance_when_omitted(tmp_path: Path):
     assert report.frames_described == 1
 
 
+def test_report_counters_all_accumulate_across_repeated_calls_sharing_one_report(
+    tmp_path: Path,
+):
+    """#90 re-review item 3: reusing ONE `report=` across two engine calls must
+    accumulate EVERY counter, not just the three that already did
+    (`videos_selected`, `frames_described`, `frames_failed`). `videos_current`
+    and `items_repropagated` used to be plain ASSIGNMENTS — the second call's
+    count silently REPLACED the first call's instead of adding to it, an
+    inconsistent contract on an otherwise-uniform seam.
+
+    Two independent batches (distinct stores, one shared `report`), each
+    contributing to every counter: a stale item that changes cleanly, an
+    already-current item (`videos_current`), and — in the second batch — one
+    frame missing on disk (a real `frames_failed`), so nothing here is 0 in
+    a way that could hide a broken counter.
+    """
+    first_stale = _item("1", contract="", descriptions=("old", "old"))
+    first_current = _item("cur1", contract=FRAME_CAPTION_CONTRACT, descriptions=("x",))
+    first_store = {"1": first_stale, "cur1": first_current}
+    _media(tmp_path, first_stale)
+    _media(tmp_path, first_current)
+
+    report = RedescribeReport()
+    redescribe_frames(
+        first_store, media_root=tmp_path, describe_fn=lambda path: "new", report=report
+    )
+
+    assert (
+        report.videos_selected,
+        report.videos_current,
+        report.frames_described,
+        report.frames_failed,
+        report.items_repropagated,
+    ) == (1, 1, 2, 0, 1)
+
+    second_stale = _item("2", contract="", descriptions=("old", "old"))
+    second_current = _item("cur2", contract=FRAME_CAPTION_CONTRACT, descriptions=("x",))
+    second_store = {"2": second_stale, "cur2": second_current}
+    _media(tmp_path, second_stale)
+    _media(tmp_path, second_current)
+    # Delete one of item 2's frame images so this batch also feeds `frames_failed`.
+    (tmp_path / second_stale.content.sources[0].frames[0].local_path).unlink()
+
+    redescribe_frames(
+        second_store, media_root=tmp_path, describe_fn=lambda path: "new", report=report
+    )
+
+    # Every counter is now the SUM of both batches — never just the second's
+    # (which alone would read (1, 1, 1, 1, 1), the exact shape a regressed
+    # assignment on `videos_current`/`items_repropagated` would produce).
+    assert (
+        report.videos_selected,
+        report.videos_current,
+        report.frames_described,
+        report.frames_failed,
+        report.items_repropagated,
+    ) == (2, 2, 3, 1, 2)
+
+
 # ---------------------------------------------------------------------------
 # #90 review I3: `--dry-run`'s summary wording must be predictive, not
 # past-tense, and must be textually distinct from a real run's.
