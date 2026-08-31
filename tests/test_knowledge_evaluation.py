@@ -279,3 +279,18 @@ def test_the_case_count_reconciles_including_the_unmeasured(corpus) -> None:
     ).to_dict()
     total = len(load_cases(FIXTURE_GOLDEN)) + len(load_scenarios(FIXTURE_GOLDEN))
     assert len(payload["cases"]) + len(payload["unmeasured"]) + len(payload["scenarios"]) == total
+
+
+def test_the_retrieval_depth_never_falls_below_the_largest_reported_k(corpus) -> None:
+    """`--limit 1` while reporting recall@20 would measure the LIMIT, not the retriever.
+
+    A knob that can silently invalidate the metric beside it is worse than no knob: the
+    report would show `recall@20` computed over at most one result, and the number would look
+    exactly like a retrieval failure. So the depth is `max(limit, max(ks))` — raising it is
+    allowed (it answers "is this a ranking problem or an absence?"), lowering it below the
+    reported k is not.
+    """
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    clamped = evaluate(cases, corpus, ks=(20,), limit=1)
+    natural = evaluate(cases, corpus, ks=(20,))
+    assert clamped.to_dict()["by_stratum"] == natural.to_dict()["by_stratum"]

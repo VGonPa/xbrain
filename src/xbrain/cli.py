@@ -2960,7 +2960,11 @@ def _render_inspect(payload: dict) -> str:
 @_handle_cli_errors
 def eval_command(
     strategy: str = typer.Option("lexical", "--strategy", help="Estrategia a evaluar."),
-    limit: int = typer.Option(10, "--limit", help="Profundidad de recuperación por caso."),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        help="Profundidad de recuperación por caso (nunca por debajo del mayor k).",
+    ),
     k: list[int] = typer.Option([], "--k", help="Valores de k a reportar (repetible)."),
     min_recall: float | None = typer.Option(
         None,
@@ -2997,6 +3001,7 @@ def eval_command(
         ks=tuple(k) if k else DEFAULT_KS,
         threshold=min_recall,
         scenarios=load_scenarios(path),
+        limit=limit,
     )
     payload = result.to_dict()
     json_path = report or (cfg.data_dir / "eval-report.json")
@@ -3015,7 +3020,6 @@ def eval_command(
         # A gate that reports its own failure on stdout and exits 0 is the `gh pr checks`
         # trap of CLAUDE.md rule 9, reproduced locally. The non-zero exit is the signal.
         raise ValueError("La evaluación no alcanza el umbral:\n  " + "\n  ".join(result.failures))
-    _ = limit
 
 
 if __name__ == "__main__":

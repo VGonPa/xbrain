@@ -258,6 +258,7 @@ def evaluate(
     threshold: float | None = None,
     scenarios: Sequence[GoldenScenario] = (),
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
+    limit: int | None = None,
 ) -> EvaluationReport:
     """Score every case and aggregate by stratum and by provenance.
 
@@ -265,7 +266,13 @@ def evaluate(
     falls below it becomes a named failure. When absent, the report only reports — spec §8.6
     fixes thresholds after the baseline, and a default here would be a number that could not
     come out any other way.
+
+    `limit` is how deep the retriever is asked to go. It defaults to `max(ks)`, because
+    asking for fewer results than the largest k being reported would make that k's recall a
+    measurement of the LIMIT rather than of the retriever — a number that cannot come out any
+    other way. A caller may raise it to see whether a miss is a ranking problem or an absence.
     """
+    depth = max(limit or 0, max(ks))
     index, stats = build_index(corpus, params=params)
     results: list[CaseResult] = []
     unmeasured: list[dict[str, Any]] = []
@@ -287,7 +294,7 @@ def evaluate(
             )
             continue
         started = time.perf_counter()
-        hits = _search(index, case, limit=max(ks))
+        hits = _search(index, case, limit=depth)
         latencies.append((time.perf_counter() - started) * 1000)
         results.append(_score(case, hits, ks))
 
