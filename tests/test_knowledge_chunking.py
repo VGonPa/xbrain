@@ -708,3 +708,39 @@ def test_a_surface_shorter_than_the_floor_still_yields_its_one_chunk() -> None:
     chunks = chunk_surface(surface, params=params)
     assert len(chunks) == 1
     assert chunks[0].text == "tiny"
+
+
+def test_the_harness_chunks_an_article_on_its_block_boundaries() -> None:
+    """m8: the guard on the PRODUCTION path, not on the entry point the tests call.
+
+    M1 was never really about the `if blocks:` branch in `_spans`. It was that no production
+    caller could feed it: `chunk_surfaces` had no `blocks` parameter, so the branch was
+    unreachable from the CLI and from the harness, and deleting it left the whole suite
+    green. The fix wired both callers — and nothing pinned the wiring. Measured: deleting
+    `blocks_by_surface_id=article_block_texts(item)` from `evaluation.corpus_chunks` left
+    2,143 tests passing.
+
+    So this asserts through `corpus_chunks`, the function the harness actually calls, over a
+    corpus holding the article whose blocks the paragraph fallback provably cannot reproduce
+    (`_discriminating_blocks`, guarded by its own discrimination test above).
+    """
+    from xbrain.knowledge.evaluation import Corpus, corpus_chunks
+
+    blocks = _discriminating_blocks()
+    item = _article_item(blocks)
+    corpus = Corpus(items={item.id: item}, vocab=[], topic_pages={}, source="m8")
+
+    chunks, _surfaces = corpus_chunks(corpus)
+    article = [c for c in chunks if c.surface_type == "x_article"]
+
+    assert article, "the corpus walk emitted no article chunk at all"
+    edges, cursor = {0}, 0
+    for block in blocks:
+        cursor += len(block.text)
+        edges.add(cursor)
+    for chunk in article:
+        assert chunk.char_start in edges, (
+            f"the harness cut inside a block at {chunk.char_start}: it is not being handed "
+            "the block boundaries"
+        )
+        assert chunk.char_end in edges, f"the harness cut inside a block at {chunk.char_end}"

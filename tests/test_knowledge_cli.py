@@ -232,3 +232,41 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
         "a threshold of 1.0 passed having scored zero cases:\n" + result.output
     )
     assert "0" in result.output and "medid" in result.output, result.output
+
+
+def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> None:
+    """m8, the other production caller: `knowledge inspect --chunks`.
+
+    The same defect and the same blind spot as the harness — measured, deleting
+    `blocks_by_surface_id=article_block_texts(item)` from `cli._inspect_item` left the full
+    suite green. Driven through the real command, because the CLI is what a consumer runs
+    and the argument lives in the CLI, not in the chunker.
+
+    The article fixture is IMPORTED, not copied: two literals that must agree about where a
+    block ends are two definitions that will drift (rule 5).
+    """
+    from tests.test_knowledge_chunking import _article_item, _discriminating_blocks
+
+    blocks = _discriminating_blocks()
+    item = _article_item(blocks)
+    store_path = workspace / "data" / "items.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    store[item.id] = item.model_dump(mode="json")
+    store_path.write_text(json.dumps(store, indent=2, default=str), encoding="utf-8")
+
+    payload = _json_stdout(
+        runner.invoke(app, ["knowledge", "inspect", item.id, "--chunks", "--json"])
+    )
+    article = [c for c in payload["chunks"] if c["surface_type"] == "x_article"]
+
+    assert article, "the command emitted no article chunk at all"
+    edges, cursor = {0}, 0
+    for block in blocks:
+        cursor += len(block.text)
+        edges.add(cursor)
+    for chunk in article:
+        assert chunk["char_start"] in edges, (
+            f"`inspect --chunks` cut inside a block at {chunk['char_start']}: the command is "
+            "not handing the chunker the block boundaries"
+        )
+        assert chunk["char_end"] in edges
