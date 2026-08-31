@@ -330,8 +330,6 @@ def _enrichment_surfaces(item: Item) -> list[KnowledgeSurface]:
     return out
 
 
-
-
 def _content_source_surfaces(
     item: Item,
     index: int,

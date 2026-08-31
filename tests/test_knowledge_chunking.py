@@ -287,9 +287,9 @@ def test_the_block_fixture_actually_discriminates_blocks_from_paragraphs() -> No
     interior = {e for e in fallback_edges if e not in block_edges}
 
     assert interior, "the fixture does not discriminate: paragraph edges == block edges"
-    assert any(
-        0 < e < len(blocks[0].text) for e in interior
-    ), f"no fallback edge falls inside the author's first block: {sorted(interior)}"
+    assert any(0 < e < len(blocks[0].text) for e in interior), (
+        f"no fallback edge falls inside the author's first block: {sorted(interior)}"
+    )
     article = [c for c in with_blocks if c.surface_type == "x_article"]
     assert [(c.char_start, c.char_end) for c in article] != [
         (c.char_start, c.char_end) for c in without
@@ -316,9 +316,7 @@ def test_a_block_above_the_ceiling_is_still_cut_inside_itself() -> None:
     item = _article_item([huge, ArticleTextBlock(text="\n\n" + "F" * 600)])
     chunks = [
         c
-        for c in chunk_surfaces(
-            item_surfaces(item), blocks_by_surface_id=article_block_texts(item)
-        )
+        for c in chunk_surfaces(item_surfaces(item), blocks_by_surface_id=article_block_texts(item))
         if c.surface_type == "x_article"
     ]
     interior = [c for c in chunks if 0 < c.char_end < len(huge.text)]

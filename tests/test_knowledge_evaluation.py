@@ -348,9 +348,10 @@ def test_a_case_that_names_no_surface_does_not_lower_the_stratum_surface_recall(
 
     item_id, query = _some_item(corpus)
     surface = next(
-        s for s in __import__(
-            "xbrain.knowledge.surfaces", fromlist=["item_surfaces"]
-        ).item_surfaces(corpus.items[item_id])
+        s
+        for s in __import__("xbrain.knowledge.surfaces", fromlist=["item_surfaces"]).item_surfaces(
+            corpus.items[item_id]
+        )
     )
     measured = _case(
         id="WITH-SURFACE",
@@ -358,9 +359,7 @@ def test_a_case_that_names_no_surface_does_not_lower_the_stratum_surface_recall(
         strata=("exacto",),
         relevant_items=(item_id,),
         relevant_surfaces=(
-            RelevantSurface(
-                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
-            ),
+            RelevantSurface(owner_type="item", owner_id=item_id, surface_type=surface.surface_type),
         ),
     )
     silent = _case(id="NO-SURFACE", query=query, strata=("exacto",), relevant_items=(item_id,))
@@ -393,9 +392,7 @@ def test_a_case_with_no_relevant_owner_reports_recall_as_unmeasured_not_zero(cor
         query=query,
         strata=("exacto",),
         relevant_surfaces=(
-            RelevantSurface(
-                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
-            ),
+            RelevantSurface(owner_type="item", owner_id=item_id, surface_type=surface.surface_type),
         ),
     )
     metrics = evaluate([case], corpus, ks=(1,)).cases[0].metrics
@@ -422,9 +419,7 @@ def test_a_bucket_whose_cases_all_skip_a_metric_reports_it_without_coverage(corp
         query=query,
         strata=("exacto",),
         relevant_surfaces=(
-            RelevantSurface(
-                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
-            ),
+            RelevantSurface(owner_type="item", owner_id=item_id, surface_type=surface.surface_type),
         ),
     )
     bucket = evaluate([case], corpus, ks=(10,)).by_stratum["exacto"]
@@ -452,9 +447,7 @@ def test_an_unmeasured_metric_can_never_be_reported_as_a_threshold_failure(corpu
         query=query,
         strata=("exacto",),
         relevant_surfaces=(
-            RelevantSurface(
-                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
-            ),
+            RelevantSurface(owner_type="item", owner_id=item_id, surface_type=surface.surface_type),
         ),
     )
     report = evaluate([case], corpus, ks=(10,), threshold=1.0)
@@ -473,9 +466,7 @@ def test_the_markdown_renders_an_unmeasured_metric_as_words_not_a_number(corpus)
         query=query,
         strata=("exacto",),
         relevant_surfaces=(
-            RelevantSurface(
-                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
-            ),
+            RelevantSurface(owner_type="item", owner_id=item_id, surface_type=surface.surface_type),
         ),
     )
     rendered = render_markdown(evaluate([case], corpus, ks=(1, 10)))

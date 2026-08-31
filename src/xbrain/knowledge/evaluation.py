@@ -480,27 +480,31 @@ def _aggregate(
     out: dict[str, Any] = {}
     for bucket in sorted(buckets):
         members = [r for r in results if bucket in key(r)]
-        if not members:
-            out[bucket] = NO_COVERAGE
-            continue
-        metric_names = [f"recall@{k}" for k in ks]
-        metric_names += [f"precision@{k}" for k in ks]
-        metric_names += [f"surface_recall@{k}" for k in ks]
-        metric_names.append("mrr")
-        bucket_metrics: dict[str, Any] = {}
-        measured: dict[str, int] = {}
-        for name in metric_names:
-            values = [
-                value for m in members if (value := m.metrics.get(name)) is not None
-            ]
-            measured[name] = len(values)
-            bucket_metrics[name] = (
-                round(sum(values) / len(values), 4) if values else NO_COVERAGE
-            )
-        bucket_metrics["cases"] = len(members)
-        bucket_metrics["measured"] = measured
-        out[bucket] = bucket_metrics
+        out[bucket] = _bucket_means(members, ks) if members else NO_COVERAGE
     return out
+
+
+def _metric_names(ks: tuple[int, ...]) -> list[str]:
+    """Every metric the report carries, in table order. One list, so the aggregate and the
+    per-case scoring cannot disagree about what exists."""
+    names = [f"recall@{k}" for k in ks]
+    names += [f"precision@{k}" for k in ks]
+    names += [f"surface_recall@{k}" for k in ks]
+    names.append("mrr")
+    return names
+
+
+def _bucket_means(members: Sequence[CaseResult], ks: tuple[int, ...]) -> dict[str, Any]:
+    """One non-empty bucket's means, each over the members that CARRY that metric."""
+    metrics: dict[str, Any] = {}
+    measured: dict[str, int] = {}
+    for name in _metric_names(ks):
+        values = [value for m in members if (value := m.metrics.get(name)) is not None]
+        measured[name] = len(values)
+        metrics[name] = round(sum(values) / len(values), 4) if values else NO_COVERAGE
+    metrics["cases"] = len(members)
+    metrics["measured"] = measured
+    return metrics
 
 
 def _failures(

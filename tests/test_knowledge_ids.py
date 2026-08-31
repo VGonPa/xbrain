@@ -267,21 +267,20 @@ def test_the_photo_source_key_is_public_and_lives_with_the_key_family() -> None:
     from xbrain.knowledge.ids import photo_source_key
 
     url = "https://pbs.twimg.com/media/abc.jpg"
-    assert photo_source_key(url) == hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:12]
+    assert (
+        photo_source_key(url) == hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:12]
+    )
     assert photo_source_key(url) != photo_source_key(url + "?x=1")
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(surfaces)))
     private = [
         alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and (node.module or "").startswith("xbrain.knowledge")
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("xbrain.knowledge")
         for alias in node.names
         if alias.name.startswith("_")
     ]
-    assert not private, (
-        f"`surfaces.py` still reaches into a sibling's privates: {private}"
-    )
+    assert not private, f"`surfaces.py` still reaches into a sibling's privates: {private}"
 
     # Scoped to imports from WITHIN this layer, deliberately. `surfaces.py` also imports
     # `_FAILURE_CLAUSE` from `executors.api`, and that one is the seam, not the smell: it is
