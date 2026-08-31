@@ -235,3 +235,99 @@ Re-running skips videos already carrying an `x_video` source unless `--force`.
 Slow? See [Troubleshooting → digest-video](troubleshooting.md#digest-video-is-slow-or-times-out).
 Digest reads fluently but doesn't match the video? →
 [Troubleshooting](troubleshooting.md#a-digest-reads-perfectly-but-says-nothing-that-was-said).
+
+## Fixing stale captions — `redescribe-frames`
+
+The rubric behind `--frames`' captions can itself change after you've already
+captioned a corpus — it did once: captions were found to be **translating**
+on-screen text (slide labels, code identifiers, chart axis labels) into the
+output language instead of transcribing it verbatim. Whoever later cites a
+label needs to match it against what is actually printed on screen, and a
+translated label breaks that match.
+
+When the rubric changes like that, you do **not** need to re-fetch the
+videos. The frames it would re-describe are already on disk at
+`data/media/<id>/frames/`, so `redescribe-frames` re-describes those bytes
+directly — **zero network, zero ffmpeg, zero X:**
+
+```bash
+uv run xbrain redescribe-frames --dry-run   # free: no model call, no [vision].command needed
+uv run xbrain redescribe-frames             # the real re-caption pass
+```
+
+`--dry-run` costs nothing at all: it doesn't require `[vision].command` to be
+configured, and it never calls the vision model — it just checks which frame
+images actually exist on disk, so it can tell you a frame whose PNG is gone
+will fail without spending a single vision call to find that out. It cannot
+predict which captions will *change*, since only the model calling on the real
+text can tell you that.
+
+**It skips anything already re-captioned.** Every video's frames remember the
+caption contract they were described under, so re-running the command on an
+already-current corpus costs zero vision calls; `--force` re-describes
+everything regardless. Select a narrower slice the same way as `digest-video`:
+`--ids a,b,c` (an id absent from the store is warned about, not silently
+dropped), `--topic <t>`, `--source bookmarks|tweets|all`, `--limit N`. With
+**none** of those set, the command targets every stale video in the corpus —
+deliberately, unlike `digest-video`'s selectors, because this is a one-shot
+corpus-wide repair rather than an incremental pipeline stage you run
+regularly.
+
+**A permanently-missing frame image is a real, recurring cost — know this
+before you rely on it for a large backfill.** A video's frames are marked
+"re-captioned" only once *every one* of them re-describes successfully. If
+even one frame's PNG is gone for good, that video never gets marked done:
+every future `redescribe-frames` run re-describes its surviving frames all
+over again — and because a real vision model is not deterministic, those
+captions come back reworded even though the pixels never changed, which
+re-triggers `enrich` and `video-digest` for that item on **every single run**,
+not just once. This is the price of the all-or-nothing design (it is what
+lets a partially-broken video keep retrying instead of being marked "done"
+with a stale caption baked in), but it means a video stuck this way is not a
+one-time cost — it is an ongoing one, for as long as it stays selected. On the
+corpus that motivated this command, that was 2077 frames across 142 videos,
+some of whose source videos are no longer downloadable at all.
+
+**This fixes translation, not an OCR misread.** `redescribe-frames` re-runs
+the *rubric* over the same pixels — it fixes a mistranslated or paraphrased
+label. It cannot fix a label the model genuinely could not read: the stored
+frames are downscaled to 640px wide at extraction time, and that resolution
+is not recoverable from the PNGs on disk. If a caption is wrong because the
+frame itself is illegible, the fix is re-extracting the frame — `digest-video
+--force --frames` — not `redescribe-frames`.
+
+It is destructive (rewrites `items.json`) → auto-snapshots first, but only
+when at least one frame was actually re-described. That is a lower bar than
+"a caption changed": a frame whose new caption comes back byte-identical to
+the old one still counts, because writing the `caption_contract` stamp is
+itself a real store change — persisting it is what makes the corpus converge,
+so the *next* run costs zero vision calls instead of re-paying for the same
+frame forever. A run that re-describes nothing (already-current corpus, or an
+empty selection) skips the snapshot and the write entirely.
+
+### The photo half needs a manual step
+
+`redescribe-frames` only covers **video key frames**. The same on-screen-text
+rule was also added to the rubric `xbrain describe` uses for tweet photos, and
+that half does **not** self-invalidate: `describe` decides whether a photo is
+stale by comparing its stored `description_version` against the hand-set
+`[describe].version` tag in `config.toml` — never by looking at whether the
+rubric's *content* changed. So after upgrading, if you want already-described
+photos to lose their old, possibly mistranslated captions, you have to say so
+explicitly:
+
+```toml
+[describe]
+version = "v2"   # was "v1" (or whatever you had it at)
+```
+
+```bash
+uv run xbrain describe
+```
+
+Without that bump, every photo `describe` already ran stays exactly as it
+was, forever — the rubric changed under it and nothing re-reads it. The
+default in `config.py` is deliberately **not** bumped for you: doing that
+automatically would silently re-describe every photo in every user's corpus
+on their next upgrade, at full vision-API cost, with no warning. That decision
+is yours to make, on your own schedule.
