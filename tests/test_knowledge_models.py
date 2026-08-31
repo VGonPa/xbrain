@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from xbrain.knowledge.models import (
     UNFETCHED_REASON_BY_FAILURE,
+    DerivedText,
     KnowledgeChunk,
     KnowledgeItem,
     KnowledgeSurface,
@@ -250,8 +251,8 @@ def test_topic_record_staleness_is_derived_not_stored_twice() -> None:
     record = TopicRecord(
         topic_id="topic:ai-coding",
         slug="ai-coding",
-        description="d",
-        overview="",
+        description=DerivedText(text="d", origin="unknown"),
+        overview=None,
         notes=(),
         primary_item_ids=(),
         secondary_item_ids=(),
@@ -262,3 +263,17 @@ def test_topic_record_staleness_is_derived_not_stored_twice() -> None:
         synthesis_fingerprint=None,
     )
     assert record.stale is True and record.synthesis_fingerprint is None
+
+
+def test_topic_layers_carry_their_own_provenance() -> None:
+    """Spec §3.6: the description, the overview and the notes are *derived layers WITH THEIR
+    OWN provenance*.
+
+    They are `DerivedText`, not bare strings, for the reason m-ii gives for
+    `SearchResult.summary`: nesting the text together with its `origin` is how invariant 2
+    is satisfied structurally. A single `origin` on `TopicRecord` would have to lie about one
+    of them — the vocabulary does not record whether a description was written or generated
+    (`unknown`), while the overview and the notes are known LLM output.
+    """
+    assert TopicRecord.model_fields["description"].annotation is DerivedText
+    assert "origin" in DerivedText.model_fields

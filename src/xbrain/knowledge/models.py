@@ -35,7 +35,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from xbrain.knowledge.provenance import Origin, TrustClass
-from xbrain.models import Author, ContentKind, FailureReason, SourceName
+from xbrain.models import Author, ContentKind, FailureReason, SourceName, Verdict
 
 # Every kind of text this layer can surface. Spec §4, one row per physical surface.
 SurfaceType = Literal[
@@ -90,6 +90,28 @@ UNFETCHED_REASON_BY_FAILURE: dict[FailureReason, UnfetchedReason] = {
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 _SHA256 = r"^[0-9a-f]{64}$"
+
+
+class DerivedText(BaseModel):
+    """A piece of DERIVED text with its provenance attached in the SAME object.
+
+    This is the shape that satisfies invariant 2 of spec §3.7 structurally rather than by
+    convention: the text cannot be read without the `origin` that qualifies it, because the
+    two arrive together. It is why `SearchResult.summary`, `TopicRecord.overview` and the
+    topic notes are nested models rather than bare strings — spec §3.6 is explicit that a
+    topic's description, overview and notes *are derived layers WITH THEIR OWN provenance*,
+    and a bare `str` field would strip exactly that.
+
+    `verification_status` is hydrated from the live store when the text is a verified output
+    (M5), and is `None` when there is no CURRENT verdict — never a stale one, and never a
+    reassuring default.
+    """
+
+    model_config = _FROZEN
+
+    text: str
+    origin: Origin
+    verification_status: Verdict | None = None
 
 
 class Locator(BaseModel):
@@ -274,9 +296,9 @@ class TopicRecord(BaseModel):
 
     topic_id: str
     slug: str
-    description: str
-    overview: str
-    notes: tuple[str, ...] = ()
+    description: DerivedText
+    overview: DerivedText | None = None
+    notes: tuple[DerivedText, ...] = ()
     primary_item_ids: tuple[str, ...] = ()
     secondary_item_ids: tuple[str, ...] = ()
     synthesized_at: datetime | None = None

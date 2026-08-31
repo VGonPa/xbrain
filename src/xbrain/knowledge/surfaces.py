@@ -43,6 +43,7 @@ from xbrain.knowledge.ids import (
 )
 from xbrain.knowledge.models import (
     UNFETCHED_REASON_BY_FAILURE,
+    DerivedText,
     KnowledgeItem,
     KnowledgeSurface,
     Locator,
@@ -636,9 +637,21 @@ def topic_record(
     return TopicRecord(
         topic_id=topic_id(topic.slug),
         slug=topic.slug,
-        description=topic.description,
-        overview=overview,
-        notes=tuple(page.notes) if page else (),
+        # Each layer keeps ITS OWN provenance (spec §3.6). The vocabulary does not record
+        # whether a description was written or generated, so it is `unknown` and fails closed
+        # to synthesis; the overview and the notes are known LLM output. One `origin` for the
+        # whole record would have to lie about one of them.
+        description=DerivedText(text=topic.description, origin=SURFACE_ORIGIN["topic_description"]),
+        overview=(
+            DerivedText(text=overview, origin=SURFACE_ORIGIN["topic_overview"]) if page else None
+        ),
+        notes=(
+            tuple(
+                DerivedText(text=note, origin=SURFACE_ORIGIN["topic_note"]) for note in page.notes
+            )
+            if page
+            else ()
+        ),
         primary_item_ids=primary_item_ids,
         secondary_item_ids=secondary_item_ids,
         synthesized_at=page.synthesized_at if page else None,

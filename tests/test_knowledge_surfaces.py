@@ -534,14 +534,16 @@ def test_topic_surfaces_carry_their_own_origins() -> None:
     assert [s.locator.note_index for s in _by_type(surfaces, "topic_note")] == [0, 1]
 
 
-def test_a_topic_without_a_page_is_stale_with_an_empty_overview() -> None:
+def test_a_topic_without_a_page_has_no_overview_at_all_and_is_stale() -> None:
     """Plan 01 §9: a vocabulary entry with no `TopicPage` is not an error.
 
-    It is the normal state of a topic that has never been synthesized, and reporting it as
-    stale is what tells a consumer the overview they did not get is missing, not empty.
+    It is the normal state of a topic that has never been synthesized. The overview is
+    `None`, not `""`: an overview that was never written is MISSING, and an empty string
+    would tell a consumer that a synthesis ran and produced nothing — a different, false
+    fact. `stale` says the same thing from the other side.
     """
     record = topic_record(Topic(slug="new-topic", description="d"), None, (), ())
-    assert (record.overview, record.synthesized_at, record.stale) == ("", None, True)
+    assert (record.overview, record.synthesized_at, record.stale) == (None, None, True)
     assert topic_surfaces(Topic(slug="new-topic", description="d"), None)[0].surface_type == (
         "topic_description"
     )
