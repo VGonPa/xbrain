@@ -207,48 +207,85 @@ def _read(path: Path) -> dict[str, Any]:
 
 
 def _case(entry: dict[str, Any], path: Path) -> GoldenCase:
-    """Validate one entry. Every rejection names the case, so a 23-case file is debuggable."""
+    """Validate one entry. Every rejection names the case, so a 23-case file is debuggable.
+
+    Split into one validator per concern rather than one long branch: the chunker and the
+    loader are the two functions Plan 01 §13 flags as the complexity risk, and a validator
+    nobody can read is how a wrong rejection message survives review.
+    """
+    _ = path
     case_id = str(entry.get("id", "<sin id>"))
     unknown = set(entry) - _CASE_KEYS
     if unknown:
         raise GoldenSetError(f"caso {case_id}: claves desconocidas {sorted(unknown)}")
 
+    items, topics, surfaces = _validate_relevants(entry, case_id)
+    return GoldenCase(
+        id=case_id,
+        query=_validate_query(entry, case_id),
+        provenance=_validate_provenance(entry, case_id),
+        strata=_validate_strata(entry, case_id),
+        filters=_filters(entry.get("filters") or {}, case_id),
+        relevant_items=items,
+        relevant_topics=topics,
+        relevant_surfaces=surfaces,
+        expected_text=_validate_expected_text(entry, case_id),
+        notes=str(entry.get("notes", "")),
+    )
+
+
+def _validate_query(entry: dict[str, Any], case_id: str) -> str:
+    """The question itself — and never an unfilled template.
+
+    A `<X>` placeholder rejects the whole FILE rather than being skipped. Skipping is the
+    worst of the three options: the case does not score, nobody is told, and the report shows
+    one fewer case than the file visibly contains.
+    """
     query = str(entry.get("query", "")).strip()
     if not query:
         raise GoldenSetError(f"caso {case_id}: sin `query`")
-    # An unfilled template rejects the FILE rather than being skipped. Skipping is the worst
-    # of the three options: the case does not score, nobody is told, and the report shows one
-    # fewer case than the file visibly contains.
     if "<" in query and ">" in query:
         raise GoldenSetError(
             f"caso {case_id}: es una plantilla sin rellenar ({query!r}); no es una pregunta"
         )
+    return query
 
+
+def _validate_provenance(entry: dict[str, Any], case_id: str) -> str:
+    """`real` or `construido` — the value decides how the result is READ.
+
+    Spec §8.2 reports metrics separately by provenance: constructed cases are regression,
+    real ones decide usefulness. A third value would quietly open a third column that means
+    nothing.
+    """
     provenance = str(entry.get("provenance", ""))
     if provenance not in PROVENANCES:
         raise GoldenSetError(
             f"caso {case_id}: procedencia {provenance!r}; admitidas {sorted(PROVENANCES)}"
         )
+    return provenance
 
+
+def _validate_strata(entry: dict[str, Any], case_id: str) -> tuple[str, ...]:
+    """A closed vocabulary (spec §8.2).
+
+    A typo would create a silent new bucket, and the report would show it with one case in
+    it — a stratum nobody defined, presented as if it had been measured.
+    """
     strata = tuple(str(s) for s in entry.get("strata") or ())
-    unknown_strata = set(strata) - STRATA
-    if unknown_strata:
+    unknown = set(strata) - STRATA
+    if unknown:
         raise GoldenSetError(
-            f"caso {case_id}: estrato desconocido {sorted(unknown_strata)}; "
-            f"admitidos {sorted(STRATA)}"
+            f"caso {case_id}: estrato desconocido {sorted(unknown)}; admitidos {sorted(STRATA)}"
         )
+    return strata
 
-    items = tuple(str(i) for i in entry.get("relevant_items") or ())
-    # Spec §8.1: a topic pseudo-id is not a retrievable item. Left in `relevant_items` it
-    # would be counted forever as an item retrieval failed to return — a permanent, invisible
-    # penalty that no retriever could ever clear.
-    pseudo = [i for i in items if i.startswith("topic:")]
-    if pseudo:
-        raise GoldenSetError(
-            f"caso {case_id}: pseudo-id de topic en relevant_items {pseudo}; "
-            "migra a relevant_topics + relevant_surfaces"
-        )
 
+def _validate_relevants(
+    entry: dict[str, Any], case_id: str
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[RelevantSurface, ...]]:
+    """The enumerated ground truth — the thing that makes a case scorable at all (B2)."""
+    items = _validate_item_ids(entry, case_id)
     topics = tuple(str(t) for t in entry.get("relevant_topics") or ())
     surfaces = tuple(_surface(s, case_id) for s in entry.get("relevant_surfaces") or ())
     if not (items or topics or surfaces):
@@ -256,26 +293,43 @@ def _case(entry: dict[str, Any], path: Path) -> GoldenCase:
             f"caso {case_id}: sin conjunto relevante enumerado. Con el conjunto vacío el "
             "recall@k es 0/0 y no mide nada; archívalo como `scenario` con su razón"
         )
+    return items, topics, surfaces
 
+
+def _validate_item_ids(entry: dict[str, Any], case_id: str) -> tuple[str, ...]:
+    """The relevant ITEM ids — and never a topic pseudo-id among them.
+
+    Spec §8.1: a topic pseudo-id is not a retrievable item. v1 wrote
+    `items_relevantes: ["topic:agency-and-mindset"]` for S7/S8/S9; left there it would be
+    counted forever as an item retrieval failed to return — a permanent, invisible penalty
+    that no change to retrieval could ever clear.
+    """
+    items = tuple(str(i) for i in entry.get("relevant_items") or ())
+    pseudo = [i for i in items if i.startswith("topic:")]
+    if pseudo:
+        raise GoldenSetError(
+            f"caso {case_id}: pseudo-id de topic en relevant_items {pseudo}; "
+            "migra a relevant_topics + relevant_surfaces"
+        )
+    return items
+
+
+def _validate_expected_text(entry: dict[str, Any], case_id: str) -> str | None:
+    """A short identifying fragment, never a copy of the body.
+
+    The ceiling is what keeps "we only version questions and ids" true over time rather than
+    true on the day it was written — the golden set is in Git, so anything that lands in this
+    field is published.
+    """
     expected = entry.get("expected_text")
-    if expected is not None and len(str(expected)) > MAX_EXPECTED_TEXT:
+    if expected is None:
+        return None
+    if len(str(expected)) > MAX_EXPECTED_TEXT:
         raise GoldenSetError(
             f"caso {case_id}: expected_text de {len(str(expected))} chars supera el techo de "
             f"{MAX_EXPECTED_TEXT}; es un fragmento identificador, no una copia del cuerpo"
         )
-
-    return GoldenCase(
-        id=case_id,
-        query=query,
-        provenance=provenance,
-        strata=strata,
-        filters=_filters(entry.get("filters") or {}, case_id),
-        relevant_items=items,
-        relevant_topics=topics,
-        relevant_surfaces=surfaces,
-        expected_text=str(expected) if expected is not None else None,
-        notes=str(entry.get("notes", "")),
-    )
+    return str(expected)
 
 
 def _surface(raw: Any, case_id: str) -> RelevantSurface:
