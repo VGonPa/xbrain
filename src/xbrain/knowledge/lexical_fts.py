@@ -15,6 +15,38 @@ would wreck the Spanish half of the corpus. So "agent" does not match "agents". 
 real limitation of the lexical baseline, it is what the vector layer of Plan 03 has to beat,
 and it is pinned by a test — because a limit nobody writes down gets quietly attributed to
 the corpus instead of to the tokenizer.
+
+THE CONNECTIVE IS A DISJUNCTION, AND THAT IS A RETRIEVAL DECISION, NOT A DEFAULT (M3). Terms
+were ANDed — the FTS5 default — which turns a twelve-word question into a demand that all
+twelve words sit inside ONE chunk. Measured on the real corpus (2,404 items, 18,319 chunks,
+the 21 scorable cases of `eval/golden-set.yaml`): the conjunction returned NOT ONE ROW for 18
+of the 21, and the only three that retrieved anything were single-term `exacto` queries. The
+published baseline — `semantico` 0.0, `cruzado_idioma` 0.0, `topic` 0.0 — was therefore a
+measurement of the query builder, and it was being read as an absence of vocabulary overlap.
+The counterfactual, on the SAME index, SAME bm25, SAME chunks, SAME tie-break, changing only
+the connective: empty result sets 18/21 -> 0/21, mean `recall@10` 0.1429 -> 0.8099, and the
+`exacto` stratum did not degrade (0.60 -> 0.80).
+
+The deeper reason is that a conjunction and `bm25()` are two different retrieval models
+stacked on one another. bm25 is a RANKING function over a bag of words: it expects a wide
+candidate set and discriminates inside it, weighting each term by inverse document frequency
+so that a word present in nearly every chunk contributes almost nothing. Requiring every term
+first does that discrimination by brute force BEFORE the scorer runs, and in 18 of 21 cases
+it left the scorer nothing to rank. Plan 01 §5.3 justifies sharing this module with Plan 02's
+persisted index on the grounds that "what dies in Plan 02 is where the database lives, not how
+it scores" — which is only true if the score is what decides the ranking. Under the
+conjunction it mostly was not.
+
+The cost is real and is declared: the candidate set is much wider, so latency went from p50
+0.23 ms / p95 0.74 ms to p50 8.6 ms / p95 27.4 ms over the same corpus and the same 21 cases.
+
+WHAT WAS DELIBERATELY NOT DONE. No stopword list (bm25's IDF already discounts a term that
+matches everything, and a bilingual list would be a judgement nobody measured), and no
+"AND first, OR if empty" fallback — that would score some cases under boolean retrieval and
+others under bm25 while publishing both in one column, which is the two-definitions defect of
+CLAUDE.md rule 5. Choosing between `OR`, a minimum-should-match or a per-term weighting is
+Plan 02's sweep, with the golden set in front of it. What this module fixes is that the
+number published today measures the retriever.
 """
 
 from __future__ import annotations
@@ -25,6 +57,11 @@ import sqlite3
 # The ONE tokenizer string. Exported so the baseline, Plan 02's persisted index and the
 # ranking fixture all record the same value and a change to it is visible in a diff.
 FTS_TOKENIZE = "unicode61 remove_diacritics 2"
+
+# The ONE connective, exported for the same reason as the tokenizer: it decides the candidate
+# set, so it decides every recall number downstream, and it belongs in the characterization
+# fixture where a change to it shows up in a diff instead of in a rewritten baseline.
+FTS_CONNECTIVE = "OR"
 
 # `rowid INTEGER PRIMARY KEY` explicitly (m1): an implicit rowid is renumbered by `VACUUM`,
 # which would silently repoint every FTS row at a different chunk.
@@ -76,8 +113,15 @@ def match_expression(query: str) -> str | None:
 
     Every term is wrapped in double quotes with internal quotes doubled, which makes it an
     FTS5 *string* — punctuation inside is literal, so `@simonw` searches for the handle
-    instead of erroring, and `NEAR(` cannot start an operator. Terms are ANDed, the FTS5
-    default.
+    instead of erroring, and `NEAR(` cannot start an operator. That quoting is the security
+    property and it is unchanged by the connective: a term that is literally `OR` becomes the
+    string `"OR"`, never the operator.
+
+    Terms are joined by `FTS_CONNECTIVE`, a DISJUNCTION (M3). The FTS5 default is a
+    conjunction, and it required every word of a question to appear in one chunk: 18 of the
+    21 scorable golden-set cases came back with zero rows against the real corpus, so the
+    published `semantico: 0.0` measured the connective rather than the corpus. See the module
+    docstring for the measurement and for what a disjunction costs.
 
     Returning None rather than raising lets the caller distinguish "you asked nothing"
     (a validation error, spec §9.3) from "your terms were all punctuation" (an honest empty
@@ -87,4 +131,5 @@ def match_expression(query: str) -> str | None:
     terms = [term for term in _TERM_SPLIT.split(query.strip()) if term]
     if not terms:
         return None
-    return " ".join('"' + term.replace('"', '""') + '"' for term in terms)
+    quoted = ('"' + term.replace('"', '""') + '"' for term in terms)
+    return f" {FTS_CONNECTIVE} ".join(quoted)
