@@ -7,17 +7,17 @@
     "min_chars": 40
   },
   "tokenize": "unicode61 remove_diacritics 2",
-  "chunks_indexed": 51,
+  "chunks_indexed": 43,
   "rankings": {
     "Quillfeather": [
       "item:k12:user_note:0:0:xbrain-knowledge-chunker/v1",
-      "item:k03:external_article:80e0981ad499:4:xbrain-knowledge-chunker/v1"
+      "item:k03:external_article:80e0981ad499:1:xbrain-knowledge-chunker/v1"
     ],
     "Marrowgate protocol": [
-      "item:k04:external_article:bac1a1248324:3:xbrain-knowledge-chunker/v1"
+      "item:k04:external_article:bac1a1248324:1:xbrain-knowledge-chunker/v1"
     ],
     "Bramblewick": [
-      "item:k05:x_article:0a85d123c615:2:xbrain-knowledge-chunker/v1"
+      "item:k05:x_article:0a85d123c615:0:xbrain-knowledge-chunker/v1"
     ],
     "Cindervale checklist": [
       "item:k06:thread:5a43807e8d84:0:xbrain-knowledge-chunker/v1"

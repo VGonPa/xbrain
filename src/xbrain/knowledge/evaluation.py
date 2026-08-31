@@ -54,6 +54,37 @@ SURFACES_WITHOUT_DATA: tuple[str, ...] = ("thread", "user_note")
 
 DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 
+# Which of spec §7.2's eight filters each strategy can actually push into the backend.
+#
+# THIS TABLE IS THE DIFFERENCE BETWEEN A ZERO AND A GAP. The lexical baseline indexes chunks
+# and their surface metadata; it has no date, author, source or content-kind columns — those
+# arrive with Plan 02's persisted index, and spec §7.2 says of `content_kinds` and
+# `has_surfaces` that they come from no existing column and need their own plumbing.
+#
+# Scoring a case whose filter nobody applied produced `filtros: recall@10 = 0.0` in the first
+# real-corpus run of this harness. That number reads as "retrieval failed at filtering", when
+# the truth is that the instrument does not exist yet — a fabricated zero, and precisely what
+# spec §8.6.8 forbids. So an unsupported filter makes the case UNMEASURED instead.
+SUPPORTED_FILTERS: dict[str, frozenset[str]] = {
+    "lexical": frozenset({"has_surfaces", "origins"}),
+}
+
+
+def unsupported_filters(filters: Any, strategy: str) -> tuple[str, ...]:
+    """The filters this case declares that `strategy` cannot apply, in declaration order.
+
+    A filter left at its default is not "declared", so a case with `filters: {}` is always
+    measurable. Only a filter the case actually set, and the backend cannot honour, makes it
+    unmeasurable.
+    """
+    supported = SUPPORTED_FILTERS.get(strategy, frozenset())
+    declared = tuple(
+        name
+        for name, field_info in type(filters).model_fields.items()
+        if getattr(filters, name) not in (None, (), field_info.default)
+    )
+    return tuple(name for name in declared if name not in supported)
+
 
 @dataclass(frozen=True)
 class Corpus:
@@ -110,6 +141,7 @@ class EvaluationReport:
     latency: dict[str, float]
     without_coverage: dict[str, list[str]]
     scenarios: tuple[GoldenScenario, ...] = ()
+    unmeasured: tuple[dict[str, Any], ...] = ()
     threshold: float | None = None
     failures: tuple[str, ...] = ()
     index_stats: IndexStats | None = None
@@ -130,6 +162,7 @@ class EvaluationReport:
             "by_provenance": self.by_provenance,
             "latency": self.latency,
             "without_coverage": self.without_coverage,
+            "unmeasured": [dict(entry) for entry in self.unmeasured],
             "cases": [
                 {
                     "id": case.id,
@@ -234,8 +267,25 @@ def evaluate(
     come out any other way.
     """
     index, stats = build_index(corpus, params=params)
-    results, latencies = [], []
+    results: list[CaseResult] = []
+    unmeasured: list[dict[str, Any]] = []
+    latencies: list[float] = []
     for case in cases:
+        blocked = unsupported_filters(case.filters, strategy)
+        if blocked:
+            unmeasured.append(
+                {
+                    "id": case.id,
+                    "strata": list(case.strata),
+                    "provenance": case.provenance,
+                    "unsupported_filters": list(blocked),
+                    "reason": (
+                        f"la estrategia `{strategy}` no puede aplicar {list(blocked)}; "
+                        "puntuar el caso sería fabricar un cero (spec §8.6.8)"
+                    ),
+                }
+            )
+            continue
         started = time.perf_counter()
         hits = _search(index, case, limit=max(ks))
         latencies.append((time.perf_counter() - started) * 1000)
@@ -261,6 +311,7 @@ def evaluate(
             "strata": sorted(k for k, v in by_stratum.items() if v == NO_COVERAGE),
             "surfaces": list(SURFACES_WITHOUT_DATA),
         },
+        unmeasured=tuple(unmeasured),
         scenarios=tuple(scenarios),
         threshold=threshold,
         failures=failures,
@@ -432,10 +483,25 @@ def render_markdown(report: EvaluationReport) -> str:
         "No se puntúan y **no se reportan como 0,0** (spec §8.6.8): un cero aquí diría que la",
         "recuperación falló donde nadie preguntó.",
         "",
-        f"- Estratos sin casos: {', '.join(report.without_coverage['strata']) or 'ninguno'}.",
+        f"- Estratos sin casos medibles: {', '.join(report.without_coverage['strata']) or 'ninguno'}.",
         f"- Superficies sin datos en el corpus: {', '.join(report.without_coverage['surfaces'])}.",
         "",
     ]
+    if report.unmeasured:
+        lines += [
+            "### Casos NO medidos (la estrategia no puede aplicar sus filtros)",
+            "",
+            "No puntúan: un 0,0 aquí diría que la recuperación falló, cuando lo que falta es el",
+            "instrumento. Los filtros de fecha, autor, fuente y content kind llegan con el índice",
+            "persistido del Plan 02.",
+            "",
+        ]
+        lines += [
+            f"- **{entry['id']}** ({', '.join(entry['strata'])}) — filtros sin soporte: "
+            f"{', '.join(entry['unsupported_filters'])}."
+            for entry in report.unmeasured
+        ]
+        lines.append("")
     if report.scenarios:
         lines += ["## Escenarios archivados (no puntúan)", ""]
         lines += [f"- **{s.id}** — {s.reason.strip()}" for s in report.scenarios]

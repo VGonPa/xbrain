@@ -194,33 +194,42 @@ def _window_spans(length: int, params: ChunkerParams) -> list[tuple[int, int]]:
 def _merge_short(
     spans: list[tuple[int, int]], text: str, params: ChunkerParams
 ) -> list[tuple[int, int]]:
-    """Fold fragments below `min_chars` into a neighbour, and split anything above `max_chars`.
+    """PACK consecutive structural units up to `target`, then split anything over `max_chars`.
 
-    A 10-character paragraph is noise as a chunk: it matches nothing useful and dilutes the
-    ranking with a fragment that tells a reader nothing. Merging keeps its words in the index
-    without giving them an id of their own.
+    `target` is a SOFT ceiling per chunk, not "one chunk per paragraph", and the difference
+    is load-bearing. Measured on the real corpus (2026-08-31, 2,404 items): emitting one
+    chunk per paragraph produced **30,449** chunks where the plan's own volume estimate,
+    derived from the measured character counts, predicted 18–25k — and the plan says landing
+    outside that range means the chunker is not doing what it describes. The whole gap was
+    small paragraphs: `x_article` averaged **194 chars** across 11,016 chunks from 210
+    articles.
 
-    It NEVER deletes: a surface whose entire text is below the floor still yields one chunk,
-    because dropping it would silently remove an item from the corpus with nothing reporting
-    the loss. The merge is into the PREVIOUS span where there is one, so the offsets stay
-    contiguous.
+    A 194-character chunk is bad retrieval before it is bad arithmetic. It carries too little
+    context for a reader to judge the match, and it scatters one argument across a dozen ids
+    so bm25 sees a dozen weak documents instead of one strong one.
+
+    Packing keeps the author's boundaries — a chunk always starts and ends on a paragraph
+    edge — and simply stops adding paragraphs when the next one would cross `target`. The
+    `min_chars` floor is subsumed: a scrap can never stand alone, because it is packed with
+    its neighbour. It NEVER deletes — a surface whose entire text is below the floor still
+    yields one chunk, since dropping it would remove an item from the corpus with nothing
+    reporting the loss.
     """
-    merged: list[tuple[int, int]] = []
+    packed: list[tuple[int, int]] = []
     for start, end in spans:
-        if merged and len(text[start:end].strip()) < params.min_chars:
-            merged[-1] = (merged[-1][0], end)
+        if not packed:
+            packed.append((start, end))
             continue
-        if (
-            merged
-            and (end - merged[-1][0]) <= params.target
-            and (len(text[merged[-1][0] : merged[-1][1]].strip()) < params.min_chars)
-        ):
-            merged[-1] = (merged[-1][0], end)
-            continue
-        merged.append((start, end))
+        open_start, open_end = packed[-1]
+        combined = end - open_start
+        too_short = len(text[open_start:open_end].strip()) < params.min_chars
+        if combined <= params.target or too_short:
+            packed[-1] = (open_start, end)
+        else:
+            packed.append((start, end))
 
     out: list[tuple[int, int]] = []
-    for start, end in merged:
+    for start, end in packed:
         out += (
             _oversize_spans(start, end, params)
             if end - start > params.max_chars

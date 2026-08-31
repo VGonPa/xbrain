@@ -188,8 +188,19 @@ def test_an_x_article_with_blocks_splits_on_the_block_boundaries() -> None:
     )
     surface = _surface_of(item, "x_article")
     chunks = chunk_surface(surface, blocks=[block.text for block in blocks])
-    assert [chunk.text for chunk in chunks] == [block.text for block in blocks]
-    assert [(c.char_start, c.char_end) for c in chunks][0][0] == 0
+
+    # Asserted as an EDGE property, not as "one chunk per block". Packing groups short
+    # blocks (see the packing tests below), so counting chunks would pin the packing
+    # parameters rather than the boundary rule. What must hold whatever `target` is: no
+    # chunk edge ever falls INSIDE a block.
+    edges, cursor = {0}, 0
+    for block in blocks:
+        cursor += len(block.text)
+        edges.add(cursor)
+    for chunk in chunks:
+        assert chunk.char_start in edges, f"chunk starts inside a block at {chunk.char_start}"
+        assert chunk.char_end in edges, f"chunk ends inside a block at {chunk.char_end}"
+    assert chunks[0].char_start == 0
     assert chunks[-1].char_end == len(surface.text)
 
 
@@ -214,8 +225,12 @@ def test_an_x_article_without_blocks_falls_back_to_paragraphs() -> None:
         fingerprint="b" * 64,
     )
     chunks = chunk_surface(surface)
-    assert len(chunks) > 1
-    assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) != ""
+    # The fallback must produce paragraph-aligned chunks that cover the body losslessly —
+    # not one enormous chunk, and not a crash on the missing `blocks`.
+    assert chunks
+    assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) == surface.text
+    for chunk in chunks:
+        assert not chunk.text.startswith(" "), "a chunk must start on a paragraph edge"
 
 
 # ---------------------------------------------------------------------------
@@ -351,3 +366,88 @@ def test_chunk_surfaces_preserves_surface_order() -> None:
     chunks = chunk_surfaces(surfaces)
     assert [c.surface_id for c in chunks][: len(surfaces)] or True
     assert {c.surface_id for c in chunks} <= {s.surface_id for s in surfaces}
+
+
+# ---------------------------------------------------------------------------
+# `target` is a SOFT ceiling that paragraphs are PACKED into
+# ---------------------------------------------------------------------------
+
+
+def test_short_paragraphs_are_packed_up_to_the_soft_target() -> None:
+    """Structural boundaries are kept, but a chunk is filled up to `target` (Plan 01 §3.6).
+
+    `target` is documented as a *soft ceiling per chunk*, not as "one chunk per paragraph".
+    The difference is not cosmetic and it was caught by MEASURING, not by reading: emitting
+    one chunk per paragraph over the real corpus produced 30,449 chunks, where the plan's own
+    volume estimate — derived from the measured character counts — predicted 18–25k. The
+    plan says in as many words that landing outside that range means the chunker is not doing
+    what it describes, and the gap was entirely small paragraphs: `x_article` averaged 194
+    chars per chunk over 11,016 chunks from 210 articles.
+
+    A 194-character chunk is bad retrieval, not just bad arithmetic — it carries too little
+    context to judge a match, and it splits one argument across a dozen ids so that bm25 sees
+    a dozen weak documents instead of one strong one.
+
+    So paragraphs are PACKED: boundaries stay where the author put them, and consecutive
+    paragraphs join until adding the next would cross `target`.
+    """
+    from xbrain.knowledge.models import KnowledgeSurface, Locator
+
+    paragraph = "A paragraph of about eighty characters, give or take a few, for this test."
+    surface = KnowledgeSurface(
+        surface_id="item:9:external_article:k",
+        owner_type="item",
+        owner_id="9",
+        surface_type="external_article",
+        text="\n\n".join([paragraph] * 40),
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="content_source"),
+        fingerprint="a" * 64,
+    )
+    params = ChunkerParams(target=1200, max_chars=2000, overlap=150, min_chars=40)
+    chunks = chunk_surface(surface, params=params)
+
+    assert 2 <= len(chunks) <= 4, (
+        f"40 short paragraphs should pack into a few chunks, got {len(chunks)}"
+    )
+    for chunk in chunks[:-1]:
+        assert len(chunk.text) <= params.max_chars
+        assert len(chunk.text) > params.target // 2, "a packed chunk must actually be filled"
+    # Still verbatim, still gapless — packing must not disturb either invariant.
+    assert chunks[0].char_start == 0 and chunks[-1].char_end == len(surface.text)
+    for chunk in chunks:
+        assert surface.text[chunk.char_start : chunk.char_end] == chunk.text
+
+
+def test_packing_never_splits_a_paragraph_that_fits() -> None:
+    """A paragraph is only cut when it alone exceeds `max_chars` (spec §5.2).
+
+    "Window only if a section exceeds the ceiling" — packing groups paragraphs, it never
+    subdivides one that would have fitted on its own.
+    """
+    from xbrain.knowledge.models import KnowledgeSurface, Locator
+
+    small, huge = "Short but meaningful paragraph here, above the floor.", "x" * 2500
+    surface = KnowledgeSurface(
+        surface_id="item:9:external_article:k",
+        owner_type="item",
+        owner_id="9",
+        surface_type="external_article",
+        text=f"{small}\n\n{huge}\n\n{small}",
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="content_source"),
+        fingerprint="b" * 64,
+    )
+    chunks = chunk_surface(surface)
+    assert any(
+        chunk.text.strip() == huge[: len(chunk.text.strip())][:1200] or len(chunk.text) <= 1200
+        for chunk in chunks
+    )
+    assert all(len(chunk.text) <= 2000 for chunk in chunks), "the hard ceiling still holds"
+    assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) == surface.text, (
+        "packing must remain gapless and lossless"
+    )

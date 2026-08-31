@@ -138,17 +138,6 @@ def test_archived_scenarios_are_listed_with_their_reason_and_never_scored(report
     assert scored_ids.isdisjoint({entry["id"] for entry in payload["scenarios"]})
 
 
-def test_the_case_count_reconciles(report) -> None:
-    """Cases scored + scenarios archived == every entry in the file.
-
-    Without this, a case silently dropped by a loader bug would just make the report shorter,
-    and nothing would say so.
-    """
-    payload = report.to_dict()
-    total = len(load_cases(FIXTURE_GOLDEN)) + len(load_scenarios(FIXTURE_GOLDEN))
-    assert len(payload["cases"]) + len(payload["scenarios"]) == total
-
-
 # ---------------------------------------------------------------------------
 # 28 — report only
 # ---------------------------------------------------------------------------
@@ -235,3 +224,58 @@ def test_building_the_index_reports_what_it_skipped(corpus) -> None:
     assert len(index) == stats.chunks
     assert stats.items == 12
     assert stats.surfaces >= stats.items
+
+
+# ---------------------------------------------------------------------------
+# A filter the strategy cannot apply is NOT a case the retriever failed
+# ---------------------------------------------------------------------------
+
+
+def test_a_case_whose_filters_the_strategy_cannot_apply_is_not_scored(corpus) -> None:
+    """The fabricated zero this harness exists to prevent, caught on the real corpus.
+
+    The lexical baseline pushes only `has_surfaces` and `origins` into `WHERE`. It has no
+    date, source or content-kind filtering — those need columns Plan 02 has to build (spec
+    §7.2 says so of `content_kinds` and `has_surfaces` explicitly). Scoring F1 and F2 anyway
+    produced `filtros: recall@10 = 0.0` in the first real-corpus run, which reads as "the
+    retriever failed at filtering" when the truth is that the instrument does not exist yet.
+
+    Spec §8.6.8: *failures and skips are published; zeros are never fabricated by mixing in
+    unmeasured cases.* So an unsupported filter makes the case UNMEASURED — listed with the
+    filters that caused it — and its stratum reports no coverage rather than a zero.
+    """
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    payload = evaluate(cases, corpus, strategy="lexical").to_dict()
+
+    unmeasured = {entry["id"]: entry for entry in payload["unmeasured"]}
+    assert "FX7" in unmeasured, "FX7 declares `source: own_tweet`, which lexical cannot apply"
+    assert unmeasured["FX7"]["unsupported_filters"] == ["source"]
+    assert payload["by_stratum"]["filtros"] == NO_COVERAGE
+    assert "FX7" not in {case["id"] for case in payload["cases"]}
+
+
+def test_supported_filters_are_still_applied_not_skipped(corpus) -> None:
+    """`has_surfaces` and `origins` ARE pushed down, so a case using them still scores.
+
+    Without this, "unsupported" would be a way to quietly stop measuring anything awkward.
+    """
+    from xbrain.knowledge.contracts import SearchFilters
+    from xbrain.knowledge.evaluation import unsupported_filters
+
+    assert unsupported_filters(SearchFilters(has_surfaces=("post",)), "lexical") == ()
+    assert unsupported_filters(SearchFilters(origins=("vlm",)), "lexical") == ()
+    assert unsupported_filters(SearchFilters(source="own_tweet"), "lexical") == ("source",)
+
+
+def test_the_case_count_reconciles_including_the_unmeasured(corpus) -> None:
+    """Scored + unmeasured + archived == every entry in the file.
+
+    The first version of this reconciliation counted only scored + archived, and would have
+    gone green while two cases vanished from the report entirely.
+    """
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    payload = evaluate(
+        cases, corpus, strategy="lexical", scenarios=load_scenarios(FIXTURE_GOLDEN)
+    ).to_dict()
+    total = len(load_cases(FIXTURE_GOLDEN)) + len(load_scenarios(FIXTURE_GOLDEN))
+    assert len(payload["cases"]) + len(payload["unmeasured"]) + len(payload["scenarios"]) == total
