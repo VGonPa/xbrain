@@ -575,3 +575,138 @@ def test_packing_never_splits_a_paragraph_that_fits() -> None:
     assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) == surface.text, (
         "packing must remain gapless and lossless"
     )
+
+
+# ---------------------------------------------------------------------------
+# m1 — `chunk.url` is the OWNER's URL, and says so
+# ---------------------------------------------------------------------------
+
+
+def test_a_chunk_carries_the_owner_url_and_the_surface_keeps_its_own_locator() -> None:
+    """One meaning for `chunk.url`, asserted by WHERE the value comes from (rule 1).
+
+    `url=url or surface.locator.url` read as a designed fallback and was dead: both callers
+    always pass `item.url`, which is truthy, so 9,377 of 9,377 non-`post` chunks carried the
+    tweet URL and 0 carried their own. The fallback was unreachable — the same shape as M1.
+
+    It is deleted rather than reached, because the two URLs are not interchangeable and the
+    item's is the right one: a `video_transcript`'s locator holds a SIGNED, EXPIRING
+    `video.twimg.com` URL, and serving that as the chunk's citable link would hand a
+    consumer a dead link. Nothing is lost — the surface keeps its locator, which is where a
+    precise position belongs, and this test pins that it is still there.
+    """
+    from xbrain.knowledge.evaluation import load_corpus
+
+    item = load_corpus(FIXTURES / "knowledge_corpus.json").items["k08"]
+    surface = _surface_of(item, "video_transcript")
+    (chunk,) = tuple(
+        c
+        for c in chunk_surfaces(item_surfaces(item), url=item.url)
+        if c.surface_id == surface.surface_id
+    )[:1]
+
+    assert chunk.url == item.url
+    assert surface.locator.url and surface.locator.url != item.url, (
+        "the fixture must have a surface whose own locator differs, or this pins nothing"
+    )
+
+    # And the AMBIGUITY cannot come back. The behaviour above was already correct before the
+    # fallback was deleted — both callers pass a truthy `item.url` — so a purely behavioural
+    # test here would be green before and after, which rule 1 says is the tell that it pins
+    # nothing. This asserts on the SOURCE (rule 9): `_chunk` must not reach for the
+    # surface's locator, because a reachable fallback would make `chunk.url` mean two
+    # different things depending on the caller.
+    import ast
+    import inspect
+    import textwrap
+
+    from xbrain.knowledge import chunking
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(chunking._chunk))).body[0]
+    statements = [n for n in tree.body if not isinstance(n, ast.Expr)]  # drop the docstring
+    code = "\n".join(ast.unparse(n) for n in statements)
+    assert "locator" not in code, (
+        "`_chunk` reads the surface locator again: `chunk.url` would mean the owner's URL "
+        f"for one caller and an expiring asset URL for another\n{code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# m2 — the `min_chars` floor covers the TAIL too
+# ---------------------------------------------------------------------------
+
+
+def _splittable(text: str):
+    """A bare splittable surface — the shape the structural path takes."""
+    from xbrain.knowledge.models import KnowledgeSurface, Locator
+
+    return KnowledgeSurface(
+        surface_id="item:9:external_article:k",
+        owner_type="item",
+        owner_id="9",
+        surface_type="external_article",
+        text=text,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="content_source"),
+        fingerprint="c" * 64,
+    )
+
+
+def test_a_trailing_scrap_is_merged_backwards_not_emitted_alone() -> None:
+    """`_merge_short` packs looking BACKWARDS, so the last fragment had nobody to join.
+
+    The docstring claimed the floor was subsumed — *a scrap can never stand alone, because
+    it is packed with its neighbour* — and that was false for the tail: packing merges a
+    span into the one before it, so a final short unit is appended untouched.
+
+    Seen red with paragraphs of 1200/1200/10 and `min_chars=40`: a final span of 10 chars.
+    """
+    params = ChunkerParams(target=1200, max_chars=2000, overlap=150, min_chars=40)
+    surface = _splittable("\n\n".join(["A" * 1200, "B" * 1200, "C" * 10]))
+    chunks = chunk_surface(surface, params=params)
+
+    assert len(chunks) > 1, "the fixture must actually split, or this pins nothing"
+    for chunk in chunks:
+        assert len(chunk.text.strip()) >= params.min_chars, (
+            f"a {len(chunk.text.strip())}-char scrap was emitted alone: {chunk.text!r}"
+        )
+    assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) == surface.text
+
+
+def test_the_tail_of_an_oversized_split_is_absorbed_too() -> None:
+    """`_oversize_spans` runs AFTER packing, so ITS tails were never re-packed.
+
+    This is the shape the real corpus actually hits. Measured 2026-08-31 over 17,642 chunks:
+    9 fell below the floor without being the whole surface (`external_article` 7,
+    `video_digest` 2), the smallest a 4-char `'Woo!'` and one a 16-char `'zure AI Foundry.'`
+    cut mid-word. It is 0.05% of the corpus and it is not cosmetic: bm25 normalizes by
+    length, so a 16-character chunk holding the query term can outrank the paragraph that
+    actually answers it.
+    """
+    params = ChunkerParams(target=1200, max_chars=2000, overlap=150, min_chars=40)
+    # One paragraph just over `max_chars`, so the oversize split leaves a short remainder.
+    surface = _splittable("D" * (params.target * 2 + 12))
+    chunks = chunk_surface(surface, params=params)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk.text.strip()) >= params.min_chars, (
+            f"an oversize tail of {len(chunk.text.strip())} chars stood alone: {chunk.text!r}"
+        )
+    assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) == surface.text
+
+
+def test_a_surface_shorter_than_the_floor_still_yields_its_one_chunk() -> None:
+    """The floor MERGES, it never DELETES.
+
+    A surface whose whole text is below the floor still produces one chunk: dropping it
+    would remove an item from the corpus with nothing reporting the loss. Pinned beside the
+    two tests above so the fix cannot be over-applied into a filter.
+    """
+    params = ChunkerParams(target=1200, max_chars=2000, overlap=150, min_chars=40)
+    surface = _splittable("tiny")
+    chunks = chunk_surface(surface, params=params)
+    assert len(chunks) == 1
+    assert chunks[0].text == "tiny"

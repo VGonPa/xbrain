@@ -223,11 +223,20 @@ def _merge_short(
     so bm25 sees a dozen weak documents instead of one strong one.
 
     Packing keeps the author's boundaries — a chunk always starts and ends on a paragraph
-    edge — and simply stops adding paragraphs when the next one would cross `target`. The
-    `min_chars` floor is subsumed: a scrap can never stand alone, because it is packed with
-    its neighbour. It NEVER deletes — a surface whose entire text is below the floor still
-    yields one chunk, since dropping it would remove an item from the corpus with nothing
-    reporting the loss.
+    edge — and simply stops adding paragraphs when the next one would cross `target`.
+
+    THE FLOOR IS NOT SUBSUMED BY THE PACKING, and the docstring used to claim it was. Packing
+    looks BACKWARDS — it merges a unit into the span before it — so the LAST unit has nobody
+    to join and is appended however short it is; and `_oversize_spans` runs AFTER the packing,
+    so the remainders it leaves are never re-packed at all. Measured on the real corpus
+    (2026-08-31, 17,642 chunks): 9 chunks sat below the floor without being the whole surface
+    (`external_article` 7, `video_digest` 2), the smallest a 4-char `'Woo!'` and one a 16-char
+    `'zure AI Foundry.'` cut mid-word. 0.05% of the corpus, and not cosmetic: bm25 normalizes
+    by length, so a 16-character chunk holding the query term can outrank the paragraph that
+    answers it. `_absorb_scraps` closes it by merging forwards-produced scraps backwards.
+
+    It NEVER deletes — a surface whose entire text is below the floor still yields one chunk,
+    since dropping it would remove an item from the corpus with nothing reporting the loss.
     """
     packed: list[tuple[int, int]] = []
     for start, end in spans:
@@ -249,7 +258,33 @@ def _merge_short(
             if end - start > params.max_chars
             else [(start, end)]
         )
-    return out
+    return _absorb_scraps(out, text, params)
+
+
+def _absorb_scraps(
+    spans: list[tuple[int, int]], text: str, params: ChunkerParams
+) -> list[tuple[int, int]]:
+    """Merge any span below `min_chars` into the one before it — the LAST pass, after all.
+
+    Both producers above leave scraps the packing cannot reach: packing merges backwards, so
+    a short final unit has no successor to absorb it, and `_oversize_spans` runs afterwards
+    and its remainder is never re-packed.
+
+    A scrap is merged into its PREDECESSOR, so the first span is never a scrap's victim and
+    a surface that is entirely below the floor keeps its single chunk. The merge can push a
+    chunk at most `min_chars` past `target`, which is far below `max_chars` — a 1,216-char
+    chunk is a better document than a 1,200-char one plus a 16-char one.
+
+    Coverage is preserved: the spans are contiguous, and merging two adjacent ones leaves
+    them contiguous, so `surface.text[start:end] == chunk.text` still tiles the surface.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and len(text[start:end].strip()) < params.min_chars:
+            merged[-1] = (merged[-1][0], end)
+            continue
+        merged.append((start, end))
+    return merged
 
 
 def _oversize_spans(start: int, end: int, params: ChunkerParams) -> list[tuple[int, int]]:
@@ -286,6 +321,16 @@ def _chunk(
     second definition of the same fact (CLAUDE.md rule 5), and the one that mattered — the
     quoted post's third-party author — is exactly the one a second derivation would get
     wrong by falling back to the item.
+
+    `url` is the OWNER's URL — where a human opens this chunk — and has exactly that one
+    meaning. It used to read `url or surface.locator.url`, which looked like a designed
+    fallback to the surface's own address and was dead: both callers always pass a truthy
+    `item.url`, so 9,377 of 9,377 non-`post` chunks carried the tweet's URL and none carried
+    their own. The fallback is deleted rather than reached, because the two are not
+    interchangeable: a `video_transcript`'s locator holds a SIGNED, EXPIRING
+    `video.twimg.com` URL, and a `quoted_post`'s would still be the poster's page. Serving
+    either as the chunk's citable link buys nothing and rots. The precise position stays
+    where it belongs — on `surface.locator`, which the consumer already receives.
     """
     text = surface.text[start:end]
     cid = chunk_id(surface.surface_id, index, chunker_version=chunker_version)
@@ -306,7 +351,7 @@ def _chunk(
         derived=surface.derived,
         attribution=attribution,
         topics=topics,
-        url=url or surface.locator.url,
+        url=url,
         language=surface.language,
         fingerprint=chunk_fingerprint(
             surface.surface_id, index, text, chunker_version=chunker_version
