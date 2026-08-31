@@ -248,6 +248,47 @@ rubric change:
 (otro output, otra fuente u otra rúbrica). No pintan badge; hay que re-verificarlos.
 ```
 
+## `xbrain eval` fails to load or to resolve the golden set — and they are different faults
+
+The golden-set loader has **two stages**, and the error tells you which one tripped. Reading
+the wrong one sends you to the wrong file.
+
+**`caso X: …` from `load_cases` — the FILE is wrong.** A structural problem, visible in
+`eval/golden-set.yaml` itself without opening the corpus: an unknown stratum or filter, an
+unfilled `<X>` template, a scorable case with an empty relevant set, an `expected_text` over
+the 300-char ceiling, a topic pseudo-id left in `relevant_items`, a duplicate id. Fix the
+YAML. This stage runs in CI, so a broken golden set is caught before it reaches anyone.
+
+**`caso X: id relevante que no existe en el store` from `resolve_cases` — the CORPUS moved.**
+The file is fine; an id it names is no longer in `data/items.json`. That is an error and not
+a case scoring zero, deliberately: scoring it zero would blame retrieval for a stale ground
+truth, and the number would look like a permanent regression that no change to retrieval
+could ever fix. Either the item was removed, or the id was mistyped when the case was
+enumerated. Re-verify it against the store and update the case — and record in `notes:` how
+you verified it.
+
+**"golden set no encontrado".** `xbrain eval` resolves `--golden-set` relative to the repo
+root. Running it against another checkout's corpus needs both `XBRAIN_REPO_ROOT` pointing at
+that checkout and `--golden-set` pointing at this one.
+
+---
+
+## `eval` reports a stratum as *sin cobertura* — is that a failure?
+
+No, and the distinction is the point. Three different things are NOT a score of 0.0:
+
+- **a stratum with no cases** (`expansion` has no mechanism until the graph exists);
+- **a surface with no data** (`thread` and `user_note` have zero instances in the corpus, so
+  no case can be written and none is invented);
+- **a case whose filters the strategy cannot apply** — the lexical baseline has no date,
+  author, source or content-kind columns, so the two `filtros` cases are listed under *casos
+  NO medidos* with the filters that blocked them.
+
+Reporting any of these as 0.0 would say retrieval failed where nobody asked it anything. If
+you want a gate, pass `--min-recall`; buckets without coverage can never trigger it.
+
+---
+
 ## Where's the source of truth? Can I delete the vault notes?
 
 `data/items.json` is the hub — the markdown is **derived and disposable**.

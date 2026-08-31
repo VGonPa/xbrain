@@ -32,6 +32,7 @@
   - [evidence](#evidence)
   - [verify](#verify)
   - [verify-entities](#verify-entities)
+- [The knowledge layer](#the-knowledge-layer)
 - [Artifacts: the data layer](#artifacts-the-data-layer)
 - [Rubrics: the prompt layer](#rubrics-the-prompt-layer)
 - [Validator and guardrails](#validator-and-guardrails)
@@ -741,6 +742,149 @@ So the count is not a floor on the ensemble's false negatives, and an earlier dr
 
 ---
 
+## The knowledge layer
+
+`src/xbrain/knowledge/` is the READ contract: the logical view an external model queries, so
+a consumer never has to know the shape of `items.json`, hunt for a markdown heading, or guess
+which account wrote a quoted tweet. Nothing in it mutates the store — every module is
+read-only by construction, and the two commands it ships (`knowledge inspect`, `eval`) take
+no snapshot because they have nothing to snapshot.
+
+It is built over four PRs. This one is the contract and the evaluation; the persisted index,
+embeddings, the minimal graph and the MCP adapter come later and consume these names without
+renegotiating them.
+
+### The four entities
+
+```
+Item + Content + Enrichment + Topic + TopicPage
+                     │
+                     ▼
+   KnowledgeItem · KnowledgeSurface · KnowledgeChunk · TopicRecord
+                     │
+        ┌────────────┴────────────┐
+        ▼                         ▼
+ retrieval index            CLI JSON / MCP
+```
+
+A **surface** is one semantic unit of text before chunking — a tweet, an article body, a
+transcript, a frame caption, a summary, a topic note. A **chunk** is the indexable fragment a
+search actually scores. Every chunk resolves back to its surface and owner, and
+`surface.text[chunk.char_start:chunk.char_end] == chunk.text` for every chunk in the corpus:
+that equality is the operational form of "verbatim", and it is property-tested rather than
+promised.
+
+### Provenance is a type, not a label
+
+`Origin` ∈ `source | asr | vlm | llm | user | unknown`, mapped by ONE total table to a
+`TrustClass`. It decides what a model may assert about a fragment: an ASR transcript is not
+the speaker's words, a VLM description is not text that appeared in the image, and an LLM
+summary is not a primary source.
+
+`unknown` maps to `llm_synthesis` and `is_derived("unknown")` is `True` — deliberately, and
+this is the module's fail-closed decision. `Topic.description` does not record whether it was
+generated or hand-edited, and the two errors are not symmetric: treating a source as
+synthesis loses a citation, while treating synthesis as a source manufactures one.
+
+### How it relates to `evidence.py`, and why they are not the same thing
+
+`xbrain.evidence` answers *what may support a generated output*. The knowledge contract
+answers *what exists and where*. They differ on three axes, all three on purpose:
+
+| axis | `evidence.evidence_surfaces` | the knowledge emitter |
+|---|---|---|
+| scope | depends on the target (`summary`/`digest`/`topics`) | every surface, no target |
+| truncation | `ARTICLE_CHAR_LIMIT` on the article body | never — a retrieval layer cannot be capped by a prompt's budget |
+| multiplicity | the FIRST source of each kind | all of them — 119 items carry more than one |
+
+So what the two SHARE is the atomic walk, not the assembled block: `iter_content_sources`,
+`iter_described_photos` and `iter_video_frames` in `executors/api.py`. The enrichment
+selectors were re-expressed onto those iterators with no observable change, and the knowledge
+emitter reads `.text` off the same three — which is how the spec's "reuse the extractors,
+never grow a second hand-written list" is satisfied in code rather than in prose.
+
+What binds the two contracts is NOT an identity assertion (`knowledge.x is evidence.x` is
+green forever the moment delegation exists, and binds nothing — rule 1). It is **totality**:
+`tests/test_knowledge_surface_coverage.py` asserts three maps complete against types the
+OTHER side owns, so adding a `ContentKind`, a derived surface, or an evidence key and
+forgetting this side goes red. All three were seen red by deleting an entry.
+
+And the guarantee that this PR did not MOVE `evidence.py` is
+`tests/test_evidence_characterization.py`, which pins the judge's source text and the full
+`contract_fingerprint` as hex literals. Had one byte moved, every stored `VerificationVerdict`
+would have gone stale and every badge would have vanished from `generate` — rule 6 run
+backwards.
+
+### Verification is hydrated, never persisted on a surface
+
+`KnowledgeSurface` has no `verification` field, and its absence is asserted by a test.
+`surface_fingerprint` hashes (version, surface type, origin, text) and does NOT depend on the
+verdict, so a verdict copied beside the text could never be invalidated when the verdict
+changed: a `FAIL` revoked by `verify --audit` would keep being served as the `PASS` it used
+to be. Verdicts are read from the LIVE store at response time, through the same freshness
+check `generate._verdict_badge` applies — one definition, not two.
+
+### Identity
+
+```
+topic_id   = "topic:<slug>"
+surface_id = "<owner_type>:<owner_id>:<surface_type>:<source_key>"
+chunk_id   = "<surface_id>:<chunk_index>:<chunker_version>"
+```
+
+A content source's `source_key` is `sha1(kind\0url)[:12]`, **not** its index in
+`content.sources`, because `fetch` rewrites that list on every re-capture — an index-keyed id
+would repoint stored chunks at a different body the first time two sources swapped, and it
+would do it silently, since the id still resolves. A repeated `(kind, url)` within one item
+takes a `#n` suffix; 0 items in the corpus have one today, so it is a safe failure path
+rather than the normal case.
+
+### Chunking
+
+Structural where the data allows it. Atomic surfaces (post, summary, image description,
+frame, quoted post, topic note, user note) are emitted whole **whatever their length** —
+`MAX_CHARS` applies only to splittable surfaces, because a quoted post has ONE author and
+half of it is a fragment that no longer says whose words it is. An article splits on
+paragraphs, an X Article on its own blocks, a transcript into overlapping windows.
+
+`target` is a SOFT ceiling that paragraphs are PACKED into, not "one chunk per paragraph".
+Measured on the real corpus: one chunk per paragraph gave 30,449 chunks (`x_article`
+averaging 194 chars), and packing gives **18,328** — 9,294 atomic + 9,034 splittable. A
+194-character chunk is bad retrieval before it is bad arithmetic: too little context to judge
+a match, and one argument scattered across a dozen ids so bm25 sees a dozen weak documents
+instead of one strong one.
+
+The chunker's parameters are ARGUMENTS, not module constants, so a future sweep changes the
+default without being able to move the ranking fixture that pins today's behaviour.
+
+### The evaluation, and where its gate really reaches
+
+`eval/golden-set.yaml` is **tracked in Git** — the one exception to "nothing personal is
+versioned" — because it is the ground truth of a merge gate. Untracked, the migration would
+appear in no diff, `xbrain eval` could never run in CI (there is no `data/` there), and a
+case edited to turn a gate green would leave no history. It carries questions, ids and short
+identifying fragments; a 300-char ceiling on `expected_text`, checked in CI against the real
+file, keeps a corpus body from arriving through the back door.
+
+The loader has **two stages** for exactly that reason: `load_cases(path)` validates structure
+without opening the store, and `resolve_cases(cases, store)` checks the ids. Fused, the very
+test proving the evaluation runs in CI could not run.
+
+Only a case whose ground truth is ENUMERATED scores. With `relevant_items: []` the recall@k
+is 0/0, which comes out as 1.0 or 0.0 depending on the implementation and measures nothing
+either way; those are archived as `scenarios` with their reason. And a case whose filters the
+strategy cannot apply is reported as UNMEASURED, not as 0.0 — the lexical baseline has no
+date or source columns, so scoring those cases would say retrieval failed where the
+instrument does not exist yet.
+
+The baseline is the SAME FTS5 the persisted index will use, on `sqlite3(":memory:")`: same
+DDL, same tokenizer (`unicode61 remove_diacritics 2`, no stemming — FTS5 has no multilingual
+stemmer and an English one would wreck the Spanish half), same `bm25()`, same explicit
+tie-break on `chunk_id`. So what changes later is where the database lives, not how it
+scores, and the fixture pins one scorer against itself over time.
+
+---
+
 ## Artifacts: the data layer
 
 Everything XBrain knows lives in a handful of files inside `data/` (gitignored). The four that are the store proper — `items.json`, `state.json`, `vocab.yaml`, `topics.json` — are JSON or YAML, plain text, human-readable, and small enough that you can `jq` them. Binary assets (photo bytes from `xbrain media`) live alongside under `data/media/<id>/`, the raw capture under `data/payloads/`, and the report-only artifacts beside them.
@@ -943,6 +1087,9 @@ xbrain/
 │   ├── quality.yml          ← the required `quality` gate (runs scripts/check.sh)
 │   └── gate-audit.yml       ← scheduled auditor of that gate; runs from `main`
 │
+├── eval/
+│   └── golden-set.yaml      ← retrieval ground truth — TRACKED (the one exception)
+│
 ├── docs/                    ← user-facing guides
 │   ├── tutorial.md
 │   ├── troubleshooting.md
@@ -952,6 +1099,19 @@ xbrain/
 │   ├── cli.py               ← typer CLI — one command per stage
 │   ├── models.py            ← pydantic data models — the shapes
 │   ├── config.py            ← config.toml loader
+│   │
+│   ├── knowledge/           ← the READ contract (search/get/graph_expand)
+│   │   ├── provenance.py    ← Origin, TrustClass, ORIGIN_TRUST — one total table
+│   │   ├── models.py        ← KnowledgeItem/Surface/Chunk/TopicRecord + SurfaceType
+│   │   ├── ids.py           ← surface_id/chunk_id/topic_id + fingerprints
+│   │   ├── surfaces.py      ← the emitter + the three totality maps
+│   │   ├── chunking.py      ← structural chunker (atomic beats MAX_CHARS)
+│   │   ├── profile.py       ← the item's retrieval profile (never a citation)
+│   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen at schema_version "1"
+│   │   ├── goldenset.py     ← two-stage loader: structure, then resolution
+│   │   ├── lexical_fts.py   ← the FTS5 DDL + scorer Plan 02 reuses
+│   │   ├── lexical_memory.py← that same FTS5 on sqlite3(":memory:")
+│   │   └── evaluation.py    ← the harness: per-stratum metrics, report-only
 │   │
 │   ├── extract/             ← X traffic interception
 │   │   ├── browser.py       ← Playwright session + login
