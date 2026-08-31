@@ -348,3 +348,148 @@ def test_verify_rubric_declares_the_evidence_surfaces_per_target():
     assert "digest" in text and "summary" in text
     assert "video transcript" in text.lower()
     assert "fetched article body" in text.lower()
+
+
+def test_load_rubric_splices_the_shared_onscreen_fragment(tmp_path, monkeypatch):
+    """`{onscreen_text_rule}` is replaced by the shared fragment file, and the
+    fragment's OWN `{language}` is substituted in the same call — the fragment
+    must be spliced BEFORE the language pass, not after."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "fragment-onscreen-text.md").write_text(
+        "Transcribe VERBATIM; your prose is in {language}.\n", encoding="utf-8"
+    )
+    (rubric_dir / "rubric-probe.md").write_text(
+        "**Language:** {language}\n\n{onscreen_text_rule}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    text = load_rubric("probe", language="Spanish")
+    assert "{onscreen_text_rule}" not in text
+    assert "Transcribe VERBATIM" in text
+    # The fragment's own placeholder resolved too — proves the splice ran first.
+    assert "your prose is in Spanish" in text
+    assert "{language}" not in text
+
+
+def test_load_rubric_without_the_placeholder_is_unchanged(tmp_path, monkeypatch):
+    """A rubric that does not opt in is returned byte-for-byte — the splice is
+    opt-in, so the six rubrics that carry no on-screen text are untouched."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "rubric-plain.md").write_text("No placeholders here.\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    assert load_rubric("plain", language="English") == "No placeholders here.\n"
+
+
+def test_load_rubric_catches_a_misspelt_onscreen_placeholder(tmp_path, monkeypatch):
+    """`{onscreen_text_rules}` (plural) survives str.replace and would ship the
+    literal placeholder to the vision model. Same defence as `{Language}`."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "fragment-onscreen-text.md").write_text("rule\n", encoding="utf-8")
+    (rubric_dir / "rubric-typo.md").write_text("{onscreen_text_rules}\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    with pytest.raises(ValueError, match=r"onscreen_text_rules"):
+        load_rubric("typo", language="English")
+
+
+def test_load_rubric_missing_fragment_is_a_loud_error(tmp_path, monkeypatch):
+    """A rubric asking for a fragment that is not packaged must fail loudly, not
+    ship a half-rendered prompt."""
+    from xbrain import rubrics as rubrics_mod
+
+    rubric_dir = tmp_path / "rubrics"
+    rubric_dir.mkdir()
+    (rubric_dir / "rubric-orphan.md").write_text("{onscreen_text_rule}\n", encoding="utf-8")
+    monkeypatch.setattr(rubrics_mod, "_RUBRICS_DIR", rubric_dir)
+
+    with pytest.raises(FileNotFoundError, match="fragment-onscreen-text.md"):
+        load_rubric("orphan", language="English")
+
+
+def test_describe_frame_rubric_states_the_verbatim_rule():
+    """The frame rubric must carry the shared rule and resolve both placeholders."""
+    text = load_rubric("describe-frame", language="Spanish")
+    assert "{language}" not in text
+    assert "{onscreen_text_rule}" not in text
+    assert "Spanish" in text
+    # The rule must enforce exact transcription without translation or normalization.
+    assert "VERBATIM" in text
+    # The rule must forbid translation explicitly — this is the #90 defect.
+    assert "Never translate" in text
+    # And must license an honest gap rather than a guess.
+    assert "do NOT guess" in text
+
+
+def test_describe_frame_rubric_asks_for_plain_text_not_json():
+    """`vision.describe_image` reads raw stdout, so the frame contract is prose.
+    Asking for JSON here would make every caption unparseable."""
+    text = load_rubric("describe-frame", language="English")
+    assert "is_decorative" not in text
+    assert "JSON" in text  # ...only to forbid it
+    assert "no JSON" in text
+
+
+def test_describe_frame_rubric_carries_the_shared_fragment():
+    """The frame half of the anti-drift assertion: the rule reaches the rubric from
+    the fragment file, not from a paragraph pasted into it. (The photo half lands
+    in Task 3, once that rubric opts in.)"""
+    frame = load_rubric("describe-frame", language="English")
+    fragment = rubrics_module._load_fragment(rubrics_module._ONSCREEN_FRAGMENT).replace(
+        "{language}", "English"
+    )
+    assert fragment in frame
+
+
+def test_describe_image_and_describe_frame_share_one_rule():
+    """The anti-drift assertion, now that BOTH rubrics opt in: they must carry the
+    SAME rule text, because both are spliced from the same fragment. If someone
+    re-inlines the paragraph into either one, this fails."""
+    frame = load_rubric("describe-frame", language="English")
+    photo = load_rubric("describe-image", language="English")
+    fragment = rubrics_module._load_fragment(rubrics_module._ONSCREEN_FRAGMENT).replace(
+        "{language}", "English"
+    )
+    assert fragment in frame
+    assert fragment in photo
+
+
+def test_describe_image_rubric_no_longer_orders_paraphrase_or_bans_quotes():
+    """Two clauses actively caused #90 on the photo surface:
+    'paraphrase the substance in your own words' discarded on-screen text, and
+    'no quotes' removed the only device for marking a verbatim string."""
+    text = load_rubric("describe-image", language="English")
+    assert "paraphrase the substance in your own words" not in text
+    assert "no quotes" not in text
+
+
+def test_describe_image_rubric_keeps_its_json_contract():
+    """The photo path is a BATCH JSON contract and must stay one — the new rule
+    changes what goes in `description`, never the response shape."""
+    text = load_rubric("describe-image", language="English")
+    assert "is_decorative" in text
+    assert "index" in text
+
+
+def test_both_image_rubrics_defer_language_to_the_onscreen_rule():
+    """The negative assertions above only catch the two exact strings #90 deleted;
+    they pass forever once those are gone. This is the positive half: BOTH image
+    rubrics must keep saying that `{language}` governs the model's own prose and
+    that the on-screen-text rule overrides it. Restoring an unconditional
+    "write in {language} regardless of any text visible" — the wording that
+    caused #90 — deletes these phrases, so this test fails where the negative
+    ones would not.
+    """
+    for name in ("describe-image", "describe-frame"):
+        text = load_rubric(name, language="English")
+        assert "for your own prose" in text, f"{name} no longer scopes {{language}} to prose"
+        assert "overrides this" in text, f"{name} no longer defers to the on-screen rule"

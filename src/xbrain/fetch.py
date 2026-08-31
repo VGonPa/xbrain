@@ -498,12 +498,17 @@ def _utcnow() -> datetime:
 # fingerprinted automatically instead of being silently dropped by a stale
 # allow-list. It fails safe: forgetting to exclude a bookkeeping field costs at
 # most one redundant re-enrichment, never a lost (stale-content) one.
-_BOOKKEEPING_FIELDS = {"attempts", "error"}
+#
+# `caption_contract` (#90) is bookkeeping too: it records WHICH rubric produced a
+# source's frame captions, not what those captions say. Re-stamping unchanged
+# captions must not read as a content change — see the field's own comment in
+# `models.py` for why it sits at source level rather than on `VideoFrame`.
+_BOOKKEEPING_FIELDS = {"attempts", "error", "caption_contract"}
 
 
 def _source_signature(source: ContentSource) -> str:
     """A *material-content* fingerprint of one source: the whole model minus
-    fetch bookkeeping (`attempts`/`error`).
+    fetch bookkeeping (`attempts`/`error`/`caption_contract`).
 
     Two sources with equal signatures carry the same material content even if a
     re-fetch churned their bookkeeping. Deriving the fingerprint from the model
@@ -570,7 +575,7 @@ def fetch_item(
     re-flag the item forever — one wasted, identical LLM call per stuck item per
     cycle. So when the re-fetched source set is *materially equivalent* to the
     existing one — the whole source model minus fetch bookkeeping
-    (`attempts`/`error`); see `_source_signature` — we keep the prior
+    (`attempts`/`error`/`caption_contract`); see `_source_signature` — we keep the prior
     `fetched_at`; it advances only when the content actually changed (a failure
     that becomes a success, new/edited text, a changed title, a changed failure
     reason/status). `now` is injectable for deterministic tests.

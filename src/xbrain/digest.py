@@ -38,7 +38,14 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from xbrain.models import Content, ContentSource, ContentSourceSuccess, Item, VideoFrame
+from xbrain.models import (
+    Content,
+    ContentSource,
+    ContentSourceSuccess,
+    FRAME_CAPTION_CONTRACT,
+    Item,
+    VideoFrame,
+)
 from xbrain.transcribe import Transcript, TranscriberFailed, transcribe_media
 from xbrain.video_fetch import FetchReport, _select_entry, fetch_videos
 from xbrain.video_frames import (
@@ -285,6 +292,12 @@ def attach_transcript(
     video enriched from its tweet BEFORE the transcript landed must re-enrich, and
     that hinges on `fetched_at` moving past the earlier `enriched_at`. Without the
     bump the new transcript would look already-processed and the video keeps "—".
+
+    When this run actually described frames, the source is also stamped with
+    `FRAME_CAPTION_CONTRACT` (`caption_contract`, #90) — which rubric produced
+    those captions, so `redescribe-frames` can tell a current caption from a
+    stale pre-#90 one and skip it. An audio-only digest attaches `""`: it made
+    no captions, so it has nothing to vouch for.
     """
     now = datetime.now(timezone.utc)
     frames_map = frames_by_item or {}
@@ -293,6 +306,7 @@ def attach_transcript(
         item = store.get(item_id)
         if item is None:
             continue
+        item_frames = frames_map.get(item_id, [])
         source = ContentSourceSuccess(
             kind="x_video",
             url=_source_url_for(item),
@@ -300,7 +314,10 @@ def attach_transcript(
             text=transcript.text,
             has_speech=transcript.has_speech,
             language=transcript.language,
-            frames=frames_map.get(item_id, []),
+            frames=item_frames,
+            # Claim the contract only when this run actually described frames; an
+            # audio-only digest has no captions to vouch for.
+            caption_contract=FRAME_CAPTION_CONTRACT if item_frames else "",
         )
         if item.content is None:
             item.content = Content(fetched_at=now, sources=[source])

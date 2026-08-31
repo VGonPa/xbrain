@@ -661,6 +661,14 @@ ArticleBlockAdapter: TypeAdapter[Union[ArticleTextBlock, ArticleImageBlock, Arti
 )
 
 
+# The frame-caption contract the descriptions on a source were produced under
+# (#90). Mirrors `verification._CONTRACT_VERSION`: when the rubric changes in a
+# way that invalidates existing captions, bump this and `redescribe-frames`
+# treats every older caption as stale. `""` means "produced before #90" — which
+# is also stale, and is what every record in the current corpus carries.
+FRAME_CAPTION_CONTRACT = "xbrain-frame-caption/v1"
+
+
 class ContentSourceSuccess(BaseModel):
     """A fetched article whose body was successfully extracted.
 
@@ -711,6 +719,19 @@ class ContentSourceSuccess(BaseModel):
     # every article source) simply carries an empty digest, and `generate` falls
     # back to rendering the raw transcript + frames. `""` = "no digest yet".
     digest: str = ""
+    # Which frame-caption contract the `frames` descriptions were produced under
+    # (#90). Optional + additive (defaults to `""`), so every EXISTING record
+    # LOADS unchanged — the same pattern as `frames`/`has_speech`/`digest`.
+    #
+    # It lives HERE and not on `VideoFrame` on purpose. `fetch._source_signature`
+    # fingerprints material content with `model_dump_json(exclude=...)` over a
+    # FLAT set of top-level field names; a stamp nested inside `frames` would land
+    # INSIDE that fingerprint, so re-stamping unchanged captions would read as a
+    # material change and bump `content.fetched_at` — re-enriching the whole video
+    # corpus for nothing. At source level it is excluded cleanly, as bookkeeping.
+    # Source-level granularity is also the right unit: captions are re-described
+    # per video, never per frame.
+    caption_contract: str = ""
     # Ordered body blocks (text + inline images) for `kind="x_article"` sources
     # captured as a structured Article (#39). Optional + additive (defaults to
     # `[]`), so every EXISTING record LOADS unchanged — a pre-#39 `x_article`

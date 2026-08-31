@@ -941,3 +941,23 @@ def test_format_digest_summary_omits_visual_on_non_frames_run():
     Visual segment — the summary is byte-unchanged from the PR2/PR3 shape."""
     report = DigestReport(transcribed=1, groups={"amplify_video/1": ["a"]})
     assert "Visual:" not in format_digest_summary(report)
+
+
+def test_digest_stamps_the_caption_contract_when_frames_were_described():
+    """A `--frames` run produces captions under the CURRENT contract, so it must
+    say so — otherwise `redescribe-frames` re-captions frames that are already
+    fresh, at full cost."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT, VideoFrame
+
+    store = {"1": _item("1", _VIDEO_A_URL_1)}
+    frames = {"1": [VideoFrame(timestamp=0.0, local_path="1/frames/0.png", description="d")]}
+    attach_transcript(store, ["1"], _speech(), frames_by_item=frames)
+    source = store["1"].content.sources[-1]
+    assert source.caption_contract == FRAME_CAPTION_CONTRACT
+
+
+def test_digest_leaves_the_contract_empty_when_no_frames_were_described():
+    """An audio-only digest describes nothing, so it must claim no contract."""
+    store = {"1": _item("1", _VIDEO_A_URL_1)}
+    attach_transcript(store, ["1"], _speech())
+    assert store["1"].content.sources[-1].caption_contract == ""

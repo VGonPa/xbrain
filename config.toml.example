@@ -100,6 +100,12 @@ command = "parakeet-mlx"
 # (split with shlex, run without a shell). `--frames` is fully opt-in: a normal
 # `digest-video` run never touches ffmpeg or this command.
 #
+# xbrain also sets XBRAIN_VISION_PROMPT in the command's environment, carrying the
+# frame-caption rubric (transcribe on-screen text verbatim, never translated). The
+# argv is unchanged, so a command that ignores the variable still works — it just
+# gets no caption discipline, and its captions will not ground what the digest
+# says about the screen. A custom command SHOULD read it and use it as the prompt.
+#
 # The bundled `scripts/xbrain-vision` wrapper is a MULTI-BACKEND SELECTOR: the
 # `--model` name routes to a local mlx-vlm model OR a cloud Claude model, so one
 # command serves both. Pick per run with `digest-video --vision-model NAME`, or

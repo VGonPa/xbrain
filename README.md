@@ -583,6 +583,14 @@ reads `XBRAIN_VISION_MLX_PYTHON` only if mlx-vlm is not at the uv-tool default
 a `--frames` run — a cold `qwen-32b` (~18 GB) download can exceed the 300 s
 per-frame vision timeout and fail the first run (a re-run uses the cache).
 
+xbrain also sets `XBRAIN_VISION_PROMPT` in the command's environment, carrying
+the frame-caption rubric it renders (transcribe on-screen text verbatim, never
+translated). The argv contract `<command> [--model M] <image-path>` is
+deliberately unchanged, so a command that ignores the variable still works — it
+just gets no caption discipline, and its captions will not ground what the
+digest says about the screen. A custom command SHOULD read it and use it as the
+prompt.
+
 ---
 
 ## The pipeline

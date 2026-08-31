@@ -1471,6 +1471,9 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
     `vision_model` overrides `[vision].model` for this run (the `--vision-model`
     flag): the model name is passed to `[vision].command` as `--model`, so a
     multi-backend wrapper can route it (e.g. `opus` → cloud, `qwen-7b` → local).
+
+    The frame rubric is rendered in `cfg.output_language` (the wiki's language),
+    deliberately not in `digest-video --language` (the audio language).
     """
     if not cfg.vision_command.strip():
         raise ValueError(
@@ -1498,7 +1501,17 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
         )
 
     def _describe(path: Path) -> str:
-        return describe_image(path, command=cfg.vision_command, model=model)
+        # `cfg.output_language` — the WIKI's language, which is what the frame
+        # rubric's `{language}` means. NOT `digest-video --language`, which is the
+        # AUDIO language passed to the transcriber. `language` became required on
+        # `describe_image` in #90 (a default would silently ship an unresolved
+        # `{language}`); wiring it here is the minimal fix this call site needs to
+        # keep working — the dedicated pinning test for it is
+        # `test_frames_render_the_rubric_in_the_output_language` in
+        # `tests/test_cli.py`, shipped in this same branch.
+        return describe_image(
+            path, command=cfg.vision_command, model=model, language=cfg.output_language
+        )
 
     return VisualConfig(
         media_root=cfg.media_dir, extract_fn=_extract, describe_fn=_describe, reduce_fn=_reduce
