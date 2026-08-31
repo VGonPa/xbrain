@@ -285,7 +285,17 @@ No, and the distinction is the point. Three different things are NOT a score of 
   NO medidos* with the filters that blocked them.
 
 Reporting any of these as 0.0 would say retrieval failed where nobody asked it anything. If
-you want a gate, pass `--min-recall`; buckets without coverage can never trigger it.
+you want a gate, pass `--min-recall`. A bucket without coverage can never be NAMED as the one
+that failed — that would be a verdict on a population nobody measured — but the gate is not
+vacuous either: it counts the `(bucket, metric)` comparisons it actually made, and if that
+count is **zero** it fails with *«el umbral … no se comparó contra nada»* instead of passing.
+A threshold of 1.0 used to exit 0 over a golden set the baseline could not score at all.
+
+You will also see a **`vacíos`** column. It counts the cases in that bucket whose query
+retrieved **no chunk at all**, which is a different fault from "the right item ranked below
+k" even though both leave `recall@k` at 0.0. When `vacíos == casos`, the retriever was never
+given anything to rank; `precision@k` is then reported as *sin cobertura* rather than 0.0,
+because its numerator is zero by construction and the figure would restate the empty set.
 
 ---
 
