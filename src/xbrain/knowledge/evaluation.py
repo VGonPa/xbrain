@@ -513,16 +513,29 @@ def _failures(
     threshold: float | None,
     ks: tuple[int, ...],
 ) -> tuple[str, ...]:
-    """Buckets below the threshold, each NAMED with its value.
+    """Buckets below the threshold, each NAMED with its value — or the gate's own failure.
 
     "It failed" is not actionable. "stratum semantico: recall@1 = 0.5 < 1.0" tells the reader
     which bucket to look at and by how much — and, because buckets with no coverage carry the
     sentinel rather than a zero, an unmeasured stratum can never be reported as a failure.
+
+    THE COMPARISONS ARE COUNTED, and zero of them is itself a failure (M2). Every skip above
+    is right on its own: a bucket with no cases, and a metric no case in it measured, must
+    not be named. But `passed` is `not failures`, so when the skips consume EVERY bucket the
+    strictest threshold that exists comes out green having compared nothing — the FAIL-OPEN
+    cell of CLAUDE.md rule 11, in the command whose acceptance criterion is "the evaluation
+    can fail". Reproduced through the CLI on the real corpus: `--min-recall 1.0` over a
+    golden set whose filters the baseline cannot apply exited 0 with `passed: true`.
+
+    So the counter, and not a fabricated bucket: naming a stratum here would be B1 again in
+    the opposite direction, inventing a failure for a population nobody measured. What
+    failed is the GATE, and the failure says so.
     """
     if threshold is None:
         return ()
     metric = f"recall@{max(ks)}"
     failures = []
+    comparisons = 0
     for label, buckets in (("stratum", by_stratum), ("provenance", by_provenance)):
         for name, values in buckets.items():
             if values == NO_COVERAGE:
@@ -533,8 +546,14 @@ def _failures(
             # nothing — the fabricated zero wearing a gate's clothes.
             if value is None or value == NO_COVERAGE:
                 continue
+            comparisons += 1
             if value < threshold:
                 failures.append(f"{label} {name}: {metric} = {value} < {threshold}")
+    if not comparisons:
+        failures.append(
+            f"el umbral {threshold} no se comparó contra nada: 0 buckets con {metric} "
+            "medido. La puerta no puede pasar sin haber medido (M2)"
+        )
     return tuple(failures)
 
 

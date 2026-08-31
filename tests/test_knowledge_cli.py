@@ -203,3 +203,32 @@ def test_eval_reports_the_corpus_it_measured(workspace: Path) -> None:
     payload = _json_stdout(runner.invoke(app, ["eval", "--json"]))
     assert payload["corpus"]["items"] == 12
     assert payload["corpus"]["chunks"] > 0
+
+
+def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: Path) -> None:
+    """M2: a gate that compared the threshold against NOTHING must not report PASS.
+
+    `_failures` skips every bucket with no coverage and every metric carrying the sentinel —
+    correctly, because naming one would be the fabricated zero of spec §8.6.8. But `passed`
+    is literally "no failures", so when the threshold reaches no bucket at all the strictest
+    gate that exists comes out green over zero comparisons. That is the FAIL-OPEN cell of
+    CLAUDE.md rule 11, inside the command whose acceptance criterion 10 is "the evaluation
+    can fail".
+
+    Driven through the real CLI, because the exit code is the only surface a caller reads:
+    the golden set is trimmed to FX7, whose `source` filter the lexical baseline cannot
+    push into `WHERE`, so the case is UNMEASURED and every bucket ends up empty.
+    """
+    golden = yaml.safe_load((workspace / "eval" / "golden-set.yaml").read_text(encoding="utf-8"))
+    golden["cases"] = [c for c in golden["cases"] if c["id"] == "FX7"]
+    golden.pop("scenarios", None)
+    (workspace / "eval" / "golden-set.yaml").write_text(
+        yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["eval", "--min-recall", "1.0"])
+
+    assert result.exit_code != 0, (
+        "a threshold of 1.0 passed having scored zero cases:\n" + result.output
+    )
+    assert "0" in result.output and "medid" in result.output, result.output

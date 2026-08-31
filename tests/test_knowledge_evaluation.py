@@ -431,11 +431,16 @@ def test_a_bucket_whose_cases_all_skip_a_metric_reports_it_without_coverage(corp
 
 
 def test_an_unmeasured_metric_can_never_be_reported_as_a_threshold_failure(corpus) -> None:
-    """A gate that fails a bucket on a metric nobody measured is the fabricated zero again.
+    """A gate that fails a BUCKET on a metric nobody measured is the fabricated zero again.
 
     `_failures` read `values.get(metric, 0.0)`; with the metric carrying the sentinel that
     default would compare a dict against a float, or (with a plain 0.0) name a failure that
     measured nothing.
+
+    REWRITTEN for M2. The first version asserted `failures == ()`, which cemented the
+    fail-open: with the only case unmeasurable, "no bucket was named" and "the gate passed"
+    are two different claims and it only made the first. Both have to hold at once — no
+    bucket is slandered, AND a threshold that reached nothing does not report PASS.
     """
     from xbrain.knowledge.goldenset import RelevantSurface
     from xbrain.knowledge.surfaces import item_surfaces
@@ -451,7 +456,56 @@ def test_an_unmeasured_metric_can_never_be_reported_as_a_threshold_failure(corpu
         ),
     )
     report = evaluate([case], corpus, ks=(10,), threshold=1.0)
-    assert report.failures == (), f"named a failure over an unmeasured metric: {report.failures}"
+    assert not any("exacto" in failure for failure in report.failures), (
+        f"named a bucket as failing a metric nobody measured: {report.failures}"
+    )
+    assert not report.passed, "a threshold compared against nothing must not report PASS (M2)"
+
+
+def test_a_threshold_that_reached_no_bucket_fails_closed_naming_the_count(corpus) -> None:
+    """M2: `passed` must mean "the threshold was met", not "no failure was recorded".
+
+    Every guard below this one is correct — an empty bucket carries the sentinel, an
+    unmeasured metric is skipped, and neither may be named as a failure. What nobody checked
+    is the case where the skipping leaves ZERO comparisons: `passed = not failures` then
+    reads the absence of a comparison as a pass, and `--min-recall 1.0`, the strictest gate
+    that exists, comes out green. That is the FAIL-OPEN cell of CLAUDE.md rule 11.
+
+    The failure names the COUNT rather than a bucket, because no bucket failed: inventing a
+    bucket here would be B1 again, in the opposite direction.
+    """
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = item_surfaces(corpus.items[item_id])[0]
+    case = _case(
+        id="SURFACE-ONLY",
+        query=query,
+        strata=("exacto",),
+        relevant_surfaces=(
+            RelevantSurface(owner_type="item", owner_id=item_id, surface_type=surface.surface_type),
+        ),
+    )
+    report = evaluate([case], corpus, ks=(10,), threshold=1.0)
+    assert len(report.failures) == 1, report.failures
+    assert "0" in report.failures[0] and "medid" in report.failures[0], report.failures[0]
+    assert "sin cobertura" not in report.failures[0], "the sentinel is not a failing value"
+    assert "## Fallos" in render_markdown(report), "the published report must carry it too"
+
+
+def test_a_threshold_that_reached_one_bucket_is_not_reported_as_unapplied(corpus) -> None:
+    """The other side of M2: one real comparison is enough, and it must NOT fail closed.
+
+    Without this, the fix could satisfy the test above by failing every run with a
+    threshold — a gate that always fails is as useless as one that never does, and it would
+    make `test_the_evaluation_can_fail` pass for the wrong reason.
+    """
+    item_id, query = _some_item(corpus)
+    case = _case(id="OWNER", query=query, strata=("exacto",), relevant_items=(item_id,))
+    report = evaluate([case], corpus, ks=(10,), threshold=0.0)
+    assert report.passed, report.failures
+    assert report.failures == ()
 
 
 def test_the_markdown_renders_an_unmeasured_metric_as_words_not_a_number(corpus) -> None:
