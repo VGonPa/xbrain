@@ -4001,11 +4001,23 @@ def test_verify_refuses_to_write_a_verdict_from_a_pre_contract_worksheet(
 # ------------------------------------------------------------ redescribe-frames (#90 Task 9)
 
 
-def _video_item_with_frames(item_id: str, data_dir: Path, *, contract: str = "") -> Item:
+def _video_item_with_frames(
+    item_id: str,
+    data_dir: Path,
+    *,
+    contract: str = "",
+    source: str = "bookmark",
+    topic: str | None = None,
+    url: str = _AMPLIFY_URL_1,
+) -> Item:
     """A stored `x_video` source with two described frames, PNGs written to disk.
 
     Reuses `_video_item` and `_write_slide_png` so the fixture matches what
-    `digest-video --frames` really persists.
+    `digest-video --frames` really persists. `source`/`topic` let callers build
+    the ENGINE's own population (`redescribe.stale_video_sources`) scoped the
+    same way `--source`/`--topic` narrow `redescribe-frames` (#90 review I2) —
+    unlike the plain `_video_item` (no `content`/frames), which the engine never
+    selects at all.
     """
     frames = []
     for index in range(2):
@@ -4016,13 +4028,19 @@ def _video_item_with_frames(item_id: str, data_dir: Path, *, contract: str = "")
         frames.append(
             VideoFrame(timestamp=float(index * 10), local_path=local_path, description="vieja")
         )
-    item = _video_item(item_id, url=_AMPLIFY_URL_1)
+    item = _video_item(item_id, url=url, source=source)
+    if topic is not None:
+        item.enriched = Enrichment(
+            enriched_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+            executor="manual",
+            primary_topic=topic,
+        )
     item.content = Content(
         fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
         sources=[
             ContentSourceSuccess(
                 kind="x_video",
-                url=_AMPLIFY_URL_1,
+                url=url,
                 text="transcripción",
                 frames=frames,
                 caption_contract=contract,
@@ -4087,8 +4105,12 @@ def test_redescribe_frames_dry_run_needs_no_vision_command(tmp_path: Path, monke
     assert result.exit_code == 0, result.output
     assert not (data_dir / "snapshots").exists()
     # The preview still reports real counts (it stats the frame files, it just
-    # never calls the vision model) — not a silent "0 vídeos" placeholder.
-    assert "2 regeneradas" in result.output
+    # never calls the vision model) — not a silent "0 vídeos" placeholder. The
+    # wording is PREDICTIVE ("se regenerarían"), not past-tense ("regeneradas")
+    # — #90 review I3: a dry run must not claim, in the past tense, work it
+    # never did.
+    assert "2 se regenerarían" in result.output
+    assert "--dry-run: no se ha tocado el store." in result.output
     source = load_store(data_dir / "items.json")["42"].content.sources[0]
     assert [f.description for f in source.frames] == ["vieja", "vieja"]  # untouched
 
@@ -4166,33 +4188,391 @@ def test_resolve_redescribe_ids_dedupes_and_applies_the_limit():
     assert _resolve_redescribe_ids({}, "7, 8 ,7,9", None, "all", 2) == ["7", "8"]
 
 
-def test_resolve_redescribe_ids_limit_alone_caps_the_whole_corpus():
+def test_resolve_redescribe_ids_limit_alone_caps_the_whole_corpus(tmp_path: Path):
     """FINDING A: `--limit` with no `--ids`/`--topic` must still cap the
     corpus-wide selection. The plan's original `_resolve_redescribe_ids` returns
     `None` ("every stale video") the instant `--ids`/`--topic` are both absent,
     silently ignoring `--limit` — the obvious way to test the waters before a
-    multi-thousand-frame backfill would describe the ENTIRE corpus instead."""
+    multi-thousand-frame backfill would describe the ENTIRE corpus instead.
+
+    Uses `_video_item_with_frames` (the ENGINE's own population — a frame-
+    bearing `x_video` source), not the plain `_video_item`: #90 review I2 moved
+    the selection off the `list_video_entries` media catalog, so a store built
+    from `_video_item` alone (no `content`) is no longer selected at all.
+    """
     from xbrain.cli import _resolve_redescribe_ids
 
     store = {
-        "1": _video_item("1", url=_AMPLIFY_URL_1),
-        "2": _video_item("2", url=_DISTINCT_VIDEO_URL),
+        "1": _video_item_with_frames("1", tmp_path),
+        "2": _video_item_with_frames("2", tmp_path),
     }
     result = _resolve_redescribe_ids(store, None, None, "all", 1)
     assert result is not None  # NOT the "whole corpus" sentinel
     assert len(result) == 1
 
 
-def test_resolve_redescribe_ids_source_alone_filters_the_whole_corpus():
+def test_resolve_redescribe_ids_source_alone_filters_the_whole_corpus(tmp_path: Path):
     """FINDING A: `--source` with no `--ids`/`--topic` must still scope the
     corpus-wide selection to that source — the plan's original version returns
     `None` here too, silently including every source's videos regardless of
-    `--source bookmarks`."""
+    `--source bookmarks`. See the `--limit` sibling above for why this uses
+    `_video_item_with_frames`, not `_video_item`."""
     from xbrain.cli import _resolve_redescribe_ids
 
     store = {
-        "1": _video_item("1", url=_AMPLIFY_URL_1, source="bookmark"),
-        "2": _video_item("2", url=_DISTINCT_VIDEO_URL, source="own_tweet"),
+        "1": _video_item_with_frames("1", tmp_path, source="bookmark"),
+        "2": _video_item_with_frames("2", tmp_path, source="own_tweet"),
     }
     result = _resolve_redescribe_ids(store, None, None, "bookmarks", None)
     assert result == ["1"]
+
+
+def test_resolve_redescribe_ids_limit_selects_from_the_stale_set_not_the_catalog(
+    tmp_path: Path,
+):
+    """I2, the actual reported bug: item `1` already at the current contract,
+    item `2` stale — `--limit 1` must select the STALE item (`2`), not
+    whichever item happens to sort first in the (staleness-blind)
+    `list_video_entries` catalog. The old implementation truncated the whole
+    catalog to 1 BEFORE checking staleness, so `--limit 1` here selected item
+    `1` (first in store order), the engine found nothing stale in it, and a
+    staged backfill run against `--limit 1` never advanced — identically on
+    every repeat."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {
+        "1": _video_item_with_frames("1", tmp_path, contract=FRAME_CAPTION_CONTRACT),
+        "2": _video_item_with_frames("2", tmp_path, contract=""),
+    }
+    result = _resolve_redescribe_ids(store, None, None, "all", 1)
+    assert result == ["2"]
+
+
+def test_resolve_redescribe_ids_force_widens_the_selection_to_every_frame_source(
+    tmp_path: Path,
+):
+    """`--force` must reach the SELECTION, not just the engine's re-caption
+    decision: with `force=True`, "stale" means every frame-bearing source, so
+    an already-current item is selectable too (#90 review I2's closing note)."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {"1": _video_item_with_frames("1", tmp_path, contract=FRAME_CAPTION_CONTRACT)}
+    assert _resolve_redescribe_ids(store, None, None, "all", 1, force=False) == []
+    assert _resolve_redescribe_ids(store, None, None, "all", 1, force=True) == ["1"]
+
+
+def test_resolve_redescribe_ids_topic_filters_the_stale_set(tmp_path: Path):
+    """`--topic` scopes the engine's own stale population, mirroring `--source`
+    above."""
+    from xbrain.cli import _resolve_redescribe_ids
+
+    store = {
+        "1": _video_item_with_frames("1", tmp_path, topic="ai"),
+        "2": _video_item_with_frames("2", tmp_path, topic="climate"),
+    }
+    result = _resolve_redescribe_ids(store, None, "ai", "all", None)
+    assert result == ["1"]
+
+
+# ---------------------------------------------------------------------------
+# #90 review I1 + M2: a mid-run abort must persist the completed work, take a
+# snapshot, print the summary, AND still exit non-zero.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_persists_partial_work_on_a_mid_run_abort(tmp_path: Path, monkeypatch):
+    """Measured by the reviewer: item `1` fully re-described, item `2` then
+    raises `VisionNotFound` (the vision command vanished mid-run). Before the
+    fix: exit 1, the store UNCHANGED, no snapshot, no summary — every
+    already-paid-for vision call on item `1` discarded. After the fix: item
+    `1`'s new captions are on disk, a snapshot exists, the summary printed, and
+    the run still exits non-zero with the original error."""
+    from xbrain.store import load_store
+    from xbrain.vision import VisionNotFound
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {
+            "1": _video_item_with_frames("1", data_dir),
+            "2": _video_item_with_frames("2", data_dir),
+        },
+        data_dir / "items.json",
+    )
+
+    def _describe(path, **kwargs):
+        if "2/frames" in str(path):
+            raise VisionNotFound("vision command vanished")
+        return "nueva"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _describe)
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "Error: vision command vanished" in result.output
+    # The completed work landed — NOT discarded just because item 2 blew up.
+    snapshots = list((data_dir / "snapshots").iterdir())
+    assert any("pre-redescribe-frames" in p.name for p in snapshots)
+    reloaded = load_store(data_dir / "items.json")
+    assert [f.description for f in reloaded["1"].content.sources[0].frames] == [
+        "nueva",
+        "nueva",
+    ]
+    # Item 2 never got as far as being re-described — its old captions stand.
+    assert [f.description for f in reloaded["2"].content.sources[0].frames] == [
+        "vieja",
+        "vieja",
+    ]
+    # The summary still prints, reflecting what actually landed.
+    assert "2 regeneradas" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 review I3 (CLI level): dry-run vs. real-run output must be unmistakable.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_dry_run_output_is_unmistakably_different_from_real(
+    tmp_path: Path, monkeypatch
+):
+    """A dry run and a real run over the IDENTICAL selection must never print
+    textually indistinguishable summaries — before this fix they did, modulo
+    the leading `Snapshot created: …` line on the real run."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    dry = runner.invoke(app, ["redescribe-frames", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+
+    # Reset the store back to its pre-dry-run state (the dry run must not have
+    # touched it, but re-save to be explicit and independent of that guarantee).
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    real = runner.invoke(app, ["redescribe-frames"])
+    assert real.exit_code == 0, real.output
+
+    assert dry.output != real.output
+    assert "--dry-run: no se ha tocado el store." in dry.output
+    assert "--dry-run" not in real.output
+    assert "se regenerarían" in dry.output
+    assert "regeneradas" in real.output
+    assert "predic" in dry.output.lower()  # the Re-propagados caveat
+    source = load_store(data_dir / "items.json")["42"].content.sources[0]
+    assert [f.description for f in source.frames] == ["nueva", "nueva"]
+
+
+# ---------------------------------------------------------------------------
+# #90 review I4: four CLI wirings that were executed but wholly unasserted.
+# Each test below is written to catch EXACTLY the listed mutation.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_ids_narrows_which_item_is_touched(tmp_path: Path, monkeypatch):
+    """PIN for `item_ids=selected` → `item_ids=None`: a TWO-item store where
+    `--ids` selects only one. If the resolved selection never reached the
+    engine (`item_ids=None`), BOTH items would be re-described."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {
+            "1": _video_item_with_frames("1", data_dir),
+            "2": _video_item_with_frames("2", data_dir),
+        },
+        data_dir / "items.json",
+    )
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--ids", "1"])
+
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(data_dir / "items.json")
+    assert [f.description for f in reloaded["1"].content.sources[0].frames] == [
+        "nueva",
+        "nueva",
+    ]
+    # The UNSELECTED item must be left completely untouched.
+    assert [f.description for f in reloaded["2"].content.sources[0].frames] == [
+        "vieja",
+        "vieja",
+    ]
+
+
+def test_redescribe_frames_force_flag_reaches_the_engine(tmp_path: Path, monkeypatch):
+    """PIN for `force=force` → `force=False`: an already-current source must be
+    RE-described when `--force` is passed — if the flag never reached the
+    engine, this would be a silent no-op (matching
+    `test_redescribe_frames_on_a_current_corpus_writes_nothing` WITHOUT
+    `--force`)."""
+    from xbrain.models import FRAME_CAPTION_CONTRACT
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store(
+        {"42": _video_item_with_frames("42", data_dir, contract=FRAME_CAPTION_CONTRACT)},
+        data_dir / "items.json",
+    )
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--force"])
+
+    assert result.exit_code == 0, result.output
+    reloaded = load_store(data_dir / "items.json")
+    assert [f.description for f in reloaded["42"].content.sources[0].frames] == [
+        "nueva",
+        "nueva",
+    ]
+
+
+def test_redescribe_frames_vision_model_override_reaches_the_command(tmp_path: Path, monkeypatch):
+    """PIN for `_build_describe_frame_fn(cfg, vision_model)` →
+    `(cfg, None)`: `--vision-model NAME` must reach `describe_image` as the
+    `model` kwarg — mirrors `test_digest_video_vision_model_override`."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)  # [vision].command set, model unset
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    seen: list = []
+
+    def _capture(path, *, command, model, language=None):
+        seen.append(model)
+        return "nueva"
+
+    monkeypatch.setattr("xbrain.cli.describe_image", _capture)
+
+    result = runner.invoke(app, ["redescribe-frames", "--vision-model", "opus"])
+
+    assert result.exit_code == 0, result.output
+    assert seen and set(seen) == {"opus"}
+
+
+def test_redescribe_frames_snapshot_content_predates_the_new_captions(tmp_path: Path, monkeypatch):
+    """PIN for `_auto_snapshot(...)` / `save_store(...)` order swapped: the
+    prior test (`test_redescribe_frames_snapshots_before_writing`) only checked
+    that a snapshot exists and the live store has new captions — satisfied even
+    if the snapshot were taken AFTER the write (or not copied correctly).
+    Actually reading the snapshot's OWN `items.json` and asserting it holds the
+    OLD captions is what pins "before", not just "exists"."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+    assert result.exit_code == 0, result.output
+
+    snapshots_dir = data_dir / "snapshots"
+    (snapshot_dir,) = [p for p in snapshots_dir.iterdir() if "pre-redescribe-frames" in p.name]
+    snapshotted = load_store(snapshot_dir / "items.json")
+    assert [f.description for f in snapshotted["42"].content.sources[0].frames] == [
+        "vieja",
+        "vieja",
+    ]
+    # The LIVE store, meanwhile, has the new captions.
+    live = load_store(data_dir / "items.json")
+    assert [f.description for f in live["42"].content.sources[0].frames] == ["nueva", "nueva"]
+
+
+# ---------------------------------------------------------------------------
+# #90 review M1: the circuit breaker must blame the right subsystem at the
+# CLI level too.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_total_failure_from_missing_media_blames_data_media(
+    tmp_path: Path, monkeypatch
+):
+    """Measured: every PNG deleted plus a perfectly healthy `describe_fn` must
+    NOT tell the operator to check `[vision].command`/the vision model."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    for png in (data_dir / "media" / "42" / "frames").glob("*.png"):
+        png.unlink()
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "data/media" in result.output
+    assert "[vision]" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 review M4: `--vision-model` with `--dry-run` must be a hard error, not a
+# silent no-op — matching `test_digest_video_vision_model_without_frames_errors`.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_vision_model_with_dry_run_errors(tmp_path: Path, monkeypatch):
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+
+    result = runner.invoke(app, ["redescribe-frames", "--dry-run", "--vision-model", "opus"])
+
+    assert result.exit_code == 2  # click usage error (BadParameter)
+    assert "--dry-run" in _plain_output(result.output)
+
+
+# ---------------------------------------------------------------------------
+# #90 review M5: an unknown `--topic`, and a whitespace-only `--ids`, must warn
+# — the same asymmetry the unknown-`--ids` warning was added to remove.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_unknown_topic_warns(tmp_path: Path, monkeypatch):
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--topic", "no-such-topic"])
+
+    assert result.exit_code == 0, result.output
+    assert "no-such-topic" in result.output
+    assert "0 vídeos seleccionados" in result.output
+
+
+def test_redescribe_frames_whitespace_only_ids_warns(tmp_path: Path, monkeypatch):
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+    monkeypatch.setattr("xbrain.cli.describe_image", lambda path, **kwargs: "nueva")
+
+    result = runner.invoke(app, ["redescribe-frames", "--ids", "   "])
+
+    assert result.exit_code == 0, result.output
+    assert "aviso" in result.output
+    assert "0 vídeos seleccionados" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #90 review M7: the vision guard must name WHICH operation failed.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_missing_vision_command_names_the_operation(tmp_path: Path, monkeypatch):
+    """Companion to `test_digest_video_frames_requires_vision_command`: unlike
+    that test (which only checks `"vision" in output.lower()` — satisfied by
+    the literal config key `[vision]`, not by the human-readable prose), this
+    asserts the OPERATION NAME itself is in the message."""
+    _setup_repo(tmp_path, monkeypatch)  # no [vision] section
+    data_dir = tmp_path / "data"
+    save_store({"42": _video_item_with_frames("42", data_dir)}, data_dir / "items.json")
+
+    result = runner.invoke(app, ["redescribe-frames"])
+
+    assert result.exit_code == 1
+    assert "redescribe-frames" in result.output

@@ -567,6 +567,71 @@ def test_total_frame_failure_raises_runtime_error(tmp_path: Path):
         redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
 
 
+# ---------------------------------------------------------------------------
+# #90 review M1: the circuit breaker must blame the right subsystem — a
+# missing image file (pruned/unmounted `data/media/`, an ORDINARY per-worktree
+# state) never even reaches `describe_fn`, so it must not be reported as a
+# vision failure.
+# ---------------------------------------------------------------------------
+
+
+def test_total_failure_from_missing_images_blames_data_media_not_vision(tmp_path: Path):
+    """M1: every PNG deleted, with a perfectly healthy `describe_fn` (it is never
+    even called), must name `data/media/` — NOT `[vision].command`/the vision
+    model — as the thing to check."""
+    item = _item("1", descriptions=("a",))
+    store = {"1": item}
+    _media(tmp_path, item)
+    (tmp_path / "1/frames/0.png").unlink()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+
+    message = str(excinfo.value)
+    assert "data/media" in message
+    assert "[vision]" not in message
+    assert "vision model" not in message
+
+
+def test_total_failure_from_vision_errors_blames_the_vision_model(tmp_path: Path):
+    """M1: every frame's IMAGE is present but `describe_fn` always raises
+    `VisionFailed` — the message must point at `[vision].command`/the vision
+    model, NOT at `data/media/` (nothing is missing there)."""
+    item = _item("1", descriptions=("a",))
+    store = {"1": item}
+    _media(tmp_path, item)
+
+    def _always_fails(path: Path) -> str:
+        raise VisionFailed("vision command exited 1")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        redescribe_frames(store, media_root=tmp_path, describe_fn=_always_fails)
+
+    message = str(excinfo.value)
+    assert "[vision].command" in message
+    assert "data/media" not in message
+
+
+def test_total_failure_with_mixed_causes_names_both(tmp_path: Path):
+    """M1: one frame missing, the other's `describe_fn` call fails — a run that
+    mixes both causes must name BOTH, not just whichever the implementation
+    happens to check first."""
+    item = _item("1", descriptions=("a", "b"))
+    store = {"1": item}
+    _media(tmp_path, item)
+    (tmp_path / "1/frames/0.png").unlink()
+
+    def _always_fails(path: Path) -> str:
+        raise VisionFailed("vision command exited 1")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        redescribe_frames(store, media_root=tmp_path, describe_fn=_always_fails)
+
+    message = str(excinfo.value)
+    assert "data/media" in message
+    assert "[vision].command" in message
+
+
 def test_partial_frame_failure_does_not_raise(tmp_path: Path):
     """A PARTIAL failure (some frames really described) is real progress, not a
     total failure — it must not raise, unlike the all-failed case above."""
@@ -684,3 +749,104 @@ def test_vision_failure_warning_names_the_frame_path(tmp_path: Path, caplog):
         redescribe_frames(store, media_root=tmp_path, describe_fn=_describe)
 
     assert str(frame_path) in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #90 review I1 + M2: an injectable `report` so a caller can read (and persist)
+# partial progress even when the run raises before returning.
+# ---------------------------------------------------------------------------
+
+
+def test_redescribe_frames_populates_and_returns_the_passed_in_report(tmp_path: Path):
+    """The `report` object the CALLER passed in is the SAME instance returned —
+    not a fresh one the caller has to remember to swap in."""
+    item = _item("1", descriptions=("a", "b"))
+    store = {"1": item}
+    _media(tmp_path, item)
+    report = RedescribeReport()
+
+    result = redescribe_frames(
+        store, media_root=tmp_path, describe_fn=lambda path: "new", report=report
+    )
+
+    assert result is report
+    assert report.frames_described == 2
+
+
+def test_a_mid_run_exception_leaves_partial_progress_on_the_passed_in_report(tmp_path: Path):
+    """PIN for #90 review I1: a `VisionNotFound` raised on the SECOND item must
+    not erase the first item's already-completed, already-paid-for work from the
+    caller's `report` — this is what lets the CLI's `finally` persist it.
+
+    Measured on the real bug: a 2-item store where item `42` was fully
+    re-described (2 real vision calls) and item `43` then raised
+    `VisionNotFound` left `STORE UNCHANGED: True` because the caller never got
+    ANY report back (the function raises before its final `return`). Passing a
+    pre-created `report` in sidesteps that: it is mutated IN PLACE, frame by
+    frame, so whatever landed before the raise is still there afterward.
+    """
+    first = _item("1", descriptions=("a", "b"))
+    second = _item("2", descriptions=("c",))
+    store = {"1": first, "2": second}
+    _media(tmp_path, first)
+    _media(tmp_path, second)
+
+    def _describe(path: Path) -> str:
+        if "2/frames" in str(path):
+            raise VisionNotFound("vision command vanished")
+        return "new"
+
+    report = RedescribeReport()
+    with pytest.raises(VisionNotFound):
+        redescribe_frames(store, media_root=tmp_path, describe_fn=_describe, report=report)
+
+    # Item 1's two frames were both really re-described BEFORE item 2 raised —
+    # that work must still show up on the report the caller is holding.
+    assert report.frames_described == 2
+    assert [f.description for f in store["1"].content.sources[0].frames] == ["new", "new"]
+    # Item 2 never got as far as `source.frames = new_frames` — it kept its
+    # original caption, which is correct (it was never actually re-described).
+    assert store["2"].content.sources[0].frames[0].description == "c"
+
+
+def test_report_defaults_to_a_fresh_instance_when_omitted(tmp_path: Path):
+    """Backward compatibility: every existing caller (this module's own test
+    suite included) that does not pass `report=` must keep working exactly as
+    before."""
+    item = _item("1", descriptions=("a",))
+    store = {"1": item}
+    _media(tmp_path, item)
+
+    report = redescribe_frames(store, media_root=tmp_path, describe_fn=lambda path: "new")
+    assert report.frames_described == 1
+
+
+# ---------------------------------------------------------------------------
+# #90 review I3: `--dry-run`'s summary wording must be predictive, not
+# past-tense, and must be textually distinct from a real run's.
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_summary_wording_is_predictive_not_past_tense():
+    """The real-run summary says "regeneradas"/"fallidas" — PAST TENSE, things
+    that HAPPENED. A dry run happened nothing, so its wording must not claim
+    otherwise (#90 review I3)."""
+    report = RedescribeReport(
+        videos_selected=1, videos_current=0, frames_described=2, frames_failed=0
+    )
+    dry_line = format_redescribe_summary(report, dry_run=True)
+    real_line = format_redescribe_summary(report, dry_run=False)
+
+    assert dry_line != real_line
+    assert "regeneradas" not in dry_line
+    assert "fallidas" not in dry_line
+    assert "regeneradas" in real_line
+
+
+def test_dry_run_summary_flags_repropagated_as_not_a_prediction():
+    """`Re-propagados` is explicitly NOT a prediction (the module docstring says
+    so) — that caveat must reach the OUTPUT itself, not just a docstring the
+    operator never reads (#90 review I3)."""
+    report = RedescribeReport(videos_selected=1, frames_described=2)
+    dry_line = format_redescribe_summary(report, dry_run=True)
+    assert "predic" in dry_line.lower()

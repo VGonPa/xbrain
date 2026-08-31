@@ -54,7 +54,12 @@ from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.models import ArchiveImport, Author, Item, SourceName
-from xbrain.redescribe import format_redescribe_summary, redescribe_frames
+from xbrain.redescribe import (
+    RedescribeReport,
+    format_redescribe_summary,
+    redescribe_frames,
+    stale_video_sources,
+)
 from xbrain.refresh import (
     backfill_quoted_from_store,
     backfill_quoted_sources,
@@ -105,7 +110,13 @@ from xbrain.video_media import (
     plan_video_downloads,
 )
 from xbrain.video_media import download_videos as run_download_videos
-from xbrain.video_select import format_video_table, list_video_entries, row_to_json
+from xbrain.video_select import (
+    _primary_topic,
+    _scope_by_source,
+    format_video_table,
+    list_video_entries,
+    row_to_json,
+)
 from xbrain.vision import describe_image
 from xbrain.vocab import (
     apply_vocab_worksheet,
@@ -1461,7 +1472,9 @@ def _resolve_digest_ids(
     return unique[:limit] if limit is not None else unique
 
 
-def _build_describe_frame_fn(cfg: Config, vision_model: str | None = None) -> Callable[[Path], str]:
+def _build_describe_frame_fn(
+    cfg: Config, vision_model: str | None = None, *, operation: str
+) -> Callable[[Path], str]:
     """Bind the EXTERNAL vision command into a `path -> caption` callable (#90).
 
     Shared by `digest-video --frames` and `redescribe-frames` so the two can never
@@ -1469,12 +1482,19 @@ def _build_describe_frame_fn(cfg: Config, vision_model: str | None = None) -> Ca
     unconfigured `[vision].command` is a clear operator error raised BEFORE any
     work — there is no bundled default vision model.
 
+    `operation` names the CALLER in the guard's error message (#90 review M7),
+    e.g. `"digest-video --frames"` or `"redescribe-frames"` — a refactor once
+    replaced a caller-specific message ("digest-video --frames requires an
+    external vision model: …") with a generic "esta operación necesita…", and
+    the operator lost the one clue telling them WHICH command failed. Required
+    (no default) so BOTH call sites must identify themselves.
+
     The rubric renders in `cfg.output_language` (the wiki's language), NOT in
     `digest-video --language` (the audio language handed to the transcriber).
     """
     if not cfg.vision_command.strip():
         raise ValueError(
-            "esta operación necesita un modelo de visión externo: configura "
+            f"{operation} necesita un modelo de visión externo: configura "
             "[vision].command en config.toml (no hay default incorporado)."
         )
     model = vision_model or cfg.vision_model
@@ -1496,7 +1516,7 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
     in that shared helper, so `digest-video --frames` and `redescribe-frames`
     cannot drift apart on any of the three.
     """
-    describe_fn = _build_describe_frame_fn(cfg, vision_model)
+    describe_fn = _build_describe_frame_fn(cfg, vision_model, operation="digest-video --frames")
 
     def _extract(path: Path) -> list[KeyFrame]:
         # RAW frames (cap=False): classification runs on the full distribution; the
@@ -1670,8 +1690,55 @@ def _warn_missing_ids(store: dict[str, Item], explicit_ids: list[str]) -> None:
         )
 
 
+def _stale_item_ids(
+    store: dict[str, Item], *, topic: str | None, source: str, force: bool
+) -> list[str]:
+    """Item ids carrying a re-caption candidate, scoped by `--topic`/`--source`
+    — resolved from the ENGINE's OWN population (#90 review I2).
+
+    `_resolve_redescribe_ids` used to narrow via `list_video_entries`, the
+    `list-videos` CATALOG (one row per video *media* entry). That catalog has no
+    staleness filter, so `--limit N` truncated it BEFORE `stale_video_sources`
+    (inside `redescribe_frames` itself) ever got a look — measured: on a store
+    with item 1 already current and item 2 stale, `--limit 1` selected item 1
+    (first in store order), the engine then found nothing stale in it, and
+    reported "0 vídeos seleccionados" — identically on every repeat, so a staged
+    backfill never advanced.
+
+    It also silently drifted from the engine's real population (#90 review M8):
+    the catalog is "one row per video *media* entry", while the engine walks
+    "every `x_video` success carrying frames" — an item with frames but an empty
+    `media` list is repaired by an unscoped run yet invisible to `--limit`/
+    `--source` here. Selecting straight from `stale_video_sources` (`force`
+    threaded through, so `--force` widens "stale" to "every frame-bearing
+    source", exactly like the engine itself) binds the two populations in code
+    instead of leaving them to agree by convention (this repo's rule 5).
+
+    `--topic`/`--source` are applied by reusing `video_select._primary_topic`
+    and `_scope_by_source` — the SAME functions `list_video_entries` uses
+    internally — so this can never drift from the catalog's own notion of
+    either filter.
+    """
+    scoped = _scope_by_source(store, source)
+    ids: list[str] = []
+    for item_id, _source in stale_video_sources(store, force=force):
+        item = scoped.get(item_id)
+        if item is None:
+            continue
+        if topic is not None and _primary_topic(item) != topic:
+            continue
+        ids.append(item_id)
+    return list(dict.fromkeys(ids))
+
+
 def _resolve_redescribe_ids(
-    store: dict[str, Item], ids: str | None, topic: str | None, source: str, limit: int | None
+    store: dict[str, Item],
+    ids: str | None,
+    topic: str | None,
+    source: str,
+    limit: int | None,
+    *,
+    force: bool = False,
 ) -> list[str] | None:
     """Resolve the re-description selection, or `None` for "every stale video".
 
@@ -1685,34 +1752,71 @@ def _resolve_redescribe_ids(
     `--source bookmarks`, describing the WHOLE corpus (every source) at full
     vision cost instead. So the "every stale video" shortcut fires only when
     `limit is None` and `source == "all"` too; otherwise the selection is
-    expanded via the read-only catalog exactly like `--topic` already does
-    (`list_video_entries` accepts `topic=None` — it just filters by `source`).
+    expanded via `_stale_item_ids` — the ENGINE's own stale population, not the
+    `list-videos` catalog (#90 review I2 — see `_stale_item_ids` for the bug this
+    replaced). `force` is threaded through so `--force` widens the population the
+    same way it widens the engine's own selection.
 
-    `--ids` stay verbatim, never re-scoped by `--source` (matching the sibling
-    `_resolve_digest_ids`) — but an id absent from the store is now ECHOED, not
-    silently dropped (#90 pre-flight finding C): `stale_video_sources` filters
-    `{i: store[i] for i in item_ids if i in store}`, so a typo'd `--ids 999`
-    would otherwise report zero videos and the operator could not tell "no such
-    item" from "already at the contract". This stays a WARNING, not a hard
-    error — unlike `_resolve_fetch_ids`'s all-selectors-empty case — because the
+    `--ids` stay verbatim, never re-scoped by `--source`/staleness (matching the
+    sibling `_resolve_digest_ids`) — but an id absent from the store, or the
+    whole `--ids` value collapsing to nothing after stripping whitespace (e.g.
+    `--ids "   "`), is now ECHOED, not silently dropped (#90 pre-flight finding C
+    + review M5): `stale_video_sources` filters `{i: store[i] for i in item_ids
+    if i in store}`, so a typo'd `--ids 999` would otherwise report zero videos
+    and the operator could not tell "no such item" from "already at the
+    contract" — and an unmatched `--topic` was the SAME silent blind spot
+    (`--topic no-such-topic` printed "0 vídeos seleccionados", indistinguishable
+    from an up-to-date corpus). All three stay WARNINGS, not hard errors —
+    unlike `_resolve_fetch_ids`'s all-selectors-empty case — because the
     whole-corpus repair must keep working even when one id in an `--ids` list is
-    bad. `--topic` expands via the catalog, scoped by `--source`.
+    bad.
     """
     if _redescribe_wants_whole_corpus(ids, topic, source, limit):
         return None
     id_list: list[str] = []
     if ids:
-        explicit = [part.strip() for part in ids.split(",") if part.strip()]
-        _warn_missing_ids(store, explicit)
-        id_list.extend(explicit)
+        id_list.extend(_resolve_explicit_redescribe_ids(store, ids))
     if topic or not ids:
         # Either an explicit `--topic` filter, or NOTHING selected explicitly at
         # all (the whole-corpus-but-scoped-by-limit/source path from finding A
-        # above) — either way, expand via the catalog. `topic=None` here just
-        # means "no topic filter", still scoped by `source`.
-        id_list.extend(row.id for row in list_video_entries(store, topic=topic, source=source))
+        # above) — either way, expand from the engine's own stale population.
+        # `topic=None` here just means "no topic filter", still scoped by
+        # `source`.
+        id_list.extend(_resolve_topic_scoped_redescribe_ids(store, topic, source, force))
     unique = list(dict.fromkeys(id_list))
     return unique[:limit] if limit is not None else unique
+
+
+def _resolve_explicit_redescribe_ids(store: dict[str, Item], ids: str) -> list[str]:
+    """Split/strip/dedupe an explicit `--ids` value, warning (#90 review M5)
+    when it collapses to nothing after stripping (e.g. `--ids "   "`) and when
+    any id is absent from the store (#90 pre-flight finding C, `_warn_missing_
+    ids`). Extracted out of `_resolve_redescribe_ids` to keep that function's
+    own branching at a glance (radon: this split is what keeps it at grade B).
+    """
+    explicit = [part.strip() for part in ids.split(",") if part.strip()]
+    if not explicit:
+        typer.echo(
+            "redescribe-frames: aviso, --ids no contiene ningún id válido tras quitar espacios.",
+            err=True,
+        )
+    _warn_missing_ids(store, explicit)
+    return explicit
+
+
+def _resolve_topic_scoped_redescribe_ids(
+    store: dict[str, Item], topic: str | None, source: str, force: bool
+) -> list[str]:
+    """Expand via `_stale_item_ids`, warning (#90 review M5) when an explicit
+    `--topic` matches nothing — the same silent blind spot an unknown `--ids`
+    used to have. `topic=None` just means "no topic filter" (no warning)."""
+    topic_ids = _stale_item_ids(store, topic=topic, source=source, force=force)
+    if topic is not None and not topic_ids:
+        typer.echo(
+            f"redescribe-frames: aviso, --topic {topic!r} no coincide con ningún vídeo.",
+            err=True,
+        )
+    return topic_ids
 
 
 def _dry_run_describe_fn(path: Path) -> str:
@@ -1740,7 +1844,9 @@ def redescribe_frames_command(
     ids: str | None = typer.Option(None, "--ids", help="IDs separados por comas."),
     topic: str | None = typer.Option(None, "--topic", help="Filtra por el primary_topic del item."),
     source: Source = typer.Option(Source.all, help="bookmarks | tweets | all"),
-    limit: int | None = typer.Option(None, "--limit", help="Máximo número de vídeos."),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Máximo número de items a re-describir en esta ejecución."
+    ),
     force: bool = typer.Option(False, "--force", help="Re-describe también los frames ya al día."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Muestra qué se re-describiría sin escribir nada."
@@ -1761,30 +1867,60 @@ def redescribe_frames_command(
     vuelvan a correr con la evidencia nueva. Si ninguna cambia, no toca nada.
 
     Es destructivo (reescribe `items.json`), así que auto-snapshota ANTES de
-    guardar — pero sólo cuando hay algo que guardar.
+    guardar — pero sólo cuando hay algo que guardar. Un abort a mitad de camino
+    (`RuntimeError` del circuit breaker, `VisionNotFound`, un `OSError`, Ctrl-C)
+    persiste igualmente lo que ya se re-describió antes del fallo — no se tira
+    el trabajo de visión ya pagado — y el error se sigue propagando con exit
+    code distinto de 0 (#90 review I1).
 
-    `--dry-run` NO requiere `[vision].command` configurado: previsualiza el
+    `--dry-run` NO requiere `\\[vision].command` configurado: previsualiza el
     backfill (vídeos seleccionados, captions que se regenerarían/fallarían) sin
-    llamar al modelo ni una sola vez.
+    llamar al modelo ni una sola vez. `Re-propagados` en la previsualización NO
+    es una predicción — sólo se sabe corriendo el modelo de verdad.
     """
     cfg = _config()
+    if vision_model and dry_run:
+        raise typer.BadParameter(
+            "--vision-model requires a real run (--dry-run never calls the vision model)"
+        )
     store = load_store(cfg.items_path)
-    selected = _resolve_redescribe_ids(store, ids, topic, source.value, limit)
+    selected = _resolve_redescribe_ids(store, ids, topic, source.value, limit, force=force)
     # A dry run must not demand `[vision].command` at all — see `_dry_run_
     # describe_fn` for why this can't just be the real describe_fn built eagerly.
-    describe_fn = _dry_run_describe_fn if dry_run else _build_describe_frame_fn(cfg, vision_model)
-    report = redescribe_frames(
-        store,
-        media_root=cfg.media_dir,
-        describe_fn=describe_fn,
-        item_ids=selected,
-        force=force,
-        dry_run=dry_run,
+    describe_fn = (
+        _dry_run_describe_fn
+        if dry_run
+        else _build_describe_frame_fn(cfg, vision_model, operation="redescribe-frames")
     )
-    if not dry_run and report.frames_described > 0:
-        _auto_snapshot(cfg, "redescribe-frames")
-        save_store(store, cfg.items_path)
-    typer.echo(format_redescribe_summary(report))
+    # `report` is created HERE, before the engine call, so the `finally` below
+    # holds the SAME instance the engine populated frame by frame — even if the
+    # engine raises partway through (#90 review I1 + M2). Without this, a
+    # mid-run `RuntimeError`/`VisionNotFound`/`OSError`/Ctrl-C would discard
+    # every already-paid-for vision call: the store was only ever written AFTER
+    # `redescribe_frames` returned, and an exception means it never does.
+    report = RedescribeReport()
+    try:
+        redescribe_frames(
+            store,
+            media_root=cfg.media_dir,
+            describe_fn=describe_fn,
+            item_ids=selected,
+            force=force,
+            dry_run=dry_run,
+            report=report,
+        )
+    finally:
+        # Snapshot strictly BEFORE the write — the operator's only undo for a
+        # 2077-caption rewrite — and the summary always prints, success or
+        # failure, so a run that dies partway through still tells the operator
+        # what landed. The exception (if any) propagates unmodified past this
+        # block: `finally` never swallows it.
+        if dry_run:
+            typer.echo("--dry-run: no se ha tocado el store.")
+        elif report.frames_described > 0:
+            _auto_snapshot(cfg, "redescribe-frames")
+            save_store(store, cfg.items_path)
+        typer.echo(format_redescribe_summary(report, dry_run=dry_run))
 
 
 @app.command()

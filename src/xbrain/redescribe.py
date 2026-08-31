@@ -100,6 +100,14 @@ class RedescribeReport:
     frames_described: int = 0
     frames_failed: int = 0
     items_repropagated: int = 0
+    # Split of `frames_failed` by CAUSE (#90 review M1) — used only by
+    # `_raise_on_total_failure` to name the right subsystem in its error
+    # message. A missing image file never even reaches `describe_fn`, so
+    # lumping it in with a real `VisionFailed` sent operators chasing
+    # `[vision].command` for what was actually a pruned/unmounted `data/media/`
+    # (gitignored and per-worktree — an ORDINARY state, not exotic).
+    frames_failed_missing_image: int = 0
+    frames_failed_vision_error: int = 0
 
 
 def _frame_bearing_sources(item: Item) -> list[ContentSourceSuccess]:
@@ -147,6 +155,7 @@ def redescribe_frames(
     item_ids: list[str] | None = None,
     force: bool = False,
     dry_run: bool = False,
+    report: RedescribeReport | None = None,
 ) -> RedescribeReport:
     """Re-caption every stale frame from its stored image; return the outcome.
 
@@ -157,6 +166,18 @@ def redescribe_frames(
     by calling the model, and a dry run never does — so the field stays at its
     default (0) on every dry-run report, and is not a prediction of what the real
     run will bump (#90 review M3).
+
+    `report`, when passed, is the object POPULATED in place and returned — the
+    caller then holds the SAME instance the engine is filling in, frame by
+    frame (#90 review I1). Without this seam, a mid-run exception (the
+    total-failure `RuntimeError` below, a propagating `VisionNotFound`, an
+    `OSError`, a Ctrl-C) would discard every already-paid-for vision call: the
+    caller's own `RedescribeReport()` never gets assigned because the `return`
+    that would hand it over never executes. Passing a pre-created `report` in
+    lets a `try/finally` in the caller read (and persist) whatever landed before
+    the exception, even though the exception still propagates unmodified. A
+    fresh `RedescribeReport()` is created when `report` is omitted, so every
+    existing caller (including this module's own test suite) is unaffected.
 
     A missing image, or a `describe_fn` call that raises `vision.VisionFailed`
     (non-zero exit, timeout, or an exit-0-but-empty-output run), is a PER-FRAME
@@ -171,7 +192,8 @@ def redescribe_frames(
     per-frame one and is NOT swallowed: see `_raise_on_total_failure`, called
     unconditionally at the end of a real (non-dry) run.
     """
-    report = RedescribeReport()
+    if report is None:
+        report = RedescribeReport()
     now = datetime.now(timezone.utc)
     all_frame_sources = stale_video_sources(store, item_ids, force=True)
     stale = stale_video_sources(store, item_ids, force=force)
@@ -197,26 +219,64 @@ def redescribe_frames(
             described, failed = _preview_source(source, media_root)
             report.frames_described += described
             report.frames_failed += failed
+            # A preview can only ever detect the missing-file cause (it never
+            # calls `describe_fn`, so a `VisionFailed` can never surface here).
+            report.frames_failed_missing_image += failed
             continue
-        new_frames, described, failed = _redescribe_source(source, media_root, describe_fn)
-        report.frames_described += described
-        report.frames_failed += failed
-        changed = [f.description for f in new_frames] != [f.description for f in source.frames]
-        source.frames = new_frames
-        # All-or-nothing: a source with an un-redescribed frame stays stale.
-        if failed == 0:
-            source.caption_contract = FRAME_CAPTION_CONTRACT
-        if changed:
-            item = store[item_id]
-            if item.content is not None:
-                # The SAME re-enrichment trigger `digest.attach_transcript` uses:
-                # new evidence must reach enrich → video-digest → generate. Bumped
-                # only on a real caption change, so a no-op backfill spends nothing.
-                item.content.fetched_at = now
-                repropagated_items.add(item_id)
+        _apply_real_redescription(
+            item_id,
+            source,
+            media_root=media_root,
+            describe_fn=describe_fn,
+            report=report,
+            store=store,
+            now=now,
+            repropagated_items=repropagated_items,
+        )
     report.items_repropagated = len(repropagated_items)
     _raise_on_total_failure(report, dry_run=dry_run)
     return report
+
+
+def _apply_real_redescription(
+    item_id: str,
+    source: ContentSourceSuccess,
+    *,
+    media_root: Path,
+    describe_fn: DescribeFn,
+    report: RedescribeReport,
+    store: dict[str, Item],
+    now: datetime,
+    repropagated_items: set[str],
+) -> None:
+    """Re-caption ONE stale source's frames for a REAL (non-dry) run.
+
+    Updates `report`'s counters and, when a caption actually changed, the
+    item's `content.fetched_at` + `repropagated_items` — extracted out of
+    `redescribe_frames`'s main loop to keep that loop's own branching at a
+    glance (radon: this split is what keeps `redescribe_frames` from
+    compounding a grade with every future counter it needs to track).
+    """
+    new_frames, described, failed, missing, vision_errors = _redescribe_source(
+        source, media_root, describe_fn
+    )
+    report.frames_described += described
+    report.frames_failed += failed
+    report.frames_failed_missing_image += missing
+    report.frames_failed_vision_error += vision_errors
+    changed = [f.description for f in new_frames] != [f.description for f in source.frames]
+    source.frames = new_frames
+    # All-or-nothing: a source with an un-redescribed frame stays stale.
+    if failed == 0:
+        source.caption_contract = FRAME_CAPTION_CONTRACT
+    if changed:
+        item = store[item_id]
+        if item.content is not None:
+            # The SAME re-enrichment trigger `digest.attach_transcript` uses:
+            # new evidence must reach enrich → video-digest → generate. Bumped
+            # only on a real caption change, so a no-op backfill spends nothing.
+            item.content.fetched_at = now
+            repropagated_items.add(item_id)
 
 
 def _raise_on_total_failure(report: RedescribeReport, *, dry_run: bool) -> None:
@@ -240,10 +300,39 @@ def _raise_on_total_failure(report: RedescribeReport, *, dry_run: bool) -> None:
     total_attempted = report.frames_described + report.frames_failed
     if dry_run or total_attempted == 0 or report.frames_described > 0:
         return
-    raise RuntimeError(
-        f"All {total_attempted} frame re-caption attempts failed; "
-        "check [vision].command / the vision model, and the per-frame "
-        "warnings above."
+    raise RuntimeError(_total_failure_message(report, total_attempted))
+
+
+def _total_failure_message(report: RedescribeReport, total_attempted: int) -> str:
+    """Name the right subsystem for a total failure (#90 review M1).
+
+    A missing image file (a pruned or unmounted `data/media/` — gitignored and
+    per-worktree, so "items.json present, media absent" is an ORDINARY state,
+    not an exotic one) never even reaches `describe_fn`. Blaming
+    `[vision].command`/the vision model for it — the OLD, single message below —
+    sends the operator chasing the wrong subsystem: measured, deleting every PNG
+    against a perfectly healthy `describe_fn` raised exactly that message.
+    Distinguishes the two causes (and names both when a run somehow mixes them),
+    while keeping `media.py:245-256`'s shape and tone: "All N … failed; check
+    X, and the per-frame warnings above."
+    """
+    missing = report.frames_failed_missing_image
+    vision_errors = report.frames_failed_vision_error
+    if vision_errors == 0:
+        check = (
+            "check data/media/ — the image files are missing (a pruned or "
+            "unmounted media root looks exactly like this)"
+        )
+    elif missing == 0:
+        check = "check [vision].command / the vision model"
+    else:
+        check = (
+            f"check data/media/ ({missing} missing image file(s)) and "
+            f"[vision].command / the vision model ({vision_errors} vision call failure(s))"
+        )
+    return (
+        f"All {total_attempted} frame re-caption attempts failed; {check}, "
+        "and the per-frame warnings above."
     )
 
 
@@ -265,8 +354,11 @@ def _preview_source(source: ContentSourceSuccess, media_root: Path) -> tuple[int
 
 def _redescribe_source(
     source: ContentSourceSuccess, media_root: Path, describe_fn: DescribeFn
-) -> tuple[list[VideoFrame], int, int]:
-    """Re-caption one source's frames; return (frames, described, failed).
+) -> tuple[list[VideoFrame], int, int, int, int]:
+    """Re-caption one source's frames; return (frames, described, failed,
+    missing_image, vision_error) — the last two split `failed` by CAUSE
+    (#90 review M1) so the caller's circuit breaker can name the right
+    subsystem instead of always blaming the vision model.
 
     Two DISTINCT per-frame failure modes are handled the same way — logged, the
     frame keeps its old caption, `failed` incremented, the loop continues to the
@@ -290,7 +382,7 @@ def _redescribe_source(
     having changed nothing — instead of failing fast on an operator error.
     """
     frames: list[VideoFrame] = []
-    described = failed = 0
+    described = failed = missing_image = vision_error = 0
     for frame in source.frames:
         path = media_root / frame.local_path
         if not path.is_file():
@@ -299,6 +391,7 @@ def _redescribe_source(
             )
             frames.append(frame)
             failed += 1
+            missing_image += 1
             continue
         try:
             description = describe_fn(path)
@@ -310,6 +403,7 @@ def _redescribe_source(
             )
             frames.append(frame)
             failed += 1
+            vision_error += 1
             continue
         # `model_copy(update=...)` bypasses pydantic validation — a conscious,
         # NOT-built defence-in-depth gap: `describe_fn` is typed `Callable[[Path],
@@ -320,10 +414,10 @@ def _redescribe_source(
         # (#90 review M5).
         frames.append(frame.model_copy(update={"description": description}))
         described += 1
-    return frames, described, failed
+    return frames, described, failed, missing_image, vision_error
 
 
-def format_redescribe_summary(report: RedescribeReport) -> str:
+def format_redescribe_summary(report: RedescribeReport, *, dry_run: bool = False) -> str:
     """One-line human SUMMARY of a re-description run.
 
     "vídeos seleccionados" (not "re-descritos"): `videos_selected` counts sources
@@ -331,7 +425,27 @@ def format_redescribe_summary(report: RedescribeReport) -> str:
     root gone, a run would otherwise print the self-contradictory "N vídeos
     re-descritos … 0 regeneradas" (#90 review M4). `Captions:` carries the real
     described/failed story.
+
+    `dry_run=True` renders a DIFFERENT, predictive wording (#90 review I3): the
+    real-run string above is past tense ("regeneradas", "fallidas" — things that
+    HAPPENED), and a `--dry-run` report reusing it verbatim is textually
+    indistinguishable from a real run's — plus it lies grammatically, since a
+    preview regenerates zero captions. The dry-run string below uses future/
+    conditional wording ("se regenerarían", "fallarían") and spells out, IN the
+    output itself (not just a docstring the operator never sees), that
+    `Re-propagados` is not a prediction at all — `redescribe_frames`'s own
+    docstring already says a dry run cannot know whether a caption will
+    actually CHANGE, only whether it can be attempted.
     """
+    if dry_run:
+        return (
+            f"Frames: {report.videos_selected} vídeos seleccionados, "
+            f"{report.videos_current} ya al día. "
+            f"Captions: {report.frames_described} se regenerarían, "
+            f"{report.frames_failed} fallarían. "
+            "Re-propagados: no es una predicción — sólo se sabe corriendo el "
+            "modelo de verdad (sin --dry-run)."
+        )
     return (
         f"Frames: {report.videos_selected} vídeos seleccionados, "
         f"{report.videos_current} ya al día. "
