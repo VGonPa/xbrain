@@ -1,0 +1,33 @@
+{
+  "_comment": "Pinned top-10 for six queries over tests/fixtures/knowledge_corpus.json. Rebuilt ONLY when the ranking is intended to change: it goes red when chunking, the tokenizer, the ORDER BY or the fixture corpus move, which are exactly the four things that silently alter every downstream recall number. Plan 02's chunker sweep changes the module default, not the params recorded here, so it cannot move this.",
+  "chunker_params": {
+    "target": 1200,
+    "max_chars": 2000,
+    "overlap": 150,
+    "min_chars": 40
+  },
+  "tokenize": "unicode61 remove_diacritics 2",
+  "chunks_indexed": 51,
+  "rankings": {
+    "Quillfeather": [
+      "item:k12:user_note:0:0:xbrain-knowledge-chunker/v1",
+      "item:k03:external_article:80e0981ad499:4:xbrain-knowledge-chunker/v1"
+    ],
+    "Marrowgate protocol": [
+      "item:k04:external_article:bac1a1248324:3:xbrain-knowledge-chunker/v1"
+    ],
+    "Bramblewick": [
+      "item:k05:x_article:0a85d123c615:2:xbrain-knowledge-chunker/v1"
+    ],
+    "Cindervale checklist": [
+      "item:k06:thread:5a43807e8d84:0:xbrain-knowledge-chunker/v1"
+    ],
+    "Thistledown": [
+      "item:k08:video_digest:d0c4385ea6d8:0:xbrain-knowledge-chunker/v1",
+      "item:k08:video_transcript:d0c4385ea6d8:4:xbrain-knowledge-chunker/v1"
+    ],
+    "Pelicanine": [
+      "item:k10:image_description:b17a76599fea:0:xbrain-knowledge-chunker/v1"
+    ]
+  }
+}
