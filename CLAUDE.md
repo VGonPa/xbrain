@@ -664,7 +664,9 @@ So every attack on the gate sorts into exactly two bins:
   deleting the workflow file *(probe #112: zero runs, `BLOCKED`)*; renaming the job (the
   required context `quality` never appears); `continue-on-error` on the job;
   `branches-ignore`; `paths:` under `pull_request`; an invalid `types:`. GitHub blocks the
-  merge. **The change cannot ship a lie.**
+  merge. **The change cannot ship a lie.** *(This bin assumes the PR targets `develop` or
+  `main` — what blocks is branch protection's required check, and it exists only there. On
+  any other base these cells flip into the column below: see rule 14.)*
 - **FAIL-OPEN (lethal)** — anything that lets the check still say **PASS while testing
   less**: `continue-on-error` on the gate step; `checkout` with an explicit `ref:` *(probe
   #124 — the gate ran green **on the wrong tree**; the test count gave it away, `1088
@@ -705,6 +707,40 @@ exist.
 
 **The guards catch mistakes, not attacks. The only backstop against an attack is that
 someone reads the diff of `.github/`.** Say so plainly; do not claim the gate is airtight.
+
+### 14. A PR onto a feature branch runs no gate at all — and GitHub calls it `CLEAN`
+
+Rule 11 sorts every attack on the gate into two bins. **That table is conditional on
+something it never says: the PR targets `develop` or `main`.** What blocks a merge is
+branch protection's *required check*, and branch protection lives only on those two.
+
+`quality.yml`'s trigger is `pull_request: branches: [develop, main]`. Point a PR at a
+feature branch — a stacked PR, most obviously — and the workflow fires **zero** times.
+No check is produced, so no check is missing, so nothing blocks.
+
+Measured on **#151**, stacked on #149's branch while #149 was still open:
+
+| Surface read | What it said |
+|---|---|
+| `gh run list --branch feat/90-pr2-redescribe-frames` | **no runs at all** |
+| `gh pr view 151 --json statusCheckRollup` | `[]` |
+| `gh pr view 151 --json mergeable,mergeStateStatus` | `MERGEABLE`, **`CLEAN`** |
+
+`CLEAN` does not distinguish *everything required passed* from *nothing was required*.
+That is rule 9 one level up: the instrument does not lie about a check, it lies **by the
+absence of checks**. Retargeting the same PR (`gh pr edit 151 --base develop`) started the
+gate — a `pull_request` run was in progress 30 s later — and it passed. No code changed,
+only the base.
+
+**Do: a stacked branch is a work container; a PR is a gate. Do not open them together.**
+Let the work proceed on the stacked branch, and open the PR only once its base has landed
+in `develop`. And read `required_status_checks.contexts` on the TARGET branch before
+trusting any merge state.
+
+**And check why you are stacking at all.** #151 was stacked because #149 sat merge-ready
+and unmerged — a permission boundary that was never there. `develop` is the *integration*
+branch: merging into it is the ordinary end of the loop, not a release. The cheapest fix
+for a stacked PR is usually to merge the one below it.
 
 ### Branch protection: the live settings, and what each one cost
 
