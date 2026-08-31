@@ -676,9 +676,7 @@ def _table(title: str, buckets: dict[str, Any]) -> list[str]:
     ]
     for name, values in buckets.items():
         if values == NO_COVERAGE:
-            lines.append(
-                f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — |"
-            )
+            lines.append(f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — |")
             continue
         cells = [
             _cell(values, "recall@1"),
@@ -687,9 +685,7 @@ def _table(title: str, buckets: dict[str, Any]) -> list[str]:
             _cell(values, "mrr"),
         ]
         lines.append(
-            f"| {name} | {values['cases']} | {values['no_results']} | "
-            + " | ".join(cells)
-            + " |"
+            f"| {name} | {values['cases']} | {values['no_results']} | " + " | ".join(cells) + " |"
         )
     lines.append("")
     return lines
