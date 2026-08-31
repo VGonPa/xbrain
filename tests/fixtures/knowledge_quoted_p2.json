@@ -1,0 +1,38 @@
+{
+  "id": "2041860998689132948",
+  "source": "bookmark",
+  "url": "https://x.com/vgonpa/status/2041860998689132948",
+  "author": {
+    "handle": "vgonpa",
+    "name": "Victor Gonzalez"
+  },
+  "text": "Here is the same thought by someone that knows a bit more.",
+  "created_at": "2026-07-19T09:12:00+00:00",
+  "captured_at": "2026-08-30T07:00:00+00:00",
+  "quoted_id": "2041625567473365166",
+  "content": {
+    "fetched_at": "2026-08-30T08:00:00+00:00",
+    "sources": [
+      {
+        "outcome": "success",
+        "kind": "quoted_tweet",
+        "url": "https://x.com/JosephJacks_/status/2041625567473365166",
+        "text": "delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta kilo romeo yankee foxtrot mike tango alpha hotel oscar victor charlie juliet quebec xray echo lima sierra zulu golf november uniform bravo india papa whiskey delta k",
+        "author": {
+          "handle": "JosephJacks_",
+          "name": "JJ"
+        },
+        "attempts": 1
+      }
+    ]
+  },
+  "enriched": {
+    "enriched_at": "2026-08-30T09:00:00+00:00",
+    "executor": "claude-code",
+    "summary": "Un resumen sintetico del post citado.",
+    "primary_topic": "ai-coding",
+    "topics": [
+      "ai-coding"
+    ]
+  }
+}
