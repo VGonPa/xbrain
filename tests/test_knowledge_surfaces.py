@@ -560,3 +560,54 @@ def test_topic_staleness_compares_the_live_count_with_the_synthesized_one() -> N
     )
     assert topic_record(topic, page, ("1", "2"), ("3",)).stale is False
     assert topic_record(topic, page, ("1", "2", "3"), ()).stale is True
+
+
+# ---------------------------------------------------------------------------
+# m4 — the digest has no producer, and that is the honest answer
+# ---------------------------------------------------------------------------
+
+
+def test_the_video_digest_never_borrows_the_enrichment_executor_as_its_producer() -> None:
+    """The plan's M4 table says `enriched.executor`; this surface stays `None`. On purpose.
+
+    The digest is written by the `video-digest` worksheet stage, whose executor is NOT
+    recorded on the source. `enriched.executor` belongs to `enrich`, a DIFFERENT stage, so
+    putting it here would present a conjecture about one stage as the provenance of another —
+    while criterion 3b only asks for these fields *where the datum exists in the store*.
+
+    Pinned because the plausible "fix" is exactly the wrong one: a reader chasing the
+    deviation would reach for `enriched.executor`, the field is right there on the item, and
+    the result would look populated and be manufactured. `producer` is the field that answers
+    *what wrote these words*, and a wrong answer there is worse than no answer.
+
+    Measured 2026-08-31 over 2,404 items with the commands configured: `producer` is populated
+    on 6,923 item surfaces and absent only on `post` (2,404) and `video_digest` (216).
+    """
+    item = _item(
+        enriched=Enrichment(
+            summary="a summary",
+            topics=["t"],
+            primary_topic="t",
+            executor="claude-code",
+            enriched_at=datetime(2026, 3, 2, tzinfo=UTC),
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 3, 1, tzinfo=UTC),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video",
+                    url="https://v.example/v.mp4",
+                    text="transcript body",
+                    has_speech=True,
+                    digest="What it is. Key points. Why it matters.",
+                )
+            ],
+        ),
+    )
+    surfaces = item_surfaces(item, transcribe_command="asr", vision_command="vlm")
+    digest = next(s for s in surfaces if s.surface_type == "video_digest")
+    summary = next(s for s in surfaces if s.surface_type == "summary")
+
+    assert summary.producer == "claude-code", "the enrichment DOES record its executor"
+    assert digest.producer is None, "the digest borrowed a producer from another stage"
+    assert digest.produced_at is not None, "the capture instant IS in the store"
