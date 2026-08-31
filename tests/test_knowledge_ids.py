@@ -238,3 +238,56 @@ def test_the_nul_separator_stops_two_arms_concatenating_into_a_third_value() -> 
     assert surface_fingerprint("post", "source", "ab") != surface_fingerprint(
         "post", "sourcea", "b"
     )
+
+
+# ---------------------------------------------------------------------------
+# m7 — the photo key is public, and lives with the rest of the family
+# ---------------------------------------------------------------------------
+
+
+def test_the_photo_source_key_is_public_and_lives_with_the_key_family() -> None:
+    """`surfaces.py` reached across a module boundary for `_sha1_12`, inside a function.
+
+    Every other source key in this layer — `content_source_key`, `video_frame_source_key`,
+    `topic_id`, `surface_id`, `chunk_id` — is declared here, where the rules about what goes
+    into a key (NUL joining, truncation, the `#n` ordinal) are written down once. The photo
+    key was the one exception, derived at the call site from a private helper, so the one
+    key whose derivation nobody could find from `ids.py` was also the one nobody could change
+    without grepping for an underscore.
+
+    Asserted on the SOURCE as well as the value (rule 9): the private import must be gone,
+    or the public function is decoration next to a call site that still bypasses it.
+    """
+    import ast
+    import hashlib
+    import inspect
+    import textwrap
+
+    from xbrain.knowledge import surfaces
+    from xbrain.knowledge.ids import photo_source_key
+
+    url = "https://pbs.twimg.com/media/abc.jpg"
+    assert photo_source_key(url) == hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:12]
+    assert photo_source_key(url) != photo_source_key(url + "?x=1")
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(surfaces)))
+    private = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("xbrain.knowledge")
+        for alias in node.names
+        if alias.name.startswith("_")
+    ]
+    assert not private, (
+        f"`surfaces.py` still reaches into a sibling's privates: {private}"
+    )
+
+    # Scoped to imports from WITHIN this layer, deliberately. `surfaces.py` also imports
+    # `_FAILURE_CLAUSE` from `executors.api`, and that one is the seam, not the smell: it is
+    # the shared definition of the unfetched-link reason clause, imported precisely so the
+    # knowledge layer cannot grow a second copy that drifts from the one the LLM surfaces
+    # read (rule 5). Making it public would edit a module this PR deliberately leaves
+    # unchanged from the outside. The rule being enforced here is narrower and real: a key
+    # derivation belongs in `ids.py`, next to the family and the rules it follows.
+    assert "_FAILURE_CLAUSE" in inspect.getsource(surfaces)

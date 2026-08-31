@@ -238,3 +238,27 @@ def test_an_evidence_bundle_hydrates_verification_but_never_persists_it() -> Non
     )
     assert bundle.verification == {}
     assert "verification" in EvidenceBundle.model_fields
+
+
+# ---------------------------------------------------------------------------
+# m5 — `Author` is inside the totality partition
+# ---------------------------------------------------------------------------
+
+
+def test_the_attribution_author_is_inside_the_totality_partition() -> None:
+    """`Author` transports no corpus content today — and that is not a reason to omit it.
+
+    The plan's m12 sketch listed `("Author", "handle")` and `("Author", "name")`; the
+    implementation left the model out of `CONTRACT_MODELS`, so its `str` fields sat outside
+    the partition entirely. The consequence is not today's: it is that a text field added to
+    `Author` later — a bio, a display note, anything that could carry a claim — would join
+    the contract with nobody deciding whether it needs an origin, and the totality test that
+    exists to force that decision would stay green.
+
+    `Author` is reachable from the contract twice (`SearchResult.author`,
+    `KnowledgeSurface.attribution`), and the second is the attribution rule itself.
+    """
+    from xbrain.models import Author
+
+    assert Author in CONTRACT_MODELS
+    assert {("Author", "handle"), ("Author", "name")} <= TEXT_FIELDS_WITHOUT_ORIGIN

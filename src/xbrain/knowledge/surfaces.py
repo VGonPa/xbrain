@@ -36,6 +36,7 @@ from xbrain.executors.api import (
 from xbrain.knowledge.ids import (
     SINGLETON_SOURCE_KEY,
     content_source_keys,
+    photo_source_key,
     surface_fingerprint,
     surface_id,
     topic_id,
@@ -241,7 +242,7 @@ def item_surfaces(
                 owner_type="item",
                 owner_id=item.id,
                 surface_type="image_description",
-                source_key=_photo_source_key(photo.url),
+                source_key=photo_source_key(photo.url),
                 text=photo.description,
                 producer=photo.description_version,
                 produced_at=photo.described_at,
@@ -329,10 +330,6 @@ def _enrichment_surfaces(item: Item) -> list[KnowledgeSurface]:
     return out
 
 
-def _photo_source_key(url: str) -> str:
-    from xbrain.knowledge.ids import _sha1_12
-
-    return _sha1_12(url)
 
 
 def _content_source_surfaces(

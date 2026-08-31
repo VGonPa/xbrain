@@ -115,6 +115,20 @@ def content_source_keys(item: Item) -> dict[int, str]:
     return keys
 
 
+def photo_source_key(url: str) -> str:
+    """The `source_key` of a described photo — `sha1(url)[:12]`.
+
+    Public, and here with the rest of the family. `surfaces.py` used to derive it inline from
+    `_sha1_12`, imported privately from inside a function, which made this the one key in the
+    layer whose derivation could not be found by reading `ids.py` — and the one nobody could
+    change without grepping for an underscore.
+
+    Keyed on the URL alone, unlike `content_source_key`: a photo has no `kind` to collide on,
+    and the media URL is already unique per item.
+    """
+    return _sha1_12(url)
+
+
 def video_frame_source_key(video_source_key: str, frame_index: int) -> str:
     """`<the video's source_key>.f<frame index>` (spec §3.3, `video_frame` row).
 

@@ -237,7 +237,15 @@ class GraphExpansionResponse(BaseModel):
 
 
 # Every model whose declared text fields the partition below must cover.
+#
+# `Author` is here although it comes from `xbrain.models` and carries no corpus content
+# today. It is reachable from the contract twice — `SearchResult.author` and
+# `KnowledgeSurface.attribution`, the second being the attribution rule itself — and leaving
+# it out put its `str` fields outside the partition entirely, so a text field added to it
+# later (a bio, a display note) would join the contract with nobody deciding whether it needs
+# an origin, and the totality test that exists to force that decision would stay green.
 CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
+    Author,
     DerivedText,
     SearchMatch,
     SearchResult,
@@ -295,6 +303,8 @@ TEXT_FIELDS_REQUIRING_ORIGIN: frozenset[tuple[str, str]] = frozenset(
 # names a work rather than asserting anything about it.
 TEXT_FIELDS_WITHOUT_ORIGIN: frozenset[tuple[str, str]] = frozenset(
     {
+        ("Author", "handle"),
+        ("Author", "name"),
         ("SearchResponse", "query"),
         ("SearchResponse", "cursor"),
         ("SearchResult", "item_id"),
