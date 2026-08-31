@@ -647,3 +647,52 @@ def test_the_markdown_publishes_how_many_cases_retrieved_nothing(corpus) -> None
     row = next(line for line in rendered.splitlines() if line.startswith("| exacto |"))
     assert "vacíos" in rendered, "the column must be labelled where it is read"
     assert row.split("|")[3].strip() == "1", f"the empty-result count is missing from: {row}"
+
+
+# ---------------------------------------------------------------------------
+# m10 — one list, in code, not in a docstring
+# ---------------------------------------------------------------------------
+
+
+def test_the_aggregate_carries_every_metric_the_scorer_produced() -> None:
+    """m10: `_metric_names` claimed a binding with `_score` that did not exist.
+
+    Its docstring said "One list, so the aggregate and the per-case scoring cannot disagree
+    about what exists" — but `_score` never called it. It built `recall@{k}` and friends from
+    its own f-strings, so there were two lists that happened to match. One direction was
+    guarded by accident (dropping a name from `_metric_names` turns
+    `test_metrics_are_reported_per_stratum_and_provenance` red); the other was not, and a
+    metric added to `_score` would vanish from the aggregate, from `measured` and from the
+    published table without a word. That is rule 5 — bind them in code, never in prose — in
+    the module whose docstring cites it.
+
+    The binding is asserted the only way that discriminates: hand the aggregate a case
+    carrying a metric no list mentions, and require it to come through.
+    """
+    from xbrain.knowledge.evaluation import CaseResult, _bucket_means
+
+    member = CaseResult(
+        id="NOVEL",
+        provenance="construido",
+        strata=("exacto",),
+        retrieved=(),
+        metrics={"recall@10": 1.0, "ndcg@10": 0.5},
+        no_results=False,
+    )
+
+    means = _bucket_means([member])
+
+    assert means["ndcg@10"] == 0.5, "a metric the scorer produced never reached the aggregate"
+    assert means["measured"]["ndcg@10"] == 1, "and its denominator went missing with it"
+    assert means["recall@10"] == 1.0
+
+
+def test_the_aggregate_names_come_from_the_cases_not_from_a_second_list(report) -> None:
+    """The same binding, through the public API: the two key sets are IDENTICAL.
+
+    Not "the aggregate contains the metrics" — that is satisfied by a superset, which is
+    exactly what a stale second list would produce.
+    """
+    bucket = report.by_stratum["exacto"]
+    case = next(c for c in report.cases if "exacto" in c.strata)
+    assert set(bucket["measured"]) == set(case.metrics)

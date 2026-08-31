@@ -339,8 +339,8 @@ def evaluate(
         latencies.append((time.perf_counter() - started) * 1000)
         results.append(_score(case, hits, ks))
 
-    by_stratum = _aggregate(results, STRATA, lambda case: case.strata, ks)
-    by_provenance = _aggregate(results, {"real", "construido"}, lambda case: (case.provenance,), ks)
+    by_stratum = _aggregate(results, STRATA, lambda case: case.strata)
+    by_provenance = _aggregate(results, {"real", "construido"}, lambda case: (case.provenance,))
     failures = _failures(by_stratum, by_provenance, threshold, ks)
     return EvaluationReport(
         strategy=strategy,
@@ -477,7 +477,6 @@ def _aggregate(
     results: Sequence[CaseResult],
     buckets: Iterable[str],
     key: Any,
-    ks: tuple[int, ...],
 ) -> dict[str, Any]:
     """Mean of each metric per bucket — or `NO_COVERAGE`, for the bucket AND per metric.
 
@@ -498,25 +497,38 @@ def _aggregate(
     out: dict[str, Any] = {}
     for bucket in sorted(buckets):
         members = [r for r in results if bucket in key(r)]
-        out[bucket] = _bucket_means(members, ks) if members else NO_COVERAGE
+        out[bucket] = _bucket_means(members) if members else NO_COVERAGE
     return out
 
 
-def _metric_names(ks: tuple[int, ...]) -> list[str]:
-    """Every metric the report carries, in table order. One list, so the aggregate and the
-    per-case scoring cannot disagree about what exists."""
-    names = [f"recall@{k}" for k in ks]
-    names += [f"precision@{k}" for k in ks]
-    names += [f"surface_recall@{k}" for k in ks]
-    names.append("mrr")
-    return names
+def _metric_names(members: Sequence[CaseResult]) -> list[str]:
+    """Every metric the SCORER produced, in the order it produced them.
+
+    DERIVED from the results, not restated (m10). The previous version built the names from
+    its own list of f-strings while claiming "one list, so the aggregate and the per-case
+    scoring cannot disagree about what exists" — and `_score` never called it. There were two
+    lists that happened to agree. One direction was guarded by accident; the other was not,
+    so a metric added to `_score` — spec §8.4 already anticipates `nDCG` "when grades exist" —
+    would be dropped from the aggregate, from `measured` and from the published table in
+    silence, while the docstring went on asserting it could not be. That is rule 5 in the
+    module that cites it: bind them in code, or they are two lists.
+
+    Now there is genuinely one source, and it is the scoring: the union preserves insertion
+    order, and `_score` inserts per k, so the report groups a k's metrics together rather
+    than a metric's ks. A union rather than the first member's keys, because a member missing
+    a key must not delete that column for the whole bucket.
+    """
+    names: dict[str, None] = {}
+    for member in members:
+        names.update(dict.fromkeys(member.metrics))
+    return list(names)
 
 
-def _bucket_means(members: Sequence[CaseResult], ks: tuple[int, ...]) -> dict[str, Any]:
+def _bucket_means(members: Sequence[CaseResult]) -> dict[str, Any]:
     """One non-empty bucket's means, each over the members that CARRY that metric."""
     metrics: dict[str, Any] = {}
     measured: dict[str, int] = {}
-    for name in _metric_names(ks):
+    for name in _metric_names(members):
         values = [value for m in members if (value := m.metrics.get(name)) is not None]
         measured[name] = len(values)
         metrics[name] = round(sum(values) / len(values), 4) if values else NO_COVERAGE
