@@ -27,6 +27,16 @@ from xbrain.knowledge.models import KnowledgeChunk, SurfaceType
 EXCERPT_CHARS = 300
 
 
+# The fixed SELECT skeleton. A module constant rather than an inline literal so the only
+# thing the query builder concatenates at call time is a WHERE clause made of bound `?`
+# placeholders and the `RANK_ORDER` constant — which is what makes the `# nosec B608` below
+# a statement of fact rather than a request to look away.
+_SELECT = (
+    "SELECT chunk.*, bm25(chunk_fts) AS score FROM chunk_fts "
+    "JOIN chunk ON chunk.rowid = chunk_fts.rowid"
+)
+
+
 @dataclass(frozen=True)
 class LexicalHit:
     """One ranked chunk, resolvable back to its surface and owner.
@@ -133,16 +143,19 @@ class InMemoryLexicalIndex:
             return ()
         clauses, params = ["chunk_fts MATCH ?"], [expression]
         if surface_types:
-            clauses.append(f"chunk.surface_type IN ({','.join('?' * len(surface_types))})")
+            clauses.append(f"chunk.surface_type IN ({_placeholders(len(surface_types))})")
             params += list(surface_types)
         if origins:
-            clauses.append(f"chunk.origin IN ({','.join('?' * len(origins))})")
+            clauses.append(f"chunk.origin IN ({_placeholders(len(origins))})")
             params += list(origins)
-        sql = (
-            "SELECT chunk.*, bm25(chunk_fts) AS score FROM chunk_fts "
-            "JOIN chunk ON chunk.rowid = chunk_fts.rowid "
-            f"WHERE {' AND '.join(clauses)} {RANK_ORDER} LIMIT ?"
-        )
+        # nosec B608 - no value is interpolated. Every filter VALUE is bound through a `?`
+        # placeholder; the only computed fragments are `_placeholders(n)`, which can return
+        # nothing but commas and question marks by construction, and `RANK_ORDER`, a module
+        # constant. The variadic `IN` clause is the one shape sqlite3 cannot parameterise
+        # wholesale, so building the placeholder GROUP is unavoidable — but the group is
+        # derived from a COUNT, never from the caller's strings.
+        where = " AND ".join(clauses)
+        sql = f"{_SELECT} WHERE {where} {RANK_ORDER} LIMIT ?"  # nosec B608
         try:
             rows = self._connection.execute(sql, (*params, limit)).fetchall()
         except sqlite3.OperationalError:
@@ -155,6 +168,17 @@ class InMemoryLexicalIndex:
 
     def __len__(self) -> int:
         return int(self._connection.execute("SELECT COUNT(*) FROM chunk").fetchone()[0])
+
+
+def _placeholders(count: int) -> str:
+    """`?,?,?` for a variadic `IN` clause — derived from a COUNT, never from a caller string.
+
+    The one SQL fragment this module builds dynamically, and it is built from an integer, so
+    it cannot carry a caller's text into the statement no matter what was passed. Extracted
+    as a function so that claim is structurally true and checkable in one line, rather than a
+    promise attached to an f-string.
+    """
+    return ",".join("?" * count)
 
 
 def _hit(row: sqlite3.Row) -> LexicalHit:

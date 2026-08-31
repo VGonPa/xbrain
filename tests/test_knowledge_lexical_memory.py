@@ -266,3 +266,32 @@ def test_a_surface_with_no_chunks_contributes_nothing() -> None:
     index = InMemoryLexicalIndex()
     index.add(chunk_surfaces((empty_surface,)))
     assert index.search("anything", limit=5) == ()
+
+
+def test_placeholders_can_only_ever_be_commas_and_question_marks() -> None:
+    """The one dynamically built SQL fragment is derived from an INTEGER.
+
+    `_placeholders` is what makes the `# nosec B608` on the query honest: the variadic `IN`
+    clause is the shape sqlite3 cannot parameterise wholesale, so the placeholder GROUP has
+    to be built — but it is built from a count, so no caller string can reach the statement.
+    Pinned as a property rather than left as a comment.
+    """
+    from xbrain.knowledge.lexical_memory import _placeholders
+
+    for n in range(0, 8):
+        assert set(_placeholders(n)) <= {"?", ","}
+    assert _placeholders(3) == "?,?,?"
+
+
+def test_a_filter_value_containing_sql_is_bound_not_interpolated() -> None:
+    """The behavioural half: a hostile filter value is data.
+
+    The database holds only the user's own corpus, so this is defence in depth rather than a
+    live threat — but a query builder that is only safe because nobody attacks it is one
+    refactor away from not being safe at all.
+    """
+    index = InMemoryLexicalIndex()
+    index.add([_chunk("c1", "ordinary body text")])
+    hits = index.search("ordinary", limit=5, surface_types=("post'; DROP TABLE chunk; --",))
+    assert hits == ()
+    assert len(index) == 1, "the table is still there"
