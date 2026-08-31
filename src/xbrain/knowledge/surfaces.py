@@ -248,30 +248,47 @@ def item_surfaces(
             )
         )
 
-    if item.enriched is not None:
-        for surface_type, text in (
-            ("summary", item.enriched.summary),
-            ("user_note", item.enriched.user_notes),
-        ):
-            if not _blank(text):
-                surfaces.append(
-                    _surface(
-                        owner_type="item",
-                        owner_id=item.id,
-                        surface_type=surface_type,  # type: ignore[arg-type]
-                        source_key=SINGLETON_SOURCE_KEY,
-                        text=text,  # type: ignore[arg-type]
-                        # A `user_note` is the user's own text: they are its author, and its
-                        # producer is nobody — no component generated it.
-                        attribution=item.author if surface_type == "user_note" else None,
-                        producer=item.enriched.executor if surface_type == "summary" else None,
-                        produced_at=(
-                            item.enriched.enriched_at if surface_type == "summary" else None
-                        ),
-                        locator=Locator(kind="enrichment"),
-                    )
-                )
+    surfaces += _enrichment_surfaces(item)
     return tuple(surfaces)
+
+
+def _enrichment_surfaces(item: Item) -> list[KnowledgeSurface]:
+    """The `summary` and the user's own `user_note`, when the item carries them.
+
+    `user_note` has **0 instances** in the corpus today (measured 2026-08-31) and is emitted
+    anyway, because the model already allows it and the Plan 05 vault-tail adapter will feed
+    the same surface type. Its attribution is the user — it is the one surface here whose
+    words a human wrote — and its producer is nobody, because no component generated it.
+    """
+    if item.enriched is None:
+        return []
+    out: list[KnowledgeSurface] = []
+    if not _blank(item.enriched.summary):
+        out.append(
+            _surface(
+                owner_type="item",
+                owner_id=item.id,
+                surface_type="summary",
+                source_key=SINGLETON_SOURCE_KEY,
+                text=item.enriched.summary or "",
+                producer=item.enriched.executor,
+                produced_at=item.enriched.enriched_at,
+                locator=Locator(kind="enrichment"),
+            )
+        )
+    if not _blank(item.enriched.user_notes):
+        out.append(
+            _surface(
+                owner_type="item",
+                owner_id=item.id,
+                surface_type="user_note",
+                source_key=SINGLETON_SOURCE_KEY,
+                text=item.enriched.user_notes or "",
+                attribution=item.author,
+                locator=Locator(kind="enrichment"),
+            )
+        )
+    return out
 
 
 def _photo_source_key(url: str) -> str:
@@ -430,33 +447,49 @@ def _unfetched_links(item: Item) -> tuple[UnfetchedLink, ...]:
     """
     if not item.links:
         return ()
-    fetched_urls: set[str] = set()
-    failures: dict[str, ContentSourceFailure] = {}
-    for _index, fetched in iter_content_sources(item, LINK_CONTENT_KINDS):
-        if fetched.text:
-            fetched_urls.add(fetched.url)
-    for entry in item.content.sources if item.content else []:
-        if isinstance(entry, ContentSourceFailure) and entry.kind in LINK_CONTENT_KINDS:
-            failures[entry.url] = entry
+    fetched_urls = {
+        source.url for _i, source in iter_content_sources(item, LINK_CONTENT_KINDS) if source.text
+    }
+    failures = _link_failures(item)
     if fetched_link_sources(item) >= len(item.links) and not failures:
         return ()
+    return tuple(
+        _unfetched_link(link.url, failures.get(link.url))
+        for link in item.links
+        if link.url not in fetched_urls
+    )
 
-    links: list[UnfetchedLink] = []
-    for link in item.links:
-        if link.url in fetched_urls:
-            continue
-        failure = failures.get(link.url)
-        if failure is None:
-            links.append(UnfetchedLink(url=link.url, reason="not_attempted"))
-            continue
-        links.append(
-            UnfetchedLink(
-                url=link.url,
-                reason=UNFETCHED_REASON_BY_FAILURE[failure.failure_reason],
-                detail=_FAILURE_CLAUSE.get(failure.failure_reason),
-            )
-        )
-    return tuple(links)
+
+def _link_failures(item: Item) -> dict[str, ContentSourceFailure]:
+    """`{url: failure}` for the LINK-content fetches that were attempted and failed.
+
+    Only `LINK_CONTENT_KINDS`: a failed `thread` or `quoted_tweet` is not a link failure,
+    and reporting one as the reason a URL has no body would name a cause that belongs to a
+    different source — the same distinction `executors.api._failure_clause` already draws.
+    """
+    return {
+        entry.url: entry
+        for entry in (item.content.sources if item.content else [])
+        if isinstance(entry, ContentSourceFailure) and entry.kind in LINK_CONTENT_KINDS
+    }
+
+
+def _unfetched_link(url: str, failure: ContentSourceFailure | None) -> UnfetchedLink:
+    """One URL with no body, carrying its RECORDED reason or none at all.
+
+    With no failure record there was no attempt, so there is no cause to name — and naming
+    one would be the exact sin the note exists to forbid. `executors.api._failure_clause`
+    already refuses to invent a cause it did not measure; `detail` reuses that module's
+    `_FAILURE_CLAUSE` wording so the phrasing the consumer sees cannot drift from the
+    phrasing the generators and the judge are given.
+    """
+    if failure is None:
+        return UnfetchedLink(url=url, reason="not_attempted")
+    return UnfetchedLink(
+        url=url,
+        reason=UNFETCHED_REASON_BY_FAILURE[failure.failure_reason],
+        detail=_FAILURE_CLAUSE.get(failure.failure_reason),
+    )
 
 
 def _note_path(item: Item, vault_dir: Path | None) -> str | None:
