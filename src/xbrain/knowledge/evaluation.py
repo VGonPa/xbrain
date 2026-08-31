@@ -12,11 +12,20 @@ THREE RULES, and they are the reason this module exists rather than a script:
    decision can be made from — and hides the case where a layer helps exactly one stratum.
    The report has no top-level metric key to reach for.
 
-2. **No coverage is NOT zero.** Spec §8.6.8: *failures and skips are published; zeros are
-   never fabricated by mixing in unmeasured cases*. `expansion` has no mechanism until Plan
-   04; `thread` and `user_note` have zero instances in the corpus. Reporting them at 0.0
-   would claim the retriever failed at something nobody asked, and the figure would sit in a
-   table looking exactly like a measurement.
+2. **No coverage is NOT zero, at BOTH levels.** Spec §8.6.8: *failures and skips are
+   published; zeros are never fabricated by mixing in unmeasured cases*. `expansion` has no
+   mechanism until Plan 04; `thread` and `user_note` have zero instances in the corpus.
+   Reporting them at 0.0 would claim the retriever failed at something nobody asked, and the
+   figure would sit in a table looking exactly like a measurement.
+
+   The BUCKET level was guarded from the start. The METRIC level was not (B1), and that is
+   the level the defect actually lived at: a case that names no surface is not a case that
+   failed `surface_recall`, and a case whose ground truth is surfaces only has a 0/0
+   `recall@k`. Both returned a hard 0.0 and both entered the stratum mean. So a metric is
+   `None` on the case when the case could not measure it, the bucket mean is taken over the
+   members that carry it, and the bucket reports `NO_COVERAGE` for a metric none of them do.
+   `measured` states each mean's denominator, because a mean over a silently smaller
+   population is the same defect in its next costume (rule 2).
 
 3. **Report-only.** Never writes `items.json`, never snapshots — the precedent `verify` sets
    by default and `cv-guardrail` follows. Asserted by hashing the file across a run.
@@ -43,8 +52,10 @@ from xbrain.knowledge.surfaces import item_surfaces, item_topics, topic_surfaces
 from xbrain.models import Item, Topic, TopicPage
 from xbrain.store import load_store, load_topic_pages
 
-# The marker a bucket carries INSTEAD of numbers when it has no cases. A sentinel rather than
-# a `None` or a zero, so it survives JSON and renders as words in the markdown.
+# The marker carried INSTEAD of a number by a bucket with no cases, and by a METRIC that no
+# case in a bucket could measure (B1). A sentinel rather than a `None` or a zero, so it
+# survives JSON and renders as words in the markdown. `None` is what a single CASE carries;
+# this is what the AGGREGATE carries, because the aggregate is what gets published and read.
 NO_COVERAGE = {"coverage": "sin cobertura"}
 
 # Surfaces the emitter supports for which the corpus holds NO data (measured 2026-08-31), so
@@ -128,7 +139,9 @@ class CaseResult:
     provenance: str
     strata: tuple[str, ...]
     retrieved: tuple[str, ...]
-    metrics: dict[str, float]
+    # `None` = NOT MEASURED for this case, never "scored zero" (B1). A case that names no
+    # surface did not fail surface recall; a case with no relevant OWNER has a 0/0 recall.
+    metrics: dict[str, float | None]
 
 
 @dataclass(frozen=True)
@@ -362,14 +375,20 @@ def _score(case: GoldenCase, hits: Sequence[LexicalHit], ks: tuple[int, ...]) ->
     relevant = {_owner_key("item", i) for i in case.relevant_items}
     relevant |= {_owner_key("topic", t) for t in case.relevant_topics}
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, float | None] = {}
     for k in ks:
         top = ranked[:k]
         found = len(relevant & set(top))
-        metrics[f"recall@{k}"] = found / len(relevant) if relevant else 0.0
-        metrics[f"precision@{k}"] = found / len(top) if top else 0.0
+        # 0/0 IS NOT 0.0 (B1.b). `load_cases` accepts a case whose ground truth is
+        # `relevant_surfaces` only, and `relevant` is then empty. Returning 0.0 reported a
+        # perfect rank-1 answer as a total recall failure — the fabricated zero of spec
+        # §8.6.8, one level below the empty bucket the sentinel already covers. Precision
+        # goes with it: with no relevant owner its numerator is 0 by construction, so the
+        # number would restate the empty set rather than measure the retriever (rule 2).
+        metrics[f"recall@{k}"] = found / len(relevant) if relevant else None
+        metrics[f"precision@{k}"] = (found / len(top) if top else 0.0) if relevant else None
         metrics[f"surface_recall@{k}"] = _surface_recall(case, hits, k)
-    metrics["mrr"] = _mrr(ranked, relevant)
+    metrics["mrr"] = _mrr(ranked, relevant) if relevant else None
     return CaseResult(
         id=case.id,
         provenance=case.provenance,
@@ -379,15 +398,29 @@ def _score(case: GoldenCase, hits: Sequence[LexicalHit], ks: tuple[int, ...]) ->
     )
 
 
-def _surface_recall(case: GoldenCase, hits: Sequence[LexicalHit], k: int) -> float:
+def _surface_recall(case: GoldenCase, hits: Sequence[LexicalHit], k: int) -> float | None:
     """How many of the case's named surfaces appear among the top-k retrieved CHUNKS.
 
     Spec §8.4 asks for this alongside item recall because returning the right item through
     the wrong surface is a different, usually worse, answer: the evidence a consumer would
     open is not the evidence the fact is in. Item recall alone scores that as a success.
+
+    THE UNIT IS THE CHUNK, and `recall@k`'s unit is the deduplicated OWNER (m6). Under one
+    label `k` they therefore count different things: with `depth = max(limit, max(ks))`,
+    `recall@10` can be formed from more than ten chunks (ten distinct owners may take more
+    than ten hits to accumulate) while `surface_recall@10` never sees past the tenth chunk.
+    The chunk is the right unit here — the question is whether the EVIDENCE surfaced, and a
+    surface that arrived as the 30th chunk did not surface — but the two columns are not
+    comparable to each other, only to their own value in the next run.
+
+    `None`, never 0.0, when the case names no surface (B1.a): that case did not fail this
+    metric, it did not measure it, and a 0.0 entered the stratum mean looking exactly like a
+    measurement. Measured on the real corpus (2026-08-31, 2,404 items, 23 cases): three
+    cases name no surface, and they depressed `enterrado`'s published `surface_recall@10`
+    from 0.1667 to 0.125.
     """
     if not case.relevant_surfaces:
-        return 0.0
+        return None
     wanted = {(s.owner_type, s.owner_id, s.surface_type) for s in case.relevant_surfaces}
     seen = {(hit.owner_type, hit.owner_id, hit.surface_type) for hit in hits[:k]}
     return len(wanted & seen) / len(wanted)
@@ -406,11 +439,21 @@ def _aggregate(
     key: Any,
     ks: tuple[int, ...],
 ) -> dict[str, Any]:
-    """Mean of each metric per bucket — or `NO_COVERAGE` when the bucket has no cases.
+    """Mean of each metric per bucket — or `NO_COVERAGE`, for the bucket AND per metric.
 
-    This is rule 2 of the module docstring made mechanical: there is no code path that
-    produces a 0.0 for an empty bucket, because the empty branch returns a sentinel instead
-    of averaging an empty list.
+    This is rule 2 of the module docstring made mechanical, at BOTH levels. The empty bucket
+    was always covered; the metric inside a non-empty bucket was not (B1). A case that names
+    no surface contributed a hard 0.0 to `surface_recall`, and a case whose ground truth is
+    surfaces only contributed a 0/0 `recall`. Both averaged in as though they were
+    measurements, which is precisely the mixing spec §8.6.8 forbids.
+
+    So the mean is taken over the members that ACTUALLY CARRY the metric, and the metric
+    gets the same sentinel as an empty bucket when none of them do.
+
+    `measured` ships beside the means because averaging a subset silently moves the
+    population: `cases: 8` next to a mean over 6 of them is a second fabricated number, of
+    the shape rule 2 exists to stop. `cases` is the bucket's size; `measured[name]` is the
+    denominator that metric's mean was actually divided by.
     """
     out: dict[str, Any] = {}
     for bucket in sorted(buckets):
@@ -422,11 +465,18 @@ def _aggregate(
         metric_names += [f"precision@{k}" for k in ks]
         metric_names += [f"surface_recall@{k}" for k in ks]
         metric_names.append("mrr")
-        bucket_metrics = {
-            name: round(sum(m.metrics.get(name, 0.0) for m in members) / len(members), 4)
-            for name in metric_names
-        }
+        bucket_metrics: dict[str, Any] = {}
+        measured: dict[str, int] = {}
+        for name in metric_names:
+            values = [
+                value for m in members if (value := m.metrics.get(name)) is not None
+            ]
+            measured[name] = len(values)
+            bucket_metrics[name] = (
+                round(sum(values) / len(values), 4) if values else NO_COVERAGE
+            )
         bucket_metrics["cases"] = len(members)
+        bucket_metrics["measured"] = measured
         out[bucket] = bucket_metrics
     return out
 
@@ -451,7 +501,12 @@ def _failures(
         for name, values in buckets.items():
             if values == NO_COVERAGE:
                 continue
-            value = values.get(metric, 0.0)
+            value = values.get(metric)
+            # A metric no case in this bucket measured cannot be a failure of this bucket
+            # (B1). Reading a missing metric as 0.0 would name a failure that measured
+            # nothing — the fabricated zero wearing a gate's clothes.
+            if value is None or value == NO_COVERAGE:
+                continue
             if value < threshold:
                 failures.append(f"{label} {name}: {metric} = {value} < {threshold}")
     return tuple(failures)
@@ -529,10 +584,26 @@ def _table(title: str, buckets: dict[str, Any]) -> list[str]:
         if values == NO_COVERAGE:
             lines.append(f"| {name} | — | sin cobertura | sin cobertura | sin cobertura | — |")
             continue
-        lines.append(
-            f"| {name} | {values['cases']} | {values.get('recall@1', '—')} | "
-            f"{values.get('recall@10', '—')} | {values.get('precision@10', '—')} | "
-            f"{values['mrr']} |"
-        )
+        cells = [
+            _cell(values, "recall@1"),
+            _cell(values, "recall@10"),
+            _cell(values, "precision@10"),
+            _cell(values, "mrr"),
+        ]
+        lines.append(f"| {name} | {values['cases']} | " + " | ".join(cells) + " |")
     lines.append("")
     return lines
+
+
+def _cell(values: dict[str, Any], name: str) -> str:
+    """One metric cell — words when nobody measured it, never a number (spec §8.6.8).
+
+    The markdown is where a fabricated zero does its damage, because it is the surface that
+    gets read and quoted. A `0.0` here is indistinguishable from a measured failure.
+    """
+    value = values.get(name)
+    if value is None:
+        return "—"
+    if value == NO_COVERAGE:
+        return "sin cobertura"
+    return str(value)

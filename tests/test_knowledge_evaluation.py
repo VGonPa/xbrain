@@ -294,3 +294,191 @@ def test_the_retrieval_depth_never_falls_below_the_largest_reported_k(corpus) ->
     clamped = evaluate(cases, corpus, ks=(20,), limit=1)
     natural = evaluate(cases, corpus, ks=(20,))
     assert clamped.to_dict()["by_stratum"] == natural.to_dict()["by_stratum"]
+
+
+# ---------------------------------------------------------------------------
+# B1 — a metric nobody could measure is NOT a zero (spec §8.6.8)
+# ---------------------------------------------------------------------------
+#
+# The guardrail against the fabricated zero existed at BUCKET level (`_aggregate` returns
+# `NO_COVERAGE` for a bucket with no cases) and nowhere at METRIC level. A case that names no
+# surface is not a case that failed `surface_recall`: it is a case that did not measure it,
+# and the 0.0 it contributed entered the stratum mean looking exactly like a measurement.
+#
+# The tests below were seen RED against the pre-fix tree (CLAUDE.md rule 1):
+#   - the surface test:  0.5 != 1.0   (the unmeasured case halved the stratum mean)
+#   - the rank-1 test:   0.0 is not None, and `assert recall is None` failed on 0.0
+# They are written against the PUBLIC API (`evaluate`), not against `_score`, so they keep
+# holding if the internals move.
+
+
+def _case(**kwargs):
+    """One golden case, with only the ground truth the test is about."""
+    from xbrain.knowledge.contracts import SearchFilters
+    from xbrain.knowledge.goldenset import GoldenCase
+
+    kwargs.setdefault("provenance", "construido")
+    kwargs.setdefault("filters", SearchFilters())
+    return GoldenCase(**kwargs)
+
+
+def _some_item(corpus) -> tuple[str, str]:
+    """An `(item_id, query)` pair whose query retrieves that item at rank 1.
+
+    Taken from the fixture corpus rather than invented, so the test exercises the real
+    index rather than a mock that can agree with a broken scorer.
+    """
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    for item_id, item in corpus.items.items():
+        surfaces = item_surfaces(item)
+        if surfaces and len(surfaces[0].text.split()) > 4:
+            return item_id, surfaces[0].text
+    raise AssertionError("the fixture corpus has no usable item")
+
+
+def test_a_case_that_names_no_surface_does_not_lower_the_stratum_surface_recall(corpus) -> None:
+    """A case with `relevant_surfaces: ()` is UNMEASURED for surface recall, not failed.
+
+    Seen red: the unmeasured case contributed a hard 0.0 and the stratum mean came out
+    0.5 where the only case that measured anything scored 1.0. Measured on the real corpus
+    this depressed `enterrado`'s published `surface_recall@10` from 0.1667 to 0.125.
+    """
+    from xbrain.knowledge.goldenset import RelevantSurface
+
+    item_id, query = _some_item(corpus)
+    surface = next(
+        s for s in __import__(
+            "xbrain.knowledge.surfaces", fromlist=["item_surfaces"]
+        ).item_surfaces(corpus.items[item_id])
+    )
+    measured = _case(
+        id="WITH-SURFACE",
+        query=query,
+        strata=("exacto",),
+        relevant_items=(item_id,),
+        relevant_surfaces=(
+            RelevantSurface(
+                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
+            ),
+        ),
+    )
+    silent = _case(id="NO-SURFACE", query=query, strata=("exacto",), relevant_items=(item_id,))
+
+    alone = evaluate([measured], corpus).by_stratum["exacto"]["surface_recall@10"]
+    together = evaluate([measured, silent], corpus).by_stratum["exacto"]["surface_recall@10"]
+    assert alone == together, (
+        "a case that names no surface must not enter the surface_recall mean; "
+        f"it moved {alone} -> {together}"
+    )
+
+
+def test_a_case_with_no_relevant_owner_reports_recall_as_unmeasured_not_zero(corpus) -> None:
+    """The 0/0 case, scoring a RANK-1 hit — B1.b, the latent half.
+
+    `load_cases` accepts a case whose ground truth is `relevant_surfaces` only, and for it
+    `recall@k` is 0/0. Returned as a hard 0.0 that is the fabricated zero one level below
+    the one plan §4.4 exists to kill: the retriever put the requested surface FIRST and the
+    report said it recalled nothing.
+
+    Seen red: `recall@1 == 0.0` and `mrr == 0.0` on a perfect rank-1 answer.
+    """
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = item_surfaces(corpus.items[item_id])[0]
+    case = _case(
+        id="SURFACE-ONLY",
+        query=query,
+        strata=("exacto",),
+        relevant_surfaces=(
+            RelevantSurface(
+                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
+            ),
+        ),
+    )
+    metrics = evaluate([case], corpus, ks=(1,)).cases[0].metrics
+
+    assert metrics["surface_recall@1"] == 1.0, "the retriever DID return the requested surface"
+    assert metrics["recall@1"] is None, f"0/0 must be unmeasured, got {metrics['recall@1']!r}"
+    assert metrics["precision@1"] is None, f"0/0 must be unmeasured, got {metrics['precision@1']!r}"
+    assert metrics["mrr"] is None, f"0/0 must be unmeasured, got {metrics['mrr']!r}"
+
+
+def test_a_bucket_whose_cases_all_skip_a_metric_reports_it_without_coverage(corpus) -> None:
+    """The bucket exists and has cases, but nobody measured THAT metric.
+
+    The same sentinel the empty bucket already uses, one level down — so a reader of
+    `eval-report.json` cannot mistake "nobody measured this" for "it scored zero".
+    """
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = item_surfaces(corpus.items[item_id])[0]
+    case = _case(
+        id="SURFACE-ONLY",
+        query=query,
+        strata=("exacto",),
+        relevant_surfaces=(
+            RelevantSurface(
+                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
+            ),
+        ),
+    )
+    bucket = evaluate([case], corpus, ks=(10,)).by_stratum["exacto"]
+    assert bucket["cases"] == 1
+    assert bucket["recall@10"] == NO_COVERAGE
+    assert bucket["surface_recall@10"] == 1.0
+    assert bucket["measured"]["recall@10"] == 0, "the population per metric must be stated"
+    assert bucket["measured"]["surface_recall@10"] == 1
+
+
+def test_an_unmeasured_metric_can_never_be_reported_as_a_threshold_failure(corpus) -> None:
+    """A gate that fails a bucket on a metric nobody measured is the fabricated zero again.
+
+    `_failures` read `values.get(metric, 0.0)`; with the metric carrying the sentinel that
+    default would compare a dict against a float, or (with a plain 0.0) name a failure that
+    measured nothing.
+    """
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = item_surfaces(corpus.items[item_id])[0]
+    case = _case(
+        id="SURFACE-ONLY",
+        query=query,
+        strata=("exacto",),
+        relevant_surfaces=(
+            RelevantSurface(
+                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
+            ),
+        ),
+    )
+    report = evaluate([case], corpus, ks=(10,), threshold=1.0)
+    assert report.failures == (), f"named a failure over an unmeasured metric: {report.failures}"
+
+
+def test_the_markdown_renders_an_unmeasured_metric_as_words_not_a_number(corpus) -> None:
+    """The human report is where a fabricated zero does its damage — it gets quoted."""
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = item_surfaces(corpus.items[item_id])[0]
+    case = _case(
+        id="SURFACE-ONLY",
+        query=query,
+        strata=("exacto",),
+        relevant_surfaces=(
+            RelevantSurface(
+                owner_type="item", owner_id=item_id, surface_type=surface.surface_type
+            ),
+        ),
+    )
+    rendered = render_markdown(evaluate([case], corpus, ks=(1, 10)))
+    row = next(line for line in rendered.splitlines() if line.startswith("| exacto |"))
+    assert "0.0" not in row, f"a fabricated zero reached the published table: {row}"
+    assert "sin cobertura" in row
