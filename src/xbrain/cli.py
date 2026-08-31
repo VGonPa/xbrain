@@ -2811,7 +2811,12 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
     of spec §3.8, and it cannot be evaluated by a consumer that was handed only the chunks.
     """
     from xbrain.knowledge.chunking import chunk_surfaces
-    from xbrain.knowledge.surfaces import hydrate_verification, item_surfaces, item_topics
+    from xbrain.knowledge.surfaces import (
+        article_block_texts,
+        hydrate_verification,
+        item_surfaces,
+        item_topics,
+    )
 
     cfg = _config()
     item = corpus.items.get(item_id)
@@ -2843,7 +2848,12 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
     if want_chunks:
         payload["chunks"] = [
             c.model_dump(mode="json")
-            for c in chunk_surfaces(surfaces, topics=item_topics(item), url=item.url)
+            for c in chunk_surfaces(
+                surfaces,
+                topics=item_topics(item),
+                url=item.url,
+                blocks_by_surface_id=article_block_texts(item),
+            )
         ]
     return payload
 

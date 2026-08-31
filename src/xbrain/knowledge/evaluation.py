@@ -48,7 +48,12 @@ from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chu
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
 from xbrain.knowledge.lexical_memory import InMemoryLexicalIndex, LexicalHit
 from xbrain.knowledge.models import KnowledgeChunk
-from xbrain.knowledge.surfaces import item_surfaces, item_topics, topic_surfaces
+from xbrain.knowledge.surfaces import (
+    article_block_texts,
+    item_surfaces,
+    item_topics,
+    topic_surfaces,
+)
 from xbrain.models import Item, Topic, TopicPage
 from xbrain.store import load_store, load_topic_pages
 
@@ -230,7 +235,13 @@ def corpus_chunks(
         emitted = item_surfaces(item)
         surfaces += len(emitted)
         chunks += list(
-            chunk_surfaces(emitted, params=params, topics=item_topics(item), url=item.url)
+            chunk_surfaces(
+                emitted,
+                params=params,
+                topics=item_topics(item),
+                url=item.url,
+                blocks_by_surface_id=article_block_texts(item),
+            )
         )
     for topic in corpus.vocab:
         emitted = topic_surfaces(topic, corpus.topic_pages.get(topic.slug))

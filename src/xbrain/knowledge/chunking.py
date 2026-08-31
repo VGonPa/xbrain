@@ -103,6 +103,7 @@ def chunk_surfaces(
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
     topics: tuple[str, ...] = (),
     url: str | None = None,
+    blocks_by_surface_id: dict[str, list[str]] | None = None,
     chunker_version: str = CHUNKER_VERSION,
 ) -> tuple[KnowledgeChunk, ...]:
     """Every chunk of every surface, in surface order then chunk order.
@@ -110,11 +111,24 @@ def chunk_surfaces(
     Deterministic across runs, which spec §3.7.8 needs for stable ordering under ties: an
     index built twice from the same store must produce the same ids in the same sequence, or
     a tie-break on `chunk_id` would silently reorder results between rebuilds.
+
+    `blocks_by_surface_id` is HOW THE X-ARTICLE BOUNDARIES REACH THIS MODULE. `chunk_surface`
+    could always take `blocks`, but this — the only batch entry point, and the only one the
+    CLI and the evaluation harness call — could not pass them, so the branch was unreachable
+    from every caller and all 41 sources that carry blocks were chunked by the paragraph
+    fallback. Build the map with `surfaces.article_block_texts(item)`; omitting it keeps the
+    fallback, which is the right behaviour for a topic surface or a pre-#39 article.
     """
+    blocks_by_surface_id = blocks_by_surface_id or {}
     chunks: list[KnowledgeChunk] = []
     for surface in surfaces:
         chunks += chunk_surface(
-            surface, params=params, topics=topics, url=url, chunker_version=chunker_version
+            surface,
+            params=params,
+            topics=topics,
+            url=url,
+            blocks=blocks_by_surface_id.get(surface.surface_id),
+            chunker_version=chunker_version,
         )
     return tuple(chunks)
 

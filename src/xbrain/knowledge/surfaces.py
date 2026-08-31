@@ -55,6 +55,7 @@ from xbrain.knowledge.models import (
 from xbrain.knowledge.provenance import ORIGIN_TRUST, Origin, is_derived
 from xbrain.models import (
     LINK_CONTENT_KINDS,
+    ArticleTextBlock,
     Author,
     ContentKind,
     ContentSourceFailure,
@@ -251,6 +252,42 @@ def item_surfaces(
 
     surfaces += _enrichment_surfaces(item)
     return tuple(surfaces)
+
+
+def article_block_texts(item: Item) -> dict[str, list[str]]:
+    """`{surface_id: the ordered ArticleTextBlock bodies}` for this item's X Articles.
+
+    THE SEAM THAT MAKES SPEC §4's BLOCK BOUNDARIES REACHABLE. The chunker has always known
+    how to split an `x_article` on the boundaries its author set, but nothing in production
+    could hand it the blocks: `chunk_surfaces` — the only batch entry point, and the only one
+    the CLI and the evaluation harness call — had no parameter for them. So all 41 sources
+    that carry blocks were chunked by the paragraph fallback, and 41 of 41 landed on
+    boundaries the author did not set (measured 2026-08-31 on 2,404 items).
+
+    The map is keyed by `surface_id` rather than by position in `content.sources` for the
+    reason `ids.py` hashes `(kind, url)` instead of the index: `fetch` rewrites that list, and
+    a position-keyed map would hand one source's blocks to another the first time two entries
+    swapped — silently, because the lookup would still succeed.
+
+    Only `ArticleTextBlock` contributes. An image or a video block carries no text and is not
+    part of the flattened body, so counting it would push every later boundary off by the
+    length of a caption that is not there.
+
+    Blocks whose concatenation does NOT reproduce the surface text are dropped rather than
+    used. The `ContentSourceSuccess` validator makes that unreachable for anything the
+    producer wrote, but the offsets are the chunker's whole verbatim guarantee
+    (`surface.text[start:end] == chunk.text`), so a disagreeing record degrades to the
+    paragraph fallback instead of cutting the body at offsets that do not describe it.
+    """
+    out: dict[str, list[str]] = {}
+    keys = content_source_keys(item)
+    for index, source in iter_content_sources(item, {"x_article"}):
+        texts = [b.text for b in source.blocks if isinstance(b, ArticleTextBlock)]
+        if not texts or "".join(texts) != source.text:
+            continue
+        (surface_type,) = CONTENT_KIND_TO_SURFACE_TYPES[source.kind]
+        out[surface_id("item", item.id, surface_type, keys[index])] = texts
+    return out
 
 
 def _enrichment_surfaces(item: Item) -> list[KnowledgeSurface]:

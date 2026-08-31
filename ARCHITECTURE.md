@@ -847,6 +847,20 @@ frame, quoted post, topic note, user note) are emitted whole **whatever their le
 half of it is a fragment that no longer says whose words it is. An article splits on
 paragraphs, an X Article on its own blocks, a transcript into overlapping windows.
 
+The X-Article blocks reach the chunker through `surfaces.article_block_texts(item)`, handed
+to `chunk_surfaces(blocks_by_surface_id=...)` by every production caller. That seam did not
+exist at first: `chunk_surface` took `blocks`, `chunk_surfaces` did not, and since the batch
+entry point is the only one the CLI and the harness call, the branch was unreachable and all
+41 sources fell back to paragraphs. Nothing caught it, because a fixture whose blocks were
+separated by blank lines chunks identically either way — deleting the branch left the whole
+suite green. Two real shapes tell them apart, and both are now in the fixture: a block with
+an internal blank line (5 of the 41), and the separator the producer bakes at the START of
+each block, which the paragraph split keeps at the END of the previous one — so every edge
+lands two characters late, which is why 41 of 41 crossed. Measured after wiring: **39 of 41**
+sources land every chunk edge exactly on an author edge; the other 2 each carry a single
+block above `MAX_CHARS` (5,879 and 2,861 chars), windowed inside itself by spec §5.2. The
+chunk count is unchanged (512 → 512) and every one of the 512 fingerprints moved.
+
 `target` is a SOFT ceiling that paragraphs are PACKED into, not "one chunk per paragraph".
 Measured on the real corpus: one chunk per paragraph gave 30,449 chunks (`x_article`
 averaging 194 chars), and packing gives **18,328** — 9,294 atomic + 9,034 splittable. A

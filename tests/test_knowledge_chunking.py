@@ -147,25 +147,17 @@ def test_the_surface_title_travels_on_every_chunk() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_x_article_with_blocks_splits_on_the_block_boundaries() -> None:
-    """Spec §4: `x_article.blocks` defines the boundaries when it exists.
+def _article_item(blocks):
+    """One item carrying an `x_article` source whose body IS the concatenation of `blocks`.
 
-    And it is NOT indexed in addition to `.text`: the concatenation of the text blocks IS
-    `text` (a `ContentSourceSuccess` model validator guarantees it), so emitting both would
-    duplicate the corpus. The boundaries are used, the bodies are not doubled.
+    Built through the real models, so the `ContentSourceSuccess` validator that guarantees
+    `text == "".join(text blocks)` is the thing keeping the fixture honest.
     """
     from datetime import datetime, timezone
 
-    from xbrain.models import ArticleTextBlock, Author, Content, ContentSourceSuccess
+    from xbrain.models import Author, Content, ContentSourceSuccess
 
-    # Each block is comfortably above `min_chars`, so the split under test is the BLOCK
-    # boundary and not the short-fragment merge — which has its own test below.
-    blocks = [
-        ArticleTextBlock(text="First block of the article, long enough to stand on its own."),
-        ArticleTextBlock(text="\n\nSecond block, also long enough to survive the minimum floor."),
-        ArticleTextBlock(text="\n\nThird and final block, again comfortably above the floor."),
-    ]
-    item = Item(
+    return Item(
         id="9",
         source="bookmark",
         url="https://x.com/a/status/9",
@@ -180,19 +172,78 @@ def test_an_x_article_with_blocks_splits_on_the_block_boundaries() -> None:
                     kind="x_article",
                     url="https://x.com/i/article/9",
                     title="An Article",
-                    text="".join(block.text for block in blocks),
+                    text="".join(b.text for b in blocks),
                     blocks=blocks,
                 )
             ],
         ),
     )
+
+
+def _discriminating_blocks():
+    """Blocks whose edges the PARAGRAPH fallback provably cannot reproduce.
+
+    Both real shapes are present, because the fixture that failed to discriminate had
+    neither:
+
+    * the first block carries an INTERNAL blank line. Splitting on paragraphs cuts there —
+      950 characters into a block the author never divided. Measured on the real corpus
+      (2026-08-31): 5 of the 41 `x_article` sources with blocks have one.
+    * the later blocks carry the separator BAKED AT THEIR START, which is how the producer
+      writes them (`generate` strips it back off with `removeprefix`). `_paragraph_spans`
+      keeps a separator at the END of the preceding span, so every edge lands two characters
+      late. That alone is why 41 of 41 real sources chunk on boundaries the author did not
+      set, including the 36 with no internal blank line.
+    """
+    from xbrain.models import ArticleTextBlock
+
+    return [
+        ArticleTextBlock(text=("A" * 950) + "\n\n" + ("B" * 948)),
+        ArticleTextBlock(text="\n\n" + ("C" * 1100)),
+        ArticleTextBlock(text="\n\n" + ("D" * 1100)),
+    ]
+
+
+def test_an_x_article_with_blocks_splits_on_the_block_boundaries() -> None:
+    """Spec §4: `x_article.blocks` defines the boundaries when it exists.
+
+    THROUGH THE PRODUCTION PATH. The previous version of this test called
+    `chunk_surface(blocks=...)` by hand — the one call site in the repo that passed blocks —
+    while `chunk_surfaces`, the only batch entry point and the only one the CLI and the
+    harness use, had no `blocks` parameter at all. So the branch under test was unreachable
+    from every caller, and deleting it left the whole suite green (2,124 pass, 0 fail). That
+    is rule 1 in its hardest form: not a test that passes before the fix, but one that passes
+    after the functionality is deleted.
+
+    This one builds the item, emits its surfaces and chunks them exactly as
+    `xbrain knowledge inspect --chunks` and the evaluation harness do.
+
+    And it is NOT indexed in addition to `.text`: the concatenation of the text blocks IS
+    `text` (a `ContentSourceSuccess` model validator guarantees it), so emitting both would
+    duplicate the corpus. The boundaries are used, the bodies are not doubled.
+    """
+    from xbrain.knowledge.chunking import chunk_surfaces
+    from xbrain.knowledge.surfaces import article_block_texts
+
+    blocks = _discriminating_blocks()
+    item = _article_item(blocks)
+    surfaces = item_surfaces(item)
+    chunks = [
+        c
+        for c in chunk_surfaces(surfaces, blocks_by_surface_id=article_block_texts(item))
+        if c.surface_type == "x_article"
+    ]
     surface = _surface_of(item, "x_article")
-    chunks = chunk_surface(surface, blocks=[block.text for block in blocks])
 
     # Asserted as an EDGE property, not as "one chunk per block". Packing groups short
     # blocks (see the packing tests below), so counting chunks would pin the packing
     # parameters rather than the boundary rule. What must hold whatever `target` is: no
     # chunk edge ever falls INSIDE a block.
+    #
+    # This holds only while no single block exceeds `max_chars` — spec §5.2 windows a
+    # section above the ceiling, and that cut lands inside the block by design. The fixture
+    # stays under it; the exception has its own test below, so the 39-of-41 measured on the
+    # real corpus is a documented property and not an unexplained residue.
     edges, cursor = {0}, 0
     for block in blocks:
         cursor += len(block.text)
@@ -202,6 +253,79 @@ def test_an_x_article_with_blocks_splits_on_the_block_boundaries() -> None:
         assert chunk.char_end in edges, f"chunk ends inside a block at {chunk.char_end}"
     assert chunks[0].char_start == 0
     assert chunks[-1].char_end == len(surface.text)
+
+
+def test_the_block_fixture_actually_discriminates_blocks_from_paragraphs() -> None:
+    """The guard on the test above: prove the fixture can tell the two apart.
+
+    The assertion "every chunk edge is a block edge" is vacuous whenever the blocks happen
+    to align with the paragraphs — which is what let the previous fixture survive the
+    deletion of the branch it existed to protect. So the discriminating power is asserted
+    here rather than assumed: chunking the SAME text without blocks must produce a different
+    set of edges, and at least one of them must fall strictly inside a block.
+
+    If someone later edits the fixture into alignment, this goes red and says so, instead of
+    the boundary test quietly becoming a paragraph test again.
+    """
+    from xbrain.knowledge.chunking import chunk_surface, chunk_surfaces
+    from xbrain.knowledge.surfaces import article_block_texts
+
+    blocks = _discriminating_blocks()
+    item = _article_item(blocks)
+    surface = _surface_of(item, "x_article")
+
+    with_blocks = chunk_surfaces(
+        item_surfaces(item), blocks_by_surface_id=article_block_texts(item)
+    )
+    without = chunk_surface(surface)
+
+    block_edges, cursor = {0}, 0
+    for block in blocks:
+        cursor += len(block.text)
+        block_edges.add(cursor)
+    fallback_edges = {c.char_start for c in without} | {c.char_end for c in without}
+    interior = {e for e in fallback_edges if e not in block_edges}
+
+    assert interior, "the fixture does not discriminate: paragraph edges == block edges"
+    assert any(
+        0 < e < len(blocks[0].text) for e in interior
+    ), f"no fallback edge falls inside the author's first block: {sorted(interior)}"
+    article = [c for c in with_blocks if c.surface_type == "x_article"]
+    assert [(c.char_start, c.char_end) for c in article] != [
+        (c.char_start, c.char_end) for c in without
+    ]
+
+
+def test_a_block_above_the_ceiling_is_still_cut_inside_itself() -> None:
+    """Spec §5.2: *a window only if a section exceeds the ceiling* — blocks included.
+
+    The author's boundary is respected wherever it CAN be. A single block longer than
+    `max_chars` cannot be honoured and one chunk of it — the whole point of a ceiling is that
+    nothing above it is emitted whole. Measured on the real corpus (2026-08-31): 39 of the 41
+    sources that carry blocks land every chunk edge exactly on an author edge, and the 2 that
+    do not each contain one block of 5,879 and 2,861 chars against the 2,000 ceiling.
+
+    Pinned so that number is explained rather than filed as a leftover defect.
+    """
+    from xbrain.knowledge.chunking import chunk_surfaces
+    from xbrain.knowledge.surfaces import article_block_texts
+    from xbrain.models import ArticleTextBlock
+
+    params = ChunkerParams()
+    huge = ArticleTextBlock(text="E" * (params.max_chars * 2))
+    item = _article_item([huge, ArticleTextBlock(text="\n\n" + "F" * 600)])
+    chunks = [
+        c
+        for c in chunk_surfaces(
+            item_surfaces(item), blocks_by_surface_id=article_block_texts(item)
+        )
+        if c.surface_type == "x_article"
+    ]
+    interior = [c for c in chunks if 0 < c.char_end < len(huge.text)]
+    assert interior, "a block above the ceiling must be windowed, not emitted whole"
+    assert all(c.char_end - c.char_start <= params.max_chars for c in chunks)
+    surface = _surface_of(item, "x_article")
+    assert "".join(surface.text[c.char_start : c.char_end] for c in chunks) == surface.text
 
 
 def test_an_x_article_without_blocks_falls_back_to_paragraphs() -> None:
