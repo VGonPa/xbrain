@@ -128,8 +128,14 @@ class IndexStats:
     items: int
     topics: int
     surfaces: int
-    chunks: int
-    empty_surfaces: int
+    chunks: int  # what the chunker EMITTED
+    # Emitted but REFUSED by the index — a blank body, or a `chunk_id` already held. It was
+    # called `empty_surfaces` and counted neither empty things nor surfaces: hardcoded to 0
+    # in `corpus_chunks`, recomputed as `chunks - indexed` in `build_index`. Two different
+    # wrong answers under one name, the discordance B3 renamed `stale_chunks_excluded` for.
+    # Counting empty SURFACES honestly would be a constant anyway — the emitters drop a
+    # blank surface at `_blank` — so the number could not come out any other way (rule 2).
+    chunks_not_indexed: int
 
 
 @dataclass(frozen=True)
@@ -227,10 +233,16 @@ def load_corpus_from_store(items_path: Path, vocab: list[Topic], topics_path: Pa
 
 def corpus_chunks(
     corpus: Corpus, *, params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
-) -> tuple[list[KnowledgeChunk], IndexStats]:
-    """Every chunk of every item and topic surface, with the coverage stats."""
+) -> tuple[list[KnowledgeChunk], int]:
+    """Every chunk of every item and topic surface, and how many SURFACES were walked.
+
+    Returns the surface count rather than an `IndexStats`, because it has not indexed
+    anything: assembling the stats here would force a `chunks_not_indexed` that could only
+    ever be 0 — a fabricated constant in the one module whose job is not to fabricate any.
+    `build_index` owns the stats, because `build_index` is what does the refusing.
+    """
     chunks: list[KnowledgeChunk] = []
-    surfaces = empty = 0
+    surfaces = 0
     for item in corpus.items.values():
         emitted = item_surfaces(item)
         surfaces += len(emitted)
@@ -247,29 +259,27 @@ def corpus_chunks(
         emitted = topic_surfaces(topic, corpus.topic_pages.get(topic.slug))
         surfaces += len(emitted)
         chunks += list(chunk_surfaces(emitted, params=params))
-    stats = IndexStats(
-        items=len(corpus.items),
-        topics=len(corpus.vocab),
-        surfaces=surfaces,
-        chunks=len(chunks),
-        empty_surfaces=empty,
-    )
-    return chunks, stats
+    return chunks, surfaces
 
 
 def build_index(
     corpus: Corpus, *, params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
 ) -> tuple[InMemoryLexicalIndex, IndexStats]:
-    """The lexical baseline over a whole corpus, plus what it covered."""
-    chunks, stats = corpus_chunks(corpus, params=params)
+    """The lexical baseline over a whole corpus, plus what it covered.
+
+    `chunks` is what the chunker EMITTED and `chunks_not_indexed` is the difference the index
+    refused, so the two together say whether coverage is complete — one number that silently
+    meant "indexed" could not.
+    """
+    chunks, surfaces = corpus_chunks(corpus, params=params)
     index = InMemoryLexicalIndex()
     indexed = index.add(chunks)
     return index, IndexStats(
-        items=stats.items,
-        topics=stats.topics,
-        surfaces=stats.surfaces,
-        chunks=indexed,
-        empty_surfaces=stats.chunks - indexed,
+        items=len(corpus.items),
+        topics=len(corpus.vocab),
+        surfaces=surfaces,
+        chunks=len(chunks),
+        chunks_not_indexed=len(chunks) - indexed,
     )
 
 
@@ -333,6 +343,7 @@ def evaluate(
             "topics": len(corpus.vocab),
             "surfaces": stats.surfaces,
             "chunks": stats.chunks,
+            "chunks_not_indexed": stats.chunks_not_indexed,
         },
         cases=tuple(results),
         by_stratum=by_stratum,
@@ -540,12 +551,22 @@ def render_markdown(report: EvaluationReport) -> str:
         "",
         f"- Corpus: `{report.corpus['source']}` — {report.corpus['items']} items, "
         f"{report.corpus['topics']} topics, {report.corpus['surfaces']} superficies, "
-        f"{report.corpus['chunks']} chunks.",
+        f"{report.corpus['chunks']} chunks emitidos, "
+        f"{report.corpus.get('chunks_not_indexed', 0)} rechazados por el índice.",
         f"- Umbral: {report.threshold if report.threshold is not None else 'ninguno (solo informe)'}.",
         f"- Latencia p50 {report.latency['p50_ms']} ms · p95 {report.latency['p95_ms']} ms.",
         "",
         "> Las cifras de arriba son una fotografía del corpus medido, no una constante del",
         "> producto. Vuelve a derivarlas al ejecutar (CLAUDE.md regla 2).",
+        "",
+        "> `recall@k` cuenta OWNERS deduplicados; `surface_recall@k` cuenta CHUNKS (m6). Bajo",
+        "> la misma `k` no miden la misma población: con `depth = max(limit, max(ks))`, diez",
+        "> owners distintos pueden necesitar más de diez chunks, mientras que",
+        "> `surface_recall@10` nunca mira más allá del décimo. Compara cada columna con su",
+        "> propio valor en la siguiente ejecución, no una con la otra.",
+        "",
+        "> Una celda `sin cobertura` NO es un cero: ningún caso del bucket pudo medir esa",
+        "> métrica (spec §8.6.8). `measured` en el JSON lleva el denominador de cada media.",
         "",
     ]
     lines += _table("Por estrato", report.by_stratum)

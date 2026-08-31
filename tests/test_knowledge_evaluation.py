@@ -221,9 +221,9 @@ def test_building_the_index_reports_what_it_skipped(corpus) -> None:
     cases, and only the coverage line would say why the rest went missing.
     """
     index, stats = build_index(corpus)
-    assert len(index) == stats.chunks
     assert stats.items == 12
     assert stats.surfaces >= stats.items
+    assert stats.chunks == len(index) + stats.chunks_not_indexed
 
 
 # ---------------------------------------------------------------------------
@@ -482,3 +482,49 @@ def test_the_markdown_renders_an_unmeasured_metric_as_words_not_a_number(corpus)
     row = next(line for line in rendered.splitlines() if line.startswith("| exacto |"))
     assert "0.0" not in row, f"a fabricated zero reached the published table: {row}"
     assert "sin cobertura" in row
+
+
+# ---------------------------------------------------------------------------
+# m3 — the coverage field measures what its name says
+# ---------------------------------------------------------------------------
+
+
+def test_the_stat_for_refused_chunks_is_named_for_what_it_counts(corpus) -> None:
+    """`empty_surfaces` counted neither empty things nor surfaces.
+
+    In `corpus_chunks` it was initialised to 0 and never incremented, so it was hardcoded;
+    in `build_index` it was recomputed as `chunks - indexed`, which counts CHUNKS the index
+    refused. Two different wrong answers under one name, and no test touched it — the same
+    name/value discordance that made B3 rename `stale_chunks_excluded`.
+
+    Renamed rather than "counted for real", because counting empty SURFACES honestly would
+    be a constant: `item_surfaces` and `topic_surfaces` already drop a blank surface at the
+    emitter (`_blank`), so the number could never come out any other way (rule 2). What the
+    index actually refuses is a real quantity, so that is what it is called.
+    """
+    from xbrain.knowledge.evaluation import build_index, corpus_chunks
+
+    chunks, surfaces = corpus_chunks(corpus)
+    index, stats = build_index(corpus)
+
+    assert not hasattr(stats, "empty_surfaces"), "the misnamed field is still there"
+    assert stats.surfaces == surfaces
+    assert stats.chunks == len(chunks), "`chunks` is what the chunker EMITTED"
+    assert stats.chunks_not_indexed == len(chunks) - len(index)
+
+
+def test_a_chunk_the_index_refuses_is_counted_not_silently_dropped() -> None:
+    """And the count can be non-zero — otherwise it is a constant wearing a metric's name.
+
+    The index refuses a blank body and a `chunk_id` it already holds. Driven here through
+    `add`'s public return value, because the emitter cannot produce either shape today: that
+    is exactly why the number must be reported rather than assumed to be zero.
+    """
+    from xbrain.knowledge.lexical_memory import InMemoryLexicalIndex
+
+    from tests.test_knowledge_lexical_memory import _corpus_chunks
+
+    chunks = _corpus_chunks()
+    index = InMemoryLexicalIndex()
+    assert index.add(chunks) == len(chunks)
+    assert index.add(chunks) == 0, "a duplicate chunk_id must be refused, and countable"
