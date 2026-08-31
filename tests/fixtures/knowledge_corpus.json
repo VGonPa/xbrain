@@ -1,0 +1,477 @@
+{
+  "items": {
+    "k01": {
+      "id": "k01",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k01",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Zephyrine is the codename nobody wrote down anywhere else.",
+      "created_at": "2026-01-01T09:00:00+00:00",
+      "captured_at": "2026-01-02T09:00:00+00:00"
+    },
+    "k02": {
+      "id": "k02",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k02",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "A short note about evaluation harnesses.",
+      "created_at": "2026-01-02T09:00:00+00:00",
+      "captured_at": "2026-01-03T09:00:00+00:00",
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Un resumen sobre arneses de evaluacion y recall.",
+        "primary_topic": "agent-evaluation",
+        "topics": [
+          "agent-evaluation",
+          "observability"
+        ]
+      }
+    },
+    "k03": {
+      "id": "k03",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k03",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Good essay on export controls.",
+      "created_at": "2026-01-03T09:00:00+00:00",
+      "captured_at": "2026-01-04T09:00:00+00:00",
+      "links": [
+        {
+          "url": "https://example.org/essay",
+          "domain": "example.org"
+        }
+      ],
+      "content": {
+        "fetched_at": "2026-01-04T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "external_article",
+            "url": "https://example.org/essay",
+            "text": "Controls paragraph 0. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nControls paragraph 1. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nControls paragraph 2. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nControls paragraph 3. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nThe Quillfeather threshold was set at 512 units.",
+            "attempts": 1,
+            "title": "On Controls and Thresholds"
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Un ensayo sobre controles de exportacion.",
+        "primary_topic": "ai-policy",
+        "topics": [
+          "ai-policy"
+        ]
+      }
+    },
+    "k04": {
+      "id": "k04",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k04",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Two readings on the same question.",
+      "created_at": "2026-01-04T09:00:00+00:00",
+      "captured_at": "2026-01-05T09:00:00+00:00",
+      "content": {
+        "fetched_at": "2026-01-05T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "external_article",
+            "url": "https://example.org/first",
+            "text": "First paragraph 0. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nFirst paragraph 1. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nFirst paragraph 2. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. ",
+            "attempts": 1,
+            "title": "First Reading"
+          },
+          {
+            "outcome": "success",
+            "kind": "external_article",
+            "url": "https://example.org/second",
+            "text": "Second paragraph 0. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nSecond paragraph 1. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nSecond paragraph 2. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. \n\nMarrowgate is the name of the second protocol.",
+            "attempts": 1,
+            "title": "Second Reading"
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Dos lecturas sobre la misma cuestion.",
+        "primary_topic": "ai-policy",
+        "topics": [
+          "ai-policy"
+        ]
+      }
+    },
+    "k05": {
+      "id": "k05",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k05",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "https://t.co/article",
+      "created_at": "2026-01-05T09:00:00+00:00",
+      "captured_at": "2026-01-06T09:00:00+00:00",
+      "content": {
+        "fetched_at": "2026-01-06T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "x_article",
+            "url": "https://x.com/i/article/k05",
+            "text": "Harness engineering is a name for a practice.\n\nIt was coined by a practitioner, not by a lab.\n\nThe Bramblewick pattern is its clearest example.",
+            "attempts": 1,
+            "title": "Harness Engineering",
+            "blocks": [
+              {
+                "kind": "text",
+                "text": "Harness engineering is a name for a practice."
+              },
+              {
+                "kind": "text",
+                "text": "\n\nIt was coined by a practitioner, not by a lab."
+              },
+              {
+                "kind": "text",
+                "text": "\n\nThe Bramblewick pattern is its clearest example."
+              }
+            ]
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Un articulo largo sobre harness engineering.",
+        "primary_topic": "agentic-engineering",
+        "topics": [
+          "agentic-engineering"
+        ]
+      }
+    },
+    "k06": {
+      "id": "k06",
+      "source": "own_tweet",
+      "url": "https://x.com/vgonpa/status/k06",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "A thread on how I run reviews.",
+      "created_at": "2026-01-06T09:00:00+00:00",
+      "captured_at": "2026-01-07T09:00:00+00:00",
+      "content": {
+        "fetched_at": "2026-01-07T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "thread",
+            "url": "https://x.com/vgonpa/status/k06",
+            "text": "Second tweet of the thread. The Cindervale checklist has four steps.",
+            "attempts": 1
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Un hilo propio sobre revisiones.",
+        "primary_topic": "software-engineering",
+        "topics": [
+          "software-engineering"
+        ]
+      }
+    },
+    "k07": {
+      "id": "k07",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k07",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Same thought, said better by someone else.",
+      "created_at": "2026-01-07T09:00:00+00:00",
+      "captured_at": "2026-01-08T09:00:00+00:00",
+      "quoted_id": "k07q",
+      "content": {
+        "fetched_at": "2026-01-08T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "quoted_tweet",
+            "url": "https://x.com/othervoice/status/k07q",
+            "text": "Open weights change who gets to audit a model. Open weights change who gets to audit a model. Open weights change who gets to audit a model. Open weights change who gets to audit a model. ",
+            "attempts": 1,
+            "author": {
+              "handle": "othervoice",
+              "name": "Other Voice"
+            }
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Un post citado sobre pesos abiertos.",
+        "primary_topic": "ai-policy",
+        "topics": [
+          "ai-policy"
+        ]
+      }
+    },
+    "k08": {
+      "id": "k08",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k08",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Full talk below.",
+      "created_at": "2026-01-08T09:00:00+00:00",
+      "captured_at": "2026-01-09T09:00:00+00:00",
+      "content": {
+        "fetched_at": "2026-01-09T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "x_video",
+            "url": "https://video.example/k08.mp4",
+            "text": "Transcript. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves. Retrieval quality depends on how the corpus is cut into pieces. A window that ends mid-sentence hides the sentence from both halves.  The speaker mentions Thistledown twice.",
+            "attempts": 1,
+            "title": "A talk on evaluation",
+            "has_speech": true,
+            "language": "en",
+            "frames": [
+              {
+                "timestamp": 12.0,
+                "local_path": "k08/frames/0.jpg",
+                "description": "A slide titled Self-Attention."
+              },
+              {
+                "timestamp": 48.0,
+                "local_path": "k08/frames/1.jpg",
+                "description": "A slide showing arXiv 2502.16982."
+              }
+            ],
+            "digest": "What it is: a talk. Key points: evaluation loops and Thistledown."
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Una charla sobre bucles de evaluacion.",
+        "primary_topic": "agent-evaluation",
+        "topics": [
+          "agent-evaluation"
+        ]
+      }
+    },
+    "k09": {
+      "id": "k09",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k09",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "No audio on this one.",
+      "created_at": "2026-01-09T09:00:00+00:00",
+      "captured_at": "2026-01-10T09:00:00+00:00",
+      "content": {
+        "fetched_at": "2026-01-10T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "success",
+            "kind": "x_video",
+            "url": "https://video.example/k09.mp4",
+            "text": "",
+            "attempts": 1,
+            "title": "A silent demo",
+            "has_speech": false,
+            "frames": [
+              {
+                "timestamp": 3.0,
+                "local_path": "k09/frames/0.jpg",
+                "description": "A terminal showing the Foxglove command."
+              }
+            ]
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Una demo sin audio.",
+        "primary_topic": "ai-coding",
+        "topics": [
+          "ai-coding"
+        ]
+      }
+    },
+    "k10": {
+      "id": "k10",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k10",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "The chart says it all.",
+      "created_at": "2026-01-10T09:00:00+00:00",
+      "captured_at": "2026-01-11T09:00:00+00:00",
+      "media": [
+        {
+          "type": "photo",
+          "kind": "photo_described",
+          "url": "https://pbs.example/chart.jpg",
+          "local_path": "k10/0.jpg",
+          "width": 800,
+          "height": 600,
+          "bytes_size": 40000,
+          "downloaded_at": "2026-01-06T09:00:00+00:00",
+          "is_decorative": false,
+          "description": "A bar chart. The Pelicanine rate falls from 0.76 to 0.69.",
+          "description_lang": "Spanish",
+          "description_version": "describe/v7",
+          "described_at": "2026-01-06T11:00:00+00:00"
+        },
+        {
+          "type": "photo",
+          "kind": "photo_described",
+          "url": "https://pbs.example/avatar.jpg",
+          "local_path": "k10/1.jpg",
+          "width": 800,
+          "height": 600,
+          "bytes_size": 40000,
+          "downloaded_at": "2026-01-06T09:00:00+00:00",
+          "is_decorative": true,
+          "description": "",
+          "description_lang": "Spanish",
+          "description_version": "describe/v7",
+          "described_at": "2026-01-06T11:00:00+00:00"
+        }
+      ],
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Una grafica comparativa.",
+        "primary_topic": "longevity",
+        "topics": [
+          "longevity"
+        ]
+      }
+    },
+    "k11": {
+      "id": "k11",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k11",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Worth reading, if it still exists.",
+      "created_at": "2026-01-11T09:00:00+00:00",
+      "captured_at": "2026-01-12T09:00:00+00:00",
+      "links": [
+        {
+          "url": "https://dead.example/gone",
+          "domain": "dead.example"
+        }
+      ],
+      "content": {
+        "fetched_at": "2026-01-12T10:00:00+00:00",
+        "sources": [
+          {
+            "outcome": "failure",
+            "kind": "external_article",
+            "url": "https://dead.example/gone",
+            "failure_reason": "not_found",
+            "error": "404 Not Found",
+            "attempts": 1
+          }
+        ]
+      },
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Un enlace que ya no existe.",
+        "primary_topic": "ai-policy",
+        "topics": [
+          "ai-policy"
+        ]
+      }
+    },
+    "k12": {
+      "id": "k12",
+      "source": "bookmark",
+      "url": "https://x.com/vgonpa/status/k12",
+      "author": {
+        "handle": "vgonpa",
+        "name": "Victor Gonzalez"
+      },
+      "text": "Filing this for later.",
+      "created_at": "2026-01-12T09:00:00+00:00",
+      "captured_at": "2026-01-13T09:00:00+00:00",
+      "bookmark_folder": "to-read",
+      "enriched": {
+        "enriched_at": "2026-01-06T09:00:00+00:00",
+        "executor": "claude-code",
+        "summary": "Una nota guardada.",
+        "primary_topic": "knowledge-management",
+        "topics": [
+          "knowledge-management"
+        ],
+        "user_notes": "Mi nota: el patron Quillfeather aparece tambien en el ensayo k03."
+      }
+    }
+  },
+  "vocab": {
+    "agent-evaluation": {
+      "slug": "agent-evaluation",
+      "description": "Agents that evaluate their own work and the harnesses around them."
+    },
+    "ai-policy": {
+      "slug": "ai-policy",
+      "description": "Export controls, open weights and the governance of frontier models."
+    }
+  },
+  "topics": {
+    "agent-evaluation": {
+      "slug": "agent-evaluation",
+      "overview": "Evaluation is the part of agent work that nobody enjoys and everybody needs.\n\nThe recurring theme across these items is that a harness which cannot fail is not a harness.\n\nThe Ravensgate rule appears three times: measure the thing you will act on.",
+      "notes": [
+        "Development jobs rose by roughly ten percent, against the replacement narrative.",
+        "A chess clock that only runs while you work is the anti-procrastination trick."
+      ],
+      "synthesized_at": "2026-01-20T09:00:00+00:00",
+      "post_count_at_synth": 2
+    },
+    "ai-policy": {
+      "slug": "ai-policy",
+      "overview": "Export controls and open weights are argued from the same premises by both sides.",
+      "notes": [
+        "Cheap models strengthen rather than weaken the case for chip controls."
+      ],
+      "synthesized_at": "2026-01-20T09:00:00+00:00",
+      "post_count_at_synth": 4
+    }
+  }
+}
