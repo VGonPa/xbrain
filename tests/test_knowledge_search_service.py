@@ -204,6 +204,33 @@ def test_an_index_missing_a_table_is_refused_naming_the_rebuild(
     assert table in str(caught.value), "names WHAT is missing, not only that something is"
 
 
+def test_a_corrupt_fts_structure_is_an_actionable_error_not_a_traceback(
+    context: QueryContext,
+) -> None:
+    """G-4 (gate round 04): a `sqlite3.DatabaseError` at QUERY time escaped as a traceback.
+
+    C-2 guards the DECLARED tables; F-3 proves the first page is readable. Neither sees an
+    FTS5 SHADOW table (`chunks_fts_data`, outside `TABLES | FTS_TABLES`) that is gone, nor a
+    file corrupt beyond page 1: on the real corpus `DROP TABLE chunks_fts_data` made `search`
+    print a 68-line Rich traceback ending in `DatabaseError: fts5: corruption found reading
+    blob 10 from table "chunks_fts"` — loud, not silent, but not the actionable error spec
+    §9.3 requires and Plan 02 §11 tabulates as *base corrupta -> `index build --force`*.
+
+    Two layers close it: a positive PROBE at the open door (a trivial `MATCH` on each FTS
+    plane, 0.01 ms each — it sees exactly what `search` sees), and `LexicalIndex._fetch`
+    turning any remaining `DatabaseError` into the same sentence.
+
+    Seen red before the fix: `sqlite3.DatabaseError` propagated out of `search`.
+    """
+    connection = sqlite3.connect(db_path(context.index_dir))
+    connection.execute("DROP TABLE chunks_fts_data")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        search("Quillfeather", context)
+
+
 def test_search_refuses_a_base_that_disagrees_with_its_manifest(context: QueryContext) -> None:
     """G-2's third closure, and B-c (gate round 04): `search` compared VERSIONS and schema
     against the manifest, never `counts`, so over a base whose topic plane had been deleted

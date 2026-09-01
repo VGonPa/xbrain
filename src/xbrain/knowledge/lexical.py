@@ -39,6 +39,7 @@ from datetime import datetime
 from pydantic import ValidationError
 
 from xbrain.knowledge.contracts import SearchFilters
+from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.lexical_fts import match_expression, rank_order
 from xbrain.knowledge.models import KnowledgeChunk, Locator, SurfaceType
 from xbrain.models import Author
@@ -457,6 +458,16 @@ class LexicalIndex:
             if _is_fts_parse_error(error):
                 return []
             raise
+        except sqlite3.DatabaseError as error:
+            # The REST of the family — `fts5: corruption found reading blob…`, `file is not
+            # a database`, `database disk image is malformed` — is what a corrupt or
+            # amputated base raises at QUERY time, past the page-1 and schema checks of the
+            # open door (G-4). It is neither an `IndexError_` nor an `OSError`, so it
+            # reached the operator as a 68-line traceback naming no command; Plan 02 §11
+            # tabulates it as *base corrupta -> error accionable con `index build --force`*.
+            raise IndexIncompatibleError(
+                f"La base del índice no se puede consultar ({error}). {REBUILD_ADVICE}"
+            ) from error
 
 
 # What FTS5's expression parser says when it cannot parse — measured on sqlite 3.51.2 with

@@ -17,6 +17,7 @@ serving stale evidence as fresh, so it fails towards the warning.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -440,6 +441,33 @@ def test_status_reports_how_many_items_changed(workspace, corpus) -> None:
     assert after.items_changed == 1
     assert after.items_removed == 1
     assert "xbrain index update" in after.advice
+
+
+def test_status_and_update_see_the_corruption_search_would_hit(workspace, corpus) -> None:
+    """G-4's other half: the diagnostic instrument said HEALTHY over a base `search` crashed on.
+
+    `_prove_readable` touched only `sqlite_master`, so with `chunks_fts_data` dropped `status`
+    exited 0 with every count in place and `update --dry-run` returned normally — while
+    `search` died with a `DatabaseError`. Two instruments, opposite answers on one state
+    (rule 9), and the one that lies is the one an operator runs to find out. The probe runs
+    at the open door, so the three see the same thing and name the same command.
+
+    Seen red before the fix: `status` returned `incomplete=False` and `update` an
+    `UpdateReport`.
+    """
+    store, vocab, pages = corpus
+    _build(workspace, corpus)
+    connection = sqlite3.connect(db_path(workspace / "index"))
+    connection.execute("DROP TABLE chunks_fts_data")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index_build.status(workspace / "index", store, workspace / "items.json")
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index_build.update(
+            workspace / "index", store, vocab, pages, workspace / "items.json", dry_run=True
+        )
 
 
 def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(workspace, corpus) -> None:

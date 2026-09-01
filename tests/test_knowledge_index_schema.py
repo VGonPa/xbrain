@@ -68,6 +68,18 @@ def test_the_ddl_creates_every_declared_table() -> None:
     assert FTS_TABLES <= present
 
 
+def test_every_fts_plane_has_an_open_door_probe() -> None:
+    """G-4's totality half: a plane added to the DDL without a probe goes red here.
+
+    The probes are literals keyed by table (bandit reads an f-string over a table name as
+    B608, and a suppression is a request to stop looking), so the key set is asserted equal
+    to `FTS_TABLES` the way `_COUNT_STATEMENTS` is asserted against the counted planes.
+    """
+    from xbrain.knowledge.index_schema import _FTS_PROBES
+
+    assert set(_FTS_PROBES) == FTS_TABLES
+
+
 def test_the_two_fts_planes_are_separate_tables() -> None:
     """Spec §5.1: the profile finds the ITEM, the chunks find the FRAGMENT.
 

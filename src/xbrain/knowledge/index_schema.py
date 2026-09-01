@@ -335,7 +335,7 @@ def open_index(path: Path, *, read_only: bool = False, create: bool = False) -> 
         require_database(path.parent)
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
-        return _verify_schema(_prove_readable(connection, path), path)
+        return _probe_fts(_verify_schema(_prove_readable(connection, path), path), path)
     existed = path.exists()
     if not existed and not create:
         require_database(path.parent)
@@ -348,7 +348,7 @@ def open_index(path: Path, *, read_only: bool = False, create: bool = False) -> 
         # so a dropped table would be silently re-created EMPTY and `index update` would
         # then carry on as if nothing had happened (C-2). A fresh file is the only one
         # that gets its schema created here.
-        _verify_schema(connection, path)
+        _probe_fts(_verify_schema(connection, path), path)
     create_schema(connection)
     return connection
 
@@ -401,6 +401,44 @@ def _verify_schema(connection: sqlite3.Connection, path: Path) -> sqlite3.Connec
             f"La base del índice en {path} está incompleta: faltan las tablas "
             f"{', '.join(missing)}. {REBUILD_ADVICE}"
         )
+    return connection
+
+
+# One trivial `MATCH` per FTS plane — LITERALS keyed by table, like `_COUNT_STATEMENTS`, and
+# a test asserts the key set equals `FTS_TABLES` so a plane added to the DDL is probed too.
+_FTS_PROBES: dict[str, str] = {
+    "chunks_fts": "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH ?",
+    "profiles_fts": "SELECT count(*) FROM profiles_fts WHERE profiles_fts MATCH ?",
+}
+_PROBE_TERM = '"xbrain-index-probe"'
+
+
+def _probe_fts(connection: sqlite3.Connection, path: Path) -> sqlite3.Connection:
+    """Run the query `search` runs, so the OPEN door sees what the query would see (G-4).
+
+    `_prove_readable` reads page 1 and `_verify_schema` reads `sqlite_master`; neither
+    touches an FTS5 SHADOW table (`chunks_fts_data`, `…_idx`, `…_config`) or a page beyond
+    the first. With `chunks_fts_data` dropped on the real corpus, `search` died with a
+    68-line traceback ending in `DatabaseError: fts5: corruption found reading blob 10 from
+    table "chunks_fts"`, while `status` — which never issues a `MATCH` — exited 0 and called
+    the index healthy, and `update --dry-run` returned normally. The diagnostic instrument
+    was the one that lied (rule 9).
+
+    A `MATCH` on a term nobody indexed costs 0.01 ms per plane (measured on the 52 MB real
+    index) and raises exactly where `search` would. `PRAGMA quick_check` would see more
+    (152 ms) but reports the fts5 corruption as a ROW, not an exception, and a probe that
+    has to parse its answer is a second guard to keep in step. What the probe still cannot
+    reach — a corrupt segment a real query hits later — `LexicalIndex._fetch` turns into the
+    same sentence.
+    """
+    try:
+        for statement in _FTS_PROBES.values():
+            connection.execute(statement, (_PROBE_TERM,)).fetchone()
+    except sqlite3.DatabaseError as error:
+        connection.close()
+        raise IndexIncompatibleError(
+            f"La base del índice en {path} no se puede consultar ({error}). {REBUILD_ADVICE}"
+        ) from error
     return connection
 
 

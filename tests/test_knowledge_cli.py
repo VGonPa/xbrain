@@ -426,6 +426,42 @@ def test_a_corrupt_database_names_the_rebuild_command_on_every_command(
     assert "xbrain index build --force" in result.output, result.output
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["search", "Quillfeather"],
+        ["index", "status"],
+        ["index", "update", "--dry-run"],
+    ],
+)
+def test_a_corrupt_fts_structure_names_the_rebuild_command_on_every_command(
+    workspace: Path, argv: list[str]
+) -> None:
+    """G-4 at the CLI: corruption BEYOND page 1 — an FTS5 shadow table dropped — is the
+    actionable sentence on all three commands, with a non-zero exit, and no traceback.
+
+    Measured on the real corpus before the fix: `search` exit 1 with a 68-line Rich traceback
+    (`sqlite3.DatabaseError` is not in `_OPERATOR_ERRORS`), `status` exit 0 and healthy,
+    `update --dry-run` exit 0. The traceback is asserted absent through `result.exception`:
+    a clean exit is a `SystemExit`, a crash is the raw error.
+
+    Seen red before the fix on all three parametrisations.
+    """
+    import sqlite3
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    connection = sqlite3.connect(workspace / "data" / "index" / "knowledge.db")
+    connection.execute("DROP TABLE chunks_fts_data")
+    connection.commit()
+    connection.close()
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code != 0, result.output
+    assert "xbrain index build --force" in result.output, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+
+
 def test_mine_maps_to_own_tweet(workspace: Path) -> None:
     """Spec §7.2's shortcut, asserted through the FILTER the response echoes back.
 

@@ -948,6 +948,27 @@ def test_a_missing_table_is_an_error_not_an_empty_result() -> None:
         index.search("marrowgate", 5)
 
 
+def test_a_database_error_at_query_time_is_the_rebuild_advice_not_a_traceback() -> None:
+    """G-4 in `_fetch`: what the open-door probe does not catch, the query turns into the
+    same sentence. `sqlite3.DatabaseError` (the parent of `OperationalError`) is what FTS5
+    raises on a corrupt or missing shadow table — `fts5: corruption found reading blob…` —
+    and it is neither an `IndexError_` nor an `OSError`, so it reached the operator raw.
+
+    The parser's own errors keep degrading to `[]` (the test below), an `OperationalError`
+    that is not a parse error keeps propagating as itself (C-2), and everything else in the
+    `DatabaseError` family becomes `IndexIncompatibleError` with the rebuild advice.
+
+    Seen red before the fix: `sqlite3.DatabaseError` propagated out of `search`.
+    """
+    from xbrain.knowledge.index_schema import IndexIncompatibleError
+
+    index = _index()
+    index.add(_corpus_chunks())
+    index.connection.execute("DROP TABLE chunks_fts_data")
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index.search("marrowgate", 5)
+
+
 def test_only_an_fts_syntax_error_degrades_to_no_results() -> None:
     """The other half of C-2: what the catch was FOR still degrades, so narrowing it did not
     turn a hostile query into a traceback.
