@@ -56,6 +56,7 @@ from xbrain.knowledge.index_schema import (
     delete_profile_rows,
     manifest_path,
     open_index,
+    open_memory_index,
 )
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.lexical_fts import FTS_CONNECTIVE, FTS_TOKENIZE
@@ -626,6 +627,18 @@ def build(
     Rebuilding over an existing index requires `force`, because a rebuild throws away
     something that may have taken minutes and the incremental path usually wants
     `index update` instead. The error names both.
+
+    TWO THINGS FOUND BY MEASURING, NOT BY READING, and both are here:
+
+    * `--dry-run` builds into `sqlite3(":memory:")` and touches NO FILE AT ALL. The first
+      version opened the real database (creating it when absent), rolled back, and then
+      removed the file it believed it had created — so a dry run against a working index
+      DESTROYED it, from the flag whose whole promise is that it changes nothing;
+    * `--force` UNLINKS the database before rebuilding instead of clearing the rows. Clearing
+      in place left SQLite's freelist behind: on the real corpus a fresh build was 51.2 MB and
+      the same index after five forced rebuilds was 66.5 MB, with a `VACUUM` recovering it
+      only to 60.6 MB. A derived artefact whose size depends on how many times it has been
+      rebuilt is one nobody can reason about.
     """
     options = options or IndexOptions()
     if manifest_path(index_dir).exists() and not force and not dry_run:
@@ -637,31 +650,22 @@ def build(
     counters = WriteCounters()
     failed: list[dict[str, str]] = []
 
-    connection = open_index(db_path(index_dir))
+    if dry_run:
+        connection = open_memory_index()
+    else:
+        db_path(index_dir).unlink(missing_ok=True)
+        connection = open_index(db_path(index_dir))
     try:
         with connection:  # a single transaction: commit on success, rollback on any exception
-            _clear(connection)
-            index = LexicalIndex(connection)
-            for item_id in sorted(store):
-                write_item(index, store[item_id], vocab, counters, options=options)
-            for topic in sorted(vocab, key=lambda t: t.slug):
-                primary, secondary = topic_membership(store, topic.slug)
-                write_topic(
-                    index,
-                    topic,
-                    topic_pages.get(topic.slug),
-                    primary,
-                    secondary,
-                    counters,
-                    options=options,
-                )
+            _write_everything(
+                LexicalIndex(connection), store, vocab, topic_pages, counters, options=options
+            )
             if dry_run:
                 # A dry run does the whole walk and then throws it away, so the counts it
                 # reports are the counts a real build WOULD produce — not an estimate.
                 raise _DryRun
     except _DryRun:
         connection.close()
-        _remove_if_created(index_dir, dry_run=True)
         return _build_report(
             counters, failed, started, items=len(store), topics=len(vocab), dry_run=True
         )
@@ -669,7 +673,56 @@ def build(
         if not connection_closed(connection):
             connection.close()
 
-    manifest = Manifest(
+    write_manifest(
+        index_dir,
+        _fresh_manifest(store, vocab, topic_pages, items_path, counters, failed, options=options),
+    )
+    return _build_report(
+        counters, failed, started, items=len(store), topics=len(vocab), dry_run=False
+    )
+
+
+def _write_everything(
+    index: LexicalIndex,
+    store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
+    counters: WriteCounters,
+    *,
+    options: IndexOptions,
+) -> None:
+    """Every item and every topic, in SORTED order, inside the caller's transaction.
+
+    Sorted so two builds of the same store write the same rows in the same sequence — spec
+    §3.7.8 needs that for the `chunk_id` tie-break to mean anything, since an order following
+    dict iteration would reorder results between rebuilds of identical data.
+    """
+    for item_id in sorted(store):
+        write_item(index, store[item_id], vocab, counters, options=options)
+    for topic in sorted(vocab, key=lambda t: t.slug):
+        primary, secondary = topic_membership(store, topic.slug)
+        write_topic(
+            index, topic, topic_pages.get(topic.slug), primary, secondary, counters, options=options
+        )
+
+
+def _fresh_manifest(
+    store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
+    items_path: Path,
+    counters: WriteCounters,
+    failed: list[dict[str, str]],
+    *,
+    options: IndexOptions,
+) -> Manifest:
+    """The manifest a full build writes — every version taken from the CODE, not carried over.
+
+    The opposite of `_next_manifest`, and deliberately so: a build is what DEFINES the
+    versions the index was written under, while an update has already proved they match and
+    must copy them rather than silently "fix" a mismatch that should have refused the run.
+    """
+    return Manifest(
         schema_version=SCHEMA_VERSION,
         built_at=datetime.now(timezone.utc),
         store_fingerprint=store_fingerprint(store, options=options),
@@ -691,10 +744,6 @@ def build(
         skipped=_skipped(counters),
         failed=failed,
     )
-    write_manifest(index_dir, manifest)
-    return _build_report(
-        counters, failed, started, items=len(store), topics=len(vocab), dry_run=False
-    )
 
 
 class _DryRun(Exception):
@@ -708,45 +757,6 @@ def connection_closed(connection: sqlite3.Connection) -> bool:
     except sqlite3.ProgrammingError:
         return True
     return False
-
-
-def _remove_if_created(index_dir: Path, *, dry_run: bool) -> None:
-    """A dry run leaves NO artefact — not even an empty database file.
-
-    A manifest without a database is worse than neither, because a query finds it and trusts
-    it; an empty database is milder but still a file the user did not ask for.
-    """
-    if not dry_run:
-        return
-    path = db_path(index_dir)
-    if path.exists():
-        path.unlink()
-    if index_dir.exists() and not any(index_dir.iterdir()):
-        index_dir.rmdir()
-
-
-def _clear(connection: sqlite3.Connection) -> None:
-    """Empty every table, retracting the FTS entries first (see `index_schema`)."""
-    connection.execute(
-        "INSERT INTO chunks_fts(chunks_fts, rowid, text, title) "
-        "SELECT 'delete', rowid, text, title FROM chunks"
-    )
-    connection.execute(
-        "INSERT INTO profiles_fts(profiles_fts, rowid, profile_text) "
-        "SELECT 'delete', rowid, profile_text FROM profiles"
-    )
-    for statement in (
-        "DELETE FROM chunks",
-        "DELETE FROM profiles",
-        "DELETE FROM items",
-        "DELETE FROM item_topics",
-        "DELETE FROM item_content_kinds",
-        "DELETE FROM surfaces",
-        "DELETE FROM topics",
-        "DELETE FROM source_failures",
-        "DELETE FROM unfetched_links",
-    ):
-        connection.execute(statement)
 
 
 def _params_dict(params: ChunkerParams) -> dict[str, int]:

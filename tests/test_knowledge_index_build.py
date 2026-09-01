@@ -155,6 +155,46 @@ def test_build_dry_run_creates_no_database_and_no_manifest(workspace, corpus) ->
     assert not manifest_path(workspace / "index").exists()
 
 
+def test_a_dry_run_does_not_destroy_an_existing_index(workspace, corpus) -> None:
+    """A `--dry-run` that DELETED the index is worse than one that rebuilt it.
+
+    Found by measuring, not by reading: the first implementation opened the real database
+    (creating it if absent), rolled the transaction back, and then removed the file it
+    believed it had created — so running `index build --dry-run` against a working index
+    destroyed it, silently, from the flag whose entire promise is that it changes nothing.
+
+    The bytes are compared, not just the existence: a dry run that recreated an empty
+    database would satisfy `exists()` and still have thrown the index away.
+    """
+    _build(workspace, corpus)
+    before = db_path(workspace / "index").read_bytes()
+    manifest_before = manifest_path(workspace / "index").read_text(encoding="utf-8")
+
+    report = _build(workspace, corpus, dry_run=True)
+
+    assert report.chunks_written > 0
+    assert db_path(workspace / "index").read_bytes() == before
+    assert manifest_path(workspace / "index").read_text(encoding="utf-8") == manifest_before
+
+
+def test_a_forced_rebuild_produces_a_file_the_same_size_as_a_fresh_one(
+    workspace, corpus
+) -> None:
+    """`--force` starts from a NEW file, so the artefact is deterministic.
+
+    Measured on the real corpus first: clearing the rows in place left SQLite's freelist
+    behind, so a fresh build was 51.2 MB and the same index after five `--force` rebuilds was
+    66.5 MB — and a `VACUUM` only recovered it to 60.6 MB. A derived artefact whose size
+    depends on how many times it has been rebuilt is a derived artefact nobody can reason
+    about, so `--force` unlinks first.
+    """
+    _build(workspace, corpus)
+    fresh = db_path(workspace / "index").stat().st_size
+    for _ in range(3):
+        _build(workspace, corpus, force=True)
+    assert db_path(workspace / "index").stat().st_size == fresh
+
+
 def test_the_dry_run_prints_counts_not_text(workspace, corpus) -> None:
     """§12.7 (spec §10.8): logs never carry an article body.
 
