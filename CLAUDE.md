@@ -489,8 +489,9 @@ generates an Obsidian wiki.
   build|update|status`) — there is no daemon, by decision, and `docs/knowledge-index.md` carries
   the measurements that decision needs. Measured 2026-09-01 on the live store (2,404 items,
   sha256 `f76341a3…`): a full build is **1.37 s** median, `update` with 100 changed items
-  **0.26 s**, the database **52.4 MB**, **22,286 chunks**, `search` p50 **26 ms** over the 23
-  golden-set cases. **Both silent modes come from `chunks_fts` being an EXTERNAL-content table**
+  **0.26 s**, the database **52.4 MB**, **22,286 chunks**, `search` p50 **27.7 ms** at `--limit 10` (35.6 ms
+  at 20; medians of 3 passes over the 23 golden-set cases, store preloaded, load average 9 —
+  the old `26 ms` declared none of that, M-4). **Both silent modes come from `chunks_fts` being an EXTERNAL-content table**
   — it stores no text and reads it from `chunks` by rowid: the rowid is an explicit `INTEGER
   PRIMARY KEY` because `VACUUM` may renumber an implicit one and repoint every entry (SQLite
   says *may*, and measured on 3.51.2 it did NOT renumber, so the guard is the DDL assertion and
@@ -511,7 +512,27 @@ generates an Obsidian wiki.
   were found by RUNNING the build on the real corpus and by nothing else: `--dry-run` deleted an
   existing index (it removed the file it believed it had created), and `--force` grew the
   database across rebuilds (51.2 → 66.5 MB after five, a `VACUUM` recovering only to 60.6) —
-  the dry run now builds in `:memory:` and `--force` unlinks first.
+  the dry run now builds in `:memory:` and `--force` unlinks first. **Round 02 (2026-09-01) found
+  that `--force` unlinked the DATABASE first and kept the OLD MANIFEST standing until the new one
+  was written (C-1)**: an interrupted forced rebuild — the path every rebuild error recommends —
+  left a manifest every query accepted over an EMPTY base, `status` said `incomplete=False`, and
+  the `update` that followed rewrote every item and dropped the whole topic plane for good (C-3:
+  45 topics, 616 surfaces, 703 chunks), because `topics_rebuilt` compared fingerprints against the
+  manifest and never looked at the base. Now a forced rebuild removes the manifest BEFORE the
+  database; `counts`/`skipped` are READ BACK FROM THE BASE by one function after build and update
+  (schema **2**: three per-item omission columns on `items`, so an update that carried
+  `surfaces`/`skipped` over and hand-adjusted the rest — 43 surfaces published against 41 rows,
+  chunk counts drifting up on every vocabulary rebuild, A-3 — cannot happen), and `update` REFUSES
+  while `status` declares a base that does not hold what its manifest declares. A missing table is
+  the corrupt-base error, not an empty search (C-2: `_fetch` used to swallow every
+  `OperationalError` but a read-only one, so `DROP TABLE chunks_fts` answered normally). And
+  `search` carries the SURFACE's attribution and locator on every match (A-1 — the index stored
+  them and threw them away, so a quoted post was served under the poster's name: the rule this
+  file says was paid for in blood, reintroduced on a new surface), `get --query` paginates with a
+  `q:<offset>` cursor (A-2), and `get` keeps the configured transcriber/vision command as
+  `producer` (A-4). §8.7 is measured: a typical `enrich` run re-enriches 31 items (median of 10
+  real runs, 2026-05 → 2026-08) and leaves 345 chunks stale (1.55 % of 22,286); the largest, a
+  1,098-item backfill, 8,503.
 - **The chunker's parameters are MEASURED now, and the overlap axis was decided by a retriever
   that cannot use it.** Plan 02 §7's sweep (`target ∈ {800,1200,1600,2400} × overlap ∈
   {0,150,300}`, 23 scorable golden-set cases, real corpus) moved the default from the plan-01

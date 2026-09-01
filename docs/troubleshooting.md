@@ -330,8 +330,15 @@ chunker. Those chunks are **not returned** and are counted in `corrupt_chunks_ex
 silently dropped and never repaired mid-query. `xbrain index build --force`.
 
 **`Índice: INCOMPLETO o inexistente`** from `index status` — a build was interrupted. The
-manifest is written last, precisely so an interrupted build leaves nothing a query will trust.
-Rebuild.
+manifest is written last, precisely so an interrupted build leaves nothing a query will trust —
+and a forced rebuild removes the previous manifest **first**, so an interrupted `--force` cannot
+leave the old manifest standing over an empty base (C-1). Rebuild with `xbrain index build`.
+
+**`⚠ Índice INCOMPLETO o inutilizable`** from `index status`, with a manifest present — the base
+does not hold what its manifest declares (`topics 0 != 45`), or the manifest is from another
+schema/emitter/chunker version. `index update` refuses the same state instead of rewriting every
+item over it (C-3). The advice names `xbrain index build --force`, and it has to: plain
+`index build` refuses while a manifest exists.
 
 **A search does not find an accent.** It should: the tokenizer is `unicode61 remove_diacritics
 2`, so `evaluacion` reaches `evaluación`. What it will **not** do is match `agent` to `agents` —
@@ -341,8 +348,13 @@ would wreck the Spanish half of the corpus. See
 
 **`search` returns a summary with `no_underlying_source`.** Not a bug: the match landed on
 derived text (a summary, a digest, a topic note) and that item keeps no primary source to check
-it against. On the real corpus 40 % of items have no `content` at all, so this is common. The
-JSON says it as `verify_with: []`, which is reachable in exactly that one case.
+it against. It is NOT common: measured 2026-09-01 on the real corpus (2,404 items, sha256
+`f76341a3…`), **0 items** have no evidence-class surface — every item keeps its `post`, and a post
+is a primary source — so the warning is a contract guarantee, not a frequent state. *(This
+paragraph used to say "40 % of items have no `content`, so this is common": that is the F-5
+confusion of two populations, items without a `content` block (960) and items without any
+primary surface (0), left uncorrected here in round 01.)* The JSON says it as `verify_with: []`,
+which is reachable in exactly that one case.
 
 ## Where's the source of truth? Can I delete the vault notes?
 

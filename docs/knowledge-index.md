@@ -30,7 +30,7 @@ Reindex after anything that changes indexable text:
 | `topics` | overviews and topic notes | `xbrain index update` |
 | `digest-video` / `describe` / `redescribe-frames` | transcripts, captions, image prose | `xbrain index update` |
 | `vocab` | topic descriptions — which enter every assigned item's PROFILE | `xbrain index update` (it rebuilds the profiles) |
-| upgraded xbrain and `index update` refuses | the emitter or the chunker moved | `xbrain index build --force` |
+| upgraded xbrain and `index update` refuses | the emitter, the chunker or the SCHEMA moved (schema **2** since round 02) | `xbrain index build --force` |
 
 **You do not have to remember.** Two independent signals say so for you:
 
@@ -58,17 +58,22 @@ on an Apple-silicon laptop, with the shipped chunker (`target=800, overlap=0`, c
 | loading the store (not counted above) | 0.22 s |
 | `index update`, 0 items changed | 0.15 s — 0 writes to the DATABASE (the manifest is always rewritten: it records the current cheap signal) |
 | `index update`, 1 item changed | 0.16 s — 3 chunks out, 3 in |
-| `index update`, 100 items changed | 0.26 s — 645 chunks out, 645 in |
+| `index update`, 100 items changed (SYNTHETIC: 100 summaries rewritten in memory) | 0.26 s — 645 chunks out, 645 in |
 | `data/index/knowledge.db` | **52.4 MB** (manifest 1 KB) |
 | chunks | **22,286** — 10,160 surfaces, 2,404 profiles |
 | chunks per item | median 3, mean 9.0, max 712 |
-| `search` latency over the 23 golden-set cases | p50 **26 ms**, p95 43 ms, max 66 ms |
+| `search` latency, 23 golden-set cases with their filters, **`--limit 10`** | p50 **27.7 ms**, p95 57.3 ms — medians of 3 passes (p50 27.6 / 28.1 / 27.7; max 67–97 ms) |
+| the same, **`--limit 20`** (the depth the baseline runs at) | p50 **35.6 ms**, p95 69.8 ms — medians of 3 passes (max 76–109 ms) |
+| cold `xbrain search … --json` (process start + config + store load + one query) | 0.77 – 0.86 s, 3 runs |
 | omitted, by cause | 63 failed fetches · 108 silent videos · 14 decorative images · 0 empty |
 
 `search` latency is index-open + score + fingerprint-verify + group + hydrate, with the store
-**already loaded**. Add the 0.22 s store load for a cold CLI invocation: `search` hydrates
+**already loaded**, one warm-up pass first so the 52 MB database sits in the page cache, sqlite
+3.51.2, load average **9.0** during the run (M-4: the row used to read `p50 26 ms · p95 43 ms ·
+max 66 ms` with no `--limit`, no repetitions and no load stated — and `--limit` alone moves the
+p50 by ~1.3×, so that figure is retired rather than reinterpreted). `search` hydrates
 verification from the live store (a verdict copied into the index could never be invalidated),
-so the store is not optional.
+so the store is not optional; the cold CLI figure above is what that costs end to end.
 
 **Whether to automate this is now decidable and the answer looks like "not yet":** a full
 rebuild costs under two seconds. There is no incremental-cost problem to solve, and the honest
@@ -86,16 +91,65 @@ simply call `index update` on their way out*.
 | `summary` | 2,404 | | `topic_overview` | 132 |
 | `video_frame` | 2,197 | | `topic_description` | 45 |
 
+### Staleness after a typical `enrich` (Plan 02 §8.7)
+
+Measured 2026-09-01 on the same store, from the `enriched.enriched_at` the store records: all
+2,404 items carry an enrichment and they were (re)enriched on **11 distinct days**. Re-enriching
+an item changes its fingerprint, and `index update` deletes and rewrites **every** chunk and the
+profile of a changed item, so *chunks stale after that run* is the chunks those items own in
+today's index (chunker v2):
+
+| run (by day) | items | chunks they own today | | run | items | chunks |
+|---|---:|---:|---|---|---:|---:|
+| 2026-05-19 | 725 | 3,060 | | 2026-07-09 | 7 | 76 |
+| 2026-05-23 | 14 | 34 | | 2026-07-10 | 20 | 446 |
+| 2026-06-09 | 53 | 240 | | 2026-08-12 | **1,098** | **8,503** |
+| 2026-06-25 | 22 | 244 | | 2026-08-30 | 88 | 1,857 |
+| 2026-06-30 | 4 | 37 | | 2026-08-31 | 40 | 514 |
+| 2026-07-05 | 333 | 6,572 | | | | |
+
+Leaving out the 2026-08-12 backfill, a **typical run re-enriches 31 items (median of 10 runs;
+4 – 333) and leaves 345 chunks stale (median; 34 – 6,572), i.e. 1.55 % of the 22,286** — well
+inside what `update` handles in a fraction of a second. What `enrich` would process if run
+today: **1** item (a re-enrichment), owning 3 chunks. The "100 items changed" row above is a
+SYNTHETIC population and is labelled as such; it sits between a typical run and the largest.
+
 ### Interruption
 
-`Ctrl-C` mid-build rolls the transaction back and writes **no manifest**. There are **TWO
-reachable states**, not one (F-13): a `SIGINT` early enough (measured at 0.55 s) leaves neither
-database nor manifest, and one late enough (0.75 s) leaves the database with all 22,286 rows
-committed and **still no manifest**. The safety property holds in both, and it is the manifest
-that carries it: an index with no manifest is **refused** by every query rather than answered
-partially, so an interruption can never leave a small — or even a complete — index that looks
-valid. `xbrain index status` reports it as incomplete and names `xbrain index build`.
-*(This paragraph used to say only "`chunks` holds 0 rows", which is one of the two states.)*
+`Ctrl-C` mid-build rolls the transaction back and writes **no manifest**, and it is the manifest
+that carries the safety property: an index with no manifest is **refused** by every query rather
+than answered partially. **This was only true for a FRESH build until round 02 (C-1):** `--force`
+— the command every rebuild error recommends — kept the OLD manifest standing while the new
+database was written, so an interrupted forced rebuild left a manifest every query accepted over
+an empty base (`status` said nothing, `search` answered "no results"). A forced rebuild now
+removes the manifest **before** the database. Re-measured through the CLI on the real corpus
+(SIGINT sent from a driver; a shell's background job ignores it), three reachable states, all
+failing closed:
+
+| `SIGINT` at | what is left | `status` | `search` / `update` | recovery |
+|---|---|---|---|---|
+| 0.4 s — before `build()` runs (interpreter + store load) | the **previous** index, intact | healthy | answer normally | nothing to recover |
+| 0.9 – 1.8 s — mid-transaction | database with **0** rows, **no manifest** | `incomplete`, names `xbrain index build` | exit 1, «No hay manifest…» | `xbrain index build` → 22,286 chunks |
+| 2.0 s — after the commit, before the manifest | database with all **22,286** rows, **no manifest** | `incomplete` | exit 1 | same |
+
+*(The F-13 paragraph this replaces measured a FRESH build at 0.55 s / 0.75 s and reported the
+last two states; the first is specific to `--force`, whose previous index survives only if the
+signal lands before the rebuild starts.)*
+
+### The manifest describes the base, or the base is refused (C-3, A-3)
+
+`counts` and `skipped` in the manifest are **read back from the database** by the same function
+after a build and after an update — five `COUNT(*)` plus a `SUM` over three per-item omission
+columns on `items` (schema **2**). Until round 02 an update carried `surfaces`, `skipped` and
+`failed` over from the previous manifest and adjusted the rest by hand, which drifted (topic
+chunks were added on every vocabulary rebuild and never subtracted), so `index status --json`
+published the previous population as current. Because the manifest now describes the base by
+construction, a base that contradicts it is DETECTED: `index update` refuses (`El índice no
+contiene lo que su manifest declara (topics 0 != 45)` + the rebuild command) instead of silently
+rewriting every item and dropping the topic plane — the recovery path the Claude gate measured
+losing 45 topics, 616 surfaces and 703 chunks for good — and `index status` reports it as
+incomplete, naming `xbrain index build --force`. `status` also applies the same version check
+`search` and `update` do, so the three instruments agree on one state.
 
 ---
 
@@ -180,6 +234,21 @@ the retriever.
   (`--strategy banana`) is a validation error naming the valid ones.
 
 ---
+
+## What a match and a bundle carry (round 02)
+
+- **A `search` match names the SURFACE's author and locator (A-1).** `SearchMatch.attribution`
+  is the quoted author on a `quoted_post` — never the poster — and `locator` is the surface's
+  own (`source_index`, `content_kind`, the source URL; `media_index` on an image description)
+  with the chunk's character range on top. The human view prints `autor: @handle (Name)` under a
+  match whose author is not the item's. Until round 02 the index stored both and `search` threw
+  them away: k07's quoted post came back with `attribution: null` under the poster's name.
+- **`get --query` paginates with a cursor (A-2).** The ranking is deterministic, so the cursor is
+  `q:<offset>` into it; `truncated: true` always comes with one, and the two cursor shapes
+  (`q:<offset>` for a query, `<surface>:<chunk>` positional) refuse each other by name.
+- **`get` keeps the ASR/VLM producer (A-4).** `transcribe_command` and `vision_command` travel in
+  `QueryContext` from the same config definition the build uses, so a transcript's `producer` is
+  the configured transcriber in `get` exactly as in the index.
 
 ## Troubleshooting the index
 
