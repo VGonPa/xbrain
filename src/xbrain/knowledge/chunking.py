@@ -22,8 +22,26 @@ module constant, that sweep would break the very fixture that exists to pin the 
 and the comfortable fix would be to regenerate it, at which point it pins nothing. The
 defaults live in `DEFAULT_CHUNKER_PARAMS`; the pinned test passes its own.
 
-The values below are PROVISIONAL and declared as such (Plan 01 §3.6). They are not measured
-— Plan 02 measures them.
+THE VALUES ARE MEASURED NOW, and they moved (Plan 02 §7). The Plan 01 provisional was
+`target=1200, overlap=150`; the sweep over `target ∈ {800,1200,1600,2400} × overlap ∈
+{0,150,300}` against the 23 scorable golden-set cases on the real 2,404-item corpus put
+`target=800, overlap=0` first on `recall@10` (0.8119 vs 0.8027) and on MRR (0.8179 vs
+0.7449), improving exactly the three strata where chunking is supposed to matter —
+`enterrado` +2.1 pp (the stratum Plan 02 §7 says decides), `semantico` +2.4 pp,
+`cruzado_idioma` +0.9 pp — and regressing none. The cost is +21.6 % chunks (18,320 ->
+22,286). The chunk-size distribution does NOT return to the 194-character pathology that
+motivated packing: the median moves 658 -> 670 and `x_article` averages 661.
+
+**THE OVERLAP AXIS WAS DECIDED BY A RETRIEVER THAT CANNOT USE IT, AND THAT IS A DECLARED
+LIMIT, NOT A FINDING.** Overlap applies only to `video_transcript`, the one windowed surface,
+and it exists so a sentence spanning a boundary is complete in at least one window. But
+`lexical_fts.match_expression` quotes every TERM separately and never builds a phrase, so
+this retriever cannot benefit from a whole sentence — measured, `recall@10` is IDENTICAL for
+overlap 0 and 150 at every target, and only MRR moves (more overlap = more near-duplicate
+chunks competing). The golden set also contains no case that requires a sentence to survive a
+boundary. So the sweep chose 0 on the evidence it has, and Plan 03 MUST re-decide this axis
+with the vector retriever in front of it: an embedding of a truncated sentence is a worse
+vector, and that is a cost this measurement is blind to.
 """
 
 from __future__ import annotations
@@ -39,9 +57,9 @@ from xbrain.models import ARTICLE_PARAGRAPH_SEP, Author
 class ChunkerParams:
     """Provisional chunking parameters, passed explicitly so a sweep cannot move a pin."""
 
-    target: int = 1200  # soft ceiling per chunk
+    target: int = 800  # soft ceiling per chunk — MEASURED, see the module docstring
     max_chars: int = 2000  # hard ceiling — SPLITTABLE surfaces only (see the module docstring)
-    overlap: int = 150  # windows only; a paragraph split never overlaps
+    overlap: int = 0  # windows only; a paragraph split never overlaps
     min_chars: int = 40  # below this a fragment is merged into a neighbour, not emitted
 
 

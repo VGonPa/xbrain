@@ -248,7 +248,7 @@ def test_a_different_chunker_version_refuses_the_update(built: Path, corpus) -> 
     store, _vocab, _pages = corpus
     path = manifest_path(built / "index")
     raw = json.loads(path.read_text(encoding="utf-8"))
-    raw["chunker_version"] = "xbrain-knowledge-chunker/v2"
+    raw["chunker_version"] = "xbrain-knowledge-chunker/v99"
     path.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(IndexIncompatibleError, match="index build --force"):
@@ -283,7 +283,10 @@ def test_different_chunker_parameters_also_refuse_the_update(built: Path, corpus
             vocab,
             pages,
             built / "items.json",
-            options=index_build.IndexOptions(params=ChunkerParams(target=800)),
+            # A target the default is NOT: `ChunkerParams(target=800)` was this line until
+            # Plan 02 §7's sweep made 800 the default, at which point the test compared the
+            # default with itself and could only pass by accident (rule 1).
+            options=index_build.IndexOptions(params=ChunkerParams(target=1234)),
         )
 
 

@@ -1,0 +1,39 @@
+{
+  "note": "The ranking under the parameters Plan 02 §7's sweep MEASURED, pinned separately from knowledge_ranking.json — which keeps the Plan 01 provisional and is NOT regenerated. The two exist to be compared: same corpus, same scorer, different cut.",
+  "chunker_params": {
+    "target": 800,
+    "max_chars": 2000,
+    "overlap": 0,
+    "min_chars": 40
+  },
+  "chunker_version": "xbrain-knowledge-chunker/v2",
+  "tokenize": "unicode61 remove_diacritics 2",
+  "connective": "OR",
+  "chunks": 49,
+  "rankings": {
+    "Quillfeather": [
+      "item:k12:user_note:0:0:xbrain-knowledge-chunker/v2",
+      "item:k03:external_article:80e0981ad499:3:xbrain-knowledge-chunker/v2"
+    ],
+    "Marrowgate protocol": [
+      "item:k04:external_article:bac1a1248324:2:xbrain-knowledge-chunker/v2"
+    ],
+    "Bramblewick": [
+      "item:k05:x_article:0a85d123c615:0:xbrain-knowledge-chunker/v2"
+    ],
+    "Cindervale checklist": [
+      "item:k06:thread:5a43807e8d84:0:xbrain-knowledge-chunker/v2"
+    ],
+    "Thistledown": [
+      "item:k08:video_digest:d0c4385ea6d8:0:xbrain-knowledge-chunker/v2",
+      "item:k08:video_transcript:d0c4385ea6d8:6:xbrain-knowledge-chunker/v2"
+    ],
+    "Pelicanine": [
+      "item:k10:image_description:b17a76599fea:0:xbrain-knowledge-chunker/v2"
+    ],
+    "Marrowgate Zephyrine": [
+      "item:k01:post:0:0:xbrain-knowledge-chunker/v2",
+      "item:k04:external_article:bac1a1248324:2:xbrain-knowledge-chunker/v2"
+    ]
+  }
+}

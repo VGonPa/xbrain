@@ -208,7 +208,10 @@ def test_chunk_fingerprint_changes_when_the_chunker_version_is_bumped() -> None:
     """
     sid = surface_id("item", "42", "post", "0")
     base = chunk_fingerprint(sid, 0, "hello")
-    assert chunk_fingerprint(sid, 0, "hello", chunker_version="xbrain-knowledge-chunker/v2") != base
+    # DERIVED from the current constant, never a literal: the literal used to be
+    # `.../v2`, and Plan 02's sweep made that the current version — so the assertion
+    # quietly became "the default differs from the default" and could only pass by luck.
+    assert chunk_fingerprint(sid, 0, "hello", chunker_version=CHUNKER_VERSION + "-other") != base
     assert chunk_fingerprint(sid, 1, "hello") != base
     assert chunk_fingerprint(surface_id("item", "43", "post", "0"), 0, "hello") != base
 

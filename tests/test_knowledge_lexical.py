@@ -33,7 +33,8 @@ from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge.chunking import ChunkerParams, chunk_surfaces
+from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
+from xbrain.knowledge.ids import CHUNKER_VERSION
 from xbrain.knowledge.contracts import SearchFilters
 from xbrain.knowledge.index_schema import open_index, open_memory_index
 from xbrain.knowledge.lexical import LexicalIndex
@@ -50,6 +51,17 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # would be to regenerate it — at which point it pins nothing.
 PINNED_CHUNKER_PARAMS = ChunkerParams(target=1200, max_chars=2000, overlap=150, min_chars=40)
 
+# AND THE VERSION, for the same reason and through the same door — the gap Plan 02 §7's M7
+# note left open. It made the PARAMS an argument so the sweep could not move the fixture, and
+# then mandated a `CHUNKER_VERSION` bump when the sweep changed them. But `chunk_id` ENDS in
+# the chunker version, so the bump renames every id the fixture pins and breaks it just as
+# surely — from the very section that promised it would stay green without regenerating.
+#
+# Pinning the version loses nothing the fixture exists to protect: the version is a label in
+# the id and contributes no character to the ranking, while the SPANS come from the params,
+# which are pinned beside it. Change the chunking and this still goes red.
+PINNED_CHUNKER_VERSION = "xbrain-knowledge-chunker/v1"
+
 
 # Every item genuinely has a creation and a capture instant, so `items` declares both NOT
 # NULL and the helper below supplies them where the test does not care which they are.
@@ -63,13 +75,28 @@ def _index() -> LexicalIndex:
     return LexicalIndex(open_memory_index())
 
 
-def _corpus_chunks() -> list[KnowledgeChunk]:
+def _corpus_chunks(
+    *,
+    params: ChunkerParams = PINNED_CHUNKER_PARAMS,
+    chunker_version: str = PINNED_CHUNKER_VERSION,
+) -> list[KnowledgeChunk]:
+    """The fixture corpus, chunked with parameters the CALLER names.
+
+    Both are arguments defaulting to the PINNED values, so the characterization test gets the
+    Plan 01 provisional whatever the module defaults become, and the winner's test asks for
+    the module defaults explicitly. Neither reads a constant by accident.
+    """
     raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
     chunks: list[KnowledgeChunk] = []
     for item_raw in raw["items"].values():
         item = Item.model_validate(item_raw)
         chunks += list(
-            chunk_surfaces(item_surfaces(item), params=PINNED_CHUNKER_PARAMS, url=item.url)
+            chunk_surfaces(
+                item_surfaces(item),
+                params=params,
+                url=item.url,
+                chunker_version=chunker_version,
+            )
         )
     return chunks
 
@@ -262,6 +289,62 @@ def test_the_ranking_fixture_records_the_parameters_it_was_built_with() -> None:
     assert fixture["connective"] == FTS_CONNECTIVE
 
 
+def test_the_measured_winner_has_its_own_pinned_ranking() -> None:
+    """Plan 02 §7: *el ganador del barrido se prueba aparte, con su propia fixture y su propio
+    `CHUNKER_VERSION`, y el informe compara las dos.*
+
+    TWO FIXTURES, TWO JOBS. `knowledge_ranking.json` keeps the Plan 01 provisional
+    (`target=1200, overlap=150`, chunker v1) and is NOT regenerated — it pins the SCORER
+    across time, which is why it passes its parameters and its version as arguments.
+    `knowledge_ranking_v2.json` pins what the corpus ranks like under the parameters the sweep
+    MEASURED, and it reads the module defaults, so it is the one that goes red the day someone
+    changes the chunking without saying so.
+
+    The comparison the plan asks for is visible right here: the two agree on 3 of the 7 pinned
+    queries and differ on 4 — same number of hits, different chunk ids, because the cut moved.
+    A sweep that changed nothing would have produced two identical rankings, and the plan's
+    §13.15 instruction to publish a flat result would have applied instead.
+    """
+    fixture = json.loads((FIXTURES / "knowledge_ranking_v2.json").read_text(encoding="utf-8"))
+    assert fixture["chunker_params"] == {
+        "target": DEFAULT_CHUNKER_PARAMS.target,
+        "max_chars": DEFAULT_CHUNKER_PARAMS.max_chars,
+        "overlap": DEFAULT_CHUNKER_PARAMS.overlap,
+        "min_chars": DEFAULT_CHUNKER_PARAMS.min_chars,
+    }
+    assert fixture["chunker_version"] == CHUNKER_VERSION
+    assert fixture["tokenize"] == FTS_TOKENIZE and fixture["connective"] == FTS_CONNECTIVE
+
+    index = _index()
+    index.add(_corpus_chunks(params=DEFAULT_CHUNKER_PARAMS, chunker_version=CHUNKER_VERSION))
+    actual = {
+        query: [hit.chunk_id for hit in index.search(query, limit=10)] for query in RANKING_QUERIES
+    }
+    assert actual == fixture["rankings"]
+
+
+def test_the_two_pinned_rankings_are_not_the_same_ranking() -> None:
+    """The sweep MOVED the cut, and the two fixtures record that it did.
+
+    Without this, both fixtures could drift onto the same parameters and nobody would notice
+    that the "comparison" the plan asks for had become a comparison of a thing with itself —
+    the tautology of CLAUDE.md rule 1, in fixture form.
+    """
+    v1 = json.loads((FIXTURES / "knowledge_ranking.json").read_text(encoding="utf-8"))
+    v2 = json.loads((FIXTURES / "knowledge_ranking_v2.json").read_text(encoding="utf-8"))
+    assert v1["chunker_params"] != v2["chunker_params"]
+
+    def without_version(ids: list[str]) -> list[str]:
+        return [chunk_id.rsplit(":", 1)[0] for chunk_id in ids]
+
+    differing = [
+        query
+        for query in v1["rankings"]
+        if without_version(v1["rankings"][query]) != without_version(v2["rankings"][query])
+    ]
+    assert differing, "the two fixtures pin the same ranking: the sweep changed nothing"
+
+
 def test_the_sweep_cannot_move_the_characterization_fixture() -> None:
     """Step 17b (M7): the fixture reads its parameters from an ARGUMENT, never a constant.
 
@@ -275,7 +358,12 @@ def test_the_sweep_cannot_move_the_characterization_fixture() -> None:
     raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
     item = Item.model_validate(next(iter(raw["items"].values())))
     pinned_ids = {
-        c.chunk_id for c in chunk_surfaces(item_surfaces(item), params=PINNED_CHUNKER_PARAMS)
+        c.chunk_id
+        for c in chunk_surfaces(
+            item_surfaces(item),
+            params=PINNED_CHUNKER_PARAMS,
+            chunker_version=PINNED_CHUNKER_VERSION,
+        )
     }
     swept_ids = {c.chunk_id for c in chunk_surfaces(item_surfaces(item), params=swept)}
     assert pinned_ids  # the fixture item does produce chunks

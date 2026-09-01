@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from xbrain.knowledge import index_build
+from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS
 from xbrain.knowledge.index_schema import (
     IndexIncompatibleError,
     db_path,
@@ -81,11 +82,14 @@ def test_build_writes_a_manifest_with_every_field_the_spec_requires(workspace, c
     assert set(raw) == index_build.MANIFEST_FIELDS
     assert raw["schema_version"] == "1"
     assert raw["surface_version"] and raw["chunker_version"]
+    # The MEASURED parameters (Plan 02 §7's sweep), read from the module rather than written
+    # here a second time: two literals that must agree are two definitions (rule 5), and the
+    # point of the assertion is that the manifest records what the code USED.
     assert raw["chunker_params"] == {
-        "target": 1200,
-        "max_chars": 2000,
-        "overlap": 150,
-        "min_chars": 40,
+        "target": DEFAULT_CHUNKER_PARAMS.target,
+        "max_chars": DEFAULT_CHUNKER_PARAMS.max_chars,
+        "overlap": DEFAULT_CHUNKER_PARAMS.overlap,
+        "min_chars": DEFAULT_CHUNKER_PARAMS.min_chars,
     }
     # The hole Plan 03 fills. Declared now so its arrival is not a manifest migration.
     assert raw["embeddings"] is None

@@ -35,7 +35,11 @@ from xbrain.models import ContentSourceSuccess, Item
 # INTO the fingerprints (and the chunker version into the chunk id itself), so a rebuild
 # after a bump writes new ids rather than overwriting old ones with differently-cut text.
 SURFACE_VERSION = "xbrain-knowledge-surface/v1"
-CHUNKER_VERSION = "xbrain-knowledge-chunker/v1"
+# Bumped to v2 by Plan 02 §7's sweep: `target` moved 1200 -> 800 and `overlap` 150 -> 0, so
+# the same `(surface_id, chunk_index)` now holds DIFFERENT text. The version is in the chunk
+# id precisely so those two never collide — a v1 id and a v2 id are different chunks, and an
+# index built under either refuses to be updated by the other (`load_compatible_manifest`).
+CHUNKER_VERSION = "xbrain-knowledge-chunker/v2"
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
