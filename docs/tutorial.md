@@ -187,7 +187,42 @@ one blind spot, and this one cannot share it but cannot read a claim.
 running only once enough of the corpus carries verdicts — otherwise, as above,
 you are measuring your own coverage.
 
-## 7. See the whole corpus at a glance
+## 7. Index it, and ask it things
+
+The wiki is for reading. The **index** is for asking — and it is derived, so building it is
+never a risk:
+
+```bash
+xbrain index build            # ~1.4 s on a 2,400-item corpus
+xbrain search "agentes que evalúan su propio trabajo"
+```
+
+Each result shows the item, its author and date, the surface the match came from with its
+`origin`, the excerpt, and — the useful line — the exact command that pulls up the source:
+
+```
+→ verifica con: xbrain get 1884636410839535967 --surface external_article
+```
+
+Run that and you get the article body **complete**, not the truncated version the LLM prompts
+see. Add `--query "..."` to jump to the paragraphs that score inside a long source.
+
+Filter the way you think:
+
+```bash
+xbrain search "SDLC" --from 2026-01-01 --to 2026-03-31 --mine
+xbrain search "DunedinPACE" --origin vlm
+xbrain search "..." --topic agent-evaluation --kind x_video --author karpathy --limit 20
+```
+
+After the next `enrich` or `topics`, run `xbrain index update` — it touches only what changed.
+If you forget, `search` tells you: it compares the store's timestamp against the one it was
+built from and warns before showing you a single result. `xbrain index status` says how many
+items have moved.
+
+Costs, limits and the measured baseline: [`docs/knowledge-index.md`](./knowledge-index.md).
+
+## 8. See the whole corpus at a glance
 
 `generate` also writes `dashboard.html` — a self-contained interactive dashboard
 (counts, topics, authors, growth over time, photo thumbnails), with drill-down and

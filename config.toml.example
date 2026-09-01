@@ -125,3 +125,13 @@ command = "parakeet-mlx"
 # interval_seconds = 15      # also keep a frame every N s (covers static tails)
 # dedupe           = true    # perceptual-hash near-duplicate removal
 # dedupe_distance  = 6        # max dHash Hamming distance to call two frames "same" (0-64)
+
+[index]
+# The persisted knowledge index under `data/index/` — derived and reconstructible, never
+# versioned. Built and updated explicitly (`xbrain index build|update`); there is no daemon,
+# by decision, and `docs/knowledge-index.md` carries the measurements that decision needs.
+# dir                  = "index"   # a NAME under data/, not a path: it is proven contained
+# max_matches_per_item = 3         # cap on matches per item in `search`, so one long
+#                                  # transcript cannot take ten of the top ten
+# get_char_budget      = 40000     # per-response ceiling for `get` before it truncates and
+#                                  # hands back a cursor; a surface is never cut mid-body

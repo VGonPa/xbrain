@@ -484,6 +484,54 @@ generates an Obsidian wiki.
   pre-packing implementation, which no longer exists, so read it as history, never as a figure
   you could reproduce today.) The chunker's parameters are ARGUMENTS, so the Plan-02 sweep
   cannot move the ranking fixture that pins today's behaviour.
+- **The persisted index (`data/index/`) is DERIVED, and two of its failure modes are silent.**
+  SQLite + FTS5, zero new dependencies, built and updated explicitly (`xbrain index
+  build|update|status`) — there is no daemon, by decision, and `docs/knowledge-index.md` carries
+  the measurements that decision needs. Measured 2026-09-01 on the live store (2,404 items,
+  sha256 `f76341a3…`): a full build is **1.37 s** median, `update` with 100 changed items
+  **0.26 s**, the database **52.4 MB**, **22,286 chunks**, `search` p50 **26 ms** over the 23
+  golden-set cases. **Both silent modes come from `chunks_fts` being an EXTERNAL-content table**
+  — it stores no text and reads it from `chunks` by rowid: the rowid is an explicit `INTEGER
+  PRIMARY KEY` because `VACUUM` may renumber an implicit one and repoint every entry (SQLite
+  says *may*, and measured on 3.51.2 it did NOT renumber, so the guard is the DDL assertion and
+  not a behavioural test that would pass for the wrong reason); and a delete must retract the old
+  text, or the tokens survive under a rowid a later chunk reuses — measured, a query for
+  `marrowgate` then returned a chunk whose body is *"a totally different body"*. **The
+  invalidation signal is a fingerprint over the emitted SURFACES, not over `(fetched_at,
+  enriched_at)`** as plan-01 §10 sketched: `content.fetched_at` cannot reach the 961 of 2,404
+  items with no `content`, and a timestamp is a proxy that a hand-edited summary walks straight
+  past. **`search` never repairs anything** (the connection is `file:…?mode=ro`, so a write
+  RAISES) and it declares two things it cannot fix: a chunk whose fingerprint does not recompute
+  is excluded and counted in `corrupt_chunks_excluded`, and an index behind the store —
+  the failure that ACTUALLY happens, because indexing is manual — is declared as
+  `degraded: ["index_behind_store"]` and still answered, because possibly-stale evidence is
+  usable exactly as long as it says so. **`get` reads the STORE, never the index**, and the
+  operational form of that is a test that deletes `data/index/` and calls it anyway. Two defects
+  were found by RUNNING the build on the real corpus and by nothing else: `--dry-run` deleted an
+  existing index (it removed the file it believed it had created), and `--force` grew the
+  database across rebuilds (51.2 → 66.5 MB after five, a `VACUUM` recovering only to 60.6) —
+  the dry run now builds in `:memory:` and `--force` unlinks first.
+- **The chunker's parameters are MEASURED now, and the overlap axis was decided by a retriever
+  that cannot use it.** Plan 02 §7's sweep (`target ∈ {800,1200,1600,2400} × overlap ∈
+  {0,150,300}`, 23 scorable golden-set cases, real corpus) moved the default from the plan-01
+  provisional `1200/150` to **`800/0`** and bumped `CHUNKER_VERSION` to `v2`. It is not flat:
+  `enterrado` +2.1 pp (the stratum the plan says decides), `semantico` +2.4 pp, `cruzado_idioma`
+  +0.9 pp, nothing regressing, at +21.6 % chunks. **But state the gain at the right depth**: the
+  sweep scores at retrieval depth 10, while the published baseline runs at depth 20, and there
+  `recall@10` is UNCHANGED at 0.8264 — `recall@k` counts deduped OWNERS, so it depends on depth.
+  What survives at depth 20 is rank position: `recall@1` 0.4730 → **0.6034**, MRR 0.7449 →
+  **0.8179**. **Overlap applies only to `video_transcript` and exists so a sentence spanning a
+  window boundary survives whole — and `match_expression` quotes every TERM separately and never
+  builds a phrase, so this retriever cannot benefit from it.** Measured, `recall@10` is identical
+  for overlap 0 and 150 at every target; only MRR moves. No golden-set case requires a sentence
+  to survive a boundary. **Plan 03 must re-decide this axis with the vector retriever in front of
+  it**, where a truncated sentence is a worse embedding — that cost is invisible here. And the
+  bump exposed a gap in the plan's own M7 fix: M7 made the chunker PARAMS an argument so the
+  sweep could not move `tests/fixtures/knowledge_ranking.json`, then mandated a version bump when
+  the sweep changed them — but `chunk_id` ENDS in the chunker version, so the bump renames every
+  id the fixture pins. The fixture now pins the VERSION as an argument too (it is a label in the
+  id and contributes no character to the ranking), and it is NOT regenerated;
+  `knowledge_ranking_v2.json` pins the winner separately, and the two differ on 4 of 7 queries.
 - **`eval/golden-set.yaml` is TRACKED — the single exception to "nothing personal in Git" —
   and the loader has two stages because of it.** Untracked (it lived under `data/*`), the v3
   migration would have appeared in no diff, `xbrain eval` could never run in CI, and a case

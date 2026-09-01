@@ -750,9 +750,9 @@ which account wrote a quoted tweet. Nothing in it mutates the store — every mo
 read-only by construction, and the two commands it ships (`knowledge inspect`, `eval`) take
 no snapshot because they have nothing to snapshot.
 
-It is built over four PRs. This one is the contract and the evaluation; the persisted index,
-embeddings, the minimal graph and the MCP adapter come later and consume these names without
-renegotiating them.
+It is built over four PRs. The first two are in: the contract with its evaluation harness, and
+the **persisted index with `search` and `get`**. Embeddings, the minimal graph and the MCP
+adapter come later and consume these names without renegotiating them.
 
 ### The four entities
 
@@ -785,6 +785,90 @@ summary is not a primary source.
 this is the module's fail-closed decision. `Topic.description` does not record whether it was
 generated or hand-edited, and the two errors are not symmetric: treating a source as
 synthesis loses a citation, while treating synthesis as a source manufactures one.
+
+### The persisted index — SQLite with FTS5
+
+`data/index/knowledge.db`, derived and reconstructible, never versioned. SQLite because it adds
+**zero dependencies** (`sqlite3` is stdlib, against a runtime of eight), because `WHERE` +
+`MATCH` is exactly "filters applied before scoring", because `bm25()` is native, because a
+half-finished update inside a transaction leaves no lying index, and because the minimal graph
+of Plan 04 can live in the same metadata tables. Whoosh and Tantivy were rejected as a
+dependency for something FTS5 already does; LanceDB and Chroma because they bundle an embedding
+model, which is precisely the decision the spec forbids taking without an evaluation; Elastic
+and Meili because a query must need no network.
+
+**Two retrieval planes, two tables, on purpose** (spec §5.1). `chunks_fts` scores the fragments
+that can be CITED; `profiles_fts` scores a composed per-item string — post + titles + summary +
+digest + topic descriptions + author — that finds an item as a conceptual unit. A profile is a
+string nobody wrote, so it may never be returned as a quotation, and `ProfileHit` has no field
+that could hold one. The two are not fused: their bm25 scores come from different corpora and
+one sorted list would invent a scale. Chunk matches rank first because they carry evidence;
+profile-only candidates follow. Fusion is Plan 03's, with RRF.
+
+**Two failure modes here are silent, and both are structural.** `chunks_fts` is an FTS5 table of
+EXTERNAL content — it stores no text and reads it back from `chunks` by rowid — so (1) the rowid
+is an explicit `INTEGER PRIMARY KEY`, because SQLite documents that `VACUUM` may renumber an
+implicit one and every FTS entry would then point at a different chunk; and (2) a delete must
+retract the old text through FTS5's `'delete'` command, or the tokens survive under a rowid that
+a later chunk reuses and that chunk starts matching a word it never contained. Measured: without
+the retraction, a query for `marrowgate` returned a chunk whose body is *"a totally different
+body"*.
+
+### Invalidation — two signals, two costs, two places
+
+Indexing is **manual by decision** (spec §9.2), so the failure that actually happens is not
+corruption: it is *you ran `enrich` and did not reindex*.
+
+| signal | cost | where | what it answers |
+|---|---|---|---|
+| `store_signal` — `mtime_ns` + size of `items.json` | one `os.stat` | **every** `search` / `get` / `index status` | "the store moved" |
+| `store_fingerprint` — sha256 per item | loads the store | `index build` / `update` / `status` | "**which** items changed, and how many" |
+
+The cheap one can give false positives and that is accepted: a false positive costs one warning,
+a false negative costs serving stale evidence as fresh. It fails towards the warning, the same
+direction `origin: unknown → llm_synthesis` fails.
+
+**The per-item fingerprint hashes the emitted SURFACES**, not `(content.fetched_at,
+enriched.enriched_at)`. Two reasons, both CLAUDE.md rule 6: `content.fetched_at` cannot reach an
+item whose `content` is `None` — 961 of 2,404 in the real store — because there is nothing to
+stamp; and a timestamp is a proxy, so a summary edited by hand changes the indexable corpus and
+leaves it unmoved. Hashing the surface fingerprints plus the filterable metadata asks the
+question directly and reaches every item.
+
+A chunk whose fingerprint does not recompute over its own text is **not returned** and is counted
+in `corrupt_chunks_excluded`. A query never repairs the index — the connection is opened
+`file:…?mode=ro`, so a write raises rather than being a promise.
+
+### `search` and `get` are services; the CLI is an adapter
+
+```
+search_service.search / get_service.get   ──┬── CLI human   (render.py)
+                                            ├── CLI --json  (the frozen models)
+                                            └── MCP         (Plan 04)
+```
+
+`search` groups chunk matches by item (capped at `max_matches_per_item`, so one long transcript
+cannot take ten of the top ten), hydrates each result, and answers *what should I ask `get` for
+to check this* in `verify_with` — the underlying primary surfaces for a derived match, the
+surface itself for a primary one, and an empty tuple in exactly one case: a derived match on an
+item that keeps no recoverable source. A match on a `topic_note` expands to that topic's
+supporting items, because `SearchResult` is item-shaped and a note has no author or date of its
+own.
+
+**`get` reads the STORE, never the index** (invariant 7 of spec §3.7), and the operational form
+of that claim is a test that deletes `data/index/` and calls `get` anyway — including the
+`query` path, which ranks with the same scorer on an in-memory database built from the item's own
+chunks. Truncation never shortens a surface's `text`: a `KnowledgeSurface` carries a fingerprint
+over its own body, so a body cut to fit a budget would carry a fingerprint that no longer
+describes it. Whole surfaces go in `surfaces`; the fragments of one that did not fit go in
+`chunks`, with `truncated: true` and a cursor.
+
+**Verification is hydrated from the live store on every response** (M5). There is no verdict
+column, and there cannot be one: `surface_fingerprint` does not depend on the verdict, so a
+stored copy could never be invalidated and a `FAIL` revoked by `verify --audit` would keep being
+served as the `PASS` it used to be.
+
+Costs, the published lexical baseline and the limits: [`docs/knowledge-index.md`](docs/knowledge-index.md).
 
 ### How it relates to `evidence.py`, and why they are not the same thing
 

@@ -299,6 +299,51 @@ because its numerator is zero by construction and the figure would restate the e
 
 ---
 
+## The knowledge index
+
+Every error below is deliberately actionable: spec §9.3 requires the message to name the
+command that fixes it, and none of them ever repairs anything on its own — a query that
+silently repaired the index would be a query whose results depend on when you ran it.
+
+**`No hay índice en data/index. Constrúyelo con xbrain index build`** — `search` needs the
+index; `get` does not. The index is derived and reconstructible, so this is never data loss:
+`xbrain index build` takes under two seconds on a 2,400-item corpus.
+
+**`El índice fue construido con otra versión: … Reconstruye el índice con xbrain index build
+--force`** — you upgraded xbrain and the surface emitter, the chunker or its parameters moved.
+The query is refused **entirely** rather than answered partially, because a partial answer over
+the wrong version is a wrong answer wearing a right one's shape. `xbrain index update` refuses
+for the same reason: an incremental update under a new chunker would leave the corpus half cut
+one way and half the other, with every id still resolving, so nothing would raise and the
+ranking would quietly become a blend of two chunkers.
+
+**`⚠ El índice va por detrás del store`** (`degraded: ["index_behind_store"]`) — you ran
+`enrich`, `topics`, `digest-video` or `fetch` and did not reindex. The answer is still given —
+possibly-stale evidence is usable as long as it says so — but run `xbrain index update`. This is
+the failure that actually happens, because indexing is manual by decision. `xbrain index status`
+tells you **how many** items changed. A `touch` on `items.json` with no edit also trips it: a
+false positive costs one warning, a false negative costs serving stale evidence as fresh.
+
+**`⚠ N chunk(s) excluido(s): su fingerprint no cuadra con su texto`** — a row whose fingerprint
+does not recompute over its own text: a hand-edited database, or a row written by a different
+chunker. Those chunks are **not returned** and are counted in `corrupt_chunks_excluded`, never
+silently dropped and never repaired mid-query. `xbrain index build --force`.
+
+**`Índice: INCOMPLETO o inexistente`** from `index status` — a build was interrupted. The
+manifest is written last, precisely so an interrupted build leaves nothing a query will trust.
+Rebuild.
+
+**A search does not find an accent.** It should: the tokenizer is `unicode61 remove_diacritics
+2`, so `evaluacion` reaches `evaluación`. What it will **not** do is match `agent` to `agents` —
+there is no stemming, deliberately, because FTS5 has no multilingual stemmer and the English one
+would wreck the Spanish half of the corpus. See
+[`docs/knowledge-index.md`](./knowledge-index.md#what-the-lexical-baseline-cannot-do).
+
+**`search` returns a summary with `no_underlying_source`.** Not a bug: the match landed on
+derived text (a summary, a digest, a topic note) and that item keeps no primary source to check
+it against. On the real corpus 40 % of items have no `content` at all, so this is common. The
+JSON says it as `verify_with: []`, which is reachable in exactly that one case.
+
 ## Where's the source of truth? Can I delete the vault notes?
 
 `data/items.json` is the hub — the markdown is **derived and disposable**.
