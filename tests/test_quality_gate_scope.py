@@ -253,3 +253,43 @@ def test_ruff_examines_every_python_file_in_the_repo():
         "extensionless `#!/usr/bin/env python3` executable — add it to `extend-include` "
         "under [tool.ruff], because ruff does not discover those from a directory."
     )
+
+
+# ---------------------------------------------------------------------------
+# 3. The per-package coverage floor is a MECHANISM, not a sentence  (M8)
+# ---------------------------------------------------------------------------
+
+
+def test_check_sh_enforces_knowledge_package_coverage():
+    """`knowledge/` must have a real, enforced coverage floor — not prose in a table.
+
+    Before this, "knowledge/ >= 90 %" sat in the *quality gates* table of four plan
+    documents, beside checks that actually block, with nothing behind it: `COVERAGE_MIN=78`
+    is global, `pyproject.toml`'s `fail_under` is global, and no per-package threshold
+    existed anywhere. Nothing would have gone red if the package landed at 40 %. That is
+    CLAUDE.md rule 11's *hollowing out*, except present from birth — the gate never had the
+    coverage its summary implied.
+
+    `coverage.py` can do this, so it is mechanized rather than downgraded. And this test
+    exists because **a guard you can delete without anything failing is not a guard**: it
+    asserts on the SOURCE of `check.sh`, never on a conclusion the script reports (rule 9),
+    which is the same reason `tests/test_ci_workflow.py` parses `quality.yml`.
+
+    Seen red by deleting the `coverage report` line from `check.sh`.
+    """
+    body = CHECK_SH.read_text()
+    assert "KNOWLEDGE_COVERAGE_MIN=90" in body, (
+        "the knowledge package coverage floor is gone from scripts/check.sh, so the gate "
+        "would print ALL CRITICAL CHECKS PASSED with the package at any coverage at all"
+    )
+    assert "--include='src/xbrain/knowledge/*'" in body, (
+        "the per-package coverage report no longer scopes to src/xbrain/knowledge/*"
+    )
+    assert '--fail-under="$KNOWLEDGE_COVERAGE_MIN"' in body, (
+        "the per-package coverage report no longer FAILS below its threshold — a report "
+        "that only prints is not a gate"
+    )
+    assert 'mark_failed "Knowledge coverage"' in body, (
+        "a failing per-package coverage must mark the run failed; otherwise check.sh still "
+        "exits 0 and the summary still says PASSED"
+    )

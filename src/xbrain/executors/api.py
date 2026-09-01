@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 
 from xbrain.executors.base import EnrichmentJudgment
 from xbrain.llm_json import json_from_response
@@ -23,6 +23,7 @@ from xbrain.models import (
     Item,
     MediaPhotoDescribed,
     Topic,
+    VideoFrame,
 )
 from xbrain.rubrics import (
     ARTICLE_CHAR_LIMIT,
@@ -76,6 +77,84 @@ def _system_prompt(language: str) -> str:
     )
 
 
+# The content kinds whose body is a VIDEO. Its own frozenset, for the same reason
+# `LINK_CONTENT_KINDS` and `QUOTED_CONTENT_KINDS` are: every surface must select the
+# video by the SAME predicate, and a string literal repeated at each call site is how
+# two of them end up disagreeing.
+_VIDEO_CONTENT_KINDS: frozenset[str] = frozenset({"x_video"})
+
+
+def iter_content_sources(
+    item: Item, kinds: Collection[str]
+) -> Iterator[tuple[int, ContentSourceSuccess]]:
+    """Every readable content source of one of `kinds`, WITH its index in `content.sources`.
+
+    THE atomic walk over `content.sources`, shared by the enrichment selectors below and
+    by the knowledge-surface emitter (`xbrain.knowledge.surfaces`). The spec (§2.2) forbids
+    two hand-written lists of what counts as a source; the selectors collapse this walk in
+    three different ways (first-only, truncated, text-required), so what they share has to
+    be the walk itself, not any one of its collapses.
+
+    THREE PROPERTIES ARE LOAD-BEARING and none of them survives a `list[str]`:
+
+    * the INDEX is the position in `content.sources` — a `locator.source_index` built from
+      a counter over the filtered matches points at the wrong source as soon as one entry
+      is a failure;
+    * the URL rides on the yielded source — `source_key = sha1(kind\0url)` needs it, and
+      it is the only stable handle on a source (the list ORDER is rewritten by `fetch`);
+    * MULTIPLICITY is preserved — 119 items in the corpus carry more than one source, and
+      the emitter must surface every one of them.
+
+    Deliberately does NOT filter on `text`. A no-speech `x_video` (107 of 259) has an empty
+    transcript and real frames, and `_video_source` has always returned it; filtering here
+    would silently drop those videos and their frame descriptions. Callers that need a body
+    apply that filter themselves — which is exactly what makes the three collapses possible
+    over one walk.
+    """
+    if item.content is None:
+        return
+    for index, source in enumerate(item.content.sources):
+        if isinstance(source, ContentSourceSuccess) and source.kind in kinds:
+            yield index, source
+
+
+def iter_described_photos(item: Item) -> Iterator[tuple[int, MediaPhotoDescribed]]:
+    """Every content-bearing described photo, WITH its index in `item.media`.
+
+    THE atomic walk over `item.media`, and the home of the non-decorative seam: decorative
+    photos (avatars, reaction memes) and empty descriptions are filtered HERE, once, so the
+    enrichment prompt and the knowledge emitter cannot disagree about whether an avatar is
+    indexable content (spec §4: decorative descriptions emit no chunks).
+
+    The index is the position in `item.media`, not a counter over the matches — a video
+    entry, a merely-downloaded photo or a decorative one shifts it, and the emitter builds
+    `locator.media_index` from it.
+    """
+    for index, entry in enumerate(item.media):
+        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description:
+            yield index, entry
+
+
+def iter_video_frames(
+    item: Item,
+) -> Iterator[tuple[int, ContentSourceSuccess, int, VideoFrame]]:
+    """Every captioned key frame as `(source_index, source, frame_index, frame)`.
+
+    THE atomic walk over the frames of every `x_video` source. `_video_frame_descriptions`
+    flattens this into one `list[str]` across all videos, which makes it impossible to say
+    WHICH video and WHICH slide produced a caption — and a frame's `source_key` is
+    `<the video's source_key>.f<frame index>`, so both are required.
+
+    `frame_index` is the position in `source.frames`, preserved across the empty-caption
+    filter: a frame whose vision pass found nothing to say is skipped, and the next one is
+    still reported at its real index.
+    """
+    for source_index, source in iter_content_sources(item, _VIDEO_CONTENT_KINDS):
+        for frame_index, frame in enumerate(source.frames):
+            if frame.description:
+                yield source_index, source, frame_index, frame
+
+
 def _content_image_descriptions(item: Item) -> list[str]:
     """Return non-decorative image descriptions on the item, in media order.
 
@@ -85,11 +164,7 @@ def _content_image_descriptions(item: Item) -> list[str]:
     image happened to depict. Items without described photos return an
     empty list.
     """
-    return [
-        entry.description
-        for entry in item.media
-        if isinstance(entry, MediaPhotoDescribed) and not entry.is_decorative and entry.description
-    ]
+    return [entry.description for _index, entry in iter_described_photos(item)]
 
 
 def _video_frame_descriptions(item: Item) -> list[str]:
@@ -102,13 +177,7 @@ def _video_frame_descriptions(item: Item) -> list[str]:
     (`_content_image_descriptions`). Empty-description frames (the VLM found nothing
     to say, or the frame was unreadable) are skipped.
     """
-    if item.content is None:
-        return []
-    descriptions: list[str] = []
-    for src in item.content.sources:
-        if isinstance(src, ContentSourceSuccess) and src.kind == "x_video":
-            descriptions += [frame.description for frame in src.frames if frame.description]
-    return descriptions
+    return [frame.description for _si, _src, _fi, frame in iter_video_frames(item)]
 
 
 def _video_frames_section(item: Item) -> list[str]:
@@ -294,10 +363,8 @@ def first_source_text(item: Item, kinds: Collection[str]) -> str | None:
     The one reader every surface shares (api prompt, worksheet, judge source), so a
     thread / quoted post / linked article is never picked up under another's label.
     """
-    if item.content is None:
-        return None
-    for src in item.content.sources:
-        if isinstance(src, ContentSourceSuccess) and src.kind in kinds and src.text:
+    for _index, src in iter_content_sources(item, kinds):
+        if src.text:
             return src.text[:ARTICLE_CHAR_LIMIT]
     return None
 
@@ -318,10 +385,8 @@ def quoted_source(item: Item) -> ContentSourceSuccess | None:
     THE selector. Every surface asks this one question, so "is the quoted content
     here?" cannot get five different answers.
     """
-    if item.content is None:
-        return None
-    for src in item.content.sources:
-        if isinstance(src, ContentSourceSuccess) and src.kind in QUOTED_CONTENT_KINDS and src.text:
+    for _index, src in iter_content_sources(item, QUOTED_CONTENT_KINDS):
+        if src.text:
             return src
     return None
 
@@ -440,11 +505,8 @@ def _video_source(item: Item) -> ContentSourceSuccess | None:
     "which source is the video" is the same drift, one level down, that `xbrain.evidence`
     exists to end. One definition; every consumer imports it.
     """
-    if item.content is None:
-        return None
-    for source in item.content.sources:
-        if isinstance(source, ContentSourceSuccess) and source.kind == "x_video":
-            return source
+    for _index, source in iter_content_sources(item, _VIDEO_CONTENT_KINDS):
+        return source
     return None
 
 

@@ -2785,5 +2785,252 @@ def verify_entities_command(
     typer.echo(f"Report: {cfg.data_dir / 'entity-report.md'}")
 
 
+# ============================================================================
+# knowledge — the read contract (Plan 01)
+# ============================================================================
+
+knowledge_app = typer.Typer(help="Inspeccionar el contrato de conocimiento (solo lectura).")
+app.add_typer(knowledge_app, name="knowledge")
+
+
+def _knowledge_corpus():
+    """The live corpus as the knowledge layer sees it. Read-only, no snapshot."""
+    from xbrain.knowledge.evaluation import load_corpus_from_store
+
+    cfg = _config()
+    return cfg, load_corpus_from_store(
+        cfg.items_path, load_vocab(cfg.data_dir / "vocab.yaml"), cfg.topics_path
+    )
+
+
+def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: bool) -> dict:
+    """The JSON document for one item: the read projection, its surfaces and its chunks.
+
+    `--chunks` implies `--surfaces` because a chunk is only checkable against the surface it
+    was cut from: `surface.text[char_start:char_end] == chunk.text` is the operational form
+    of spec §3.8, and it cannot be evaluated by a consumer that was handed only the chunks.
+    """
+    from xbrain.knowledge.chunking import chunk_surfaces
+    from xbrain.knowledge.surfaces import (
+        article_block_texts,
+        hydrate_verification,
+        item_surfaces,
+        item_topics,
+    )
+
+    cfg = _config()
+    item = corpus.items.get(item_id)
+    if item is None:
+        raise ValueError(
+            f"No existe el item {item_id!r} en {cfg.items_path}. "
+            "Comprueba el id con `xbrain knowledge inspect <id>`."
+        )
+    from xbrain.knowledge.surfaces import knowledge_item
+
+    surfaces = item_surfaces(
+        item,
+        transcribe_command=cfg.transcribe_command,
+        vision_command=cfg.vision_command,
+    )
+    payload: dict = {
+        "schema_version": "1",
+        "item": knowledge_item(item, vault_dir=cfg.output_dir).model_dump(mode="json"),
+        # Hydrated from the LIVE store, never persisted on a surface (M5): a stored copy
+        # could not be invalidated when the verdict changed, so a revoked FAIL would keep
+        # being served as the PASS it used to be.
+        "verification": {
+            target: verdict.model_dump(mode="json")
+            for target, verdict in hydrate_verification(item, cfg.output_language).items()
+        },
+    }
+    if want_surfaces or want_chunks:
+        payload["surfaces"] = [s.model_dump(mode="json") for s in surfaces]
+    if want_chunks:
+        payload["chunks"] = [
+            c.model_dump(mode="json")
+            for c in chunk_surfaces(
+                surfaces,
+                topics=item_topics(item),
+                url=item.url,
+                blocks_by_surface_id=article_block_texts(item),
+            )
+        ]
+    return payload
+
+
+def _topic_membership(corpus, slug: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(primary_item_ids, secondary_item_ids)` for a topic, both sorted.
+
+    Sorted because `TopicRecord` is compared and fingerprinted downstream, and an order that
+    followed dict iteration would make two runs over the same store differ. An item that is
+    PRIMARY is excluded from the secondary list rather than appearing in both — the two lists
+    answer different questions, and double-counting would inflate any membership figure taken
+    from them.
+    """
+    primary = tuple(
+        sorted(
+            item.id
+            for item in corpus.items.values()
+            if item.enriched and item.enriched.primary_topic == slug
+        )
+    )
+    secondary = tuple(
+        sorted(
+            item.id
+            for item in corpus.items.values()
+            if item.enriched and slug in item.enriched.topics and item.id not in primary
+        )
+    )
+    return primary, secondary
+
+
+def _inspect_topic(corpus, slug: str, *, want_surfaces: bool) -> dict:
+    from xbrain.knowledge.surfaces import topic_record, topic_surfaces
+
+    topic = next((t for t in corpus.vocab if t.slug == slug), None)
+    if topic is None:
+        raise ValueError(f"No existe el topic {slug!r} en data/vocab.yaml.")
+    page = corpus.topic_pages.get(slug)
+    primary, secondary = _topic_membership(corpus, slug)
+    payload: dict = {
+        "schema_version": "1",
+        "topic": topic_record(topic, page, primary, secondary).model_dump(mode="json"),
+    }
+    if want_surfaces:
+        payload["surfaces"] = [s.model_dump(mode="json") for s in topic_surfaces(topic, page)]
+    return payload
+
+
+@knowledge_app.command("inspect")
+@_handle_cli_errors
+def knowledge_inspect(
+    item_id: str | None = typer.Argument(None, help="Id del item a inspeccionar."),
+    topic: str | None = typer.Option(None, "--topic", help="Inspecciona un topic en su lugar."),
+    surfaces: bool = typer.Option(False, "--surfaces", help="Incluye las superficies emitidas."),
+    chunks: bool = typer.Option(False, "--chunks", help="Incluye los chunks (implica --surfaces)."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Muestra el corpus unificado de un item o un topic: superficies, procedencia y chunks.
+
+    SOLO LECTURA: no escribe en el store, no toma snapshot y no llama a ningún modelo. Es la
+    forma de comprobar a mano lo que la capa de conocimiento ofrece — y, por la regla 7 de
+    CLAUDE.md, enseñar la evidencia al lado de la afirmación es la capa de verificación más
+    barata que existe: el autor real de un post citado se ve de un vistazo.
+    """
+    if (item_id is None) == (topic is None):
+        raise ValueError("Indica un id de item O `--topic <slug>`, no ambos ni ninguno.")
+    _cfg, corpus = _knowledge_corpus()
+    payload = (
+        _inspect_topic(corpus, topic, want_surfaces=surfaces or chunks)
+        if topic is not None
+        else _inspect_item(corpus, item_id or "", want_surfaces=surfaces, want_chunks=chunks)
+    )
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(_render_inspect(payload))
+
+
+def _render_inspect(payload: dict) -> str:
+    """The human rendering. Same model as `--json` (spec §7.6), never a second shape."""
+    lines: list[str] = []
+    if "item" in payload:
+        item = payload["item"]
+        lines += [
+            f"{item['item_id']}  @{item['author']['handle']} ({item['author']['name']})",
+            f"  {item['url']}",
+            f"  creado {item['created_at'][:10]} · fuente {item['source']}"
+            f" · topics {', '.join(item['topics']) or '—'}",
+            f"  superficies: {', '.join(item['available_surfaces']) or '—'}",
+        ]
+        for failure in item["failed_sources"]:
+            lines.append(
+                f"  ⚠ fetch falló: {failure['kind']} {failure['url']} ({failure['failure_reason']})"
+            )
+        for link in item["unfetched_links"]:
+            lines.append(f"  ⚠ sin cuerpo: {link['url']} ({link['reason']})")
+    else:
+        topic = payload["topic"]
+        lines += [
+            f"topic:{topic['slug']} — {topic['description']['text']}",
+            f"  primarios {len(topic['primary_item_ids'])}"
+            f" · secundarios {len(topic['secondary_item_ids'])}"
+            f" · {'DESACTUALIZADO' if topic['stale'] else 'al día'}",
+        ]
+    for surface in payload.get("surfaces", []):
+        excerpt = surface["text"][:120].replace("\n", " ")
+        lines.append(
+            f"  [{surface['surface_type']}] origin={surface['origin']}"
+            f" trust={surface['trust_class']}  {excerpt}"
+        )
+    return "\n".join(lines)
+
+
+@app.command("eval")
+@_handle_cli_errors
+def eval_command(
+    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia a evaluar."),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        help="Profundidad de recuperación por caso (nunca por debajo del mayor k).",
+    ),
+    k: list[int] = typer.Option([], "--k", help="Valores de k a reportar (repetible)."),
+    min_recall: float | None = typer.Option(
+        None,
+        "--min-recall",
+        help="Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa.",
+    ),
+    golden_set: Path = typer.Option(
+        Path("eval/golden-set.yaml"), "--golden-set", help="Ruta del golden set."
+    ),
+    report: Path | None = typer.Option(
+        None, "--report", help="Dónde escribir el informe (por defecto data/eval-report.json)."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Evalúa la recuperación contra el golden set y publica el informe.
+
+    SOLO INFORME: no escribe en `items.json` ni toma snapshot, igual que `verify` por defecto.
+
+    Sin `--min-recall` informa y no juzga: el spec §8.6 fija los umbrales de merge DESPUÉS de
+    correr el baseline, así que un número por defecto aquí sería exactamente la métrica que no
+    puede salir de otra manera (regla 2 de CLAUDE.md). Con umbral, el comando es una puerta y
+    nombra el bucket que falló.
+    """
+    from xbrain.knowledge.evaluation import DEFAULT_KS, evaluate, render_markdown
+    from xbrain.knowledge.goldenset import load_cases, load_scenarios, resolve_cases
+
+    cfg, corpus = _knowledge_corpus()
+    path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
+    cases = resolve_cases(load_cases(path), corpus.items)
+    result = evaluate(
+        cases,
+        corpus,
+        strategy=strategy,
+        ks=tuple(k) if k else DEFAULT_KS,
+        threshold=min_recall,
+        scenarios=load_scenarios(path),
+        limit=limit,
+    )
+    payload = result.to_dict()
+    json_path = report or (cfg.data_dir / "eval-report.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_markdown(result), encoding="utf-8")
+
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    if not result.passed:
+        # A gate that reports its own failure on stdout and exits 0 is the `gh pr checks`
+        # trap of CLAUDE.md rule 9, reproduced locally. The non-zero exit is the signal.
+        raise ValueError("La evaluación no alcanza el umbral:\n  " + "\n  ".join(result.failures))
+
+
 if __name__ == "__main__":
     app()

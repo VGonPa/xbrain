@@ -441,6 +441,95 @@ generates an Obsidian wiki.
   `tests/test_evidence_contract.py` asserts the generator, the rubric and the judge against
   this module BY IDENTITY, per target — add a surface to one consumer and forget the others
   and it goes red.
+- **The knowledge layer (`src/xbrain/knowledge/`) is the READ contract, and it is read-only by
+  construction** (spec «conocimiento verificable» §3, §4, §8). It projects `Item` + `Content` +
+  `Enrichment` + `Topic` + `TopicPage` into `KnowledgeItem` · `KnowledgeSurface` ·
+  `KnowledgeChunk` · `TopicRecord`, so a consumer never parses `items.json`, hunts a markdown
+  heading, or guesses who wrote a quoted tweet. **It does not replace `evidence.py` and it is
+  not the same contract** — the two differ on three axes ON PURPOSE: scope (all surfaces vs.
+  target-dependent), truncation (never vs. `ARTICLE_CHAR_LIMIT`) and multiplicity (every
+  source vs. the first — 119 items carry more than one). What they SHARE is the atomic walk,
+  not the assembled block: `iter_content_sources` / `iter_described_photos` /
+  `iter_video_frames` in `executors/api.py`, onto which the five enrichment selectors were
+  re-expressed with no observable change. What BINDS them is not an identity assertion
+  (tautology the moment delegation exists — rule 1) but **three totality tests**
+  (`tests/test_knowledge_surface_coverage.py`) that go red when someone adds a `ContentKind`,
+  a derived surface or an evidence key and forgets the other side; the `video_digest` deletion
+  leaves the per-kind test GREEN and only the closure test fires. And the proof that the
+  refactor did not MOVE `evidence.py` is `tests/test_evidence_characterization.py`, which pins
+  the judge's source text and the full `contract_fingerprint` as hex literals: one byte of
+  drift would have retired every stored verdict and deleted every badge from `generate` —
+  rule 6 run backwards. **Provenance is a TYPE** (`Origin` → `TrustClass`, one total table),
+  and `unknown` maps to `llm_synthesis` with `is_derived == True`: it fails closed, because
+  `Topic.description` does not record whether it was written or generated and the two errors
+  are not symmetric — treating a source as synthesis loses a citation, treating synthesis as a
+  source manufactures one. **`verification` is NOT a field of `KnowledgeSurface`** and the
+  absence is asserted: `surface_fingerprint` does not depend on the verdict, so a stored copy
+  could never be invalidated and a FAIL revoked by `verify --audit` would keep being served as
+  the old PASS; it is hydrated from the live store through the SAME freshness check
+  `generate._verdict_badge` applies. **`source_key = sha1(kind\0url)[:12]`, never the index in
+  `content.sources`** — `fetch` rewrites that order, and an index-keyed id would repoint stored
+  chunks at a different body silently, because the id still resolves. **Atomic beats
+  `MAX_CHARS`**: a quoted post has ONE author, so the P2 quoted post of 3,943 chars is emitted
+  whole against a 2,000 ceiling — splitting it creates two fragments that no longer say whose
+  words they are. `target` is a SOFT ceiling that paragraphs are PACKED into, and this was
+  found by MEASURING, not by reading: one chunk per paragraph gave **30,449** chunks
+  (`x_article` averaging 194 chars) against the plan's predicted 18–25k, and packing gives
+  **18,319** (9,294 atomic + 9,025 splittable) — a 194-char chunk is bad retrieval before it
+  is bad arithmetic, too small to judge a match and scattering one argument across a dozen ids.
+  (The figure was **18,328 / 9,034** until `_absorb_scraps` merged the 9 chunks that sat below
+  the floor; the commit that removed them said so and this line was not re-derived — rule 6 in
+  miniature, in the file the repo says is read first and acted on. Re-derived 2026-08-31 on the
+  same 2,404-item corpus, md5 `5aaf62f4…`. **30,449 is NOT re-derivable**: it measured the
+  pre-packing implementation, which no longer exists, so read it as history, never as a figure
+  you could reproduce today.) The chunker's parameters are ARGUMENTS, so the Plan-02 sweep
+  cannot move the ranking fixture that pins today's behaviour.
+- **`eval/golden-set.yaml` is TRACKED — the single exception to "nothing personal in Git" —
+  and the loader has two stages because of it.** Untracked (it lived under `data/*`), the v3
+  migration would have appeared in no diff, `xbrain eval` could never run in CI, and a case
+  edited to turn a gate green would leave no history. It holds questions, ids and short
+  identifying fragments; a 300-char ceiling on `expected_text`, checked in CI **against the
+  real file**, keeps a corpus body out. `load_cases(path)` validates STRUCTURE without opening
+  the store (so it runs in CI, where there is no `data/`); `resolve_cases(cases, store)` checks
+  the ids (local, or CI against fixtures). Fusing them would make the very test that proves the
+  evaluation runs in CI the first one that cannot. **Only an ENUMERATED case scores**: with
+  `relevant_items: []` the recall@k is 0/0 and comes out 1.0 or 0.0 depending on the
+  implementation — rule 2 — so unenumerated cases are archived as `scenarios` with their reason.
+  Migration measured 2026-08-31 against 2,404 items: D1c/U2 enumerates to **exactly 12** (so the
+  Plan-03 bake-off keeps its deciding stratum), P1 to **6** where the file said 5, U3 to **22**
+  where it said 20 — the two moved because the corpus grew, which is why the figures are notes
+  and never asserts. **`video_digest` still has NO case, and now the reason is measured**: of
+  the 36 proper nouns appearing only in a digest, **22 LEAK** (a fuzzy variant sits in the
+  transcript, sometimes ASR-mangled — "Johannes Trithemius" vs "johannes tritemius", ratio 0.97)
+  and the other **14 have no support on any surface**, i.e. candidates for invention. The first
+  group fails the anexo-A.3 leak rule; founding a case on the second would enshrine a possible
+  hallucination as ground truth. Zero usable candidates — and the population measured is proper
+  nouns, not all facts. **A case whose filters the strategy cannot apply is UNMEASURED, not
+  0.0**: the FTS5 baseline pushes only `has_surfaces`/`origins` into `WHERE`, and the first real
+  run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at filtering" when
+  the instrument does not exist yet (spec §8.6.8). The baseline is the SAME FTS5 the persisted
+  index will use, on `sqlite3(":memory:")` — same DDL, same `unicode61 remove_diacritics 2`
+  (no stemming: FTS5 has none multilingual, and the English one would wreck the Spanish half),
+  same `bm25()`, same explicit `chunk_id` tie-break — so what dies later is where the database
+  lives, not how it scores. **And that last clause was FALSE while the terms were ANDed.** The
+  FTS5 default conjunction requires every word of a question inside ONE chunk: measured on the
+  real corpus, 18 of the 21 scorable cases got back NOT ONE ROW, and the only three that
+  retrieved anything were single-term `exacto` queries. So bm25 ranked nothing in 18 of 21
+  cases, and the published `semantico: 0.0` / `cruzado_idioma: 0.0` / `topic: 0.0` measured the
+  QUERY BUILDER while the execution report read them as an absence of vocabulary overlap. The
+  connective is now a **disjunction** (`FTS_CONNECTIVE`, recorded in the ranking fixture beside
+  the tokenizer): empty result sets 18/21 → 0/21, recall@10 0.1429 → 0.8099, MRR 0.1429 →
+  0.7206, `exacto` unchanged and **no stratum regressed**, at p50 0.23 → 9.75 ms. A conjunction
+  in front of bm25 is two retrieval models stacked: bm25 wants a wide candidate set and
+  discriminates by IDF, and requiring every term does that by brute force *before* the scorer
+  runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
+  as a function word can still be rare to the index and go undiscounted — `el` is 1 of 43
+  fixture chunks (2.3 %) and 5,748 of 18,319 real ones (31.4 %), which is why a fixture query
+  ranks it high and the real corpus does not. That, and no stemming, is what Plan 03's vector
+  layer has to beat. Picking between `OR`, minimum-should-match and per-term weighting is Plan
+  02's sweep. **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
+  counts the comparisons it made and fails closed at zero, because `passed = not failures` let
+  `--min-recall 1.0` exit 0 having scored nothing.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·
