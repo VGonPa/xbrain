@@ -26,7 +26,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from xbrain.knowledge.contracts import EvidenceBundle, SearchResponse, SearchResult
+from xbrain.knowledge.contracts import (
+    FALLBACK_STRATEGY,
+    NOT_IMPLEMENTED_SUFFIX,
+    EvidenceBundle,
+    SearchResponse,
+    SearchResult,
+)
 from xbrain.knowledge.index_build import BuildReport, StatusReport, UpdateReport
 from xbrain.knowledge.search_service import no_underlying_source
 
@@ -63,7 +69,7 @@ def _index_lines(response: SearchResponse) -> list[str]:
     Before, not after: a reader who stops at the first result must already have seen that the
     evidence may be stale. A warning under the fold is a warning nobody read.
     """
-    lines = [DEGRADED_TEXT.get(flag, f"⚠ {flag}") for flag in response.index.degraded]
+    lines = [_degraded_line(flag) for flag in response.index.degraded]
     if response.index.corrupt_chunks_excluded:
         lines.append(
             f"⚠ {response.index.corrupt_chunks_excluded} chunk(s) excluido(s): su fingerprint "
@@ -72,6 +78,24 @@ def _index_lines(response: SearchResponse) -> list[str]:
     if response.truncated:
         lines.append("⚠ Resultado truncado.")
     return lines
+
+
+def _degraded_line(flag: str) -> str:
+    """One degradation as a sentence. The strategy family is computed, not tabulated.
+
+    `<requested>_not_implemented` is one flag per declared-but-unimplemented `Strategy`, so a
+    literal table here would be a second copy of the enum that goes stale the day Plan 03
+    implements one of them (rule 5). Falling through to the bare `⚠ vector_not_implemented`
+    would also have left the human view saying less than the JSON, which is the surface a
+    reader actually reads.
+    """
+    if flag.endswith(NOT_IMPLEMENTED_SUFFIX):
+        requested = flag[: -len(NOT_IMPLEMENTED_SUFFIX)]
+        return (
+            f"⚠ La estrategia `{requested}` no tiene backend todavía: ha respondido "
+            f"`{FALLBACK_STRATEGY}`. Estos resultados NO son de `{requested}`."
+        )
+    return DEGRADED_TEXT.get(flag, f"⚠ {flag}")
 
 
 def _result_lines(result: SearchResult) -> list[str]:

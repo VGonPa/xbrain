@@ -179,6 +179,31 @@ def test_a_behind_index_warns_and_names_the_command() -> None:
     assert "obsoleta" in text
 
 
+def test_an_unimplemented_strategy_is_a_sentence_naming_what_did_NOT_run() -> None:
+    """F-2 in the human view: `⚠ vector_not_implemented` is a flag, not an answer.
+
+    The JSON says the strategy that ran and the one that could not; the human view is what a
+    person actually reads, and falling through to the bare flag would have made it say LESS
+    than the JSON about the most consequential fact in the response.
+
+    The family is computed from the suffix rather than tabulated, so this stays true for
+    `hybrid` and `hybrid_graph` without a second list to keep in step.
+
+    Seen red by removing the `_not_implemented` branch from `_degraded_line`: the output was
+    the raw `⚠ vector_not_implemented`, which contains neither `lexical` nor `NO son`.
+    """
+    response = _response(
+        index=IndexStatusRef(
+            manifest_version="1",
+            built_at=WHEN,
+            degraded=("vector_not_implemented", "no_embeddings"),
+        )
+    )
+    text = render_search(response)
+    assert "`vector`" in text and "no tiene backend" in text
+    assert "NO son de `vector`" in text
+
+
 def test_the_degradation_warning_comes_before_the_results() -> None:
     """A warning under the fold is a warning nobody read.
 

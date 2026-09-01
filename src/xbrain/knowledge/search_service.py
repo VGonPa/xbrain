@@ -59,6 +59,7 @@ from xbrain.knowledge.contracts import (
     SearchResponse,
     SearchResult,
     Strategy,
+    resolve_strategy,
 )
 from xbrain.knowledge.index_store import open_for_query, verify_fingerprints
 from xbrain.knowledge.lexical import LexicalHit
@@ -133,9 +134,17 @@ def search(
 
     Read-only throughout: the index is opened `mode=ro` and the store is never written. No
     network, no model call — spec §13.12 requires that `search` work without a single LLM.
+
+    `strategy` is what the CALLER asked for; `SearchResponse.strategy` is what RAN. They
+    differ whenever the requested retriever has no backend, and the difference is declared as
+    a `<requested>_not_implemented` degradation rather than hidden — spec §9.3: *lexical
+    sigue operativo y el response declara estrategia degradada; no finge resultados
+    vectoriales.* Echoing the request back was that pretence in the one field that names the
+    retriever (F-2).
     """
     filters = filters or SearchFilters()
     _validate(query, filters, limit, context)
+    executed, strategy_degradation = resolve_strategy(strategy)
     index = open_for_query(context.index_dir, context.items_path)
     try:
         depth = min(limit * CANDIDATE_MULTIPLIER * context.max_matches_per_item, MAX_CANDIDATES)
@@ -151,9 +160,11 @@ def search(
         )
         return SearchResponse(
             query=query,
-            strategy=strategy,
+            strategy=executed,
             filters=filters,
-            index=index.status_ref(corrupt_chunks_excluded=excluded),
+            index=index.status_ref(
+                corrupt_chunks_excluded=excluded, strategy_degradation=strategy_degradation
+            ),
             results=results,
         )
     finally:

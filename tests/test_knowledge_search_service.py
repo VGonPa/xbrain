@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -101,6 +102,71 @@ def test_the_response_declares_no_embeddings(context: QueryContext) -> None:
     """
     response = search("Quillfeather", context)
     assert "no_embeddings" in response.index.degraded
+
+
+def test_a_strategy_with_no_backend_is_answered_lexically_and_says_so(
+    context: QueryContext,
+) -> None:
+    """F-2 / spec §9.3: *lexical sigue operativo y el response declara estrategia degradada;
+    no finge resultados vectoriales.*
+
+    `SearchResponse.strategy` used to be the strategy REQUESTED, echoed back without a check:
+    `search(..., strategy="hybrid")` returned `strategy: "hybrid"` over results produced
+    entirely by bm25. `degraded: ["no_embeddings"]` was there, but the field that NAMES the
+    retriever is the one a consumer reads to know what ran, and it said the wrong name — the
+    "finge resultados vectoriales" the spec forbids, in the one field that could commit it.
+
+    The response now names the strategy that EXECUTED, and the degradation names the one that
+    could not, so both halves of the spec bullet are readable from the JSON alone. This is
+    the shape Plan 04's MCP adapter consumes; the CLI never passes `--strategy` today, which
+    is why the library API is where it had to be fixed.
+
+    Seen red before the fix: `strategy` came back `'vector'` and `'hybrid'`, and no
+    `*_not_implemented` flag existed at all.
+    """
+    for requested in ("vector", "hybrid", "hybrid_graph"):
+        response = search("Quillfeather", context, strategy=requested)
+        assert response.strategy == "lexical", requested
+        assert f"{requested}_not_implemented" in response.index.degraded, requested
+        assert response.results, "lexical stays operational — the spec's first clause"
+
+
+def test_the_implemented_strategy_is_declared_without_a_degradation(
+    context: QueryContext,
+) -> None:
+    """The other side of the same predicate, so the flag is not raised unconditionally.
+
+    Without this, a `degraded` that always carried a `*_not_implemented` marker would satisfy
+    the test above for the wrong reason (rule 1).
+    """
+    response = search("Quillfeather", context, strategy="lexical")
+    assert response.strategy == "lexical"
+    assert not [flag for flag in response.index.degraded if flag.endswith("_not_implemented")]
+
+
+def test_a_strategy_that_is_not_in_the_contract_is_refused_before_any_work(
+    context: QueryContext,
+) -> None:
+    """A DECLARED strategy with no backend degrades; a strategy that does not exist refuses.
+
+    The two are different failures and the spec treats them differently: §9.3 asks for
+    degradation when the embeddings backend is missing, and for a *stable validation error*
+    when the arguments are invalid. Silently answering `strategy="banana"` with lexical
+    results would turn a typo into a measurement.
+
+    THE INDEX DIRECTORY IS DELIBERATELY GONE, and that is what makes this assertion able to
+    fail. Without it the test passes today for the wrong reason (rule 1): `SearchResponse` is
+    a pydantic model over a `Literal`, so an unknown strategy raises a `ValidationError` —
+    itself a `ValueError` — at the very END, after the whole query has run. Pointing at a
+    missing index separates the two: refusing FIRST raises our error, refusing last raises
+    `IndexMissingError`, and only one of those can happen.
+
+    Seen red before the fix: `IndexMissingError: No hay índice en ...`.
+    """
+    nowhere = replace(context, index_dir=context.index_dir.parent / "does-not-exist")
+    with pytest.raises(ValueError, match="Estrategia desconocida") as caught:
+        search("Quillfeather", nowhere, strategy="banana")
+    assert "lexical" in str(caught.value), "names what would have been valid"
 
 
 def test_search_is_deterministic(context: QueryContext) -> None:

@@ -21,7 +21,7 @@ total: adding a text field without deciding which side it is on goes red.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, get_args, get_origin
+from typing import Literal, cast, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.fields import FieldInfo
@@ -46,6 +46,53 @@ _FROZEN = ConfigDict(frozen=True, extra="forbid")
 # though this PR ships only `lexical`, because the enum is part of the frozen contract:
 # adding a member later would change the response schema.
 Strategy = Literal["lexical", "vector", "hybrid", "hybrid_graph"]
+
+# WHICH OF THEM THIS BUILD CAN ACTUALLY RUN (F-2). The comment above already stated this fact
+# — *this PR ships only `lexical`* — but it stated it in PROSE, and prose is not readable by
+# the two surfaces that label their output with a strategy name. `search` echoed the strategy
+# it was ASKED for into `SearchResponse.strategy`, so `strategy="hybrid"` came back labelled
+# `hybrid` over results produced entirely by bm25; and `xbrain eval --strategy vector`
+# published a report headed `vector` with 21 cases scored by the lexical retriever. Turning
+# the prose into a constant is rule 5 applied to a fact the file already asserted.
+#
+# Plan 03 adds its member here when the vector backend lands, and both surfaces stop
+# degrading with no other change.
+IMPLEMENTED_STRATEGIES: frozenset[str] = frozenset({"lexical"})
+
+# What answers when the requested strategy has no backend. Spec §9.3's first bullet is
+# explicit that this is a DEGRADATION and not a refusal: *lexical sigue operativo y el
+# response declara estrategia degradada; no finge resultados vectoriales.*
+FALLBACK_STRATEGY: Strategy = "lexical"
+
+NOT_IMPLEMENTED_SUFFIX = "_not_implemented"
+
+
+def resolve_strategy(requested: str) -> tuple[Strategy, tuple[str, ...]]:
+    """The strategy that will actually run, and what to call the gap. Spec §9.3.
+
+    THREE OUTCOMES, and the difference between the last two is the whole point:
+
+    - implemented -> it runs, nothing is degraded;
+    - declared in `Strategy` but with no backend -> `lexical` runs and the response says
+      `<requested>_not_implemented`, which is the spec's *lexical sigue operativo* and its
+      *el response declara estrategia degradada* in one return value;
+    - not in `Strategy` at all -> `ValueError` naming what would have been valid. A typo is
+      not a degradation, and answering it with lexical results would turn it into a
+      measurement; spec §9.3 asks for a *error de validación estable* for invalid arguments.
+
+    Read from the module global at call time rather than closed over, so a test can inject a
+    hypothetical backend without depending on `vector` staying unimplemented.
+    """
+    if requested in IMPLEMENTED_STRATEGIES:
+        return cast(Strategy, requested), ()
+    if requested in get_args(Strategy):
+        return FALLBACK_STRATEGY, (f"{requested}{NOT_IMPLEMENTED_SUFFIX}",)
+    raise ValueError(
+        f"Estrategia desconocida: {requested!r}. "
+        f"Las declaradas son: {', '.join(get_args(Strategy))}; "
+        f"implementadas hoy: {', '.join(sorted(IMPLEMENTED_STRATEGIES))}."
+    )
+
 
 # Which generator produced a match. `graph` is declared for Plan 04 for the same reason.
 Channel = Literal["lexical", "vector", "graph"]

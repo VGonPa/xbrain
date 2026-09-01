@@ -46,7 +46,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
-from xbrain.knowledge.contracts import SearchFilters
+from xbrain.knowledge.contracts import SearchFilters, resolve_strategy
 from xbrain.knowledge.index_schema import open_memory_index
 from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
 from xbrain.knowledge.models import KnowledgeChunk
@@ -175,6 +175,11 @@ class CaseResult:
 
 @dataclass(frozen=True)
 class EvaluationReport:
+    # THE STRATEGY THAT RAN, never the one that was asked for (F-2). `xbrain eval --strategy
+    # vector` published a report headed `vector`, with 21 cases and `recall@10 = 0.8099`,
+    # produced entirely by the lexical retriever — a metric whose label does not describe its
+    # instrument, which is rule 2 and spec §8.6.8 in one line. `requested_strategy` keeps the
+    # question that was asked, and `degraded` says why the answer came from somewhere else.
     strategy: str
     corpus: dict[str, Any]
     cases: tuple[CaseResult, ...]
@@ -187,6 +192,12 @@ class EvaluationReport:
     threshold: float | None = None
     failures: tuple[str, ...] = ()
     index_stats: IndexStats | None = None
+    requested_strategy: str = ""
+    degraded: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.requested_strategy:
+            object.__setattr__(self, "requested_strategy", self.strategy)
 
     @property
     def passed(self) -> bool:
@@ -196,6 +207,8 @@ class EvaluationReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy,
+            "requested_strategy": self.requested_strategy,
+            "degraded": list(self.degraded),
             "corpus": self.corpus,
             "threshold": self.threshold,
             "passed": self.passed,
@@ -344,18 +357,26 @@ def evaluate(
     fixes thresholds after the baseline, and a default here would be a number that could not
     come out any other way.
 
+    `strategy` is what was ASKED FOR. What the report is labelled with is what RAN: a
+    strategy declared in the frozen `Strategy` literal but with no backend degrades to
+    `lexical` and the degradation is published beside the numbers (spec §9.3 — *lexical sigue
+    operativo y el response declara estrategia degradada*), while a strategy that is in no
+    contract at all raises. Echoing the request into the heading is how a lexical baseline got
+    published as a vector measurement (F-2).
+
     `limit` is how deep the retriever is asked to go. It defaults to `max(ks)`, because
     asking for fewer results than the largest k being reported would make that k's recall a
     measurement of the LIMIT rather than of the retriever — a number that cannot come out any
     other way. A caller may raise it to see whether a miss is a ranking problem or an absence.
     """
+    executed, degraded = resolve_strategy(strategy)
     depth = max(limit or 0, max(ks))
     index, stats = build_index(corpus, params=params)
     results: list[CaseResult] = []
     unmeasured: list[dict[str, Any]] = []
     latencies: list[float] = []
     for case in cases:
-        blocked = unsupported_filters(case.filters, strategy)
+        blocked = unsupported_filters(case.filters, executed)
         if blocked:
             unmeasured.append(
                 {
@@ -364,7 +385,7 @@ def evaluate(
                     "provenance": case.provenance,
                     "unsupported_filters": list(blocked),
                     "reason": (
-                        f"la estrategia `{strategy}` no puede aplicar {list(blocked)}; "
+                        f"la estrategia `{executed}` no puede aplicar {list(blocked)}; "
                         "puntuar el caso sería fabricar un cero (spec §8.6.8)"
                     ),
                 }
@@ -379,7 +400,9 @@ def evaluate(
     by_provenance = _aggregate(results, {"real", "construido"}, lambda case: (case.provenance,))
     failures = _failures(by_stratum, by_provenance, threshold, ks)
     return EvaluationReport(
-        strategy=strategy,
+        strategy=executed,
+        requested_strategy=strategy,
+        degraded=degraded,
         corpus={
             "source": corpus.source,
             "items": len(corpus.items),
@@ -637,8 +660,14 @@ def _percentiles(latencies: list[float]) -> dict[str, float]:
 
 def render_markdown(report: EvaluationReport) -> str:
     """The human report. Publishes failures and gaps, never fabricated zeros (spec §8.6.8)."""
+    heading = f"# Evaluación de recuperación — `{report.strategy}`"
+    if report.degraded:
+        heading += (
+            f" · solicitada `{report.requested_strategy}`, sin backend "
+            f"({', '.join(report.degraded)}): las cifras son del recuperador que SÍ corrió"
+        )
     lines = [
-        f"# Evaluación de recuperación — `{report.strategy}`",
+        heading,
         "",
         f"- Corpus: `{report.corpus['source']}` — {report.corpus['items']} items, "
         f"{report.corpus['topics']} topics, {report.corpus['surfaces']} superficies, "

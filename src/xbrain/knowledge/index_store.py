@@ -64,13 +64,25 @@ class OpenIndex:
     def close(self) -> None:
         self.lexical.connection.close()
 
-    def status_ref(self, corrupt_chunks_excluded: int = 0) -> IndexStatusRef:
-        """The `index` block of a response (spec §7.2)."""
+    def status_ref(
+        self,
+        corrupt_chunks_excluded: int = 0,
+        *,
+        strategy_degradation: tuple[str, ...] = (),
+    ) -> IndexStatusRef:
+        """The `index` block of a response (spec §7.2).
+
+        `strategy_degradation` comes from the CALLER, not from the index: whether the
+        requested retriever exists is a property of the build (`IMPLEMENTED_STRATEGIES`),
+        not of the database that was opened. It LEADS the tuple because *what you asked for
+        did not run* outranks *this index has no embeddings*, and putting it first keeps the
+        order deterministic without a set operation (spec §3.7.8 applies to the envelope).
+        """
         return IndexStatusRef(
             manifest_version=self.manifest.schema_version,
             built_at=self.manifest.built_at,
             corrupt_chunks_excluded=corrupt_chunks_excluded,
-            degraded=self.degraded,
+            degraded=strategy_degradation + self.degraded,
         )
 
 

@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from xbrain.knowledge import contracts, evaluation
+from xbrain.knowledge.contracts import SearchFilters
 from xbrain.knowledge.evaluation import (
     EvaluationReport,
     NO_COVERAGE,
@@ -231,7 +233,32 @@ def test_building_the_index_reports_what_it_skipped(corpus) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_case_whose_filters_the_strategy_cannot_apply_is_not_scored(corpus) -> None:
+STUB_BACKEND = "stub_backend_that_pushes_no_filter"
+
+
+@pytest.fixture()
+def stub_backend(monkeypatch):
+    """A HYPOTHETICAL retrieval backend that exists and can push no filter at all.
+
+    Injected rather than borrowed from the frozen `Strategy` literal (F-2). The previous
+    version of the guardrail below drove the branch with `strategy="vector"`, which made the
+    test depend on `vector` staying UNIMPLEMENTED: the day Plan 03 lands the vector backend,
+    a guardrail about fabricated zeros would go red for a reason that has nothing to do with
+    fabricated zeros, and the comfortable fix would be to delete it.
+
+    Two injections because two facts are being supposed, and they are genuinely different
+    facts: that the backend EXISTS (`IMPLEMENTED_STRATEGIES`, or `resolve_strategy` would
+    degrade it to `lexical` and the filters would all be pushed after all), and that it can
+    push NO filter (`SUPPORTED_FILTERS`).
+    """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical", STUB_BACKEND}))
+    monkeypatch.setitem(evaluation.SUPPORTED_FILTERS, STUB_BACKEND, frozenset())
+    return STUB_BACKEND
+
+
+def test_a_case_whose_filters_the_strategy_cannot_apply_is_not_scored(
+    corpus, stub_backend: str
+) -> None:
     """The fabricated zero this harness exists to prevent — the MECHANISM, still guarded.
 
     Scoring a case whose filter nobody applied produced `filtros: recall@10 = 0.0` in this
@@ -239,21 +266,89 @@ def test_a_case_whose_filters_the_strategy_cannot_apply_is_not_scored(corpus) ->
     the truth was that the instrument did not exist yet. Spec §8.6.8: *failures and skips are
     published; zeros are never fabricated by mixing in unmeasured cases.*
 
-    THE STRATEGY IS `vector`, NOT `lexical`, AND THAT IS THE POINT. Plan 02 gave the lexical
-    baseline all eight filters, so `lexical` can no longer demonstrate this branch — driving
-    it with `lexical` would leave a test that passes because nothing is unsupported, which is
-    a test of nothing (rule 1). `vector` is declared in the frozen `Strategy` literal and is
-    Plan 03's to implement; it supports no filter today, so it is the honest way to keep the
-    guardrail exercised until there is a second real strategy.
+    THE STRATEGY IS INJECTED, and that is the point. Plan 02 gave the lexical baseline all
+    eight filters, so `lexical` can no longer demonstrate this branch — driving it with
+    `lexical` would leave a test that passes because nothing is unsupported, which is a test
+    of nothing (rule 1). Driving it with `vector` was the same mistake one level up: it
+    borrowed a REAL entry of the frozen literal and made this guardrail's survival depend on
+    that entry staying unimplemented, i.e. on Plan 03 not happening.
+
+    Seen red by giving the stub every filter (`frozenset(SearchFilters.model_fields)`): FX7
+    is scored, `unmeasured` is empty and `filtros` publishes a number.
     """
     cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
-    payload = evaluate(cases, corpus, strategy="vector").to_dict()
+    payload = evaluate(cases, corpus, strategy=stub_backend).to_dict()
 
     unmeasured = {entry["id"]: entry for entry in payload["unmeasured"]}
-    assert "FX7" in unmeasured, "FX7 declares `source: own_tweet`, which `vector` cannot apply"
+    assert "FX7" in unmeasured, "FX7 declares `source: own_tweet`, which the stub cannot apply"
     assert unmeasured["FX7"]["unsupported_filters"] == ["source"]
     assert payload["by_stratum"]["filtros"] == NO_COVERAGE
     assert "FX7" not in {case["id"] for case in payload["cases"]}
+    assert payload["strategy"] == stub_backend, "the stub RAN; nothing was degraded"
+
+
+def test_the_guardrail_no_longer_depends_on_vector_being_unimplemented(corpus) -> None:
+    """The coupling F-2 named, asserted so it cannot come back silently.
+
+    `vector` IS declared in the frozen `Strategy` literal, so the day it has a backend it is
+    added to `IMPLEMENTED_STRATEGIES` and this simulates that day. The guardrail above must
+    still hold — it uses an injected stub — and `evaluate(strategy="vector")` must stop
+    reporting the filter cases as unmeasurable, because a real vector backend that declares
+    all eight filters can apply them.
+    """
+    monkeypatch_free = frozenset({"lexical", "vector"})
+    original_implemented = contracts.IMPLEMENTED_STRATEGIES
+    original_filters = dict(evaluation.SUPPORTED_FILTERS)
+    contracts.IMPLEMENTED_STRATEGIES = monkeypatch_free  # type: ignore[misc]
+    evaluation.SUPPORTED_FILTERS["vector"] = frozenset(SearchFilters.model_fields)
+    try:
+        cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+        payload = evaluate(cases, corpus, strategy="vector").to_dict()
+        assert payload["strategy"] == "vector"
+        assert payload["unmeasured"] == []
+        assert payload["degraded"] == []
+    finally:
+        contracts.IMPLEMENTED_STRATEGIES = original_implemented  # type: ignore[misc]
+        evaluation.SUPPORTED_FILTERS.clear()
+        evaluation.SUPPORTED_FILTERS.update(original_filters)
+
+
+def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(corpus) -> None:
+    """F-2 at the harness: `xbrain eval --strategy vector` published `vector`, scored by bm25.
+
+    21 cases, `recall@10 = 0.8099`, under a heading that named a retriever which does not
+    exist. That is the metric whose label does not describe its instrument — rule 2, and spec
+    §8.6.8's fabricated number wearing a different costume.
+
+    The report now names the strategy that RAN and declares the one that could not, in the
+    JSON and in the markdown heading, so no reader can take the numbers for vector's.
+
+    Seen red before the fix: `payload["strategy"]` came back `"vector"` and the markdown
+    heading named `vector` as though a vector retriever had produced the numbers.
+    """
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = evaluate(cases, corpus, strategy="vector")
+    payload = report.to_dict()
+
+    assert payload["strategy"] == "lexical", "what ran"
+    assert payload["requested_strategy"] == "vector", "what was asked for"
+    assert payload["degraded"] == ["vector_not_implemented"]
+    assert payload["cases"], "spec §9.3: lexical stays operational"
+
+    markdown = render_markdown(report)
+    assert "`lexical`" in markdown.splitlines()[0]
+    assert "vector" in markdown.splitlines()[0], "the request is not hidden either"
+
+
+def test_every_implemented_strategy_declares_which_filters_it_can_push(corpus) -> None:
+    """Rule 5: the two tables that must agree are asserted to agree, not hoped to.
+
+    `IMPLEMENTED_STRATEGIES` says which retrievers run; `SUPPORTED_FILTERS` says what each
+    can push into `WHERE`. A strategy implemented without an entry here would fall to
+    `SUPPORTED_FILTERS.get(strategy, frozenset())` and report every filtered case as
+    UNMEASURED — the gap silently reopening under a strategy that works.
+    """
+    assert set(evaluation.SUPPORTED_FILTERS) == set(contracts.IMPLEMENTED_STRATEGIES)
 
 
 def test_the_lexical_strategy_now_scores_the_filter_stratum(corpus) -> None:

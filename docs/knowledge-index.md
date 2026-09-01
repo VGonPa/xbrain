@@ -152,8 +152,16 @@ the retriever.
 - **`KnowledgeSurface.language` is `None` on almost everything.** The only language the store
   records is `ContentSourceSuccess.language`, populated by transcriptions. It is never guessed,
   and there is **no language filter**.
-- **No embeddings.** Every response declares `degraded: ["no_embeddings"]` — so a consumer
-  cannot read a lexical answer as a hybrid one.
+- **No embeddings, and `strategy` says which retriever ran.** Every response declares
+  `degraded: ["no_embeddings"]`. Asking for a strategy that has no backend
+  (`vector`, `hybrid`, `hybrid_graph`) does not fail — spec §9.3 requires that *lexical sigue
+  operativo* — it answers lexically, labels the response `strategy: "lexical"` and adds
+  `<requested>_not_implemented` to `degraded`. `xbrain eval` does the same: the report is
+  headed with the strategy that RAN and names the one that was asked for. Until F-2 was fixed
+  the `degraded` flag was there but the `strategy` field echoed the request, so a `hybrid`
+  answer produced by bm25 came back labelled `hybrid`, and `xbrain eval --strategy vector`
+  published a report headed `vector`. A strategy that is in no contract at all
+  (`--strategy banana`) is a validation error naming the valid ones.
 
 ---
 
