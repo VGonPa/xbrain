@@ -36,9 +36,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from pydantic import ValidationError
+
 from xbrain.knowledge.contracts import SearchFilters
 from xbrain.knowledge.lexical_fts import match_expression, rank_order
-from xbrain.knowledge.models import KnowledgeChunk, SurfaceType
+from xbrain.knowledge.models import KnowledgeChunk, Locator, SurfaceType
+from xbrain.models import Author
 
 # How much of a matching chunk is shown back. Long enough to recognise the hit, short enough
 # that a log or a report never carries an article (spec §10.8).
@@ -47,9 +50,21 @@ EXCERPT_CHARS = 300
 # The fixed SELECT skeletons. Module constants rather than inline literals so the only thing
 # the query builder concatenates at call time is a WHERE clause of bound `?` placeholders
 # plus `RANK_ORDER` — which is what makes the `# nosec B608` below a statement of fact.
+# The surface columns ride along on a LEFT JOIN by primary key (A-1): the index STORES each
+# surface's attribution and locator, and the first version threw both away between the row
+# and the response — a quoted post came back with `attribution: null` under the poster's
+# name. LEFT, not INNER, because the retriever is also driven bare (`add` without a surface
+# row) by the characterization fixture and the evaluation harness, and a chunk whose
+# surface row is missing must still rank; it simply carries no attribution.
+_SURFACE_COLUMNS = (
+    "surfaces.attribution_handle AS surface_attribution_handle, "
+    "surfaces.attribution_name AS surface_attribution_name, "
+    "surfaces.locator_json AS surface_locator_json"
+)
 _SELECT_CHUNKS = (
-    "SELECT chunks.*, bm25(chunks_fts) AS score FROM chunks_fts "
-    "JOIN chunks ON chunks.rowid = chunks_fts.rowid"
+    f"SELECT chunks.*, {_SURFACE_COLUMNS}, bm25(chunks_fts) AS score FROM chunks_fts "
+    "JOIN chunks ON chunks.rowid = chunks_fts.rowid "
+    "LEFT JOIN surfaces ON surfaces.surface_id = chunks.surface_id"
 )
 _COUNT_CHUNKS = "SELECT COUNT(*) FROM chunks_fts JOIN chunks ON chunks.rowid = chunks_fts.rowid"
 _SELECT_PROFILES = (
@@ -68,6 +83,11 @@ class LexicalHit:
     Carries the owner and the surface, not just a score: spec §3.3 requires reverse
     resolution from a chunk to its surface and item, and a ranked id nobody can resolve is a
     number rather than evidence.
+
+    `attribution` is the SURFACE's author — the quoted author of a quoted post, never the
+    poster (spec §3.7 invariant 3) — and `surface_locator` is where the surface lives in the
+    original data; the chunk's `char_start`/`char_end` narrow it to the match (A-1). Both are
+    `None` for a chunk indexed without its surface row.
     """
 
     chunk_id: str
@@ -88,6 +108,8 @@ class LexicalHit:
     text: str
     excerpt: str
     score: float
+    attribution: Author | None = None
+    surface_locator: Locator | None = None
 
 
 @dataclass(frozen=True)
@@ -355,7 +377,10 @@ class LexicalIndex:
     def fetch_chunk(self, chunk_id: str) -> LexicalHit | None:
         """One chunk by id, with everything needed to verify its fingerprint."""
         row = self.connection.execute(
-            "SELECT chunks.*, 0.0 AS score FROM chunks WHERE chunk_id = ?", (chunk_id,)
+            f"SELECT chunks.*, {_SURFACE_COLUMNS}, 0.0 AS score FROM chunks "  # nosec B608
+            "LEFT JOIN surfaces ON surfaces.surface_id = chunks.surface_id "
+            "WHERE chunk_id = ?",
+            (chunk_id,),
         ).fetchone()
         return _hit(row) if row is not None else None
 
@@ -550,6 +575,28 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _surface_locator(raw: str | None) -> Locator | None:
+    """The surface's locator, or None when the row carries none a `Locator` can hold.
+
+    `set_item_metadata` writes `{}` for the minimal surface rows the retriever's own tests
+    use, and a chunk indexed bare has no row at all; neither is a locator, and inventing one
+    would be the fabrication A-1 removed.
+    """
+    if not raw:
+        return None
+    try:
+        return Locator.model_validate_json(raw)
+    except ValidationError:
+        return None
+
+
+def _attribution(row: sqlite3.Row) -> Author | None:
+    handle = row["surface_attribution_handle"]
+    if handle is None:
+        return None
+    return Author(handle=handle, name=row["surface_attribution_name"] or "")
+
+
 def _hit(row: sqlite3.Row) -> LexicalHit:
     return LexicalHit(
         chunk_id=row["chunk_id"],
@@ -570,4 +617,6 @@ def _hit(row: sqlite3.Row) -> LexicalHit:
         text=row["text"],
         excerpt=row["text"][:EXCERPT_CHARS],
         score=float(row["score"]),
+        attribution=_attribution(row),
+        surface_locator=_surface_locator(row["surface_locator_json"]),
     )

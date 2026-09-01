@@ -32,7 +32,7 @@ from xbrain.knowledge.index_schema import (
     open_index,
 )
 from xbrain.knowledge.search_service import QueryContext, search
-from xbrain.knowledge.surfaces import knowledge_item
+from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Item, Topic, TopicPage, VerificationVerdict
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -629,3 +629,84 @@ def _rows(data: Path, sql: str) -> int:
     value = connection.execute(sql).fetchone()[0]
     connection.close()
     return int(value)
+
+
+# ---------------------------------------------------------------------------
+# A-1 — the poster is not the author of what they quote, in `search` too
+# ---------------------------------------------------------------------------
+
+
+def test_a_quoted_post_match_carries_the_quoted_author_not_the_poster(
+    context: QueryContext,
+) -> None:
+    """A-1 (round 02, both gates): `SearchMatch.attribution` exists in the frozen contract for
+    exactly this and `search` never filled it. The index STORES the surface's attribution
+    (`surfaces.attribution_*`) and `search` threw it away on the way out: k07's quoted post
+    belongs to @othervoice and came back with `attribution: null` under the poster's name,
+    with a locator pointing at the poster's tweet. On the real corpus (2026-09-01) the same
+    shape: item 1875646438350450928, quoted post by @mdancho84, served under @miguelgfierro.
+
+    CLAUDE.md lists *a quoted post rendered as if the poster had written it* among the
+    defects that cost blood, and every other LLM surface enforces the rule through one shared
+    label; `search` is a NEW surface that did not (rule 5, spec §3.7 invariant 3).
+
+    Seen red before the fix: `match.attribution is None`.
+    """
+    response = search("audit", context)
+    result = next(r for r in response.results if r.item_id == "k07")
+    match = next(m for m in result.matches if m.surface_type == "quoted_post")
+    quoted = next(s for s in item_surfaces(context.store["k07"]) if s.surface_type == "quoted_post")
+
+    assert match.attribution == quoted.attribution
+    assert match.attribution is not None and match.attribution.handle == "othervoice"
+    assert result.author.handle == "vgonpa", "the RESULT is still the poster's item"
+    assert match.attribution != result.author, "and the match says who wrote the quote"
+
+
+def test_a_match_locator_is_the_surface_locator_plus_the_character_range(
+    context: QueryContext,
+) -> None:
+    """The second half of A-1: `_match` fabricated a generic locator from the chunk's own
+    columns — `source_index: null`, `content_kind: null`, `url` = the ITEM's — so a consumer
+    could not resolve the match back to the source it came from (spec §3.8: *superficie,
+    propietario y localizador son resolubles*). The surface's locator was in
+    `surfaces.locator_json` the whole time.
+
+    The match locator is now the SURFACE's locator with the chunk's character range on top:
+    `source_index`, `content_kind` and the source's own URL for a content source;
+    `media_index` for an image description.
+
+    Seen red before the fix: `source_index is None` and `url` was the poster's tweet.
+    """
+    response = search("audit", context)
+    match = next(
+        m
+        for r in response.results
+        if r.item_id == "k07"
+        for m in r.matches
+        if m.surface_type == "quoted_post"
+    )
+    quoted = next(s for s in item_surfaces(context.store["k07"]) if s.surface_type == "quoted_post")
+    expected = quoted.locator.model_dump(exclude_none=True)
+    got = match.locator.model_dump(exclude_none=True)
+    assert {k: got[k] for k in expected} == expected, got
+    assert got["url"] == "https://x.com/othervoice/status/k07q"
+    assert match.locator.char_start == 0 and match.locator.char_end == len(quoted.text)
+
+    described = next(
+        (iid, s)
+        for iid, item in context.store.items()
+        for s in item_surfaces(item)
+        if s.surface_type == "image_description"
+    )
+    term = next(w for w in described[1].text.split() if len(w) > 6).strip(".,")
+    response = search(term, context, limit=20)
+    image = next(
+        m
+        for r in response.results
+        if r.item_id == described[0]
+        for m in r.matches
+        if m.surface_type == "image_description"
+    )
+    assert image.locator.kind == "media"
+    assert image.locator.media_index == described[1].locator.media_index is not None

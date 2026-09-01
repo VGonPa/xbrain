@@ -305,3 +305,32 @@ def test_the_get_rendering_lists_the_surfaces_you_can_ask_for() -> None:
     """The body is withheld by default, so the NAMES are what make it reachable."""
     text = render_get(_bundle())
     assert "superficies disponibles: post, external_article" in text
+
+
+def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
+    """A-1 in the human view: a quoted post's match names the quoted author on its own line,
+    so a reader sees in two seconds that the result's author and the quote's author differ
+    (CLAUDE.md rule 7). Asserted on the label the line carries, not on the handle appearing
+    somewhere in the output — the handle is also in the JSON and would satisfy a substring.
+
+    Seen red before the fix: no line carried `autor:`.
+    """
+    quoted = SearchMatch(
+        chunk_id="item:1:quoted_post:abc:0:v1",
+        surface_type="quoted_post",
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        excerpt="Lo que dijo la persona citada.",
+        attribution=Author(handle="othervoice", name="Other Voice"),
+        matched_by=("lexical",),
+        lexical_rank=1,
+        score=-2.0,
+        locator=Locator(kind="content_source", char_start=0, char_end=30),
+    )
+    text = render_search(_response(results=(_result(matches=(quoted,)),)))
+    lines = [line.strip() for line in text.splitlines()]
+    assert any(line.startswith("autor: @othervoice (Other Voice)") for line in lines), text
+    assert not any(line.startswith("autor: @karpathy") for line in lines), (
+        "the poster's own surfaces carry no separate author line"
+    )

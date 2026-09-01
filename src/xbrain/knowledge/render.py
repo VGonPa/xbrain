@@ -119,6 +119,11 @@ def _result_lines(result: SearchResult) -> list[str]:
             f"   · [{match.surface_type}] origin={match.origin} trust={match.trust_class}"
             f" · via {'+'.join(match.matched_by)}"
         )
+        if match.attribution is not None and match.attribution != result.author:
+            # The surface's own author, when it is not the item's (A-1): a quoted post is
+            # somebody else's words, and the cheapest guard against reading them as the
+            # poster's is to say whose they are next to the excerpt (CLAUDE.md rule 7).
+            lines.append(f"     autor: @{match.attribution.handle} ({match.attribution.name})")
         lines.append(f"     {_one_line(match.excerpt)}")
     if not result.matches:
         # A profile-only candidate. Saying so matters: the profile is a composed string

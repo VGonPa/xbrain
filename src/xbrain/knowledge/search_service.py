@@ -332,10 +332,17 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
     as a RANKING SIGNAL rather than a probability, which spec §5.3 requires — a fused rank
     has no calibrated scale, and neither does an unfused one.
 
-    The locator is rebuilt from the chunk's own columns rather than read back from
-    `surfaces.locator_json`: what a consumer needs to check this MATCH is the character range
-    inside the surface, and the surface's own locator answers a different question.
+    THE ATTRIBUTION AND THE LOCATOR ARE THE SURFACE'S (A-1). The first version left
+    `attribution` at its default and fabricated a locator from the chunk's own columns —
+    `source_index: null`, `content_kind: null`, the ITEM's url — so a quoted post's match
+    was served under the poster's name and pointed at the poster's tweet: the exact defect
+    CLAUDE.md lists as paid for in blood, on a new LLM surface (spec §3.7 invariant 3, §3.8).
+    The surface's locator says where the surface lives; the chunk's range narrows it to the
+    match. A chunk indexed without its surface row keeps the previous, honest fallback.
     """
+    base = hit.surface_locator or Locator(
+        kind="content_source" if hit.owner_type == "item" else "topic_page", url=hit.url
+    )
     return SearchMatch(
         chunk_id=hit.chunk_id,
         surface_type=hit.surface_type,
@@ -343,15 +350,11 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
         trust_class=hit.trust_class,  # type: ignore[arg-type]
         derived=hit.derived,
         excerpt=hit.excerpt,
+        attribution=hit.attribution,
         matched_by=("lexical",),
         lexical_rank=position,
         score=hit.score,
-        locator=Locator(
-            kind="content_source" if hit.owner_type == "item" else "topic_page",
-            url=hit.url,
-            char_start=hit.char_start,
-            char_end=hit.char_end,
-        ),
+        locator=base.model_copy(update={"char_start": hit.char_start, "char_end": hit.char_end}),
     )
 
 
