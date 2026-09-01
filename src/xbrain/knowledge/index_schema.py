@@ -351,14 +351,23 @@ def delete_item_rows(connection: sqlite3.Connection, item_ids: Iterable[str]) ->
     Split from the two functions above because those two carry the FTS ordering constraint
     and these do not: a metadata table is an ordinary delete. Keeping them apart means the
     constrained path stays small enough to read in one screen.
+
+    The six statements are LITERALS rather than an f-string over a table-name tuple. The
+    f-string version was safe — the names came from a module constant — but it made `bandit`
+    report B608 and needed a suppression, and a suppression is a request to stop looking. Six
+    literals need no argument from anybody.
     """
+    statements = (
+        "DELETE FROM items WHERE item_id = ?",
+        "DELETE FROM item_topics WHERE item_id = ?",
+        "DELETE FROM item_content_kinds WHERE item_id = ?",
+        "DELETE FROM source_failures WHERE item_id = ?",
+        "DELETE FROM unfetched_links WHERE item_id = ?",
+        "DELETE FROM surfaces WHERE owner_type = 'item' AND owner_id = ?",
+    )
     for item_id in item_ids:
-        for table in ("items", "item_topics", "item_content_kinds", "source_failures"):
-            connection.execute(f"DELETE FROM {table} WHERE item_id = ?", (item_id,))  # noqa: S608
-        connection.execute("DELETE FROM unfetched_links WHERE item_id = ?", (item_id,))
-        connection.execute(
-            "DELETE FROM surfaces WHERE owner_type = 'item' AND owner_id = ?", (item_id,)
-        )
+        for statement in statements:
+            connection.execute(statement, (item_id,))
 
 
 def tokenizer() -> str:

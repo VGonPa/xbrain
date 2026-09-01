@@ -46,7 +46,9 @@ from typing import Any, Iterable, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
-from xbrain.knowledge.lexical_memory import InMemoryLexicalIndex, LexicalHit
+from xbrain.knowledge.contracts import SearchFilters
+from xbrain.knowledge.index_schema import open_memory_index
+from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
 from xbrain.knowledge.models import KnowledgeChunk
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -271,7 +273,7 @@ def corpus_chunks(
 
 def build_index(
     corpus: Corpus, *, params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
-) -> tuple[InMemoryLexicalIndex, IndexStats]:
+) -> tuple[LexicalIndex, IndexStats]:
     """The lexical baseline over a whole corpus, plus what it covered.
 
     `chunks` is what the chunker EMITTED and `chunks_not_indexed` is the difference the index
@@ -279,7 +281,7 @@ def build_index(
     meant "indexed" could not.
     """
     chunks, surfaces = corpus_chunks(corpus, params=params)
-    index = InMemoryLexicalIndex()
+    index = LexicalIndex(open_memory_index())
     indexed = index.add(chunks)
     return index, IndexStats(
         items=len(corpus.items),
@@ -368,7 +370,7 @@ def evaluate(
     )
 
 
-def _search(index: InMemoryLexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalHit, ...]:
+def _search(index: LexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalHit, ...]:
     """Run one case's query, applying its filters BEFORE scoring (spec §5.3).
 
     The filters a case declares are part of the case (spec §8.1) — v1 kept windows under a
@@ -381,7 +383,7 @@ def _search(index: InMemoryLexicalIndex, case: GoldenCase, limit: int) -> tuple[
         case.query,
         limit=limit,
         surface_types=case.filters.has_surfaces,
-        origins=case.filters.origins,
+        filters=SearchFilters(origins=case.filters.origins),
     )
 
 

@@ -1,0 +1,556 @@
+"""The lexical retriever over the persisted schema — the SAME scorer, a different home.
+
+This replaces `lexical_memory.InMemoryLexicalIndex` (Plan 02 §9). Plan 01 §5.3 justified
+building the baseline on FTS5 rather than a hand-written BM25 with the claim that *what dies
+in Plan 02 is where the database lives, not how it scores*; this module is where that claim
+is either kept or quietly broken. It is kept: the tokenizer, the indexed column set, the
+connective and the tie-break all come from `lexical_fts.py`, and the only thing that changed
+is the connection — `sqlite3(":memory:")` for the evaluation harness,
+`data/index/knowledge.db` for the real index. The characterization fixture
+(`tests/fixtures/knowledge_ranking.json`) is NOT regenerated, and its assertion moved here
+with the module (m-vii).
+
+FILTERS ARE `WHERE` CLAUSES, NOT QUERY TEXT (spec §5.3). All eight of spec §7.2 are pushed
+into SQL BEFORE the `MATCH` runs, over columns denormalised onto `chunks` (`created_at`,
+`source`, `primary_topic`) and `EXISTS` sub-queries over the metadata tables. The alternative
+— appending the filter's words to the query string — lets the filter compete for bm25 weight
+against the user's terms, and a filter that changes the RANKING is not a filter.
+
+TWO PLANES, TWO RETURN TYPES (spec §5.1). `search` returns `LexicalHit`s, which carry an
+excerpt and resolve back to a surface: they are citable. `search_profiles` returns
+`ProfileHit`s, which carry an item id and a score and NOTHING ELSE. The profile is a string
+nobody wrote — a post, a summary and three topic descriptions glued together — so a shape
+that could not carry an excerpt is what stops it ever being presented as a quotation.
+
+ITEM-SCOPED FILTERS FAIL CLOSED ON TOPIC-OWNED CHUNKS. A `topic_note` has no author, no date
+and no source; `created_at`, `source` and `primary_topic` are NULL on its row, so a date or
+author filter excludes it by construction. The one exception is the topic filter itself,
+which matches a topic surface against its OWN slug — otherwise filtering by a topic would
+exclude exactly the surfaces that ARE that topic.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
+
+from xbrain.knowledge.contracts import SearchFilters
+from xbrain.knowledge.lexical_fts import match_expression, rank_order
+from xbrain.knowledge.models import KnowledgeChunk, SurfaceType
+
+# How much of a matching chunk is shown back. Long enough to recognise the hit, short enough
+# that a log or a report never carries an article (spec §10.8).
+EXCERPT_CHARS = 300
+
+# The fixed SELECT skeletons. Module constants rather than inline literals so the only thing
+# the query builder concatenates at call time is a WHERE clause of bound `?` placeholders
+# plus `RANK_ORDER` — which is what makes the `# nosec B608` below a statement of fact.
+_SELECT_CHUNKS = (
+    "SELECT chunks.*, bm25(chunks_fts) AS score FROM chunks_fts "
+    "JOIN chunks ON chunks.rowid = chunks_fts.rowid"
+)
+_COUNT_CHUNKS = "SELECT COUNT(*) FROM chunks_fts JOIN chunks ON chunks.rowid = chunks_fts.rowid"
+_SELECT_PROFILES = (
+    "SELECT profiles.item_id, bm25(profiles_fts) AS score FROM profiles_fts "
+    "JOIN profiles ON profiles.rowid = profiles_fts.rowid"
+)
+
+_CHUNK_RANK_ORDER = rank_order("chunks_fts", "chunks")
+_PROFILE_RANK_ORDER = "ORDER BY bm25(profiles_fts) ASC, profiles.item_id ASC"
+
+
+@dataclass(frozen=True)
+class LexicalHit:
+    """One ranked chunk, resolvable back to its surface and owner.
+
+    Carries the owner and the surface, not just a score: spec §3.3 requires reverse
+    resolution from a chunk to its surface and item, and a ranked id nobody can resolve is a
+    number rather than evidence.
+    """
+
+    chunk_id: str
+    surface_id: str
+    owner_type: str
+    owner_id: str
+    surface_type: SurfaceType
+    origin: str
+    trust_class: str
+    derived: bool
+    chunk_index: int
+    char_start: int
+    char_end: int
+    title: str | None
+    url: str | None
+    language: str | None
+    fingerprint: str
+    text: str
+    excerpt: str
+    score: float
+
+
+@dataclass(frozen=True)
+class ProfileHit:
+    """One ranked ITEM, from the profile plane. Deliberately carries no text.
+
+    Spec §5.1.A: the profile is *a retrieval representation, not a new source returned as a
+    citation*. Two fields, and neither of them can hold a quotation.
+    """
+
+    item_id: str
+    score: float
+
+
+class LexicalIndex:
+    """FTS5 over the persisted schema. Read or write, depending on how the connection opened.
+
+    Takes a `sqlite3.Connection` rather than a path so the caller decides — and so `search`
+    can be handed a `file:…?mode=ro` connection on which a write RAISES rather than silently
+    repairing the index (spec §5.6). That is a property of the object, not a promise about
+    the code.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self.connection.row_factory = sqlite3.Row
+
+    # -- writing -----------------------------------------------------------
+
+    def add(
+        self,
+        chunks: Sequence[KnowledgeChunk],
+        *,
+        created_at: datetime | None = None,
+        source: str | None = None,
+    ) -> int:
+        """Index a batch of chunks. Returns how many were stored.
+
+        `created_at` and `source` are the item's, DENORMALISED onto every chunk of the batch
+        so the date and source filters run before the `MATCH` with no join. They are
+        arguments rather than fields of `KnowledgeChunk` because the chunk is part of the
+        frozen contract and a retrieval-layout copy has no business on it — and because a
+        batch is always one owner's chunks, so one value per call is the honest shape. A
+        topic's chunks pass neither, which is what makes an item-scoped filter exclude them.
+
+        A chunk already present (same `chunk_id`) is skipped rather than duplicated: the
+        emitter can legitimately produce the same chunk twice across two calls, and a
+        duplicate would let one body occupy two ranks.
+
+        A blank body is skipped for the reason the emitters drop a blank surface — there is
+        nothing to retrieve — and `index build` counts the skip so the omission is visible.
+        """
+        stored = 0
+        for chunk in chunks:
+            if not chunk.text.strip():
+                continue
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO chunks (chunk_id, surface_id, owner_type, owner_id, "
+                "surface_type, origin, trust_class, derived, chunk_index, char_start, "
+                "char_end, text, title, url, language, fingerprint, created_at, source, "
+                "primary_topic) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    chunk.chunk_id,
+                    chunk.surface_id,
+                    chunk.owner_type,
+                    chunk.owner_id,
+                    chunk.surface_type,
+                    chunk.origin,
+                    chunk.trust_class,
+                    int(chunk.derived),
+                    chunk.chunk_index,
+                    chunk.char_start,
+                    chunk.char_end,
+                    chunk.text,
+                    chunk.title,
+                    chunk.url,
+                    chunk.language,
+                    chunk.fingerprint,
+                    _iso(created_at),
+                    source,
+                    chunk.topics[0] if chunk.topics else None,
+                ),
+            )
+            if cursor.rowcount:
+                # The FTS row carries the SAME rowid as its metadata row, which is what lets
+                # the join be a plain equality — and is why `rowid INTEGER PRIMARY KEY` is
+                # declared explicitly in `index_schema` (VACUUM renumbers an implicit one).
+                self.connection.execute(
+                    "INSERT INTO chunks_fts (rowid, text, title) VALUES (?,?,?)",
+                    (cursor.lastrowid, chunk.text, chunk.title or ""),
+                )
+                stored += 1
+        return stored
+
+    def add_profile(self, item_id: str, text: str, fingerprint: str) -> bool:
+        """Store one item profile on its own plane. Returns whether it was written."""
+        if not text.strip():
+            return False
+        cursor = self.connection.execute(
+            "INSERT OR IGNORE INTO profiles (item_id, profile_text, fingerprint) VALUES (?,?,?)",
+            (item_id, text, fingerprint),
+        )
+        if not cursor.rowcount:
+            return False
+        self.connection.execute(
+            "INSERT INTO profiles_fts (rowid, profile_text) VALUES (?,?)",
+            (cursor.lastrowid, text),
+        )
+        return True
+
+    def set_item_metadata(
+        self,
+        item_id: str,
+        *,
+        source: str = "bookmark",
+        url: str = "",
+        author_handle: str = "",
+        author_name: str = "",
+        created_at: datetime | None = None,
+        captured_at: datetime | None = None,
+        primary_topic: str | None = None,
+        note_path: str | None = None,
+        bookmark_folder: str | None = None,
+        store_fingerprint: str = "",
+        topics: tuple[str, ...] = (),
+        content_kinds: tuple[str, ...] = (),
+        surface_types: tuple[str, ...] = (),
+    ) -> None:
+        """Write the filterable metadata of one item, replacing whatever was there.
+
+        The `surface_types` argument writes MINIMAL rows into `surfaces` — enough for the
+        `has_surfaces` filter and no more. The full surface records come from `index_build`,
+        which has the emitter's output; this keeps the retriever testable on its own without
+        a second, divergent way of populating the table.
+        """
+        self.connection.execute(
+            "INSERT OR REPLACE INTO items (item_id, source, url, author_handle, author_name, "
+            "created_at, captured_at, primary_topic, note_path, bookmark_folder, "
+            "store_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                item_id,
+                source,
+                url,
+                author_handle,
+                author_name,
+                _iso(created_at),
+                _iso(captured_at),
+                primary_topic,
+                note_path,
+                bookmark_folder,
+                store_fingerprint,
+            ),
+        )
+        self.connection.execute("DELETE FROM item_topics WHERE item_id = ?", (item_id,))
+        for position, slug in enumerate(topics):
+            self.connection.execute(
+                "INSERT OR REPLACE INTO item_topics (item_id, slug, is_primary) VALUES (?,?,?)",
+                (item_id, slug, int(position == 0 and slug == (primary_topic or topics[0]))),
+            )
+        self.connection.execute("DELETE FROM item_content_kinds WHERE item_id = ?", (item_id,))
+        for kind in content_kinds:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO item_content_kinds (item_id, kind) VALUES (?,?)",
+                (item_id, kind),
+            )
+        for surface_type in surface_types:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO surfaces (surface_id, owner_type, owner_id, "
+                "surface_type, origin, trust_class, derived, locator_json, fingerprint, "
+                "char_length) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"item:{item_id}:{surface_type}:0",
+                    "item",
+                    item_id,
+                    surface_type,
+                    "source",
+                    "primary_source",
+                    0,
+                    "{}",
+                    "0" * 64,
+                    0,
+                ),
+            )
+
+    # -- reading -----------------------------------------------------------
+
+    def search(
+        self,
+        query: str,
+        limit: int,
+        *,
+        filters: SearchFilters | None = None,
+        surface_types: tuple[SurfaceType, ...] = (),
+        owner_ids: tuple[str, ...] = (),
+    ) -> tuple[LexicalHit, ...]:
+        """The top `limit` chunks for `query`, best first, deterministic under ties.
+
+        `surface_types` and `owner_ids` are NOT among spec §7.2's eight — they are internal
+        narrowing used by `get` (rank inside one item's long source) and by the evaluation
+        harness. They are kept off `SearchFilters` because that model is the FROZEN external
+        contract and adding to it would be the incompatible change the freeze prevents.
+
+        An empty query is a validation error, not an empty result (spec §9.3): an empty
+        result set claims something about the corpus, when the truth is that nothing was
+        asked. A non-positive limit is the same mistake wearing a different hat.
+        """
+        expression = self._expression(query, limit)
+        if expression is None:
+            return ()
+        clauses, params = self._where(expression, filters, surface_types, owner_ids)
+        sql = f"{_SELECT_CHUNKS} WHERE {' AND '.join(clauses)} {_CHUNK_RANK_ORDER} LIMIT ?"  # nosec B608
+        rows = self._fetch(sql, (*params, limit))
+        return tuple(_hit(row) for row in rows)
+
+    def search_profiles(
+        self, query: str, limit: int, *, filters: SearchFilters | None = None
+    ) -> tuple[ProfileHit, ...]:
+        """The top `limit` ITEMS for `query` on the profile plane (spec §5.1.A).
+
+        The two planes are NOT fused here and their bm25 scores are not comparable: they are
+        computed over different corpora, so a single sorted merge would invent a scale.
+        Fusion is Plan 03's decision, with RRF and the golden set in front of it.
+        """
+        expression = self._expression(query, limit)
+        if expression is None:
+            return ()
+        clauses = ["profiles_fts MATCH ?"]
+        params: list[object] = [expression]
+        if filters is not None:
+            item_clauses, item_params = _item_clauses(filters, "profiles.item_id")
+            clauses += item_clauses
+            params += item_params
+        sql = f"{_SELECT_PROFILES} WHERE {' AND '.join(clauses)} {_PROFILE_RANK_ORDER} LIMIT ?"  # nosec B608
+        rows = self._fetch(sql, (*params, limit))
+        return tuple(ProfileHit(item_id=row["item_id"], score=float(row["score"])) for row in rows)
+
+    def explain(self, query: str, filters: SearchFilters | None = None) -> tuple[str, ...]:
+        """`EXPLAIN QUERY PLAN` for the filtered search, as sqlite's own `detail` strings.
+
+        Exposed so a test can assert that the backend USES an index for the filtered column
+        rather than scanning the corpus (m3). Asserting the SQL string would only prove that
+        we wrote that string.
+        """
+        expression = match_expression(query) or ""
+        clauses, params = self._where(expression, filters, (), ())
+        sql = f"{_SELECT_CHUNKS} WHERE {' AND '.join(clauses)} {_CHUNK_RANK_ORDER}"  # nosec B608
+        return tuple(
+            row["detail"] for row in self.connection.execute(f"EXPLAIN QUERY PLAN {sql}", params)
+        )
+
+    def scored_row_count(self, query: str, filters: SearchFilters | None = None) -> int:
+        """How many rows the filtered query hands the scorer — the second half of m3.
+
+        A filter that runs shows up as FEWER rows reaching bm25. A filter applied afterwards
+        would leave this number unchanged and only shorten the output.
+        """
+        expression = match_expression(query)
+        if expression is None:
+            return 0
+        clauses, params = self._where(expression, filters, (), ())
+        sql = f"{_COUNT_CHUNKS} WHERE {' AND '.join(clauses)}"  # nosec B608
+        row = self.connection.execute(sql, params).fetchone()
+        return int(row[0])
+
+    def fetch_chunk(self, chunk_id: str) -> LexicalHit | None:
+        """One chunk by id, with everything needed to verify its fingerprint."""
+        row = self.connection.execute(
+            "SELECT chunks.*, 0.0 AS score FROM chunks WHERE chunk_id = ?", (chunk_id,)
+        ).fetchone()
+        return _hit(row) if row is not None else None
+
+    def __len__(self) -> int:
+        return int(self.connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+
+    # -- internals ---------------------------------------------------------
+
+    def _expression(self, query: str, limit: int) -> str | None:
+        if not query.strip():
+            raise ValueError("la consulta está vacía")
+        if limit <= 0:
+            raise ValueError(f"limit debe ser >= 1, recibido {limit}")
+        return match_expression(query)
+
+    def _where(
+        self,
+        expression: str,
+        filters: SearchFilters | None,
+        surface_types: tuple[SurfaceType, ...],
+        owner_ids: tuple[str, ...],
+    ) -> tuple[list[str], list[object]]:
+        """The WHERE clauses and their bound parameters — never an interpolated value."""
+        clauses = ["chunks_fts MATCH ?"]
+        params: list[object] = [expression]
+        if filters is not None:
+            chunk_clauses, chunk_params = _chunk_clauses(filters)
+            clauses += chunk_clauses
+            params += chunk_params
+            item_clauses, item_params = _item_clauses(filters, "chunks.owner_id")
+            clauses += item_clauses
+            params += item_params
+            topic_clause, topic_params = _topic_clause(filters)
+            if topic_clause:
+                clauses.append(topic_clause)
+                params += topic_params
+        if surface_types:
+            clauses.append(f"chunks.surface_type IN ({_placeholders(len(surface_types))})")
+            params += list(surface_types)
+        if owner_ids:
+            clauses.append(f"chunks.owner_id IN ({_placeholders(len(owner_ids))})")
+            params += list(owner_ids)
+        return clauses, params
+
+    def _fetch(self, sql: str, params: tuple[object, ...]) -> list[sqlite3.Row]:
+        try:
+            return list(self.connection.execute(sql, params))
+        except sqlite3.OperationalError as error:
+            # A malformed MATCH expression that survived quoting. Degrading to "no results"
+            # is right HERE AND ONLY HERE: the query was understood as data, it simply
+            # matched nothing FTS5 could parse. It is NOT the same as an empty query, which
+            # is rejected above — and it must not swallow a read-only violation, which is a
+            # real defect and is re-raised.
+            if "readonly" in str(error).lower() or "attempt to write" in str(error).lower():
+                raise
+            return []
+
+
+def _chunk_clauses(filters: SearchFilters) -> tuple[list[str], list[object]]:
+    """Filters that live on the DENORMALISED columns of `chunks` — no join at all.
+
+    `created_at`, `source` and `origin` are copied onto every chunk precisely so these run
+    before the `MATCH` without a per-query join. A topic-owned chunk has NULL in the first
+    two, so a date or source filter excludes it by construction — which is the right answer,
+    since a topic note has no date and no source of its own.
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    if filters.created_from is not None:
+        clauses.append("chunks.created_at >= ?")
+        params.append(filters.created_from.isoformat())
+    if filters.created_to is not None:
+        clauses.append("chunks.created_at <= ?")
+        params.append(filters.created_to.isoformat())
+    if filters.source is not None:
+        clauses.append("chunks.source = ?")
+        params.append(filters.source)
+    if filters.origins:
+        clauses.append(f"chunks.origin IN ({_placeholders(len(filters.origins))})")
+        params += list(filters.origins)
+    return clauses, params
+
+
+def _item_clauses(filters: SearchFilters, owner_column: str) -> tuple[list[str], list[object]]:
+    """Filters that need the item tables, as `EXISTS` sub-queries on the owner id.
+
+    `owner_column` is a CALLER-CHOSEN identifier from a closed set of two (`chunks.owner_id`,
+    `profiles.item_id`), never a user string — the two planes ask the same questions of the
+    same tables and a second copy of these clauses would be the divergence rule 5 is about.
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    if filters.author is not None:
+        clauses.append(
+            f"EXISTS (SELECT 1 FROM items WHERE items.item_id = {owner_column} "  # nosec B608
+            "AND items.author_handle = ?)"
+        )
+        params.append(filters.author)
+    if filters.content_kinds:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM item_content_kinds WHERE item_content_kinds.item_id = "  # nosec B608
+            f"{owner_column} AND item_content_kinds.kind IN "
+            f"({_placeholders(len(filters.content_kinds))}))"
+        )
+        params += list(filters.content_kinds)
+    if filters.has_surfaces:
+        clauses.append(
+            f"EXISTS (SELECT 1 FROM surfaces WHERE surfaces.owner_id = {owner_column} "  # nosec B608
+            f"AND surfaces.owner_type = 'item' AND surfaces.surface_type IN "
+            f"({_placeholders(len(filters.has_surfaces))}))"
+        )
+        params += list(filters.has_surfaces)
+    if owner_column != "chunks.owner_id":
+        # The profile plane has no chunk row to read `source`/`created_at` off, so the two
+        # denormalised filters are answered from `items` instead. Same question, same table
+        # family, and the chunk plane keeps its faster path.
+        if filters.source is not None:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM items WHERE items.item_id = {owner_column} "  # nosec B608
+                "AND items.source = ?)"
+            )
+            params.append(filters.source)
+        if filters.created_from is not None:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM items WHERE items.item_id = {owner_column} "  # nosec B608
+                "AND items.created_at >= ?)"
+            )
+            params.append(filters.created_from.isoformat())
+        if filters.created_to is not None:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM items WHERE items.item_id = {owner_column} "  # nosec B608
+                "AND items.created_at <= ?)"
+            )
+            params.append(filters.created_to.isoformat())
+        if filters.topics:
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM item_topics WHERE item_topics.item_id = {owner_column} "  # nosec B608
+                f"AND item_topics.slug IN ({_placeholders(len(filters.topics))}))"
+            )
+            params += list(filters.topics)
+    return clauses, params
+
+
+def _topic_clause(filters: SearchFilters) -> tuple[str, list[object]]:
+    """The topic filter on the CHUNK plane, with its one exception.
+
+    An item chunk matches through `item_topics`. A TOPIC-owned chunk matches against its own
+    slug: without that branch, filtering by a topic would exclude exactly the surfaces that
+    ARE the topic — a `topic_note` about `ai-policy` would vanish from `--topic ai-policy`,
+    which reads as "the topic has no notes" rather than as a shape of the filter.
+    """
+    if not filters.topics:
+        return "", []
+    placeholders = _placeholders(len(filters.topics))
+    clause = (
+        "(EXISTS (SELECT 1 FROM item_topics WHERE item_topics.item_id = chunks.owner_id "  # nosec B608
+        f"AND item_topics.slug IN ({placeholders})) "
+        f"OR (chunks.owner_type = 'topic' AND chunks.owner_id IN ({placeholders})))"
+    )
+    return clause, [*filters.topics, *filters.topics]
+
+
+def _placeholders(count: int) -> str:
+    """`?,?,?` for a variadic `IN` clause — derived from a COUNT, never from a caller string.
+
+    The one SQL fragment this module builds dynamically, and it is built from an integer, so
+    it cannot carry a caller's text into the statement no matter what was passed. Extracted
+    as a function so that claim is structurally true and checkable in one line, rather than a
+    promise attached to an f-string.
+    """
+    return ",".join("?" * count)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _hit(row: sqlite3.Row) -> LexicalHit:
+    return LexicalHit(
+        chunk_id=row["chunk_id"],
+        surface_id=row["surface_id"],
+        owner_type=row["owner_type"],
+        owner_id=row["owner_id"],
+        surface_type=row["surface_type"],
+        origin=row["origin"],
+        trust_class=row["trust_class"],
+        derived=bool(row["derived"]),
+        chunk_index=row["chunk_index"],
+        char_start=row["char_start"],
+        char_end=row["char_end"],
+        title=row["title"],
+        url=row["url"],
+        language=row["language"],
+        fingerprint=row["fingerprint"],
+        text=row["text"],
+        excerpt=row["text"][:EXCERPT_CHARS],
+        score=float(row["score"]),
+    )
