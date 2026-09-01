@@ -632,6 +632,32 @@ def test_filters_reach_the_service(context: QueryContext) -> None:
     assert all(context.store[item_id].source == "own_tweet" for item_id in mine)
 
 
+@pytest.mark.parametrize("origin", ["vlm", "asr"])
+def test_an_origin_filter_never_admits_a_profile_only_candidate(
+    context: QueryContext, origin: str
+) -> None:
+    """G-1 (gate round 04): `--origin` reached the chunk plane and NOT the profile plane.
+
+    `search_profiles` applied only the item-scoped clauses, `origins` lives on `chunks.origin`,
+    and `_append_profile_candidates` appended whatever the profile plane returned — so
+    `search "Forecasting" --origin asr` on the real corpus (2,404 items, 2026-09-01) answered
+    8 items, 7 with no match and 6 with no ASR surface anywhere. Spec §7.2 puts `--origin vlm`
+    as its literal example; acceptance 6 says *the eight* filters, and this was the eighth.
+
+    Through the public service, on the fixture corpus: every result under an origin filter
+    carries at least one citable match, and every match is of that origin. A profile has no
+    origin, so it cannot satisfy the filter and contributes no candidate.
+
+    Seen red before the fix: `k02` (no VLM or ASR surface at all) and `k08` came back with
+    zero matches under both origins, for the queries `agents` and `evaluation`.
+    """
+    for query in ("agents", "evaluation", "Quillfeather", "audit"):
+        response = search(query, context, filters=SearchFilters(origins=(origin,)), limit=10)
+        for result in response.results:
+            assert result.matches, f"{query!r} --origin {origin}: {result.item_id} has no match"
+            assert {m.origin for m in result.matches} == {origin}, (query, result.item_id)
+
+
 def _rows(data: Path, sql: str) -> int:
     connection = open_index(db_path(data / "index"), read_only=True)
     value = connection.execute(sql).fetchone()[0]

@@ -839,7 +839,16 @@ def test_the_profile_plane_returns_items_not_citable_chunks() -> None:
 
 
 def test_the_profile_plane_honours_the_same_filters() -> None:
-    """A filter that applies to items must apply on both planes, or the two disagree."""
+    """A filter that applies to items must apply on both planes, or the two disagree.
+
+    `origins` is the one that did NOT (G-1): it lives on `chunks.origin`, the profile plane
+    applied only the item-scoped clauses, and `search "Forecasting" --origin asr` on the real
+    corpus answered 8 items of which 6 had no ASR surface at all. A profile is a string
+    nobody wrote and has no origin, so under an origin filter it contributes NOTHING — the
+    same fail-closed shape as a topic chunk under an author filter.
+
+    Seen red before the fix: `origins=("vlm",)` returned both profiles.
+    """
     index = _index()
     index.add_profile("i1", "agent evaluation harnesses", "a" * 64)
     index.add_profile("i2", "agent evaluation notes", "b" * 64)
@@ -848,6 +857,78 @@ def test_the_profile_plane_honours_the_same_filters() -> None:
 
     hits = index.search_profiles("evaluation", limit=5, filters=SearchFilters(source="own_tweet"))
     assert [h.item_id for h in hits] == ["i2"]
+    assert index.search_profiles("evaluation", limit=5, filters=SearchFilters(origins=("vlm",))) == ()
+
+
+@pytest.fixture()
+def profiled_index() -> LexicalIndex:
+    """Two PROFILES whose items differ on every filter axis and share the query term.
+
+    The profile-plane twin of `filtered_index`: with both profiles matching the text, a
+    filter the profile plane ignores leaves both in the result, so every assertion below can
+    only pass because the filter reached `search_profiles`.
+    """
+    index = _index()
+    index.add_profile("old", "the shared marrowgate profile", "a" * 64)
+    index.add_profile("new", "the shared marrowgate profile too", "b" * 64)
+    index.set_item_metadata(
+        "old",
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+        source="bookmark",
+        author_handle="karpathy",
+        topics=("agent-evaluation",),
+        content_kinds=("external_article",),
+        surface_types=("post", "external_article"),
+    )
+    index.set_item_metadata(
+        "new",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 6, 2, tzinfo=timezone.utc),
+        source="own_tweet",
+        author_handle="vgonpa",
+        topics=("ai-policy",),
+        content_kinds=("x_video",),
+        surface_types=("post", "image_description"),
+    )
+    return index
+
+
+def test_every_declared_filter_is_pushed_on_the_profile_plane_too(
+    profiled_index: LexicalIndex,
+) -> None:
+    """The TOTALITY half for the SECOND plane (G-1, spec §7.2, acceptance 6: *the eight*).
+
+    `test_every_declared_filter_is_actually_pushed_to_sql` enumerates the eight fields of
+    `SearchFilters` against `index.search` only, and `origins` slipped through the profile
+    plane for exactly that reason: seven filters were asserted on both planes, one on one.
+    The expected set is spelled out per filter rather than "old or new", because the honest
+    answer for `origins` is the EMPTY set — a profile has no origin — and "narrowed to
+    nothing" is a different claim from "narrowed to the other item".
+
+    Seen red before the fix: `origins` returned `{"old", "new"}`.
+    """
+    expected = {
+        "created_from": ({"created_from": datetime(2026, 1, 1, tzinfo=timezone.utc)}, {"new"}),
+        "created_to": ({"created_to": datetime(2025, 6, 1, tzinfo=timezone.utc)}, {"old"}),
+        "source": ({"source": "own_tweet"}, {"new"}),
+        "author": ({"author": "karpathy"}, {"old"}),
+        "topics": ({"topics": ("ai-policy",)}, {"new"}),
+        "content_kinds": ({"content_kinds": ("x_video",)}, {"new"}),
+        "origins": ({"origins": ("vlm",)}, set()),
+        "has_surfaces": ({"has_surfaces": ("external_article",)}, {"old"}),
+    }
+    assert set(expected) == set(SearchFilters.model_fields), (
+        "a filter was added to the frozen contract without a test that it reaches the profile plane"
+    )
+
+    def owners(**kwargs) -> set[str]:
+        hits = profiled_index.search_profiles("marrowgate", limit=10, filters=SearchFilters(**kwargs))
+        return {hit.item_id for hit in hits}
+
+    assert owners() == {"old", "new"}, "the fixture must match both before any filter"
+    for name, (kwargs, wanted) in expected.items():
+        assert owners(**kwargs) == wanted, f"filter {name} did not narrow the profile plane"
 
 
 def test_a_missing_table_is_an_error_not_an_empty_result() -> None:

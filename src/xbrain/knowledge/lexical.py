@@ -335,9 +335,20 @@ class LexicalIndex:
         The two planes are NOT fused here and their bm25 scores are not comparable: they are
         computed over different corpora, so a single sorted merge would invent a scale.
         Fusion is Plan 03's decision, with RRF and the golden set in front of it.
+
+        AN ORIGIN FILTER YIELDS NOTHING ON THIS PLANE (G-1). `origins` is a property of the
+        TEXT that matched — spec §7.2's `--origin vlm` asks for the figure *seen in an image*
+        — and a profile is a string nobody wrote, composed from a post, a summary and three
+        topic descriptions: it has no origin to satisfy. Until round 04 the seven item-scoped
+        filters reached this plane and `origins` did not, so `search "Forecasting" --origin
+        asr` on the real corpus answered 8 items, 6 of them without one ASR surface and 7
+        without one citable match. Failing closed here is the same shape as a topic chunk
+        under an author filter: what cannot satisfy the question is not a candidate for it.
         """
         expression = self._expression(query, limit)
         if expression is None:
+            return ()
+        if filters is not None and filters.origins:
             return ()
         clauses = ["profiles_fts MATCH ?"]
         params: list[object] = [expression]
@@ -494,6 +505,12 @@ def _item_clauses(filters: SearchFilters, owner_column: str) -> tuple[list[str],
     `owner_column` is a CALLER-CHOSEN identifier from a closed set of two (`chunks.owner_id`,
     `profiles.item_id`), never a user string — the two planes ask the same questions of the
     same tables and a second copy of these clauses would be the divergence rule 5 is about.
+
+    What is NOT here, and where it is: `origins` is a CHUNK property (`_chunk_clauses`), and
+    on the profile plane it is answered by `search_profiles` returning nothing at all, because
+    a profile has no origin (G-1). The totality test over both planes
+    (`test_every_declared_filter_is_pushed_on_the_profile_plane_too`) is what keeps the two
+    planes agreeing on all eight, this docstring only says where each one lives.
     """
     clauses: list[str] = []
     params: list[object] = []
