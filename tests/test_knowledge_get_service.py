@@ -1,0 +1,383 @@
+# tests/test_knowledge_get_service.py
+"""`get` (Plan 02 §5, steps 21–25b).
+
+THE DEFINING TEST OF THIS FILE IS THE ONE THAT DELETES `data/index/`. Invariant 7 of spec
+§3.7 — *`get` lee el store actual; el índice no se convierte en una segunda fuente de
+verdad* — has no meaning as prose; it has meaning as a test that removes the index and calls
+`get` anyway. An index that could answer `get` would be a copy of the corpus that nothing
+invalidates, and the day the two disagreed nobody could say which one a reader had seen.
+
+THE SECOND THING THIS FILE PINS IS THAT TRUNCATION NEVER CUTS A SURFACE'S TEXT. A
+`KnowledgeSurface` carries a fingerprint over its own body; shortening the body to fit a
+budget would leave a fingerprint that no longer describes its own field, so the verbatim
+claim of spec §3.8 would be broken by the pagination itself. Whole surfaces go in `surfaces`;
+the fragments of one that did not fit go in `chunks`, each with its own offsets.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from xbrain.knowledge import index_build
+from xbrain.knowledge.contracts import EvidenceBundle
+from xbrain.knowledge.get_service import (
+    DEFAULT_SURFACES,
+    GetLimits,
+    UnknownSurfaceError,
+    get,
+)
+from xbrain.knowledge.search_service import QueryContext
+from xbrain.models import Item, Topic, TopicPage
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture()
+def corpus() -> tuple[dict[str, Item], list[Topic], dict[str, TopicPage]]:
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    return (
+        {k: Item.model_validate(v) for k, v in raw["items"].items()},
+        [Topic.model_validate(v) for v in raw["vocab"].values()],
+        {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()},
+    )
+
+
+@pytest.fixture()
+def context(tmp_path: Path, corpus) -> QueryContext:
+    store, vocab, pages = corpus
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "items.json").write_text(
+        json.dumps({k: v.model_dump(mode="json") for k, v in store.items()}), encoding="utf-8"
+    )
+    index_build.build(data / "index", store, vocab, pages, data / "items.json")
+    return QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=data / "index",
+        items_path=data / "items.json",
+    )
+
+
+@pytest.fixture()
+def long_article_context(tmp_path: Path, corpus) -> QueryContext:
+    """The S2 case: a real 20k-character article, as a COMMITTED fixture (m-iv).
+
+    The number below is a property of `tests/fixtures/knowledge_long_article.json`, not of the
+    corpus — which is why it can be asserted at all. A corpus figure in an assert would be a
+    test that goes red when someone runs `enrich` (M6).
+    """
+    item = Item.model_validate(
+        json.loads((FIXTURES / "knowledge_long_article.json").read_text(encoding="utf-8"))
+    )
+    _store, vocab, pages = corpus
+    store = {item.id: item}
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "items.json").write_text(
+        json.dumps({k: v.model_dump(mode="json") for k, v in store.items()}), encoding="utf-8"
+    )
+    return QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=data / "index",
+        items_path=data / "items.json",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 21 — the index is not a second source of truth
+# ---------------------------------------------------------------------------
+
+
+def test_get_works_with_the_index_directory_deleted(context: QueryContext) -> None:
+    """Step 21 / acceptance 9: the OPERATIONAL definition of invariant 7 (spec §3.7).
+
+    Not "we do not import index_store" — that is a claim about the code. The index directory
+    is REMOVED and `get` answers anyway. Seen red by reading any field from the index: the
+    call raises `IndexMissingError` instead of returning a bundle.
+    """
+    shutil.rmtree(context.index_dir)
+    assert not context.index_dir.exists()
+
+    bundle = get("k03", context, surfaces=("external_article",))
+
+    assert isinstance(bundle, EvidenceBundle)
+    assert bundle.item.item_id == "k03"
+    assert bundle.surfaces and bundle.surfaces[0].surface_type == "external_article"
+
+
+def test_get_with_a_query_also_works_without_the_index(context: QueryContext) -> None:
+    """The `query` path is the one that could most easily reach for the persisted index.
+
+    It ranks with the SAME scorer — `lexical_fts` — on an in-memory database built from this
+    item's own chunks, so it is one ranking function used twice rather than two that agree by
+    coincidence (rule 5). Seen red by pointing it at `data/index/knowledge.db`.
+    """
+    shutil.rmtree(context.index_dir)
+    bundle = get("k03", context, surfaces=("external_article",), query="Quillfeather")
+    assert bundle.chunks
+    assert "Quillfeather" in bundle.chunks[0].text
+
+
+# ---------------------------------------------------------------------------
+# 22 — the default is metadata, not a dump
+# ---------------------------------------------------------------------------
+
+
+def test_get_without_surfaces_does_not_dump_the_long_bodies(context: QueryContext) -> None:
+    """Step 22 / Plan 02 §5: metadata, topics, summary and the LIST of what is available.
+
+    Asserted by what is ABSENT — no article, no transcript — rather than by a length
+    threshold, which would pass or fail on how long the fixture happens to be.
+    """
+    bundle = get("k03", context)
+    assert {s.surface_type for s in bundle.surfaces} <= set(DEFAULT_SURFACES)
+    assert "external_article" in bundle.item.available_surfaces, (
+        "the body is withheld, but its NAME must be there or the caller cannot ask for it"
+    )
+    assert bundle.chunks == ()
+
+
+def test_get_carries_the_topics_with_their_own_provenance(context: QueryContext) -> None:
+    """Spec §3.6: each topic layer keeps its own provenance.
+
+    The description is `unknown` (the vocabulary does not record whether it was written or
+    generated) and therefore synthesis by the fail-closed rule; the overview is known LLM
+    output. One `origin` for the whole record would have to lie about one of them.
+    """
+    bundle = get("k03", context)
+    assert bundle.topics
+    record = bundle.topics[0]
+    assert record.description.origin == "unknown"
+    assert record.overview is None or record.overview.origin == "llm"
+
+
+def test_asking_for_a_surface_the_item_does_not_have_lists_what_it_does(
+    context: QueryContext,
+) -> None:
+    """An empty bundle would make "we never had it" look like "it is empty" (spec §9.3)."""
+    with pytest.raises(UnknownSurfaceError, match="Superficies disponibles"):
+        get("k01", context, surfaces=("video_transcript",))
+
+
+def test_getting_an_unknown_item_names_how_to_find_the_id(context: QueryContext) -> None:
+    """An actionable error, never a `KeyError` from inside a service."""
+    with pytest.raises(ValueError, match="xbrain search"):
+        get("nope", context)
+
+
+# ---------------------------------------------------------------------------
+# 23 — the complete body (m-iv: a FIXTURE figure, not a corpus one)
+# ---------------------------------------------------------------------------
+
+
+def test_get_returns_the_whole_article_body_untruncated(
+    long_article_context: QueryContext,
+) -> None:
+    """Step 23 / acceptance 9: the S2 article COMPLETE — 20,147 chars from the fixture.
+
+    `ARTICLE_CHAR_LIMIT` truncates in `evidence.py` because that is a prompt; retrieval cannot
+    (plan-00 §3). The number is read from the fixture rather than hard-coded twice, and the
+    equality against the stored source text is what makes it a verbatim claim rather than a
+    length claim. Seen red by applying any ceiling: the body comes back short.
+    """
+    item = next(iter(long_article_context.store.values()))
+    source = next(s for s in item.content.sources if getattr(s, "kind", None) == "external_article")
+
+    bundle = get(item.id, long_article_context, surfaces=("external_article",))
+
+    (surface,) = bundle.surfaces
+    assert surface.text == source.text
+    assert len(surface.text) == 20147, (
+        "this is a property of tests/fixtures/knowledge_long_article.json, not of the corpus"
+    )
+    assert bundle.truncated is False and bundle.cursor is None
+
+
+# ---------------------------------------------------------------------------
+# 24 — explicit truncation and a cursor that continues
+# ---------------------------------------------------------------------------
+
+
+def test_a_body_over_the_budget_is_paginated_not_cut(
+    long_article_context: QueryContext,
+) -> None:
+    """Step 24 / spec §9.3: `truncated: true` plus a cursor, never a silent cut.
+
+    The surface does not appear in `surfaces` at all, because a surface is delivered COMPLETE
+    or not at all: its fingerprint covers its own body, and a shortened `text` would carry a
+    fingerprint that no longer describes it. Its CHUNKS come instead, each with its own
+    offsets and its own fingerprint.
+    """
+    item = next(iter(long_article_context.store.values()))
+    bundle = get(
+        item.id,
+        long_article_context,
+        surfaces=("external_article",),
+        limits=GetLimits(char_budget=3000),
+    )
+    assert bundle.truncated is True and bundle.cursor
+    assert bundle.surfaces == (), "a partial surface would carry a fingerprint that lies"
+    assert bundle.chunks
+    assert sum(len(c.text) for c in bundle.chunks) <= 3000 + max(len(c.text) for c in bundle.chunks)
+
+
+def test_the_cursor_continues_where_the_previous_call_stopped(
+    long_article_context: QueryContext,
+) -> None:
+    """A cursor that does not advance is a loop that looks like progress.
+
+    Asserted by walking the WHOLE body across pages and reassembling it: the concatenation of
+    every chunk delivered equals the stored source text, in order, with nothing repeated and
+    nothing lost. That is the strongest form of "pagination is complete" — a page count would
+    pass while dropping a paragraph.
+    """
+    item = next(iter(long_article_context.store.values()))
+    source = next(s for s in item.content.sources if getattr(s, "kind", None) == "external_article")
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _page in range(50):
+        bundle = get(
+            item.id,
+            long_article_context,
+            surfaces=("external_article",),
+            limits=GetLimits(char_budget=3000),
+            cursor=cursor,
+        )
+        seen += [chunk.text for chunk in bundle.chunks]
+        seen += [surface.text for surface in bundle.surfaces]
+        if not bundle.truncated:
+            break
+        assert bundle.cursor != cursor, "the cursor did not advance"
+        cursor = bundle.cursor
+    else:
+        pytest.fail("pagination never terminated")
+
+    assert "".join(seen) == source.text
+
+
+def test_a_malformed_cursor_is_refused(long_article_context: QueryContext) -> None:
+    """Restarting silently on a bad cursor loops a consumer forever while looking fine."""
+    item = next(iter(long_article_context.store.values()))
+    with pytest.raises(ValueError, match="Cursor"):
+        get(item.id, long_article_context, surfaces=("external_article",), cursor="banana")
+
+
+# ---------------------------------------------------------------------------
+# The query path (spec §7.3)
+# ---------------------------------------------------------------------------
+
+
+def test_a_query_prioritises_the_chunks_that_score(context: QueryContext) -> None:
+    """Spec §7.3: *priorizar dentro de una fuente larga usando un query opcional.*
+
+    THE CASE IS CONSTRUCTED, and it has to be. The obvious fixture —
+    `knowledge_long_article.json` — cannot test this: its 20,147 characters are the NATO
+    alphabet repeated, so every word appears in all 23 chunks and **zero** words are unique to
+    one (measured). A query over it returns the same order as no query at all, and the test
+    would be green while proving nothing (rule 2). The fixture is right for what it exists to
+    pin — that a 20 k body comes back whole — and wrong for this.
+
+    So the body below places a distinctive term in the LAST paragraph, and the assertion is
+    against the POSITIONAL order: the ranked first chunk must not be the positional first
+    chunk. A passthrough that ignored the query would fail on exactly that line.
+    """
+    item = context.store["k03"]
+    body = "\n\n".join(
+        ["Ordinary filler prose about evaluation harnesses. " * 12 for _ in range(6)]
+        + ["The distinctive marker here is Zephyrine, and it appears nowhere else."]
+    )
+    sources = list(item.content.sources)
+    sources[0] = sources[0].model_copy(update={"text": body})
+    store = dict(context.store)
+    store["k03"] = item.model_copy(
+        update={"content": item.content.model_copy(update={"sources": sources})}
+    )
+    local = QueryContext(**{**context.__dict__, "store": store})
+
+    # The chunker's own order, taken directly: a budgeted `get` would only show the first
+    # page, and a term chosen from one page cannot discriminate ranked from unranked.
+    from xbrain.knowledge.chunking import chunk_surfaces
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    surface = next(s for s in item_surfaces(store["k03"]) if s.surface_type == "external_article")
+    positional = chunk_surfaces((surface,), url=store["k03"].url)
+    assert len(positional) > 1, "the body must produce several chunks or nothing is ranked"
+    assert "Zephyrine" not in positional[0].text, "the marker must not open the article"
+
+    ranked = get("k03", local, surfaces=("external_article",), query="Zephyrine").chunks
+
+    assert ranked, "the query path must return something"
+    assert "Zephyrine" in ranked[0].text
+    assert ranked[0].chunk_id != positional[0].chunk_id, (
+        "the ranked first chunk equals the positional first chunk: the query changed nothing"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 25 / 25b — failures and unfetched links are STATE, not silence
+# ---------------------------------------------------------------------------
+
+
+def test_get_returns_a_failed_fetch_as_structured_state(context: QueryContext) -> None:
+    """Step 25 / acceptance 10 / spec §4: a dead link is state, not a silence.
+
+    `k11` has a 404. The failure travels with its `failure_reason`, so a consumer can tell
+    "the server refused" from "we never tried" — which is the whole reason `failed_sources`
+    and `unfetched_links` are two fields (m7).
+    """
+    bundle = get("k11", context)
+    assert bundle.failures
+    assert bundle.failures[0].failure_reason == "not_found"
+
+
+def test_get_returns_unfetched_links_with_their_reason(context: QueryContext) -> None:
+    """Step 25b (m7): a link with no body carries WHY, and carries no text.
+
+    There is deliberately no text field on `UnfetchedLink`: naming the cause never licenses
+    describing the content, and the absence of the field is the guardrail.
+    """
+    bundle = get("k11", context)
+    assert bundle.unfetched_links
+    link = bundle.unfetched_links[0]
+    assert link.reason == "http_error"
+    assert not hasattr(link, "text")
+
+
+def test_asking_for_a_failed_surface_answers_with_the_failure(context: QueryContext) -> None:
+    """The branch `_select` exists for: a FAILED fetch is answered, not refused.
+
+    "This item has no article" and "the article returned 404" are different facts, and an
+    error for both would collapse them.
+    """
+    bundle = get("k11", context, surfaces=("external_article",))
+    assert bundle.failures
+    assert bundle.surfaces == ()
+
+
+# ---------------------------------------------------------------------------
+# 28 — read-only
+# ---------------------------------------------------------------------------
+
+
+def test_get_does_not_touch_items_json(context: QueryContext) -> None:
+    """Acceptance 13, hashed before and after."""
+    import hashlib
+
+    before = hashlib.sha256(context.items_path.read_bytes()).hexdigest()
+    get("k03", context, surfaces=("external_article",))
+    assert hashlib.sha256(context.items_path.read_bytes()).hexdigest() == before
+
+
+def test_the_bundle_validates_against_the_frozen_schema(context: QueryContext) -> None:
+    """`extra="forbid"` means a field the service invents fails construction."""
+    bundle = get("k03", context, surfaces=("external_article",))
+    assert EvidenceBundle.model_validate(bundle.model_dump()) == bundle
