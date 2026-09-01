@@ -32,6 +32,7 @@ from xbrain.knowledge.index_schema import (
     open_index,
 )
 from xbrain.knowledge.search_service import QueryContext, search
+from xbrain.knowledge.surfaces import knowledge_item
 from xbrain.models import Item, Topic, TopicPage, VerificationVerdict
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -268,12 +269,25 @@ def test_a_derived_match_with_no_primary_source_says_so(tmp_path: Path, corpus) 
     """Step 19 / acceptance 8: `verify_with: []` plus the `no_underlying_source` predicate.
 
     Spec §3.5: *si una superficie derivada no permite llegar a material sustentante, el
-    resultado debe decirlo.* This is not a rare branch — on the real corpus 961 of 2,404
-    items (40 %) have no `content` at all, so it covers a large fraction of every answer.
+    resultado debe decirlo.*
+
+    HOW OFTEN THIS HAPPENS ON THE REAL CORPUS: never (F-5). Measured 2026-09-01 over
+    `data/items.json` (2,404 items, sha256 `f76341a3…`), items with NO evidence-class
+    surface: **0 of 2,404**. Every item has a `post` — the tweet text — and a `post` is a
+    `primary_source`. The docstring used to say *961 of 2,404 (40 %)*, which is a different
+    population: items with no `content` BLOCK (960 of 2,404 on the same measurement, F-14).
+    Having no `content` and having no primary surface are not the same fact, and the second
+    one is empty. Rule 2, inside a docstring, in the repository that wrote rule 2.
+
+    THE BRANCH IS STILL WORTH GUARDING because it is a CONTRACT guarantee, not a frequency
+    claim: `verify_with == ()` is the structural form of `no_underlying_source`, so if the
+    emitter ever stops emitting `post` for some item shape, this is what says so instead of
+    silently returning a derived match with nowhere to check it.
 
     The item here is stripped of its post as well as its content, because a post IS a primary
     surface: leaving it would make `verify_with` non-empty for a perfectly good reason and
-    the test would pass without testing the branch (rule 1).
+    the test would pass without testing the branch (rule 1). That stripping is asserted to be
+    load-bearing below, so the constructed item cannot quietly stop being the reason.
     """
     store, vocab, pages = corpus
     store = dict(store)
@@ -298,6 +312,13 @@ def test_a_derived_match_with_no_primary_source_says_so(tmp_path: Path, corpus) 
     assert result.matches and all(m.derived for m in result.matches)
     assert result.verify_with == ()
     assert search_service.no_underlying_source(result) is True
+
+    # And the stripping is what produced it: with its post back, the very same item has a
+    # primary surface to verify against. This is the corpus-wide case (0 of 2,404 items lack
+    # one), so without this line the test could not tell "the branch fired" from "the emitter
+    # stopped emitting `post` for everything".
+    dressed = knowledge_item(store["k02"].model_copy(update={"text": "Snapdragon original"}))
+    assert "post" in dressed.available_surfaces
 
 
 def test_a_primary_match_verifies_against_itself(context: QueryContext) -> None:

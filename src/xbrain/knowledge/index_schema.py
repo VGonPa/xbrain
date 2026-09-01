@@ -16,11 +16,18 @@ pointing at a DIFFERENT row, and the index would return wrong text without raisi
 `chunk_id` stays the contract's identity (`TEXT UNIQUE NOT NULL`); it simply stops being the
 physical key.
 
-**2. A delete retracts the OLD text FIRST.** With external content FTS5 cannot retract a
-row's tokens after the row is gone, because it can no longer read them. Deleting the content
-row first leaves orphan entries in the index — the same silent wrongness as the rowid. The
-order lives in exactly two functions (`delete_chunk_rows`, `delete_profile_rows`) and nowhere
-else.
+**2. A delete RETRACTS the old text — and what matters is that it happens at all, not the
+order (F-7).** With external content, `chunks_fts` stores no text: a `'delete'` command has
+to be handed the original values, which is why both deletion functions SELECT the row before
+touching anything. Because the values are captured first, running the two statements in the
+other order is harmless — measured on sqlite 3.51.2, retract-then-delete and
+delete-then-retract both leave zero rows behind. This file used to claim the opposite
+(*"reversing these two statements produces phantom results"*), and the claim was the wrong
+guard to give the next maintainer: the defect that actually exists is omitting the retraction,
+which leaves an orphan FTS entry that an `INNER JOIN` HIDES until the rowid is reused — and
+then the query returns a chunk whose body is a completely different one. That is what
+`tests/test_knowledge_index_schema.py` pins, by reusing the rowid. The retraction lives in
+exactly two functions (`delete_chunk_rows`, `delete_profile_rows`) and nowhere else.
 
 **3. `profiles_fts` is external content over `profiles`, which stores `profile_text`.** Plan
 02 §2 sketched it as `content=''`. A contentless FTS5 table cannot be deleted from without
@@ -338,11 +345,19 @@ def open_memory_index() -> sqlite3.Connection:
 def delete_chunk_rows(connection: sqlite3.Connection, chunk_ids: Sequence[str]) -> int:
     """Remove chunks from BOTH planes, in the only order that works. Returns how many.
 
-    THE ORDER IS THE WHOLE FUNCTION. `chunks_fts` is external content, so FTS5 must re-read
-    the OLD text to retract its tokens; once the row in `chunks` is gone it cannot, and the
-    tokens stay behind pointing at a rowid that no longer exists. Reversing these two
-    statements produces phantom results and raises nothing — which is why the deletion lives
-    in one function instead of at each call site.
+    THE RETRACTION IS THE WHOLE FUNCTION — not the order of its two statements (F-7).
+    `chunks_fts` is external content and stores no text, so the `'delete'` command must be
+    HANDED the original values; that is what the `SELECT` above is for, and it is why running
+    the `DELETE` first is harmless (measured: both orders leave zero rows behind).
+
+    What is NOT harmless is omitting the `'delete'`. The tokens then stay behind pointing at
+    a rowid that no longer exists, the `INNER JOIN` hides the orphan for as long as nothing
+    reuses that rowid, and the moment `index update` does, the query returns a chunk whose
+    body is a different one entirely. Silent, and invisible to any test that only checks that
+    the deleted word stops matching.
+
+    Which is why the deletion lives in one function instead of at each call site: a call site
+    that forgets the retraction is the failure, and there is nowhere to forget it from here.
     """
     deleted = 0
     for chunk_id in chunk_ids:
@@ -361,7 +376,7 @@ def delete_chunk_rows(connection: sqlite3.Connection, chunk_ids: Sequence[str]) 
 
 
 def delete_profile_rows(connection: sqlite3.Connection, item_ids: Sequence[str]) -> int:
-    """Remove item profiles from both planes, in the same order and for the same reason."""
+    """Remove item profiles from both planes, retracting first and for the same reason."""
     deleted = 0
     for item_id in item_ids:
         row = connection.execute(

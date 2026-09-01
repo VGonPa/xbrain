@@ -353,23 +353,34 @@ def test_the_sweep_cannot_move_the_characterization_fixture() -> None:
     unaffected because it never consults `DEFAULT_CHUNKER_PARAMS`. Seen red by changing
     `_corpus_chunks` to omit `params=` — it then follows the module constant and the fixture
     becomes a hostage of the sweep.
+
+    THE DIFFERENCE IS NOW ASSERTED (F-6). The last line used to be
+    `assert swept_ids is not None`, and a `set` is never `None`: the docstring's first claim
+    — *a DIFFERENT set of chunk ids* — was protected by nothing at all (rule 1).
+
+    BOTH SIDES PASS `chunker_version=PINNED_CHUNKER_VERSION` on purpose. `chunk_id` ENDS in
+    the chunker version, so leaving the swept side on the module default would make the two
+    sets differ by the version SUFFIX whatever the parameters did — the assertion would be
+    green with `swept == PINNED_CHUNKER_PARAMS`, which is the same rule-1 defect wearing a
+    different suffix. Holding the version equal leaves the parameters as the only thing that
+    can move the ids.
+
+    AND IT RUNS OVER THE WHOLE FIXTURE CORPUS, not over the first item. Writing the assertion
+    revealed that the old code chunked only `next(iter(raw["items"]))` = `k01`, whose surfaces
+    all fit in one chunk at both 1200/150 and 2400/0 — so the docstring's claim was not merely
+    unprotected, it was FALSE for the body it named. Over the corpus: 43 pinned chunks against
+    38 swept, differing on `k03`, `k04` and `k08`, the three items with a long surface.
     """
     swept = ChunkerParams(target=2400, max_chars=2000, overlap=0, min_chars=40)
-    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
-    item = Item.model_validate(next(iter(raw["items"].values())))
-    pinned_ids = {
-        c.chunk_id
-        for c in chunk_surfaces(
-            item_surfaces(item),
-            params=PINNED_CHUNKER_PARAMS,
-            chunker_version=PINNED_CHUNKER_VERSION,
-        )
+    pinned_ids = {chunk.chunk_id for chunk in _corpus_chunks()}
+    swept_ids = {
+        chunk.chunk_id
+        for chunk in _corpus_chunks(params=swept, chunker_version=PINNED_CHUNKER_VERSION)
     }
-    swept_ids = {c.chunk_id for c in chunk_surfaces(item_surfaces(item), params=swept)}
-    assert pinned_ids  # the fixture item does produce chunks
+    assert pinned_ids  # the fixture corpus does produce chunks
+    assert swept_ids != pinned_ids, "the sweep's extreme candidate chunks the corpus the same"
     # And the pinned ranking still holds, because it passed its own parameters.
     test_ranking_matches_the_characterization_fixture()
-    assert swept_ids is not None
 
 
 def test_a_hit_resolves_back_to_its_item_and_surface() -> None:

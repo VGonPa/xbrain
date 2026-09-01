@@ -454,7 +454,11 @@ def test_surfaces_never_carry_a_verdict() -> None:
 
 
 def test_an_item_without_content_still_emits_post_and_summary() -> None:
-    """961 of 2 404 items (40 %) have no `content` at all — that is not an error.
+    """960 of 2 404 items (40 %) have no `content` at all — that is not an error.
+
+    Measured 2026-09-01 on `data/items.json`, sha256 `f76341a3…`. NOTE the population: this
+    is *no `content` block*, which is NOT *no primary surface* — the second is 0 of 2,404,
+    because every one of these still emits a `post` (F-5).
 
     Plan 01 §9: they emit `post` + `summary` + topics, with `content_kinds=()`.
     """

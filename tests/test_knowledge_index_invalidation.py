@@ -140,7 +140,10 @@ def test_update_touches_only_the_changed_item(built: Path, corpus) -> None:
 
 
 def test_update_detects_a_summary_change_on_an_item_with_no_content(built: Path, corpus) -> None:
-    """Step 6: 961 of 2,404 real items have NO `content`, so `fetched_at` reaches none of them.
+    """Step 6: 960 of 2,404 real items have NO `content`, so `fetched_at` reaches none of them.
+
+    (Measured 2026-09-01 on `data/items.json`, sha256 `f76341a3…`. The claim holds with
+    either number; 961 was one item stale, F-14.)
 
     CLAUDE.md rule 6 in its exact form: *check the invalidation signal actually reaches the
     population being repaired*. Seen red by fingerprinting `content.fetched_at` alone — this

@@ -18,7 +18,8 @@ towards the warning, the same direction `origin: unknown -> llm_synthesis` fails
 
 THE PER-ITEM FINGERPRINT IS OVER THE SURFACES, NOT OVER `(fetched_at, enriched_at)` as Plan
 01 §10 sketched, and CLAUDE.md rule 6 is both reasons. First, `content.fetched_at` cannot
-reach an item whose `content` is `None` — 961 of 2,404 in the real store — because there is
+reach an item whose `content` is `None` — 960 of 2,404 in the real store, measured
+2026-09-01 on sha256 `f76341a3…` — because there is
 nothing to stamp. Second, a timestamp is a PROXY: a summary edited by hand, or any repair
 that rewrites text without touching a clock, changes the indexable corpus and leaves the
 proxy unmoved, so the index would keep serving the old body under a fingerprint asserting it
