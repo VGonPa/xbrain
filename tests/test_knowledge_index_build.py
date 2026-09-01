@@ -181,9 +181,7 @@ def test_a_dry_run_does_not_destroy_an_existing_index(workspace, corpus) -> None
     assert manifest_path(workspace / "index").read_text(encoding="utf-8") == manifest_before
 
 
-def test_a_forced_rebuild_produces_a_file_the_same_size_as_a_fresh_one(
-    workspace, corpus
-) -> None:
+def test_a_forced_rebuild_produces_a_file_the_same_size_as_a_fresh_one(workspace, corpus) -> None:
     """`--force` starts from a NEW file, so the artefact is deterministic.
 
     Measured on the real corpus first: clearing the rows in place left SQLite's freelist

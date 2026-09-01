@@ -178,19 +178,7 @@ def load_config(repo_root: Path) -> Config:
         raise ValueError(
             "config.toml: [frames].interval_seconds must be > 0 (0 selects every frame)"
         )
-    # Imported HERE rather than at module scope: `config` is imported by almost everything,
-    # and `knowledge.get_service` pulls in the whole knowledge stack. Deferring keeps the
-    # dependency one-way and stops a future `knowledge -> config` edge becoming a cycle.
-    from xbrain.knowledge.get_service import DEFAULT_CHAR_BUDGET
-    from xbrain.knowledge.index_schema import DEFAULT_INDEX_DIR_NAME
-
-    index = settings.get("index", {})
-    index_max_matches = int(index.get("max_matches_per_item", 3))
-    if index_max_matches < 1:
-        raise ValueError("config.toml: [index].max_matches_per_item must be >= 1")
-    index_budget = int(index.get("get_char_budget", DEFAULT_CHAR_BUDGET))
-    if index_budget < 1:
-        raise ValueError("config.toml: [index].get_char_budget must be >= 1")
+    index = _index_settings(settings.get("index", {}))
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -214,7 +202,36 @@ def load_config(repo_root: Path) -> Config:
         frames_interval_seconds=frames_interval_seconds,
         frames_dedupe=bool(frames.get("dedupe", True)),
         frames_dedupe_distance=frames_dedupe_distance,
-        index_dir=index.get("dir", DEFAULT_INDEX_DIR_NAME),
-        index_max_matches_per_item=index_max_matches,
-        index_get_char_budget=index_budget,
+        index_dir=index["dir"],
+        index_max_matches_per_item=index["max_matches_per_item"],
+        index_get_char_budget=index["get_char_budget"],
     )
+
+
+def _index_settings(raw: dict) -> dict:
+    """The `[index]` section, defaulted and range-checked with actionable messages.
+
+    Extracted rather than inlined for the reason `[frames]` should have been: `load_config` is
+    one branch per setting, and every section added to it costs a point of cyclomatic
+    complexity that belongs to the section, not to the loader.
+
+    The two knowledge imports are deferred to HERE, not module scope: `config` is imported by
+    almost everything and `knowledge.get_service` pulls in the whole knowledge stack, so a
+    module-level edge would make a future `knowledge -> config` import a cycle.
+    """
+    from xbrain.knowledge.get_service import DEFAULT_CHAR_BUDGET
+    from xbrain.knowledge.index_schema import DEFAULT_INDEX_DIR_NAME
+
+    max_matches = int(raw.get("max_matches_per_item", 3))
+    if max_matches < 1:
+        raise ValueError("config.toml: [index].max_matches_per_item must be >= 1")
+    budget = int(raw.get("get_char_budget", DEFAULT_CHAR_BUDGET))
+    if budget < 1:
+        raise ValueError("config.toml: [index].get_char_budget must be >= 1")
+    return {
+        # A NAME under `data/`, never a path: `Config.index_path` resolves it and PROVES
+        # containment, which rejecting `..` alone would not (a symlink passes that check).
+        "dir": raw.get("dir", DEFAULT_INDEX_DIR_NAME),
+        "max_matches_per_item": max_matches,
+        "get_char_budget": budget,
+    }
