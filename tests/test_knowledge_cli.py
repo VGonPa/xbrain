@@ -506,12 +506,25 @@ def test_update_dry_run_over_a_deleted_database_leaves_search_closed(workspace: 
 
 
 def test_index_status_reports_the_store_delta(workspace: Path) -> None:
-    """Step 10c at the CLI: `status --json` says how many items changed."""
+    """Step 10c at the CLI: `status --json` says HOW MANY items changed — a number.
+
+    The clean half (`0`) is satisfied by a boolean too (G-3), so the store on disk is then
+    edited on TWO items and the count asserted `== 2`. Seen red under the `int(bool(…))`
+    mutation of `status` in an isolated copy: `1 == 2` fails.
+    """
     runner.invoke(app, ["index", "build"])
     payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
     assert payload["items_changed"] == 0 and payload["behind"] is False
     assert payload["manifest"]["chunker_version"]
     assert payload["counts"]["chunks"] > 0
+
+    items_path = workspace / "data" / "items.json"
+    raw = json.loads(items_path.read_text(encoding="utf-8"))
+    for item_id in ("k02", "k03"):
+        raw[item_id]["enriched"]["summary"] = f"un resumen completamente distinto para {item_id}"
+    items_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert payload["items_changed"] == 2 and payload["behind"] is True
 
 
 def test_get_works_after_the_index_is_removed(workspace: Path) -> None:

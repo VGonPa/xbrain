@@ -417,29 +417,42 @@ def test_status_reports_how_many_items_changed(workspace, corpus) -> None:
     """Step 10c: `status` is an explicit command, so it CAN afford to load the store.
 
     "Something changed" is not actionable — it does not distinguish a touched file from a
-    hundred re-enriched items. Seen red by reporting a boolean.
+    hundred re-enriched items. So the fixture changes TWO items, removes TWO and adds TWO,
+    and asserts `== 2` on each: the previous version changed one and removed one and
+    asserted `== 1` / `== 0`, which a BOOLEAN satisfies — and its docstring claimed *seen red
+    by reporting a boolean*, which was false (G-3, gate round 04: with `len(delta.x)` mutated
+    to `int(bool(delta.x))` in `status` and `_update_report`, every count test stayed green).
+
+    Seen red, for real this time, under that same mutation in an isolated copy: `2 == 1`.
     """
     store, vocab, pages = corpus
     _build(workspace, corpus)
     clean = index_build.status(workspace / "index", store, workspace / "items.json")
     assert clean.items_changed == 0 and clean.items_added == 0 and clean.items_removed == 0
 
+    def reenriched(item: Item) -> Item:
+        return item.model_copy(
+            update={
+                "enriched": item.enriched.model_copy(
+                    update={
+                        "summary": f"un resumen completamente distinto para {item.id}",
+                        "enriched_at": item.enriched.enriched_at + timedelta(hours=1),
+                    }
+                )
+            }
+        )
+
     changed = dict(store)
-    victim = changed["k02"]
-    changed["k02"] = victim.model_copy(
-        update={
-            "enriched": victim.enriched.model_copy(
-                update={
-                    "summary": "un resumen completamente distinto",
-                    "enriched_at": victim.enriched.enriched_at + timedelta(hours=1),
-                }
-            )
-        }
-    )
+    changed["k02"] = reenriched(store["k02"])
+    changed["k03"] = reenriched(store["k03"])
     del changed["k01"]
+    del changed["k04"]
+    changed["k98"] = store["k05"].model_copy(update={"id": "k98"})
+    changed["k99"] = store["k06"].model_copy(update={"id": "k99"})
     after = index_build.status(workspace / "index", changed, workspace / "items.json")
-    assert after.items_changed == 1
-    assert after.items_removed == 1
+    assert after.items_changed == 2
+    assert after.items_removed == 2
+    assert after.items_added == 2
     assert "xbrain index update" in after.advice
 
 
