@@ -18,8 +18,10 @@ the corpus instead of to the tokenizer.
 
 THE CONNECTIVE IS A DISJUNCTION, AND THAT IS A RETRIEVAL DECISION, NOT A DEFAULT (M3). Terms
 were ANDed — the FTS5 default — which turns a twelve-word question into a demand that all
-twelve words sit inside ONE chunk. Measured on the real corpus (2,404 items, 18,319 chunks,
-the 21 scorable cases of `eval/golden-set.yaml`): the conjunction returned NOT ONE ROW for 18
+twelve words sit inside ONE chunk. Measured on the real corpus (2,404 items, 18,319 chunks
+under the PROVISIONAL chunker v1 — the shipped v2 emits 22,286, and this counterfactual has
+not been re-run on it because the connective decision does not turn on the chunk count; the
+21 scorable cases of `eval/golden-set.yaml`): the conjunction returned NOT ONE ROW for 18
 of the 21, and the only three that retrieved anything were single-term `exacto` queries. The
 published baseline — `semantico` 0.0, `cruzado_idioma` 0.0, `topic` 0.0 — was therefore a
 measurement of the query builder, and it was being read as an absence of vocabulary overlap.

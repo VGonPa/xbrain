@@ -56,7 +56,7 @@ on an Apple-silicon laptop, with the shipped chunker (`target=800, overlap=0`, c
 |---|---|
 | `index build`, full | **1.37 s** median of 5 (1.20 – 1.54) |
 | loading the store (not counted above) | 0.22 s |
-| `index update`, 0 items changed | 0.15 s |
+| `index update`, 0 items changed | 0.15 s — 0 writes to the DATABASE (the manifest is always rewritten: it records the current cheap signal) |
 | `index update`, 1 item changed | 0.16 s — 3 chunks out, 3 in |
 | `index update`, 100 items changed | 0.26 s — 645 chunks out, 645 in |
 | `data/index/knowledge.db` | **52.4 MB** (manifest 1 KB) |
@@ -88,11 +88,14 @@ simply call `index update` on their way out*.
 
 ### Interruption
 
-`Ctrl-C` mid-build rolls the transaction back and writes **no manifest**. Measured: after an
-interrupt, `chunks` holds 0 rows and no manifest exists — and an index with no manifest is
-**refused** by every query rather than answered partially, so an interruption can never leave a
-small index that looks valid. `xbrain index status` reports it as incomplete and names
-`xbrain index build`.
+`Ctrl-C` mid-build rolls the transaction back and writes **no manifest**. There are **TWO
+reachable states**, not one (F-13): a `SIGINT` early enough (measured at 0.55 s) leaves neither
+database nor manifest, and one late enough (0.75 s) leaves the database with all 22,286 rows
+committed and **still no manifest**. The safety property holds in both, and it is the manifest
+that carries it: an index with no manifest is **refused** by every query rather than answered
+partially, so an interruption can never leave a small — or even a complete — index that looks
+valid. `xbrain index status` reports it as incomplete and names `xbrain index build`.
+*(This paragraph used to say only "`chunks` holds 0 rows", which is one of the two states.)*
 
 ---
 
@@ -131,6 +134,15 @@ asked.
 `expansion` has no cases because it is the stratum the minimal graph is for (Plan 04). `thread`
 and `user_note` have **no data in the corpus at all**, so no case can exist for them.
 
+**`filtros` publishes `recall@10 = precision@10 = 1.000` BY CONSTRUCTION, and that pair does
+not measure ranking (F-11).** Its two cases define `relevant_items` as *exactly* the population
+the filter selects (2 and 3 items), so a filter that reaches the backend returns that population
+and nothing else. The number is not vacuous — it can come out near 0 if the filter never reaches
+the `WHERE`, which is the defect that motivated the cases (rule 2 is satisfied: there is a way
+for a different answer to come out) — but read it as *the filter runs*, never as *ranking is
+perfect there*. Its effect on the aggregate, said out loud: `precision@10` 0.2500 → **0.3152**
+and `recall@10` 0.8099 → **0.8264**.
+
 ---
 
 ## What the lexical baseline cannot do
@@ -142,9 +154,13 @@ the retriever.
   half of a bilingual corpus, so `agent` does not match `agents`. This is what a vector layer is
   for.
 - **IDF is relative to THIS corpus.** A word that reads as a function word can still be rare to
-  the index and therefore undiscounted. Measured: `el` sits in 5,748 of the chunks (31 %) on the
-  real corpus and in 1 of 43 in the test fixture — bm25 behaving correctly on each corpus it was
-  given, and ranking `el` very differently in the two.
+  the index and therefore undiscounted. Measured 2026-09-01 on the shipped chunker
+  (`target=800, overlap=0`, v2; 2,404 items, 22,286 chunks, store sha256 `f76341a3…`): `el`
+  sits in **6,070 of the 22,286 chunks (27.2 %)** on the real corpus and in 1 of 49 in the test
+  fixture — bm25 behaving correctly on each corpus it was given, and ranking `el` very
+  differently in the two. *(This line read `5,748 (31 %)` until F-4: that is the figure for the
+  PROVISIONAL chunker v1, `1200/150`, whose corpus is 18,320 chunks — a v1 number published
+  under a v2 population. The chunker moved and the derived figure did not, which is rule 6.)*
 - **The terms are ORed, not phrased.** Every term is quoted as an FTS5 string and joined with
   `OR`. A conjunction returned zero rows for 18 of 21 cases (measured), so the disjunction is
   what makes bm25 able to rank at all — but it also means no phrase query, and therefore no

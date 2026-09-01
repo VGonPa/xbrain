@@ -477,10 +477,17 @@ def test_idf_is_relative_to_THIS_corpus_and_that_limit_is_declared() -> None:
     """The declared limit of the disjunction, pinned as a measurement rather than a warning.
 
     IDF is a property of the INDEXED CORPUS, not of the language, so a word that is a
-    function word to a reader can still be rare to the index. Measured: `el` sits in 1 of the
-    43 fixture chunks (2.3 %) and in 5,748 of the 18,319 real-corpus chunks (31.4 %), so the
-    fixture ranks it high and the real corpus does not — both bm25 behaving correctly on the
-    corpus it was given. This is what a vector layer is for (Plan 03).
+    function word to a reader can still be rare to the index. Measured 2026-09-01 with the
+    SHIPPED chunker (v2, `800/0`) on `data/items.json` sha256 `f76341a3…`: `el` sits in 1 of
+    the 49 fixture chunks (2.0 %) and in **6,070 of the 22,286** real-corpus chunks
+    (**27.2 %**), so the fixture ranks it high and the real corpus does not — both bm25
+    behaving correctly on the corpus it was given. This is what a vector layer is for
+    (Plan 03).
+
+    THE ASSERTION BELOW CHUNKS AT v1 (`_corpus_chunks()` defaults to `PINNED_CHUNKER_PARAMS`),
+    which is why it says 43 and not 49; the ratio is 1-in-something either way and the point
+    is the CONTRAST with the real corpus. The prose used to quote `5,748 of 18,319 (31.4 %)`
+    — the v1 figure, left standing after this branch changed the chunker to v2 (F-4).
     """
     index = _index()
     index.add(_corpus_chunks())
