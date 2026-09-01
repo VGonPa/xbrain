@@ -3008,6 +3008,10 @@ def _query_context(cfg: Config):
     """
     from xbrain.knowledge.search_service import QueryContext
 
+    # The producers are read off `_index_options`, not off `cfg` a second time (A-4): the
+    # build and `get` must agree on what wrote a transcript, and two readings of the same
+    # config are the divergence rule 5 is about.
+    options = _index_options(cfg)
     return QueryContext(
         store=load_store(cfg.items_path),
         vocab=load_vocab(cfg.data_dir / "vocab.yaml"),
@@ -3017,6 +3021,8 @@ def _query_context(cfg: Config):
         vault_dir=cfg.output_dir,
         language=cfg.output_language,
         max_matches_per_item=cfg.index_max_matches_per_item,
+        transcribe_command=options.transcribe_command,
+        vision_command=options.vision_command,
     )
 
 

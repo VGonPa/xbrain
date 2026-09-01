@@ -470,3 +470,24 @@ def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
     result = runner.invoke(app, ["search", "Quillfeather"])
     assert result.exit_code == 0
     assert "xbrain get " in result.output
+
+
+def test_get_reports_the_configured_transcriber_as_the_transcripts_producer(
+    workspace: Path,
+) -> None:
+    """A-4 at the adapter: the ONE place the producer is defined is `config.toml`, and both
+    `index build` and `get` must read it from there (rule 5). Before the fix `_query_context`
+    dropped it and `get` answered `producer: null` for a transcript the build had stamped.
+
+    Seen red before the fix: `producer` was `None`.
+    """
+    config = workspace / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + '[transcribe]\ncommand = "review-transcriber"\n',
+        encoding="utf-8",
+    )
+    bundle = _json_stdout(
+        runner.invoke(app, ["get", "k08", "--surface", "video_transcript", "--json"])
+    )
+    assert bundle["surfaces"][0]["surface_type"] == "video_transcript"
+    assert bundle["surfaces"][0]["producer"] == "review-transcriber"

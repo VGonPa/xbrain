@@ -474,3 +474,44 @@ def test_a_query_cursor_is_refused_without_its_query_and_vice_versa(
             query="Alpha",
             cursor="0:3",
         )
+
+
+# ---------------------------------------------------------------------------
+# A-4 — `get` keeps the ASR/VLM producer
+# ---------------------------------------------------------------------------
+
+
+def test_get_keeps_the_transcriber_and_vision_command_that_produced_a_surface(
+    tmp_path: Path, corpus
+) -> None:
+    """A-4 (round 02, Codex F-06): the build received `transcribe_command` and
+    `vision_command` from one CLI definition, but `QueryContext` did not carry them and
+    `get` called `item_surfaces(item, transcribe_command=None, vision_command=None)`, so the
+    same transcript surface the index was built with `producer="review-transcriber"` came
+    out of `get` with `producer=None`. Spec §3.4 requires *el método o componente que la
+    produjo* to be conserved, and CLAUDE.md records why it is not bookkeeping: parakeet does
+    not fail on Spanish audio, it invents, and a reader must be able to recover what wrote
+    the words they are reading.
+
+    Seen red before the fix: `QueryContext` had no such fields (`TypeError`), and with them
+    ignored, `producer is None`.
+    """
+    store, vocab, pages = corpus
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "items.json").write_text(
+        json.dumps({k: v.model_dump(mode="json") for k, v in store.items()}), encoding="utf-8"
+    )
+    context = QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=data / "index",
+        items_path=data / "items.json",
+        transcribe_command="review-transcriber",
+        vision_command="review-vision",
+    )
+    transcript = get("k08", context, surfaces=("video_transcript",)).surfaces[0]
+    assert transcript.producer == "review-transcriber"
+    frame = get("k08", context, surfaces=("video_frame",)).surfaces[0]
+    assert frame.producer == "review-vision"

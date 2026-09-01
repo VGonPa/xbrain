@@ -104,7 +104,13 @@ def get(
             f"No existe el item {item_id!r} en el store. "
             "Comprueba el id con `xbrain search` o `xbrain knowledge inspect <id>`."
         )
-    emitted = item_surfaces(item, transcribe_command=None, vision_command=None)
+    # The SAME producers the build stamped (A-4): without them a transcript the index holds
+    # with `producer="parakeet-mlx"` came back from `get` with `producer=None`.
+    emitted = item_surfaces(
+        item,
+        transcribe_command=context.transcribe_command,
+        vision_command=context.vision_command,
+    )
     projection = knowledge_item(item, vault_dir=context.vault_dir)
     wanted = _select(surfaces, emitted, projection.available_surfaces, projection.failed_sources)
 

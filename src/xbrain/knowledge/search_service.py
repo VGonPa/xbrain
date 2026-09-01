@@ -110,6 +110,12 @@ class QueryContext:
     the live store, and M5 makes `search` hydrate verification from it. A service that read
     metadata from the index and verdicts from the store would have two answers to *who wrote
     this*, which is the divergence rule 5 is about.
+
+    `transcribe_command` and `vision_command` are the two PRODUCERS that do not live in the
+    store (A-4). The build stamps them on every transcript and frame surface; a `get` that
+    re-emitted those surfaces without them answered `producer: null` for the very data the
+    index had just been built with — spec §3.4's *método o componente que la produjo*, lost
+    on the hydration path. They come from the same config definition as `IndexOptions`.
     """
 
     store: Mapping[str, Item]
@@ -120,6 +126,8 @@ class QueryContext:
     vault_dir: Path | None = None
     language: str = "English"
     max_matches_per_item: int = 3
+    transcribe_command: str | None = None
+    vision_command: str | None = None
 
 
 def search(
