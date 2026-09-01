@@ -923,3 +923,27 @@ def test_the_sweep_cannot_move_the_characterization_fixture(corpus) -> None:
 
     assert DEFAULT_CHUNKER_PARAMS is before, "the sweep mutated the module default"
     test_ranking_matches_the_characterization_fixture()
+
+
+def test_evaluate_closes_the_index_it_built(corpus) -> None:
+    """M-1 (round 02, Codex F-08): `evaluate` built its `:memory:` index through
+    `build_index` and returned the report with the connection still open — and
+    `sweep_chunker` calls `evaluate` once per combination, so a twelve-cell sweep leaked
+    twelve handles and the gate printed `ResourceWarning: unclosed database` for each.
+
+    Seen red before the fix: one `unclosed database` warning per `evaluate`.
+    """
+    import gc
+    import warnings
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        evaluate(cases, corpus)
+        gc.collect()
+    leaks = [
+        w
+        for w in caught
+        if issubclass(w.category, ResourceWarning) and "unclosed database" in str(w.message)
+    ]
+    assert not leaks, [str(w.message) for w in leaks]

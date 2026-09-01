@@ -375,26 +375,31 @@ def evaluate(
     results: list[CaseResult] = []
     unmeasured: list[dict[str, Any]] = []
     latencies: list[float] = []
-    for case in cases:
-        blocked = unsupported_filters(case.filters, executed)
-        if blocked:
-            unmeasured.append(
-                {
-                    "id": case.id,
-                    "strata": list(case.strata),
-                    "provenance": case.provenance,
-                    "unsupported_filters": list(blocked),
-                    "reason": (
-                        f"la estrategia `{executed}` no puede aplicar {list(blocked)}; "
-                        "puntuar el caso sería fabricar un cero (spec §8.6.8)"
-                    ),
-                }
-            )
-            continue
-        started = time.perf_counter()
-        hits = _search(index, case, limit=depth)
-        latencies.append((time.perf_counter() - started) * 1000)
-        results.append(_score(case, hits, ks))
+    try:
+        for case in cases:
+            blocked = unsupported_filters(case.filters, executed)
+            if blocked:
+                unmeasured.append(
+                    {
+                        "id": case.id,
+                        "strata": list(case.strata),
+                        "provenance": case.provenance,
+                        "unsupported_filters": list(blocked),
+                        "reason": (
+                            f"la estrategia `{executed}` no puede aplicar {list(blocked)}; "
+                            "puntuar el caso sería fabricar un cero (spec §8.6.8)"
+                        ),
+                    }
+                )
+                continue
+            started = time.perf_counter()
+            hits = _search(index, case, limit=depth)
+            latencies.append((time.perf_counter() - started) * 1000)
+            results.append(_score(case, hits, ks))
+    finally:
+        # The `:memory:` index lives exactly as long as the scoring (M-1). `sweep_chunker`
+        # calls this once per combination; a twelve-cell sweep used to leak twelve handles.
+        index.connection.close()
 
     by_stratum = _aggregate(results, STRATA, lambda case: case.strata)
     by_provenance = _aggregate(results, {"real", "construido"}, lambda case: (case.provenance,))

@@ -297,8 +297,13 @@ def _ranked_chunks(
         for chunk in _chunks_of(item, surface):
             by_id[chunk.chunk_id] = chunk
     index = LexicalIndex(open_memory_index())
-    index.add(list(by_id.values()))
-    hits = index.search(query, max(len(by_id), 1))
+    try:
+        index.add(list(by_id.values()))
+        hits = index.search(query, max(len(by_id), 1))
+    finally:
+        # A scratch database per call, CLOSED per call (M-1): a long-lived adapter would
+        # otherwise hold one handle per `get --query` it ever answered.
+        index.connection.close()
     ordered = [by_id[hit.chunk_id] for hit in hits if hit.chunk_id in by_id]
 
     page = _Page(budget=limits.char_budget)

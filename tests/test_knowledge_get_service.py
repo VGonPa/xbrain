@@ -515,3 +515,31 @@ def test_get_keeps_the_transcriber_and_vision_command_that_produced_a_surface(
     assert transcript.producer == "review-transcriber"
     frame = get("k08", context, surfaces=("video_frame",)).surfaces[0]
     assert frame.producer == "review-vision"
+
+
+# ---------------------------------------------------------------------------
+# M-1 — the scratch database is closed
+# ---------------------------------------------------------------------------
+
+
+def test_get_with_a_query_closes_its_scratch_database(context: QueryContext) -> None:
+    """M-1 (round 02, Codex F-08): `_ranked_chunks` opened `sqlite3(":memory:")` and never
+    closed it; Python 3.13 reports the leak as a `ResourceWarning: unclosed database`, which
+    the gate printed repeatedly during pytest. One call is harmless; a long-lived adapter
+    (Plan 04's MCP server) accumulates handles for every `get --query`.
+
+    Seen red before the fix: one `unclosed database` warning per call.
+    """
+    import gc
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        get("k03", context, surfaces=("external_article",), query="Alpha")
+        gc.collect()
+    leaks = [
+        w
+        for w in caught
+        if issubclass(w.category, ResourceWarning) and "unclosed database" in str(w.message)
+    ]
+    assert not leaks, [str(w.message) for w in leaks]
