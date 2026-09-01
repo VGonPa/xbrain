@@ -404,14 +404,31 @@ class LexicalIndex:
         try:
             return list(self.connection.execute(sql, params))
         except sqlite3.OperationalError as error:
-            # A malformed MATCH expression that survived quoting. Degrading to "no results"
-            # is right HERE AND ONLY HERE: the query was understood as data, it simply
-            # matched nothing FTS5 could parse. It is NOT the same as an empty query, which
-            # is rejected above — and it must not swallow a read-only violation, which is a
-            # real defect and is re-raised.
-            if "readonly" in str(error).lower() or "attempt to write" in str(error).lower():
-                raise
-            return []
+            # A MATCH expression FTS5's parser rejects degrades to "no results", HERE AND
+            # ONLY HERE: the query was understood as data and simply held nothing FTS5
+            # could parse. Everything else propagates (C-2). The first version caught every
+            # `OperationalError` except a read-only one — chosen by substring, rule 9 in
+            # miniature — so `no such table`, `database is locked` and `disk I/O error`
+            # all came back as "the corpus holds nothing". The parser's own error family is
+            # the closed set the branch was written for, and it is matched positively.
+            if _is_fts_parse_error(error):
+                return []
+            raise
+
+
+# What FTS5's expression parser says when it cannot parse — measured on sqlite 3.51.2 with
+# `NEAR(`, `"unterminated` and `*`. A closed, positive list: an error that is not one of these
+# is not a parse error and must not be read as an empty corpus.
+_FTS_PARSE_ERRORS: tuple[str, ...] = (
+    "fts5: syntax error",
+    "unterminated string",
+    "unknown special query",
+)
+
+
+def _is_fts_parse_error(error: sqlite3.OperationalError) -> bool:
+    message = str(error)
+    return any(message.startswith(prefix) for prefix in _FTS_PARSE_ERRORS)
 
 
 def _chunk_clauses(filters: SearchFilters) -> tuple[list[str], list[object]]:

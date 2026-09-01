@@ -170,6 +170,32 @@ def test_a_strategy_that_is_not_in_the_contract_is_refused_before_any_work(
     assert "lexical" in str(caught.value), "names what would have been valid"
 
 
+@pytest.mark.parametrize("table", ["chunks_fts", "surfaces", "profiles_fts"])
+def test_an_index_missing_a_table_is_refused_naming_the_rebuild(
+    context: QueryContext, table: str
+) -> None:
+    """C-2 (round 02, both gates): an INCOMPLETE schema was answered as a valid search.
+
+    `open_index(read_only=True)` only proved `sqlite_master` was readable, and
+    `LexicalIndex._fetch` swallowed EVERY `sqlite3.OperationalError` but a read-only one, so
+    `DROP TABLE chunks_fts` produced a normal response — profile-plane results, or none —
+    with `degraded: ["no_embeddings"]` and no word about the missing table. Measured on the
+    real corpus (2,404 items, 2026-09-01): `query_returned_normally=True`, 10 results, and
+    nothing declared. A schema that cannot answer the question is the corrupt-base case of
+    F-3 in another costume, and it ends with the same sentence.
+
+    Seen red before the fix: `search` returned a `SearchResponse` for all three tables.
+    """
+    connection = sqlite3.connect(db_path(context.index_dir))
+    connection.execute(f"DROP TABLE {table}")  # nosec B608 — a test fixture, closed set
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
+        search("Quillfeather", context)
+    assert table in str(caught.value), "names WHAT is missing, not only that something is"
+
+
 def test_search_is_deterministic(context: QueryContext) -> None:
     """Spec §3.7.8: the same query over the same index answers identically, twice."""
     assert search("agents", context).model_dump() == search("agents", context).model_dump()

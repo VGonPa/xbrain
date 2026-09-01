@@ -297,11 +297,18 @@ def open_index(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
             )
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
-        return _prove_readable(connection, path)
+        return _verify_schema(_prove_readable(connection, path), path)
+    existed = path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     _prove_readable(connection, path)
+    if existed:
+        # An EXISTING database is verified, never repaired: `create_schema` is idempotent,
+        # so a dropped table would be silently re-created EMPTY and `index update` would
+        # then carry on as if nothing had happened (C-2). A fresh file is the only one
+        # that gets its schema created here.
+        _verify_schema(connection, path)
     create_schema(connection)
     return connection
 
@@ -325,6 +332,35 @@ def _prove_readable(connection: sqlite3.Connection, path: Path) -> sqlite3.Conne
         raise IndexIncompatibleError(
             f"La base del índice en {path} no se puede leer ({error}). {REBUILD_ADVICE}"
         ) from error
+    return connection
+
+
+def _verify_schema(connection: sqlite3.Connection, path: Path) -> sqlite3.Connection:
+    """Refuse a database that lacks a table this code queries (C-2).
+
+    `_prove_readable` proves the FILE is SQLite; it says nothing about what is inside. Both
+    round-03 gates dropped `chunks_fts` behind a healthy manifest and got a normal answer:
+    `LexicalIndex._fetch` absorbed the `no such table` as "no rows", so `search` returned
+    the profile-plane candidates — or nothing — with `degraded: ["no_embeddings"]` and not
+    one word about the missing table, indistinguishable from a corpus that holds nothing.
+    Spec §9.3 asks for an actionable error; Plan 02 §11 tabulates a base the code cannot
+    read as *error accionable con `index build --force`*. Same operator situation as a
+    corrupt file, same sentence.
+
+    Checked against `TABLES | FTS_TABLES`, the declared set, so a table added to the DDL is
+    verified without anybody remembering to add it here.
+    """
+    present = {
+        row["name"]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    missing = sorted((TABLES | FTS_TABLES) - present)
+    if missing:
+        connection.close()
+        raise IndexIncompatibleError(
+            f"La base del índice en {path} está incompleta: faltan las tablas "
+            f"{', '.join(missing)}. {REBUILD_ADVICE}"
+        )
     return connection
 
 

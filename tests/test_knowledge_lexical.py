@@ -37,6 +37,7 @@ from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chu
 from xbrain.knowledge.ids import CHUNKER_VERSION
 from xbrain.knowledge.contracts import SearchFilters
 from xbrain.knowledge.index_schema import open_index, open_memory_index
+from xbrain.knowledge import lexical
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.lexical_fts import FTS_CONNECTIVE, FTS_TOKENIZE
 from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, Locator
@@ -844,3 +845,36 @@ def test_the_profile_plane_honours_the_same_filters() -> None:
 
     hits = index.search_profiles("evaluation", limit=5, filters=SearchFilters(source="own_tweet"))
     assert [h.item_id for h in hits] == ["i2"]
+
+
+def test_a_missing_table_is_an_error_not_an_empty_result() -> None:
+    """C-2: `_fetch` used to absorb EVERY `OperationalError` except a read-only one and
+    return `[]`, so `no such table`, `database is locked` and `disk I/O error` all came back
+    as "the corpus holds nothing" — and the decision was made by substring of the message,
+    which is CLAUDE.md rule 9 in miniature.
+
+    The catch now absorbs exactly what it was written for — an expression FTS5's parser
+    rejects — and everything else propagates. Seen red before the fix: `search` returned `()`
+    over an index whose `chunks_fts` had been dropped.
+    """
+    index = _index()
+    index.add(_corpus_chunks())
+    index.connection.execute("DROP TABLE chunks_fts")
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        index.search("marrowgate", 5)
+
+
+def test_only_an_fts_syntax_error_degrades_to_no_results() -> None:
+    """The other half of C-2: what the catch was FOR still degrades, so narrowing it did not
+    turn a hostile query into a traceback.
+
+    `match_expression` quotes every term, so no expression built by `search` can reach the
+    parser malformed; the branch is exercised through `_fetch` directly with the three
+    error families FTS5's parser emits (measured on sqlite 3.51.2: `fts5: syntax error`,
+    `unterminated string`, `unknown special query`).
+    """
+    index = _index()
+    index.add(_corpus_chunks())
+    sql = f"{lexical._SELECT_CHUNKS} WHERE chunks_fts MATCH ? {lexical._CHUNK_RANK_ORDER} LIMIT ?"
+    for malformed in ("NEAR(", '"unterminated', "*"):
+        assert index._fetch(sql, (malformed, 5)) == [], malformed
