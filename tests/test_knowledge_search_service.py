@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge import index_build, search_service
+from xbrain.knowledge import contracts, index_build, search_service
 from xbrain.knowledge.contracts import SearchFilters, SearchResponse
 from xbrain.knowledge.index_schema import (
     IndexIncompatibleError,
@@ -106,10 +106,17 @@ def test_the_response_declares_no_embeddings(context: QueryContext) -> None:
 
 
 def test_a_strategy_with_no_backend_is_answered_lexically_and_says_so(
-    context: QueryContext,
+    context: QueryContext, monkeypatch
 ) -> None:
     """F-2 / spec §9.3: *lexical sigue operativo y el response declara estrategia degradada;
     no finge resultados vectoriales.*
+
+    THE PREMISE IS PINNED, NOT INHERITED (M-2, round 02): this test is ABOUT the degradation,
+    so it needs a strategy with no backend — and it used to borrow that from production by
+    assuming `vector` stays unimplemented, the coupling F-2 removed from the guardrail one
+    door further in. Simulated with `vector` added to `IMPLEMENTED_STRATEGIES`: red before
+    the pin (`'vector' == 'lexical'` fails), green with it, because the test now declares
+    the world it tests instead of depending on Plan 03 not having landed.
 
     `SearchResponse.strategy` used to be the strategy REQUESTED, echoed back without a check:
     `search(..., strategy="hybrid")` returned `strategy: "hybrid"` over results produced
@@ -125,6 +132,7 @@ def test_a_strategy_with_no_backend_is_answered_lexically_and_says_so(
     Seen red before the fix: `strategy` came back `'vector'` and `'hybrid'`, and no
     `*_not_implemented` flag existed at all.
     """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
     for requested in ("vector", "hybrid", "hybrid_graph"):
         response = search("Quillfeather", context, strategy=requested)
         assert response.strategy == "lexical", requested

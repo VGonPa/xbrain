@@ -313,8 +313,16 @@ def test_the_guardrail_no_longer_depends_on_vector_being_unimplemented(corpus) -
         evaluation.SUPPORTED_FILTERS.update(original_filters)
 
 
-def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(corpus) -> None:
+def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(
+    corpus, monkeypatch
+) -> None:
     """F-2 at the harness: `xbrain eval --strategy vector` published `vector`, scored by bm25.
+
+    THE PREMISE IS PINNED, NOT INHERITED (M-2, round 02): `vector` is the example of a
+    declared-but-unimplemented strategy, and borrowing that fact from production made the
+    test expire the day Plan 03 lands — the same coupling F-2 removed from the guardrail.
+    Simulated with `vector` added to `IMPLEMENTED_STRATEGIES`: red before the pin
+    (`payload["strategy"] == "vector"`), green with it.
 
     21 cases, `recall@10 = 0.8099`, under a heading that named a retriever which does not
     exist. That is the metric whose label does not describe its instrument — rule 2, and spec
@@ -326,6 +334,7 @@ def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(corp
     Seen red before the fix: `payload["strategy"]` came back `"vector"` and the markdown
     heading named `vector` as though a vector retriever had produced the numbers.
     """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
     cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
     report = evaluate(cases, corpus, strategy="vector")
     payload = report.to_dict()
