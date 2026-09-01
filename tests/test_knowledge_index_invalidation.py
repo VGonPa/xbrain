@@ -21,6 +21,7 @@ resolve — so nothing would raise, and the ranking would be a blend of two chun
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -28,7 +29,14 @@ import pytest
 
 from xbrain.knowledge import index_build
 from xbrain.knowledge.chunking import ChunkerParams
-from xbrain.knowledge.index_schema import IndexIncompatibleError, db_path, manifest_path, open_index
+from xbrain.knowledge.index_schema import (
+    FTS_TABLES,
+    TABLES,
+    IndexIncompatibleError,
+    db_path,
+    manifest_path,
+    open_index,
+)
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Item, Topic, TopicPage
 
@@ -574,6 +582,50 @@ def test_update_over_a_missing_database_creates_nothing_and_leaves_search_closed
     )
     with pytest.raises(IndexError_, match="xbrain index build --force"):
         search("Quillfeather", context)
+
+
+@pytest.mark.parametrize("table", sorted(TABLES | FTS_TABLES))
+def test_update_refuses_an_index_missing_a_table_instead_of_recreating_it_empty(
+    built: Path, corpus, table: str
+) -> None:
+    """G-8 (gate round 04): the WRITE door of the C-2 schema guard had no test.
+
+    `open_index` in write mode verifies the schema of an EXISTING database so `update` does
+    not carry on over a dropped table — `create_schema` is idempotent and would re-create it
+    EMPTY. The read door had its test (`test_an_index_missing_a_table_is_refused_naming_the_
+    rebuild`); this one did not, and the gate measured what removing the call costs: 119
+    tests still green, and then `DROP TABLE chunks_fts` → `update` returns normally (an empty
+    `chunks_fts` under 56 full `chunks` rows), `status.incomplete=False`, and `search`
+    answers with 0 matches and `degraded: ["no_embeddings"]` — the silent mode of C-2,
+    re-entered through `update`.
+
+    Parametrised over the DECLARED set (`TABLES | FTS_TABLES`), like the DDL test, so a table
+    added to the schema is covered without anyone remembering. `update` and `status` are both
+    asserted, and on the same two facts: the error names the TABLE and the rebuild command.
+
+    Seen red by removing `_verify_schema` from the write door of `open_index` (in an isolated
+    copy of the tree): ALL ELEVEN parametrisations fail, through two different doors. For
+    the six tables no `COUNT(*)` watches (`chunks_fts`, `profiles_fts`, `item_topics`,
+    `item_content_kinds`, `source_failures`, `unfetched_links`) `update` simply returns an
+    `UpdateReport`. For the five counted planes `update` still raises — `require_consistent`
+    sees `items 0 != 12` — but `create_schema` runs through `executescript`, which COMMITS,
+    so the refused update has already re-created the table EMPTY on disk, and the `status`
+    that follows finds a complete schema and merely declares a count mismatch instead of
+    raising. A guard that repairs the schema on its way to refusing is the silent mode with
+    one extra step, which is why both instruments are asserted here.
+    """
+    store, _vocab, _pages = corpus
+    connection = sqlite3.connect(db_path(built / "index"))
+    connection.execute(f"DROP TABLE {table}")  # nosec B608 — a test fixture, closed set
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
+        _update(built, store, corpus)
+    assert table in str(caught.value), "names WHAT is missing, not only that something is"
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
+        index_build.status(built / "index", store, built / "items.json")
+    assert table in str(caught.value)
 
 
 def test_status_declares_a_manifest_the_code_cannot_use(built: Path, corpus) -> None:
