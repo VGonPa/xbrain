@@ -635,7 +635,9 @@ def test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface(
     sources = list(item.content.sources)
     patch = {field: Author(**value) if field == "author" else value}
     sources[position] = sources[position].model_copy(update=patch)
-    edited = item.model_copy(update={"content": item.content.model_copy(update={"sources": sources})})
+    edited = item.model_copy(
+        update={"content": item.content.model_copy(update={"sources": sources})}
+    )
     assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), field
 
 

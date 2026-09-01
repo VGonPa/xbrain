@@ -857,7 +857,9 @@ def test_the_profile_plane_honours_the_same_filters() -> None:
 
     hits = index.search_profiles("evaluation", limit=5, filters=SearchFilters(source="own_tweet"))
     assert [h.item_id for h in hits] == ["i2"]
-    assert index.search_profiles("evaluation", limit=5, filters=SearchFilters(origins=("vlm",))) == ()
+    assert (
+        index.search_profiles("evaluation", limit=5, filters=SearchFilters(origins=("vlm",))) == ()
+    )
 
 
 @pytest.fixture()
@@ -923,7 +925,9 @@ def test_every_declared_filter_is_pushed_on_the_profile_plane_too(
     )
 
     def owners(**kwargs) -> set[str]:
-        hits = profiled_index.search_profiles("marrowgate", limit=10, filters=SearchFilters(**kwargs))
+        hits = profiled_index.search_profiles(
+            "marrowgate", limit=10, filters=SearchFilters(**kwargs)
+        )
         return {hit.item_id for hit in hits}
 
     assert owners() == {"old", "new"}, "the fixture must match both before any filter"

@@ -584,7 +584,9 @@ def test_update_over_a_missing_database_creates_nothing_and_leaves_search_closed
         search("Quillfeather", context)
 
 
-def test_update_sees_a_quoted_author_repaired_without_touching_the_body(built: Path, corpus) -> None:
+def test_update_sees_a_quoted_author_repaired_without_touching_the_body(
+    built: Path, corpus
+) -> None:
     """G-5 (gate round 04): rule 6 on the attribution rule this repo says it paid for in blood.
 
     `item_fingerprint` hashed the item's metadata plus each surface's `surface_fingerprint`

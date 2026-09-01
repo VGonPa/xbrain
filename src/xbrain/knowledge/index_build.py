@@ -348,8 +348,21 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
 
 # The column order of `surfaces`, as ONE tuple type shared by the writer and the fingerprint.
 SurfaceRow = tuple[
-    str, str, str, str, str, str, int, str | None, str | None, str | None, str | None, str,
-    str | None, str, int,
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    int,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str,
+    str | None,
+    str,
+    int,
 ]
 
 
