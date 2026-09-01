@@ -50,7 +50,8 @@ EXCERPT_CHARS = 300
 
 # The fixed SELECT skeletons. Module constants rather than inline literals so the only thing
 # the query builder concatenates at call time is a WHERE clause of bound `?` placeholders
-# plus `RANK_ORDER` — which is what makes the `# nosec B608` below a statement of fact.
+# plus the `rank_order` string — which is what makes the `# nosec B608` below a statement of
+# fact.
 # The surface columns ride along on a LEFT JOIN by primary key (A-1): the index STORES each
 # surface's attribution and locator, and the first version threw both away between the row
 # and the response — a quoted post came back with `attribution: null` under the poster's

@@ -54,7 +54,6 @@ number published today measures the retriever.
 from __future__ import annotations
 
 import re
-import sqlite3
 
 # The ONE tokenizer string. Exported so the baseline, Plan 02's persisted index and the
 # ranking fixture all record the same value and a change to it is visible in a diff.
@@ -107,42 +106,11 @@ def rank_order(fts_table: str, meta_table: str) -> str:
     return f"ORDER BY bm25({fts_table}) ASC, {meta_table}.chunk_id ASC"
 
 
-# `rowid INTEGER PRIMARY KEY` explicitly (m1): an implicit rowid is renumbered by `VACUUM`,
-# which would silently repoint every FTS row at a different chunk.
-_SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS chunk (
-    rowid        INTEGER PRIMARY KEY,
-    chunk_id     TEXT NOT NULL UNIQUE,
-    surface_id   TEXT NOT NULL,
-    owner_type   TEXT NOT NULL,
-    owner_id     TEXT NOT NULL,
-    surface_type TEXT NOT NULL,
-    origin       TEXT NOT NULL,
-    trust_class  TEXT NOT NULL,
-    derived      INTEGER NOT NULL,
-    title        TEXT,
-    url          TEXT,
-    text         TEXT NOT NULL,
-    fingerprint  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS chunk_owner ON chunk (owner_type, owner_id);
-CREATE INDEX IF NOT EXISTS chunk_surface_type ON chunk (surface_type);
-
-{fts5_table_sql("chunk_fts")};
-"""
-
-RANK_ORDER = rank_order("chunk_fts", "chunk")
-
 # FTS5 reads punctuation as syntax: `@`, `"`, `*`, `(`, `NEAR`, `-`. The golden set has
 # literal queries — `@simonw`, `11.37%` — whose characters would otherwise become operators
 # or a syntax error. Every term is therefore quoted as an FTS5 string literal, so the query
 # is DATA and never syntax.
 _TERM_SPLIT = re.compile(r"[^\w@#.%/-]+", re.UNICODE)
-
-
-def create_schema(connection: sqlite3.Connection) -> None:
-    """Create the chunk table and its FTS5 companion. Idempotent."""
-    connection.executescript(_SCHEMA)
 
 
 def match_expression(query: str) -> str | None:
