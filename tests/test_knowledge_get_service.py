@@ -368,6 +368,20 @@ def test_asking_for_a_failed_surface_answers_with_the_failure(context: QueryCont
 # ---------------------------------------------------------------------------
 
 
+def test_the_two_copies_of_the_failure_list_agree(context: QueryContext) -> None:
+    """`EvidenceBundle.failures` and `KnowledgeItem.failed_sources` are BOTH in the frozen
+    contract, and the service fills both from one projection.
+
+    Two fields holding the same fact is the shape that drifts (rule 5). Plan 01 froze them
+    and Plan 02 §0 forbids amending the contract here, so the redundancy is pinned by a test
+    instead: the day a second writer fills one and forgets the other, this goes red. The same
+    holds for `unfetched_links`.
+    """
+    bundle = get("k11", context)
+    assert bundle.failures == bundle.item.failed_sources
+    assert bundle.unfetched_links == bundle.item.unfetched_links
+
+
 def test_get_does_not_touch_items_json(context: QueryContext) -> None:
     """Acceptance 13, hashed before and after."""
     import hashlib

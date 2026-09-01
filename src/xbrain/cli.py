@@ -51,6 +51,7 @@ from xbrain.fetch_x import (
     refetch_full_texts,
 )
 from xbrain.generate import generate as run_generate
+from xbrain.knowledge.index_schema import IndexError_
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -246,6 +247,13 @@ def _is_date_only(value: str) -> bool:
 _OPERATOR_ERRORS = (
     FileNotFoundError,
     ValueError,
+    # The knowledge index's own actionable errors (`IndexMissingError`,
+    # `IndexIncompatibleError`). They are NOT `ValueError`s on purpose — "the index is not
+    # built" is a state of the world, not a bad argument — so without this row they escaped
+    # the handler and the CLI printed a bare traceback for exactly the two cases spec §9.3
+    # requires to name a command. Caught by the CLI test that asserts BOTH a non-zero exit
+    # and the text `xbrain index build`.
+    IndexError_,
     KeyError,
     RuntimeError,
     NotImplementedError,
@@ -2964,6 +2972,245 @@ def _render_inspect(payload: dict) -> str:
             f" trust={surface['trust_class']}  {excerpt}"
         )
     return "\n".join(lines)
+
+
+# ============================================================================
+# index / search / get — the persisted index and the two query services (Plan 02)
+# ============================================================================
+
+index_app = typer.Typer(help="Construir y consultar el índice de conocimiento.")
+app.add_typer(index_app, name="index")
+
+
+def _index_options(cfg: Config):
+    """The build options, from config. One place, so build/update/status cannot disagree.
+
+    Three different `IndexOptions` built at three call sites is the divergence CLAUDE.md rule
+    5 is about, and the field that would go wrong first is `transcribe_command`: it lands in
+    `KnowledgeSurface.producer`, so an update that omitted it would rewrite every transcript
+    surface with a null producer and the fingerprint would change for no reason at all.
+    """
+    from xbrain.knowledge.index_build import IndexOptions
+
+    return IndexOptions(
+        vault_dir=cfg.output_dir,
+        transcribe_command=cfg.transcribe_command,
+        vision_command=cfg.vision_command or None,
+    )
+
+
+def _query_context(cfg: Config):
+    """The store, the vocabulary and the topic pages — what every query needs.
+
+    The STORE is loaded here and not inside the services, because spec §3.7.7 makes `get`
+    read the live store and M5 makes `search` hydrate verification from it. One load, one
+    definition of what the corpus currently says.
+    """
+    from xbrain.knowledge.search_service import QueryContext
+
+    return QueryContext(
+        store=load_store(cfg.items_path),
+        vocab=load_vocab(cfg.data_dir / "vocab.yaml"),
+        topic_pages=load_topic_pages(cfg.topics_path),
+        index_dir=cfg.index_path,
+        items_path=cfg.items_path,
+        vault_dir=cfg.output_dir,
+        language=cfg.output_language,
+        max_matches_per_item=cfg.index_max_matches_per_item,
+    )
+
+
+@index_app.command("build")
+@_handle_cli_errors
+def index_build_command(
+    force: bool = typer.Option(False, "--force", help="Reconstruye un índice ya existente."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Cuenta el trabajo sin escribir."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Construye `data/index/` desde cero a partir del store.
+
+    NO ES DESTRUCTIVO y por eso NO toma snapshot: `data/index/` es derivado y reconstruible
+    por definición (spec §5.6). Lo que sí hace es leer `items.json`, `vocab.yaml` y
+    `topics.json` sin escribir en ninguno.
+    """
+    from xbrain.knowledge import index_build as build_module
+    from xbrain.knowledge.render import render_build
+
+    cfg = _config()
+    report = build_module.build(
+        cfg.index_path,
+        load_store(cfg.items_path),
+        load_vocab(cfg.data_dir / "vocab.yaml"),
+        load_topic_pages(cfg.topics_path),
+        cfg.items_path,
+        options=_index_options(cfg),
+        dry_run=dry_run,
+        force=force,
+    )
+    if json_out:
+        typer.echo(json.dumps(_dataclass_json(report), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_build(report))
+
+
+@index_app.command("update")
+@_handle_cli_errors
+def index_update_command(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Muestra el plan sin escribir."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Actualiza el índice incrementalmente: solo lo que cambió en el store."""
+    from xbrain.knowledge import index_build as build_module
+    from xbrain.knowledge.render import render_update
+
+    cfg = _config()
+    report = build_module.update(
+        cfg.index_path,
+        load_store(cfg.items_path),
+        load_vocab(cfg.data_dir / "vocab.yaml"),
+        load_topic_pages(cfg.topics_path),
+        cfg.items_path,
+        options=_index_options(cfg),
+        dry_run=dry_run,
+    )
+    if json_out:
+        typer.echo(json.dumps(_dataclass_json(report), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_update(report))
+
+
+@index_app.command("status")
+@_handle_cli_errors
+def index_status_command(
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Informa de qué contiene el índice y cuánto se ha quedado atrás respecto al store.
+
+    Es un comando EXPLÍCITO, así que puede permitirse cargar el store y decir CUÁNTOS items
+    cambiaron — no solo que algo cambió (B3, paso 10c).
+    """
+    from xbrain.knowledge import index_build as build_module
+    from xbrain.knowledge.render import render_status
+
+    cfg = _config()
+    report = build_module.status(
+        cfg.index_path,
+        load_store(cfg.items_path),
+        cfg.items_path,
+        options=_index_options(cfg),
+    )
+    if json_out:
+        typer.echo(json.dumps(_status_json(report), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_status(report))
+
+
+def _dataclass_json(report) -> dict:
+    """A build/update report as JSON. Plain values only — no dataclass leaks into stdout."""
+    return {key: value for key, value in report.__dict__.items()}
+
+
+def _status_json(report) -> dict:
+    return {
+        "schema_version": "1",
+        "manifest": report.manifest.to_dict() if report.manifest else None,
+        "counts": report.counts,
+        "items_added": report.items_added,
+        "items_changed": report.items_changed,
+        "items_removed": report.items_removed,
+        "behind": report.behind,
+        "incomplete": report.incomplete,
+        "advice": report.advice,
+    }
+
+
+@app.command("search")
+@_handle_cli_errors
+def search_command(
+    query: str = typer.Argument(..., help="La consulta."),
+    limit: int = typer.Option(10, "--limit", help="Número máximo de items a devolver."),
+    since: str | None = typer.Option(None, "--from", help="Fecha mínima (YYYY-MM-DD)."),
+    until: str | None = typer.Option(None, "--to", help="Fecha máxima (YYYY-MM-DD)."),
+    mine: bool = typer.Option(False, "--mine", help="Solo tus propios tweets (own_tweet)."),
+    source: str | None = typer.Option(None, "--source", help="bookmark | own_tweet."),
+    author: str | None = typer.Option(None, "--author", help="Handle del autor del item."),
+    topic: list[str] = typer.Option([], "--topic", help="Topic asignado (repetible)."),
+    kind: list[str] = typer.Option([], "--kind", help="Content kind (repetible)."),
+    origin: list[str] = typer.Option([], "--origin", help="Procedencia del chunk (repetible)."),
+    has_surface: list[str] = typer.Option(
+        [], "--has-surface", help="El item tiene esta superficie (repetible)."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Busca en el corpus y devuelve items con sus fragmentos citables.
+
+    SOLO LECTURA: abre el índice en modo `ro` y no escribe en `items.json`, `vocab.yaml` ni
+    `topics.json`. Sin red y sin ninguna llamada a un modelo (spec §13.12).
+    """
+    from xbrain.knowledge.contracts import SearchFilters
+    from xbrain.knowledge.render import render_search
+    from xbrain.knowledge.search_service import search as run_search
+
+    cfg = _config()
+    if mine and source and source != "own_tweet":
+        raise ValueError("--mine y --source son incompatibles: --mine ya significa own_tweet.")
+    filters = SearchFilters(
+        created_from=_parse_date(since),
+        created_to=_parse_date(until, end_of_day=True),
+        source="own_tweet" if mine else source,  # type: ignore[arg-type]
+        author=author,
+        topics=tuple(topic),
+        content_kinds=tuple(kind),  # type: ignore[arg-type]
+        origins=tuple(origin),  # type: ignore[arg-type]
+        has_surfaces=tuple(has_surface),  # type: ignore[arg-type]
+    )
+    response = run_search(query, _query_context(cfg), filters=filters, limit=limit)
+    if json_out:
+        typer.echo(json.dumps(response.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_search(response))
+
+
+@app.command("get")
+@_handle_cli_errors
+def get_command(
+    item_id: str = typer.Argument(..., help="Id del item."),
+    surface: list[str] = typer.Option(
+        [], "--surface", help="Superficie a volcar completa (repetible)."
+    ),
+    query: str | None = typer.Option(
+        None, "--query", help="Prioriza los fragmentos que puntúan dentro de la fuente."
+    ),
+    budget: int | None = typer.Option(
+        None, "--budget", help="Techo de caracteres por respuesta antes de truncar."
+    ),
+    cursor: str | None = typer.Option(
+        None, "--cursor", help="Continúa desde donde truncó la respuesta anterior."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Devuelve la evidencia de un item, leyendo el STORE — nunca el índice (spec §3.7.7).
+
+    Funciona con `data/index/` borrado, que es la definición operativa del invariante 7: el
+    índice no es una segunda fuente de verdad.
+    """
+    from xbrain.knowledge.get_service import GetLimits
+    from xbrain.knowledge.get_service import get as run_get
+    from xbrain.knowledge.render import render_get
+
+    cfg = _config()
+    bundle = run_get(
+        item_id,
+        _query_context(cfg),
+        surfaces=tuple(surface) or None,  # type: ignore[arg-type]
+        query=query,
+        limits=GetLimits(char_budget=budget or cfg.index_get_char_budget),
+        cursor=cursor,
+    )
+    if json_out:
+        typer.echo(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_get(bundle))
 
 
 @app.command("eval")

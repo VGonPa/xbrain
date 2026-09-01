@@ -70,6 +70,25 @@ class Config:
     frames_interval_seconds: float
     frames_dedupe: bool
     frames_dedupe_distance: int
+    # `[index]` — the persisted knowledge index (Plan 02). Names are FLAT, like every other
+    # field here: `Config` is a plain dataclass and a nested class per TOML section would be
+    # a second convention for the same job (m19). `index_dir` is a NAME under `data/`, never
+    # a path, so `resolve_index_dir` can prove containment instead of trusting a string.
+    index_dir: str
+    index_max_matches_per_item: int
+    index_get_char_budget: int
+
+    @property
+    def index_path(self) -> Path:
+        """Where `data/index/` lives, PROVEN to stay inside `data/` (§12.6, m8).
+
+        Resolved through `resolve_index_dir` rather than joined here, because rejecting `..`
+        is not the same check as proving containment: a symlink under `data/` passes the
+        first and fails the second.
+        """
+        from xbrain.knowledge.index_schema import resolve_index_dir
+
+        return resolve_index_dir(self.data_dir, self.index_dir)
 
     @property
     def payload_dir(self) -> Path:
@@ -159,6 +178,19 @@ def load_config(repo_root: Path) -> Config:
         raise ValueError(
             "config.toml: [frames].interval_seconds must be > 0 (0 selects every frame)"
         )
+    # Imported HERE rather than at module scope: `config` is imported by almost everything,
+    # and `knowledge.get_service` pulls in the whole knowledge stack. Deferring keeps the
+    # dependency one-way and stops a future `knowledge -> config` edge becoming a cycle.
+    from xbrain.knowledge.get_service import DEFAULT_CHAR_BUDGET
+    from xbrain.knowledge.index_schema import DEFAULT_INDEX_DIR_NAME
+
+    index = settings.get("index", {})
+    index_max_matches = int(index.get("max_matches_per_item", 3))
+    if index_max_matches < 1:
+        raise ValueError("config.toml: [index].max_matches_per_item must be >= 1")
+    index_budget = int(index.get("get_char_budget", DEFAULT_CHAR_BUDGET))
+    if index_budget < 1:
+        raise ValueError("config.toml: [index].get_char_budget must be >= 1")
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -182,4 +214,7 @@ def load_config(repo_root: Path) -> Config:
         frames_interval_seconds=frames_interval_seconds,
         frames_dedupe=bool(frames.get("dedupe", True)),
         frames_dedupe_distance=frames_dedupe_distance,
+        index_dir=index.get("dir", DEFAULT_INDEX_DIR_NAME),
+        index_max_matches_per_item=index_max_matches,
+        index_get_char_budget=index_budget,
     )

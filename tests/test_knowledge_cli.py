@@ -270,3 +270,147 @@ def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> N
             "not handing the chunker the block boundaries"
         )
         assert chunk["char_end"] in edges
+
+
+# ---------------------------------------------------------------------------
+# 26, 28 — `index`, `search`, `get` at the CLI (Plan 02 §6)
+# ---------------------------------------------------------------------------
+
+
+def _store_hash(workspace: Path) -> str:
+    """The hash of the store file, for the before/after comparison of step 28."""
+    return hashlib.sha256((workspace / "data" / "items.json").read_bytes()).hexdigest()
+
+
+def test_index_build_then_search_then_get_end_to_end(workspace: Path) -> None:
+    """The chain the plan's exit gate is about, run as a user would run it.
+
+    Three commands in sequence against a real workspace, because each of them is green on its
+    own and the interesting failures are at the seams — a config field the CLI does not
+    thread, an index directory resolved differently by two commands, a store loaded twice
+    with different vocabularies. CLAUDE.md rule 3: the judge must EXECUTE.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+
+    found = _json_stdout(runner.invoke(app, ["search", "Quillfeather", "--json"]))
+    assert found["schema_version"] == "1" and found["strategy"] == "lexical"
+    assert found["results"], "the built index answered nothing"
+    item_id = found["results"][0]["item_id"]
+
+    bundle = _json_stdout(runner.invoke(app, ["get", item_id, "--json"]))
+    assert bundle["item"]["item_id"] == item_id
+
+
+def test_every_json_path_writes_only_json_to_stdout(workspace: Path) -> None:
+    """Step 26 / spec §3.7.9: `--json` never mixes human diagnostics into stdout.
+
+    Parsed as a WHOLE document per command, so one stray `print` fails here instead of
+    failing a consumer's parser weeks later, far from the cause. Every command of the plan is
+    covered, because the one that regresses will be whichever is not.
+    """
+    runner.invoke(app, ["index", "build"])
+    for argv in (
+        ["index", "status", "--json"],
+        ["index", "update", "--json"],
+        ["search", "Quillfeather", "--json"],
+        ["get", "k03", "--json"],
+        ["get", "k03", "--surface", "external_article", "--json"],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, f"{argv}: {result.output}"
+        json.loads(result.stdout)
+
+
+def test_no_command_of_this_plan_writes_to_the_store(workspace: Path) -> None:
+    """Step 28 / acceptance 13: a hash of `items.json` before and after every command.
+
+    A claim about the FILE, not about the code. "We never call `save_store`" is what someone
+    believes; an unchanged sha256 is what happened. `vocab.yaml` and `topics.json` are
+    included for the same reason.
+    """
+    before = {
+        name: hashlib.sha256((workspace / "data" / name).read_bytes()).hexdigest()
+        for name in ("items.json", "topics.json", "vocab.yaml")
+    }
+    for argv in (
+        ["index", "build"],
+        ["index", "update"],
+        ["index", "status"],
+        ["search", "Quillfeather"],
+        ["get", "k03", "--surface", "external_article"],
+        ["index", "build", "--force", "--dry-run"],
+    ):
+        assert runner.invoke(app, argv).exit_code == 0, argv
+    after = {
+        name: hashlib.sha256((workspace / "data" / name).read_bytes()).hexdigest()
+        for name in ("items.json", "topics.json", "vocab.yaml")
+    }
+    assert after == before
+
+
+def test_index_build_takes_no_snapshot(workspace: Path) -> None:
+    """Plan 02 §6: no command here is destructive, so none of them snapshots.
+
+    `data/index/` is derived and reconstructible by definition (spec §5.6). A snapshot would
+    copy a store nothing touched, and would train the reader to ignore the ones that matter.
+    """
+    runner.invoke(app, ["index", "build"])
+    snapshots = workspace / "data" / "snapshots"
+    assert not snapshots.exists() or not list(snapshots.iterdir())
+
+
+def test_search_without_an_index_names_the_build_command(workspace: Path) -> None:
+    """Step 30 at the CLI: an actionable message, and a non-zero exit.
+
+    Both halves. A command that prints its own failure and exits 0 is the `gh pr checks` trap
+    of CLAUDE.md rule 9 reproduced locally — the exit status is what a script reads.
+    """
+    result = runner.invoke(app, ["search", "Quillfeather"])
+    assert result.exit_code != 0
+    assert "xbrain index build" in result.output
+
+
+def test_mine_maps_to_own_tweet(workspace: Path) -> None:
+    """Spec §7.2's shortcut, asserted through the FILTER the response echoes back.
+
+    The response carries the filters it applied, so this checks the mapping the service
+    received rather than the flag the CLI parsed.
+    """
+    runner.invoke(app, ["index", "build"])
+    payload = _json_stdout(runner.invoke(app, ["search", "thread", "--mine", "--json"]))
+    assert payload["filters"]["source"] == "own_tweet"
+
+
+def test_mine_and_a_conflicting_source_are_refused(workspace: Path) -> None:
+    """Two flags that mean different things must not silently pick one."""
+    runner.invoke(app, ["index", "build"])
+    result = runner.invoke(app, ["search", "agents", "--mine", "--source", "bookmark"])
+    assert result.exit_code != 0
+    assert "incompatibles" in result.output
+
+
+def test_index_status_reports_the_store_delta(workspace: Path) -> None:
+    """Step 10c at the CLI: `status --json` says how many items changed."""
+    runner.invoke(app, ["index", "build"])
+    payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert payload["items_changed"] == 0 and payload["behind"] is False
+    assert payload["manifest"]["chunker_version"]
+    assert payload["counts"]["chunks"] > 0
+
+
+def test_get_works_after_the_index_is_removed(workspace: Path) -> None:
+    """Acceptance 9 at the CLI: `get` reads the store, so the index can be gone."""
+    runner.invoke(app, ["index", "build"])
+    shutil.rmtree(workspace / "data" / "index")
+    payload = _json_stdout(
+        runner.invoke(app, ["get", "k03", "--surface", "external_article", "--json"])
+    )
+    assert payload["surfaces"][0]["surface_type"] == "external_article"
+
+
+def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
+    """Step 27 at the CLI: the human view is rendered from the SAME response model."""
+    runner.invoke(app, ["index", "build"])
+    result = runner.invoke(app, ["search", "Quillfeather"])
+    assert result.exit_code == 0
+    assert "xbrain get " in result.output
