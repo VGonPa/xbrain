@@ -31,8 +31,9 @@ identical by construction: same tokenizer, same columns, same `bm25()`, same tie
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 
 from xbrain.knowledge.chunking import chunk_surfaces
 from xbrain.knowledge.contracts import EvidenceBundle
@@ -109,7 +110,7 @@ def get(
 
     if query:
         delivered_surfaces: tuple[KnowledgeSurface, ...] = ()
-        chunks, truncated, next_cursor = _ranked_chunks(item, wanted, query, limits)
+        chunks, truncated, next_cursor = _ranked_chunks(item, wanted, query, limits, cursor)
     else:
         delivered_surfaces, chunks, truncated, next_cursor = _paginate(item, wanted, limits, cursor)
 
@@ -211,7 +212,7 @@ def _paginate(
         if resume == 0 and len(surface.text) <= page.budget:
             page.take_surface(surface)
             continue
-        stopped = page.take_chunks(_chunks_of(item, surface), position, resume)
+        stopped = page.take_chunks(_chunks_of(item, surface), resume, partial(_encode, position))
         if stopped is not None:
             return page.surfaces_out(), page.chunks_out(), True, stopped
         if position + 1 < len(wanted):
@@ -236,9 +237,14 @@ class _Page:
         self.budget -= len(surface.text)
 
     def take_chunks(
-        self, pieces: Sequence[KnowledgeChunk], position: int, resume: int
+        self, pieces: Sequence[KnowledgeChunk], resume: int, encode: Callable[[int], str]
     ) -> str | None:
         """Fill from `pieces`, returning the cursor if the budget ran out. None if it did not.
+
+        `encode` turns the offset to resume from into the caller's cursor — positional for
+        `_paginate`, `q:<offset>` for the ranked path — so ONE budget loop serves both and
+        the query path cannot again end up with a truncation that names no continuation
+        (A-2).
 
         The FIRST chunk of a page is always taken, however long it is: refusing it would
         return an empty page with a cursor pointing at the same place, and a consumer
@@ -246,11 +252,11 @@ class _Page:
         """
         for offset, chunk in enumerate(pieces[resume:], start=resume):
             if self.chunks and len(chunk.text) > self.budget:
-                return _encode(position, offset)
+                return encode(offset)
             self.chunks.append(chunk)
             self.budget -= len(chunk.text)
             if self.budget <= 0 and offset + 1 < len(pieces):
-                return _encode(position, offset + 1)
+                return encode(offset + 1)
         return None
 
     def surfaces_out(self) -> tuple[KnowledgeSurface, ...]:
@@ -261,9 +267,9 @@ class _Page:
 
 
 def _ranked_chunks(
-    item, wanted: Sequence[KnowledgeSurface], query: str, limits: GetLimits
+    item, wanted: Sequence[KnowledgeSurface], query: str, limits: GetLimits, cursor: str | None
 ) -> tuple[tuple[KnowledgeChunk, ...], bool, str | None]:
-    """The chunks of `wanted` that score for `query`, best first (spec §7.3).
+    """The chunks of `wanted` that score for `query`, best first (spec §7.3), PAGED.
 
     THE SAME SCORER AS `search`, on an in-memory database built from this item's own chunks.
     Not a second ranking function (rule 5), and not the persisted index either — `get` must
@@ -272,6 +278,13 @@ def _ranked_chunks(
 
     Chunks rather than whole surfaces because prioritising INSIDE a long source is what the
     query is for; the surface it came from is still named on every chunk, so nothing is lost.
+
+    THE CURSOR IS AN OFFSET INTO THE RANKING (A-2). The first version returned
+    `(kept, True, None)` when the budget ran out and `get` ignored `cursor` whenever a
+    `query` was given, so the query path declared the truncation and offered no way to
+    continue — the human view printed `--cursor None`. The ranking is deterministic (same
+    scorer, same tie-break, same chunks), so an offset resumes exactly where the previous
+    page stopped; the pages are disjoint and reassemble the whole list.
     """
     by_id: dict[str, KnowledgeChunk] = {}
     for surface in wanted:
@@ -282,14 +295,9 @@ def _ranked_chunks(
     hits = index.search(query, max(len(by_id), 1))
     ordered = [by_id[hit.chunk_id] for hit in hits if hit.chunk_id in by_id]
 
-    kept: list[KnowledgeChunk] = []
-    budget = limits.char_budget
-    for chunk in ordered:
-        if kept and len(chunk.text) > budget:
-            return tuple(kept), True, None
-        kept.append(chunk)
-        budget -= len(chunk.text)
-    return tuple(kept), False, None
+    page = _Page(budget=limits.char_budget)
+    stopped = page.take_chunks(ordered, _decode_query(cursor), _encode_query)
+    return page.chunks_out(), stopped is not None, stopped
 
 
 def _chunks_of(item, surface: KnowledgeSurface) -> tuple[KnowledgeChunk, ...]:
@@ -307,23 +315,61 @@ def _chunks_of(item, surface: KnowledgeSurface) -> tuple[KnowledgeChunk, ...]:
     )
 
 
+# The two cursor shapes. A positional cursor is `<surface>:<chunk>`; a ranked one is
+# `q:<offset>`. They index DIFFERENT sequences — emitter order against a ranking that only
+# exists for one query — so each decoder refuses the other's shape by name: a positional
+# cursor applied to a ranking would resume at an unrelated place while looking like progress.
+_QUERY_CURSOR_PREFIX = "q"
+
+
 def _encode(surface_index: int, chunk_index: int) -> str:
-    """The cursor: where the next call resumes. Opaque to the caller, deterministic to us."""
+    """The positional cursor: where the next call resumes. Opaque to the caller."""
     return f"{surface_index}:{chunk_index}"
 
 
+def _encode_query(offset: int) -> str:
+    """The ranked cursor: the offset into the query's ranking to resume from (A-2)."""
+    return f"{_QUERY_CURSOR_PREFIX}:{offset}"
+
+
 def _decode(cursor: str | None) -> tuple[int, int]:
-    """Parse a cursor, refusing a malformed one rather than silently restarting.
+    """Parse a positional cursor, refusing a malformed one rather than silently restarting.
 
     Restarting from the beginning on a bad cursor would loop a paginating consumer forever
     while looking like it was making progress.
     """
     if not cursor:
         return 0, 0
+    head, _, tail = cursor.partition(":")
+    if head == _QUERY_CURSOR_PREFIX:
+        raise ValueError(
+            f"Cursor inválido: {cursor!r} es un cursor de --query. "
+            "Pásalo junto a la misma --query que lo devolvió."
+        )
+    return _component(head, cursor), _component(tail, cursor)
+
+
+def _decode_query(cursor: str | None) -> int:
+    """Parse a ranked cursor (A-2), refusing a positional one by name."""
+    if not cursor:
+        return 0
+    head, _, tail = cursor.partition(":")
+    if head != _QUERY_CURSOR_PREFIX:
+        raise ValueError(
+            f"Cursor inválido: {cursor!r} es un cursor de posición, no de --query. "
+            "Usa el que devolvió la respuesta anterior a esta misma --query."
+        )
+    return _component(tail, cursor)
+
+
+def _component(raw: str, cursor: str) -> int:
+    """One non-negative integer of a cursor. A negative one is a restart in disguise."""
     try:
-        surface_index, chunk_index = cursor.split(":")
-        return int(surface_index), int(chunk_index)
+        value = int(raw)
     except ValueError as error:
         raise ValueError(
             f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior."
         ) from error
+    if value < 0:
+        raise ValueError(f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior.")
+    return value

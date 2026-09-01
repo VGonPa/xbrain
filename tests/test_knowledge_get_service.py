@@ -395,3 +395,82 @@ def test_the_bundle_validates_against_the_frozen_schema(context: QueryContext) -
     """`extra="forbid"` means a field the service invents fails construction."""
     bundle = get("k03", context, surfaces=("external_article",))
     assert EvidenceBundle.model_validate(bundle.model_dump()) == bundle
+
+
+# ---------------------------------------------------------------------------
+# A-2 — `--query` paginates with a cursor, never a silent cut
+# ---------------------------------------------------------------------------
+
+
+def test_a_query_over_the_budget_paginates_with_a_cursor_that_continues(
+    long_article_context: QueryContext,
+) -> None:
+    """A-2 (round 02, both gates): `_ranked_chunks` returned `(kept, True, None)` when the
+    budget ran out, and `get` ignored `cursor` whenever a `query` was given — so the query
+    path said `truncated: true` and offered no way to continue, and the human view printed
+    literally `--cursor None`. Spec §9.3: *truncamiento explícito + cursor, nunca corte
+    silencioso*; the explicit half was there and the continuation was not. Measured on the
+    20,147-char fixture article with `query="Alpha"` and a 1,000-char budget:
+    `truncated=True, cursor=None, chunks_returned=1`.
+
+    The ranked list is deterministic (same scorer, same in-memory index), so a cursor is an
+    offset into it. Followed to the end, the pages are disjoint, each page advances, and
+    their union IS the full ranked list a single unbounded call returns.
+
+    Seen red before the fix: `truncated with no cursor`.
+    """
+    item = next(iter(long_article_context.store.values()))
+    limits = GetLimits(char_budget=1000)
+    cursor: str | None = None
+    seen: list[str] = []
+    for _ in range(100):
+        bundle = get(
+            item.id,
+            long_article_context,
+            surfaces=("external_article",),
+            query="Alpha",
+            limits=limits,
+            cursor=cursor,
+        )
+        assert bundle.chunks, "a page with a cursor must deliver something"
+        ids = [chunk.chunk_id for chunk in bundle.chunks]
+        assert not set(ids) & set(seen), "a page repeated a chunk"
+        seen += ids
+        if not bundle.truncated:
+            assert bundle.cursor is None
+            break
+        assert bundle.cursor is not None, "truncated with no cursor"
+        assert bundle.cursor != cursor, "the cursor did not advance"
+        cursor = bundle.cursor
+    else:
+        pytest.fail("the query path never finished paginating")
+
+    assert len(seen) > 1, "the budget forced more than one page"
+    whole = get(
+        item.id,
+        long_article_context,
+        surfaces=("external_article",),
+        query="Alpha",
+        limits=GetLimits(char_budget=10**9),
+    )
+    assert seen == [chunk.chunk_id for chunk in whole.chunks], "the pages reassemble the ranking"
+
+
+def test_a_query_cursor_is_refused_without_its_query_and_vice_versa(
+    long_article_context: QueryContext,
+) -> None:
+    """The two cursor shapes are not interchangeable, and mixing them is an error rather
+    than a silent restart — the loop-that-looks-like-progress `_decode` already refuses for
+    a malformed positional cursor.
+    """
+    item = next(iter(long_article_context.store.values()))
+    with pytest.raises(ValueError, match="query"):
+        get(item.id, long_article_context, surfaces=("external_article",), cursor="q:3")
+    with pytest.raises(ValueError, match="query"):
+        get(
+            item.id,
+            long_article_context,
+            surfaces=("external_article",),
+            query="Alpha",
+            cursor="0:3",
+        )
