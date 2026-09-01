@@ -232,39 +232,70 @@ def test_building_the_index_reports_what_it_skipped(corpus) -> None:
 
 
 def test_a_case_whose_filters_the_strategy_cannot_apply_is_not_scored(corpus) -> None:
-    """The fabricated zero this harness exists to prevent, caught on the real corpus.
+    """The fabricated zero this harness exists to prevent — the MECHANISM, still guarded.
 
-    The lexical baseline pushes only `has_surfaces` and `origins` into `WHERE`. It has no
-    date, source or content-kind filtering — those need columns Plan 02 has to build (spec
-    §7.2 says so of `content_kinds` and `has_surfaces` explicitly). Scoring F1 and F2 anyway
-    produced `filtros: recall@10 = 0.0` in the first real-corpus run, which reads as "the
-    retriever failed at filtering" when the truth is that the instrument does not exist yet.
+    Scoring a case whose filter nobody applied produced `filtros: recall@10 = 0.0` in this
+    harness's first real-corpus run, which reads as "the retriever failed at filtering" when
+    the truth was that the instrument did not exist yet. Spec §8.6.8: *failures and skips are
+    published; zeros are never fabricated by mixing in unmeasured cases.*
 
-    Spec §8.6.8: *failures and skips are published; zeros are never fabricated by mixing in
-    unmeasured cases.* So an unsupported filter makes the case UNMEASURED — listed with the
-    filters that caused it — and its stratum reports no coverage rather than a zero.
+    THE STRATEGY IS `vector`, NOT `lexical`, AND THAT IS THE POINT. Plan 02 gave the lexical
+    baseline all eight filters, so `lexical` can no longer demonstrate this branch — driving
+    it with `lexical` would leave a test that passes because nothing is unsupported, which is
+    a test of nothing (rule 1). `vector` is declared in the frozen `Strategy` literal and is
+    Plan 03's to implement; it supports no filter today, so it is the honest way to keep the
+    guardrail exercised until there is a second real strategy.
     """
     cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
-    payload = evaluate(cases, corpus, strategy="lexical").to_dict()
+    payload = evaluate(cases, corpus, strategy="vector").to_dict()
 
     unmeasured = {entry["id"]: entry for entry in payload["unmeasured"]}
-    assert "FX7" in unmeasured, "FX7 declares `source: own_tweet`, which lexical cannot apply"
+    assert "FX7" in unmeasured, "FX7 declares `source: own_tweet`, which `vector` cannot apply"
     assert unmeasured["FX7"]["unsupported_filters"] == ["source"]
     assert payload["by_stratum"]["filtros"] == NO_COVERAGE
     assert "FX7" not in {case["id"] for case in payload["cases"]}
 
 
-def test_supported_filters_are_still_applied_not_skipped(corpus) -> None:
-    """`has_surfaces` and `origins` ARE pushed down, so a case using them still scores.
+def test_the_lexical_strategy_now_scores_the_filter_stratum(corpus) -> None:
+    """WHAT PLAN 02 CHANGED, asserted rather than described.
 
-    Without this, "unsupported" would be a way to quietly stop measuring anything awkward.
+    Under Plan 01 the baseline had no date, source or content-kind column, so every case in
+    the `filtros` stratum was reported UNMEASURED and the stratum carried `NO_COVERAGE`. The
+    persisted schema has all eight columns and the harness builds through the SAME writer as
+    `index build`, so those cases are measurable — and the stratum publishes a number for the
+    first time.
+
+    Seen red by reverting `SUPPORTED_FILTERS` to `{has_surfaces, origins}`: `filtros` goes
+    back to `NO_COVERAGE` and FX7 back to the unmeasured list.
+    """
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    payload = evaluate(cases, corpus, strategy="lexical").to_dict()
+
+    assert payload["unmeasured"] == [], "no case is unmeasurable for lexical any more"
+    assert "FX7" in {case["id"] for case in payload["cases"]}
+    assert payload["by_stratum"]["filtros"] != NO_COVERAGE
+
+
+def test_the_supported_filter_set_is_DERIVED_from_the_frozen_contract(corpus) -> None:
+    """All eight, and taken from `SearchFilters` rather than written out a second time.
+
+    A hand-written list here would be a second copy of the contract, and the day a ninth
+    filter is added to `SearchFilters` the copy would silently keep declaring eight — the
+    case would be scored with a filter nobody applied, which is the fabricated zero coming
+    back through the door marked "supported".
     """
     from xbrain.knowledge.contracts import SearchFilters
-    from xbrain.knowledge.evaluation import unsupported_filters
+    from xbrain.knowledge.evaluation import SUPPORTED_FILTERS, unsupported_filters
 
-    assert unsupported_filters(SearchFilters(has_surfaces=("post",)), "lexical") == ()
-    assert unsupported_filters(SearchFilters(origins=("vlm",)), "lexical") == ()
-    assert unsupported_filters(SearchFilters(source="own_tweet"), "lexical") == ("source",)
+    assert SUPPORTED_FILTERS["lexical"] == frozenset(SearchFilters.model_fields)
+    assert len(SUPPORTED_FILTERS["lexical"]) == 8
+    for name in SearchFilters.model_fields:
+        value = {"source": "own_tweet", "author": "x"}.get(
+            name, ("post",) if name in {"has_surfaces"} else None
+        )
+        if value is None:
+            continue
+        assert unsupported_filters(SearchFilters(**{name: value}), "lexical") == ()
 
 
 def test_the_case_count_reconciles_including_the_unmeasured(corpus) -> None:
@@ -697,3 +728,103 @@ def test_the_aggregate_names_come_from_the_cases_not_from_a_second_list(report) 
     bucket = report.by_stratum["exacto"]
     case = next(c for c in report.cases if "exacto" in c.strata)
     assert set(bucket["measured"]) == set(case.metrics)
+
+
+# ---------------------------------------------------------------------------
+# The chunker sweep (Plan 02 §7, steps 17b)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_sweep_accepts_both_syntaxes_and_refuses_a_typo() -> None:
+    """A typo that silently swept nothing would publish the DEFAULT's numbers as a sweep.
+
+    So an unknown axis is refused rather than ignored. Both spellings work: one flag per axis,
+    and the plan's own quoted `target=... overlap=...`.
+    """
+    from xbrain.knowledge.evaluation import parse_sweep
+
+    assert parse_sweep(["target=800,1200", "overlap=0,150"]) == {
+        "target": [800, 1200],
+        "overlap": [0, 150],
+    }
+    assert parse_sweep(["target=800,1200 overlap=0,150"]) == {
+        "target": [800, 1200],
+        "overlap": [0, 150],
+    }
+    with pytest.raises(ValueError, match="desconocido"):
+        parse_sweep(["targt=800"])
+    with pytest.raises(ValueError, match="inválido"):
+        parse_sweep(["target"])
+
+
+def test_the_sweep_scores_every_combination_and_ranks_them(corpus) -> None:
+    """§7: the cartesian product, best `recall@k` first.
+
+    The row count is the product of the axes, asserted so a sweep that silently dropped a
+    combination — the failure that would make a "winner" the winner of a smaller contest —
+    goes red.
+    """
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [800, 1600], "overlap": [0, 150]})
+
+    assert len(report.rows) == 4
+    assert report.winner is report.rows[0]
+    recalls = [row.recall for row in report.rows if row.recall is not None]
+    assert recalls == sorted(recalls, reverse=True)
+
+
+def test_the_sweep_reports_the_chunk_count_so_a_tie_can_be_broken(corpus) -> None:
+    """Spec §13.15: a flat result is DOCUMENTED, and the tie-break is fewer chunks.
+
+    That only works if the count is in the table, so it is asserted to be there and to differ
+    between combinations — a column that were constant could not break anything.
+    """
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [400, 2400]})
+
+    counts = {row.params.target: row.chunks for row in report.rows}
+    assert all(count > 0 for count in counts.values())
+    assert counts[400] > counts[2400], "a smaller target must produce more chunks"
+
+
+def test_a_flat_sweep_says_it_is_flat(corpus) -> None:
+    """The negative result, published as one (spec §13.15).
+
+    Two combinations that score identically must not be presented as a winner and a loser:
+    the rendering says PLANO and states that the tie-break was the chunk count.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    # `min_chars` at two values that cannot change the ranking on this corpus: the fixture has
+    # no fragment near the floor, so the two runs are identical by construction.
+    report = sweep_chunker(cases, corpus, {"min_chars": [40, 41]})
+    text = render_sweep_markdown(report)
+
+    assert "PLANO" in text
+    assert "menos chunks" in text
+
+
+def test_the_sweep_cannot_move_the_characterization_fixture(corpus) -> None:
+    """Step 17b (M7), asserted where the sweep lives.
+
+    The sweep passes `ChunkerParams` as an ARGUMENT and never assigns
+    `DEFAULT_CHUNKER_PARAMS`, so the pinned ranking — which passes its own parameters — is
+    untouchable by it. Checked by running the sweep and then re-running the pinned assertion
+    in the same process: if the sweep mutated the module constant, the fixture would move.
+    """
+    from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    from tests.test_knowledge_lexical import test_ranking_matches_the_characterization_fixture
+
+    before = DEFAULT_CHUNKER_PARAMS
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    sweep_chunker(cases, corpus, {"target": [400, 2400], "overlap": [0, 300]})
+
+    assert DEFAULT_CHUNKER_PARAMS is before, "the sweep mutated the module default"
+    test_ranking_matches_the_characterization_fixture()

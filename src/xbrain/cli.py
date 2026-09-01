@@ -3213,6 +3213,40 @@ def get_command(
         typer.echo(render_get(bundle))
 
 
+def _run_sweep(cfg, cases, corpus, axes, strategy: str, report, *, json_out: bool) -> None:
+    """`eval --sweep-chunker`: score every `(target, overlap)` and publish the table.
+
+    A SEPARATE PATH, not a flag threaded through `evaluate`, because the two answer different
+    questions: `eval` measures the retriever at the parameters in force, the sweep measures
+    the parameters. Folding them would make the ordinary report's numbers depend on whether a
+    sweep flag happened to be present.
+
+    The sweep changes `ChunkerParams` as an ARGUMENT and never the module constant, so
+    `tests/fixtures/knowledge_ranking.json` — which passes its own pinned parameters — cannot
+    be moved by it (M7).
+    """
+    from xbrain.knowledge.evaluation import (
+        parse_sweep,
+        render_sweep_markdown,
+        sweep_chunker as run_sweep,
+    )
+
+    grid = parse_sweep(axes)
+    result = run_sweep(cases, corpus, grid, strategy=strategy)
+    json_path = report or (cfg.data_dir / "eval-sweep.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_sweep_markdown(result), encoding="utf-8")
+    if json_out:
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(render_sweep_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
@@ -3234,6 +3268,11 @@ def eval_command(
     report: Path | None = typer.Option(
         None, "--report", help="Dónde escribir el informe (por defecto data/eval-report.json)."
     ),
+    sweep_chunker: list[str] = typer.Option(
+        [],
+        "--sweep-chunker",
+        help="Barrido del troceo: `target=800,1200 overlap=0,150` (repetible o entrecomillado).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
     """Evalúa la recuperación contra el golden set y publica el informe.
@@ -3251,6 +3290,9 @@ def eval_command(
     cfg, corpus = _knowledge_corpus()
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)
+    if sweep_chunker:
+        _run_sweep(cfg, cases, corpus, sweep_chunker, strategy, report, json_out=json_out)
+        return
     result = evaluate(
         cases,
         corpus,

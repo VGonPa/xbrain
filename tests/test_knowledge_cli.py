@@ -215,13 +215,27 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
     CLAUDE.md rule 11, inside the command whose acceptance criterion 10 is "the evaluation
     can fail".
 
-    Driven through the real CLI, because the exit code is the only surface a caller reads:
-    the golden set is trimmed to FX7, whose `source` filter the lexical baseline cannot
-    push into `WHERE`, so the case is UNMEASURED and every bucket ends up empty.
+    THE DRIVER CHANGED IN PLAN 02, and the reason is worth recording. It used to trim the
+    golden set to FX7, whose `source` filter the lexical baseline could not push into
+    `WHERE` — so the case was unmeasured and every bucket ended up empty. Plan 02 gave the
+    baseline all eight filters, so FX7 now scores and that driver stopped exercising anything
+    (rule 1: a test green for a reason unrelated to its name). The driver is now a golden set
+    with every case ARCHIVED AS A SCENARIO, which is a shape the file can legitimately take —
+    Plan 01 §4.4 archives exactly this way — and which reaches the same zero comparisons.
+
+    Driven through the real CLI, because the exit code is the only surface a caller reads.
     """
     golden = yaml.safe_load((workspace / "eval" / "golden-set.yaml").read_text(encoding="utf-8"))
-    golden["cases"] = [c for c in golden["cases"] if c["id"] == "FX7"]
-    golden.pop("scenarios", None)
+    golden["scenarios"] = [
+        {
+            "id": case["id"],
+            "question": case["query"],
+            "provenance": case["provenance"],
+            "reason": "archivado para este test: sin verdad de terreno enumerada",
+        }
+        for case in golden["cases"]
+    ]
+    golden["cases"] = []
     (workspace / "eval" / "golden-set.yaml").write_text(
         yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
     )
@@ -231,7 +245,9 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
     assert result.exit_code != 0, (
         "a threshold of 1.0 passed having scored zero cases:\n" + result.output
     )
-    assert "0" in result.output and "medid" in result.output, result.output
+    assert "no se comparó contra nada" in result.output, (
+        "the gate must SAY it measured nothing, not merely exit 1"
+    )
 
 
 def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> None:

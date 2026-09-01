@@ -42,7 +42,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
@@ -74,17 +74,27 @@ DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 
 # Which of spec §7.2's eight filters each strategy can actually push into the backend.
 #
-# THIS TABLE IS THE DIFFERENCE BETWEEN A ZERO AND A GAP. The lexical baseline indexes chunks
-# and their surface metadata; it has no date, author, source or content-kind columns — those
-# arrive with Plan 02's persisted index, and spec §7.2 says of `content_kinds` and
-# `has_surfaces` that they come from no existing column and need their own plumbing.
+# THIS TABLE IS THE DIFFERENCE BETWEEN A ZERO AND A GAP, and Plan 02 is what closed the gap.
 #
-# Scoring a case whose filter nobody applied produced `filtros: recall@10 = 0.0` in the first
-# real-corpus run of this harness. That number reads as "retrieval failed at filtering", when
-# the truth is that the instrument does not exist yet — a fabricated zero, and precisely what
-# spec §8.6.8 forbids. So an unsupported filter makes the case UNMEASURED instead.
+# Under Plan 01 the baseline held only chunks and their surface metadata: no date, no author,
+# no source, no content-kind column. Scoring a case whose filter nobody applied produced
+# `filtros: recall@10 = 0.0` in this harness's first real-corpus run — a number that reads as
+# "retrieval failed at filtering" when the truth was that the instrument did not exist yet.
+# A fabricated zero, and precisely what spec §8.6.8 forbids, so those cases were reported
+# UNMEASURED instead.
+#
+# The persisted schema has all eight columns and the harness now builds through the SAME
+# writer as `index build`, so the set is `SearchFilters.model_fields` — derived from the
+# frozen contract rather than written out again, which means a ninth filter added to the
+# contract shows up here without anybody remembering to.
+#
+# WHAT THIS CHANGES IN THE PUBLISHED NUMBERS, said out loud: the two `filtros` cases of
+# `eval/golden-set.yaml` (`source`+dates, `content_kinds`+dates) move from UNMEASURED to
+# scored. No case in the golden set declares `has_surfaces`, so the previous code's mapping of
+# it onto a chunk-level surface restriction — a different question from the contract's *the
+# item HAS this surface* — was a no-op on the real data and its correction moves nothing.
 SUPPORTED_FILTERS: dict[str, frozenset[str]] = {
-    "lexical": frozenset({"has_surfaces", "origins"}),
+    "lexical": frozenset(SearchFilters.model_fields),
 }
 
 
@@ -276,19 +286,43 @@ def build_index(
 ) -> tuple[LexicalIndex, IndexStats]:
     """The lexical baseline over a whole corpus, plus what it covered.
 
+    BUILT THROUGH `index_build`'s WRITER, on `sqlite3(":memory:")`. Not a second walk: the
+    harness must measure the instrument `search` actually queries, and two walks that "should"
+    emit the same corpus are the divergence CLAUDE.md rule 5 is about — the one that would
+    have gone wrong first is the metadata, which is what makes six of the eight filters
+    answerable at all.
+
     `chunks` is what the chunker EMITTED and `chunks_not_indexed` is the difference the index
     refused, so the two together say whether coverage is complete — one number that silently
     meant "indexed" could not.
     """
-    chunks, surfaces = corpus_chunks(corpus, params=params)
+    from xbrain.knowledge.index_build import IndexOptions, WriteCounters, topic_membership
+    from xbrain.knowledge.index_build import write_item as write_item_rows
+    from xbrain.knowledge.index_build import write_topic as write_topic_rows
+
     index = LexicalIndex(open_memory_index())
-    indexed = index.add(chunks)
+    counters = WriteCounters()
+    options = IndexOptions(params=params)
+    for item_id in sorted(corpus.items):
+        write_item_rows(index, corpus.items[item_id], corpus.vocab, counters, options=options)
+    for topic in sorted(corpus.vocab, key=lambda t: t.slug):
+        primary, secondary = topic_membership(corpus.items, topic.slug)
+        write_topic_rows(
+            index,
+            topic,
+            corpus.topic_pages.get(topic.slug),
+            primary,
+            secondary,
+            counters,
+            options=options,
+        )
+    index.connection.commit()
     return index, IndexStats(
         items=len(corpus.items),
         topics=len(corpus.vocab),
-        surfaces=surfaces,
-        chunks=len(chunks),
-        chunks_not_indexed=len(chunks) - indexed,
+        surfaces=counters.surfaces,
+        chunks=counters.chunks + counters.empty_text,
+        chunks_not_indexed=counters.empty_text,
     )
 
 
@@ -375,16 +409,14 @@ def _search(index: LexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalH
 
     The filters a case declares are part of the case (spec §8.1) — v1 kept windows under a
     key no loader read, so a temporal case silently became an untemporal one and its result
-    was reported as though the window had been applied. Only the filters this baseline can
-    push into `WHERE` are applied here; the rest are declared in the report rather than
-    silently ignored (see `_unsupported_filters`).
+    was reported as though the window had been applied.
+
+    ALL EIGHT are passed now, unchanged, because the persisted schema can push all eight into
+    `WHERE`. Passing `case.filters` whole rather than reconstructing a subset is what keeps
+    `SUPPORTED_FILTERS` an honest declaration instead of a list that has to be kept in step
+    with a second one here.
     """
-    return index.search(
-        case.query,
-        limit=limit,
-        surface_types=case.filters.has_surfaces,
-        filters=SearchFilters(origins=case.filters.origins),
-    )
+    return index.search(case.query, limit=limit, filters=case.filters)
 
 
 def _owner_key(owner_type: str, owner_id: str) -> str:
@@ -705,3 +737,205 @@ def _cell(values: dict[str, Any], name: str) -> str:
     if value == NO_COVERAGE:
         return "sin cobertura"
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# The chunker sweep (Plan 02 §7)
+# ---------------------------------------------------------------------------
+#
+# Spec §5.2: the chunk size and overlap *se eligen con evaluación*. This is that evaluation.
+#
+# AND IT CANNOT TOUCH THE CHARACTERIZATION FIXTURE (M7). The sweep changes
+# `DEFAULT_CHUNKER_PARAMS`; `tests/fixtures/knowledge_ranking.json` is built with parameters
+# passed as an ARGUMENT, so the two never meet. That separation is the whole reason
+# `ChunkerParams` is a parameter rather than a module constant — without it, the sweep would
+# break the fixture that exists to pin the ranking, and the comfortable fix would be to
+# regenerate it, at which point it pins nothing.
+
+
+@dataclass(frozen=True)
+class SweepRow:
+    """One `(target, overlap)` combination and what it scored.
+
+    `chunks` is carried beside the metrics because spec §13.15 asks for negative results to be
+    published rather than hidden: when two combinations tie on recall, the tie-break is the
+    one that produces FEWER chunks, and that only works if the count is in the table.
+    """
+
+    params: ChunkerParams
+    chunks: int
+    recall: float | None
+    mrr: float | None
+    by_stratum: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SweepReport:
+    """Every combination, best first, with the k the ranking was decided on."""
+
+    k: int
+    rows: tuple[SweepRow, ...]
+
+    @property
+    def winner(self) -> SweepRow | None:
+        return self.rows[0] if self.rows else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "k": self.k,
+            "rows": [
+                {
+                    "target": row.params.target,
+                    "max_chars": row.params.max_chars,
+                    "overlap": row.params.overlap,
+                    "min_chars": row.params.min_chars,
+                    "chunks": row.chunks,
+                    f"recall@{self.k}": row.recall,
+                    "mrr": row.mrr,
+                    "by_stratum": row.by_stratum,
+                }
+                for row in self.rows
+            ],
+        }
+
+
+def parse_sweep(values: Sequence[str]) -> dict[str, list[int]]:
+    """`["target=800,1200", "overlap=0,150"]` -> `{"target": [800, 1200], ...}`.
+
+    Whitespace inside one value is also split, so the plan's own syntax —
+    `--sweep-chunker "target=800,1200,1600,2400 overlap=0,150,300"` — works as written when
+    quoted, and so does one flag per axis. An unknown key is REFUSED rather than ignored: a
+    typo that silently swept nothing would publish the default's numbers under the name of a
+    sweep.
+    """
+    grid: dict[str, list[int]] = {}
+    for value in values:
+        for token in value.split():
+            if "=" not in token:
+                raise ValueError(f"Formato de barrido inválido: {token!r}. Usa `clave=v1,v2`.")
+            key, raw = token.split("=", 1)
+            if key not in {"target", "max_chars", "overlap", "min_chars"}:
+                raise ValueError(
+                    f"Eje de barrido desconocido: {key!r}. "
+                    "Válidos: target, max_chars, overlap, min_chars."
+                )
+            grid[key] = [int(part) for part in raw.split(",") if part.strip()]
+    return grid
+
+
+def sweep_chunker(
+    cases: Sequence[GoldenCase],
+    corpus: Corpus,
+    grid: Mapping[str, Sequence[int]],
+    *,
+    strategy: str = "lexical",
+    k: int = 10,
+    base: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
+) -> SweepReport:
+    """Score every combination in `grid` against the golden set (Plan 02 §7).
+
+    Ranked by `recall@k`, tie-broken by MRR and then by FEWER CHUNKS — spec §13.15 says a flat
+    result is documented rather than hidden, and "if they tie, take the one that produces less
+    index" is the honest tie-break rather than a preference dressed as a finding.
+
+    A combination that scores nothing measurable sorts last instead of sorting first, which is
+    what a `None` would do under a naive `max`.
+    """
+    rows: list[SweepRow] = []
+    for params in _combinations(grid, base):
+        report = evaluate(cases, corpus, strategy=strategy, ks=(k,), params=params)
+        overall = _overall(report, k)
+        rows.append(
+            SweepRow(
+                params=params,
+                chunks=report.index_stats.chunks if report.index_stats else 0,
+                recall=overall[0],
+                mrr=overall[1],
+                by_stratum=report.by_stratum,
+            )
+        )
+    rows.sort(key=lambda row: (-(row.recall or -1.0), -(row.mrr or -1.0), row.chunks))
+    return SweepReport(k=k, rows=tuple(rows))
+
+
+def _combinations(grid: Mapping[str, Sequence[int]], base: ChunkerParams) -> list[ChunkerParams]:
+    """The cartesian product of the swept axes, with the unswept ones held at `base`.
+
+    Deterministic order — the axes are sorted and each axis keeps the order it was given — so
+    two runs of the same sweep produce the same table and a diff between them is readable.
+    """
+    axes = sorted(grid)
+    combos = [dict[str, int]()]
+    for axis in axes:
+        combos = [{**combo, axis: value} for combo in combos for value in grid[axis]]
+    return [
+        ChunkerParams(
+            target=combo.get("target", base.target),
+            max_chars=combo.get("max_chars", base.max_chars),
+            overlap=combo.get("overlap", base.overlap),
+            min_chars=combo.get("min_chars", base.min_chars),
+        )
+        for combo in combos
+    ]
+
+
+def _overall(report: EvaluationReport, k: int) -> tuple[float | None, float | None]:
+    """The mean `recall@k` and MRR over every SCORED case, or `(None, None)` if none scored.
+
+    Computed over the cases rather than over the stratum means, because the strata have very
+    different sizes and averaging the averages would weight a one-case stratum like a
+    twelve-case one.
+    """
+    recalls = _measured(report, f"recall@{k}")
+    mrrs = _measured(report, "mrr")
+    return (
+        sum(recalls) / len(recalls) if recalls else None,
+        sum(mrrs) / len(mrrs) if mrrs else None,
+    )
+
+
+def _measured(report: EvaluationReport, metric: str) -> list[float]:
+    """Every case that actually measured `metric`. A `None` is an ABSENCE, never a zero.
+
+    Filtering here rather than defaulting to 0.0 is the same rule B1 established at bucket
+    level, applied one layer down: a case that could not measure a metric must not drag the
+    mean towards a number nobody observed.
+    """
+    values = []
+    for case in report.cases:
+        value = case.metrics.get(metric)
+        if value is not None:
+            values.append(float(value))
+    return values
+
+
+def render_sweep_markdown(report: SweepReport) -> str:
+    """The sweep table, winner first (Plan 02 §7).
+
+    Published even when flat, and the flatness is stated in the table rather than left for a
+    reader to notice: spec §13.15 asks for negative results to be documented, and a sweep
+    whose rows are indistinguishable is a result about the chunker, not a missing measurement.
+    """
+    lines = [
+        f"| target | overlap | chunks | recall@{report.k} | MRR |",
+        "|---:|---:|---:|---:|---:|",
+    ]
+    for row in report.rows:
+        lines.append(
+            f"| {row.params.target} | {row.params.overlap} | {row.chunks} "
+            f"| {_number(row.recall)} | {_number(row.mrr)} |"
+        )
+    winner = report.winner
+    if winner is not None:
+        distinct = {(_number(r.recall), _number(r.mrr)) for r in report.rows}
+        verdict = (
+            "PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks."
+            if len(distinct) == 1
+            else f"Gana target={winner.params.target}, overlap={winner.params.overlap}."
+        )
+        lines += ["", verdict]
+    return "\n".join(lines)
+
+
+def _number(value: float | None) -> str:
+    return "sin cobertura" if value is None else f"{value:.4f}"
