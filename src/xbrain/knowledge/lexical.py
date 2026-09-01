@@ -56,13 +56,16 @@ EXCERPT_CHARS = 300
 # name. LEFT, not INNER, because the retriever is also driven bare (`add` without a surface
 # row) by the characterization fixture and the evaluation harness, and a chunk whose
 # surface row is missing must still rank; it simply carries no attribution.
-_SURFACE_COLUMNS = (
+#
+# The three aliases appear as LITERALS here and in `fetch_chunk`, rather than through one
+# shared f-string: bandit reads any f-string that starts with `SELECT` as B608, and a
+# suppression is a request to stop looking. `_hit` is the one reader of the alias names.
+_SELECT_CHUNKS = (
+    "SELECT chunks.*, "
     "surfaces.attribution_handle AS surface_attribution_handle, "
     "surfaces.attribution_name AS surface_attribution_name, "
-    "surfaces.locator_json AS surface_locator_json"
-)
-_SELECT_CHUNKS = (
-    f"SELECT chunks.*, {_SURFACE_COLUMNS}, bm25(chunks_fts) AS score FROM chunks_fts "
+    "surfaces.locator_json AS surface_locator_json, "
+    "bm25(chunks_fts) AS score FROM chunks_fts "
     "JOIN chunks ON chunks.rowid = chunks_fts.rowid "
     "LEFT JOIN surfaces ON surfaces.surface_id = chunks.surface_id"
 )
@@ -377,7 +380,11 @@ class LexicalIndex:
     def fetch_chunk(self, chunk_id: str) -> LexicalHit | None:
         """One chunk by id, with everything needed to verify its fingerprint."""
         row = self.connection.execute(
-            f"SELECT chunks.*, {_SURFACE_COLUMNS}, 0.0 AS score FROM chunks "  # nosec B608
+            "SELECT chunks.*, "
+            "surfaces.attribution_handle AS surface_attribution_handle, "
+            "surfaces.attribution_name AS surface_attribution_name, "
+            "surfaces.locator_json AS surface_locator_json, "
+            "0.0 AS score FROM chunks "
             "LEFT JOIN surfaces ON surfaces.surface_id = chunks.surface_id "
             "WHERE chunk_id = ?",
             (chunk_id,),

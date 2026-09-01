@@ -533,6 +533,9 @@ def test_get_with_a_query_closes_its_scratch_database(context: QueryContext) -> 
     import gc
     import warnings
 
+    # Reap what EARLIER tests left behind first, so the measured window holds only this
+    # call's connections — in the full suite the first version caught a neighbour's leak.
+    gc.collect()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ResourceWarning)
         get("k03", context, surfaces=("external_article",), query="Alpha")

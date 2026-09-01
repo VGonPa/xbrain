@@ -946,6 +946,9 @@ def test_evaluate_closes_the_index_it_built(corpus) -> None:
     import warnings
 
     cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    # Reap what EARLIER tests left behind first, so the measured window holds only this
+    # call's connections — in the full suite the first version caught a neighbour's leak.
+    gc.collect()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ResourceWarning)
         evaluate(cases, corpus)
