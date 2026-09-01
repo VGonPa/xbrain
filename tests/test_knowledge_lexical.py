@@ -652,9 +652,20 @@ def test_the_filter_is_applied_before_scoring_not_after(filtered_index: LexicalI
        scanning every chunk;
     2. the number of rows the scorer is handed actually FALLS;
     3. the filter changes the TOP-1, which is the user-visible consequence.
+
+    PIECE 1 NAMES THE INDEX, and the previous version of it could not fail (F-1, rule 1). It
+    asked for `any("chunks" in step and "SCAN" not in step)`, which is satisfied by
+    `SEARCH chunks USING INTEGER PRIMARY KEY (rowid=?)` — the step an external-content FTS5
+    join emits UNCONDITIONALLY, filter or no filter. Measured on this very fixture, the
+    predicate was `True` with `SearchFilters()`, with `SearchFilters(source=...)` and with
+    `SearchFilters(origins=...)` alike, so it distinguished nothing. Naming `chunks_source` is
+    the falsifiable form: the unfiltered plan does not contain it (seen red by driving this
+    same assertion with `SearchFilters()`), and neither does the plan of a DIFFERENT filter —
+    `origins` narrows through `chunks_origin` — so the assertion is tied to the filter under
+    test, and it goes red if the `source` clause stops reaching the `WHERE` (also seen red).
     """
     plan = filtered_index.explain("marrowgate", SearchFilters(source="own_tweet"))
-    assert any("chunks" in step and "SCAN" not in step for step in plan), plan
+    assert any(step.startswith("SEARCH chunks USING INDEX chunks_source") for step in plan), plan
 
     unfiltered_rows = filtered_index.scored_row_count("marrowgate", SearchFilters())
     filtered_rows = filtered_index.scored_row_count("marrowgate", SearchFilters(source="own_tweet"))
