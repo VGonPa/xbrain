@@ -498,9 +498,10 @@ generates an Obsidian wiki.
   text, or the tokens survive under a rowid a later chunk reuses — measured, a query for
   `marrowgate` then returned a chunk whose body is *"a totally different body"*. **The
   invalidation signal is a fingerprint over the emitted SURFACES, not over `(fetched_at,
-  enriched_at)`** as plan-01 §10 sketched: `content.fetched_at` cannot reach the 961 of 2,404
-  items with no `content`, and a timestamp is a proxy that a hand-edited summary walks straight
-  past. **`search` never repairs anything** (the connection is `file:…?mode=ro`, so a write
+  enriched_at)`** as plan-01 §10 sketched: `content.fetched_at` cannot reach the **960** of 2,404
+  items with no `content` (re-derived 2026-09-01 on `data/items.json` sha256 `f76341a3…`; this line
+  said 961, the plan-01 photograph of an older store — F-14), and a timestamp is a proxy that a
+  hand-edited summary walks straight past. **`search` never repairs anything** (the connection is `file:…?mode=ro`, so a write
   RAISES) and it declares two things it cannot fix: a chunk whose fingerprint does not recompute
   is excluded and counted in `corrupt_chunks_excluded`, and an index behind the store —
   the failure that ACTUALLY happens, because indexing is manual — is declared as

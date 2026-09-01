@@ -830,7 +830,8 @@ direction `origin: unknown → llm_synthesis` fails.
 
 **The per-item fingerprint hashes the emitted SURFACES**, not `(content.fetched_at,
 enriched.enriched_at)`. Two reasons, both CLAUDE.md rule 6: `content.fetched_at` cannot reach an
-item whose `content` is `None` — 961 of 2,404 in the real store — because there is nothing to
+item whose `content` is `None` — **960** of 2,404 in the real store, re-derived 2026-09-01 on
+sha256 `f76341a3…` (this line said 961, an older photograph — F-14) — because there is nothing to
 stamp; and a timestamp is a proxy, so a summary edited by hand changes the indexable corpus and
 leaves it unmoved. Hashing the surface fingerprints plus the filterable metadata asks the
 question directly and reaches every item.
@@ -997,8 +998,12 @@ connectives apart, so the change would otherwise have passed the fixture in sile
 
 The remaining known limits, both declared rather than discovered later: there is **no
 stemming**, and **IDF is relative to this corpus**, so a word that reads as a function word
-can still be rare to the index and go undiscounted (`el` is 1 of 43 fixture chunks and 5,748
-of 18,319 real ones). Those are what the vector layer of Plan 03 has to beat.
+can still be rare to the index and go undiscounted: `el` is 1 of 49 fixture chunks and **6,070 of
+22,286** real ones (27.2 %), re-derived 2026-09-01 on the SHIPPED chunker (v2, `800/0`, store
+sha256 `f76341a3…`). *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
+chunker v1 and the store md5 `5aaf62f4…` — correct for that population, and left undated after
+the chunker moved; F-4 corrected the other three sites and missed this one.)* Those are what the
+vector layer of Plan 03 has to beat.
 
 **A threshold that reached no bucket fails closed.** `--min-recall` counts the
 `(bucket, metric)` comparisons it actually made; at zero it reports an explicit failure

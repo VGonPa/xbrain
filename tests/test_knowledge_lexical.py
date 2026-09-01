@@ -359,12 +359,15 @@ def test_the_sweep_cannot_move_the_characterization_fixture() -> None:
     `assert swept_ids is not None`, and a `set` is never `None`: the docstring's first claim
     — *a DIFFERENT set of chunk ids* — was protected by nothing at all (rule 1).
 
-    BOTH SIDES PASS `chunker_version=PINNED_CHUNKER_VERSION` on purpose. `chunk_id` ENDS in
-    the chunker version, so leaving the swept side on the module default would make the two
-    sets differ by the version SUFFIX whatever the parameters did — the assertion would be
-    green with `swept == PINNED_CHUNKER_PARAMS`, which is the same rule-1 defect wearing a
-    different suffix. Holding the version equal leaves the parameters as the only thing that
-    can move the ids.
+    BOTH SIDES PASS `chunker_version=PINNED_CHUNKER_VERSION` explicitly, and it is belt and
+    braces rather than the load-bearing piece (M-5, round 02). `chunk_id` ENDS in the chunker
+    version, so two sets cut under different VERSIONS would differ by the suffix whatever the
+    parameters did — but `_corpus_chunks` already DEFAULTS `chunker_version` to the pinned
+    value, so omitting the argument does not fall through to the module constant; measured
+    (review 02, H-5): with the swept side left on the default and `swept ==
+    PINNED_CHUNKER_PARAMS`, the assertion is RED, not green. The explicit argument states the
+    intent — the parameters are the only thing allowed to move the ids — and would carry the
+    protection only if that default were ever removed.
 
     AND IT RUNS OVER THE WHOLE FIXTURE CORPUS, not over the first item. Writing the assertion
     revealed that the old code chunked only `next(iter(raw["items"]))` = `k01`, whose surfaces
