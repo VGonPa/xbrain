@@ -1231,6 +1231,49 @@ def _clear_topics(connection: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _status_manifest(index_dir: Path, options: IndexOptions) -> tuple[Manifest | None, str]:
+    """The manifest as `status` sees it: the document, and why the code cannot use it (or ``).
+
+    Applies the SAME compatibility check `search` and `update` apply. Without it `status`
+    answered `incomplete=False` over a manifest both of them refuse — two instruments,
+    opposite answers on one state (rule 9) — and its advice named plain `index build`, which
+    refuses while a manifest exists.
+    """
+    try:
+        manifest = load_manifest(index_dir)
+    except IndexMissingError:
+        return None, ""
+    except IndexIncompatibleError as error:
+        return None, str(error)
+    try:
+        load_compatible_manifest(index_dir, params=options.params)
+    except IndexIncompatibleError as error:
+        return manifest, str(error)
+    return manifest, ""
+
+
+def _index_contents(index_dir: Path) -> tuple[dict[str, int], dict[str, str]]:
+    """`(row counts per plane, {item_id: stored fingerprint})`, or two empties with no base."""
+    if not db_path(index_dir).exists():
+        return {}, {}
+    connection = open_index(db_path(index_dir), read_only=True)
+    try:
+        return _count_rows(connection), _stored_fingerprints(connection)
+    finally:
+        connection.close()
+
+
+def _mismatch_advice(manifest: Manifest, counts: Mapping[str, int]) -> str:
+    """The C-3 sentence, or `` when the base holds what the manifest declares."""
+    mismatch = manifest_mismatch(manifest, counts)
+    if not mismatch:
+        return ""
+    return (
+        f"El índice está incompleto: la base no contiene lo que el manifest declara "
+        f"({mismatch}). {REBUILD_ADVICE}"
+    )
+
+
 def status(
     index_dir: Path,
     store: Mapping[str, Item],
@@ -1246,35 +1289,10 @@ def status(
     is worth its minutes.
     """
     options = options or IndexOptions()
-    manifest: Manifest | None = None
-    unusable = ""
-    try:
-        manifest = load_manifest(index_dir)
-        # The SAME check `search` and `update` apply. Without it `status` answered
-        # `incomplete=False` over a manifest both of them refuse — two instruments, opposite
-        # answers on one state (rule 9) — and its advice named plain `index build`, which
-        # refuses while a manifest exists.
-        load_compatible_manifest(index_dir, params=options.params)
-    except IndexMissingError:
-        manifest = None
-    except IndexIncompatibleError as error:
-        unusable = str(error)
-
-    counts: dict[str, int] = {}
-    stored: dict[str, str] = {}
-    if db_path(index_dir).exists():
-        connection = open_index(db_path(index_dir), read_only=True)
-        counts = _count_rows(connection)
-        stored = _stored_fingerprints(connection)
-        connection.close()
-
+    manifest, unusable = _status_manifest(index_dir, options)
+    counts, stored = _index_contents(index_dir)
     if manifest is not None and not unusable:
-        mismatch = manifest_mismatch(manifest, counts)
-        if mismatch:
-            unusable = (
-                f"El índice está incompleto: la base no contiene lo que el manifest declara "
-                f"({mismatch}). {REBUILD_ADVICE}"
-            )
+        unusable = _mismatch_advice(manifest, counts)
 
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
     delta = _classify(current, stored)
