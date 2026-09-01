@@ -47,6 +47,7 @@ from xbrain.executors.api import iter_content_sources
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION, surface_fingerprint
 from xbrain.knowledge.index_schema import (
+    REBUILD_ADVICE,
     SCHEMA_VERSION,
     IndexIncompatibleError,
     IndexMissingError,
@@ -99,9 +100,9 @@ MANIFEST_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-# The advice every incompatibility ends with. One string, so the CLI, the services and the
-# tests all name the same command.
-REBUILD_ADVICE = "Reconstruye el índice con `xbrain index build --force`."
+# `REBUILD_ADVICE` is imported from `index_schema`, beside the error that carries it: a
+# corrupt database raises the same error with the same advice, and two copies of the sentence
+# would be two things that have to be kept in step (rule 5).
 UPDATE_ADVICE = "Actualiza el índice con `xbrain index update`."
 
 

@@ -386,6 +386,46 @@ def test_search_without_an_index_names_the_build_command(workspace: Path) -> Non
     assert "xbrain index build" in result.output
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["search", "Quillfeather"],
+        ["index", "status"],
+        ["index", "update"],
+    ],
+)
+def test_a_corrupt_database_names_the_rebuild_command_on_every_command(
+    workspace: Path, argv: list[str]
+) -> None:
+    """Plan 02 §11 / spec §9.3: *base corrupta -> error accionable con `index build --force`*.
+
+    The row was tabulated and not implemented (F-3). `_OPERATOR_ERRORS` catches `IndexError_`,
+    which covers a MISSING index and an incompatible MANIFEST — but `sqlite3.DatabaseError` is
+    neither, so all three commands printed a raw traceback. The manifest half had a test; the
+    database half had none, and that is why nobody noticed.
+
+    THE CORRUPTION IS REAL, not a mock: the SQLite header is overwritten in place on a
+    database that was really built, so `sqlite3.connect` still succeeds — it is lazy — and the
+    failure lands on the first read, which is exactly where it lands in production.
+
+    BOTH HALVES ARE ASSERTED, text AND exit code, for CLAUDE.md rule 9's reason: a command
+    that prints its own failure and exits 0 is read as success by every script above it.
+
+    Seen red before the fix on all three parametrisations: `sqlite3.DatabaseError: file is not
+    a database` escaped `_handle_cli_errors`, `result.exception` was the raw `DatabaseError`
+    and the output named no command at all.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    database = workspace / "data" / "index" / "knowledge.db"
+    with database.open("r+b") as handle:
+        handle.write(b"this is not a sqlite database at all, not even close, really!!")
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code != 0, result.output
+    assert "xbrain index build --force" in result.output, result.output
+
+
 def test_mine_maps_to_own_tweet(workspace: Path) -> None:
     """Spec §7.2's shortcut, asserted through the FILTER the response echoes back.
 

@@ -228,7 +228,17 @@ class IndexIncompatibleError(IndexError_):
     Raised INSTEAD of answering. Spec §9.3: an incompatible manifest is never queried
     partially — a partial answer over a schema the code no longer understands is a wrong
     answer wearing a right one's shape.
+
+    It is ALSO what a corrupt database raises (F-3). Both are the same operator situation —
+    *what is on disk is not what this code can read, and the fix is to rebuild* — so they end
+    with the same sentence rather than with two that have to be kept in step.
     """
+
+
+# The advice every incompatibility ends with. ONE string, so the CLI, the services and the
+# tests all name the same command; it lives here, beside the error that carries it, rather
+# than in `index_build`, which cannot be imported from this module.
+REBUILD_ADVICE = "Reconstruye el índice con `xbrain index build --force`."
 
 
 def db_path(index_dir: Path) -> Path:
@@ -280,11 +290,34 @@ def open_index(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
             )
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
-        return connection
+        return _prove_readable(connection, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
+    _prove_readable(connection, path)
     create_schema(connection)
+    return connection
+
+
+def _prove_readable(connection: sqlite3.Connection, path: Path) -> sqlite3.Connection:
+    """Force the first page read HERE, and turn a corrupt file into actionable advice (F-3).
+
+    `sqlite3.connect` is LAZY: it opens a corrupt file without complaint and the
+    `DatabaseError` surfaces later, at whatever statement happens to touch the disk first —
+    inside `search`, inside `index status`, inside `index update`. `sqlite3.DatabaseError` is
+    not an `IndexError_` and not an `OSError`, so it escaped the CLI's `_OPERATOR_ERRORS` and
+    all three commands printed a raw traceback naming no command, which is precisely the row
+    Plan 02 §11 tabulates as *error accionable con `index build --force`*.
+
+    One probe, at the one door every path already goes through, so no caller has to remember.
+    """
+    try:
+        connection.execute("SELECT count(*) FROM sqlite_master")
+    except sqlite3.DatabaseError as error:
+        connection.close()
+        raise IndexIncompatibleError(
+            f"La base del índice en {path} no se puede leer ({error}). {REBUILD_ADVICE}"
+        ) from error
     return connection
 
 
