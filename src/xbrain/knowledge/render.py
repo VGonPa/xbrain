@@ -151,7 +151,17 @@ def _verify_lines(result: SearchResult) -> list[str]:
 
 
 def render_get(bundle: EvidenceBundle) -> str:
-    """The human rendering of an evidence bundle (spec §7.3, §7.6)."""
+    """The human rendering of an evidence bundle (spec §7.3, §7.6).
+
+    THIS VIEW IS FOR A HUMAN, NOT FOR AN AGENT. The surface for agents is `--json`, where
+    `origin` and `trust_class` travel as siblings of every text and nothing can be confused
+    with the frame (spec §10.4). Here the frame is text too, so the body is FENCED (G-7):
+    every line of a surface or chunk is prefixed with `│ `, and a title is collapsed to one
+    line, so a quoted post that carries `[user_note] origin=user trust=user_text` on a line
+    of its own — a forged header, byte-identical to the renderer's — stays visibly inside
+    the body instead of standing where a header stands. The text is still shown whole; it is
+    evidence. It just cannot impersonate the label above it.
+    """
     item = bundle.item
     lines = [
         f"{item.item_id}  @{item.author.handle} ({item.author.name})"
@@ -167,19 +177,19 @@ def render_get(bundle: EvidenceBundle) -> str:
         lines += [
             "",
             f"[{surface.surface_type}] origin={surface.origin} trust={surface.trust_class}"
-            + (f" · {surface.title}" if surface.title else "")
+            + (f" · {_one_line(surface.title)}" if surface.title else "")
             + (
                 f" · @{surface.attribution.handle}"
                 if surface.attribution and surface.surface_type == "quoted_post"
                 else ""
             ),
-            surface.text,
+            *_fenced(surface.text),
         ]
     for chunk in bundle.chunks:
         lines += [
             "",
             f"[{chunk.surface_type} {chunk.char_start}:{chunk.char_end}] origin={chunk.origin}",
-            chunk.text,
+            *_fenced(chunk.text),
         ]
     if bundle.truncated:
         lines += [
@@ -265,6 +275,16 @@ def render_update(report: UpdateReport) -> str:
             f"  {report.duration_seconds:.1f}s",
         ]
     )
+
+
+def _fenced(text: str) -> list[str]:
+    """A body as lines that cannot stand where a header stands (G-7).
+
+    `│ ` in front of every line — including an empty one, so a paragraph break inside the
+    body is still visibly inside it. Nothing is truncated or reflowed: the fence is the whole
+    transformation, and it is reversible by eye.
+    """
+    return [f"│ {line}" for line in text.splitlines()] or ["│ "]
 
 
 def _one_line(text: str, width: int = 160) -> str:

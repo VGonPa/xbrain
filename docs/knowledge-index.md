@@ -171,6 +171,24 @@ while a manifest exists.
 Measured on the same corpus, against the 23 scorable cases of `eval/golden-set.yaml`
 (`xbrain eval`). All 23 score; none is unmeasurable, and none returned an empty result set.
 
+**What ranking this number measures, said before the number (G-6).** `xbrain eval` scores
+`LexicalIndex.search` — the CHUNK plane, hits deduplicated by owner in rank order, a hit on a
+topic surface counting as the owner `topic:<slug>`. That is NOT the ranking `xbrain search`
+serves: the service expands each topic hit into up to `limit` supporting items (primary
+first), appends profile-plane candidates after the chunk-matched ones, and can never return a
+topic as a result. Re-derived 2026-09-01 on the same 23 cases at depth 10, harness against
+service: the top-10 differs in **17 of 23** cases; `recall@10` reads **0.8119** on the harness
+and **0.6924** on the service (the three `relevant_topics` cases cannot be hit by a service
+that never returns a topic); on the 20 item-only cases the two are **0.7837** and **0.7962** —
+the service is not worse, it is differently shaped — and **42.8 %** of the service's match
+slots (140 of 327) are topic surfaces attached to expanded items. So the table below is the
+retriever's number, the one the next retriever is compared against on the same plane; it is
+not a measurement of what a `search` caller sees. **Decision recorded for Plan 03:** whether
+the topic expansion should consume `max_matches_per_item` slots (today an expanded item can
+carry three topic-surface matches and no match of its own), and whether the harness should
+score the service's ranking beside the retriever's, are open, and the fusion sweep has to
+settle both before publishing a `hybrid` number as comparable to this one.
+
 | metric | mean |
 |---|---:|
 | `recall@1` | 0.6034 |
@@ -262,6 +280,17 @@ the retriever.
 - **`get` keeps the ASR/VLM producer (A-4).** `transcribe_command` and `vision_command` travel in
   `QueryContext` from the same config definition the build uses, so a transcript's `producer` is
   the configured transcriber in `get` exactly as in the index.
+- **The spec's `matched_surface` is the contract's `surface_type` (M-6).** Spec §7.2 names the
+  field `matched_surface` in its illustrative JSON and says the example *defines semantics, not
+  final property names*; Plan 01 froze `SearchMatch.surface_type` at `schema_version: "1"` and
+  Plan 02 §0 forbids renaming it. Read one as the other; do not look for `matched_surface`.
+- **The human view is NOT a surface for agents — use `--json` (G-7).** The JSON carries `origin`
+  and `trust_class` beside every text, so nothing in a body can be mistaken for the frame. The
+  human view of `get` is text all the way down, so since round 03 it FENCES every body line with
+  `│ ` and collapses titles to one line: a quoted post containing a line identical to the
+  renderer's own `[user_note] origin=user trust=user_text` header (reproduced by the round-04
+  gate) stays visibly inside the body. That is a courtesy to the reader, not a security boundary;
+  an agent that parses the human view instead of the JSON is parsing untrusted text.
 
 ## Troubleshooting the index
 
