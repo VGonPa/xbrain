@@ -418,8 +418,18 @@ def write_item(
     )
     stored = index.add(chunks, created_at=item.created_at, source=item.source)
     counters.chunks += stored
-    counters.empty_text += len(chunks) - stored
-    _count_omissions(item, counters)
+    empty_text = len(chunks) - stored
+    decorative, no_speech = _count_omissions(item)
+    counters.empty_text += empty_text
+    counters.decorative += decorative
+    counters.no_speech += no_speech
+    # Recorded ON THE ITEM'S ROW, so the manifest's `skipped` can be summed from the base
+    # after an incremental update instead of carried over from the previous manifest (A-3).
+    index.connection.execute(
+        "UPDATE items SET skipped_empty_text = ?, skipped_decorative = ?, "
+        "skipped_no_speech = ? WHERE item_id = ?",
+        (empty_text, decorative, no_speech, item.id),
+    )
     if index.add_profile(item.id, profile_text(item, list(vocab)), fingerprint):
         counters.profiles += 1
 
@@ -491,23 +501,24 @@ def _write_item_metadata(
         )
 
 
-def _count_omissions(item: Item, counters: WriteCounters) -> None:
-    """The two omissions that CAN be non-zero, counted where the data is (spec §5.6).
+def _count_omissions(item: Item) -> tuple[int, int]:
+    """`(decorative, no_speech)` — the two omissions that CAN be non-zero (spec §5.6).
 
     A decorative photo and a silent video are surfaces the emitter deliberately does not
     produce. Counting them here, rather than inferring them from a missing chunk, is what
     lets the manifest name the CAUSE instead of reporting a gap.
     """
-    counters.decorative += sum(
+    decorative = sum(
         1
         for entry in item.media
         if isinstance(entry, MediaPhotoDescribed) and (entry.is_decorative or not entry.description)
     )
-    counters.no_speech += sum(
+    no_speech = sum(
         1
         for _index, source in iter_content_sources(item, {"x_video"})
         if source.has_speech is False
     )
+    return decorative, no_speech
 
 
 def write_topic(
@@ -677,6 +688,7 @@ def build(
             _write_everything(
                 LexicalIndex(connection), store, vocab, topic_pages, counters, options=options
             )
+            tallies = manifest_tallies(connection)
             if dry_run:
                 # A dry run does the whole walk and then throws it away, so the counts it
                 # reports are the counts a real build WOULD produce — not an estimate.
@@ -692,7 +704,7 @@ def build(
 
     write_manifest(
         index_dir,
-        _fresh_manifest(store, vocab, topic_pages, items_path, counters, failed, options=options),
+        _fresh_manifest(store, vocab, topic_pages, items_path, tallies, failed, options=options),
     )
     return _build_report(
         counters, failed, started, items=len(store), topics=len(vocab), dry_run=False
@@ -723,12 +735,61 @@ def _write_everything(
         )
 
 
+@dataclass(frozen=True)
+class ManifestTallies:
+    """`counts` and `skipped` as the DATABASE holds them — the one source for both writers.
+
+    A fresh build and an incremental update used to compute these differently: the build
+    from its run counters, the update by carrying the previous manifest's `surfaces`,
+    `skipped` and `failed` over and adjusting four of the five counts by hand — and the
+    hand adjustment drifted (topic chunks were added on every rebuild and never subtracted).
+    Reading them back from the rows means the manifest describes the base by construction,
+    and a base that disagrees with its manifest can be DETECTED (C-3).
+    """
+
+    counts: dict[str, int]
+    skipped: dict[str, int]
+
+
+def manifest_tallies(connection: sqlite3.Connection) -> ManifestTallies:
+    """What the manifest reports about the base, read from the base itself."""
+    counts = _count_rows(connection)
+    summed = connection.execute(
+        "SELECT COALESCE(SUM(skipped_empty_text), 0), COALESCE(SUM(skipped_decorative), 0), "
+        "COALESCE(SUM(skipped_no_speech), 0) FROM items"
+    ).fetchone()
+    failed_sources = connection.execute("SELECT COUNT(*) FROM source_failures").fetchone()[0]
+    return ManifestTallies(
+        counts=counts,
+        skipped={
+            "empty_text": int(summed[0]),
+            "decorative": int(summed[1]),
+            "no_speech": int(summed[2]),
+            "failed_sources": int(failed_sources),
+        },
+    )
+
+
+def manifest_mismatch(manifest: Manifest, counts: Mapping[str, int]) -> str:
+    """The planes on which the base disagrees with its manifest, as one sentence, or ``.
+
+    Empty means consistent. Compared plane by plane rather than as one boolean so the
+    error names WHAT is missing — `topics 0 != 45` is a diagnosis, `incomplete` is not.
+    """
+    differing = [
+        f"{plane} {counts.get(plane, 0)} != {declared}"
+        for plane, declared in sorted(manifest.counts.items())
+        if counts.get(plane, 0) != declared
+    ]
+    return ", ".join(differing)
+
+
 def _fresh_manifest(
     store: Mapping[str, Item],
     vocab: Sequence[Topic],
     topic_pages: Mapping[str, TopicPage],
     items_path: Path,
-    counters: WriteCounters,
+    tallies: ManifestTallies,
     failed: list[dict[str, str]],
     *,
     options: IndexOptions,
@@ -751,14 +812,8 @@ def _fresh_manifest(
         chunker_params=_params_dict(options.params),
         tokenize=FTS_TOKENIZE,
         connective=FTS_CONNECTIVE,
-        counts={
-            "items": len(store),
-            "topics": len(vocab),
-            "surfaces": counters.surfaces,
-            "chunks": counters.chunks,
-            "profiles": counters.profiles,
-        },
-        skipped=_skipped(counters),
+        counts=dict(tallies.counts),
+        skipped=dict(tallies.skipped),
         failed=failed,
     )
 
@@ -1007,23 +1062,20 @@ def _next_manifest(
     vocab: Sequence[Topic],
     topic_pages: Mapping[str, TopicPage],
     items_path: Path,
+    tallies: ManifestTallies,
     *,
-    inserted: int,
-    deleted_chunks: int,
-    profiles_inserted: int,
-    profiles_deleted: int,
     options: IndexOptions,
 ) -> Manifest:
-    """The manifest after an update: NEW signals, the versions carried over unchanged.
+    """The manifest after an update: NEW signals and tallies, the versions carried over.
 
     The versions are copied rather than recomputed because `load_compatible_manifest` has
     already proved they match — recomputing them here would silently "fix" a mismatch that
-    was supposed to have refused the run.
+    was supposed to have refused the run. The COUNTS AND OMISSIONS ARE NOT COPIED (A-3):
+    the first version carried `surfaces`, `skipped` and `failed` over and adjusted the other
+    four by hand, so after one update the manifest published the previous population and
+    `index status --json` exposed it as current. They are read from the base now, through
+    the same function a fresh build uses.
     """
-    counts = dict(previous.counts)
-    counts.update({"items": len(store), "topics": len(vocab)})
-    counts["chunks"] = counts["chunks"] - deleted_chunks + inserted
-    counts["profiles"] = counts["profiles"] - profiles_deleted + profiles_inserted
     return Manifest(
         schema_version=previous.schema_version,
         built_at=datetime.now(timezone.utc),
@@ -1037,14 +1089,22 @@ def _next_manifest(
         tokenize=previous.tokenize,
         connective=previous.connective,
         embeddings=previous.embeddings,
-        counts=counts,
-        skipped=previous.skipped,
+        counts=dict(tallies.counts),
+        skipped=dict(tallies.skipped),
         failed=previous.failed,
     )
 
 
-def _status_advice(incomplete: bool, delta: _Delta, *, behind: bool) -> str:
-    """The command that fixes what `status` just found — never a bare diagnosis."""
+def _status_advice(incomplete: bool, delta: _Delta, *, behind: bool, unusable: str = "") -> str:
+    """The command that fixes what `status` just found — never a bare diagnosis.
+
+    `unusable` is the sentence for a manifest that EXISTS but cannot be used — another
+    version, a malformed document, or a base that does not hold what it declares (C-3). It
+    already names `index build --force`, and it must, because plain `index build` refuses
+    while a manifest exists: the previous advice sent the operator into a dead end.
+    """
+    if unusable:
+        return unusable
     if incomplete:
         return (
             "El índice está incompleto o no tiene manifest: ninguna consulta lo usará. "
@@ -1076,6 +1136,7 @@ def update(
     started = time.perf_counter()
 
     connection = open_index(db_path(index_dir))
+    _require_consistent(connection, manifest)
     index = LexicalIndex(connection)
     stored = _stored_fingerprints(connection)
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
@@ -1102,6 +1163,7 @@ def update(
                 topics_rebuilt=topics_rebuilt,
                 options=options,
             )
+            tallies = manifest_tallies(connection)
             if dry_run:
                 raise _DryRun
     except _DryRun:
@@ -1115,22 +1177,30 @@ def update(
 
     write_manifest(
         index_dir,
-        _next_manifest(
-            manifest,
-            store,
-            vocab,
-            topic_pages,
-            items_path,
-            inserted=counters.chunks,
-            deleted_chunks=deleted_chunks,
-            profiles_inserted=counters.profiles,
-            profiles_deleted=deleted_profiles,
-            options=options,
-        ),
+        _next_manifest(manifest, store, vocab, topic_pages, items_path, tallies, options=options),
     )
     return _update_report(
         delta, counters, deleted_chunks, deleted_profiles, topics_rebuilt, started, dry_run=False
     )
+
+
+def _require_consistent(connection: sqlite3.Connection, manifest: Manifest) -> None:
+    """Refuse to be incremental over a base that does not hold what its manifest declares.
+
+    C-3: `update` decided `topics_rebuilt` against the MANIFEST's fingerprints and never
+    looked at the base, so a manifest declaring 45 topics over a base holding 0 produced an
+    update that rewrote every item and silently dropped the topic plane for good — no later
+    update would find a fingerprint to disagree with. The manifest is the baseline an
+    incremental update reasons from; when the base contradicts it there is no baseline, and
+    the honest answer is the rebuild.
+    """
+    mismatch = manifest_mismatch(manifest, _count_rows(connection))
+    if mismatch:
+        connection.close()
+        raise IndexIncompatibleError(
+            f"El índice no contiene lo que su manifest declara ({mismatch}): quedó "
+            f"incompleto. {REBUILD_ADVICE}"
+        )
 
 
 def _delete_item(connection: sqlite3.Connection, item_id: str) -> int:
@@ -1176,12 +1246,19 @@ def status(
     is worth its minutes.
     """
     options = options or IndexOptions()
+    manifest: Manifest | None = None
+    unusable = ""
     try:
-        manifest: Manifest | None = load_manifest(index_dir)
+        manifest = load_manifest(index_dir)
+        # The SAME check `search` and `update` apply. Without it `status` answered
+        # `incomplete=False` over a manifest both of them refuse — two instruments, opposite
+        # answers on one state (rule 9) — and its advice named plain `index build`, which
+        # refuses while a manifest exists.
+        load_compatible_manifest(index_dir, params=options.params)
     except IndexMissingError:
         manifest = None
-    except IndexIncompatibleError:
-        manifest = None
+    except IndexIncompatibleError as error:
+        unusable = str(error)
 
     counts: dict[str, int] = {}
     stored: dict[str, str] = {}
@@ -1191,10 +1268,18 @@ def status(
         stored = _stored_fingerprints(connection)
         connection.close()
 
+    if manifest is not None and not unusable:
+        mismatch = manifest_mismatch(manifest, counts)
+        if mismatch:
+            unusable = (
+                f"El índice está incompleto: la base no contiene lo que el manifest declara "
+                f"({mismatch}). {REBUILD_ADVICE}"
+            )
+
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
     delta = _classify(current, stored)
     behind = manifest is not None and manifest.store_signal != StoreSignal.of(items_path)
-    incomplete = manifest is None
+    incomplete = manifest is None or bool(unusable)
     return StatusReport(
         manifest=manifest,
         counts=counts,
@@ -1203,5 +1288,5 @@ def status(
         items_removed=len(delta.removed),
         behind=behind,
         incomplete=incomplete,
-        advice=_status_advice(incomplete, delta, behind=behind),
+        advice=_status_advice(incomplete, delta, behind=behind, unusable=unusable),
     )

@@ -25,6 +25,7 @@ import pytest
 from xbrain.knowledge import index_build
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS
 from xbrain.knowledge.index_schema import (
+    SCHEMA_VERSION,
     IndexIncompatibleError,
     IndexMissingError,
     db_path,
@@ -81,7 +82,7 @@ def test_build_writes_a_manifest_with_every_field_the_spec_requires(workspace, c
     report = _build(workspace, corpus)
     raw = json.loads(manifest_path(workspace / "index").read_text(encoding="utf-8"))
     assert set(raw) == index_build.MANIFEST_FIELDS
-    assert raw["schema_version"] == "1"
+    assert raw["schema_version"] == SCHEMA_VERSION
     assert raw["surface_version"] and raw["chunker_version"]
     # The MEASURED parameters (Plan 02 §7's sweep), read from the module rather than written
     # here a second time: two literals that must agree are two definitions (rule 5), and the
@@ -467,7 +468,10 @@ def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(workspa
 @pytest.mark.parametrize(
     "field, value",
     [
-        ("schema_version", "2"),
+        # DERIVED from the constant, not a literal: the literal `"2"` stopped being foreign
+        # the day C-3 bumped the schema to "2", and the test went red for a reason that had
+        # nothing to do with what it pins — the shape of defect 5 in the execution report.
+        ("schema_version", f"{SCHEMA_VERSION}-foreign"),
         ("surface_version", "xbrain-knowledge-surface/v9"),
         ("chunker_version", "xbrain-knowledge-chunker/v9"),
     ],

@@ -223,6 +223,10 @@ def render_status(report: StatusReport) -> str:
         f" · -{report.items_removed} borrados"
         f" · señal barata {'DESFASADA' if report.behind else 'al día'}"
     )
+    if report.incomplete:
+        # A manifest exists and the code cannot use it, or the base does not hold what it
+        # declares (C-3): said BEFORE the advice, so the header above is not read as health.
+        lines.append("  ⚠ Índice INCOMPLETO o inutilizable: ninguna consulta lo usará.")
     if report.advice:
         lines.append(f"  → {report.advice}")
     return "\n".join(lines)

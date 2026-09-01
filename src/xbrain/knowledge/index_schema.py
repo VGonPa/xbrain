@@ -62,7 +62,10 @@ from xbrain.models import _reject_local_path_traversal
 # Bumped when the physical layout changes in a way an existing database cannot answer. The
 # manifest records it and a mismatch refuses the query ENTIRELY (spec §9.3) — never a partial
 # answer over a schema the code no longer understands.
-SCHEMA_VERSION = "1"
+# "2" since C-3/A-3: `items` carries the per-item omission counters, so the manifest's
+# `skipped` is a SUM over rows the incremental path already maintains, rather than a figure
+# carried over from the previous manifest and wrong after the first `update`.
+SCHEMA_VERSION = "2"
 
 DB_FILENAME = "knowledge.db"
 MANIFEST_FILENAME = "manifest.json"
@@ -102,7 +105,13 @@ CREATE TABLE IF NOT EXISTS items (
     primary_topic     TEXT,
     note_path         TEXT,
     bookmark_folder   TEXT,
-    store_fingerprint TEXT NOT NULL
+    store_fingerprint TEXT NOT NULL,
+    -- What the emitter DECLINED for this item, counted where the item is (A-3). The
+    -- manifest's `skipped` is a SUM over these, so an incremental update that deletes and
+    -- rewrites the row keeps the total exact without re-walking the corpus.
+    skipped_empty_text INTEGER NOT NULL DEFAULT 0,
+    skipped_decorative INTEGER NOT NULL DEFAULT 0,
+    skipped_no_speech  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS items_author ON items (author_handle);
 CREATE INDEX IF NOT EXISTS items_source ON items (source);

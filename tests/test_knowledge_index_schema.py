@@ -78,8 +78,13 @@ def test_the_two_fts_planes_are_separate_tables() -> None:
 
 
 def test_the_schema_version_is_declared() -> None:
-    """The manifest records it, and a mismatch refuses the query entirely (spec §9.3)."""
-    assert SCHEMA_VERSION == "1"
+    """The manifest records it, and a mismatch refuses the query entirely (spec §9.3).
+
+    "2" since C-3/A-3: `items` gained the three per-item omission columns the manifest's
+    `skipped` is summed from, and a v1 base has no such columns. The pin exists so a layout
+    change cannot ship without the bump that makes an existing index refuse the query.
+    """
+    assert SCHEMA_VERSION == "2"
 
 
 # ---------------------------------------------------------------------------

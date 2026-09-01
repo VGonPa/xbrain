@@ -29,6 +29,7 @@ import pytest
 from xbrain.knowledge import index_build
 from xbrain.knowledge.chunking import ChunkerParams
 from xbrain.knowledge.index_schema import IndexIncompatibleError, db_path, manifest_path, open_index
+from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Item, Topic, TopicPage
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -411,3 +412,136 @@ def test_an_update_that_raises_mid_way_leaves_the_index_unchanged(built: Path, c
         index_build.write_item = real  # type: ignore[assignment]
 
     assert _rows(built, "SELECT chunk_id, rowid FROM chunks ORDER BY rowid") == before
+
+
+# ---------------------------------------------------------------------------
+# C-3 / A-3 — the manifest describes the database, or the update refuses
+# ---------------------------------------------------------------------------
+
+
+def _db_counts(data: Path) -> dict[str, int]:
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        return index_build._count_rows(connection)
+    finally:
+        connection.close()
+
+
+def _manifest(data: Path) -> dict:
+    return json.loads(manifest_path(data / "index").read_text(encoding="utf-8"))
+
+
+def test_update_recomputes_surfaces_and_omissions_instead_of_carrying_them(
+    built: Path, corpus
+) -> None:
+    """A-3 (round 02, Codex F-05): `_next_manifest` updated `items`, `topics`, `chunks` and
+    `profiles` and CARRIED `counts["surfaces"]`, every `skipped` counter and `failed` over
+    from the previous manifest. Remove an item with two surfaces and a failed fetch and the
+    base was right while the manifest kept publishing the old population — `surfaces 43`
+    against 41 rows, `failed_sources 1` against 0 — and `index status --json` exposed both
+    as they were. Spec §5.6 asks for counts and omissions that are VALID, not merely present
+    (acceptance 2).
+
+    Every count and every omission is now DERIVED FROM THE DATABASE, by the same function a
+    fresh build uses, so the two writers cannot disagree (rule 5). Seen red before the fix:
+    `43 == 41` and `1 == 0`.
+    """
+    store, _vocab, _pages = corpus
+    victim = "k11"  # two surfaces and a failed fetch, on this fixture
+    assert len(item_surfaces(store[victim])) >= 2
+    assert knowledge_item(store[victim]).failed_sources
+    before = _manifest(built)
+
+    smaller = {k: v for k, v in store.items() if k != victim}
+    _write_store(built / "items.json", smaller)
+    _update(built, smaller, corpus)
+
+    after = _manifest(built)
+    counts = _db_counts(built)
+    connection = open_index(db_path(built / "index"), read_only=True)
+    try:
+        failures = connection.execute("SELECT COUNT(*) FROM source_failures").fetchone()[0]
+    finally:
+        connection.close()
+    assert after["counts"]["surfaces"] == counts["surfaces"] < before["counts"]["surfaces"]
+    assert after["skipped"]["failed_sources"] == failures < before["skipped"]["failed_sources"]
+    assert after["counts"] == counts, "every plane, not only the four that used to move"
+
+
+def test_the_manifest_counts_match_the_database_after_every_update(built: Path, corpus) -> None:
+    """The cumulative drift the Claude gate measured (M-4 there, A-3 here): with topics
+    rebuilt, `_clear_topics` discarded the return of `delete_chunk_rows`, so each update
+    with a changed vocabulary ADDED the topic chunks to `counts["chunks"]` without ever
+    subtracting them — 84 declared against 56 real after four updates. Deriving the counts
+    from the database makes the invariant hold by construction; this test pins it across
+    three updates that each force a topic rebuild.
+    """
+    store, vocab, pages = corpus
+    for round_ in range(3):
+        slug = next(iter(pages))
+        pages = {
+            **pages,
+            slug: pages[slug].model_copy(update={"overview": f"round {round_} overview"}),
+        }
+        report = index_build.update(built / "index", store, vocab, pages, built / "items.json")
+        assert report.topics_rebuilt is True
+        assert _manifest(built)["counts"] == _db_counts(built), f"drifted on round {round_}"
+
+
+def test_update_refuses_a_database_that_disagrees_with_its_manifest(built: Path, corpus) -> None:
+    """C-3 (round 02, Claude gate H-3): `update` decided `topics_rebuilt` by comparing the
+    vocabulary and topic-page fingerprints against the MANIFEST, never against what the
+    database contains. On the real corpus, after an interrupted forced rebuild (C-1), the
+    old manifest declared 45 topics over a base that held 0: `update` inserted every item,
+    never rebuilt the topic plane — 45 topics, 616 surfaces, 703 chunks gone FOR GOOD,
+    since no later update would find a fingerprint to disagree with — and `status` answered
+    `incomplete=False` with an empty advice.
+
+    C-1 closes that route (no manifest survives), so the state is staged directly: the
+    topic plane is deleted behind the manifest's back. An incremental update over a base
+    that does not contain what its manifest declares has no honest baseline, so it REFUSES
+    and names the rebuild, and `status` says INCOMPLETE and names it too — the declaration
+    the gate found missing.
+
+    Seen red before the fix: `update` returned an `UpdateReport` with `topics_rebuilt=False`
+    and `status` reported `incomplete=False`.
+    """
+    store, vocab, pages = corpus
+    connection = open_index(db_path(built / "index"))
+    try:
+        with connection:
+            index_build._clear_topics(connection)
+    finally:
+        connection.close()
+    assert _db_counts(built)["topics"] == 0 < _manifest(built)["counts"]["topics"]
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
+        _update(built, store, corpus)
+    assert "topics" in str(caught.value), "names WHICH plane disagrees"
+
+    report = index_build.status(built / "index", store, built / "items.json")
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice
+    assert "topics" in report.advice
+
+
+def test_status_declares_a_manifest_the_code_cannot_use(built: Path, corpus) -> None:
+    """The neighbour of C-3's declaration: a manifest from another chunker version.
+
+    `search` and `update` refuse it with exit 1 and the rebuild advice; `status` read it
+    without checking the versions and answered `incomplete=False`, `advice=''` — two
+    instruments, opposite answers on the same state (rule 9). And its "incomplete" advice
+    named plain `xbrain index build`, which REFUSES while a manifest exists: a dead end in
+    two hops. `status` now applies the same compatibility check and names `--force`.
+
+    Seen red before the fix: `incomplete is False`.
+    """
+    store, _vocab, _pages = corpus
+    path = manifest_path(built / "index")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["chunker_version"] = "xbrain-knowledge-chunker/v0"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    report = index_build.status(built / "index", store, built / "items.json")
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice
