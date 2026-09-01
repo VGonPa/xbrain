@@ -585,6 +585,73 @@ def test_the_item_fingerprint_also_covers_the_filterable_metadata(corpus) -> Non
     assert index_build.item_fingerprint(moved) != index_build.item_fingerprint(item)
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("author", {"handle": "someoneelse", "name": "Someone Else"}),
+        ("title", "A different title"),
+        ("language", "fr"),
+        ("url", "https://x.com/othervoice/status/moved"),
+    ],
+)
+def test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface(
+    corpus, field: str, value: object
+) -> None:
+    """G-5: every column the index STORES about a surface moves the fingerprint.
+
+    `surface_fingerprint` is `(version, type, origin, text)` by design — two surfaces with
+    the same text under different provenance must differ, and nothing more. But the index
+    persists more than that in `surfaces`: attribution, title, url, locator and language,
+    which `search` serves on every match (A-1) and `--has-surface` filters on. A change to
+    any of them with the text untouched left `update` seeing nothing to do.
+
+    Four axes, one parametrised test, each changing ONE field of k07's quoted post and
+    nothing else. The url moves the locator too (`locator.url`), which is the point: the
+    locator is what the consumer resolves the evidence through. `producer` is deliberately
+    NOT here — the index has no producer column and `get` reads it from the configured
+    command at read time, so hashing it would rewrite every ASR/VLM item on a binary
+    rename for a field no query serves from the index.
+
+    Seen red before the fix on all four: the fingerprint did not move.
+    """
+    from xbrain.models import Author
+
+    store, _vocab, _pages = corpus
+    item = store["k07"]
+    position = next(i for i, s in enumerate(item.content.sources) if s.kind == "quoted_tweet")
+    sources = list(item.content.sources)
+    patch = {field: Author(**value) if field == "author" else value}
+    sources[position] = sources[position].model_copy(update=patch)
+    edited = item.model_copy(update={"content": item.content.model_copy(update={"sources": sources})})
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), field
+
+
+def test_the_fingerprint_hashes_the_same_row_the_writer_inserts(workspace, corpus) -> None:
+    """G-5's binding half (rule 5): ONE projection of a surface, shared by the writer and the
+    fingerprint, so a column added to `surfaces` cannot be stored without being hashed.
+
+    Asserted by reading the rows back: for every surface of every item, the tuple the
+    fingerprint hashes IS the row `_write_surfaces` wrote, column for column. Two lists that
+    "should" match would be the divergence; one function is the binding.
+    """
+    store, _vocab, _pages = corpus
+    _build(workspace, corpus)
+    connection = open_index(db_path(workspace / "index"), read_only=True)
+    try:
+        for item in store.values():
+            for surface in index_build.item_surfaces(item):
+                row = connection.execute(
+                    "SELECT surface_id, owner_type, owner_id, surface_type, origin, trust_class, "
+                    "derived, attribution_handle, attribution_name, title, url, locator_json, "
+                    "language, fingerprint, char_length FROM surfaces WHERE surface_id = ?",
+                    (surface.surface_id,),
+                ).fetchone()
+                assert row is not None, surface.surface_id
+                assert tuple(row) == index_build.surface_row(surface), surface.surface_id
+    finally:
+        connection.close()
+
+
 def test_the_store_fingerprint_is_order_independent(corpus) -> None:
     """Two loads of the same store must agree, whatever order the dict happens to iterate in."""
     store, _vocab, _pages = corpus

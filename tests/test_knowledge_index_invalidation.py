@@ -584,6 +584,48 @@ def test_update_over_a_missing_database_creates_nothing_and_leaves_search_closed
         search("Quillfeather", context)
 
 
+def test_update_sees_a_quoted_author_repaired_without_touching_the_body(built: Path, corpus) -> None:
+    """G-5 (gate round 04): rule 6 on the attribution rule this repo says it paid for in blood.
+
+    `item_fingerprint` hashed the item's metadata plus each surface's `surface_fingerprint`
+    — `(version, type, origin, TEXT)` — and nothing else about the surface. So a repair that
+    fills in the AUTHOR of a quoted post without touching its body (`refresh-quoted` on a
+    quoted fetch that came back authorless; 826 `quoted_tweet` sources on the real store, 29
+    of them failures with no author yet) left `update` reporting `0 cambiados` and `search`
+    serving the old attribution from `surfaces.attribution_handle` — the repaired evidence
+    with the derivative standing. Title, language and locator had the same blind spot, and
+    the index stores and serves all four (A-1).
+
+    Seen red before the fix: `items_changed == 0` and the stored `attribution_handle` was
+    still `othervoice`.
+    """
+    from xbrain.models import Author
+
+    store, _vocab, _pages = corpus
+    item = store["k07"]
+    position = next(i for i, s in enumerate(item.content.sources) if s.kind == "quoted_tweet")
+    sources = list(item.content.sources)
+    sources[position] = sources[position].model_copy(
+        update={"author": Author(handle="repairedvoice", name="Repaired Voice")}
+    )
+    repaired = dict(store)
+    repaired["k07"] = item.model_copy(
+        update={"content": item.content.model_copy(update={"sources": sources})}
+    )
+    assert repaired["k07"].content.sources[position].text == item.content.sources[position].text
+    _write_store(built / "items.json", repaired)
+
+    report = _update(built, repaired, corpus)
+
+    assert report.items_changed == 1
+    (row,) = _rows(
+        built,
+        "SELECT attribution_handle FROM surfaces WHERE owner_id = 'k07' "
+        "AND surface_type = 'quoted_post'",
+    )
+    assert row[0] == "repairedvoice"
+
+
 @pytest.mark.parametrize("table", sorted(TABLES | FTS_TABLES))
 def test_update_refuses_an_index_missing_a_table_instead_of_recreating_it_empty(
     built: Path, corpus, table: str

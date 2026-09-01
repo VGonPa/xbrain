@@ -295,11 +295,26 @@ class StatusReport:
 def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     """sha256 over everything about this item that the INDEX holds.
 
-    Two halves, and both are needed. The SURFACE fingerprints answer *did the indexable text
-    change?* exactly — they already hash the emitter version, the surface type, the origin and
-    the body. The filterable METADATA (source, author, date, topics, content kinds) answers
-    the other half: a changed author changes what `--author` returns even though not one
-    character of text moved.
+    Two halves, and both are needed. The SURFACE ROWS answer *did what the index holds about
+    each surface change?* — `surface_row` is the exact tuple `_write_surfaces` inserts, so
+    it covers the surface fingerprint (emitter version, type, origin, body) AND the
+    attribution, title, url, locator and language the index stores and `search` serves on
+    every match (A-1). The filterable METADATA of the item (source, author, date, topics,
+    content kinds) answers the other half: a changed author changes what `--author` returns
+    even though not one character of text moved.
+
+    THE ROW, NOT THE SURFACE FINGERPRINT ALONE (G-5). `surface_fingerprint` is
+    `(version, type, origin, text)` by design and must stay so; but hashing only that here
+    meant a `refresh-quoted` that filled in the author of a quoted post without touching
+    its body left `update` reporting `0 cambiados` and `search` serving the old attribution
+    — the evidence repaired, the derivative standing (CLAUDE.md rule 6), on the attribution
+    rule this repo paid for in blood. Sharing the writer's projection is what makes "every
+    stored column is hashed" structural rather than a list kept in step by hand.
+
+    What is NOT hashed, and why: `producer`. The index has no producer column — `get` reads
+    it from the configured transcribe/vision command at read time — so hashing a config
+    value here would rewrite every ASR/VLM item on a binary rename for a field no query
+    serves from the index.
 
     Deliberately NOT `(item_id, content.fetched_at, enriched.enriched_at)`: see the module
     docstring for why a timestamp proxy both misses hand edits and cannot reach the 40 % of
@@ -326,9 +341,44 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
             source.kind
             for _index, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
         ),
-        *(surface.fingerprint for surface in surfaces),
+        *(json.dumps(surface_row(surface), ensure_ascii=False) for surface in surfaces),
     ]
     return _sha256("\0".join(parts))
+
+
+# The column order of `surfaces`, as ONE tuple type shared by the writer and the fingerprint.
+SurfaceRow = tuple[
+    str, str, str, str, str, str, int, str | None, str | None, str | None, str | None, str,
+    str | None, str, int,
+]
+
+
+def surface_row(surface: KnowledgeSurface) -> SurfaceRow:
+    """What the index STORES about a surface — the row `_write_surfaces` inserts, verbatim.
+
+    One projection, two readers: the writer binds it to the `INSERT`, `item_fingerprint`
+    hashes it. A column added to `surfaces` therefore cannot be stored without being hashed,
+    and `test_the_fingerprint_hashes_the_same_row_the_writer_inserts` reads the rows back to
+    prove the two never drifted. The last column is a LENGTH, never the body (spec §10.8);
+    the body is covered by `fingerprint`, which hashes it.
+    """
+    return (
+        surface.surface_id,
+        surface.owner_type,
+        surface.owner_id,
+        surface.surface_type,
+        surface.origin,
+        surface.trust_class,
+        int(surface.derived),
+        surface.attribution.handle if surface.attribution else None,
+        surface.attribution.name if surface.attribution else None,
+        surface.title,
+        surface.locator.url,
+        surface.locator.model_dump_json(),
+        surface.language,
+        surface.fingerprint,
+        len(surface.text),
+    )
 
 
 def store_fingerprint(store: Mapping[str, Item], *, options: IndexOptions | None = None) -> str:
@@ -566,29 +616,14 @@ def _write_surfaces(
 ) -> None:
     for surface in surfaces:
         counters.surfaces += 1
+        # The SAME projection `item_fingerprint` hashes (G-5): what is stored is what is
+        # fingerprinted, by construction. LENGTH, never the body, in the last column: spec
+        # §10.8 keeps articles out of derived stores, and `chunks.text` is where text lives.
         index.connection.execute(
             "INSERT OR REPLACE INTO surfaces (surface_id, owner_type, owner_id, surface_type, "
             "origin, trust_class, derived, attribution_handle, attribution_name, title, url, "
             "locator_json, language, fingerprint, char_length) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                surface.surface_id,
-                surface.owner_type,
-                surface.owner_id,
-                surface.surface_type,
-                surface.origin,
-                surface.trust_class,
-                int(surface.derived),
-                surface.attribution.handle if surface.attribution else None,
-                surface.attribution.name if surface.attribution else None,
-                surface.title,
-                surface.locator.url,
-                surface.locator.model_dump_json(),
-                surface.language,
-                surface.fingerprint,
-                # LENGTH, never the body: spec §10.8 keeps articles out of derived stores
-                # that are not the index itself, and `chunks.text` is where the text lives.
-                len(surface.text),
-            ),
+            surface_row(surface),
         )
 
 

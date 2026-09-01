@@ -30,7 +30,9 @@ Reindex after anything that changes indexable text:
 | `topics` | overviews and topic notes | `xbrain index update` |
 | `digest-video` / `describe` / `redescribe-frames` | transcripts, captions, image prose | `xbrain index update` |
 | `vocab` | topic descriptions — which enter every assigned item's PROFILE | `xbrain index update` (it rebuilds the profiles) |
+| `refresh-quoted` / any repair of a source's author, title, language or URL that leaves its body untouched | the attribution and locator `search` serves on every match (A-1) | `xbrain index update` — since round 03 the item fingerprint covers every column `surfaces` stores, not the text alone (G-5); before, this repair left `update` at «0 cambiados» and `search` serving the old author |
 | upgraded xbrain and `index update` refuses | the emitter, the chunker or the SCHEMA moved (schema **2** since round 02) | `xbrain index build --force` |
+| upgraded xbrain across round 03 and `index update` reports **every** item changed | the fingerprint's definition moved (G-5), so an index built before it compares unequal on all items — a ONE-TIME full rewrite (2,404 items, measured), after which the next `update` is back to 0 | nothing: let it run once |
 
 **You do not have to remember.** Two independent signals say so for you:
 
