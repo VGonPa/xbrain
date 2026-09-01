@@ -47,10 +47,11 @@ from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
 # The degradations this plan can declare, in a FIXED order so two responses over the same
 # state are byte-identical (spec §3.7.8 applies to the envelope too, not only to the ranking).
 #
-# `no_embeddings` is permanent here and that is the point: spec §9.3 requires that without a
-# vector backend *lexical sigue operativo y el response declara estrategia degradada*. Plan 02
-# is literally that state, and declaring it is what stops a consumer reading a lexical answer
-# as a hybrid one.
+# `no_embeddings` is what every Plan 02 index declares, because every Plan 02 manifest carries
+# `embeddings: null`: spec §9.3 requires that without a vector backend *lexical sigue operativo
+# y el response declara estrategia degradada*, and declaring it is what stops a consumer
+# reading a lexical answer as a hybrid one. It is derived from the manifest, not permanent
+# (B-i) — see `_degraded`.
 DEGRADED_ORDER: tuple[str, ...] = ("index_behind_store", "no_embeddings")
 
 
@@ -122,8 +123,16 @@ def _degraded(manifest: Manifest, items_path: Path) -> tuple[str, ...]:
     `index_behind_store` is ONE `os.stat` (B3). A `touch` with no edit is a false positive
     and that is accepted: a false positive costs one warning, a false negative costs serving
     stale evidence as fresh. It fails towards the warning.
+
+    `no_embeddings` is READ OFF THE MANIFEST (B-i), never hard-coded: the manifest's
+    `embeddings` block is where a vector backend is recorded, and a flag that was always on
+    said nothing about this index — the day Plan 03 writes the block, a constant would keep
+    declaring a degradation that no longer applies, with the test beside it green (the F-2
+    shape, one field over).
     """
-    flags = {"no_embeddings"}
+    flags = set()
+    if manifest.embeddings is None:
+        flags.add("no_embeddings")
     if manifest.store_signal != StoreSignal.of(items_path):
         flags.add("index_behind_store")
     return tuple(flag for flag in DEGRADED_ORDER if flag in flags)
