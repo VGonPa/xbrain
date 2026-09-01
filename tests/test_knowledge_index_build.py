@@ -26,6 +26,7 @@ from xbrain.knowledge import index_build
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS
 from xbrain.knowledge.index_schema import (
     IndexIncompatibleError,
+    IndexMissingError,
     db_path,
     manifest_path,
     open_index,
@@ -243,6 +244,68 @@ def test_an_interrupted_build_leaves_no_manifest_and_no_partial_rows(workspace, 
     )
     connection = open_index(db_path(workspace / "index"))
     assert connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+
+
+def test_an_interrupted_forced_rebuild_leaves_no_manifest_behind(workspace, corpus) -> None:
+    """C-1 (round 02, both gates): `--force` over an EXISTING index is the documented way to
+    rebuild — every rebuild error names it — and it is the one shape the test above never
+    exercised, because a fresh build has no previous manifest that could survive.
+
+    HEAD unlinked the database and left the OLD manifest standing until the new one was
+    written. Interrupt the rebuild and the transaction rolls the rows back, but the old
+    manifest — same versions, same cheap signal — is still there, so `load_compatible_manifest`
+    accepts it, `status` says nothing is wrong, and `search` answers "no results" over an
+    EMPTY database: indistinguishable from a corpus with no matches. Measured on the real
+    corpus (2,404 items, 2026-09-01): `old_manifest_survives=True`, `chunks_after_interrupt=0`,
+    `status_incomplete=False`, `query_returned_normally=True` with 0 results.
+
+    The manifest is what carries the safety property, so a forced rebuild removes it FIRST.
+    Seen red on HEAD: the manifest survived, `status` said `incomplete=False`, and the
+    `update` below "recovered" by inserting every item while dropping the whole topic plane.
+    """
+    store, vocab, pages = corpus
+    _build(workspace, corpus)
+    assert manifest_path(workspace / "index").exists()
+
+    calls = {"n": 0}
+    real = index_build.write_item
+
+    def explode(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise KeyboardInterrupt
+        return real(*args, **kwargs)
+
+    index_build.write_item = explode  # type: ignore[assignment]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _build(workspace, corpus, force=True)
+    finally:
+        index_build.write_item = real  # type: ignore[assignment]
+
+    assert not manifest_path(workspace / "index").exists(), (
+        "the OLD manifest survived a forced rebuild: a query would trust it over an empty base"
+    )
+    report = index_build.status(workspace / "index", store, workspace / "items.json")
+    assert report.incomplete is True
+    assert "xbrain index build" in report.advice
+
+    # The recovery path: `update` REFUSES (there is no manifest to be incremental against),
+    # and a fresh `build` restores everything — including the topic plane C-3 lost.
+    with pytest.raises(IndexMissingError):
+        index_build.update(workspace / "index", store, vocab, pages, workspace / "items.json")
+    _build(workspace, corpus)
+    connection = open_index(db_path(workspace / "index"), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM topics").fetchone()[0] == len(vocab)
+        assert (
+            connection.execute("SELECT COUNT(*) FROM chunks WHERE owner_type = 'topic'").fetchone()[
+                0
+            ]
+            > 0
+        )
+    finally:
+        connection.close()
 
 
 def test_status_calls_an_index_without_a_manifest_incomplete(workspace, corpus) -> None:

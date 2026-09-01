@@ -621,14 +621,20 @@ def build(
 ) -> BuildReport:
     """Build `data/index/` from scratch. Read-only with respect to the store.
 
-    ONE TRANSACTION, AND THE MANIFEST LAST. A `Ctrl-C` or a full disk mid-build rolls the
-    rows back and leaves no manifest — and an index with no manifest is REFUSED by every
-    query rather than answered partially, so an interruption cannot produce a small index
-    that looks valid (spec §9.3, Plan 02 §11).
+    ONE TRANSACTION, AND THE MANIFEST LAST — AND, ON A FORCED REBUILD, THE OLD MANIFEST
+    REMOVED FIRST. A `Ctrl-C` or a full disk mid-build rolls the rows back and leaves no
+    manifest — and an index with no manifest is REFUSED by every query rather than answered
+    partially, so an interruption cannot produce a small index that looks valid (spec §9.3,
+    Plan 02 §11). That sentence was only true for a FRESH build until C-1: `--force` kept the
+    previous manifest standing while the new database was written, so an interrupted forced
+    rebuild left a manifest that every query accepted over an empty base.
 
-    Rebuilding over an existing index requires `force`, because a rebuild throws away
-    something that may have taken minutes and the incremental path usually wants
-    `index update` instead. The error names both.
+    A forced rebuild therefore does NOT preserve the previous index: the manifest and the
+    database are both gone before the first row is written, and recovering from an
+    interruption is `xbrain index build` again (which `status` names). Rebuilding over an
+    existing index requires `force`, because a rebuild throws away something that may have
+    taken minutes and the incremental path usually wants `index update` instead. The error
+    names both.
 
     TWO THINGS FOUND BY MEASURING, NOT BY READING, and both are here:
 
@@ -655,6 +661,15 @@ def build(
     if dry_run:
         connection = open_memory_index()
     else:
+        # THE MANIFEST GOES FIRST (C-1). It is what every query trusts, so it must not
+        # outlive the database it describes: with the old manifest standing while the new
+        # database was being written, an interrupted `--force` rolled the rows back and left
+        # a manifest whose versions and cheap signal still matched — `status` reported
+        # nothing wrong and `search` answered "no results" over an EMPTY base, which is
+        # indistinguishable from a corpus with no matches. Measured on the real corpus
+        # (2,404 items, 2026-09-01). With the manifest gone first, the interrupted state is
+        # the one this docstring promises: refused by every query, named by `status`.
+        manifest_path(index_dir).unlink(missing_ok=True)
         db_path(index_dir).unlink(missing_ok=True)
         connection = open_index(db_path(index_dir))
     try:
