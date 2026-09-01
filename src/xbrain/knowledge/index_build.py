@@ -59,6 +59,7 @@ from xbrain.knowledge.index_schema import (
     manifest_path,
     open_index,
     open_memory_index,
+    require_database,
 )
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.lexical_fts import FTS_CONNECTIVE, FTS_TOKENIZE
@@ -682,7 +683,9 @@ def build(
         # the one this docstring promises: refused by every query, named by `status`.
         manifest_path(index_dir).unlink(missing_ok=True)
         db_path(index_dir).unlink(missing_ok=True)
-        connection = open_index(db_path(index_dir))
+        # The ONE caller allowed to create the file (G-2): every other door finds the
+        # absence and names the command instead of leaving an empty base behind.
+        connection = open_index(db_path(index_dir), create=True)
     try:
         with connection:  # a single transaction: commit on success, rollback on any exception
             _write_everything(
@@ -753,7 +756,7 @@ class ManifestTallies:
 
 def manifest_tallies(connection: sqlite3.Connection) -> ManifestTallies:
     """What the manifest reports about the base, read from the base itself."""
-    counts = _count_rows(connection)
+    counts = count_rows(connection)
     summed = connection.execute(
         "SELECT COALESCE(SUM(skipped_empty_text), 0), COALESCE(SUM(skipped_decorative), 0), "
         "COALESCE(SUM(skipped_no_speech), 0) FROM items"
@@ -955,7 +958,7 @@ _COUNT_STATEMENTS: dict[str, str] = {
 }
 
 
-def _count_rows(connection: sqlite3.Connection) -> dict[str, int]:
+def count_rows(connection: sqlite3.Connection) -> dict[str, int]:
     """How many rows each plane holds — what `index status --json` reports (acceptance 2)."""
     return {
         table: int(connection.execute(statement).fetchone()[0])
@@ -1135,8 +1138,11 @@ def update(
     manifest = load_compatible_manifest(index_dir, params=options.params)
     started = time.perf_counter()
 
-    connection = open_index(db_path(index_dir))
-    _require_consistent(connection, manifest)
+    # BEFORE the write door (G-2): an update over a database that is not there has nothing
+    # to be incremental over, and opening for writing used to create it — an empty base
+    # under a standing manifest, which the next `search` answered as an empty corpus.
+    connection = open_index(require_database(index_dir))
+    require_consistent(connection, manifest)
     index = LexicalIndex(connection)
     stored = _stored_fingerprints(connection)
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
@@ -1184,8 +1190,8 @@ def update(
     )
 
 
-def _require_consistent(connection: sqlite3.Connection, manifest: Manifest) -> None:
-    """Refuse to be incremental over a base that does not hold what its manifest declares.
+def require_consistent(connection: sqlite3.Connection, manifest: Manifest) -> None:
+    """Refuse a base that does not hold what its manifest declares. Closes the connection.
 
     C-3: `update` decided `topics_rebuilt` against the MANIFEST's fingerprints and never
     looked at the base, so a manifest declaring 45 topics over a base holding 0 produced an
@@ -1193,8 +1199,14 @@ def _require_consistent(connection: sqlite3.Connection, manifest: Manifest) -> N
     update would find a fingerprint to disagree with. The manifest is the baseline an
     incremental update reasons from; when the base contradicts it there is no baseline, and
     the honest answer is the rebuild.
+
+    Public since G-2 because `search` runs it too (`index_store.open_for_query`): it used to
+    compare versions and schema only, so a base amputated behind the manifest's back — or
+    the empty one a stray write door left behind — was answered as a corpus with no matches
+    while `update` and `status` refused it. Five `COUNT(*)`, 0.04 ms on the 52 MB real
+    index, and the three instruments say one thing.
     """
-    mismatch = manifest_mismatch(manifest, _count_rows(connection))
+    mismatch = manifest_mismatch(manifest, count_rows(connection))
     if mismatch:
         connection.close()
         raise IndexIncompatibleError(
@@ -1258,7 +1270,7 @@ def _index_contents(index_dir: Path) -> tuple[dict[str, int], dict[str, str]]:
         return {}, {}
     connection = open_index(db_path(index_dir), read_only=True)
     try:
-        return _count_rows(connection), _stored_fingerprints(connection)
+        return count_rows(connection), _stored_fingerprints(connection)
     finally:
         connection.close()
 

@@ -129,7 +129,7 @@ def test_the_index_still_answers_the_same_after_a_vacuum(tmp_path: Path) -> None
     (an index that stops answering after a compaction) is real and cheap to check.
     """
     path = tmp_path / "knowledge.db"
-    connection = open_index(path)
+    connection = open_index(path, create=True)
     for index in range(1, 21):
         _insert_chunk(connection, f"c{index:02d}", f"quillfeather body number {index}")
     connection.executescript(
@@ -177,7 +177,7 @@ def test_a_deleted_chunk_leaves_no_tokens_behind_for_a_reused_rowid(tmp_path: Pa
     """
     from xbrain.knowledge.index_schema import delete_chunk_rows
 
-    connection = open_index(tmp_path / "knowledge.db")
+    connection = open_index(tmp_path / "knowledge.db", create=True)
     _insert_chunk(connection, "c1", "the marrowgate protocol is documented here")
     connection.commit()
     (freed,) = connection.execute("SELECT rowid FROM chunks WHERE chunk_id = 'c1'").fetchone()
@@ -217,7 +217,7 @@ def test_deleting_a_profile_removes_its_terms_from_the_index(tmp_path: Path) -> 
     """
     from xbrain.knowledge.index_schema import delete_profile_rows
 
-    connection = open_index(tmp_path / "knowledge.db")
+    connection = open_index(tmp_path / "knowledge.db", create=True)
     _insert_profile(connection, "i1", "zephyrine appears only in this profile")
     _insert_profile(connection, "i2", "an ordinary profile")
     connection.commit()
@@ -244,7 +244,7 @@ def test_a_read_only_connection_refuses_to_write(tmp_path: Path) -> None:
     than a repair nobody asked for. Seen red by opening it read-write.
     """
     path = tmp_path / "knowledge.db"
-    open_index(path).close()
+    open_index(path, create=True).close()
     connection = open_index(path, read_only=True)
     with pytest.raises(sqlite3.OperationalError):
         connection.execute("INSERT INTO chunks (chunk_id, surface_id, text) VALUES ('x','y','z')")
@@ -256,6 +256,35 @@ def test_opening_a_missing_index_read_only_is_an_actionable_error(tmp_path: Path
 
     with pytest.raises(IndexMissingError, match="xbrain index build"):
         open_index(tmp_path / "nope.db", read_only=True)
+
+
+def test_opening_a_missing_database_for_writing_does_not_create_it(tmp_path: Path) -> None:
+    """G-2's second closure: the WRITE door does not create a file outside `build`.
+
+    `open_index(path)` used to `mkdir + connect + create_schema` whenever the file was
+    absent, which is what let `index update --dry-run` leave an empty base under a standing
+    manifest. Creation is now an explicit `create=True`, which only `build` passes; every
+    other writer finds the absence and names the command. And the advice depends on what
+    is left: with a manifest beside the missing file, plain `xbrain index build` REFUSES
+    (a manifest exists), so the sentence has to name `--force`.
+
+    Seen red before the fix: the file existed after the first call.
+    """
+    from xbrain.knowledge.index_schema import IndexMissingError, manifest_path
+
+    path = tmp_path / "index" / "knowledge.db"
+    with pytest.raises(IndexMissingError, match="xbrain index build"):
+        open_index(path)
+    assert not path.exists() and not path.parent.exists()
+
+    path.parent.mkdir()
+    manifest_path(path.parent).write_text("{}", encoding="utf-8")
+    with pytest.raises(IndexMissingError, match="xbrain index build --force"):
+        open_index(path)
+    assert not path.exists()
+
+    open_index(path, create=True).close()
+    assert path.exists()
 
 
 # ---------------------------------------------------------------------------

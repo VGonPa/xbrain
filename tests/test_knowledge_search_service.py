@@ -204,6 +204,32 @@ def test_an_index_missing_a_table_is_refused_naming_the_rebuild(
     assert table in str(caught.value), "names WHAT is missing, not only that something is"
 
 
+def test_search_refuses_a_base_that_disagrees_with_its_manifest(context: QueryContext) -> None:
+    """G-2's third closure, and B-c (gate round 04): `search` compared VERSIONS and schema
+    against the manifest, never `counts`, so over a base whose topic plane had been deleted
+    behind the manifest's back it answered normally and declared nothing — while `update`
+    and `status` (C-3) refused the same base naming the plane. The gate called this *the gap
+    G-2 enters through*: a base of zero rows under a standing manifest is exactly a base
+    that does not hold what its manifest declares.
+
+    Five `COUNT(*)` per query (measured 0.04 ms in total on the 52 MB real index), and the
+    same sentence `update` and `status` already use, so the three instruments agree.
+
+    Seen red before the fix: `search` returned a `SearchResponse` with `degraded ==
+    ("no_embeddings",)` over the amputated base.
+    """
+    connection = open_index(db_path(context.index_dir))
+    try:
+        with connection:
+            index_build._clear_topics(connection)
+    finally:
+        connection.close()
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
+        search("Quillfeather", context)
+    assert "topics" in str(caught.value), "names WHICH plane disagrees"
+
+
 def test_search_is_deterministic(context: QueryContext) -> None:
     """Spec §3.7.8: the same query over the same index answers identically, twice."""
     assert search("agents", context).model_dump() == search("agents", context).model_dump()

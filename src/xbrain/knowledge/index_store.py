@@ -35,8 +35,13 @@ from pathlib import Path
 from xbrain.knowledge.chunking import ChunkerParams
 from xbrain.knowledge.contracts import IndexStatusRef
 from xbrain.knowledge.ids import chunk_fingerprint
-from xbrain.knowledge.index_build import Manifest, StoreSignal, load_compatible_manifest
-from xbrain.knowledge.index_schema import IndexMissingError, db_path, open_index
+from xbrain.knowledge.index_build import (
+    Manifest,
+    StoreSignal,
+    load_compatible_manifest,
+    require_consistent,
+)
+from xbrain.knowledge.index_schema import open_index, require_database
 from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
 
 # The degradations this plan can declare, in a FIXED order so two responses over the same
@@ -94,19 +99,21 @@ def open_for_query(
     `params` is threaded through so a chunker sweep that changed the parameters without
     bumping `CHUNKER_VERSION` is caught here too — the case where the id resolves and the
     text behind it is not what it was.
+
+    AND THE BASE MUST HOLD WHAT THE MANIFEST DECLARES (G-2, B-c). Versions and schema were
+    checked; `counts` were not, so a base amputated behind the manifest's back — or the
+    empty one a write door used to leave behind (`index update --dry-run` over a deleted
+    database) — was answered as a corpus with no matches, `degraded: ["no_embeddings"]` and
+    nothing else, while `update` and `status` refused it naming the plane. The check is the
+    SAME function they run (`require_consistent`), five `COUNT(*)` measured at 0.04 ms on the
+    52 MB real index, so a query and the two maintenance commands say one thing.
     """
-    database = db_path(index_dir)
-    if not database.exists():
-        raise IndexMissingError(
-            f"No hay índice en {index_dir}. Constrúyelo con `xbrain index build`."
-        )
+    database = require_database(index_dir)
     manifest = load_compatible_manifest(index_dir, params=params)
     degraded = _degraded(manifest, items_path)
-    return OpenIndex(
-        lexical=LexicalIndex(open_index(database, read_only=True)),
-        manifest=manifest,
-        degraded=degraded,
-    )
+    connection = open_index(database, read_only=True)
+    require_consistent(connection, manifest)
+    return OpenIndex(lexical=LexicalIndex(connection), manifest=manifest, degraded=degraded)
 
 
 def _degraded(manifest: Manifest, items_path: Path) -> tuple[str, ...]:

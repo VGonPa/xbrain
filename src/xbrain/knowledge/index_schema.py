@@ -292,22 +292,53 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(_SCHEMA)
 
 
-def open_index(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
-    """Open the index database, creating the schema when opening for writing.
+def require_database(index_dir: Path) -> Path:
+    """The database file, or the ONE actionable error for its absence (G-2).
+
+    The advice depends on what is left beside the missing file. With no manifest the index
+    was simply never built, and plain `xbrain index build` builds it. With a manifest still
+    standing — the operator deleted the 52 MB database by hand and kept the 1 KB document —
+    plain `build` REFUSES (*Ya existe un índice*), so naming it would send the operator into
+    a dead end in two hops; the honest command is the forced rebuild. One function, called by
+    every door (`open_index`, `update`, `open_for_query`), so the three cannot disagree on
+    which command that is.
+    """
+    database = db_path(index_dir)
+    if database.exists():
+        return database
+    if manifest_path(index_dir).exists():
+        raise IndexMissingError(
+            f"No hay base de datos en {database} pero su manifest sigue en pie: el índice "
+            f"quedó incompleto. {REBUILD_ADVICE}"
+        )
+    raise IndexMissingError(f"No hay índice en {index_dir}. Constrúyelo con `xbrain index build`.")
+
+
+def open_index(path: Path, *, read_only: bool = False, create: bool = False) -> sqlite3.Connection:
+    """Open the index database. Creates it ONLY when `create=True`, which only `build` passes.
 
     `read_only=True` opens `file:…?mode=ro`, so a stray write is an `OperationalError`
     instead of a silent repair — spec §5.6 is explicit that a query never modifies or repairs
     the index. A promise not to write is not the same property as being unable to.
+
+    THE WRITE DOOR DOES NOT CREATE A FILE EITHER (G-2). It used to `mkdir + connect +
+    create_schema` whenever the file was absent, which is how `index update --dry-run` left
+    an EMPTY database under a manifest that was still standing: the consistency check then
+    raised the right error with the file already on disk, and the next `search` — which
+    checked `exists()` and a compatible manifest — answered «Sin resultados» with exit 0 over
+    zero rows while `status` said incomplete. Measured on the real corpus through the CLI
+    (2026-09-01): a 167,936-byte `knowledge.db` from a dry run. Creation is now opt-in and
+    named, so the instrument that says "let me see what would happen" cannot change what
+    happens next.
     """
     if read_only:
-        if not path.exists():
-            raise IndexMissingError(
-                f"No hay índice en {path}. Constrúyelo con `xbrain index build`."
-            )
+        require_database(path.parent)
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         return _verify_schema(_prove_readable(connection, path), path)
     existed = path.exists()
+    if not existed and not create:
+        require_database(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row

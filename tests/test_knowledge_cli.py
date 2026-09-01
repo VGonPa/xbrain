@@ -445,6 +445,30 @@ def test_mine_and_a_conflicting_source_are_refused(workspace: Path) -> None:
     assert "incompatibles" in result.output
 
 
+def test_update_dry_run_over_a_deleted_database_leaves_search_closed(workspace: Path) -> None:
+    """G-2 at the CLI, the exact operator sequence the gate reproduced on the real corpus.
+
+    `knowledge.db` deleted by hand (52 MB, a natural clean-up target), `manifest.json` kept:
+    `index update --dry-run` exited 1 with the right message and CREATED an empty database;
+    the next `search` exited 0 with «Sin resultados» over zero rows. The instrument that says
+    "let me see what would happen" must not change what happens next.
+
+    Seen red before the fix: `knowledge.db` existed after the dry run and `search` exited 0.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    database = workspace / "data" / "index" / "knowledge.db"
+    database.unlink()
+
+    result = runner.invoke(app, ["index", "update", "--dry-run"])
+    assert result.exit_code != 0, result.output
+    assert "xbrain index build --force" in result.output, result.output
+    assert not database.exists(), "the dry run created the database"
+
+    result = runner.invoke(app, ["search", "Quillfeather"])
+    assert result.exit_code != 0, result.output
+    assert "xbrain index build --force" in result.output, result.output
+
+
 def test_index_status_reports_the_store_delta(workspace: Path) -> None:
     """Step 10c at the CLI: `status --json` says how many items changed."""
     runner.invoke(app, ["index", "build"])

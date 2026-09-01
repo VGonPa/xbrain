@@ -151,6 +151,17 @@ losing 45 topics, 616 surfaces and 703 chunks for good — and `index status` re
 incomplete, naming `xbrain index build --force`. `status` also applies the same version check
 `search` and `update` do, so the three instruments agree on one state.
 
+**And since round 03, `search` runs the same count check (G-2, B-c).** Until then a query
+compared versions and schema only: over a base amputated behind the manifest's back it answered
+«Sin resultados» and declared nothing, while `update` and `status` refused it. The path that
+actually produced that base was `index update --dry-run` over a deleted `knowledge.db` (52 MB, a
+natural clean-up target; the 1 KB manifest stays): the write door created an EMPTY database
+before the consistency check raised, and the next `search` exited 0 over zero rows. Now no door
+but `build` creates the file, `update` refuses before touching the disk, and every `search` runs
+five `COUNT(*)` (0.04 ms on the real index) against the manifest. With a manifest standing beside
+a missing database the advice names `xbrain index build --force`, because plain `build` refuses
+while a manifest exists.
+
 ---
 
 ## The lexical baseline — the number Plan 03 has to beat

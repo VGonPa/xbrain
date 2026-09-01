@@ -422,7 +422,7 @@ def test_an_update_that_raises_mid_way_leaves_the_index_unchanged(built: Path, c
 def _db_counts(data: Path) -> dict[str, int]:
     connection = open_index(db_path(data / "index"), read_only=True)
     try:
-        return index_build._count_rows(connection)
+        return index_build.count_rows(connection)
     finally:
         connection.close()
 
@@ -523,6 +523,57 @@ def test_update_refuses_a_database_that_disagrees_with_its_manifest(built: Path,
     assert report.incomplete is True
     assert "xbrain index build --force" in report.advice
     assert "topics" in report.advice
+
+
+def test_update_over_a_missing_database_creates_nothing_and_leaves_search_closed(
+    built: Path, corpus
+) -> None:
+    """G-2 (gate round 04): `index update` — even `--dry-run` — CREATED an empty database
+    under a manifest that was still standing, and `search` went from failing closed to
+    answering open.
+
+    `update()` opened the database for writing, and `open_index` without `read_only` did
+    `mkdir + connect + create_schema` whenever the file did not exist; `_require_consistent`
+    then detected `chunks 0 != …` and raised — with the file already created. `open_for_query`
+    only checked `exists()` plus a compatible manifest, so the next `search` answered "no
+    results" with exit 0 over a base of zero rows while `status` said `incomplete=True`: two
+    instruments, opposite answers (rule 9), and the exact shape of CRITICAL C-1 reached by
+    the command an operator runs "to see what happens". Reproduced on the real corpus through
+    the CLI: `rm knowledge.db` (52 MB, a natural clean-up target) → `update --dry-run` exit 1
+    with the right message AND a 167,936-byte `knowledge.db` → `search` exit 0, «Sin
+    resultados».
+
+    Three closures, asserted through the public functions: `update` refuses BEFORE touching
+    the disk and names `--force` (plain `build` refuses while the manifest exists — the dead
+    end B-r is about); no file appears; `search` keeps refusing.
+
+    Seen red before the fix: `db_path(...).exists()` was True after the dry run and `search`
+    returned a `SearchResponse`.
+    """
+    from xbrain.knowledge.index_schema import IndexError_, IndexMissingError
+    from xbrain.knowledge.search_service import QueryContext, search
+
+    store, vocab, pages = corpus
+    db_path(built / "index").unlink()
+    assert manifest_path(built / "index").exists(), "the manifest is what makes this state"
+
+    with pytest.raises(IndexMissingError, match="xbrain index build --force"):
+        _update(built, store, corpus, dry_run=True)
+    assert not db_path(built / "index").exists(), "update must not create the base"
+
+    with pytest.raises(IndexMissingError, match="xbrain index build --force"):
+        _update(built, store, corpus)
+    assert not db_path(built / "index").exists()
+
+    context = QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=built / "index",
+        items_path=built / "items.json",
+    )
+    with pytest.raises(IndexError_, match="xbrain index build --force"):
+        search("Quillfeather", context)
 
 
 def test_status_declares_a_manifest_the_code_cannot_use(built: Path, corpus) -> None:

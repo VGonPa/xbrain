@@ -803,7 +803,7 @@ def test_the_index_never_writes_when_opened_read_only(tmp_path: Path) -> None:
     read-write: the insert succeeds and the query has repaired an index nobody asked it to.
     """
     path = tmp_path / "knowledge.db"
-    writer = LexicalIndex(open_index(path))
+    writer = LexicalIndex(open_index(path, create=True))
     writer.add([_chunk("c1", "marrowgate body")])
     writer.connection.commit()
     writer.connection.close()
