@@ -161,26 +161,43 @@ def _select(
     """
     names = tuple(requested) if requested is not None else DEFAULT_SURFACES
     chosen = tuple(surface for surface in emitted if surface.surface_type in names)
-    if requested is None:
-        return chosen
-    present = {surface.surface_type for surface in emitted}
-    failed = {
+    if requested is not None:
+        _refuse_unknown(names, emitted, available, _failed_surface_types(failures))
+    return chosen
+
+
+def _failed_surface_types(failures: Sequence[SourceFailure]) -> set[SurfaceType]:
+    """The surfaces the failed kinds WOULD have produced — the names a failure answers for."""
+    return {
         surface_type
         for failure in failures
         for surface_type in CONTENT_KIND_TO_SURFACE_TYPES[failure.kind]
     }
+
+
+def _refuse_unknown(
+    names: Sequence[SurfaceType],
+    emitted: Sequence[KnowledgeSurface],
+    available: Sequence[SurfaceType],
+    failed: set[SurfaceType],
+) -> None:
+    """Raise for every requested name that is neither emitted nor the surface of a failed kind.
+
+    Split out of `_select` (N-4, round 06): the M-2 fix made `_select` a radon grade C —
+    the one C in `knowledge/`, introduced in round 05 and reported as pre-existing — and the
+    refusal is the half that carries the branching.
+    """
+    present = {surface.surface_type for surface in emitted}
     unknown = [name for name in names if name not in present and name not in failed]
-    if unknown:
-        raise UnknownSurfaceError(
-            f"Este item no tiene {', '.join(unknown)}. "
-            f"Superficies disponibles: {', '.join(available) or '—'}."
-            + (
-                f" Fuentes que fallaron al obtenerse: {', '.join(sorted(failed))}."
-                if failed
-                else ""
-            )
-        )
-    return chosen
+    if not unknown:
+        return
+    failed_note = (
+        f" Fuentes que fallaron al obtenerse: {', '.join(sorted(failed))}." if failed else ""
+    )
+    raise UnknownSurfaceError(
+        f"Este item no tiene {', '.join(unknown)}. "
+        f"Superficies disponibles: {', '.join(available) or '—'}.{failed_note}"
+    )
 
 
 def _topics(item, context: QueryContext) -> tuple:
