@@ -565,6 +565,56 @@ def test_the_query_connection_refuses_a_write(context: QueryContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A-1 (round 05) — the profile plane is a route, and it has to be seen serving
+# ---------------------------------------------------------------------------
+
+
+def test_a_query_by_handle_is_answered_by_the_profile_plane_with_no_citable_match(
+    context: QueryContext,
+) -> None:
+    """A-1 (gate Fable, round 05): the profile plane of `search` could DISAPPEAR entirely
+    with the suite green. With `profile_ids = []` in `search_service.search` the nine Plan 02
+    suites stayed at 274 passed, and on this fixture a query by author went from 10 results
+    to 0 with nothing red — CLAUDE.md rule 11's fail-open shape (the answer shrinks and
+    nothing says so) on the plane G-1 had just touched. The retriever is tested (the
+    totality tests of `lexical.py` go red on it); what was missing was ONE positive test at
+    the SERVICE level, so here it is.
+
+    The premise is asserted first (rule 1): the handle lives in NO chunk and DOES live in
+    the profile plane, so the profile plane is the only route by which these results can
+    arrive. Then the shape spec §5.1.A requires — a profile is a retrieval representation,
+    never a citation: `matches == ()`, a `verify_with` that still leads to a real surface —
+    and the human line that says why there is no excerpt.
+
+    Seen red under `profile_ids = []` in an isolated copy: `response.results == ()`.
+    """
+    from xbrain.knowledge.index_store import open_for_query
+    from xbrain.knowledge.render import render_search
+
+    opened = open_for_query(
+        context.index_dir,
+        context.items_path,
+        vocab_path=context.vocab_path,
+        topics_path=context.topics_path,
+    )
+    try:
+        assert opened.lexical.search("vgonpa", 50) == (), (
+            "the handle must live in no chunk, or the chunk plane could be what answers"
+        )
+        assert opened.lexical.search_profiles("vgonpa", 50), "and the profile plane holds it"
+    finally:
+        opened.close()
+
+    response = search("vgonpa", context)
+
+    assert response.results, "a query by handle is served by the profile plane, or by nothing"
+    assert all(result.matches == () for result in response.results), "a profile is never cited"
+    assert all(result.verify_with for result in response.results), "and still leads to a source"
+    assert all(context.store[r.item_id].author.handle == "vgonpa" for r in response.results)
+    assert "coincide por el perfil del item" in render_search(response)
+
+
+# ---------------------------------------------------------------------------
 # 10b — the failure that will actually happen (B3)
 # ---------------------------------------------------------------------------
 
