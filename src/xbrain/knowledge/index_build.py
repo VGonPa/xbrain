@@ -1342,12 +1342,16 @@ def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = 
     """
     manifest = load_manifest(index_dir)
     mismatches = []
+    # `!r` on every manifest string (T-1, round 08): the manifest is hand-editable, and the
+    # three version strings were interpolated raw, so a newline in `schema_version` stood at
+    # column 0 of `index status` as a forged header and an ESC reached the TTY through the
+    # sentence `search` and `update` raise. A repr carries neither.
     if manifest.schema_version != SCHEMA_VERSION:
-        mismatches.append(f"schema_version {manifest.schema_version} != {SCHEMA_VERSION}")
+        mismatches.append(f"schema_version {manifest.schema_version!r} != {SCHEMA_VERSION!r}")
     if manifest.surface_version != SURFACE_VERSION:
-        mismatches.append(f"surface_version {manifest.surface_version} != {SURFACE_VERSION}")
+        mismatches.append(f"surface_version {manifest.surface_version!r} != {SURFACE_VERSION!r}")
     if manifest.chunker_version != CHUNKER_VERSION:
-        mismatches.append(f"chunker_version {manifest.chunker_version} != {CHUNKER_VERSION}")
+        mismatches.append(f"chunker_version {manifest.chunker_version!r} != {CHUNKER_VERSION!r}")
     if params is not None and manifest.chunker_params != _params_dict(params):
         mismatches.append(f"chunker_params {manifest.chunker_params} != {_params_dict(params)}")
     if manifest.tokenize != FTS_TOKENIZE:

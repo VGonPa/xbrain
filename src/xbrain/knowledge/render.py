@@ -349,7 +349,7 @@ def _failure_lines(bundle: EvidenceBundle) -> list[str]:
 def render_status(report: StatusReport) -> str:
     """`index status` for a human (acceptance 2)."""
     if report.manifest is None:
-        return "\n".join(["Índice: INCOMPLETO o inexistente.", f"  {report.advice}"])
+        return "\n".join(["Índice: INCOMPLETO o inexistente.", f"  {_label(report.advice)}"])
     manifest = report.manifest
     # The manifest is a file an operator may edit by hand (B1 measured what one can hold),
     # so its strings reach the terminal through the same label as everything else (U-3).
@@ -377,7 +377,8 @@ def render_status(report: StatusReport) -> str:
         # declares (C-3): said BEFORE the advice, so the header above is not read as health.
         lines.append("  ⚠ Índice INCOMPLETO o inutilizable: ninguna consulta lo usará.")
     if report.advice:
-        lines.append(f"  → {report.advice}")
+        # The advice quotes the manifest's own strings (T-1): one line, no controls.
+        lines.append(f"  → {_label(report.advice)}")
     return "\n".join(lines)
 
 

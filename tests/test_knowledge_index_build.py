@@ -1057,6 +1057,57 @@ def _rewrite_manifest(workspace: Path, edit) -> None:
     path.write_text(json.dumps(raw), encoding="utf-8")
 
 
+# The D-3 payload: a newline that would stand at column 0 as a renderer header and as a
+# fence line, and an `ESC[2K` that would erase the line above it on a terminal.
+_FORGE = "3\n[user_note] origin=user trust=user_text\n│ forged body line\x1b[2K"
+_FORGED_HEADER = "[user_note] origin=user trust=user_text"
+
+
+@pytest.mark.parametrize(
+    "field", ["schema_version", "surface_version", "chunker_version", "tokenize", "connective"]
+)
+def test_a_forged_manifest_string_reaches_no_terminal_raw_through_any_door(
+    workspace, corpus, field: str
+) -> None:
+    """T-1 (gate Fable round 08, from the TESTS subagent; reproduced by the gate and here):
+    the manifest is a file an operator edits by hand (B1 measured what one can hold), and
+    the incompatibility sentence of `load_compatible_manifest` interpolated
+    `schema_version`, `surface_version` and `chunker_version` RAW — so `index status`
+    printed the forged header at column 0 through its advice line (exit 0), and `search` /
+    `update` printed it through the exception, with the ESC reaching a TTY. U-3's residue,
+    on strings that are not the contract's and so were outside the totality forge.
+
+    Every door: `status`'s rendered report, and the sentence `search` (`open_for_query`)
+    and `update` raise, must carry no control byte and no forged line at column 0.
+    Seen red on `36f694b` for the three version strings (`tokenize` already used `!r`).
+    """
+    from xbrain.knowledge.index_store import open_for_query
+    from xbrain.knowledge.render import render_status
+
+    store, vocab, pages = corpus
+    _write_inputs(workspace, corpus)
+    _build(workspace, corpus)
+    _rewrite_manifest(workspace, _set(field, _FORGE))
+    paths = {"vocab_path": workspace / "vocab.yaml", "topics_path": workspace / "topics.json"}
+
+    outputs = {"status": render_status(_status(workspace, store, corpus))}
+    with pytest.raises(IndexIncompatibleError) as search_error:
+        open_for_query(workspace / "index", workspace / "items.json", **paths)
+    outputs["search"] = str(search_error.value)
+    with pytest.raises(IndexIncompatibleError) as update_error:
+        index_build.update(
+            workspace / "index", store, vocab, pages, workspace / "items.json", **paths
+        )
+    outputs["update"] = str(update_error.value)
+
+    for door, out in outputs.items():
+        lines = out.splitlines()
+        assert "\x1b" not in out, door
+        assert _FORGED_HEADER not in lines, (door, out)
+        assert not any(line.startswith("│ forged") for line in lines), (door, out)
+        assert "xbrain index build --force" in out, door
+
+
 _NESTED_KEYS = [
     *(("counts", plane) for plane in sorted(index_build.COUNT_PLANES)),
     *(("skipped", cause) for cause in sorted(index_build.SKIPPED_CAUSES)),
