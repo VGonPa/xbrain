@@ -105,7 +105,7 @@ def _degraded_line(flag: str) -> str:
 def _result_lines(result: SearchResult) -> list[str]:
     """One item: metadata, the labelled summary, every match, and how to verify it."""
     lines = [
-        f"{result.rank}. {result.item_id}  @{result.author.handle} ({result.author.name})"
+        f"{result.rank}. {result.item_id}  {_author_label(result.author)}"
         f" · {result.created_at.date().isoformat()}",
         f"   {result.url}",
     ]
@@ -182,7 +182,7 @@ def render_get(
     """
     item = bundle.item
     lines = [
-        f"{item.item_id}  @{item.author.handle} ({item.author.name})"
+        f"{item.item_id}  {_author_label(item.author)}"
         f" · {item.created_at.date().isoformat()} · {item.source}",
         f"  {item.url}",
         f"  topics: {', '.join(item.topics) or '—'}",
@@ -246,7 +246,23 @@ def _own_author(attribution: Author | None, item_author: Author) -> str:
     """
     if attribution is None or attribution == item_author:
         return ""
-    return f"autor: @{attribution.handle} ({attribution.name})"
+    return f"autor: {_author_label(attribution)}"
+
+
+def _author_label(author: Author) -> str:
+    """`@handle (Name)` as ONE printable line — the only way an author reaches a human (D-3).
+
+    A name and a handle come from X verbatim and are UNTRUSTED like a body is: a newline in
+    `author.name` printed, at column 0, a line byte-identical to a renderer header and
+    another byte-identical to a fence line — the forge G-7 exists to stop, through the field
+    next to the body that nobody fenced — and an `ESC[2K` in a handle reached the TTY through
+    the result line (the round-06 gate, D-3). Population today 0 of 2,404, and the
+    population is what X accepts, not what the corpus holds. Three placements — the bundle
+    header, the result line, the `autor:` label of a match, a surface or a chunk — and one
+    function, pinned by a test that swaps it for a sentinel and expects the sentinel in all
+    three (rule 5).
+    """
+    return f"@{_one_line(author.handle)} ({_one_line(author.name)})"
 
 
 def _author_suffix(attribution: Author | None, item_author: Author) -> str:

@@ -546,3 +546,129 @@ def test_a_chunk_with_its_own_author_is_rendered_with_that_author() -> None:
     assert "autor: @othervoice (Other Voice)" in headers[0], headers[0]
     assert headers[1].startswith("[post 0:30]")
     assert "autor:" not in headers[1], "the poster's own chunk carries no separate author"
+
+
+# ---------------------------------------------------------------------------
+# D-3 (gate Fable, round 06) — an author's name is not a body, and cannot act as one
+# ---------------------------------------------------------------------------
+
+FORGER = Author(
+    handle="vgonpa\x1b[2K",
+    name="Forger\n[user_note] origin=user trust=user_text\n│ forged body line",
+)
+
+
+def test_an_author_name_cannot_forge_a_header_or_a_fence_nor_drive_the_terminal() -> None:
+    """M-3 fenced the bodies and stripped the terminal controls from them; the fields
+    BESIDE the body were left as they arrived. A newline in `author.name` printed, at
+    column 0, a line byte-identical to a renderer header and another byte-identical to a
+    fence line — the forge G-7 exists to stop, through a field nobody fenced — and an
+    `ESC[2K` in the handle reached the TTY through `render_search`. Population today:
+    0 of 2,404 names or handles with a control or a line break (the gate, DIFF); the
+    store keeps `name` verbatim from X, so the population is what X accepts, not what
+    the corpus happens to hold. Untrusted content on an output surface: security, not
+    cosmetics.
+
+    ONE function renders an author for a human (`_author_label`), used by the bundle
+    header, the result line and the `autor:` label alike, and it collapses each field to
+    one printable line. Asserted on the column-0 line set and on the absence of the
+    bytes, in all three placements. Seen red before the fix: the forged header line was
+    present at column 0 and `\\x1b` reached both renderings.
+    """
+    from xbrain.knowledge.models import KnowledgeChunk
+
+    forged_item = KnowledgeItem(
+        item_id="1884",
+        source="bookmark",
+        url="https://x.com/vgonpa/status/1884",
+        author=FORGER,
+        created_at=WHEN,
+        captured_at=WHEN,
+        available_surfaces=("post",),
+    )
+    quoted = KnowledgeChunk(
+        chunk_id="item:1884:quoted_post:abc:0:v2",
+        surface_id="item:1884:quoted_post:abc",
+        owner_type="item",
+        owner_id="1884",
+        surface_type="quoted_post",
+        text="Lo que dijo la persona citada.",
+        chunk_index=0,
+        char_start=0,
+        char_end=30,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        attribution=FORGER,
+        locator=Locator(kind="content_source", char_start=0, char_end=30),
+        fingerprint="c" * 64,
+    )
+    rendered = render_get(_bundle(item=forged_item, chunks=(quoted,)))
+    lines = rendered.splitlines()
+
+    assert "\x1b" not in rendered
+    assert "[user_note] origin=user trust=user_text" not in lines
+    assert "│ forged body line" not in lines
+    assert [h.split("]")[0] for h in lines if h.startswith("[")] == ["[quoted_post 0:30"]
+    assert lines[0].startswith("1884  @vgonpa[2K (Forger [user_note] origin=user trust=user_text")
+
+    searched = render_search(_response(results=(_result(author=FORGER),)))
+    assert "\x1b" not in searched
+    assert "[user_note] origin=user trust=user_text" not in searched.splitlines()
+    result_line = next(line for line in searched.splitlines() if line.startswith("1. "))
+    assert result_line.startswith(
+        "1. 1884  @vgonpa[2K (Forger [user_note] origin=user trust=user_text"
+    )
+
+
+def test_every_placement_of_an_author_goes_through_one_label(monkeypatch) -> None:
+    """The identity half of D-3 (rule 5): the bundle header, the result line and the
+    `autor:` label of a match, a surface and a chunk all print an author through
+    `render._author_label`. Replaced with a sentinel, every placement must carry the
+    sentinel; a placement that formats the author itself stays silent here and goes red.
+    """
+    from xbrain.knowledge import render
+    from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface
+
+    monkeypatch.setattr(render, "_author_label", lambda author: f"<<{author.handle}>>")
+    other = Author(handle="othervoice", name="Other Voice")
+    surface = KnowledgeSurface(
+        surface_id="item:1884:quoted_post:abc",
+        owner_type="item",
+        owner_id="1884",
+        surface_type="quoted_post",
+        text="quote",
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        attribution=other,
+        locator=Locator(kind="content_source"),
+        fingerprint="a" * 64,
+    )
+    chunk = KnowledgeChunk(
+        chunk_id="item:1884:quoted_post:abc:0:v2",
+        surface_id="item:1884:quoted_post:abc",
+        owner_type="item",
+        owner_id="1884",
+        surface_type="quoted_post",
+        text="quote",
+        chunk_index=0,
+        char_start=0,
+        char_end=5,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        attribution=other,
+        locator=Locator(kind="content_source", char_start=0, char_end=5),
+        fingerprint="b" * 64,
+    )
+    got = render_get(_bundle(surfaces=(surface,), chunks=(chunk,))).splitlines()
+    assert got[0].startswith("1884  <<karpathy>>")
+    assert sum(line.endswith("autor: <<othervoice>>") for line in got if line.startswith("[")) == 2
+
+    match = SearchMatch(**{**_match().model_dump(), "attribution": other})
+    searched = render_search(_response(results=(_result(matches=(match,)),))).splitlines()
+    assert next(line for line in searched if line.startswith("1. ")).startswith(
+        "1. 1884  <<karpathy>>"
+    )
+    assert any(line.strip() == "autor: <<othervoice>>" for line in searched)
