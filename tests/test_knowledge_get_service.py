@@ -363,6 +363,51 @@ def test_asking_for_a_failed_surface_answers_with_the_failure(context: QueryCont
     assert bundle.surfaces == ()
 
 
+def test_a_surface_the_item_lacks_is_refused_even_when_another_fetch_failed(
+    context: QueryContext,
+) -> None:
+    """M-2 (gate Fable, round 05): `_select` checked `not failures` — ANY failure — while its
+    docstring promised the exception «unless a fetch for IT failed». So on every item with
+    one failed fetch (62 of 2,404 on the real store, measured 2026-09-02) asking for a
+    surface it never had returned an EMPTY bundle with exit 0: `get k11 --surface
+    video_transcript` → `surfaces []`, `chunks []`, `failures [external_article/not_found]`,
+    and a consumer asking for the transcript concludes the transcript failed. That is
+    precisely the collapse of "we never had it" into "it failed" that `failed_sources` and
+    `unfetched_links` exist to prevent (m7).
+
+    The requested names are now compared with the surface types the failed KINDS would have
+    produced (`CONTENT_KIND_TO_SURFACE_TYPES`), name by name: a name that is neither emitted
+    nor failed is refused listing what is available; a name that failed is answered with the
+    failure. Both directions on k11, and the mixed request is refused naming ONLY the
+    unknown name. Seen red before the fix: `get("k11", surfaces=("video_transcript",))`
+    returned a bundle.
+    """
+    with pytest.raises(UnknownSurfaceError, match="no tiene video_transcript") as caught:
+        get("k11", context, surfaces=("video_transcript",))
+    assert "Superficies disponibles" in str(caught.value)
+
+    answered = get("k11", context, surfaces=("external_article",))
+    assert answered.surfaces == () and answered.chunks == ()
+    assert [f.kind for f in answered.failures] == ["external_article"]
+
+    with pytest.raises(UnknownSurfaceError, match="no tiene video_transcript\\.") as caught:
+        get("k11", context, surfaces=("external_article", "video_transcript"))
+    assert "no tiene external_article" not in str(caught.value), "the failed one is not unknown"
+
+
+def test_a_request_mixing_a_present_and_an_absent_surface_is_refused_not_trimmed(
+    context: QueryContext,
+) -> None:
+    """The same rule on an item with no failure at all: `("post", "video_transcript")` on k03
+    used to return the post and drop the transcript in silence, because the refusal fired
+    only when NOTHING was chosen. A partial answer that names no omission is the silent cut
+    spec §9.3 forbids. Seen red before the fix: a bundle with one surface came back.
+    """
+    with pytest.raises(UnknownSurfaceError, match="no tiene video_transcript"):
+        get("k03", context, surfaces=("post", "video_transcript"))
+    assert get("k03", context, surfaces=("post",)).surfaces[0].surface_type == "post"
+
+
 # ---------------------------------------------------------------------------
 # 28 — read-only
 # ---------------------------------------------------------------------------

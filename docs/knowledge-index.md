@@ -340,6 +340,15 @@ the retriever.
   header: the text's own author is named whenever it differs from the item's
   (`[quoted_post 0:188] origin=source · autor: @othervoice (Other Voice)`). The poster is not the
   author of what they quote.
+- **`get --surface X` refuses a name the item lacks, even when another fetch failed (M-2,
+  round 05).** `_select` used to answer with an EMPTY bundle whenever the item had ANY failed
+  fetch — on the 62 of 2,404 real items with one, `get … --surface video_transcript` over a
+  404'd article came back as `surfaces []` plus the article's failure, which reads as "the
+  transcript failed". Each requested name is now compared with the surfaces the failed KIND
+  would have produced: a failed one is answered with its failure, an absent one is refused
+  naming what is available, and a mixed request is refused naming only the absent names
+  (before, `--surface post --surface video_transcript` returned the post and dropped the
+  other in silence).
 - **`get --query` paginates with a cursor (A-2).** The ranking is deterministic, so the cursor is
   `q:<offset>` into it; `truncated: true` always comes with one, and the two cursor shapes
   (`q:<offset>` for a query, `<surface>:<chunk>` positional) refuse each other by name.

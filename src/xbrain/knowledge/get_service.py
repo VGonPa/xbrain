@@ -39,9 +39,10 @@ from xbrain.knowledge.chunking import chunk_surfaces
 from xbrain.knowledge.contracts import EvidenceBundle
 from xbrain.knowledge.index_schema import open_memory_index
 from xbrain.knowledge.lexical import LexicalIndex
-from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, SurfaceType
+from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, SourceFailure, SurfaceType
 from xbrain.knowledge.search_service import QueryContext
 from xbrain.knowledge.surfaces import (
+    CONTENT_KIND_TO_SURFACE_TYPES,
     article_block_texts,
     hydrate_verification,
     item_surfaces,
@@ -137,7 +138,7 @@ def _select(
     requested: Sequence[SurfaceType] | None,
     emitted: Sequence[KnowledgeSurface],
     available: Sequence[SurfaceType],
-    failures: Sequence[object],
+    failures: Sequence[SourceFailure],
 ) -> tuple[KnowledgeSurface, ...]:
     """The surfaces to deliver, in emitter order, refusing a name the item cannot honour.
 
@@ -146,13 +147,38 @@ def _select(
     empty bundle for both would make "we never had it" and "the server returned 404"
     indistinguishable, which is exactly the collapse `failed_sources` and `unfetched_links`
     exist to prevent (m7).
+
+    NAME BY NAME, AGAINST THE SURFACES THE FAILED KIND WOULD HAVE PRODUCED (M-2, round 05).
+    The first version tested `not failures` — any failure at all — so on the 62 of 2,404
+    real items with one failed fetch, asking for a surface the item never had came back as
+    an empty bundle: `get … --surface video_transcript` on an item whose ARTICLE had 404'd
+    answered `surfaces []` + that failure, and a consumer read "the transcript failed". And
+    the refusal fired only when NOTHING was chosen, so `--surface post --surface
+    video_transcript` returned the post and dropped the other name in silence. Now every
+    requested name must be either emitted or the surface of a failed kind
+    (`CONTENT_KIND_TO_SURFACE_TYPES`), or the request is refused naming the ones that are
+    neither.
     """
     names = tuple(requested) if requested is not None else DEFAULT_SURFACES
     chosen = tuple(surface for surface in emitted if surface.surface_type in names)
-    if requested is not None and not chosen and not failures:
+    if requested is None:
+        return chosen
+    present = {surface.surface_type for surface in emitted}
+    failed = {
+        surface_type
+        for failure in failures
+        for surface_type in CONTENT_KIND_TO_SURFACE_TYPES[failure.kind]
+    }
+    unknown = [name for name in names if name not in present and name not in failed]
+    if unknown:
         raise UnknownSurfaceError(
-            f"Este item no tiene {', '.join(names)}. "
+            f"Este item no tiene {', '.join(unknown)}. "
             f"Superficies disponibles: {', '.join(available) or '—'}."
+            + (
+                f" Fuentes que fallaron al obtenerse: {', '.join(sorted(failed))}."
+                if failed
+                else ""
+            )
         )
     return chosen
 
