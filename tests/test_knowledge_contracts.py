@@ -25,10 +25,12 @@ really does travel with an origin.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
+from xbrain.knowledge import contracts as contracts_module
 from xbrain.knowledge.contracts import (
     CONTRACT_MODELS,
     TEXT_FIELDS_REQUIRING_ORIGIN,
@@ -41,8 +43,11 @@ from xbrain.knowledge.contracts import (
     SearchMatch,
     SearchResponse,
     SearchResult,
+    NOT_IMPLEMENTED_SUFFIX,
     SEARCH_SCHEMA_VERSION,
+    Strategy,
     is_str_field,
+    resolve_strategy,
 )
 from xbrain.knowledge.models import KnowledgeItem, Locator
 from xbrain.models import Author
@@ -303,6 +308,57 @@ def test_the_search_envelope_moved_when_a_key_was_added_to_the_shape_it_transpor
     with pytest.raises(ValidationError) as refused:
         SearchResponse.model_validate(legacy)
     assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
+
+
+# FRONTIER ADDITION, declared (child PR 02.1). `resolve_strategy` ships here, but at the
+# snapshot every test that exercises it lives in `tests/test_knowledge_evaluation.py` and
+# `tests/test_knowledge_search_service.py` — both later children, and both coupled to
+# services 02.1 does not ship. Porting nothing would land the function untested in the PR
+# that introduces it. These three tests are the three outcomes of its own docstring.
+
+
+def test_an_implemented_strategy_runs_and_degrades_nothing() -> None:
+    """The first outcome. `lexical` is the one member with a backend in this build."""
+    assert resolve_strategy("lexical") == ("lexical", ())
+
+
+def test_a_declared_strategy_with_no_backend_degrades_and_says_so() -> None:
+    """The second outcome, and the one F-2 exists for (spec §9.3).
+
+    `search` echoed the strategy it was ASKED for, so `strategy="hybrid"` came back labelled
+    `hybrid` over results produced entirely by bm25. Degradation is not refusal — *lexical
+    sigue operativo* — but it has to be NAMED, and the name is the requested strategy, so a
+    reader can tell which one did not run.
+    """
+    for declared in set(get_args(Strategy)) - contracts_module.IMPLEMENTED_STRATEGIES:
+        strategy, degraded = resolve_strategy(declared)
+        assert strategy == contracts_module.FALLBACK_STRATEGY == "lexical"
+        assert degraded == (f"{declared}{NOT_IMPLEMENTED_SUFFIX}",)
+
+
+def test_an_undeclared_strategy_is_a_validation_error_never_a_degradation() -> None:
+    """The third outcome. A typo answered with lexical results becomes a measurement: the
+    report would be headed `lexicl` and scored by a retriever nobody asked for. The message
+    names both sets, because "unknown" is useless without "known"."""
+    with pytest.raises(ValueError) as refused:
+        resolve_strategy("lexicl")
+    assert "lexicl" in str(refused.value)
+    assert "hybrid_graph" in str(refused.value)
+
+
+def test_the_implemented_set_is_read_at_call_time_not_closed_over(monkeypatch) -> None:
+    """Plan 03 adds its member to `IMPLEMENTED_STRATEGIES` and both surfaces stop degrading
+    with no other change — so the lookup must reach the module global when it is CALLED.
+
+    Asserted by injecting a hypothetical backend rather than by reading the source: a
+    `frozenset` captured at import time would keep degrading `vector` here, and the test
+    then does not depend on `vector` staying unimplemented forever.
+    """
+    assert resolve_strategy("vector") == ("lexical", ("vector_not_implemented",))
+    monkeypatch.setattr(
+        contracts_module, "IMPLEMENTED_STRATEGIES", frozenset({"lexical", "vector"})
+    )
+    assert resolve_strategy("vector") == ("vector", ())
 
 
 def test_responses_reject_an_unknown_field() -> None:
