@@ -1,4 +1,4 @@
-"""The external response schemas, frozen per envelope — `SearchResponse` at `"1"`,
+"""The external response schemas, frozen per envelope — `SearchResponse` at `"2"`,
 `EvidenceBundle` at `"2"`, the graph envelope at `"1"` (spec §7; the policy below).
 
 FROZEN NOW, ON PURPOSE, before the services that fill them exist. Spec §7.1 says CLI JSON
@@ -19,8 +19,14 @@ new consumer refuses (`Field required`), two producers announcing one version th
 interoperate. So a key added to a frozen shape BUMPS the version of every envelope that
 transports it, and the refusal then names the version rather than a field. Round 06 made
 `KnowledgeChunk.locator` required — spec §3.7 invariant 2 demanded it from the start — and
-`EvidenceBundle`, the one envelope carrying chunks, is at "2" for it; `SearchResponse` stays
-at "1" because `SearchMatch` always carried its locator. No document at "1" is persisted
+`EvidenceBundle`, the one envelope carrying chunks, is at "2" for it; `SearchResponse` stayed
+at "1" then, because `SearchMatch` always carried its locator, and moved to "2" when
+`SearchMatch` gained the `title` spec §4 makes accompany a chunk (B2, gate Codex on
+`b61e04b`). OPTIONAL-WITH-A-DEFAULT IS NOT AN EXEMPTION, and this is the half of U-1 that is
+easy to miss: a defaulted key is additive for the NEW consumer, which fills it in, and
+incompatible for the OLD one, which forbids it — the version-1 reader refuses the document
+outright, so the number has to move for the refusal to name the version rather than a field
+nobody told it about. No document at either number is persisted
 anywhere (the index stores `locator_json` per surface, never a bundle), so there is no
 migration, only the honest number. `EVIDENCE_SCHEMA_VERSION` is READ off the model, never
 written a second time, so an adapter that stamps an envelope by hand (`cli.py`'s inspect
@@ -122,6 +128,16 @@ class SearchMatch(BaseModel):
     fusion to preserve the EXPLANATION of a result. `score` is a ranking signal and is
     documented as such — it is deliberately not presented as a probability, because a fused
     rank has no calibrated scale.
+
+    `title` IS THE SURFACE'S, and it is here because spec §4 says *títulos de artículos
+    acompañan a sus chunks* (B2, gate Codex on `b61e04b`). The chunker already copies it onto
+    every `KnowledgeChunk` for this exact reason — *with the title only on the surface, a
+    `SearchMatch` on chunk 7 of a long article would reach the consumer as an orphan
+    paragraph* — the writer stores it and `LexicalHit` hydrates it; the loss was here, in the
+    public projection, and only here. Optional because most surfaces name no work: a tweet
+    body, a summary and an image description have no title, and `None` is the honest value
+    for them rather than the item's URL or a neighbour's title. Metadata, so it needs no
+    origin — a title names a work rather than asserting anything about it.
     """
 
     model_config = _FROZEN
@@ -132,6 +148,7 @@ class SearchMatch(BaseModel):
     trust_class: TrustClass
     derived: bool
     excerpt: str
+    title: str | None = None
     attribution: Author | None = None
     matched_by: tuple[Channel, ...] = ()
     lexical_rank: int | None = None
@@ -211,11 +228,11 @@ class IndexStatusRef(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    """The `search` envelope (spec §7.2)."""
+    """The `search` envelope (spec §7.2). At `"2"` since `SearchMatch` gained its title."""
 
     model_config = _FROZEN
 
-    schema_version: Literal["1"] = "1"
+    schema_version: Literal["2"] = "2"
     query: str
     strategy: Strategy
     filters: SearchFilters
@@ -387,6 +404,7 @@ TEXT_FIELDS_WITHOUT_ORIGIN: frozenset[tuple[str, str]] = frozenset(
         ("SearchResult", "item_id"),
         ("SearchResult", "url"),
         ("SearchMatch", "chunk_id"),
+        ("SearchMatch", "title"),
         ("SearchFilters", "author"),
         ("IndexStatusRef", "manifest_version"),
         ("EvidenceBundle", "cursor"),

@@ -486,6 +486,13 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
     fragment lives. And no fallback (B-k): a hit with no resolvable surface locator was
     excluded by `resolvable_hits` upstream; the guard below is what keeps a fabrication
     from ever being reachable again, not a path a caller takes.
+
+    AND THE TITLE IS THE SURFACE'S TOO (B2, gate Codex on `b61e04b`). Spec §4 makes an
+    article's title accompany its chunks, and it did — `_chunk` copies it, the `chunks` row
+    keeps it, `LexicalHit.title` hydrates it — until this function, which read the column
+    and dropped it. Chunk 3 of a 20 k article reached the consumer as a paragraph about
+    «controls» with nothing naming the work it is a paragraph of; the two docstrings that
+    carry the title this far both say that is the failure they exist to prevent.
     """
     if hit.surface_locator is None:
         raise IndexIncompatibleError(
@@ -498,6 +505,7 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
         trust_class=hit.trust_class,  # type: ignore[arg-type]
         derived=hit.derived,
         excerpt=hit.excerpt,
+        title=hit.title,
         attribution=hit.attribution,
         matched_by=("lexical",),
         lexical_rank=position,

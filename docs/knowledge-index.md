@@ -586,10 +586,31 @@ the retriever.
   version-1 document (`Field required`) — two producers under one number that do not
   interoperate. The policy is written once in `contracts.py`: a key added to a frozen shape
   bumps the envelope that transports it, and the refusal then names the version. `SearchResponse`
-  stays at `"1"` (`SearchMatch` always carried its locator); `xbrain knowledge inspect` reads the
+  stayed at `"1"` then (`SearchMatch` always carried its locator) and moved to `"2"` in round 09
+  when `SearchMatch` gained its `title` (below); `xbrain knowledge inspect` reads the
   number off the contract (`EVIDENCE_SCHEMA_VERSION`) instead of stamping it by hand. Nothing at
-  `"1"` is persisted anywhere, so there is no migration. `chunk.url` keeps its one meaning
+  either number is persisted anywhere, so there is no migration. `chunk.url` keeps its one meaning
   (where a human opens the owner).
+- **An article's title travels with every match on its surface (B2, round 09; gate Codex on
+  `b61e04b`).** Spec §4: *títulos de artículos acompañan a sus chunks*. It was carried the whole
+  way and dropped at the last hop — `chunking._chunk` copies `surface.title` onto every
+  `KnowledgeChunk` for exactly this reason, the `chunks` row keeps it and `LexicalHit.title`
+  hydrates it, and then `SearchMatch` did not declare the field and `search._match` threw the
+  value away. Chunk 3 of k03's article arrived as a paragraph about «controls» with nothing
+  naming the work it is a paragraph OF. The loss was in the public projection and only there:
+  `title` is not an arm of `chunking.chunk_evidence`, so **no fingerprint and no `chunk_id`
+  moved** and no index needs rebuilding. Asserted by IDENTITY against `surfaces.item_surfaces`
+  rather than against a literal, with a negative control that every untitled surface serves
+  `None` — k08 has three titled surfaces and an untitled `post` and `summary`, which is where a
+  borrowed title would show — and both assertions were checked against two mutations
+  (`title=None`, a constant borrowed title) before being trusted. The human view prints it on its
+  own line directly above the excerpt, beside the surface's own author: the two pieces of
+  accompanying provenance a reader needs to know what they are reading (rule 7), through
+  `_one_line` because a scraped `<title>` is attacker-supplied. **And it bumped
+  `SearchResponse.schema_version` to `"2"`** — optional-with-a-default is additive for the NEW
+  consumer and incompatible for the OLD one, which is `extra="forbid"` and refuses the document
+  outright, so the number has to move for the refusal to name the version rather than a field
+  nobody told it about. That is U-1 read forwards.
 - **A hit whose surface row cannot be resolved is excluded and counted (B-k, round 06).**
   `_match` used to FABRICATE a locator for it (`content_source`, the item's URL, no source
   index) — the one thing worse than a missing locator. It now counts in

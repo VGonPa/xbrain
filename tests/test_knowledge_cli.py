@@ -328,7 +328,7 @@ def test_index_build_then_search_then_get_end_to_end(workspace: Path) -> None:
     assert runner.invoke(app, ["index", "build"]).exit_code == 0
 
     found = _json_stdout(runner.invoke(app, ["search", "Quillfeather", "--json"]))
-    assert found["schema_version"] == "1" and found["strategy"] == "lexical"
+    assert found["schema_version"] == "2" and found["strategy"] == "lexical"
     assert found["results"], "the built index answered nothing"
     item_id = found["results"][0]["item_id"]
 

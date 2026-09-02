@@ -33,7 +33,7 @@ from xbrain.knowledge.index_schema import (
 )
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.search_service import QueryContext, search
-from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
+from xbrain.knowledge.surfaces import item_surfaces, knowledge_item, topic_surfaces
 from xbrain.models import Item, Topic, TopicPage, VerificationVerdict
 from xbrain.rubrics import save_vocab
 from xbrain.store import save_topic_pages
@@ -106,7 +106,7 @@ def test_search_returns_a_valid_frozen_response(context: QueryContext) -> None:
     response = search("Quillfeather", context)
     assert isinstance(response, SearchResponse)
     assert SearchResponse.model_validate(response.model_dump()) == response
-    assert response.schema_version == "1" and response.strategy == "lexical"
+    assert response.schema_version == "2" and response.strategy == "lexical"
     assert response.results
     match = response.results[0].matches[0]
     assert match.matched_by == ("lexical",)
@@ -401,6 +401,85 @@ def test_a_summary_match_points_at_the_underlying_article(context: QueryContext)
     response = search(term, context)
     result = next(r for r in response.results if r.item_id == "k03")
     assert "external_article" in result.verify_with
+
+
+def test_the_article_title_travels_with_every_match_on_its_surface(
+    context: QueryContext, corpus
+) -> None:
+    """B2 (gate Codex, `b61e04b`): spec §4 — *títulos de artículos acompañan a sus chunks*.
+
+    The title was already carried the whole way and dropped at the last hop. `_chunk` copies
+    `surface.title` onto every `KnowledgeChunk` for exactly this reason, and both docstrings
+    that do it say so — *with the title only on the surface, a `SearchMatch` on chunk 7 of a
+    long article would reach the consumer as an orphan paragraph* — the writer stores it, the
+    `chunks` row keeps it and `LexicalHit.title` hydrates it; then `SearchMatch` did not
+    declare the field and `_match` threw the value away. Chunk 3 of k03's article arrived as
+    a paragraph about «controls» with nothing saying which work it is a paragraph OF.
+
+    Asserted BY IDENTITY against `item_surfaces` — the projection that defines what the
+    surface's title IS — never against a literal, which would pass just as well if the
+    service invented one (rule 1). Seen red on `b61e04b`: `SearchMatch` had no `title`.
+    """
+    store, _, _ = corpus
+    article = next(
+        surface
+        for surface in item_surfaces(store["k03"])
+        if surface.surface_type == "external_article"
+    )
+    assert article.title, "the fixture article must have a title for this to measure"
+
+    matches = [
+        match
+        for result in search("Quillfeather", context).results
+        if result.item_id == "k03"
+        for match in result.matches
+        if match.surface_type == "external_article"
+    ]
+    assert matches, "the query must match the article for this to measure"
+    assert all(match.title == article.title for match in matches), [m.title for m in matches]
+
+
+def test_a_surface_with_no_title_gives_its_matches_none_rather_than_a_borrowed_one(
+    context: QueryContext, corpus
+) -> None:
+    """The negative control, so the field is a MEASUREMENT and not a constant (rule 2).
+
+    A tweet body has no title, and the honest value for it is `None` — not the item's URL,
+    not a neighbouring surface's title, not the empty string dressed as a name. Without this
+    the test above passes just as well for an implementation that stamps every match with
+    the first title it finds on the item, and k08 is where that would show: three of its
+    surfaces are titled *A talk on evaluation* and its `post` and `summary` are not.
+
+    Every match is checked against ITS OWN surface's title, and the two populations are
+    asserted non-empty, because `all(...)` over nothing is the vacuous green of rule 1 —
+    which is how this control was written the first time (no `post` surface matched the
+    query it used, so it passed on `b61e04b` with the field not yet existing).
+    """
+    store, vocab, pages = corpus
+    titles = {
+        (item_id, surface.surface_type): surface.title
+        for item_id, item in store.items()
+        for surface in item_surfaces(item)
+    }
+    # A topic surface is hydrated UNDER an item but is not one of its surfaces, so its title
+    # is keyed by surface type alone — the topic plane is where a served title would most
+    # plausibly be borrowed from the wrong owner.
+    topic_titles = {
+        surface.surface_type: surface.title
+        for topic in vocab
+        for surface in topic_surfaces(topic, pages.get(topic.slug))
+    }
+    assert {t for t in titles.values() if t} and None in titles.values()
+
+    seen: list[tuple[str | None, str | None]] = []
+    for result in search("the", context, limit=50).results:
+        for match in result.matches:
+            key = (result.item_id, match.surface_type)
+            expected = titles[key] if key in titles else topic_titles[match.surface_type]
+            seen.append((match.title, expected))
+    assert [s for s in seen if s[1] is None], "no untitled surface matched; nothing measured"
+    assert [s for s in seen if s[1] is not None], "no titled surface matched; nothing measured"
+    assert all(served == expected for served, expected in seen), seen
 
 
 def test_a_derived_match_with_no_primary_source_says_so(tmp_path: Path, corpus) -> None:

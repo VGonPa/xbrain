@@ -232,6 +232,30 @@ def test_excluded_chunks_are_reported_with_the_repair() -> None:
     assert "procedencia" in text and "autor" in text and "localizador" in text
 
 
+def test_the_article_title_reaches_the_reader_beside_its_fragment() -> None:
+    """B2 (gate Codex, `b61e04b`), the human half: spec §4 wants the title to ACCOMPANY the
+    chunk, and a field the renderer drops has not accompanied it anywhere a person can see.
+
+    CLAUDE.md rule 7: the cheapest verification layer is showing the evidence next to the
+    claim, and a paragraph whose work is not named is a claim with the evidence half shown.
+    The title goes through `_one_line`, like every other body-adjacent text, so a newline in
+    a scraped `<title>` cannot forge a header — asserted by the forge test below, which now
+    reaches this field through the contract's partition.
+    """
+    titled = SearchMatch(**{**_match().model_dump(), "title": "On Controls and Thresholds"})
+    text = render_search(_response(results=(_result(matches=(titled,)),)))
+    assert "On Controls and Thresholds" in text
+
+    lines = text.splitlines()
+    excerpt = next(i for i, line in enumerate(lines) if "El párrafo que coincidió" in line)
+    assert "On Controls and Thresholds" in lines[excerpt - 1], lines
+
+    untitled = render_search(_response(results=(_result(matches=(_match(),)),)))
+    assert "On Controls and Thresholds" not in untitled
+    # And an untitled surface adds no empty ornament to the line it would have sat on.
+    assert len(untitled.splitlines()) == len(lines) - 1
+
+
 def test_a_profile_only_candidate_says_it_has_no_citable_fragment() -> None:
     """Spec §5.1.A: the profile is a retrieval representation, NEVER returned as a citation.
 
@@ -791,6 +815,7 @@ def _forged_response() -> SearchResponse:
         trust_class="primary_source",
         derived=False,
         excerpt=FORGE,
+        title=FORGE,
         attribution=_forged_author(),
         matched_by=("lexical",),
         lexical_rank=1,

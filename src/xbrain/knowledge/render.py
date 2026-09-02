@@ -183,6 +183,14 @@ def _result_lines(result: SearchResult) -> list[str]:
             # somebody else's words, and the cheapest guard against reading them as the
             # poster's is to say whose they are next to the excerpt (CLAUDE.md rule 7).
             lines.append(f"     {label}")
+        if match.title:
+            # The work the fragment is a fragment OF (B2, spec §4). Its own line, directly
+            # above the excerpt and beside the author, because those are the two pieces of
+            # accompanying provenance a reader needs to know what they are reading — and
+            # because a scraped `<title>` on the header line would push `origin`/`trust`
+            # off the right edge of a terminal. Through `_one_line` like every other
+            # body-adjacent text: a `<title>` is attacker-supplied on any fetched page.
+            lines.append(f"     « {_one_line(match.title)} »")
         lines.append(f"     {_one_line(match.excerpt)}")
     if not result.matches:
         # A profile-only candidate. Saying so matters: the profile is a composed string

@@ -41,6 +41,7 @@ from xbrain.knowledge.contracts import (
     SearchMatch,
     SearchResponse,
     SearchResult,
+    SEARCH_SCHEMA_VERSION,
     is_str_field,
 )
 from xbrain.knowledge.models import KnowledgeItem, Locator
@@ -146,16 +147,21 @@ def test_a_search_match_serializes_its_excerpt_next_to_its_origin() -> None:
 
 
 # The version each envelope carries TODAY, and why (U-1, round 07). `SearchResponse` and
-# `GraphExpansionResponse` are still the Plan 01 freeze: nothing in their shape moved
-# (`SearchMatch` always carried a locator). `EvidenceBundle` is at "2" because round 06
+# `GraphExpansionResponse` is still the Plan 01 freeze: nothing in its shape moved.
+# `EvidenceBundle` is at "2" because round 06
 # made `KnowledgeChunk.locator` REQUIRED, and under `extra="forbid"` that is the incompatible
 # change the freeze exists to name: the Pydantic consumer of version 1 refuses a bundle with
 # the key (`chunks.0.locator: Extra inputs are not permitted`, measured against the exact
 # `origin/develop` model) and the new consumer refuses a version-1 document (`Field
 # required`). Two producers announcing one version that do not interoperate is the silent
 # mutation spec §7.1 forbids; the number is what makes the refusal honest.
+# `SearchResponse` is at "2" for the same rule read forwards (B2): `SearchMatch` gained the
+# `title` spec §4 makes accompany a chunk, and a DEFAULTED key is additive only for the new
+# consumer — the version-1 one forbids it, so the number moves for its refusal to name the
+# version. A bump nobody needs makes two adapters disagree; a bump nobody made makes them
+# disagree silently, which is worse.
 ENVELOPE_VERSIONS: dict[type, str] = {
-    SearchResponse: "1",
+    SearchResponse: "2",
     EvidenceBundle: "2",
     GraphExpansionResponse: "1",
 }
@@ -235,13 +241,60 @@ def test_a_version_one_bundle_is_refused_by_its_version_not_by_a_field() -> None
     assert ("chunks", 0, "locator") in {error["loc"] for error in refused.value.errors()}
 
 
-def test_the_search_envelope_did_not_move_with_the_bundle() -> None:
-    """`SearchMatch` carried `locator` from the Plan 01 freeze, so the search envelope's
-    shape did not change and its version must not: a bump nobody needs is the other way
-    to make two adapters disagree."""
+def test_the_search_envelope_moved_when_a_key_was_added_to_the_shape_it_transports() -> None:
+    """The version policy applied to `SearchMatch.title` (B2, gate Codex on `b61e04b`).
+
+    Round 06's bundle bump did NOT move this envelope, and the reason was stated as a fact
+    about the shape: *`SearchMatch` carried `locator` from the Plan 01 freeze, so the search
+    envelope's shape did not change and its version must not.* Spec §4's title changes the
+    shape, so the same rule now points the other way — *a key added to a frozen shape BUMPS
+    the version of every envelope that transports it* — and `SearchResponse` is the one
+    envelope that transports a `SearchMatch`.
+
+    Optional-with-a-default does not exempt it. Every model here is `extra="forbid"`, so it
+    is the version-1 CONSUMER that breaks: it refuses a document carrying `title` outright,
+    and the refusal has to name the version rather than a field nobody told it about. That
+    is exactly the U-1 case, running in the other direction.
+    """
     assert "locator" in SearchMatch.model_fields
     assert SearchMatch.model_fields["locator"].is_required()
-    assert SearchResponse.model_fields["schema_version"].default == "1"
+    assert SearchResponse.model_fields["schema_version"].default == "2"
+    assert SEARCH_SCHEMA_VERSION == "2"
+
+    document = SearchResponse(
+        query="q",
+        strategy="lexical",
+        filters=SearchFilters(),
+        index=IndexStatusRef(manifest_version="1", built_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        results=(
+            SearchResult(
+                rank=1,
+                item_id="1",
+                url="https://x.com/a/status/1",
+                author=Author(handle="a", name="A"),
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                matches=(
+                    SearchMatch(
+                        chunk_id="c",
+                        surface_type="external_article",
+                        origin="source",
+                        trust_class="primary_source",
+                        derived=False,
+                        excerpt="x",
+                        title="On Controls and Thresholds",
+                        locator=Locator(kind="content_source", char_start=0, char_end=1),
+                    ),
+                ),
+            ),
+        ),
+    ).model_dump(mode="json")
+    assert document["schema_version"] == "2"
+    assert document["results"][0]["matches"][0]["title"] == "On Controls and Thresholds"
+
+    legacy = {**document, "schema_version": "1"}
+    with pytest.raises(ValidationError) as refused:
+        SearchResponse.model_validate(legacy)
+    assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
 
 
 def test_responses_reject_an_unknown_field() -> None:
