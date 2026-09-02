@@ -129,8 +129,14 @@ class LexicalHit:
     surface_locator: Locator | None = None
 
 
-def _distinct_owners(hits: Sequence[LexicalHit]) -> int:
-    """How many distinct `(owner_type, owner_id)` a ranking prefix holds."""
+def distinct_owners(hits: Sequence[LexicalHit]) -> int:
+    """How many distinct `(owner_type, owner_id)` a ranking prefix holds.
+
+    Public because `search_owners` STOPS on it and `search_service` has to read the same
+    number to know whether a window shorter than it asked for is the whole ranking or just
+    a shallow one (B1). Two readings of «how deep did we get» is how the window and its
+    consumer drift apart, and the drift is invisible until the exclusions bite (rule 5).
+    """
     return len({(hit.owner_type, hit.owner_id) for hit in hits})
 
 
@@ -361,7 +367,7 @@ class LexicalIndex:
         chunk_limit = max(owners * OWNER_CHUNK_MULTIPLIER, 1)
         while True:
             hits = self.search(query, chunk_limit, filters=filters)
-            if _distinct_owners(hits) >= owners or len(hits) < chunk_limit:
+            if distinct_owners(hits) >= owners or len(hits) < chunk_limit:
                 return hits, False
             if chunk_limit >= MAX_CHUNK_DEPTH:
                 return hits, True

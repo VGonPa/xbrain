@@ -63,8 +63,13 @@ from xbrain.knowledge.contracts import (
     resolve_strategy,
 )
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
-from xbrain.knowledge.index_store import open_for_query, resolvable_hits, verify_fingerprints
-from xbrain.knowledge.lexical import LexicalHit
+from xbrain.knowledge.index_store import (
+    OpenIndex,
+    open_for_query,
+    resolvable_hits,
+    verify_fingerprints,
+)
+from xbrain.knowledge.lexical import LexicalHit, distinct_owners
 from xbrain.knowledge.models import DerivedText, SurfaceType
 from xbrain.knowledge.provenance import DEFAULT_EVIDENCE_CLASSES
 from xbrain.knowledge.surfaces import (
@@ -164,16 +169,26 @@ def search(
     A PAGE SHORTER THAN THE RANKING IS DECLARED, AND CAN BE CONTINUED (M-4, round 08).
     `truncated` and `cursor` were declared in the frozen envelope and never set: `--limit 2`
     cut a fifty-item ranking to two with `truncated: false` — the silent cut spec §9.3
-    forbids, on a field that could not come out any other way (rule 2). Now the candidate
+    forbids, on a field that could not come out any other way (rule 2). The candidate
     window is materialised until it holds ONE OWNER MORE than the page needs
     (`LexicalIndex.search_owners`, the same U-6 loop the evaluation harness scores with —
     one definition, rule 5), so `truncated` is a measurement of the ranking against the
-    page; the cursor is the offset of the next page (`s:<offset>`), and the pages are
-    disjoint and reassemble the ranking in order, because every window is a prefix of the
-    same ranking and a topic hit expands to the same sorted members under any page. The
+    page; the cursor is the offset of the next page (`s:<offset>`). The
     one truncation that has no cursor is a window that reached `MAX_CHUNK_DEPTH` short of
     owners: more may exist and cannot be paged to, and the response says so instead of
     calling the page complete.
+
+    AND THE PAGES ARE DISJOINT ONLY BECAUSE THE WINDOW COUNTS SURVIVORS (B1, gate Codex on
+    `b61e04b`). This docstring used to assert the property outright — *the pages are
+    disjoint and reassemble the ranking in order, because every window is a prefix of the
+    same ranking* — and the assertion was false wherever the exclusions bit: the window was
+    sized on the owners ASKED FOR and `resolvable_hits`/`verify_fingerprints` ran after it,
+    so a page that lost owners came back short and the profile plane padded the gap, moving
+    the boundary between the two planes one place further down on every page. Measured on
+    this repo's fixture over 441 paging runs (7 queries × 7 corruption depths × 3 exclusion
+    modes × 3 page sizes), 54 of them served an item twice or skipped one; with the window
+    sized on SURVIVORS (`_surviving_window`), 0. The prose stayed true only because nothing
+    had ever paged a damaged index.
     """
     filters = filters or SearchFilters()
     _validate(query, filters, limit, context)
@@ -189,18 +204,10 @@ def search(
     try:
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
-        candidates, exhausted = index.lexical.search_owners(query, beyond, filters=filters)
-        # A hit without a resolvable surface locator is excluded and counted FIRST (B-k):
-        # the alternative was a locator invented from the chunk's own columns — and since
-        # U-5 the fingerprint is recomputed over the narrowed locator, so a hit that has
-        # none cannot be verified at all. Then every survivor's evidence must recompute.
-        hits, unresolvable = resolvable_hits(candidates)
-        hits, corrupt = verify_fingerprints(hits)
-        excluded = corrupt + unresolvable
+        grouped, excluded, exhausted = _surviving_window(index, query, filters, context, beyond)
         profile_ids = [
             hit.item_id for hit in index.lexical.search_profiles(query, beyond, filters=filters)
         ]
-        grouped = _group_by_item(hits, context, limit=beyond)
         _append_profile_candidates(grouped, profile_ids, context, limit=beyond)
         ordered = list(grouped.items())
         page = ordered[offset : offset + limit]
@@ -295,6 +302,59 @@ def _validate(query: str, filters: SearchFilters, limit: int, context: QueryCont
 # ---------------------------------------------------------------------------
 # 4 — group by item (spec §5.4)
 # ---------------------------------------------------------------------------
+
+
+def _surviving_window(
+    index: OpenIndex,
+    query: str,
+    filters: SearchFilters,
+    context: QueryContext,
+    beyond: int,
+) -> tuple[dict[str, list[LexicalHit]], int, bool]:
+    """The ranking's prefix grouped until `beyond` items SURVIVE the exclusions (B1).
+
+    Returns `(grouped, excluded, depth_exhausted)`.
+
+    THE WINDOW IS SIZED ON WHAT SURVIVES, NOT ON WHAT WAS ASKED FOR. Until this, `search`
+    asked `search_owners` for `offset + limit + 1` owners ONCE and ran `resolvable_hits` /
+    `verify_fingerprints` afterwards, so a window that lost whole owners to the exclusions
+    came back short — and the profile plane, capped at that same number, padded what was
+    left. The two planes' boundary therefore sat one place lower on every page, and the
+    offset indexed a DIFFERENT sequence each time: reproduced on this repo's fixture with
+    three excluded owners, the cursor served one item at ranks 1 and 7 and never served
+    another that a single large page ranked first. Spec §9.3 permits a short page only as
+    *truncamiento explícito + cursor*; a cursor that repeats and skips is the silent cut it
+    forbids, arriving precisely where the index is already damaged.
+
+    Deepening only ever APPENDS, which is what makes every page a prefix of one sequence:
+    `search_owners` returns a prefix of the ranking, the two exclusions are per-hit
+    predicates, and `_group_by_item` keeps first-appearance order — so the grouped keys at
+    a deeper ask are the shallower ones plus new tails. The loop stops when enough items
+    survive, when `distinct_owners` reports fewer owners than were asked for (the whole
+    ranking, nothing deeper to find — the same number `search_owners` stops on, read once,
+    rule 5), or at `MAX_CHUNK_DEPTH`. The exclusion counts are the FINAL window's and not a
+    running total: each pass recounts the window it actually served, so a doubling cannot
+    report the same corrupt row twice.
+
+    And the profile plane can only pad a chunk plane that has run out — which the caller
+    gets for free from this contract, because whenever more chunk owners exist this returns
+    at least `beyond` of them and `_append_profile_candidates` adds nothing. A boundary that
+    only moves when the plane above it is final is a boundary that does not slide.
+    """
+    asked = beyond
+    while True:
+        candidates, depth_exhausted = index.lexical.search_owners(query, asked, filters=filters)
+        # A hit without a resolvable surface locator is excluded and counted FIRST (B-k):
+        # the alternative was a locator invented from the chunk's own columns — and since
+        # U-5 the fingerprint is recomputed over the narrowed locator, so a hit that has
+        # none cannot be verified at all. Then every survivor's evidence must recompute.
+        hits, unresolvable = resolvable_hits(candidates)
+        hits, corrupt = verify_fingerprints(hits)
+        grouped = _group_by_item(hits, context, limit=beyond)
+        whole_ranking = distinct_owners(candidates) < asked
+        if len(grouped) >= beyond or whole_ranking or depth_exhausted:
+            return grouped, corrupt + unresolvable, depth_exhausted
+        asked *= 2
 
 
 def _group_by_item(

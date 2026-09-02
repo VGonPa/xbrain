@@ -31,6 +31,7 @@ from xbrain.knowledge.index_schema import (
     manifest_path,
     open_index,
 )
+from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.search_service import QueryContext, search
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Item, Topic, TopicPage, VerificationVerdict
@@ -1352,6 +1353,77 @@ def test_a_page_that_holds_the_whole_ranking_is_not_truncated(context: QueryCont
     against the page, not a flag that is always on."""
     response = search("the", context, limit=50)
     assert response.truncated is False and response.cursor is None
+
+
+def _corrupt_top_owners(context: QueryContext, query: str, how_many: int) -> list[str]:
+    """Take the ranking's first `how_many` ITEM owners out through BOTH exclusion doors.
+
+    Half lose their fingerprint (`verify_fingerprints`), one loses its surface locator
+    (`resolvable_hits`), because the two doors are separate code paths and the defect this
+    sets up is a property of the window that survives EITHER of them.
+    """
+    connection = open_index(db_path(context.index_dir), read_only=True)
+    owners: list[str] = []
+    for hit in LexicalIndex(connection).search(query, 500):
+        if hit.owner_type == "item" and hit.owner_id not in owners:
+            owners.append(hit.owner_id)
+    connection.close()
+    victims = owners[:how_many]
+    assert len(victims) == how_many, "the fixture must rank enough item owners to corrupt"
+
+    write = sqlite3.connect(db_path(context.index_dir))
+    write.executemany(
+        "UPDATE chunks SET fingerprint = ? WHERE owner_type = 'item' AND owner_id = ?",
+        [("0" * 64, owner) for owner in victims[:-1]],
+    )
+    write.execute(
+        "UPDATE surfaces SET locator_json = '{}' WHERE owner_type = 'item' AND owner_id = ?",
+        (victims[-1],),
+    )
+    write.commit()
+    write.close()
+    return victims
+
+
+def test_the_cursor_pages_one_sequence_when_several_owners_are_excluded(
+    context: QueryContext,
+) -> None:
+    """B1 (gate Codex, `b61e04b`): the continuation must survive the exclusions, or it is
+    not a continuation.
+
+    `search` sized its candidate window at `offset + limit + 1` owners and asked for it
+    BEFORE `resolvable_hits`/`verify_fingerprints` ran. The exclusions then removed whole
+    owners from the window, and the profile plane padded what was left up to the SAME
+    number — so the boundary between the two planes moved one place further down on every
+    page, and the offset indexed into a different sequence each time. Spec §9.3 allows a
+    page shorter than the ranking only as *truncamiento explícito + cursor*: a cursor that
+    serves one item twice and never serves another is a silent cut wearing a cursor's shape,
+    and it fails exactly where the index is already damaged.
+
+    Reproduced on this fixture with three excluded owners: paging returned `k04` at ranks 1
+    and 7 and never returned `k03` at all, while a single large page ranked `k03` first.
+    The healthy-index control is the M-4 test above; this is the same property under the
+    corruption the spec makes `search` fail closed on.
+    """
+    victims = _corrupt_top_owners(context, "the", 3)
+
+    whole = _ids(search("the", context, limit=50))
+    assert search("the", context, limit=50).index.corrupt_chunks_excluded >= len(victims)
+    assert len(whole) >= 6, "the fixture must rank enough items for paging to measure"
+
+    paged, cursor, seen = [], None, 0
+    while True:
+        page = search("the", context, limit=1, cursor=cursor)
+        paged += _ids(page)
+        seen += 1
+        if not page.truncated:
+            assert page.cursor is None
+            break
+        cursor = page.cursor
+        assert seen < 40, "the cursor never reached the last page"
+
+    assert len(paged) == len(set(paged)), f"the cursor served an item twice: {paged}"
+    assert paged == whole, f"paged={paged} does not reassemble whole={whole}"
 
 
 def test_a_get_cursor_is_refused_by_search_by_name(context: QueryContext) -> None:

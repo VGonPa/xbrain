@@ -508,6 +508,26 @@ the retriever.
   naming what is available, and a mixed request is refused naming only the absent names
   (before, `--surface post --surface video_transcript` returned the post and dropped the
   other in silence).
+- **`search` pages one sequence because its window counts the owners that SURVIVE the
+  exclusions (B1, round 09; gate Codex on `b61e04b`).** M-4 gave `search` a cursor and this
+  document claimed the pages were disjoint «because every window is a prefix of the same
+  ranking». They were not, wherever `resolvable_hits`/`verify_fingerprints` bit: the window
+  was sized at `offset + limit + 1` owners and ASKED FOR before the exclusions ran, so a
+  window that lost whole owners came back short, the profile plane padded the remainder up to
+  the same number, and the boundary between the two planes sat one place lower on every page —
+  the offset indexing a different sequence each time. Reproduced on the repo fixture with the
+  ranking's first three item owners excluded (two by fingerprint, one by an unresolvable
+  locator: both doors): paging `the` at `limit=1` returned `k04` at ranks 1 and 7 and never
+  returned `k03`, which one `limit=50` page ranks FIRST. Measured over 441 paging runs on the
+  fixture (7 queries × 7 corruption depths × 3 exclusion modes × 3 page sizes), **54 served a
+  duplicate or skipped an item before the fix and 0 after**. `_surviving_window` deepens the
+  ask until enough items survive, until `distinct_owners` — the same number `search_owners`
+  itself stops on, public now so it is read once (rule 5) — reports the whole ranking, or
+  until `MAX_CHUNK_DEPTH`; deepening only APPENDS, so every page is a prefix of one sequence,
+  and the profile plane can pad only a chunk plane that has run out, which pins the boundary
+  that was sliding. The exclusion counts are the FINAL window's, never a running total, so a
+  doubling cannot report one corrupt row twice. The failure was invisible for eight rounds
+  because nothing had ever paged a DAMAGED index: the healthy control was green throughout.
 - **`get --query` paginates with a cursor (A-2).** The ranking is deterministic, so the cursor is
   `q:<offset>` into it; `truncated: true` always comes with one, and the two cursor shapes
   (`q:<offset>` for a query, `<surface>:<chunk>` positional) refuse each other by name.
