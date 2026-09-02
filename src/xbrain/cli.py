@@ -2832,8 +2832,12 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
         transcribe_command=cfg.transcribe_command,
         vision_command=cfg.vision_command,
     )
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
     payload: dict = {
-        "schema_version": "1",
+        # The version of the shapes this payload dumps, read off the contract (U-1): the
+        # surfaces and chunks here are the `EvidenceBundle`'s, so they carry its number.
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
         "item": knowledge_item(item, vault_dir=cfg.output_dir).model_dump(mode="json"),
         # Hydrated from the LIVE store, never persisted on a surface (M5): a stored copy
         # could not be invalidated when the verdict changed, so a revoked FAIL would keep
@@ -2892,8 +2896,10 @@ def _inspect_topic(corpus, slug: str, *, want_surfaces: bool) -> dict:
         raise ValueError(f"No existe el topic {slug!r} en data/vocab.yaml.")
     page = corpus.topic_pages.get(slug)
     primary, secondary = _topic_membership(corpus, slug)
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
     payload: dict = {
-        "schema_version": "1",
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
         "topic": topic_record(topic, page, primary, secondary).model_dump(mode="json"),
     }
     if want_surfaces:

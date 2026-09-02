@@ -96,9 +96,11 @@ def test_models_are_frozen(factory) -> None:
 def test_models_forbid_unknown_fields(factory) -> None:
     """`extra="forbid"` — a misspelled field must be an error, not a silent no-op.
 
-    Spec §7.1 freezes these shapes at `schema_version: "1"` so CLI and MCP cannot diverge.
-    A model that swallows unknown keys lets a producer "add" a field that no consumer ever
-    sees, which is the drift the freeze exists to prevent.
+    These shapes carry no `schema_version` of their own: the number lives on the envelopes
+    that transport them, and `contracts.py` states that policy once, versioning each envelope
+    independently. So a model that swallows unknown keys lets a producer "add" a field that no
+    consumer ever sees AND that no envelope number could ever announce — the drift spec §7.1
+    exists to prevent, CLI and MCP implementing two formats, arriving unversioned.
     """
     with pytest.raises(ValidationError):
         factory(definitely_not_a_field=1)

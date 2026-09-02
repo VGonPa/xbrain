@@ -71,9 +71,17 @@ def test_inspect_emits_pure_json_on_stdout(workspace: Path) -> None:
     Parsed as a whole document, so one stray `print` fails this test instead of failing a
     consumer's parser weeks later, far from the cause.
     """
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
     payload = _json_stdout(runner.invoke(app, ["knowledge", "inspect", "k08", "--json"]))
     assert payload["item"]["item_id"] == "k08"
-    assert payload["schema_version"] == "1"
+    # The version of the shapes it dumps, read off the contract and never stamped by hand
+    # (U-1): the surfaces and chunks in this payload are the `EvidenceBundle`'s, which is at
+    # "1" until `KnowledgeChunk.locator` lands with it in child PR 02.5. That the value is
+    # DERIVED rather than a literal that happens to agree is a separate question, and
+    # equality against the current number cannot answer it — see
+    # `test_both_inspect_payloads_read_their_version_off_the_contract`.
+    assert payload["schema_version"] == EVIDENCE_SCHEMA_VERSION == "1"
 
 
 def test_inspect_returns_surfaces_with_provenance_and_locator(workspace: Path) -> None:
@@ -134,6 +142,41 @@ def test_inspect_a_topic(workspace: Path) -> None:
     assert payload["topic"]["slug"] == "agent-evaluation"
     assert payload["topic"]["overview"]["origin"] == "llm"
     assert {s["surface_type"] for s in payload["surfaces"]} >= {"topic_overview", "topic_note"}
+
+
+@pytest.mark.parametrize(
+    ("argv", "surface"),
+    [
+        (["knowledge", "inspect", "k08", "--json"], "_inspect_item"),
+        (["knowledge", "inspect", "--topic", "agent-evaluation", "--json"], "_inspect_topic"),
+    ],
+)
+def test_both_inspect_payloads_read_their_version_off_the_contract(
+    workspace: Path, monkeypatch, argv: list[str], surface: str
+) -> None:
+    """The stamp is DERIVED from `contracts.EVIDENCE_SCHEMA_VERSION`, not a literal that
+    currently agrees with it (U-1).
+
+    WHY EQUALITY IS NOT ENOUGH, and this test exists because the equality version was
+    measured NOT catching it: reverting `_inspect_topic` alone to a hardcoded `"1"` left the
+    whole suite green, because `"1"` is exactly what the contract says today. An assertion
+    that a payload equals the current number is satisfied by a payload that will never move
+    again — CLAUDE.md rule 1, satisfied for the wrong reason.
+
+    So the version is INJECTED instead. Both inspect helpers import the constant inside the
+    function body, at call time, which is what makes it reachable here; a hardcoded literal
+    cannot follow an injected value, so this goes red on the exact mutation the equality
+    assertion survived. The sentinel is deliberately a string no contract will ever declare,
+    so it cannot pass by coincidence at any future version.
+
+    Both payloads are covered because `_inspect_topic` had no assertion on its
+    `schema_version` at all: the item path was pinned and the topic path was free to drift.
+    """
+    import xbrain.knowledge.contracts as contracts
+
+    monkeypatch.setattr(contracts, "EVIDENCE_SCHEMA_VERSION", "sentinel-not-a-version")
+    payload = _json_stdout(runner.invoke(app, argv))
+    assert payload["schema_version"] == "sentinel-not-a-version", surface
 
 
 def test_inspect_an_unknown_item_is_an_actionable_error(workspace: Path) -> None:
