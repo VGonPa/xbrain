@@ -241,10 +241,12 @@ class KnowledgeChunk(BaseModel):
     was then not in the bundle at all. `url` keeps its one meaning (where a human opens the
     OWNER); `locator` is the surface's, narrowed to `char_start`/`char_end` by
     `chunking.fragment_locator`, the same function `search` applies to a match, so the two
-    services agree by construction. On the frozen `schema_version: "1"`: this is an
-    additive key a JSON consumer of version 1 can ignore, and it is a field the spec
-    required of the chunk from the start — its absence was a defect of the contract, not
-    a property of it — which is why it is added here rather than behind a version bump.
+    services agree by construction. It is a field the spec required of the chunk from the
+    start — its absence was a defect of the contract, not a property of it — and adding it
+    BUMPED `EvidenceBundle.schema_version` to "2" (U-1, round 07): under `extra="forbid"`
+    a required key is not "additive" for the only consumer that exists, so the version is
+    what makes the two refusals (old consumer, new document; new consumer, old document)
+    honest. The policy is written once, in `contracts.py`.
     """
 
     model_config = _FROZEN

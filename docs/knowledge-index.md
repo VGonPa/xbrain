@@ -453,10 +453,19 @@ the retriever.
   chunk's range by `chunking.fragment_locator`, the SAME function `search._match` applies —
   and two tests bind the services: the match and the chunk `get` serves for one `chunk_id`
   carry one locator and one attribution (the quoted author on k07), and a sentinel swapped
-  into `fragment_locator` must reach every match and every chunk. On the frozen
-  `schema_version: "1"`: an additive key a version-1 JSON consumer can ignore, and a field spec
-  §3.7.2 required of the chunk from the start — its absence was a defect of the contract, not
-  a property of it. `chunk.url` keeps its one meaning (where a human opens the owner).
+  into `fragment_locator` must reach every match and every chunk. It is a field spec §3.7.2
+  required of the chunk from the start — its absence was a defect of the contract, not a
+  property of it — **and it bumped `EvidenceBundle.schema_version` to `"2"` (U-1, round 07)**:
+  round 06 kept `"1"` calling the key "additive", but every contract model is `extra="forbid"`,
+  so the version-1 Pydantic consumer refuses a bundle carrying `locator` (`Extra inputs are not
+  permitted`, measured against the exact `origin/develop` model) and the new consumer refuses a
+  version-1 document (`Field required`) — two producers under one number that do not
+  interoperate. The policy is written once in `contracts.py`: a key added to a frozen shape
+  bumps the envelope that transports it, and the refusal then names the version. `SearchResponse`
+  stays at `"1"` (`SearchMatch` always carried its locator); `xbrain knowledge inspect` reads the
+  number off the contract (`EVIDENCE_SCHEMA_VERSION`) instead of stamping it by hand. Nothing at
+  `"1"` is persisted anywhere, so there is no migration. `chunk.url` keeps its one meaning
+  (where a human opens the owner).
 - **A hit whose surface row cannot be resolved is excluded and counted (B-k, round 06).**
   `_match` used to FABRICATE a locator for it (`content_source`, the item's URL, no source
   index) — the one thing worse than a missing locator. It now counts in

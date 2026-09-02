@@ -144,11 +144,103 @@ def test_a_search_match_serializes_its_excerpt_next_to_its_origin() -> None:
 # ---------------------------------------------------------------------------
 
 
+# The version each envelope carries TODAY, and why (U-1, round 07). `SearchResponse` and
+# `GraphExpansionResponse` are still the Plan 01 freeze: nothing in their shape moved
+# (`SearchMatch` always carried a locator). `EvidenceBundle` is at "2" because round 06
+# made `KnowledgeChunk.locator` REQUIRED, and under `extra="forbid"` that is the incompatible
+# change the freeze exists to name: the Pydantic consumer of version 1 refuses a bundle with
+# the key (`chunks.0.locator: Extra inputs are not permitted`, measured against the exact
+# `origin/develop` model) and the new consumer refuses a version-1 document (`Field
+# required`). Two producers announcing one version that do not interoperate is the silent
+# mutation spec §7.1 forbids; the number is what makes the refusal honest.
+ENVELOPE_VERSIONS: dict[type, str] = {
+    SearchResponse: "1",
+    EvidenceBundle: "2",
+    GraphExpansionResponse: "1",
+}
+
+
 @pytest.mark.parametrize("model", [SearchResponse, EvidenceBundle, GraphExpansionResponse])
-def test_every_response_declares_schema_version_one(model) -> None:
+def test_every_response_declares_its_schema_version(model) -> None:
     """Spec §7.1: every contract carries `schema_version`, and an incompatible change needs
-    a new version rather than a silent mutation."""
-    assert model.model_fields["schema_version"].default == "1"
+    a new version rather than a silent mutation. Seen red on `9dfa34e`: `EvidenceBundle`
+    still said "1" over a shape its own version-1 model refuses."""
+    assert model.model_fields["schema_version"].default == ENVELOPE_VERSIONS[model]
+    assert (
+        getattr(__import__("xbrain.knowledge.contracts", fromlist=["x"]), "EVIDENCE_SCHEMA_VERSION")
+        == ENVELOPE_VERSIONS[EvidenceBundle]
+    )
+
+
+def _bundle_document() -> dict:
+    """A bundle as `get --query` emits it: one chunk, locator included — serialised."""
+    from xbrain.knowledge.models import KnowledgeChunk
+
+    chunk = KnowledgeChunk(
+        chunk_id="item:1:post:0:0:v2",
+        surface_id="item:1:post:0",
+        owner_type="item",
+        owner_id="1",
+        surface_type="post",
+        text="cuerpo",
+        chunk_index=0,
+        char_start=0,
+        char_end=6,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="item_text", char_start=0, char_end=6),
+        fingerprint="a" * 64,
+    )
+    bundle = EvidenceBundle(
+        item=KnowledgeItem(
+            item_id="1",
+            source="bookmark",
+            url="https://x.com/a/status/1",
+            author=Author(handle="a", name="A"),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+        ),
+        chunks=(chunk,),
+    )
+    return bundle.model_dump(mode="json")
+
+
+def test_a_version_one_bundle_is_refused_by_its_version_not_by_a_field() -> None:
+    """The transition is EXPLICIT (U-1): a document that announces `schema_version: "1"`
+    — the shape whose chunks had no locator — is refused because it is version 1, and the
+    refusal names the version. A document at "2" whose chunk lacks the locator is refused
+    too, because the locator is what "2" means (spec §3.7 invariant 2). Neither is a
+    silent acceptance and neither is a silent mutation.
+
+    Seen red on `9dfa34e`: the version-1 document validated (same literal), and only the
+    missing key was refused — a version-1 consumer and a version-2 producer under one number.
+    """
+    document = _bundle_document()
+    assert document["schema_version"] == "2"
+    assert EvidenceBundle.model_validate(document).chunks[0].locator.kind == "item_text"
+
+    legacy = {**document, "schema_version": "1"}
+    with pytest.raises(ValidationError) as refused:
+        EvidenceBundle.model_validate(legacy)
+    assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
+
+    without_locator = {
+        **document,
+        "chunks": [{k: v for k, v in document["chunks"][0].items() if k != "locator"}],
+    }
+    with pytest.raises(ValidationError) as refused:
+        EvidenceBundle.model_validate(without_locator)
+    assert ("chunks", 0, "locator") in {error["loc"] for error in refused.value.errors()}
+
+
+def test_the_search_envelope_did_not_move_with_the_bundle() -> None:
+    """`SearchMatch` carried `locator` from the Plan 01 freeze, so the search envelope's
+    shape did not change and its version must not: a bump nobody needs is the other way
+    to make two adapters disagree."""
+    assert "locator" in SearchMatch.model_fields
+    assert SearchMatch.model_fields["locator"].is_required()
+    assert SearchResponse.model_fields["schema_version"].default == "1"
 
 
 def test_responses_reject_an_unknown_field() -> None:

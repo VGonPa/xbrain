@@ -9,6 +9,22 @@ consumer rather than an author.
 It is also why `producer`, `produced_at` and the eight filters are all here in version 1.
 Adding a field afterwards is exactly the incompatible change the freeze is meant to prevent.
 
+THE VERSION POLICY, STATED ONCE (U-1, round 07). Every model here is `extra="forbid"`, so
+the only consumer that exists — these Pydantic models, which the Plan 04 MCP adapter will
+inherit — refuses a key it was not frozen with. That makes "additive" a property JSON has
+and this contract does NOT: a required key added under the same number is a document the
+version-1 consumer refuses (`Extra inputs are not permitted`) and a version-1 document the
+new consumer refuses (`Field required`), two producers announcing one version that do not
+interoperate. So a key added to a frozen shape BUMPS the version of every envelope that
+transports it, and the refusal then names the version rather than a field. Round 06 made
+`KnowledgeChunk.locator` required — spec §3.7 invariant 2 demanded it from the start — and
+`EvidenceBundle`, the one envelope carrying chunks, is at "2" for it; `SearchResponse` stays
+at "1" because `SearchMatch` always carried its locator. No document at "1" is persisted
+anywhere (the index stores `locator_json` per surface, never a bundle), so there is no
+migration, only the honest number. `EVIDENCE_SCHEMA_VERSION` is READ off the model, never
+written a second time, so an adapter that stamps an envelope by hand (`cli.py`'s inspect
+payloads) cannot drift from it.
+
 THE NAMING RULE, AND WHY IT IS ENFORCED BY TOTALITY (m12). Invariant 2 of spec §3.7: nothing
 is called `text` without `origin` beside it. A walker that scans a JSON payload and fails on
 a text field with no `origin` sibling cannot be written honestly — `query`, `url`, `handle`,
@@ -222,7 +238,10 @@ class EvidenceBundle(BaseModel):
 
     model_config = _FROZEN
 
-    schema_version: Literal["1"] = "1"
+    # "2" since round 07 (U-1): `KnowledgeChunk.locator` became required in round 06, and
+    # under `extra="forbid"` that is an incompatible change of THIS envelope — see the
+    # module docstring for the policy. A document announcing "1" is refused by its version.
+    schema_version: Literal["2"] = "2"
     item: KnowledgeItem
     topics: tuple[TopicRecord, ...] = ()
     surfaces: tuple[KnowledgeSurface, ...] = ()
@@ -283,6 +302,14 @@ class GraphExpansionResponse(BaseModel):
     nodes: tuple[GraphNode, ...] = ()
     edges: tuple[GraphEdge, ...] = ()
     paths: tuple[GraphPath, ...] = ()
+
+
+# The evidence envelope's version, read off the model so there is ONE definition (U-1). The
+# CLI's `knowledge inspect` payloads dump the same `KnowledgeSurface`/`KnowledgeChunk`/
+# `TopicRecord` shapes the bundle transports, and used to stamp "1" by hand — which is how a
+# bump here would have left them announcing the old number over the new shape.
+EVIDENCE_SCHEMA_VERSION: str = EvidenceBundle.model_fields["schema_version"].default
+SEARCH_SCHEMA_VERSION: str = SearchResponse.model_fields["schema_version"].default
 
 
 # Every model whose declared text fields the partition below must cover.
