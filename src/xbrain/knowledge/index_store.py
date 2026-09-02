@@ -13,10 +13,12 @@ a schema, an emitter or a chunker the code no longer matches, because a partial 
 the wrong version is a wrong answer wearing a right one's shape.
 
 **A chunk whose fingerprint does not recompute is NOT RETURNED, and is counted.** Invariant 6
-of spec §3.7. The check is cheap because the fingerprint is recomputed over the text already
-in the row; what it detects is a row written by a different chunker or edited by hand. It is
-counted in `corrupt_chunks_excluded`, whose name was `stale_chunks_excluded` until B3 pointed
-out that it sounded like the OTHER signal and measured this one.
+of spec §3.7. The check is cheap because the fingerprint is recomputed over what is already
+in the served row — the text AND, since U-5, the provenance, owner, position, attribution
+and locator served beside it, through the one projection `chunking.chunk_evidence`; what it
+detects is a row written by a different chunker or edited by hand. It is counted in
+`corrupt_chunks_excluded`, whose name was `stale_chunks_excluded` until B3 pointed out that
+it sounded like the OTHER signal and measured this one.
 
 TWO SIGNALS, AND THE SECOND IS THE ONE THAT WILL ACTUALLY FIRE. Indexing is manual by
 decision (spec §9.2), so the failure that happens is *you ran `enrich` and did not reindex* —
@@ -32,7 +34,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from xbrain.knowledge.chunking import ChunkerParams
+from xbrain.knowledge.chunking import ChunkerParams, chunk_evidence, fragment_locator
 from xbrain.knowledge.contracts import IndexStatusRef
 from xbrain.knowledge.ids import chunk_fingerprint
 from xbrain.knowledge.index_build import (
@@ -166,9 +168,22 @@ def verify_fingerprints(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, .
     """Drop every hit whose fingerprint does not recompute. Returns `(kept, excluded)`.
 
     Invariant 6 of spec §3.7: *un índice obsoleto falla cerrado para el chunk afectado y
-    reporta la exclusión*. Recomputed over the text ALREADY IN THE ROW, so this is an
+    reporta la exclusión*. Recomputed over what is ALREADY IN THE SERVED ROW, so this is an
     internal consistency check: it catches a row written by a different chunker version or
     edited by hand, and it cannot catch a store that moved — that is the other signal.
+
+    OVER THE WHOLE EVIDENCE, NOT THE TEXT ALONE (U-5, round 07 — gate Codex F4). The first
+    version hashed `(surface_id, chunk_index, text)`, so a quoted post's row rewritten as
+    the poster's own `summary` — `origin: llm`, `trust_class: llm_synthesis`, attributed to
+    `@vgonpa`, its locator a valid URL to the poster's page — recomputed fine and was served
+    with `corrupt_chunks_excluded: 0`: the attribution rule CLAUDE.md says was paid for in
+    blood, defeated by a valid-looking value. The evidence is rebuilt here exactly as the
+    emitter built it — `chunking.chunk_evidence` over the chunk's columns, the surface row's
+    attribution and the locator narrowed through `fragment_locator`, the SAME function that
+    builds the locator `_match` serves — so seam (b) is what the integrity check verifies.
+    A hit whose surface row holds no locator cannot rebuild its evidence and is excluded
+    here too (`resolvable_hits` counts it first, and a caller that skipped that step is
+    still closed).
 
     Excluded rather than repaired, and counted rather than logged: spec §5.6 forbids the
     query from repairing the index, and a silent exclusion would make the corpus look smaller
@@ -177,7 +192,26 @@ def verify_fingerprints(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, .
     kept: list[LexicalHit] = []
     excluded = 0
     for hit in hits:
-        expected = chunk_fingerprint(hit.surface_id, hit.chunk_index, hit.text)
+        if hit.surface_locator is None:
+            excluded += 1
+            continue
+        expected = chunk_fingerprint(
+            chunk_evidence(
+                surface_id=hit.surface_id,
+                chunk_index=hit.chunk_index,
+                text=hit.text,
+                owner_type=hit.owner_type,
+                owner_id=hit.owner_id,
+                surface_type=hit.surface_type,
+                origin=hit.origin,
+                trust_class=hit.trust_class,
+                derived=hit.derived,
+                char_start=hit.char_start,
+                char_end=hit.char_end,
+                attribution=hit.attribution,
+                locator=fragment_locator(hit.surface_locator, hit.char_start, hit.char_end),
+            )
+        )
         if expected == hit.fingerprint:
             kept.append(hit)
         else:

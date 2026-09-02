@@ -68,7 +68,12 @@ from xbrain.models import _reject_local_path_traversal
 # "2" since C-3/A-3: `items` carries the per-item omission counters, so the manifest's
 # `skipped` is a SUM over rows the incremental path already maintains, rather than a figure
 # carried over from the previous manifest and wrong after the first `update`.
-SCHEMA_VERSION = "2"
+# "3" since U-5 (round 07): `chunks.fingerprint` hashes the whole evidence projection
+# (`chunking.chunk_evidence` — provenance, owner, position, attribution, narrowed locator),
+# and a v2 base's fingerprints were computed over the text alone, so every one of its rows
+# would fail verification. The door refuses it by name, with the rebuild, rather than
+# answering «22,286 chunks excluded».
+SCHEMA_VERSION = "3"
 
 DB_FILENAME = "knowledge.db"
 MANIFEST_FILENAME = "manifest.json"

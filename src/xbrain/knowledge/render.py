@@ -75,9 +75,14 @@ def _index_lines(response: SearchResponse) -> list[str]:
     """
     lines = [_degraded_line(flag) for flag in response.index.degraded]
     if response.index.corrupt_chunks_excluded:
+        # The counter covers three rows this code cannot serve honestly: a fingerprint that
+        # does not recompute over the text, or — since U-5 — over the procedencia, autor
+        # or localizador served beside it, and — since B-k — a row that resolves to no
+        # locator at all. One sentence, one remedy.
         lines.append(
             f"⚠ {response.index.corrupt_chunks_excluded} chunk(s) excluido(s): su fingerprint "
-            "no cuadra con su texto. Reconstruye con `xbrain index build --force`."
+            "no cuadra con su texto, procedencia, autor o localizador. "
+            "Reconstruye con `xbrain index build --force`."
         )
     if response.truncated:
         lines.append("⚠ Resultado truncado.")

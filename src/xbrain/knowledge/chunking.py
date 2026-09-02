@@ -336,6 +336,63 @@ def fragment_locator(surface_locator: Locator, char_start: int, char_end: int) -
     return surface_locator.model_copy(update={"char_start": char_start, "char_end": char_end})
 
 
+def chunk_evidence(
+    *,
+    surface_id: str,
+    chunk_index: int,
+    text: str,
+    owner_type: str,
+    owner_id: str,
+    surface_type: str,
+    origin: str,
+    trust_class: str,
+    derived: bool,
+    char_start: int,
+    char_end: int,
+    attribution: Author | None,
+    locator: Locator,
+) -> tuple[str, ...]:
+    """Everything the index SERVES about a chunk, as the ONE tuple its fingerprint hashes (U-5).
+
+    The second half of seam (b), extended to integrity. `fragment_locator` is the one
+    construction of a served fragment's locator; this is the one projection of a served
+    fragment's EVIDENCE — the text, the surface it came from and its position in it, the
+    owner the words are hydrated under, the provenance that qualifies them (`origin`,
+    `trust_class`, `derived`, `surface_type`), the attribution that says whose words they
+    are, and the narrowed locator that says where to check. `_chunk` hashes it at emission;
+    `index_store.verify_fingerprints` rebuilds it from the served row — the chunk's columns,
+    the surface row's attribution and locator, the locator narrowed through
+    `fragment_locator` — and a row on which any arm was rewritten no longer recomputes: it
+    is excluded and counted, exactly like a text that does not match its hash. Before this
+    the fingerprint covered three of these fields and the other nine were served on trust
+    (gate Codex F4: a quoted post served as the poster's own `summary`, `origin: llm`, with a
+    valid URL to the poster's page and `corrupt_chunks_excluded: 0`).
+
+    Attribution is hashed as its two stored columns, never as a model dump: the index keeps
+    `handle` and `name` and rebuilds the `Author` from them, so a field added to `Author`
+    upstream would otherwise make every fingerprint fail on the next query. `None` and an
+    author with an empty name are distinct arms. The locator IS a model dump — it is stored
+    as one (`locator_json`) and rebuilt by validation, and a round trip is byte-stable.
+    """
+    return (
+        surface_id,
+        str(chunk_index),
+        text,
+        owner_type,
+        owner_id,
+        surface_type,
+        str(origin),
+        str(trust_class),
+        "1" if derived else "0",
+        str(char_start),
+        str(char_end),
+        "author" if attribution is not None else "",
+        attribution.handle if attribution is not None else "",
+        attribution.name if attribution is not None else "",
+        locator.model_dump_json(),
+    )
+
+
 def _chunk(
     surface: KnowledgeSurface,
     index: int,
@@ -373,6 +430,7 @@ def _chunk(
     text = surface.text[start:end]
     cid = chunk_id(surface.surface_id, index, chunker_version=chunker_version)
     attribution: Author | None = surface.attribution
+    locator = fragment_locator(surface.locator, start, end)
     return KnowledgeChunk(
         chunk_id=cid,
         surface_id=surface.surface_id,
@@ -390,9 +448,25 @@ def _chunk(
         attribution=attribution,
         topics=topics,
         url=url,
-        locator=fragment_locator(surface.locator, start, end),
+        locator=locator,
         language=surface.language,
+        # Over the whole served evidence (U-5), through the projection the verifier shares.
         fingerprint=chunk_fingerprint(
-            surface.surface_id, index, text, chunker_version=chunker_version
+            chunk_evidence(
+                surface_id=surface.surface_id,
+                chunk_index=index,
+                text=text,
+                owner_type=surface.owner_type,
+                owner_id=surface.owner_id,
+                surface_type=surface.surface_type,
+                origin=surface.origin,
+                trust_class=surface.trust_class,
+                derived=surface.derived,
+                char_start=start,
+                char_end=end,
+                attribution=attribution,
+                locator=locator,
+            ),
+            chunker_version=chunker_version,
         ),
     )

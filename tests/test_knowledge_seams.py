@@ -155,3 +155,20 @@ def test_every_function_that_builds_a_served_fragment_narrows_through_one_locato
     assert builders == set(FRAGMENT_BUILDERS)
     for builder in sorted(FRAGMENT_BUILDERS):
         assert "fragment_locator" in functions[builder], f"{builder} narrows its own locator"
+
+
+def test_every_chunk_fingerprint_is_computed_over_one_evidence_projection() -> None:
+    """U-5 (round 07): the fingerprint covered `(surface_id, chunk_index, text)` and the
+    index served provenance, attribution and locator beside the text bound to nothing — a
+    quoted post's row rewritten as the poster's own `summary`, `origin: llm`, pointing at
+    the poster's page, was served with `corrupt_chunks_excluded: 0`. ONE projection
+    (`chunk_evidence`) is what the emitter hashes and what the verifier recomputes; a
+    hasher that assembles the parts itself is red here.
+
+    Seen red on `9dfa34e`: `chunk_evidence` did not exist and `verify_fingerprints`
+    hashed three fields by hand.
+    """
+    functions = _functions()
+    assert _callers_of(functions, "chunk_fingerprint") == set(EVIDENCE_HASHERS)
+    for hasher in sorted(EVIDENCE_HASHERS):
+        assert "chunk_evidence" in functions[hasher], f"{hasher} assembles the evidence itself"

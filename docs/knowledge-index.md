@@ -31,7 +31,7 @@ Reindex after anything that changes indexable text:
 | `digest-video` / `describe` / `redescribe-frames` | transcripts, captions, image prose | `xbrain index update` |
 | `vocab` | topic descriptions — which enter every assigned item's PROFILE | `xbrain index update` (it rebuilds the profiles) |
 | `refresh-quoted` / any repair of a source's author, title, language or URL that leaves its body untouched | the attribution and locator `search` serves on every match (A-1) | `xbrain index update` — since round 03 the item fingerprint covers every column `surfaces` stores, not the text alone (G-5); before, this repair left `update` at «0 cambiados» and `search` serving the old author |
-| upgraded xbrain and `index update` refuses | the emitter, the chunker or the SCHEMA moved (schema **2** since round 02) | `xbrain index build --force` |
+| upgraded xbrain and `index update` refuses | the emitter, the chunker or the SCHEMA moved (schema **3** since round 07 — U-5, the fingerprint covers the whole served evidence; **2** since round 02) | `xbrain index build --force` |
 | upgraded xbrain across round 03 and `index update` reports **every** item changed | the fingerprint's definition moved (G-5), so an index built before it compares unequal on all items — a ONE-TIME full rewrite (2,404 items, measured), after which the next `update` is back to 0 | nothing: let it run once |
 | upgraded xbrain across round 05 and every `search` warns `index_behind_store` with `status` reporting 0 items and 0 topics changed | the manifest predates the three-file signal (P1a): its vocab/topics entries read back as zeros and compare unequal to the live files — the direction the signal fails in, towards the warning | `xbrain index update` once: it re-seals the manifest with the full signal |
 | upgraded xbrain across round 04 and `index status` reports `N topics con miembros desfasados` with 0 items changed | an index updated by the pre-H1 code kept the topic rows of every topic an `enrich` moved an item into or out of; `status` now reads those rows back and compares them | `xbrain index update` — it rewrites exactly those rows (`N topics con miembros recalculados`) and nothing else |
@@ -161,7 +161,7 @@ signal lands before the rebuild starts.)*
 
 `counts` and `skipped` in the manifest are **read back from the database** by the same function
 after a build and after an update — five `COUNT(*)` plus a `SUM` over three per-item omission
-columns on `items` (schema **2**). Until round 02 an update carried `surfaces`, `skipped` and
+columns on `items` (schema **2**; **3** since round 07, when the chunk fingerprint's definition moved — U-5 below). Until round 02 an update carried `surfaces`, `skipped` and
 `failed` over from the previous manifest and adjusted the rest by hand, which drifted (topic
 chunks were added on every vocabulary rebuild and never subtracted), so `index status --json`
 published the previous population as current. Because the manifest now describes the base by
@@ -475,6 +475,23 @@ the retriever.
   index) — the one thing worse than a missing locator. It now counts in
   `corrupt_chunks_excluded` like a fingerprint that does not recompute: invariant 1 (every
   chunk resolves to a surface) has the shape of invariant 6.
+- **The fingerprint covers EVERYTHING the index serves about a chunk, not the text alone (U-5,
+  round 07 — gate Codex F4, reproduced on the real corpus).** `chunk_fingerprint` hashed
+  `(surface_id, chunk_index, text)`, and the row served beside the text — `origin`,
+  `trust_class`, `derived`, `surface_type`, the owner, the position, the surface row's
+  attribution and locator — was bound to nothing. A quoted post by Josh Bryant rewritten in the
+  base as the poster's own `summary`, `origin: llm`, `trust_class: llm_synthesis`, attributed to
+  `@vgonpa` with a syntactically valid URL to the poster's page, was served by `search` with
+  `corrupt_chunks_excluded: 0` while `status` called the index healthy: the attribution rule this
+  repo paid for in blood, defeated by a valid-looking value. Now ONE projection —
+  `chunking.chunk_evidence`, the second half of seam (b) — is what `_chunk` hashes at emission
+  and what `verify_fingerprints` rebuilds from the served row (the locator narrowed through
+  `fragment_locator`, the same function that builds the locator a match carries), so any arm
+  rewritten is excluded and counted like a text that does not match its hash. Eleven per-field
+  mutations pin it; the counter is asserted EXACT (`== 2` on two victims — F7-6: `int(bool(…))`
+  had kept 495 tests green against `>= 1`). The physical schema is **3** for it: a v2 base's
+  fingerprints were computed over the text alone, so the door refuses it by name instead of
+  answering «22,286 chunks excluded». One `xbrain index build --force` on upgrade.
 - **An author's name or handle is ONE printable line wherever a human sees it (D-3, round 06).**
   M-3 fenced the bodies; the fields beside them were left as they arrived, and a newline in
   `author.name` printed at column 0 a line byte-identical to a renderer header and another to

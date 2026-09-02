@@ -93,10 +93,14 @@ def test_the_schema_version_is_declared() -> None:
     """The manifest records it, and a mismatch refuses the query entirely (spec §9.3).
 
     "2" since C-3/A-3: `items` gained the three per-item omission columns the manifest's
-    `skipped` is summed from, and a v1 base has no such columns. The pin exists so a layout
+    `skipped` is summed from, and a v1 base has no such columns. "3" since U-5 (round 07):
+    `chunks.fingerprint` hashes the whole evidence projection — provenance, ownership,
+    position, attribution, narrowed locator — and a v2 base's fingerprints were computed
+    over the text alone, so every row of it would fail verification: the door must refuse
+    it by name rather than answer «22,286 chunks excluded». The pin exists so a layout
     change cannot ship without the bump that makes an existing index refuse the query.
     """
-    assert SCHEMA_VERSION == "2"
+    assert SCHEMA_VERSION == "3"
 
 
 # ---------------------------------------------------------------------------

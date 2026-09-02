@@ -345,10 +345,15 @@ inside the default selection (an empty page) or is refused by the decoder. Since
 printed line repeats both (`xbrain get ID --surface … --query '…' --cursor C`, H2); if you typed
 the continuation by hand, pass the same `--surface` and `--query` as the first call.
 
-**`⚠ N chunk(s) excluido(s): su fingerprint no cuadra con su texto`** — a row whose fingerprint
-does not recompute over its own text: a hand-edited database, or a row written by a different
+**`⚠ N chunk(s) excluido(s): su fingerprint no cuadra con su texto, procedencia, autor o
+localizador`** — a row whose fingerprint does not recompute over what the index serves about it:
+its text, or — since round 07 (U-5) — its `origin`/`trust_class`/`surface_type`, its owner, its
+position, or the attribution and locator of its surface row; or — since round 06 (B-k) — a row
+whose surface holds no locator at all. A hand-edited database, or a row written by a different
 chunker. Those chunks are **not returned** and are counted in `corrupt_chunks_excluded`, never
-silently dropped and never repaired mid-query. `xbrain index build --force`.
+silently dropped and never repaired mid-query. `xbrain index build --force`. **After upgrading
+across round 07 every door refuses the old base by name** (`schema_version 2 != 3`), because
+every fingerprint of a v2 base was computed over the text alone: one forced rebuild.
 
 **`Índice: INCOMPLETO o inexistente`** from `index status` — a build was interrupted. The
 manifest is written last, precisely so an interrupted build leaves nothing a query will trust —

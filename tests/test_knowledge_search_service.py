@@ -1077,6 +1077,188 @@ def test_a_chunk_whose_surface_row_holds_no_locator_is_excluded_and_counted(
     ), "no match points at the owner's page unless the surface IS the post"
 
 
+def _quoted_victim(context: QueryContext) -> tuple[str, str]:
+    """`(chunk_id, surface_id)` of k07's quoted post — @othervoice's words, one chunk."""
+    connection = sqlite3.connect(db_path(context.index_dir))
+    try:
+        return connection.execute(
+            "SELECT chunk_id, surface_id FROM chunks WHERE text LIKE '%audit%' LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+
+
+def test_forged_provenance_attribution_and_locator_are_excluded_and_counted(
+    context: QueryContext,
+) -> None:
+    """U-5 (gate Codex F4, round 07, reproduced on the real corpus): the fingerprint covered
+    `(surface_id, chunk_index, text)` and the index served everything ELSE about a chunk
+    bound to nothing. A quoted post's row rewritten as the POSTER's own `summary` —
+    `origin: llm`, `trust_class: llm_synthesis`, attributed to `@vgonpa`, its locator a
+    syntactically valid URL to the poster's page — was served by `search` with
+    `corrupt_chunks_excluded: 0`, and `status` called the index healthy. The attribution
+    rule CLAUDE.md says was paid for in blood, defeated by a valid-looking row; spec §3.8's
+    «autoría y URL se conservan» and §3.7 invariants 2, 3 and 6, all at once.
+
+    The gate's exact staging, on k07's quoted post. The chunk is EXCLUDED and COUNTED — the
+    same counter and the same operator remedy as a fingerprint that does not recompute over
+    its text, because it is the same situation: a row this code cannot serve honestly.
+    Seen red on `9dfa34e`: served as `summary`/`llm`/`@vgonpa`, counter 0.
+    """
+    victim, surface_id = _quoted_victim(context)
+    connection = sqlite3.connect(db_path(context.index_dir))
+    connection.execute(
+        "UPDATE surfaces SET attribution_handle = 'vgonpa', attribution_name = 'Víctor González', "
+        "locator_json = ? WHERE surface_id = ?",
+        (json.dumps({"kind": "item_text", "url": "https://x.com/vgonpa/status/k07"}), surface_id),
+    )
+    connection.execute(
+        "UPDATE chunks SET origin = 'llm', trust_class = 'llm_synthesis', surface_type = 'summary' "
+        "WHERE surface_id = ?",
+        (surface_id,),
+    )
+    connection.commit()
+    connection.close()
+
+    response = search("audit", context)
+
+    assert response.index.corrupt_chunks_excluded == 1
+    served = [m for r in response.results for m in r.matches]
+    assert victim not in {m.chunk_id for m in served}
+    assert not any(
+        m.attribution is not None and m.attribution.handle == "vgonpa" and "audit" in m.excerpt
+        for m in served
+    ), "the quoted words must not be served under the poster's name"
+
+
+@pytest.mark.parametrize(
+    "table, column, forged",
+    [
+        ("surfaces", "attribution_handle", "vgonpa"),
+        ("surfaces", "attribution_name", "Somebody Else"),
+        (
+            "surfaces",
+            "locator_json",
+            json.dumps({"kind": "item_text", "url": "https://x.com/vgonpa/status/k07"}),
+        ),
+        ("chunks", "origin", "llm"),
+        ("chunks", "trust_class", "llm_synthesis"),
+        ("chunks", "surface_type", "summary"),
+        ("chunks", "derived", 1),
+        ("chunks", "owner_id", "k03"),
+        ("chunks", "owner_type", "topic"),
+        ("chunks", "char_start", 5),
+        ("chunks", "chunk_index", 7),
+    ],
+)
+def test_every_served_metadata_field_is_bound_to_the_fingerprint(
+    context: QueryContext, table: str, column: str, forged: object
+) -> None:
+    """U-5, one field at a time: each column the index SERVES beside the text — provenance
+    (`origin`, `trust_class`, `derived`, `surface_type`), ownership (`owner_type`,
+    `owner_id`, which decides WHICH item the words are hydrated under), position
+    (`chunk_index`, `char_start`), attribution and locator — is part of the evidence the
+    fingerprint hashes, through the ONE projection `chunking.chunk_evidence` the emitter
+    and the verifier share. Edit any one of them and the chunk is excluded and counted.
+
+    Seen red on `9dfa34e` on every parametrisation: the forged row was served, counter 0.
+    """
+    victim, surface_id = _quoted_victim(context)
+    connection = sqlite3.connect(db_path(context.index_dir))
+    key = "surface_id = ?" if table == "surfaces" else "chunk_id = ?"
+    connection.execute(
+        f"UPDATE {table} SET {column} = ? WHERE {key}",  # nosec B608 — test staging
+        (forged, surface_id if table == "surfaces" else victim),
+    )
+    connection.commit()
+    connection.close()
+
+    response = search("audit", context)
+
+    assert response.index.corrupt_chunks_excluded == 1, (table, column)
+    assert victim not in {m.chunk_id for r in response.results for m in r.matches}
+    assert not any("audit" in m.excerpt for r in response.results for m in r.matches)
+
+
+def test_the_exclusion_counter_counts_every_excluded_chunk_not_whether_any_was(
+    context: QueryContext,
+) -> None:
+    """F7-6 (gate Fable, round 07): `excluded = int(bool(corrupt or unresolvable))` kept
+    495 tests green, because the two exclusion tests asserted `>= 1` — CLAUDE.md rule 1,
+    row 2, a test for «N excluded» satisfied by «one excluded». Two victims on one query
+    («audit Marrowgate» hits exactly two chunks on two single-chunk surfaces): one with a
+    fingerprint that does not recompute, one whose surface row holds no locator. The
+    counter must read TWO, and the response must serve neither.
+    """
+    connection = sqlite3.connect(db_path(context.index_dir))
+    corrupt = connection.execute(
+        "SELECT chunk_id FROM chunks WHERE text LIKE '%audit%'"
+    ).fetchone()[0]
+    unresolvable, its_surface = connection.execute(
+        "SELECT chunk_id, surface_id FROM chunks WHERE text LIKE '%Marrowgate%'"
+    ).fetchone()
+    connection.execute("UPDATE chunks SET fingerprint = ? WHERE chunk_id = ?", ("0" * 64, corrupt))
+    connection.execute(
+        "UPDATE surfaces SET locator_json = '{}' WHERE surface_id = ?", (its_surface,)
+    )
+    connection.commit()
+    connection.close()
+
+    response = search("audit Marrowgate", context)
+
+    assert response.index.corrupt_chunks_excluded == 2
+    assert {corrupt, unresolvable}.isdisjoint(
+        {m.chunk_id for r in response.results for m in r.matches}
+    )
+
+
+def test_the_fingerprint_search_verifies_is_the_one_the_emitter_computed(
+    context: QueryContext,
+) -> None:
+    """The evidence projection by VALUE across the two sides (the G-5 pattern, rule 5): the
+    row the index holds for k07's quoted chunk carries the fingerprint the emitter computed
+    for the same chunk when `get` serves it, and recomputing it from what the ROW serves —
+    through `chunk_evidence` and `fragment_locator`, as `verify_fingerprints` does — gives
+    the same value. A verifier that assembled the parts itself, or an emitter that hashed
+    a different projection, disagrees here by value; `test_knowledge_seams.py` pins the
+    shared call structurally.
+    """
+    from xbrain.knowledge.chunking import chunk_evidence, fragment_locator
+    from xbrain.knowledge.get_service import get
+    from xbrain.knowledge.ids import chunk_fingerprint
+    from xbrain.knowledge.lexical import LexicalIndex
+
+    victim, _surface = _quoted_victim(context)
+    served = get("k07", context, surfaces=("quoted_post",), query="audit").chunks
+    assert [c.chunk_id for c in served] == [victim]
+
+    index = LexicalIndex(open_index(db_path(context.index_dir), read_only=True))
+    try:
+        hit = index.fetch_chunk(victim)
+    finally:
+        index.connection.close()
+    assert hit is not None and hit.surface_locator is not None
+    assert hit.fingerprint == served[0].fingerprint
+    recomputed = chunk_fingerprint(
+        chunk_evidence(
+            surface_id=hit.surface_id,
+            chunk_index=hit.chunk_index,
+            text=hit.text,
+            owner_type=hit.owner_type,
+            owner_id=hit.owner_id,
+            surface_type=hit.surface_type,
+            origin=hit.origin,
+            trust_class=hit.trust_class,
+            derived=hit.derived,
+            char_start=hit.char_start,
+            char_end=hit.char_end,
+            attribution=hit.attribution,
+            locator=fragment_locator(hit.surface_locator, hit.char_start, hit.char_end),
+        )
+    )
+    assert recomputed == hit.fingerprint
+
+
 def test_search_and_get_build_every_fragment_locator_through_one_function(
     context: QueryContext, monkeypatch
 ) -> None:

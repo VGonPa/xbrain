@@ -175,10 +175,12 @@ def search(
     )
     try:
         depth = min(limit * CANDIDATE_MULTIPLIER * context.max_matches_per_item, MAX_CANDIDATES)
-        hits, corrupt = verify_fingerprints(index.lexical.search(query, depth, filters=filters))
-        # A hit without a resolvable surface locator is excluded and counted too (B-k):
-        # the alternative was a locator invented from the chunk's own columns.
-        hits, unresolvable = resolvable_hits(hits)
+        # A hit without a resolvable surface locator is excluded and counted FIRST (B-k):
+        # the alternative was a locator invented from the chunk's own columns — and since
+        # U-5 the fingerprint is recomputed over the narrowed locator, so a hit that has
+        # none cannot be verified at all. Then every survivor's evidence must recompute.
+        hits, unresolvable = resolvable_hits(index.lexical.search(query, depth, filters=filters))
+        hits, corrupt = verify_fingerprints(hits)
         excluded = corrupt + unresolvable
         profile_ids = [
             hit.item_id for hit in index.lexical.search_profiles(query, limit, filters=filters)

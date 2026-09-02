@@ -227,6 +227,9 @@ def test_excluded_chunks_are_reported_with_the_repair() -> None:
     text = render_search(response)
     assert "3 chunk(s) excluido(s)" in text
     assert "index build --force" in text
+    # Since U-5 the counter also covers a row whose provenance, attribution or locator does
+    # not recompute (and, since B-k, one that resolves to no locator): the sentence says so.
+    assert "procedencia" in text and "autor" in text and "localizador" in text
 
 
 def test_a_profile_only_candidate_says_it_has_no_citable_fragment() -> None:
