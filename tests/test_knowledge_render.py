@@ -394,6 +394,75 @@ def test_the_get_rendering_fences_the_untrusted_body() -> None:
     assert any("· A title [summary]" in h for h in headers), "the title is collapsed, not dropped"
 
 
+def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
+    """M-3 (gate Fable, round 05): the fence of G-7 could be ERASED by the text it fences.
+
+    Under a pseudo-TTY `ESC[2K` (erase line) and `ESC[1A` (cursor up) stored in a tweet
+    arrived at the terminal intact through `get` and through the excerpt of `search`, so a
+    post could wipe the `[post] origin=…` header or the `│ ` fence a reader relies on to tell
+    frame from body; BEL passed even through a pipe. `\r`, NEL and U+2028 were already
+    fenced because `splitlines` opens a `│ ` line on them; the C0 controls that are not line
+    breaks were not. This is output safety, not cosmetics: the fence exists for the human
+    reader, and it is the reader these sequences deceive.
+
+    Every C0 control except TAB and LF, plus DEL and the C1 range (U+009B is CSI on a
+    terminal that honours 8-bit controls), is removed from every body line, title, summary
+    and excerpt. The text is otherwise shown whole and the fence intact; the tab survives.
+    Asserted on the ABSENCE of the bytes in the rendered text and on the fence still being
+    the only thing at column 0. Seen red before the fix: `\x1b` and `\x07` present in both
+    renderings.
+    """
+    from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface
+
+    hostile = "Real quote.\x1b[2K\x1b[1A\x07 erased?\n\tindented\x00 nul \x9b31m c1\x7f del"
+    surface = KnowledgeSurface(
+        surface_id="item:1884:post:0",
+        owner_type="item",
+        owner_id="1884",
+        surface_type="post",
+        text=hostile,
+        title="A title\x1b[2K with an escape",
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="item_text"),
+        fingerprint="a" * 64,
+    )
+    chunk = KnowledgeChunk(
+        chunk_id="item:1884:external_article:def:0:v2",
+        surface_id="item:1884:external_article:def",
+        owner_type="item",
+        owner_id="1884",
+        surface_type="external_article",
+        text=hostile,
+        chunk_index=0,
+        char_start=0,
+        char_end=len(hostile),
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        fingerprint="b" * 64,
+    )
+    text = render_get(_bundle(surfaces=(surface,), chunks=(chunk,)))
+    for byte in ("\x1b", "\x07", "\x00", "\x9b", "\x7f"):
+        assert byte not in text, repr(byte)
+    lines = text.splitlines()
+    assert lines.count("│ Real quote. erased?") == 2, lines
+    assert lines.count("│ \tindented nul 31m c1 del") == 2, "the tab survives, the controls do not"
+    assert [h.split("]")[0] for h in lines if h.startswith("[")] == [
+        "[post",
+        "[external_article 0:80",
+    ]
+
+    result = _result(
+        summary=DerivedText(text="ok \x1b[2K\x07 bad", origin="llm"),
+        matches=(SearchMatch(**{**_match().model_dump(), "excerpt": "ex \x1b[1A\x07 cerpt"}),),
+    )
+    searched = render_search(_response(results=(result,)))
+    assert "\x1b" not in searched and "\x07" not in searched
+    assert "resumen (llm): ok  bad" in searched or "resumen (llm): ok bad" in searched
+
+
 def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
     """A-1 in the human view: a quoted post's match names the quoted author on its own line,
     so a reader sees in two seconds that the result's author and the quote's author differ

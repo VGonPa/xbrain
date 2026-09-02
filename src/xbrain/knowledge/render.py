@@ -24,6 +24,7 @@ recorded in the execution report as a finding for Plan 01, not closed by a quiet
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Sequence
 
@@ -338,24 +339,47 @@ def render_update(report: UpdateReport) -> str:
     )
 
 
+# Every C0 control except TAB and LF, plus DEL and the C1 range. What a terminal would
+# INTERPRET rather than print: `ESC` opens every ANSI sequence, BEL rings, U+009B is CSI on a
+# terminal that honours 8-bit controls. TAB is kept because a body may be indented; LF is the
+# line structure `_fenced` turns into fence lines and `_one_line` collapses. The other line
+# separators (`\r`, `\v`, `\f`, NEL, U+2028…) never reach this pattern as text: `splitlines`
+# and `split` consume them first.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: str) -> str:
+    """The text with every control a terminal would act on removed (M-3).
+
+    This is output SAFETY, not cosmetics. The fence of G-7 exists so a reader can tell the
+    renderer's frame from an untrusted body — and an `ESC[2K` (erase line) or `ESC[1A`
+    (cursor up) stored in a tweet reached the terminal intact under a pseudo-TTY through
+    `get` and through the excerpt of `search`, so the body could erase the very fence and
+    header that frame it (BEL passed even through a pipe). The characters are dropped, not
+    escaped: a body is evidence and is shown whole, but what it may not do is drive the
+    terminal.
+    """
+    return _CONTROL_CHARACTERS.sub("", text)
+
+
 def _fenced(text: str) -> list[str]:
-    """A body as lines that cannot stand where a header stands (G-7).
+    """A body as lines that cannot stand where a header stands (G-7) — nor erase it (M-3).
 
     `│ ` in front of every line — including an empty one, so a paragraph break inside the
-    body is still visibly inside it. Nothing is truncated or reflowed: the fence is the whole
-    transformation, and it is reversible by eye.
+    body is still visibly inside it. Nothing is truncated or reflowed: the fence and the
+    removal of terminal controls are the whole transformation.
     """
-    return [f"│ {line}" for line in text.splitlines()] or ["│ "]
+    return [f"│ {_printable(line)}" for line in text.splitlines()] or ["│ "]
 
 
 def _one_line(text: str, width: int = 160) -> str:
-    """Collapse a body to one readable line.
+    """Collapse a body to one readable line, with no control a terminal would act on (M-3).
 
     A hard cap, because an excerpt is already bounded but a summary is not, and a terminal
     rendering that wraps a 700-character paragraph across nine lines buries every other
     result on the screen.
     """
-    flat = " ".join(text.split())
+    flat = " ".join(_printable(text).split())
     return flat if len(flat) <= width else flat[: width - 1] + "…"
 
 

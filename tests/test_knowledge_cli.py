@@ -754,6 +754,23 @@ def test_a_quoted_chunk_from_get_query_names_the_quoted_author(workspace: Path) 
     assert "autor: @othervoice (Other Voice)" in header, header
 
 
+def test_a_bell_stored_in_a_post_does_not_reach_the_terminal_through_get(workspace: Path) -> None:
+    """M-3 at the CLI, on the one control a pipe lets through: `click` strips ANSI escapes
+    when stdout is not a TTY (so `ESC` cannot be asserted here without a pseudo-terminal, and
+    a test that asserted it would be green for click's reason, rule 1), but BEL is not an
+    escape sequence and reached the reader. Seen red before the fix: `\x07` in the output.
+    """
+    items_path = workspace / "data" / "items.json"
+    raw = json.loads(items_path.read_text(encoding="utf-8"))
+    raw["k01"]["text"] = "Quiet post\x07\x07 with two bells"
+    items_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    result = runner.invoke(app, ["get", "k01", "--surface", "post"])
+    assert result.exit_code == 0, result.output
+    assert "\x07" not in result.output
+    assert "│ Quiet post with two bells" in result.output.splitlines()
+
+
 def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
     """Step 27 at the CLI: the human view is rendered from the SAME response model."""
     runner.invoke(app, ["index", "build"])

@@ -373,8 +373,13 @@ the retriever.
   human view of `get` is text all the way down, so since round 03 it FENCES every body line with
   `│ ` and collapses titles to one line: a quoted post containing a line identical to the
   renderer's own `[user_note] origin=user trust=user_text` header (reproduced by the round-04
-  gate) stays visibly inside the body. That is a courtesy to the reader, not a security boundary;
-  an agent that parses the human view instead of the JSON is parsing untrusted text.
+  gate) stays visibly inside the body. **And since round 05 the body cannot erase that fence
+  (M-3):** an `ESC[2K` / `ESC[1A` stored in a tweet reached the terminal intact under a
+  pseudo-TTY (BEL even through a pipe) and could wipe the header or the fence above it, so every
+  C0 control except TAB and LF, plus DEL and the C1 range, is removed from every body line,
+  title, summary and excerpt — dropped, not escaped; the text is still shown whole. That is a
+  courtesy to the reader, not a security boundary; an agent that parses the human view instead
+  of the JSON is parsing untrusted text.
 
 ## Troubleshooting the index
 
