@@ -150,7 +150,12 @@ def load_vocab(path: Path) -> list[Topic]:
     """Load the topic vocabulary; an empty list if the file does not exist."""
     if not path.exists():
         return []
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return parse_vocab(path.read_text(encoding="utf-8"))
+
+
+def parse_vocab(text: str) -> list[Topic]:
+    """The vocabulary from its YAML text — the ONE parser (see `store.parse_store`)."""
+    data = yaml.safe_load(text) or {}
     return [Topic(**entry) for entry in data.get("topics", [])]
 
 
