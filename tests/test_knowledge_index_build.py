@@ -1228,3 +1228,54 @@ def test_a_database_error_while_reading_the_base_is_the_rebuild_advice_on_every_
             **paths,
             dry_run=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# F-1 (gate Fable, round 06) — the pre-round-05 manifest is behind until its first update
+# ---------------------------------------------------------------------------
+
+
+def test_a_manifest_from_before_round_05_is_declared_behind_until_the_first_update(
+    workspace, corpus
+) -> None:
+    """The compatibility promise P1a documented in three places and no test exercised: a
+    manifest sealed before round 05 carries no `vocab.yaml`/`topics.json` entries, they read
+    back as ZEROS, compare unequal to the live files, and the index is declared behind until
+    one `index update` re-seals it. The only one of the gate's 30 mutations that stayed
+    green was a comparison treating a zero entry as fresh — every index built before this
+    branch would then answer over a stale topic plane with nothing declared.
+
+    Seen red under that mutation: `degraded == ("no_embeddings",)`, `behind is False`.
+    """
+    from xbrain.knowledge.index_store import open_for_query
+
+    store, vocab, pages = corpus
+    _write_inputs(workspace, corpus)
+    _build(workspace, corpus)
+    paths = {"vocab_path": workspace / "vocab.yaml", "topics_path": workspace / "topics.json"}
+
+    def pre_round_05(raw):
+        for key in (
+            "vocab_yaml_mtime_ns",
+            "vocab_yaml_size",
+            "topics_json_mtime_ns",
+            "topics_json_size",
+        ):
+            del raw["store_signal"][key]
+
+    _rewrite_manifest(workspace, pre_round_05)
+    written = json.loads(manifest_path(workspace / "index").read_text(encoding="utf-8"))
+    assert set(written["store_signal"]) == {"items_json_mtime_ns", "items_json_size"}
+
+    opened = open_for_query(workspace / "index", workspace / "items.json", **paths)
+    opened.close()
+    assert "index_behind_store" in opened.degraded, opened.degraded
+    report = _status(workspace, store, corpus)
+    assert report.behind is True and report.advice == index_build.UPDATE_ADVICE
+
+    index_build.update(workspace / "index", store, vocab, pages, workspace / "items.json", **paths)
+
+    opened = open_for_query(workspace / "index", workspace / "items.json", **paths)
+    opened.close()
+    assert "index_behind_store" not in opened.degraded, opened.degraded
+    assert _status(workspace, store, corpus).behind is False
