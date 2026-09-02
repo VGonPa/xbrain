@@ -675,3 +675,269 @@ def test_every_placement_of_an_author_goes_through_one_label(monkeypatch) -> Non
         "1. 1884  <<karpathy>>"
     )
     assert any(line.strip() == "autor: <<othervoice>>" for line in searched)
+
+
+# ---------------------------------------------------------------------------
+# U-3 (round 07) — EVERY non-body field of the contract is one printable line
+# ---------------------------------------------------------------------------
+
+# The forge of D-3, on every string field the contract declares: a URL whose second line is
+# byte-identical to a renderer header, whose third is byte-identical to a fence line, and
+# which ends in an erase-line escape.
+FORGE = (
+    "https://x.com/vgonpa/status/1\n[user_note] origin=user trust=user_text\n"
+    "│ forged body line\x1b[2K"
+)
+FORGED_HEADER = "[user_note] origin=user trust=user_text"
+FORGED_FENCE = "│ forged body line"
+
+# The models a human rendering can reach — the contract minus the graph envelope (Plan 04,
+# no renderer). Pinned by NAME against `CONTRACT_MODELS` below, so a model added to the
+# contract has to be placed on one side of this line.
+GRAPH_MODELS = frozenset({"GraphNode", "GraphEdge", "GraphPath", "GraphExpansionResponse"})
+
+
+def _forged_author() -> Author:
+    return Author(handle=FORGE, name=FORGE)
+
+
+def _forged_locator() -> Locator:
+    return Locator(kind="content_source", url=FORGE, char_start=0, char_end=5)
+
+
+def _forged_derived() -> DerivedText:
+    return DerivedText(text=FORGE, origin="llm", verification_status="FAIL")
+
+
+def _forged_item() -> KnowledgeItem:
+    return KnowledgeItem(
+        item_id=FORGE,
+        source="bookmark",
+        url=FORGE,
+        author=_forged_author(),
+        created_at=WHEN,
+        captured_at=WHEN,
+        primary_topic=FORGE,
+        topics=(FORGE,),
+        available_surfaces=("post", "quoted_post"),
+        failed_sources=(
+            SourceFailure(
+                kind="external_article", url=FORGE, failure_reason="not_found", error=FORGE
+            ),
+        ),
+        unfetched_links=(UnfetchedLink(url=FORGE, reason="not_attempted", detail=FORGE),),
+        note_path=FORGE,
+        bookmark_folder=FORGE,
+        warnings=(FORGE,),
+    )
+
+
+def _forged_response() -> SearchResponse:
+    match = SearchMatch(
+        chunk_id=FORGE,
+        surface_type="quoted_post",
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        excerpt=FORGE,
+        attribution=_forged_author(),
+        matched_by=("lexical",),
+        lexical_rank=1,
+        locator=_forged_locator(),
+    )
+    result = SearchResult(
+        rank=1,
+        item_id=FORGE,
+        url=FORGE,
+        author=Author(handle="poster", name="The Poster"),
+        created_at=WHEN,
+        summary=_forged_derived(),
+        topics=(FORGE,),
+        matches=(match,),
+        available_surfaces=("post", "quoted_post"),
+        verify_with=("quoted_post",),
+    )
+    return SearchResponse(
+        query=FORGE,
+        strategy="lexical",
+        filters=SearchFilters(author=FORGE, topics=(FORGE,)),
+        # An unknown degradation flag is printed as `⚠ <flag>`: forged too.
+        index=IndexStatusRef(
+            manifest_version=FORGE,
+            built_at=WHEN,
+            corrupt_chunks_excluded=1,
+            degraded=("no_embeddings", FORGE),
+        ),
+        results=(result,),
+        truncated=True,
+        cursor=FORGE,
+    )
+
+
+def _forged_bundle() -> EvidenceBundle:
+    from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, TopicRecord
+    from xbrain.models import VerificationVerdict
+
+    item = _forged_item()
+    surface = KnowledgeSurface(
+        surface_id=FORGE,
+        owner_type="item",
+        owner_id=FORGE,
+        surface_type="quoted_post",
+        text=FORGE,
+        title=FORGE,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        attribution=_forged_author(),
+        producer=FORGE,
+        locator=_forged_locator(),
+        fingerprint="a" * 64,
+        language=FORGE,
+    )
+    chunk = KnowledgeChunk(
+        chunk_id=FORGE,
+        surface_id=FORGE,
+        owner_type="item",
+        owner_id=FORGE,
+        surface_type="quoted_post",
+        text=FORGE,
+        title=FORGE,
+        chunk_index=0,
+        char_start=0,
+        char_end=5,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        attribution=_forged_author(),
+        topics=(FORGE,),
+        url=FORGE,
+        locator=_forged_locator(),
+        language=FORGE,
+        fingerprint="b" * 64,
+    )
+    topic = TopicRecord(
+        topic_id=FORGE,
+        slug=FORGE,
+        description=_forged_derived(),
+        overview=_forged_derived(),
+        notes=(_forged_derived(),),
+        primary_item_ids=(FORGE,),
+        secondary_item_ids=(FORGE,),
+        vocab_fingerprint="c" * 64,
+    )
+    return EvidenceBundle(
+        item=item,
+        topics=(topic,),
+        surfaces=(surface,),
+        chunks=(chunk,),
+        failures=item.failed_sources,
+        unfetched_links=item.unfetched_links,
+        verification={
+            FORGE: VerificationVerdict(
+                target="summary",
+                verdict="FAIL",
+                output_fingerprint="d" * 64,
+                verified_at=WHEN,
+            )
+        },
+        truncated=True,
+        cursor=FORGE,
+    )
+
+
+def _forged_fields(model) -> set[tuple[str, str]]:
+    """Every `(Model, field)` in this instance tree whose value carries the forge."""
+    from pydantic import BaseModel
+
+    found: set[tuple[str, str]] = set()
+    stack: list[BaseModel] = [model]
+    while stack:
+        current = stack.pop()
+        for name in type(current).model_fields:
+            value = getattr(current, name)
+            values = value if isinstance(value, (tuple, list)) else [value]
+            for element in values:
+                if isinstance(element, BaseModel):
+                    stack.append(element)
+                elif isinstance(element, str) and FORGE in element:
+                    found.add((type(current).__name__, name))
+            if isinstance(value, dict):
+                stack.extend(v for v in value.values() if isinstance(v, BaseModel))
+                if any(FORGE in k for k in value):
+                    found.add((type(current).__name__, name))
+    return found
+
+
+def test_no_string_field_of_the_contract_can_forge_a_header_or_drive_the_terminal() -> None:
+    """The human-view half of seam (b), ENUMERATED over the contract (U-3, round 07; gate
+    Fable F7-2, reproduced). D-3 fenced the author and left the URL printed two lines
+    below it raw: `item.url`, `result.url`, `failure.url` and `link.url` carried a newline
+    into column 0 — a line byte-identical to a renderer header, another to a fence line —
+    and an `ESC[2K` into the TTY, through `render_get` and `render_search` alike. And
+    `Item.url` is BUILT from the handle D-3 fenced (`extract/graphql.py`). Bodies, then
+    titles, then authors, then URLs: four families, four patches, the same mechanism.
+
+    So the enumeration is the CONTRACT's, not the renderer's: every `str` field the
+    partition in `contracts.py` declares — bodies and metadata alike — is forged at once,
+    on every model a human rendering can reach, and the two renderings must show no forged
+    line at column 0 and no control byte. A field the renderer prints raw is red here; a
+    field added to the contract joins the forge (the totality test forces it into the
+    partition) and, if a renderer ever prints it raw, goes red here without anybody
+    remembering. `render._label` is the one way a non-body field reaches a human;
+    `_one_line` (bodies) and `_author_label` (authors) are built on it.
+
+    Seen red on `9dfa34e`: the forged header at column 0 and `\\x1b` in both renderings,
+    through the four URL fields.
+    """
+    from xbrain.knowledge.contracts import (
+        CONTRACT_MODELS,
+        TEXT_FIELDS_REQUIRING_ORIGIN,
+        TEXT_FIELDS_WITHOUT_ORIGIN,
+    )
+
+    response, bundle = _forged_response(), _forged_bundle()
+    renderings = {
+        "search": render_search(response),
+        "get": render_get(bundle, surfaces=(FORGE,), query=FORGE),
+    }
+    for name, out in renderings.items():
+        lines = out.splitlines()
+        assert "\x1b" not in out, name
+        assert FORGED_HEADER not in lines, (name, out)
+        assert FORGED_FENCE not in lines, (name, out)
+        assert not any(line.startswith(FORGED_FENCE) for line in lines), name
+        # The header lines a human reads are the RENDERER's: every column-0 line that
+        # looks like a surface/chunk header names a real surface type.
+        assert [h.split("]")[0] for h in lines if h.startswith("[")] == (
+            ["[quoted_post", "[quoted_post 0:5"] if name == "get" else []
+        ), (name, out)
+
+    # TOTALITY: the forge reached every string field the contract declares on the models a
+    # rendering can reach — bodies, metadata, and the `tuple[str, ...]` collections — except
+    # the ones a regex pattern keeps closed (a sha256 hex cannot hold a control byte).
+    rendered_models = {m for m in CONTRACT_MODELS if m.__name__ not in GRAPH_MODELS}
+    assert {m.__name__ for m in CONTRACT_MODELS} - GRAPH_MODELS == {
+        m.__name__ for m in rendered_models
+    }
+
+    def patterned(model, field) -> bool:
+        return any(getattr(meta, "pattern", None) for meta in model.model_fields[field].metadata)
+
+    declared = {
+        (model.__name__, field)
+        for model in rendered_models
+        for (owner, field) in TEXT_FIELDS_REQUIRING_ORIGIN | TEXT_FIELDS_WITHOUT_ORIGIN
+        if owner == model.__name__ and not patterned(model, field)
+    }
+    collections = {
+        (model.__name__, field)
+        for model in rendered_models
+        for field, info in model.model_fields.items()
+        if str(info.annotation)
+        in {"tuple[str, ...]", "dict[str, xbrain.models.VerificationVerdict]"}
+    }
+    forged = _forged_fields(response) | _forged_fields(bundle)
+    assert declared <= forged, sorted(declared - forged)
+    assert collections <= forged, sorted(collections - forged)
+    assert forged - declared - collections == set(), sorted(forged - declared - collections)

@@ -15,6 +15,16 @@ to detect a defect, ask whether SHOWING the evidence makes it self-evident — a
 names the exact `xbrain get` command is what turns "this summary says X" into "here is how to
 read what it summarised", in one copy-paste.
 
+EVERY FIELD THAT IS NOT A BODY REACHES THE HUMAN THROUGH `_label` (U-3, round 07). M-3 fenced
+the bodies (`_fenced`) and collapsed the titles, summaries and excerpts (`_one_line`); D-3 put
+the author behind `_author_label`; and the URL printed two lines below the author was still
+raw — a newline in `item.url` stood at column 0 as a header and a fence, an `ESC[2K` reached
+the TTY, through `render_get` and `render_search` alike (the round-07 gate, F7-2). Four
+families, four patches, one mechanism. So there is ONE function for any non-body field — id,
+URL, topic slug, query, cursor, producer, path — and `_one_line` and `_author_label` are
+built on it; `tests/test_knowledge_render.py` forges every string field the contract declares
+and expects no forged line at column 0 and no control byte in either rendering.
+
 THIS IS ALSO WHERE `no_underlying_source` BECOMES A WORD. The frozen `SearchResult` has no
 `warnings` field (Plan 01 froze it at `schema_version: "1"` and Plan 02 §0 forbids amending
 the contract here), so the JSON says it structurally — `verify_with: []` is reachable in
@@ -56,7 +66,7 @@ DEGRADED_TEXT: dict[str, str] = {
 
 def render_search(response: SearchResponse) -> str:
     """The human rendering of a search (spec §7.6)."""
-    lines: list[str] = [f'"{response.query}" · estrategia {response.strategy}']
+    lines: list[str] = [f'"{_label(response.query)}" · estrategia {response.strategy}']
     lines += _index_lines(response)
     if not response.results:
         lines.append("Sin resultados. Prueba con menos filtros o términos más distintivos.")
@@ -104,18 +114,18 @@ def _degraded_line(flag: str) -> str:
             f"⚠ La estrategia `{requested}` no tiene backend todavía: ha respondido "
             f"`{FALLBACK_STRATEGY}`. Estos resultados NO son de `{requested}`."
         )
-    return DEGRADED_TEXT.get(flag, f"⚠ {flag}")
+    return DEGRADED_TEXT.get(flag, f"⚠ {_label(flag)}")
 
 
 def _result_lines(result: SearchResult) -> list[str]:
     """One item: metadata, the labelled summary, every match, and how to verify it."""
     lines = [
-        f"{result.rank}. {result.item_id}  {_author_label(result.author)}"
+        f"{result.rank}. {_label(result.item_id)}  {_author_label(result.author)}"
         f" · {result.created_at.date().isoformat()}",
-        f"   {result.url}",
+        f"   {_label(result.url)}",
     ]
     if result.topics:
-        lines.append(f"   topics: {', '.join(result.topics)}")
+        lines.append(f"   topics: {_label(', '.join(result.topics))}")
     if result.summary is not None:
         verdict = (
             f" [{result.summary.verification_status}]" if result.summary.verification_status else ""
@@ -155,8 +165,8 @@ def _verify_lines(result: SearchResult) -> list[str]:
         ]
     if not result.verify_with:
         return []
-    surfaces = " ".join(f"--surface {name}" for name in result.verify_with)
-    return [f"   → verifica con: xbrain get {result.item_id} {surfaces}"]
+    surfaces = " ".join(f"--surface {_label(name)}" for name in result.verify_with)
+    return [f"   → verifica con: xbrain get {_label(result.item_id)} {surfaces}"]
 
 
 def render_get(
@@ -187,14 +197,14 @@ def render_get(
     """
     item = bundle.item
     lines = [
-        f"{item.item_id}  {_author_label(item.author)}"
+        f"{_label(item.item_id)}  {_author_label(item.author)}"
         f" · {item.created_at.date().isoformat()} · {item.source}",
-        f"  {item.url}",
-        f"  topics: {', '.join(item.topics) or '—'}",
-        f"  superficies disponibles: {', '.join(item.available_surfaces) or '—'}",
+        f"  {_label(item.url)}",
+        f"  topics: {_label(', '.join(item.topics)) or '—'}",
+        f"  superficies disponibles: {_label(', '.join(item.available_surfaces)) or '—'}",
     ]
     for target, verdict in sorted(bundle.verification.items()):
-        lines.append(f"  verificación {target}: {verdict.verdict}")
+        lines.append(f"  verificación {_label(target)}: {verdict.verdict}")
     lines += _failure_lines(bundle)
     for surface in bundle.surfaces:
         lines += [
@@ -231,11 +241,14 @@ def _continuation(
     text and may carry spaces or quotes), then the cursor. Nothing else: what is not in
     this line does not change which chunk comes next.
     """
-    parts = [f"xbrain get {item_id}"]
-    parts += [f"--surface {name}" for name in surfaces]
+    parts = [f"xbrain get {_label(item_id)}"]
+    parts += [f"--surface {_label(name)}" for name in surfaces]
     if query:
-        parts.append(f"--query {shlex.quote(query)}")
-    parts.append(f"--cursor {bundle.cursor}")
+        # Labelled BEFORE quoting: `shlex.quote` keeps a newline or an escape intact inside
+        # its single quotes, which is exactly a forged line at column 0 on the printed
+        # continuation. Whitespace collapsed inside the query changes no term FTS5 sees.
+        parts.append(f"--query {shlex.quote(_label(query))}")
+    parts.append(f"--cursor {_label(bundle.cursor or '')}")
     return " ".join(parts)
 
 
@@ -267,7 +280,7 @@ def _author_label(author: Author) -> str:
     function, pinned by a test that swaps it for a sentinel and expects the sentinel in all
     three (rule 5).
     """
-    return f"@{_one_line(author.handle)} ({_one_line(author.name)})"
+    return f"@{_label(author.handle)} ({_label(author.name)})"
 
 
 def _author_suffix(attribution: Author | None, item_author: Author) -> str:
@@ -285,10 +298,12 @@ def _failure_lines(bundle: EvidenceBundle) -> list[str]:
     """
     lines = []
     for failure in bundle.failures:
-        lines.append(f"  ⚠ fetch falló: {failure.kind} {failure.url} ({failure.failure_reason})")
+        lines.append(
+            f"  ⚠ fetch falló: {failure.kind} {_label(failure.url)} ({failure.failure_reason})"
+        )
     for link in bundle.unfetched_links:
-        detail = f" — {link.detail}" if link.detail else ""
-        lines.append(f"  ⚠ sin cuerpo: {link.url} ({link.reason}){detail}")
+        detail = f" — {_label(link.detail)}" if link.detail else ""
+        lines.append(f"  ⚠ sin cuerpo: {_label(link.url)} ({link.reason}){detail}")
     return lines
 
 
@@ -297,12 +312,14 @@ def render_status(report: StatusReport) -> str:
     if report.manifest is None:
         return "\n".join(["Índice: INCOMPLETO o inexistente.", f"  {report.advice}"])
     manifest = report.manifest
+    # The manifest is a file an operator may edit by hand (B1 measured what one can hold),
+    # so its strings reach the terminal through the same label as everything else (U-3).
     lines = [
         f"Índice construido {manifest.built_at.isoformat(timespec='seconds')}",
-        f"  esquema {manifest.schema_version}"
-        f" · emisor {manifest.surface_version}"
-        f" · chunker {manifest.chunker_version} {manifest.chunker_params}",
-        f"  tokenizer {manifest.tokenize!r} · conectiva {manifest.connective}"
+        f"  esquema {_label(manifest.schema_version)}"
+        f" · emisor {_label(manifest.surface_version)}"
+        f" · chunker {_label(manifest.chunker_version)} {manifest.chunker_params}",
+        f"  tokenizer {_label(manifest.tokenize)!r} · conectiva {_label(manifest.connective)}"
         f" · embeddings {manifest.embeddings or '—'}",
         "  contenidos: "
         + " · ".join(f"{name} {count}" for name, count in sorted(report.counts.items())),
@@ -393,14 +410,31 @@ def _fenced(text: str) -> list[str]:
     return [f"│ {_printable(line)}" for line in text.splitlines()] or ["│ "]
 
 
+def _label(text: str) -> str:
+    """A non-body field as ONE printable line, untruncated — the only way metadata reaches
+    a human (U-3, round 07).
+
+    An id, a URL, a slug, a query, a cursor, a producer, a path: none of them is a body, so
+    none is fenced, and each of them comes from the store or from the request verbatim. The
+    line structure and the terminal controls are removed (`_printable`, M-3) and the
+    whitespace collapsed, so the value cannot stand where a header stands nor drive the
+    terminal — and it is NOT truncated, because a URL a human copies must be whole.
+    `_one_line` adds the width cap bodies need; `_author_label` adds the `@handle (Name)`
+    shape; both are this function underneath, and the totality test in
+    `tests/test_knowledge_render.py` forges every string field the contract declares to
+    prove nothing reaches the terminal by any other path.
+    """
+    return " ".join(_printable(text).split())
+
+
 def _one_line(text: str, width: int = 160) -> str:
     """Collapse a body to one readable line, with no control a terminal would act on (M-3).
 
     A hard cap, because an excerpt is already bounded but a summary is not, and a terminal
     rendering that wraps a 700-character paragraph across nine lines buries every other
-    result on the screen.
+    result on the screen. Built on `_label`, which is the safety; the cap is the ergonomics.
     """
-    flat = " ".join(_printable(text).split())
+    flat = _label(text)
     return flat if len(flat) <= width else flat[: width - 1] + "…"
 
 
