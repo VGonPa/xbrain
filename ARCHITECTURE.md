@@ -1146,7 +1146,7 @@ xbrain/
 │   │   ├── surfaces.py      ← the emitter + the three totality maps
 │   │   ├── chunking.py      ← structural chunker (atomic beats MAX_CHARS)
 │   │   ├── profile.py       ← the item's retrieval profile (never a citation)
-│   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen per envelope (SearchResponse "2", EvidenceBundle "2", Graph "1")
+│   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen per envelope (SearchResponse "2", EvidenceBundle "1", Graph "1")
 │   │   ├── goldenset.py     ← two-stage loader: structure, then resolution
 │   │   ├── lexical_fts.py   ← the FTS5 DDL + scorer Plan 02 reuses
 │   │   ├── lexical_memory.py← that same FTS5 on sqlite3(":memory:")

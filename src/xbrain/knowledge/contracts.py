@@ -1,5 +1,5 @@
 """The external response schemas, frozen per envelope — `SearchResponse` at `"2"`,
-`EvidenceBundle` at `"2"`, the graph envelope at `"1"` (spec §7; the policy below).
+`EvidenceBundle` at `"1"`, the graph envelope at `"1"` (spec §7; the policy below).
 
 FROZEN NOW, ON PURPOSE, before the services that fill them exist. Spec §7.1 says CLI JSON
 and MCP are two adapters over ONE service and must not implement two formats — and the way
@@ -17,20 +17,31 @@ and this contract does NOT: a required key added under the same number is a docu
 version-1 consumer refuses (`Extra inputs are not permitted`) and a version-1 document the
 new consumer refuses (`Field required`), two producers announcing one version that do not
 interoperate. So a key added to a frozen shape BUMPS the version of every envelope that
-transports it, and the refusal then names the version rather than a field. Round 06 made
-`KnowledgeChunk.locator` required — spec §3.7 invariant 2 demanded it from the start — and
-`EvidenceBundle`, the one envelope carrying chunks, is at "2" for it; `SearchResponse` stayed
-at "1" then, because `SearchMatch` always carried its locator, and moved to "2" when
-`SearchMatch` gained the `title` spec §4 makes accompany a chunk (B2, gate Codex on
-`b61e04b`). OPTIONAL-WITH-A-DEFAULT IS NOT AN EXEMPTION, and this is the half of U-1 that is
-easy to miss: a defaulted key is additive for the NEW consumer, which fills it in, and
-incompatible for the OLD one, which forbids it — the version-1 reader refuses the document
-outright, so the number has to move for the refusal to name the version rather than a field
-nobody told it about. No document at either number is persisted
-anywhere (the index stores `locator_json` per surface, never a bundle), so there is no
-migration, only the honest number. `EVIDENCE_SCHEMA_VERSION` is READ off the model, never
-written a second time, so an adapter that stamps an envelope by hand (`cli.py`'s inspect
-payloads) cannot drift from it.
+transports it, and the refusal then names the version rather than a field.
+OPTIONAL-WITH-A-DEFAULT IS NOT AN EXEMPTION, and this is the half of U-1 that is easy to
+miss: a defaulted key is additive for the NEW consumer, which fills it in, and incompatible
+for the OLD one, which forbids it — the version-1 reader refuses the document outright, so
+the number has to move for the refusal to name the version rather than a field nobody told
+it about. That is why `SearchResponse` is at "2" here: `SearchMatch` gained the `title`
+spec §4 makes accompany a chunk (B2, gate Codex on `b61e04b`), and `SearchResponse` is the
+one envelope that transports a `SearchMatch`.
+
+AND THE RULE CUTS BOTH WAYS — A NUMBER IS A CLAIM ABOUT A SHAPE, SO IT SHIPS WITH THE SHAPE.
+`EvidenceBundle` is at "1" in this child PR, and the reason is the whole of the policy read
+backwards. The bump queued for it means one specific thing — `KnowledgeChunk.locator` became
+required (spec §3.7 invariant 2 demanded it from the start) — and that field, together with
+the `chunking.fragment_locator` that computes it and the producers that fill it, lands in
+child PR 02.5. Announcing "2" over chunks that carry no locator would publish a version whose
+only meaning is a field this build does not have: a consumer told to expect the locator would
+find none, and the refusal-by-version this policy exists to buy would name a version that
+describes nothing. So the number moves in 02.5, in the same PR as the field, and the test
+that pins a version-1 document as refused-by-its-version moves with it. Today the honest
+triple is `SearchResponse` "2", `EvidenceBundle` "1", the graph envelope "1".
+
+No document at any of those numbers is persisted anywhere (the index stores `locator_json`
+per surface, never a bundle), so there is no migration, only the honest number.
+`EVIDENCE_SCHEMA_VERSION` is READ off the model, never written a second time, so an adapter
+that stamps an envelope by hand (`cli.py`'s inspect payloads) cannot drift from it.
 
 THE NAMING RULE, AND WHY IT IS ENFORCED BY TOTALITY (m12). Invariant 2 of spec §3.7: nothing
 is called `text` without `origin` beside it. A walker that scans a JSON payload and fails on
@@ -206,9 +217,9 @@ class IndexStatusRef(BaseModel):
 
     TWO SIGNALS WITH TWO NAMES (B3). `corrupt_chunks_excluded` counts rows whose fingerprint
     does not recompute — corruption, or a row written by a different chunker version — and,
-    since round 06 (B-k), rows whose surface cannot be resolved to a locator (spec §3.7
-    invariant 1), which are the same operator situation. That is
-    an INTERNAL consistency check and it does not detect the failure that actually happens:
+    once the writer that fills it lands (child PR 02.5, with `KnowledgeChunk.locator`), rows
+    whose surface cannot be resolved to a locator (spec §3.7 invariant 1), which are the same
+    operator situation. That is an INTERNAL consistency check and it does not detect the failure that actually happens:
     *you ran `enrich` and did not reindex*. That one is a `degraded` flag
     (`"index_behind_store"`), raised by comparing the manifest's cheap store signal against
     the current file.
@@ -256,10 +267,12 @@ class EvidenceBundle(BaseModel):
 
     model_config = _FROZEN
 
-    # "2" since round 07 (U-1): `KnowledgeChunk.locator` became required in round 06, and
-    # under `extra="forbid"` that is an incompatible change of THIS envelope — see the
-    # module docstring for the policy. A document announcing "1" is refused by its version.
-    schema_version: Literal["2"] = "2"
+    # STILL "1", and deliberately: the bump queued for this envelope means
+    # `KnowledgeChunk.locator` is required, and that field arrives in child PR 02.5 with the
+    # `chunking.fragment_locator` that computes it. A number is a claim about a shape, so it
+    # ships with the shape — see the module docstring. `SearchResponse` moved to "2" here
+    # because the key that moved it, `SearchMatch.title`, is in this PR.
+    schema_version: Literal["1"] = "1"
     item: KnowledgeItem
     topics: tuple[TopicRecord, ...] = ()
     surfaces: tuple[KnowledgeSurface, ...] = ()
@@ -324,8 +337,12 @@ class GraphExpansionResponse(BaseModel):
 
 # The evidence envelope's version, read off the model so there is ONE definition (U-1). The
 # CLI's `knowledge inspect` payloads dump the same `KnowledgeSurface`/`KnowledgeChunk`/
-# `TopicRecord` shapes the bundle transports, and used to stamp "1" by hand — which is how a
-# bump here would have left them announcing the old number over the new shape.
+# `TopicRecord` shapes the bundle transports, and used to stamp "1" by HAND — a literal that
+# happens to agree with the model today and would go on agreeing with nothing the day the
+# model moves. Reading it off the model is what makes 02.5's bump reach the CLI without
+# anyone having to remember; `tests/test_knowledge_cli.py` proves the derivation by injecting
+# a version the source does not contain, because equality against the current literal cannot
+# tell a derived value from a hardcoded one.
 EVIDENCE_SCHEMA_VERSION: str = EvidenceBundle.model_fields["schema_version"].default
 SEARCH_SCHEMA_VERSION: str = SearchResponse.model_fields["schema_version"].default
 
