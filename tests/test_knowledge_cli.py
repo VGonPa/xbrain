@@ -255,6 +255,20 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
     )
 
 
+def test_eval_sweep_honours_and_publishes_the_limit(workspace: Path) -> None:
+    """U-6 at the CLI (gate Codex F5): `xbrain eval --limit 150 --sweep-chunker …` produced
+    a report byte-identical to `--limit 10` on the real corpus, because `_run_sweep` never
+    passed the option the command advertised. The report carries the depth it ran at.
+    Seen red on `9dfa34e`: no `limit` key in the sweep report.
+    """
+    payload = _json_stdout(
+        runner.invoke(app, ["eval", "--limit", "150", "--sweep-chunker", "target=800", "--json"])
+    )
+    assert payload["limit"] == 150
+    default = _json_stdout(runner.invoke(app, ["eval", "--sweep-chunker", "target=800", "--json"]))
+    assert default["limit"] == 10
+
+
 def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> None:
     """m8, the other production caller: `knowledge inspect --chunks`.
 

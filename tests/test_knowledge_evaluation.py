@@ -959,3 +959,98 @@ def test_evaluate_closes_the_index_it_built(corpus) -> None:
         if issubclass(w.category, ResourceWarning) and "unclosed database" in str(w.message)
     ]
     assert not leaks, [str(w.message) for w in leaks]
+
+
+# ---------------------------------------------------------------------------
+# U-6 (round 07) — the depth is counted in OWNERS, and `recall@k` depends on nothing else
+# ---------------------------------------------------------------------------
+#
+# Gate Codex F5: `evaluate` asked the index for `max(limit, max(ks))` CHUNKS and deduplicated
+# owners afterwards, while every metric is defined over owners. Seven windows of one
+# transcript at the top of the ranking meant ten chunks held two owners; so `recall@10` for
+# the real case F2 was 2/3 when `--k 10` was requested alone and 1.0 when `k=20` was requested
+# beside it (the default), and the `filtros` stratum moved from 0.8333 to 1.0. A published
+# figure that depends on which neighbouring figure was asked for is a figure that cannot come
+# out any other way (rule 2). The sweep compounded it: it called `evaluate(..., ks=(k,))` with
+# no depth and `_run_sweep` never passed the `--limit` the CLI advertised, so `--limit 10` and
+# `--limit 150` produced byte-identical reports.
+
+OWNER_DOMINATED_QUERY = "Retrieval quality depends"
+
+
+def _dominated_case():
+    return _case(
+        id="U6",
+        query=OWNER_DOMINATED_QUERY,
+        strata=("enterrado",),
+        relevant_items=("k08", "k04"),
+    )
+
+
+def test_recall_at_k_is_independent_of_the_other_ks_requested(corpus) -> None:
+    """The precondition first (rule 1): two chunks of this query hold ONE owner — the
+    transcript of k08 fills the top of the ranking — so a depth counted in chunks would
+    give `recall@2` a different value depending on whether a deeper k was also asked for.
+    Then the property: `recall@2` is the same number whether `ks=(2,)` or `ks=(2, 10)`,
+    because the ranking is materialised to at least two OWNERS either way.
+
+    Seen red on `9dfa34e`: 0.5 alone, 1.0 beside k=10.
+    """
+    index, _stats = build_index(corpus)
+    try:
+        two_chunks = index.search(OWNER_DOMINATED_QUERY, 2)
+    finally:
+        index.connection.close()
+    assert len({(h.owner_type, h.owner_id) for h in two_chunks}) == 1, "the precondition moved"
+
+    alone = evaluate([_dominated_case()], corpus, ks=(2,))
+    beside = evaluate([_dominated_case()], corpus, ks=(2, 10))
+    recall_alone = alone.cases[0].metrics["recall@2"]
+    recall_beside = beside.cases[0].metrics["recall@2"]
+    assert recall_alone == recall_beside == 1.0
+    assert alone.cases[0].retrieved[:2] == beside.cases[0].retrieved[:2]
+
+
+def test_the_depth_is_counted_in_owners_and_published(corpus) -> None:
+    """`limit` is a number of OWNERS: `evaluate(..., ks=(3,))` materialises three distinct
+    owners for a query that has them, however many chunks of the first owner sit on top —
+    and the report says which depth it ran at, so a figure travels with the depth that
+    produced it (rule 2)."""
+    report = evaluate([_dominated_case()], corpus, ks=(3,))
+    retrieved = report.cases[0].retrieved
+    assert len(retrieved) == 3 and len(set(retrieved)) == 3, retrieved
+    assert report.limit == 3 and report.to_dict()["limit"] == 3
+    deeper = evaluate([_dominated_case()], corpus, ks=(3,), limit=5)
+    assert deeper.limit == 5 and len(deeper.cases[0].retrieved) <= 5
+    assert deeper.cases[0].retrieved[:3] == retrieved
+
+
+def test_the_sweep_honours_and_publishes_the_limit(corpus, monkeypatch) -> None:
+    """The sweep runs `evaluate` once per combination; the depth it runs at is the caller's
+    `limit` (the CLI's `--limit`), never silently the k. Asserted at the seam — the limit
+    each `evaluate` call received — and on the published report, which carries it.
+
+    Seen red on `9dfa34e`: `sweep_chunker` took no `limit`, `evaluate` received none, and
+    `--limit 10` / `--limit 150` produced byte-identical sweep reports on the real corpus.
+    """
+    from xbrain.knowledge import evaluation
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    received: list[int | None] = []
+    real = evaluation.evaluate
+
+    def recording(*args, **kwargs):
+        received.append(kwargs.get("limit"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation, "evaluate", recording)
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [800, 1600]}, k=10, limit=150)
+
+    assert received == [150, 150]
+    assert report.limit == 150 and report.to_dict()["limit"] == 150
+    assert "150" in render_sweep_markdown(report)
+    # And with no limit given the sweep runs at its k — declared, not implicit.
+    received.clear()
+    default = sweep_chunker(cases, corpus, {"target": [800]}, k=10)
+    assert received == [10] and default.limit == 10

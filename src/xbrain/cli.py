@@ -3258,7 +3258,9 @@ def get_command(
         typer.echo(render_get(bundle, surfaces=surface, query=query))
 
 
-def _run_sweep(cfg, cases, corpus, axes, strategy: str, report, *, json_out: bool) -> None:
+def _run_sweep(
+    cfg, cases, corpus, axes, strategy: str, report, *, json_out: bool, limit: int
+) -> None:
     """`eval --sweep-chunker`: score every `(target, overlap)` and publish the table.
 
     A SEPARATE PATH, not a flag threaded through `evaluate`, because the two answer different
@@ -3277,7 +3279,9 @@ def _run_sweep(cfg, cases, corpus, axes, strategy: str, report, *, json_out: boo
     )
 
     grid = parse_sweep(axes)
-    result = run_sweep(cases, corpus, grid, strategy=strategy)
+    # The depth the command advertises is the depth the sweep runs at (U-6): the first
+    # version dropped it here, and `--limit 10` and `--limit 150` were byte-identical.
+    result = run_sweep(cases, corpus, grid, strategy=strategy, limit=limit)
     json_path = report or (cfg.data_dir / "eval-sweep.json")
     if not json_path.is_absolute():
         json_path = _repo_root() / json_path
@@ -3299,7 +3303,7 @@ def eval_command(
     limit: int = typer.Option(
         10,
         "--limit",
-        help="Profundidad de recuperación por caso (nunca por debajo del mayor k).",
+        help="Profundidad de recuperación por caso, en OWNERS (nunca por debajo del mayor k).",
     ),
     k: list[int] = typer.Option([], "--k", help="Valores de k a reportar (repetible)."),
     min_recall: float | None = typer.Option(
@@ -3336,7 +3340,9 @@ def eval_command(
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)
     if sweep_chunker:
-        _run_sweep(cfg, cases, corpus, sweep_chunker, strategy, report, json_out=json_out)
+        _run_sweep(
+            cfg, cases, corpus, sweep_chunker, strategy, report, json_out=json_out, limit=limit
+        )
         return
     result = evaluate(
         cases,

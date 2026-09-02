@@ -72,6 +72,20 @@ SURFACES_WITHOUT_DATA: tuple[str, ...] = ("thread", "user_note")
 
 DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 
+# THE DEPTH IS COUNTED IN OWNERS (U-6, round 07 — gate Codex F5). Every metric here is defined
+# over deduplicated owners (spec §5.4 groups by item), and `evaluate` used to ask the index for
+# `max(limit, max(ks))` CHUNKS: seven windows of one transcript at the top meant ten chunks
+# held two owners, so the real case F2 scored `recall@10 = 2/3` with `--k 10` alone and 1.0
+# with `k=20` requested beside it (the default) — the `filtros` stratum moved 0.8333 -> 1.0
+# on which neighbouring figure was asked for. Now the ranking is materialised until it holds
+# the owners requested: `OWNER_CHUNK_MULTIPLIER` chunks per owner first, doubling while the
+# result set is full and short of owners, up to `MAX_CHUNK_DEPTH` (an exhausted ranking is
+# declared on the case, never read as «the owner was not there»). A prefix of a deeper FTS
+# ranking is the shallower ranking — one total order, `chunk_id` tie-break — so `recall@k`
+# for any k at or below the depth is one number, whatever else was asked for.
+OWNER_CHUNK_MULTIPLIER = 4
+MAX_CHUNK_DEPTH = 10_000
+
 # Which of spec §7.2's eight filters each strategy can actually push into the backend.
 #
 # THIS TABLE IS THE DIFFERENCE BETWEEN A ZERO AND A GAP, and Plan 02 is what closed the gap.
@@ -171,6 +185,9 @@ class CaseResult:
     # them as the first, which is how a query-construction defect got published as a semantic
     # result. Carried per case and counted per bucket so the two are never confused again.
     no_results: bool = False
+    # The ranking hit `MAX_CHUNK_DEPTH` before holding the owners asked for (U-6): the
+    # owner list is SHORT for a reason that is not the retriever's. Declared, never silent.
+    depth_exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +211,9 @@ class EvaluationReport:
     index_stats: IndexStats | None = None
     requested_strategy: str = ""
     degraded: tuple[str, ...] = ()
+    # The depth every case ran at, in OWNERS (U-6): a figure travels with the depth that
+    # produced it, or it is a figure that cannot come out any other way (rule 2).
+    limit: int = 0
 
     def __post_init__(self) -> None:
         if not self.requested_strategy:
@@ -209,6 +229,7 @@ class EvaluationReport:
             "strategy": self.strategy,
             "requested_strategy": self.requested_strategy,
             "degraded": list(self.degraded),
+            "limit": self.limit,
             "corpus": self.corpus,
             "threshold": self.threshold,
             "passed": self.passed,
@@ -226,6 +247,7 @@ class EvaluationReport:
                     "retrieved": list(case.retrieved),
                     "metrics": case.metrics,
                     "no_results": case.no_results,
+                    "depth_exhausted": case.depth_exhausted,
                 }
                 for case in self.cases
             ],
@@ -364,10 +386,11 @@ def evaluate(
     contract at all raises. Echoing the request into the heading is how a lexical baseline got
     published as a vector measurement (F-2).
 
-    `limit` is how deep the retriever is asked to go. It defaults to `max(ks)`, because
-    asking for fewer results than the largest k being reported would make that k's recall a
-    measurement of the LIMIT rather than of the retriever — a number that cannot come out any
-    other way. A caller may raise it to see whether a miss is a ranking problem or an absence.
+    `limit` is how many OWNERS the ranking is materialised to (U-6). It defaults to
+    `max(ks)`, because asking for fewer results than the largest k being reported would
+    make that k's recall a measurement of the LIMIT rather than of the retriever — a number
+    that cannot come out any other way. A caller may raise it to see whether a miss is a
+    ranking problem or an absence. It is published on the report.
     """
     executed, degraded = resolve_strategy(strategy)
     depth = max(limit or 0, max(ks))
@@ -393,9 +416,9 @@ def evaluate(
                 )
                 continue
             started = time.perf_counter()
-            hits = _search(index, case, limit=depth)
+            hits, exhausted = _search(index, case, owners=depth)
             latencies.append((time.perf_counter() - started) * 1000)
-            results.append(_score(case, hits, ks))
+            results.append(_score(case, hits, ks, depth=depth, depth_exhausted=exhausted))
     finally:
         # The `:memory:` index lives exactly as long as the scoring (M-1). `sweep_chunker`
         # calls this once per combination; a twelve-cell sweep used to leak twelve handles.
@@ -429,11 +452,15 @@ def evaluate(
         threshold=threshold,
         failures=failures,
         index_stats=stats,
+        limit=depth,
     )
 
 
-def _search(index: LexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalHit, ...]:
-    """Run one case's query, applying its filters BEFORE scoring (spec §5.3).
+def _search(
+    index: LexicalIndex, case: GoldenCase, *, owners: int
+) -> tuple[tuple[LexicalHit, ...], bool]:
+    """Run one case's query, applying its filters BEFORE scoring, deep enough to hold
+    `owners` distinct owners (spec §5.3, U-6). Returns `(hits, depth_exhausted)`.
 
     The filters a case declares are part of the case (spec §8.1) — v1 kept windows under a
     key no loader read, so a temporal case silently became an untemporal one and its result
@@ -443,20 +470,44 @@ def _search(index: LexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalH
     `WHERE`. Passing `case.filters` whole rather than reconstructing a subset is what keeps
     `SUPPORTED_FILTERS` an honest declaration instead of a list that has to be kept in step
     with a second one here.
+
+    The chunk limit starts at `OWNER_CHUNK_MULTIPLIER` per owner and doubles while the
+    result set came back FULL and still holds fewer owners than asked — a set shorter than
+    its limit is the whole ranking, and there is nothing deeper to find. `MAX_CHUNK_DEPTH`
+    bounds the walk; reaching it short of owners is declared on the case.
     """
-    return index.search(case.query, limit=limit, filters=case.filters)
+    chunk_limit = max(owners * OWNER_CHUNK_MULTIPLIER, 1)
+    while True:
+        hits = index.search(case.query, limit=chunk_limit, filters=case.filters)
+        if _distinct_owners(hits) >= owners or len(hits) < chunk_limit:
+            return hits, False
+        if chunk_limit >= MAX_CHUNK_DEPTH:
+            return hits, True
+        chunk_limit = min(chunk_limit * 2, MAX_CHUNK_DEPTH)
+
+
+def _distinct_owners(hits: Sequence[LexicalHit]) -> int:
+    return len({_owner_key(hit.owner_type, hit.owner_id) for hit in hits})
 
 
 def _owner_key(owner_type: str, owner_id: str) -> str:
     return f"{owner_type}:{owner_id}"
 
 
-def _score(case: GoldenCase, hits: Sequence[LexicalHit], ks: tuple[int, ...]) -> CaseResult:
+def _score(
+    case: GoldenCase,
+    hits: Sequence[LexicalHit],
+    ks: tuple[int, ...],
+    *,
+    depth: int,
+    depth_exhausted: bool = False,
+) -> CaseResult:
     """Recall/precision/MRR over OWNERS, plus surface recall (spec §8.4).
 
     Owners, not chunks: spec §5.4 groups by item, so a transcript matching in six windows is
     one retrieved item, not six. Deduplicated by FIRST occurrence, which preserves the rank
-    the best chunk earned.
+    the best chunk earned. `retrieved` is the owner ranking up to `depth` — the owners the
+    case was materialised to (U-6), so a reader sees the population every k was cut from.
     """
     ranked: list[str] = []
     for hit in hits:
@@ -494,9 +545,10 @@ def _score(case: GoldenCase, hits: Sequence[LexicalHit], ks: tuple[int, ...]) ->
         id=case.id,
         provenance=case.provenance,
         strata=case.strata,
-        retrieved=tuple(ranked[: max(ks)]),
+        retrieved=tuple(ranked[:depth]),
         metrics=metrics,
         no_results=not hits,
+        depth_exhausted=depth_exhausted,
     )
 
 
@@ -508,9 +560,9 @@ def _surface_recall(case: GoldenCase, hits: Sequence[LexicalHit], k: int) -> flo
     open is not the evidence the fact is in. Item recall alone scores that as a success.
 
     THE UNIT IS THE CHUNK, and `recall@k`'s unit is the deduplicated OWNER (m6). Under one
-    label `k` they therefore count different things: with `depth = max(limit, max(ks))`,
-    `recall@10` can be formed from more than ten chunks (ten distinct owners may take more
-    than ten hits to accumulate) while `surface_recall@10` never sees past the tenth chunk.
+    label `k` they therefore count different things: the ranking is materialised to k
+    OWNERS (U-6), so `recall@10` is formed from however many chunks ten distinct owners
+    take, while `surface_recall@10` never sees past the tenth chunk.
     The chunk is the right unit here — the question is whether the EVIDENCE surfaced, and a
     surface that arrived as the 30th chunk did not surface — but the two columns are not
     comparable to each other, only to their own value in the next run.
@@ -679,14 +731,16 @@ def render_markdown(report: EvaluationReport) -> str:
         f"{report.corpus['chunks']} chunks emitidos, "
         f"{report.corpus.get('chunks_not_indexed', 0)} rechazados por el índice.",
         f"- Umbral: {report.threshold if report.threshold is not None else 'ninguno (solo informe)'}.",
+        f"- Profundidad: {report.limit} owners por caso (U-6: la lista se materializa hasta"
+        " tener esos owners, y cada `recall@k` sale de su prefijo).",
         f"- Latencia p50 {report.latency['p50_ms']} ms · p95 {report.latency['p95_ms']} ms.",
         "",
         "> Las cifras de arriba son una fotografía del corpus medido, no una constante del",
         "> producto. Vuelve a derivarlas al ejecutar (CLAUDE.md regla 2).",
         "",
         "> `recall@k` cuenta OWNERS deduplicados; `surface_recall@k` cuenta CHUNKS (m6). Bajo",
-        "> la misma `k` no miden la misma población: con `depth = max(limit, max(ks))`, diez",
-        "> owners distintos pueden necesitar más de diez chunks, mientras que",
+        "> la misma `k` no miden la misma población: la lista se materializa hasta k OWNERS,",
+        "> así que `recall@10` puede formarse con más de diez chunks, mientras que",
         "> `surface_recall@10` nunca mira más allá del décimo. Compara cada columna con su",
         "> propio valor en la siguiente ejecución, no una con la otra.",
         "",
@@ -805,10 +859,13 @@ class SweepRow:
 
 @dataclass(frozen=True)
 class SweepReport:
-    """Every combination, best first, with the k the ranking was decided on."""
+    """Every combination, best first, with the k the ranking was decided on and the DEPTH
+    (in owners) every cell ran at (U-6) — the two numbers a reader needs to compare a cell
+    with the next sweep's."""
 
     k: int
     rows: tuple[SweepRow, ...]
+    limit: int = 0
 
     @property
     def winner(self) -> SweepRow | None:
@@ -817,6 +874,7 @@ class SweepReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "k": self.k,
+            "limit": self.limit,
             "rows": [
                 {
                     "target": row.params.target,
@@ -865,6 +923,7 @@ def sweep_chunker(
     strategy: str = "lexical",
     k: int = 10,
     base: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
+    limit: int | None = None,
 ) -> SweepReport:
     """Score every combination in `grid` against the golden set (Plan 02 §7).
 
@@ -874,10 +933,16 @@ def sweep_chunker(
 
     A combination that scores nothing measurable sorts last instead of sorting first, which is
     what a `None` would do under a naive `max`.
+
+    `limit` is the depth in OWNERS every cell runs at (U-6): the CLI's `--limit`, threaded
+    through and published on the report. The first version called `evaluate` with no depth
+    and `_run_sweep` never passed the option the command advertised, so `--limit 10` and
+    `--limit 150` produced byte-identical reports on the real corpus. Defaults to `k`.
     """
+    depth = limit if limit is not None else k
     rows: list[SweepRow] = []
     for params in _combinations(grid, base):
-        report = evaluate(cases, corpus, strategy=strategy, ks=(k,), params=params)
+        report = evaluate(cases, corpus, strategy=strategy, ks=(k,), params=params, limit=depth)
         overall = _overall(report, k)
         rows.append(
             SweepRow(
@@ -889,7 +954,7 @@ def sweep_chunker(
             )
         )
     rows.sort(key=lambda row: (-(row.recall or -1.0), -(row.mrr or -1.0), row.chunks))
-    return SweepReport(k=k, rows=tuple(rows))
+    return SweepReport(k=k, rows=tuple(rows), limit=depth)
 
 
 def _combinations(grid: Mapping[str, Sequence[int]], base: ChunkerParams) -> list[ChunkerParams]:
@@ -951,6 +1016,8 @@ def render_sweep_markdown(report: SweepReport) -> str:
     whose rows are indistinguishable is a result about the chunker, not a missing measurement.
     """
     lines = [
+        f"Profundidad: {report.limit} owners por caso (U-6).",
+        "",
         f"| target | overlap | chunks | recall@{report.k} | MRR |",
         "|---:|---:|---:|---:|---:|",
     ]
