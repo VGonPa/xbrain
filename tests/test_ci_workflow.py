@@ -180,6 +180,14 @@ _WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "
 # The branches that are merged INTO. A push to one of these IS a merge result.
 _GATED_BRANCHES = ("develop", "main")
 
+# A large initiative is delivered as a sequence of small child PRs onto a long-lived UMBRELLA
+# branch, and only the umbrella opens a PR to `develop`. Concrete branch names to test the
+# `VGonPa/umbrella-*` filter with — globs, not literals, so a real name is what must match.
+_UMBRELLA_BRANCHES = (
+    "VGonPa/umbrella-knowledge-index-lexical",
+    "VGonPa/umbrella-knowledge-embeddings",
+)
+
 # The status check name that branch protection on develop/main requires. This string is
 # NOT cosmetic: it is a contract with the repo settings. See the module docstring.
 _REQUIRED_CHECK = "quality"
@@ -368,6 +376,44 @@ def test_gate_still_runs_on_pull_request(branch: str) -> None:
         f"quality.yml no longer runs on `pull_request` to `{branch}`. Testing the merge "
         f"result does not replace testing the PR head: without this, a broken branch is "
         f"only caught AFTER it has already landed on `{branch}`."
+    )
+
+
+@pytest.mark.parametrize("branch", _UMBRELLA_BRANCHES)
+def test_gate_runs_on_pull_request_to_umbrella(branch: str) -> None:
+    """A child PR onto an umbrella must produce the `quality` check — rule 14, and rule 12's trap.
+
+    Rule 14: a PR whose base is a feature branch runs no gate at all, and
+    `gh pr view --json mergeStateStatus` still says `CLEAN` — which means "nothing was
+    required", not "everything required passed". The umbrella topology puts every child PR in
+    exactly that position, so the trigger is what closes the hole.
+
+    And it is not merely a detector here. The umbrella carries classic branch protection with
+    `quality` as a REQUIRED context. Drop this branch filter and the required check is never
+    created, so GitHub waits for it forever: every child PR becomes permanently unmergeable —
+    the same shape as rule 12's approval trap, arrived at from the other side.
+    """
+    assert _fires_on_branch("pull_request", branch), (
+        f"quality.yml does not run on `pull_request` to `{branch}`. Child PRs onto the umbrella "
+        f"would produce NO check run, GitHub would report `CLEAN` for a PR nothing gated "
+        f"(rule 14) — and because the umbrella's branch protection REQUIRES the `quality` "
+        f"context, every child PR would then block forever on a check that never appears."
+    )
+
+
+@pytest.mark.parametrize("branch", _UMBRELLA_BRANCHES)
+def test_gate_runs_on_push_to_umbrella(branch: str) -> None:
+    """Rule 4 applies inside the umbrella too, and a push to it IS the merge result.
+
+    Two child PRs, each green against the umbrella it was opened from and with zero textual
+    conflict, can still merge into a RED umbrella — #103's mechanism, one level down. Nothing
+    would notice until the umbrella opened its PR to `develop`, by which point the bisect
+    surface is the whole initiative instead of one child.
+    """
+    assert _fires_on_branch("push", branch), (
+        f"quality.yml does not run on `push` to `{branch}`, so the merge of a child PR into "
+        f"the umbrella is never tested. Two children, each green on its own branch, can merge "
+        f"into a red umbrella with no conflict for git to report. See CLAUDE.md rule 4."
     )
 
 
