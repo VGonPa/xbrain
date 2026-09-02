@@ -53,6 +53,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams
 from xbrain.knowledge.contracts import (
     SearchFilters,
     SearchMatch,
@@ -116,6 +117,14 @@ class QueryContext:
     re-emitted those surfaces without them answered `producer: null` for the very data the
     index had just been built with — spec §3.4's *método o componente que la produjo*, lost
     on the hydration path. They come from the same config definition as `IndexOptions`.
+
+    `params` are the chunker parameters the CODE would cut with (M-1, round 05), and they
+    come from the same `IndexOptions` too. `open_for_query` compares them against the
+    manifest only when handed them, and the one production path never did: a manifest whose
+    `chunker_params` had moved was refused by `update` and declared unusable by `status`
+    while `search` answered over it — chunks cut differently under identical ids, the case
+    the check exists for, reachable by editing the manifest or by changing
+    `DEFAULT_CHUNKER_PARAMS` without a version bump.
     """
 
     store: Mapping[str, Item]
@@ -130,6 +139,7 @@ class QueryContext:
     max_matches_per_item: int = 3
     transcribe_command: str | None = None
     vision_command: str | None = None
+    params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
 
 
 def search(
@@ -160,6 +170,7 @@ def search(
         context.items_path,
         vocab_path=context.vocab_path,
         topics_path=context.topics_path,
+        params=context.params,
     )
     try:
         depth = min(limit * CANDIDATE_MULTIPLIER * context.max_matches_per_item, MAX_CANDIDATES)

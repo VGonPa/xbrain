@@ -3037,6 +3037,9 @@ def _query_context(cfg: Config):
         max_matches_per_item=cfg.index_max_matches_per_item,
         transcribe_command=options.transcribe_command,
         vision_command=options.vision_command,
+        # The chunker parameters the build used (M-1): `search` refuses a manifest cut with
+        # other ones, exactly as `update` and `status` do, instead of answering over it.
+        params=options.params,
     )
 
 

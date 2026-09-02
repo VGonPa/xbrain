@@ -172,6 +172,8 @@ losing 45 topics, 616 surfaces and 703 chunks for good — and `index status` re
 incomplete, naming `xbrain index build --force`. `status` also applies the same version check
 `search` and `update` do, so the three instruments agree on one state.
 
+**And `search` applies the same four version checks as `update` and `status` — schema, emitter, chunker, and since round 05 (M-1) the chunker PARAMETERS too.** Until then `open_for_query` compared `chunker_params` only when handed them and the query path never did: over a manifest whose parameters had moved, `update` refused and `status` said «ninguna consulta lo usará» while `search` answered — chunks cut differently under identical ids. The parameters now travel in `QueryContext` from the same `IndexOptions` the build uses.
+
 **And since round 03, `search` runs the same count check (G-2, B-c).** Until then a query
 compared versions and schema only: over a base amputated behind the manifest's back it answered
 «Sin resultados» and declared nothing, while `update` and `status` refused it. The path that

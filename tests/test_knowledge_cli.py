@@ -463,6 +463,32 @@ def test_a_corrupt_fts_structure_names_the_rebuild_command_on_every_command(
     assert isinstance(result.exception, SystemExit), repr(result.exception)
 
 
+def test_search_refuses_an_index_whose_chunker_parameters_moved_like_status_says(
+    workspace: Path,
+) -> None:
+    """M-1 at the CLI: `status` said «inutilizable: ninguna consulta lo usará» over a manifest
+    whose `chunker_params` had moved, and `search` used it — exit 0, results. The CLI is
+    where the parameters have to be threaded from `_index_options` into the query context,
+    so the guard is pinned here as well as at the service. Both halves asserted, text and
+    exit code (rule 9).
+
+    Seen red before the fix: `search` exited 0 with results while `status` said
+    `incomplete: true`.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    manifest = workspace / "data" / "index" / "manifest.json"
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["chunker_params"]["target"] = raw["chunker_params"]["target"] + 400
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    status = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert status["incomplete"] is True and "xbrain index build --force" in status["advice"]
+
+    result = runner.invoke(app, ["search", "Quillfeather"])
+    assert result.exit_code != 0, result.output
+    assert "xbrain index build --force" in result.output and "chunker_params" in result.output
+
+
 def test_mine_maps_to_own_tweet(workspace: Path) -> None:
     """Spec §7.2's shortcut, asserted through the FILTER the response echoes back.
 

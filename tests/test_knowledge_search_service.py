@@ -802,6 +802,41 @@ def test_a_missing_index_names_the_build_command(tmp_path: Path, corpus) -> None
         search("agents", context)
 
 
+def test_chunker_parameters_that_moved_refuse_the_query_as_update_and_status_do(
+    context: QueryContext,
+) -> None:
+    """M-1 (gate Fable, round 05): `search` never checked `chunker_params`.
+
+    `load_compatible_manifest` compares the parameters only when handed `params`, and
+    `search` called `open_for_query(index_dir, items_path)` without them — the one production
+    path, and the docstring of `open_for_query` said the argument existed for exactly this
+    case (a sweep that lands on new parameters without bumping `CHUNKER_VERSION` cuts chunks
+    differently under IDENTICAL ids). So `update --dry-run` refused, `status` said «ninguna
+    consulta lo usará», and `search` answered: two instruments, opposite answers (rule 9),
+    and a guard only the suite exercised (rule 1). `docs/troubleshooting.md` promised the
+    refusal on «the chunker or its parameters» and it was true of two commands out of three.
+
+    The parameters now travel in `QueryContext` (the CLI fills them from the same
+    `IndexOptions` the build uses) and the query is refused entire, naming the rebuild. The
+    manifest is restored afterwards and the same query is shown to ANSWER, so the refusal is
+    proved to come from the parameters and not from a door that always shuts (rule 1).
+
+    Seen red before the fix: `search` returned a `SearchResponse` with 2 results.
+    """
+    path = manifest_path(context.index_dir)
+    original = path.read_text(encoding="utf-8")
+    raw = json.loads(original)
+    raw["chunker_params"]["target"] = raw["chunker_params"]["target"] + 400
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(IndexIncompatibleError, match="index build --force") as caught:
+        search("Quillfeather", context)
+    assert "chunker_params" in str(caught.value), "names WHAT moved"
+
+    path.write_text(original, encoding="utf-8")
+    assert search("Quillfeather", context).results, "with the parameters back, it answers"
+
+
 def test_an_incompatible_manifest_refuses_the_whole_query(context: QueryContext) -> None:
     """Step 29 / spec §9.3: *manifest incompatible: no se consulta parcialmente.*
 
