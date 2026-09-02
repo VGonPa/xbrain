@@ -359,7 +359,8 @@ leave the old manifest standing over an empty base (C-1). Rebuild with `xbrain i
 does not hold what its manifest declares (`topics 0 != 45`), or the manifest is from another
 schema/emitter/chunker version, or — since round 05 (B-1) — `PRAGMA quick_check` found damage
 (`La base del índice … está dañada (quick_check: …)`): `status` is the explicit command that pays
-for the whole-file check (~160 ms on the 52 MB real index), so a corrupt page no query has
+for the whole-file check (155–167 ms by the gate's measurement, a 425 ms median at load 8.6 in
+round 05, on the 52 MB real index), so a corrupt page no query has
 touched yet is declared here before a query hits it and fails closed. `index update` refuses the
 same states instead of rewriting every item over them (C-3). The advice names `xbrain index build
 --force`, and it has to: plain `index build` refuses while a manifest exists.

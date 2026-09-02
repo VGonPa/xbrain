@@ -193,8 +193,12 @@ of `0xff` over pages 17–20 of the real index left `status` saying `incomplete:
 `quick_check` reported «btreeInitPage() returns error code 11» (the round-05 gate, B-1). A query
 still fails closed the moment it reaches the page (G-4), so no instrument contradicted another;
 but `status` is the explicit command an operator runs to find out, and since round 05 it runs
-the whole-file check (~160 ms on the 52 MB index, measured by the gate) and declares the damage
-naming `xbrain index build --force`. `search` and `update` keep the cheap probes.
+the whole-file check and declares the damage naming `xbrain index build --force`. `search` and
+`update` keep the cheap probes. **Cost, on the 52 MB real index:** 155–167 ms measured by the
+gate (3 runs, its load unstated); **362–850 ms, median 425 ms**, re-measured in round 05 (5 runs of
+`PRAGMA quick_check(1)` over a read-only connection, load average **8.6**), which puts a cold
+`xbrain index status` at ~1.0 s of wall clock against 0.78 s in round 04 — the same command, one
+whole-file read heavier.
 
 ### The manifest describes the snapshot that was indexed, not the file at commit time (P1b)
 

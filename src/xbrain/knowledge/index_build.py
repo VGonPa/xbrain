@@ -1692,8 +1692,9 @@ def status(
     probes read page 1, `sqlite_master` and one `MATCH` per FTS plane, so damage on a page
     none of them touches — measured: 16 KB of `0xff` over pages 17–20 of the real index — was
     reported by `quick_check` and not by `status`. A query still fails closed the moment it
-    reaches the page (G-4); this is the explicit command paying ~160 ms so the operator
-    hears it first.
+    reaches the page (G-4); this is the explicit command paying the whole-file check —
+    155–167 ms (gate) to a 425 ms median at load 8.6 (round 05) on the 52 MB real index —
+    so the operator hears it first.
 
     It takes the vocabulary and the pages like `build` and `update` do (H1), because the
     topic plane is derived from all three, and it reads the TOPIC ROWS back from the base:

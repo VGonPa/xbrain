@@ -451,8 +451,9 @@ def quick_check(connection: sqlite3.Connection) -> str:
     none of them looks: `quick_check` reported «btreeInitPage() returns error code 11» while
     `status` said `incomplete: false`. A query that touches the page still fails closed
     (`_fetch`, G-4), so no instrument lied; but `status` is the EXPLICIT command an operator
-    runs to find out, and it can pay the 155–167 ms this costs on the real index where a
-    query cannot. `status` runs it; the open door does not, on purpose — `quick_check` reports
+    runs to find out, and it can pay what this costs on the 52 MB real index where a query
+    cannot: 155–167 ms measured by the gate; 362–850 ms, median 425, re-measured in round
+    05 at load average 8.6 (5 runs, `quick_check(1)`, read-only connection). `status` runs it; the open door does not, on purpose — `quick_check` reports
     fts5 corruption as a ROW, not an exception, so the door keeps its positive `MATCH` probe
     and this reader parses the answer here, once.
 
