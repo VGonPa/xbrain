@@ -362,8 +362,21 @@ schema/emitter/chunker version, or — since round 05 (B-1) — `PRAGMA quick_ch
 for the whole-file check (155–167 ms by the gate's measurement, a 425 ms median at load 8.6 in
 round 05, on the 52 MB real index), so a corrupt page no query has
 touched yet is declared here before a query hits it and fails closed. `index update` refuses the
-same states instead of rewriting every item over them (C-3). The advice names `xbrain index build
+same states instead of rewriting every item over them (C-3) — and since round 06 it runs the
+same `quick_check` before re-sealing the manifest (D-1). The advice names `xbrain index build
 --force`, and it has to: plain `index build` refuses while a manifest exists.
+
+**`El manifest tiene el campo 'counts' malformado: …`** (also `skipped`, `chunker_params`,
+`store_signal`, `embeddings`, `failed`, `built_at`) — the manifest parses as JSON but does not
+carry the whole nested schema: a plane, cause or parameter missing, an unknown key, a count that
+is a string, a boolean or negative. Until round 06 (B1) such a document loaded as compatible and
+a manifest with `counts: {}` compared nothing, so `status`, `search` and `update` all agreed an
+amputated base was healthy. `xbrain index build --force`; nothing is repaired in place.
+
+**`La base del índice en … no se puede leer (database disk image is malformed)`** from `index
+status`, `search` or `index update` — a damaged page that a maintenance read touched (the root
+page of `items`, `chunks` or `topics`). Until round 06 (D-1) this was a raw `sqlite3.DatabaseError`
+traceback on the three commands. `xbrain index build --force`.
 
 **A search does not find an accent.** It should: the tokenizer is `unicode61 remove_diacritics
 2`, so `evaluacion` reaches `evaluación`. What it will **not** do is match `agent` to `agents` —

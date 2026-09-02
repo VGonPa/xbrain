@@ -237,6 +237,50 @@ Neither `search` nor `get` read those columns today — both derive membership f
 store — so the immediate consumer of the repair is the operator's instrument and Plan 04's
 graph, which will.
 
+### ONE function answers «does this manifest describe this base?» — and the manifest's nested schema is total (round 06: B1, D-1, F-1)
+
+Six rounds closed the fail-open family one route at a time — an interrupted forced rebuild
+(C-1), a missing table (C-2), counts the base did not hold (C-3), a dry run that created an
+empty base (G-2), a cheap signal over one input of three (P1a) — and the round-06 gates found
+the sixth and the seventh. **B1 (Codex, blind):** `Manifest.from_dict` checked the TOP-LEVEL
+key set and cast what sat under it, so a manifest whose `counts` was `{}` loaded as compatible,
+and the consistency check, which iterated whatever `counts` offered, compared nothing: with the
+rows of `chunks` and `profiles` deleted, `status` said `incomplete: false` publishing
+`chunks 0`, `search` answered zero results with `no_embeddings` and nothing else, and `update`
+re-sealed the amputation as sound. **D-1 (Fable):** the root page of `items` overwritten (read
+from `sqlite_master.rootpage`) made `status`, `search` and `update` a 61-line
+`sqlite3.DatabaseError` traceback naming no command — the maintenance reads (`count_rows`,
+`_stored_fingerprints`, `stored_topic_rows`) ran BEFORE `quick_check` and converted nothing —
+while CLAUDE.md declared G-4 closed on the three; and with the root page of `chunks` damaged,
+`update --dry-run` returned a normal report, because `COUNT(*)` is answered from an index.
+
+Each earlier fix was right; each door kept its own reading of the question (CLAUDE.md rule 5).
+Now there is one: `index_build.describe_base(connection, manifest, database, whole_file=…)`.
+`status` reports its sentence as advice, `search` (`open_for_query`) and `update` raise it
+through `require_consistent`, and a test replaces its answer with a sentinel and asserts the
+three doors repeat it verbatim — a door that re-derives the question goes red (seen red with
+the query door re-deriving). Three things, in order, and any `DatabaseError` of its reads IS
+the answer: `PRAGMA quick_check` first, paid by `status` AND by `update` (it re-seals the
+manifest and must not seal it over a torn page; `search` keeps the cheap probes by the B-1
+decision — a query fails closed the moment it reaches the page, G-4); the five `COUNT(*)`
+against the five planes the manifest is REQUIRED to declare; and the conversion of any
+`sqlite3.DatabaseError` into the rebuild advice (`index_schema.reading_base`, wrapped around
+every maintenance read). **Cost of `update`:** one `quick_check` more than before — 155–850 ms
+on the 52 MB real index depending on load, the figures published under B-1.
+
+The nested schema is **total and closed**: `counts` holds exactly the five planes
+(`COUNT_PLANES`), `skipped` exactly the four causes (`SKIPPED_CAUSES`), `chunker_params`
+exactly the fields of `ChunkerParams`, `store_signal` the two `items.json` entries with the four
+vocab/topics entries optional (the documented pre-round-05 compatibility, now under test — F-1:
+they read as zeros, the index is declared behind, one `update` clears it), every value a
+non-negative integer (a string `"56"` or a JSON `true` is refused, not cast), unknown keys
+refused, `embeddings` `null` or an object, `failed` a list of string maps, `built_at` an
+instant. `manifest_mismatch` iterates the required planes, never `manifest.counts`; and
+`write_manifest` round-trips the document through the same reader before one byte lands, so a
+writer cannot seal what every door would refuse. Every malformed field is
+`El manifest tiene el campo 'counts' malformado: … Reconstruye el índice con \`xbrain index
+build --force\``.
+
 ---
 
 ## The lexical baseline — the number Plan 03 has to beat
@@ -291,6 +335,23 @@ asked.
 
 `expansion` has no cases because it is the stratum the minimal graph is for (Plan 04). `thread`
 and `user_note` have **no data in the corpus at all**, so no case can exist for them.
+
+**By provenance (criterion 11 asks for strategy × stratum × PROVENANCE, and this axis was
+computed and never published — B3, round 06).** Re-derived 2026-09-02 on the same corpus
+(2,404 items, sha256 `f76341a3…`), through `evaluate` over `eval/golden-set.yaml`:
+
+| provenance | scorable cases | recall@1 | recall@10 | precision@10 | MRR |
+|---|---:|---:|---:|---:|---:|
+| `construido` | 23 | 0.6034 | 0.8264 | 0.3152 | 0.8179 |
+| `real` | 0 | *sin cobertura* | | | |
+
+**Read the aggregate table above as a mean over 23 CONSTRUCTED cases**, not as a measurement of
+questions Víctor has asked. The five `real` entries in the golden set (C1–C5) are archived as
+`scenarios` with their reason — none has an enumerable, verified ground truth (Plan 01 §4.4,
+B2) — so `real` scores nothing and is declared *sin cobertura* rather than invented; the file
+itself says so (*«Las cinco D1 de este fichero son `construido`. Ningún plan las inventa como
+`real`»*). Until two or three real questions are enumerated, the number Plan 03 has to beat is
+the constructed one, and a `hybrid` figure compared against it inherits that population.
 
 **`filtros` publishes `recall@10 = precision@10 = 1.000` BY CONSTRUCTION, and that pair does
 not measure ranking (F-11).** Its two cases define `relevant_items` as *exactly* the population
@@ -383,6 +444,37 @@ the retriever.
   field `matched_surface` in its illustrative JSON and says the example *defines semantics, not
   final property names*; Plan 01 froze `SearchMatch.surface_type` at `schema_version: "1"` and
   Plan 02 §0 forbids renaming it. Read one as the other; do not look for `matched_surface`.
+- **Every fragment carries the locator of the source whose text it delivers, built by ONE
+  function for `search` and `get` (B2, round 06).** A `KnowledgeChunk` had no locator: it
+  carried the OWNER's URL and offsets into a surface that, when `get` paginated or prioritised
+  by `--query`, was not in the bundle at all (`surfaces: []`, the only shape a chunk exists in).
+  The blind gate's reproduction on k03: `chunk.url` the poster's tweet, the essay's locator
+  nowhere. `KnowledgeChunk.locator` is now REQUIRED — the surface's locator narrowed to the
+  chunk's range by `chunking.fragment_locator`, the SAME function `search._match` applies —
+  and two tests bind the services: the match and the chunk `get` serves for one `chunk_id`
+  carry one locator and one attribution (the quoted author on k07), and a sentinel swapped
+  into `fragment_locator` must reach every match and every chunk. On the frozen
+  `schema_version: "1"`: an additive key a version-1 JSON consumer can ignore, and a field spec
+  §3.7.2 required of the chunk from the start — its absence was a defect of the contract, not
+  a property of it. `chunk.url` keeps its one meaning (where a human opens the owner).
+- **A hit whose surface row cannot be resolved is excluded and counted (B-k, round 06).**
+  `_match` used to FABRICATE a locator for it (`content_source`, the item's URL, no source
+  index) — the one thing worse than a missing locator. It now counts in
+  `corrupt_chunks_excluded` like a fingerprint that does not recompute: invariant 1 (every
+  chunk resolves to a surface) has the shape of invariant 6.
+- **An author's name or handle is ONE printable line wherever a human sees it (D-3, round 06).**
+  M-3 fenced the bodies; the fields beside them were left as they arrived, and a newline in
+  `author.name` printed at column 0 a line byte-identical to a renderer header and another to
+  a fence line — the G-7 forge through the header itself — while an `ESC[2K` in a handle
+  reached the TTY through the result line. `render._author_label` is the only way an author
+  is printed (bundle header, result line, `autor:` label), collapsing each field through
+  `_one_line`; a sentinel test pins the three placements. Population today 0 of 2,404; the
+  population is what X accepts.
+- **`get` exposes the item's CURRENT verdicts, and a stale one is dropped (S-7, round 06, test
+  only).** The conduct existed; no test guarded it — `verification={}` in `get` left 443 tests
+  green — and what would vanish in silence is every FAIL a consumer of `get` would see. Now
+  pinned: a FAIL whose contract fingerprint matches the current summary travels with its stamp;
+  the same FAIL over a regenerated summary is `{}`.
 - **The human view is NOT a surface for agents — use `--json` (G-7).** The JSON carries `origin`
   and `trust_class` beside every text, so nothing in a body can be mistaken for the frame. The
   human view of `get` is text all the way down, so since round 03 it FENCES every body line with
