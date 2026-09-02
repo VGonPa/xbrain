@@ -276,6 +276,34 @@ def test_a_new_item_is_added_without_rewriting_the_rest(built: Path, corpus) -> 
     assert after[: len(before)] == before, "existing rows were rewritten by an ADD"
 
 
+def test_update_counts_how_many_items_were_added_and_removed(built: Path, corpus) -> None:
+    """M-4 (gate Fable, round 05): the half of G-3 that round 03 left open.
+
+    Round 03 fixed the boolean-shaped counters and pinned `status` on all three counts and
+    `update` on `items_changed` — but the only assertions on `update`'s `items_added` and
+    `items_removed` were `== 1` and `== 0`, which `int(bool(...))` satisfies: the gate
+    mutated both in `_update_report` and 274 tests stayed green. "How many" asserted on one
+    is a boolean with a number's name.
+
+    Two added, two removed, asserted `== 2` on each, and the base is checked to hold
+    exactly that population so the report cannot be right by accident.
+
+    Seen red under `items_added=int(bool(delta.added))` / `items_removed=int(bool(...))` in
+    an isolated copy: `(1, 0, 1) == (2, 0, 2)`.
+    """
+    store, _vocab, _pages = corpus
+    changed = {k: v for k, v in store.items() if k not in {"k01", "k04"}}
+    changed["k98"] = store["k05"].model_copy(update={"id": "k98"})
+    changed["k99"] = store["k06"].model_copy(update={"id": "k99"})
+    _write_store(built / "items.json", changed)
+
+    report = _update(built, changed, corpus)
+
+    assert (report.items_added, report.items_changed, report.items_removed) == (2, 0, 2)
+    ids = {row[0] for row in _rows(built, "SELECT item_id FROM items")}
+    assert {"k98", "k99"} <= ids and not {"k01", "k04"} & ids
+
+
 # ---------------------------------------------------------------------------
 # 8 — a chunker bump is not an incremental update
 # ---------------------------------------------------------------------------
