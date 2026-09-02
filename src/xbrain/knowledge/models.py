@@ -11,7 +11,8 @@ THREE CONSTRAINTS CARRY THE WEIGHT, and each is asserted by the suite:
 * `frozen=True` — a surface whose text can be mutated after emission has a fingerprint that
   no longer means anything, and "the retrieved text is verbatim with respect to that
   surface" (spec §3.8) stops being checkable;
-* `extra="forbid"` — spec §7.1 freezes these shapes at `schema_version: "1"` so the CLI and
+* `extra="forbid"` — spec §7.1 freezes these shapes per envelope (`SearchResponse` "2",
+  `EvidenceBundle` "2") so the CLI and
   MCP adapters cannot drift; a model that swallows unknown keys lets a producer add a field
   no consumer ever sees;
 * fingerprints are pattern-constrained to lowercase sha256 hex, the same defence

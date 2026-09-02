@@ -71,9 +71,13 @@ def test_inspect_emits_pure_json_on_stdout(workspace: Path) -> None:
     Parsed as a whole document, so one stray `print` fails this test instead of failing a
     consumer's parser weeks later, far from the cause.
     """
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
     payload = _json_stdout(runner.invoke(app, ["knowledge", "inspect", "k08", "--json"]))
     assert payload["item"]["item_id"] == "k08"
-    assert payload["schema_version"] == "1"
+    # The version of the shapes it dumps, read off the contract and never stamped by hand
+    # (U-1): the surfaces and chunks in this payload are the `EvidenceBundle`'s.
+    assert payload["schema_version"] == EVIDENCE_SCHEMA_VERSION == "2"
 
 
 def test_inspect_returns_surfaces_with_provenance_and_locator(workspace: Path) -> None:
