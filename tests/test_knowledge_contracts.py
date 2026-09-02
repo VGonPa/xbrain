@@ -2,8 +2,8 @@
 """The frozen external schemas (Plan 01 §3.5, spec §7, steps 19-20).
 
 These shapes are frozen per envelope NOW (`SearchResponse` "2" since `SearchMatch` gained
-its title, `EvidenceBundle` "1", the graph envelope "1"), while the services that fill them
-do not exist yet. That is the point: spec §7.1 says CLI JSON and MCP are adapters over the same
+its title, `EvidenceBundle` "2" since U-1, the graph envelope "1"), while the services
+that fill them do not exist yet. That is the point: spec §7.1 says CLI JSON and MCP are adapters over the same
 service and must not implement two formats, and the way two formats appear is that the
 second adapter is written months after the first, against whatever the first happened to
 emit. Freezing the model first makes the second adapter a consumer rather than an author.
@@ -151,26 +151,23 @@ def test_a_search_match_serializes_its_excerpt_next_to_its_origin() -> None:
 # ---------------------------------------------------------------------------
 
 
-# The version each envelope carries TODAY, and why (U-1). `EvidenceBundle` and
-# `GraphExpansionResponse` are still the Plan 01 freeze: nothing in the shapes they transport
-# has moved in this PR.
-#
-# `SearchResponse` is at "2" (B2, gate Codex on `b61e04b`): `SearchMatch` gained the `title`
-# spec §4 makes accompany a chunk, and under `extra="forbid"` a DEFAULTED key is additive only
-# for the NEW consumer — the version-1 one forbids it outright, so the number moves for its
-# refusal to name the version rather than a field nobody told it about.
-#
-# `EvidenceBundle` STAYS at "1", and that is the same rule read backwards. Its queued bump
-# means one specific thing — `KnowledgeChunk.locator` required (spec §3.7 invariant 2) — and
-# that field lands in child PR 02.5 with the `chunking.fragment_locator` that computes it.
-# A number is a claim about a shape, so it ships with the shape: announcing "2" here would
-# publish a version whose only meaning is a field this build does not have, and the
-# refusal-by-version the policy exists to buy would name a version that describes nothing.
-# A bump nobody needs makes two adapters disagree; a bump nobody made makes them disagree
-# silently. Both are failures, and the first is the one this table now records.
+# The version each envelope carries TODAY, and why (U-1, round 07).
+# `GraphExpansionResponse` is still the Plan 01 freeze: nothing in its shape moved.
+# `EvidenceBundle` is at "2" because round 06
+# made `KnowledgeChunk.locator` REQUIRED, and under `extra="forbid"` that is the incompatible
+# change the freeze exists to name: the Pydantic consumer of version 1 refuses a bundle with
+# the key (`chunks.0.locator: Extra inputs are not permitted`, measured against the exact
+# `origin/develop` model) and the new consumer refuses a version-1 document (`Field
+# required`). Two producers announcing one version that do not interoperate is the silent
+# mutation spec §7.1 forbids; the number is what makes the refusal honest.
+# `SearchResponse` is at "2" for the same rule read forwards (B2): `SearchMatch` gained the
+# `title` spec §4 makes accompany a chunk, and a DEFAULTED key is additive only for the new
+# consumer — the version-1 one forbids it, so the number moves for its refusal to name the
+# version. A bump nobody needs makes two adapters disagree; a bump nobody made makes them
+# disagree silently, which is worse.
 ENVELOPE_VERSIONS: dict[type, str] = {
     SearchResponse: "2",
-    EvidenceBundle: "1",
+    EvidenceBundle: "2",
     GraphExpansionResponse: "1",
 }
 
@@ -178,41 +175,36 @@ ENVELOPE_VERSIONS: dict[type, str] = {
 @pytest.mark.parametrize("model", [SearchResponse, EvidenceBundle, GraphExpansionResponse])
 def test_every_response_declares_its_schema_version(model) -> None:
     """Spec §7.1: every contract carries `schema_version`, and an incompatible change needs
-    a new version rather than a silent mutation — so the numbers are no longer one shared
-    literal but one per envelope, and this table is where they are stated once.
-
-    `EVIDENCE_SCHEMA_VERSION` is checked here against the same table because it is what the
-    CLI stamps its payloads with: the module constant and the model must not be two numbers.
-    """
+    a new version rather than a silent mutation. Seen red on `9dfa34e`: `EvidenceBundle`
+    still said "1" over a shape its own version-1 model refuses."""
     assert model.model_fields["schema_version"].default == ENVELOPE_VERSIONS[model]
-    assert contracts_module.EVIDENCE_SCHEMA_VERSION == ENVELOPE_VERSIONS[EvidenceBundle]
-    assert contracts_module.SEARCH_SCHEMA_VERSION == ENVELOPE_VERSIONS[SearchResponse]
+    assert (
+        getattr(__import__("xbrain.knowledge.contracts", fromlist=["x"]), "EVIDENCE_SCHEMA_VERSION")
+        == ENVELOPE_VERSIONS[EvidenceBundle]
+    )
 
 
-def test_the_evidence_envelope_stays_at_one_until_the_shape_it_names_arrives() -> None:
-    """The PRESENT boundary of the evidence envelope, bound to the shape it describes (U-1).
-
-    A version number is a claim about a shape, and the only claim queued for this envelope is
-    `KnowledgeChunk.locator` — required by spec §3.7 invariant 2, computed by
-    `chunking.fragment_locator`, and landing with it in child PR 02.5. So the two halves are
-    asserted as ONE biconditional rather than as two independent facts: while chunks carry no
-    locator this envelope is "1", and the PR that makes the locator required is the PR that
-    makes this "2". Bump the number without the field and this goes red; add the field without
-    the number and it goes red too. That is the check rule 5 asks for — the number and the
-    shape bound in code, not in two comments that "should" agree.
-
-    The second half is the freeze itself, at the number that is actually current: substitute
-    ANY other version into an emitted document and the refusal names `schema_version` and
-    nothing else. That is what "an incompatible change needs a new version rather than a
-    silent mutation" buys, and it is checkable today without pretending a later shape exists.
-    """
+def _bundle_document() -> dict:
+    """A bundle as `get --query` emits it: one chunk, locator included — serialised."""
     from xbrain.knowledge.models import KnowledgeChunk
 
-    chunks_carry_a_locator = "locator" in KnowledgeChunk.model_fields
-    assert chunks_carry_a_locator is (EvidenceBundle.model_fields["schema_version"].default == "2")
-    assert not chunks_carry_a_locator, "02.5 landed the locator: bump the bundle with it"
-
-    document = EvidenceBundle(
+    chunk = KnowledgeChunk(
+        chunk_id="item:1:post:0:0:v2",
+        surface_id="item:1:post:0",
+        owner_type="item",
+        owner_id="1",
+        surface_type="post",
+        text="cuerpo",
+        chunk_index=0,
+        char_start=0,
+        char_end=6,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="item_text", char_start=0, char_end=6),
+        fingerprint="a" * 64,
+    )
+    bundle = EvidenceBundle(
         item=KnowledgeItem(
             item_id="1",
             source="bookmark",
@@ -221,13 +213,37 @@ def test_the_evidence_envelope_stays_at_one_until_the_shape_it_names_arrives() -
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             captured_at=datetime(2026, 1, 2, tzinfo=UTC),
         ),
-    ).model_dump(mode="json")
-    assert document["schema_version"] == contracts_module.EVIDENCE_SCHEMA_VERSION == "1"
+        chunks=(chunk,),
+    )
+    return bundle.model_dump(mode="json")
 
-    for impostor in ("2", "0", "1.0"):
-        with pytest.raises(ValidationError) as refused:
-            EvidenceBundle.model_validate({**document, "schema_version": impostor})
-        assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
+
+def test_a_version_one_bundle_is_refused_by_its_version_not_by_a_field() -> None:
+    """The transition is EXPLICIT (U-1): a document that announces `schema_version: "1"`
+    — the shape whose chunks had no locator — is refused because it is version 1, and the
+    refusal names the version. A document at "2" whose chunk lacks the locator is refused
+    too, because the locator is what "2" means (spec §3.7 invariant 2). Neither is a
+    silent acceptance and neither is a silent mutation.
+
+    Seen red on `9dfa34e`: the version-1 document validated (same literal), and only the
+    missing key was refused — a version-1 consumer and a version-2 producer under one number.
+    """
+    document = _bundle_document()
+    assert document["schema_version"] == "2"
+    assert EvidenceBundle.model_validate(document).chunks[0].locator.kind == "item_text"
+
+    legacy = {**document, "schema_version": "1"}
+    with pytest.raises(ValidationError) as refused:
+        EvidenceBundle.model_validate(legacy)
+    assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
+
+    without_locator = {
+        **document,
+        "chunks": [{k: v for k, v in document["chunks"][0].items() if k != "locator"}],
+    }
+    with pytest.raises(ValidationError) as refused:
+        EvidenceBundle.model_validate(without_locator)
+    assert ("chunks", 0, "locator") in {error["loc"] for error in refused.value.errors()}
 
 
 def test_the_search_envelope_moved_when_a_key_was_added_to_the_shape_it_transports() -> None:

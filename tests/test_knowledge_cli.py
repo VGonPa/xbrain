@@ -76,12 +76,8 @@ def test_inspect_emits_pure_json_on_stdout(workspace: Path) -> None:
     payload = _json_stdout(runner.invoke(app, ["knowledge", "inspect", "k08", "--json"]))
     assert payload["item"]["item_id"] == "k08"
     # The version of the shapes it dumps, read off the contract and never stamped by hand
-    # (U-1): the surfaces and chunks in this payload are the `EvidenceBundle`'s, which is at
-    # "1" until `KnowledgeChunk.locator` lands with it in child PR 02.5. That the value is
-    # DERIVED rather than a literal that happens to agree is a separate question, and
-    # equality against the current number cannot answer it — see
-    # `test_both_inspect_payloads_read_their_version_off_the_contract`.
-    assert payload["schema_version"] == EVIDENCE_SCHEMA_VERSION == "1"
+    # (U-1): the surfaces and chunks in this payload are the `EvidenceBundle`'s.
+    assert payload["schema_version"] == EVIDENCE_SCHEMA_VERSION == "2"
 
 
 def test_inspect_returns_surfaces_with_provenance_and_locator(workspace: Path) -> None:

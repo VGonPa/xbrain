@@ -69,6 +69,7 @@ def _chunk(**overrides) -> KnowledgeChunk:
         origin="source",
         trust_class="primary_source",
         derived=False,
+        locator=Locator(kind="item_text", char_start=0, char_end=13),
         fingerprint=HEX64,
     )
     return KnowledgeChunk(**{**defaults, **overrides})
@@ -96,11 +97,10 @@ def test_models_are_frozen(factory) -> None:
 def test_models_forbid_unknown_fields(factory) -> None:
     """`extra="forbid"` — a misspelled field must be an error, not a silent no-op.
 
-    These shapes carry no `schema_version` of their own: the number lives on the envelopes
-    that transport them, and `contracts.py` states that policy once, versioning each envelope
-    independently. So a model that swallows unknown keys lets a producer "add" a field that no
-    consumer ever sees AND that no envelope number could ever announce — the drift spec §7.1
-    exists to prevent, CLI and MCP implementing two formats, arriving unversioned.
+    Spec §7.1 freezes these shapes per envelope — they travel in the `EvidenceBundle`,
+    at `schema_version: "2"` since `locator` became required — so CLI and MCP cannot diverge.
+    A model that swallows unknown keys lets a producer "add" a field that no consumer ever
+    sees, which is the drift the freeze exists to prevent.
     """
     with pytest.raises(ValidationError):
         factory(definitely_not_a_field=1)

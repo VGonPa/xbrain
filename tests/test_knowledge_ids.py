@@ -207,10 +207,64 @@ def test_chunk_fingerprint_changes_when_the_chunker_version_is_bumped() -> None:
     default, so this can be asserted without monkeypatching a module global.
     """
     sid = surface_id("item", "42", "post", "0")
-    base = chunk_fingerprint(sid, 0, "hello")
-    assert chunk_fingerprint(sid, 0, "hello", chunker_version="xbrain-knowledge-chunker/v2") != base
-    assert chunk_fingerprint(sid, 1, "hello") != base
-    assert chunk_fingerprint(surface_id("item", "43", "post", "0"), 0, "hello") != base
+    base = chunk_fingerprint((sid, "0", "hello"))
+    # DERIVED from the current constant, never a literal: the literal used to be
+    # `.../v2`, and Plan 02's sweep made that the current version — so the assertion
+    # quietly became "the default differs from the default" and could only pass by luck.
+    assert (
+        chunk_fingerprint((sid, "0", "hello"), chunker_version=CHUNKER_VERSION + "-other") != base
+    )
+    assert chunk_fingerprint((sid, "1", "hello")) != base
+    assert chunk_fingerprint((surface_id("item", "43", "post", "0"), "0", "hello")) != base
+
+
+def test_chunk_fingerprint_hashes_the_whole_evidence_the_index_serves() -> None:
+    """U-5 (round 07): the fingerprint is over the EVIDENCE PROJECTION — text, provenance,
+    ownership, position, attribution and the narrowed locator — built by ONE function,
+    `chunking.chunk_evidence`, so a served row whose author, origin or locator was rewritten
+    behind a valid-looking value no longer recomputes. Each arm moves the hash; `None`
+    attribution and an attribution with an empty name are distinct arms, never collapsed.
+    """
+    from xbrain.knowledge.chunking import chunk_evidence
+    from xbrain.knowledge.models import Locator
+
+    def evidence(**overrides):
+        fields = dict(
+            surface_id="item:42:quoted_post:abc",
+            chunk_index=0,
+            text="hello",
+            owner_type="item",
+            owner_id="42",
+            surface_type="quoted_post",
+            origin="source",
+            trust_class="primary_source",
+            derived=False,
+            char_start=0,
+            char_end=5,
+            attribution=Author(handle="othervoice", name="Other Voice"),
+            locator=Locator(kind="content_source", source_index=0, char_start=0, char_end=5),
+        )
+        fields.update(overrides)
+        return chunk_evidence(**fields)
+
+    base = chunk_fingerprint(evidence())
+    moved = [
+        evidence(text="hellO"),
+        evidence(owner_id="43"),
+        evidence(owner_type="topic"),
+        evidence(surface_type="summary"),
+        evidence(origin="llm"),
+        evidence(trust_class="llm_synthesis"),
+        evidence(derived=True),
+        evidence(char_start=1),
+        evidence(chunk_index=1),
+        evidence(attribution=Author(handle="vgonpa", name="Other Voice")),
+        evidence(attribution=Author(handle="othervoice", name="")),
+        evidence(attribution=None),
+        evidence(locator=Locator(kind="item_text", url="https://x.com/vgonpa/status/42")),
+    ]
+    hashes = {chunk_fingerprint(e) for e in moved}
+    assert base not in hashes and len(hashes) == len(moved)
 
 
 def test_fingerprint_defaults_are_the_module_versions() -> None:
@@ -223,8 +277,8 @@ def test_fingerprint_defaults_are_the_module_versions() -> None:
         "post", "source", "x", surface_version=SURFACE_VERSION
     )
     sid = surface_id("item", "42", "post", "0")
-    assert chunk_fingerprint(sid, 0, "x") == chunk_fingerprint(
-        sid, 0, "x", chunker_version=CHUNKER_VERSION
+    assert chunk_fingerprint((sid, "0", "x")) == chunk_fingerprint(
+        (sid, "0", "x"), chunker_version=CHUNKER_VERSION
     )
 
 

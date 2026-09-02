@@ -11,9 +11,10 @@ THREE CONSTRAINTS CARRY THE WEIGHT, and each is asserted by the suite:
 * `frozen=True` — a surface whose text can be mutated after emission has a fingerprint that
   no longer means anything, and "the retrieved text is verbatim with respect to that
   surface" (spec §3.8) stops being checkable;
-* `extra="forbid"` — spec §7.1 freezes these shapes per envelope (today `SearchResponse` "2",
-  `EvidenceBundle` "1", the graph envelope "1") so the CLI and MCP adapters cannot drift; a
-  model that swallows unknown keys lets a producer add a field no consumer ever sees;
+* `extra="forbid"` — spec §7.1 freezes these shapes per envelope (`SearchResponse` "2",
+  `EvidenceBundle` "2", the graph envelope "1") so the CLI and
+  MCP adapters cannot drift; a model that swallows unknown keys lets a producer add a field
+  no consumer ever sees;
 * fingerprints are pattern-constrained to lowercase sha256 hex, the same defence
   `VerificationVerdict.output_fingerprint` already carries.
 
@@ -242,6 +243,21 @@ class KnowledgeChunk(BaseModel):
     with the title only on the surface, a `SearchMatch` on chunk 7 of a long article would
     reach the consumer as an orphan paragraph. It is accompanying metadata, not a chunk of
     its own, so it adds nothing to the indexed corpus.
+
+    `locator` travels with the chunk too, and it is REQUIRED (B2, round 06). Spec §3.7
+    invariant 2 — *todo texto devuelto incluye origin, surface_type y localizador* — and
+    §3.8 make a fragment nobody can resolve back to its source a number rather than
+    evidence, and a chunk is exactly what `get` delivers when a surface does not fit the
+    budget or a `--query` prioritises inside it: the surface, which held the only locator,
+    was then not in the bundle at all. `url` keeps its one meaning (where a human opens the
+    OWNER); `locator` is the surface's, narrowed to `char_start`/`char_end` by
+    `chunking.fragment_locator`, the same function `search` applies to a match, so the two
+    services agree by construction. It is a field the spec required of the chunk from the
+    start — its absence was a defect of the contract, not a property of it — and adding it
+    BUMPED `EvidenceBundle.schema_version` to "2" (U-1, round 07): under `extra="forbid"`
+    a required key is not "additive" for the only consumer that exists, so the version is
+    what makes the two refusals (old consumer, new document; new consumer, old document)
+    honest. The policy is written once, in `contracts.py`.
     """
 
     model_config = _FROZEN
@@ -262,6 +278,7 @@ class KnowledgeChunk(BaseModel):
     attribution: Author | None = None
     topics: tuple[str, ...] = ()
     url: str | None = None
+    locator: Locator
     language: str | None = None
     fingerprint: str = Field(pattern=_SHA256)
 
