@@ -219,20 +219,21 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     """sha256 over everything about this item that the INDEX holds.
 
     Two halves, and both are needed. The SURFACE ROWS answer *did what the index holds about
-    each surface change?* — `surface_row` is the exact tuple `_write_surfaces` inserts, so
-    it covers the surface fingerprint (emitter version, type, origin, body) AND the
-    attribution, title, url, locator and language the index stores and `search` serves on
-    every match (A-1). The filterable METADATA of the item (source, author, date, topics,
-    content kinds) answers the other half: a changed author changes what `--author` returns
-    even though not one character of text moved.
+    each surface change?* — `surface_row` is the projection of every column the `surfaces`
+    table holds, so it covers the surface fingerprint (emitter version, type, origin, body)
+    AND the attribution, title, url, locator and language the index stores and `search`
+    serves on every match (A-1). The filterable METADATA of the item (source, author, date,
+    topics, content kinds) answers the other half: a changed author changes what `--author`
+    returns even though not one character of text moved.
 
     THE ROW, NOT THE SURFACE FINGERPRINT ALONE (G-5). `surface_fingerprint` is
     `(version, type, origin, text)` by design and must stay so; but hashing only that here
     meant a `refresh-quoted` that filled in the author of a quoted post without touching
     its body left `update` reporting `0 cambiados` and `search` serving the old attribution
     — the evidence repaired, the derivative standing (CLAUDE.md rule 6), on the attribution
-    rule this repo paid for in blood. Sharing the writer's projection is what makes "every
-    stored column is hashed" structural rather than a list kept in step by hand.
+    rule this repo paid for in blood. Hashing the projection itself is what keeps "every
+    stored column is hashed" ONE list instead of two — see `surface_row` for what still
+    binds that list to the persisted schema by hand today, and what 02.7 owes it.
 
     What is NOT hashed, and why: `producer`. The index has no producer column, and the
     producers the store records (`enriched.executor`, `description_version`) travel with
@@ -265,7 +266,8 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     return _sha256("\0".join(parts))
 
 
-# The column order of `surfaces`, as ONE tuple type shared by the writer and the fingerprint.
+# The column order of `surfaces`, as ONE tuple type: hashed here, and bound to the `INSERT`
+# by the writer 02.7 lands.
 SurfaceRow = tuple[
     str,
     str,
@@ -286,13 +288,22 @@ SurfaceRow = tuple[
 
 
 def surface_row(surface: KnowledgeSurface) -> SurfaceRow:
-    """What the index STORES about a surface — the row `_write_surfaces` inserts, verbatim.
+    """What the index STORES about a surface — the projection of one `surfaces` row.
 
-    One projection, two readers: the writer binds it to the `INSERT`, `item_fingerprint`
-    hashes it. A column added to `surfaces` therefore cannot be stored without being hashed,
-    and `test_the_fingerprint_hashes_the_same_row_the_writer_inserts` reads the rows back to
-    prove the two never drifted. The last column is a LENGTH, never the body (spec §10.8);
-    the body is covered by `fingerprint`, which hashes it.
+    ONE PROJECTION, AND 02.7's WRITER HAS TO CONSUME IT. `item_fingerprint` hashes this
+    tuple today; the writer that binds it to the `INSERT` into `surfaces` lands in 02.7 and
+    does not exist in this tree. Until it does, the correspondence with the persisted DDL
+    (`index_schema`: fifteen columns, this tuple's order and types) is kept BY HAND —
+    nothing here forces a column added to `surfaces` to be hashed, and this docstring is the
+    contract, not the guard.
+
+    Making it structural is 02.7's job, in two parts: its writer binds THIS function instead
+    of assembling a second tuple, and it writes the readback test — red first — that proves
+    the stored row and the hashed row cannot drift. Read any claim of that guard here as a
+    statement of 02.7's obligation, never as one already discharged.
+
+    The last column is a LENGTH, never the body (spec §10.8); the body is covered by
+    `fingerprint`, which hashes it.
     """
     return (
         surface.surface_id,

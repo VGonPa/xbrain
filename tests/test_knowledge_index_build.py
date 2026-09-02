@@ -13,11 +13,13 @@ serving stale evidence as fresh, so it fails towards the warning.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from xbrain.knowledge import index_build
+from xbrain.knowledge.surfaces import item_surfaces
 from xbrain.models import Item, Topic, TopicPage
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -122,17 +124,21 @@ def test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface(
     for in blood.
 
     Four axes, one parametrised test, each changing ONE field of k07's quoted post and
-    nothing else. The url moves the locator too (`locator.url`), which is the point: the
-    locator is what the consumer resolves the evidence through. `producer` is deliberately
-    NOT here — the index has no producer column, and since round 08 (F7-7) the ASR/VLM
-    surfaces carry none at all, because the store records no transcriber; the producers
-    that ARE recorded (`enriched.executor`, `description_version`) travel with the surface
-    and are not stored columns either.
+    nothing else. The `url` case moves the locator columns but does NOT pin them: it is
+    satisfied through `surface_id`, which hashes the source's kind and url, and it stays
+    green with both locator columns dropped from `surface_row` (round 09, B1). What pins
+    the locator is the test below, which moves a locator field `surface_id` cannot reach.
+
+    `producer` is deliberately NOT here — the index has no producer column, and since round
+    08 (F7-7) the ASR/VLM surfaces carry none at all, because the store records no
+    transcriber; the producers that ARE recorded (`enriched.executor`,
+    `description_version`) travel with the surface and are not stored columns either.
 
     Seen red before the fix on all four: the fingerprint did not move. Seen red again here
     under the mutant `surface_row` → `(None, None, None, …)`, which the file passed 90/90
-    before this test was restored: `surface_row` is the projection `item_fingerprint`
-    hashes, so a column dropped from it is a column the index stores and never re-hashes.
+    before this test was restored — on three of the four, the `url` case being the exception
+    named above: `surface_row` is the projection `item_fingerprint` hashes, so a column
+    dropped from it is a column the index stores and never re-hashes.
     """
     from xbrain.models import Author
 
@@ -146,6 +152,182 @@ def test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface(
         update={"content": item.content.model_copy(update={"sources": sources})}
     )
     assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), field
+
+
+def test_the_item_fingerprint_covers_the_locator_not_only_the_url_the_id_hashes(
+    corpus,
+) -> None:
+    """The LOCATOR column, which the `[url]` case above does not reach (round 09, B1).
+
+    That case moves the fingerprint through `surface_id`, which hashes the source's kind
+    and url — so it is satisfied with BOTH locator columns dropped from `surface_row`, and
+    the mutant that returns `None` and `""` for `surface.locator.url` and
+    `surface.locator.model_dump_json()` leaves the file green. That is rule 1's first row:
+    an assertion satisfied for the wrong reason, on the projection this child owns.
+
+    `Locator` carries eleven fields and ten of them reach the persisted `locator_json`
+    column (`index_schema`) through no other hashed path. They are how a reader resolves a
+    claim back to the bytes it came from — a frame timestamp says WHERE in the video the
+    slide is, `char_start`/`char_end` say where in a body a quote is — which is the whole
+    mechanism CLAUDE.md rule 7 rests on.
+
+    So this moves exactly one of them: k08's first video frame keeps its description, its
+    `frame_index`, its `source_key` and its source, and only its `frame_timestamp` changes.
+    The two guards are what make it bite for the reason it names — exactly one surface row
+    moves, in exactly one column, and that column deserialises to the new timestamp.
+
+    The sibling column `surface.locator.url` is a DUPLICATE of a field `model_dump_json()`
+    also serialises, so dropping it ALONE is unobservable in the hash by construction: no
+    test can pin it, and one claiming to would be pinning the json.
+
+    Seen red under the mutant that drops the two locator columns from `surface_row`.
+    """
+    store, _vocab, _pages = corpus
+    item = store["k08"]
+    position = next(i for i, s in enumerate(item.content.sources) if s.kind == "x_video")
+    video = item.content.sources[position]
+    assert video.frames, "this test needs a video the index locates frames inside"
+
+    frames = list(video.frames)
+    moved_to = frames[0].timestamp + 37.0
+    frames[0] = frames[0].model_copy(update={"timestamp": moved_to})
+    sources = list(item.content.sources)
+    sources[position] = video.model_copy(update={"frames": frames})
+    edited = item.model_copy(
+        update={"content": item.content.model_copy(update={"sources": sources})}
+    )
+
+    before = [index_build.surface_row(s) for s in item_surfaces(item)]
+    after = [index_build.surface_row(s) for s in item_surfaces(edited)]
+    changed = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if a != b]
+    assert len(changed) == 1, "exactly one surface row moves: the one whose timestamp changed"
+    row_before, row_after = before[changed[0]], after[changed[0]]
+    columns = [i for i, (a, b) in enumerate(zip(row_before, row_after, strict=True)) if a != b]
+    assert len(columns) == 1, "and exactly one column of that row"
+    assert json.loads(row_after[columns[0]])["frame_timestamp"] == moved_to, (
+        "the column that moved is the serialised locator, carrying the new timestamp"
+    )
+    assert json.loads(row_before[columns[0]])["frame_timestamp"] == video.frames[0].timestamp
+
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item)
+
+
+@pytest.mark.parametrize(
+    "axis, value",
+    [
+        ("author", {"handle": "someoneelse", "name": "Someone Else"}),
+        ("created_at", datetime(2026, 6, 1, 9, 0, tzinfo=timezone.utc)),
+        ("captured_at", datetime(2026, 6, 2, 9, 0, tzinfo=timezone.utc)),
+        ("bookmark_folder", "to-read"),
+    ],
+)
+def test_the_item_fingerprint_covers_the_item_plane_no_surface_carries(
+    corpus, axis: str, value: object
+) -> None:
+    """The other half of the hash: the `items` columns, pinned where no surface pins them.
+
+    `items` persists `author_handle`, `author_name`, `created_at`, `captured_at` and
+    `bookmark_folder` (`index_schema`), and `items_author` is the index `--author` answers
+    from. The test above pins `source` and nothing else: measured under the mutant that
+    deletes the rest from `item_fingerprint`, this file stayed green, so `item.author`
+    could change and `update` report nothing to do — the evidence repaired and the
+    derivative standing (rule 6), one plane up from G-5 and on the same attribution axis.
+
+    THE BASE ITEM CARRIES NO POST SURFACE, AND THAT IS THE WHOLE CONSTRUCTION (rule 1).
+    `item.author` is ALSO the attribution of the `post` surface and of a `user_note`
+    (`surfaces.item_surfaces`), so on an ordinary item this assertion moves through
+    `surface_row` and passes with the metadata half deleted — satisfied for the wrong
+    reason, which is what the round-09 mutants found. k02's text is blanked so no `post`
+    surface is emitted, and its `enriched` carries no `user_notes`: one `summary` surface
+    remains, attributed to nobody.
+
+    So every case asserts twice: that not one surface row moved — the only other input to
+    this hash — and that the fingerprint moved anyway. Delete the axis from the metadata
+    half and the second assertion fails; the first is what proves it could not have passed
+    through the surfaces instead.
+    """
+    from xbrain.models import Author
+
+    store, _vocab, _pages = corpus
+    item = store["k02"].model_copy(update={"text": ""})
+    surfaces = item_surfaces(item)
+    assert [s.surface_type for s in surfaces] == ["summary"], (
+        "the base item must carry a surface, and not one that repeats the item's author"
+    )
+    rows = [index_build.surface_row(s) for s in surfaces]
+
+    edited = item.model_copy(update={axis: Author(**value) if axis == "author" else value})
+    assert [index_build.surface_row(s) for s in item_surfaces(edited)] == rows, (
+        "no surface row may move, or the fingerprint could differ for another reason"
+    )
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), axis
+
+
+def test_the_item_fingerprint_covers_a_content_kind_that_emits_no_surface(corpus) -> None:
+    """`item_content_kinds` is a persisted plane, and a kind can arrive with no text at all.
+
+    A no-speech `x_video` (107 of 259 in the corpus) fetched without `--frames` has an
+    empty transcript, no frames and no digest, so it emits NOT ONE surface — and it is
+    still a video the index records in `item_content_kinds` and a kind filter answers
+    from. Measured under the mutant that deletes the sorted-kinds block from
+    `item_fingerprint`: green, because every kind in the fixture arrives attached to a
+    surface that moves the hash on its own.
+
+    The hash is over the sorted MULTISET while the table's primary key is
+    `(item_id, kind)` — a set — so a duplicated kind moves the fingerprint without
+    changing the stored plane: the accepted false positive, failing towards the warning
+    like everything else in this module. This case adds a kind the item did not have at
+    all, so it moves both.
+
+    Guarded like the item-plane cases above, and here the guard is also the evidence: the
+    surface rows are identical precisely BECAUSE the silent video emitted nothing. The
+    only other field the patch touches is `content.fetched_at`, which is hashed nowhere —
+    deliberately, and that is the subject of this module's docstring.
+    """
+    from xbrain.models import Content, ContentSourceSuccess
+
+    store, _vocab, _pages = corpus
+    item = store["k02"]
+    assert item.content is None, "the base item must start with no content source at all"
+    rows = [index_build.surface_row(s) for s in item_surfaces(item)]
+
+    silent = ContentSourceSuccess(
+        kind="x_video", url="https://video.example/silent.mp4", text="", has_speech=False
+    )
+    edited = item.model_copy(
+        update={"content": Content(fetched_at=item.captured_at, sources=[silent])}
+    )
+    assert [index_build.surface_row(s) for s in item_surfaces(edited)] == rows, (
+        "a silent video with no frames and no digest emits no surface"
+    )
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item)
+
+
+def test_the_leading_surface_version_is_the_belt_for_an_item_with_no_surfaces(
+    corpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An emitter-version bump has to reach an item that emits nothing.
+
+    `SURFACE_VERSION` is hashed twice over: once at the head of `item_fingerprint`'s parts
+    and once inside every `surface.fingerprint`. For any item that HAS a surface the second
+    copy carries it, which is why deleting the first left this file green — no test held an
+    item with zero surfaces. Such items exist: k01 has no content, no media and no
+    `enriched`, so blanking its text leaves the emitter with nothing to emit, and the
+    leading copy is the only place the version can still reach it. Without it, a bump would
+    leave that item's fingerprint unchanged and `update` would report it current under an
+    emitter version that no longer describes how it would be emitted.
+
+    Patching this module's binding alone is an EXACT simulation here rather than a partial
+    one: a real bump also travels through `ids.surface_fingerprint`, and this item has no
+    surface for it to travel through.
+    """
+    store, _vocab, _pages = corpus
+    item = store["k01"].model_copy(update={"text": ""})
+    assert item_surfaces(item) == (), "the belt is load-bearing only with no surfaces"
+
+    before = index_build.item_fingerprint(item)
+    monkeypatch.setattr(index_build, "SURFACE_VERSION", index_build.SURFACE_VERSION + "-next")
+    assert index_build.item_fingerprint(item) != before
 
 
 def test_the_store_fingerprint_is_order_independent(corpus) -> None:
