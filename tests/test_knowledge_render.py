@@ -453,7 +453,7 @@ def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
     assert lines.count("│ \tindented nul 31m c1 del") == 2, "the tab survives, the controls do not"
     assert [h.split("]")[0] for h in lines if h.startswith("[")] == [
         "[post",
-        "[external_article 0:80",
+        f"[external_article 0:{len(hostile)}",
     ]
 
     result = _result(
