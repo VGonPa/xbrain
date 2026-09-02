@@ -2827,11 +2827,7 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
         )
     from xbrain.knowledge.surfaces import knowledge_item
 
-    surfaces = item_surfaces(
-        item,
-        transcribe_command=cfg.transcribe_command,
-        vision_command=cfg.vision_command,
-    )
+    surfaces = item_surfaces(item)
     from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
 
     payload: dict = {

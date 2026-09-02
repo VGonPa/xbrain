@@ -196,9 +196,19 @@ class KnowledgeSurface(BaseModel):
 
     `producer` and `produced_at` answer spec §3.4's *method or component that produced it*
     and *instant of capture/generation*. They are populated from data already in the store
-    (`enriched.executor`, `MediaPhotoDescribed.description_version`/`described_at`, the
-    configured transcribe/vision command, `TopicPage.synthesized_at`) and are `None` only
-    where the format genuinely does not record it.
+    (`enriched.executor`, `MediaPhotoDescribed.description_version`/`described_at`,
+    `TopicPage.synthesized_at`, `content.fetched_at`) and are `None` where the format
+    genuinely does not record it — which INCLUDES `video_transcript` and `video_frame`
+    (F7-7, round 08): the `x_video` source records neither the transcriber nor the vision
+    command that wrote the text. Until round 08 those two surfaces carried the command
+    CONFIGURED when the surface was emitted; measured on the real corpus, changing
+    `[transcribe].command` to `whisper-large-v3` made `get` serve `producer:
+    whisper-large-v3` for a transcript parakeet wrote, text and fingerprints identical — a
+    provenance claim the store cannot back, and spec §3.4 says the unknown is not filled in
+    by intuition. It is `None` now, the origin (`asr`/`vlm`, `machine_generated`) is still
+    declared, and the honest fix — stamping the producer on the source when `digest-video`
+    attaches the transcript, as `caption_contract` does for frames — is a store change
+    outside Plan 02, recorded as an open issue for Plan 03.
     """
 
     model_config = _FROZEN
