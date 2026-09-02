@@ -110,29 +110,61 @@ UPDATE_ADVICE = "Actualiza el índice con `xbrain index update`."
 
 @dataclass(frozen=True)
 class StoreSignal:
-    """The CHEAP change signal: `mtime_ns` and size of `data/items.json` (spec §5.6).
+    """The CHEAP change signal: `mtime_ns` and size of the THREE inputs (spec §5.6, P1a).
 
-    One `os.stat`, so a query can afford it on every call. A missing store yields zeros
+    Three `os.stat`, so a query can afford it on every call. A missing file yields zeros
     rather than raising: a query must still be able to say *the index is behind* when the
     store has been moved away, and raising from inside `search` is the wrong place to learn
     it.
+
+    THREE FILES, NOT ONE (P1a, gate Codex round 05). Spec §5.6 names `data/items.json` as
+    the file the cheap signal watches, and that is what the first version stat'ed — but the
+    index derives from `vocab.yaml` and `topics.json` too: a topic description enters every
+    assigned item's PROFILE (spec §5.1.A), and overviews and notes are chunks the index
+    serves. The manifest already recorded their deep fingerprints; the query door never
+    compared them, so `xbrain topics` — which writes `topics.json` and never `items.json` —
+    left every later `search` answering over the old topic plane with nothing declared, the
+    silent staleness spec §9.3 forbids, on two of the three inputs. One signal over the
+    three files, one comparison, three `stat` calls.
+
+    A manifest written before round 05 carries no vocab/topics entries: they read back as
+    zeros, compare unequal to the live files, and the index is declared behind until the
+    next `update` re-seals the manifest. That is the direction this signal is meant to
+    fail in — towards the warning — and it costs one `index update`.
     """
 
     items_json_mtime_ns: int
     items_json_size: int
+    vocab_yaml_mtime_ns: int = 0
+    vocab_yaml_size: int = 0
+    topics_json_mtime_ns: int = 0
+    topics_json_size: int = 0
 
     @classmethod
-    def of(cls, items_path: Path) -> StoreSignal:
-        try:
-            stat = items_path.stat()
-        except OSError:
-            return cls(items_json_mtime_ns=0, items_json_size=0)
-        return cls(items_json_mtime_ns=stat.st_mtime_ns, items_json_size=stat.st_size)
+    def of(
+        cls, items_path: Path, vocab_path: Path | None = None, topics_path: Path | None = None
+    ) -> StoreSignal:
+        """The signal of the three inputs AS THEY ARE ON DISK NOW — the query-time side."""
+        items_mtime, items_size = _stat_signal(items_path)
+        vocab_mtime, vocab_size = _stat_signal(vocab_path)
+        topics_mtime, topics_size = _stat_signal(topics_path)
+        return cls(
+            items_json_mtime_ns=items_mtime,
+            items_json_size=items_size,
+            vocab_yaml_mtime_ns=vocab_mtime,
+            vocab_yaml_size=vocab_size,
+            topics_json_mtime_ns=topics_mtime,
+            topics_json_size=topics_size,
+        )
 
     def to_dict(self) -> dict[str, int]:
         return {
             "items_json_mtime_ns": self.items_json_mtime_ns,
             "items_json_size": self.items_json_size,
+            "vocab_yaml_mtime_ns": self.vocab_yaml_mtime_ns,
+            "vocab_yaml_size": self.vocab_yaml_size,
+            "topics_json_mtime_ns": self.topics_json_mtime_ns,
+            "topics_json_size": self.topics_json_size,
         }
 
     @classmethod
@@ -140,7 +172,22 @@ class StoreSignal:
         return cls(
             items_json_mtime_ns=int(raw.get("items_json_mtime_ns", 0)),
             items_json_size=int(raw.get("items_json_size", 0)),
+            vocab_yaml_mtime_ns=int(raw.get("vocab_yaml_mtime_ns", 0)),
+            vocab_yaml_size=int(raw.get("vocab_yaml_size", 0)),
+            topics_json_mtime_ns=int(raw.get("topics_json_mtime_ns", 0)),
+            topics_json_size=int(raw.get("topics_json_size", 0)),
         )
+
+
+def _stat_signal(path: Path | None) -> tuple[int, int]:
+    """`(mtime_ns, size)` of one input file, or `(0, 0)` when it is absent or not given."""
+    if path is None:
+        return 0, 0
+    try:
+        stat = path.stat()
+    except OSError:
+        return 0, 0
+    return stat.st_mtime_ns, stat.st_size
 
 
 @dataclass(frozen=True)
@@ -767,6 +814,8 @@ def build(
     topic_pages: Mapping[str, TopicPage],
     items_path: Path,
     *,
+    vocab_path: Path | None = None,
+    topics_path: Path | None = None,
     options: IndexOptions | None = None,
     dry_run: bool = False,
     force: bool = False,
@@ -845,9 +894,10 @@ def build(
         if not connection_closed(connection):
             connection.close()
 
+    signal = StoreSignal.of(items_path, vocab_path, topics_path)
     write_manifest(
         index_dir,
-        _fresh_manifest(store, vocab, topic_pages, items_path, tallies, failed, options=options),
+        _fresh_manifest(store, vocab, topic_pages, signal, tallies, failed, options=options),
     )
     return _build_report(
         counters, failed, started, items=len(store), topics=len(vocab), dry_run=False
@@ -931,7 +981,7 @@ def _fresh_manifest(
     store: Mapping[str, Item],
     vocab: Sequence[Topic],
     topic_pages: Mapping[str, TopicPage],
-    items_path: Path,
+    signal: StoreSignal,
     tallies: ManifestTallies,
     failed: list[dict[str, str]],
     *,
@@ -947,7 +997,7 @@ def _fresh_manifest(
         schema_version=SCHEMA_VERSION,
         built_at=datetime.now(timezone.utc),
         store_fingerprint=store_fingerprint(store, options=options),
-        store_signal=StoreSignal.of(items_path),
+        store_signal=signal,
         vocab_fingerprint=vocab_fingerprint(vocab),
         topics_fingerprint=topics_fingerprint(topic_pages),
         surface_version=SURFACE_VERSION,
@@ -1233,7 +1283,7 @@ def _next_manifest(
     store: Mapping[str, Item],
     vocab: Sequence[Topic],
     topic_pages: Mapping[str, TopicPage],
-    items_path: Path,
+    signal: StoreSignal,
     tallies: ManifestTallies,
     *,
     options: IndexOptions,
@@ -1252,7 +1302,7 @@ def _next_manifest(
         schema_version=previous.schema_version,
         built_at=datetime.now(timezone.utc),
         store_fingerprint=store_fingerprint(store, options=options),
-        store_signal=StoreSignal.of(items_path),
+        store_signal=signal,
         vocab_fingerprint=vocab_fingerprint(vocab),
         topics_fingerprint=topics_fingerprint(topic_pages),
         surface_version=previous.surface_version,
@@ -1301,6 +1351,8 @@ def update(
     topic_pages: Mapping[str, TopicPage],
     items_path: Path,
     *,
+    vocab_path: Path | None = None,
+    topics_path: Path | None = None,
     options: IndexOptions | None = None,
     dry_run: bool = False,
 ) -> UpdateReport:
@@ -1365,9 +1417,10 @@ def update(
         if not connection_closed(connection):
             connection.close()
 
+    signal = StoreSignal.of(items_path, vocab_path, topics_path)
     write_manifest(
         index_dir,
-        _next_manifest(manifest, store, vocab, topic_pages, items_path, tallies, options=options),
+        _next_manifest(manifest, store, vocab, topic_pages, signal, tallies, options=options),
     )
     return _update_report(
         delta,
@@ -1494,6 +1547,8 @@ def status(
     topic_pages: Mapping[str, TopicPage],
     items_path: Path,
     *,
+    vocab_path: Path | None = None,
+    topics_path: Path | None = None,
     options: IndexOptions | None = None,
 ) -> StatusReport:
     """What the index holds, and how far behind the store it is (acceptance 2, step 10c).
@@ -1521,7 +1576,9 @@ def status(
     topics_changed = len(
         _topics_behind(stored_topics, expected_topic_records(store, vocab, topic_pages))
     )
-    behind = manifest is not None and manifest.store_signal != StoreSignal.of(items_path)
+    behind = manifest is not None and manifest.store_signal != StoreSignal.of(
+        items_path, vocab_path, topics_path
+    )
     incomplete = manifest is None or bool(unusable)
     return StatusReport(
         manifest=manifest,

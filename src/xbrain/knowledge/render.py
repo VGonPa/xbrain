@@ -42,8 +42,9 @@ from xbrain.models import Author
 # flag they will ignore; spec §9.3 asks the response to NAME the command that fixes it.
 DEGRADED_TEXT: dict[str, str] = {
     "index_behind_store": (
-        "⚠ El índice va por detrás del store: `data/items.json` cambió después de "
-        "construirlo. La evidencia puede estar obsoleta — actualiza con `xbrain index update`."
+        "⚠ El índice va por detrás del store: `items.json`, `vocab.yaml` o `topics.json` "
+        "cambió después de construirlo. La evidencia puede estar obsoleta — actualiza con "
+        "`xbrain index update`."
     ),
     "no_embeddings": (
         "· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases "

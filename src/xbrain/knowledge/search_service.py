@@ -123,6 +123,8 @@ class QueryContext:
     topic_pages: Mapping[str, TopicPage] = field(default_factory=dict)
     index_dir: Path = Path("data/index")
     items_path: Path = Path("data/items.json")
+    vocab_path: Path | None = None
+    topics_path: Path | None = None
     vault_dir: Path | None = None
     language: str = "English"
     max_matches_per_item: int = 3
@@ -153,7 +155,12 @@ def search(
     filters = filters or SearchFilters()
     _validate(query, filters, limit, context)
     executed, strategy_degradation = resolve_strategy(strategy)
-    index = open_for_query(context.index_dir, context.items_path)
+    index = open_for_query(
+        context.index_dir,
+        context.items_path,
+        vocab_path=context.vocab_path,
+        topics_path=context.topics_path,
+    )
     try:
         depth = min(limit * CANDIDATE_MULTIPLIER * context.max_matches_per_item, MAX_CANDIDATES)
         hits, excluded = verify_fingerprints(index.lexical.search(query, depth, filters=filters))

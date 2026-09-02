@@ -33,13 +33,20 @@ Reindex after anything that changes indexable text:
 | `refresh-quoted` / any repair of a source's author, title, language or URL that leaves its body untouched | the attribution and locator `search` serves on every match (A-1) | `xbrain index update` — since round 03 the item fingerprint covers every column `surfaces` stores, not the text alone (G-5); before, this repair left `update` at «0 cambiados» and `search` serving the old author |
 | upgraded xbrain and `index update` refuses | the emitter, the chunker or the SCHEMA moved (schema **2** since round 02) | `xbrain index build --force` |
 | upgraded xbrain across round 03 and `index update` reports **every** item changed | the fingerprint's definition moved (G-5), so an index built before it compares unequal on all items — a ONE-TIME full rewrite (2,404 items, measured), after which the next `update` is back to 0 | nothing: let it run once |
+| upgraded xbrain across round 05 and every `search` warns `index_behind_store` with `status` reporting 0 items and 0 topics changed | the manifest predates the three-file signal (P1a): its vocab/topics entries read back as zeros and compare unequal to the live files — the direction the signal fails in, towards the warning | `xbrain index update` once: it re-seals the manifest with the full signal |
 | upgraded xbrain across round 04 and `index status` reports `N topics con miembros desfasados` with 0 items changed | an index updated by the pre-H1 code kept the topic rows of every topic an `enrich` moved an item into or out of; `status` now reads those rows back and compares them | `xbrain index update` — it rewrites exactly those rows (`N topics con miembros recalculados`) and nothing else |
 
 **You do not have to remember.** Two independent signals say so for you:
 
-- every `search` compares the manifest's `mtime`+`size` of `data/items.json` against the file
-  right now, and declares `index_behind_store` in the response — cheap enough to do on every
-  query, and it still ANSWERS, because possibly-stale evidence is usable as long as it says so;
+- every `search` compares the manifest's `mtime`+`size` of `data/items.json`, `data/vocab.yaml`
+  **and** `data/topics.json` against the files right now, and declares `index_behind_store` in
+  the response — three `stat` calls, cheap enough to do on every query, and it still ANSWERS,
+  because possibly-stale evidence is usable as long as it says so. *Three files since round 05
+  (P1a): the signal watched `items.json` alone, and the two commands in the table that write
+  the other two — `topics`, `vocab` — never touch it, so `search` after either answered over the
+  old topic plane with nothing declared (the round-05 gate's probes B and C: a term added to a
+  topic note or description, `items.json` byte-identical, 0 results, `degraded:
+  ["no_embeddings"]`, while `status` reported `topics_changed=1`).*
 - `xbrain index status` loads the store and reports **how many** items changed, added or
   disappeared — a number, not a flag, because "something changed" does not distinguish a
   `touch` from a hundred re-enriched items — and, since round 04, **how many topic rows** the

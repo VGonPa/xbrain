@@ -563,6 +563,50 @@ def test_index_status_and_update_report_the_topic_rows_behind(workspace: Path) -
     assert payload["items_changed"] == 0 and payload["topics_changed"] == 0
 
 
+@pytest.mark.parametrize("moved", ["topics.json", "vocab.yaml"])
+def test_topics_or_vocab_rewritten_on_disk_makes_search_warn_and_status_say_behind(
+    workspace: Path, moved: str
+) -> None:
+    """P1a at the CLI (gate Codex, round 05): the operator path is `xbrain topics`, which
+    writes `data/topics.json` and never `items.json` (`cli._topics_run` / `_topics_apply`),
+    and `xbrain vocab`, which writes `vocab.yaml`. After either, `search` must warn and
+    `index status` must say `behind`, and one `index update` must clear both — the promise
+    `docs/tutorial.md` made and the code did not keep.
+
+    The files are rewritten through the SAME writers the commands use, with a change the
+    index would actually serve (a note, a description). Seen red before the fix: `search`
+    printed no warning and `status --json` said `"behind": false` on both.
+    """
+    from xbrain.models import Topic, TopicPage
+    from xbrain.rubrics import load_vocab, save_vocab
+    from xbrain.store import load_topic_pages, save_topic_pages
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    assert "index update" not in runner.invoke(app, ["search", "Quillfeather"]).output
+
+    path = workspace / "data" / moved
+    if moved == "topics.json":
+        pages: dict[str, TopicPage] = load_topic_pages(path)
+        slug = sorted(pages)[0]
+        pages[slug] = pages[slug].model_copy(update={"notes": [*pages[slug].notes, "nuevo"]})
+        save_topic_pages(pages, path)
+    else:
+        vocab: list[Topic] = load_vocab(path)
+        vocab[0] = vocab[0].model_copy(update={"description": vocab[0].description + " más"})
+        save_vocab(vocab, path)
+
+    human = runner.invoke(app, ["search", "Quillfeather"])
+    assert human.exit_code == 0, human.output
+    assert "xbrain index update" in human.output, human.output
+    payload = _json_stdout(runner.invoke(app, ["search", "Quillfeather", "--json"]))
+    assert "index_behind_store" in payload["index"]["degraded"]
+    assert _json_stdout(runner.invoke(app, ["index", "status", "--json"]))["behind"] is True
+
+    assert runner.invoke(app, ["index", "update"]).exit_code == 0
+    assert _json_stdout(runner.invoke(app, ["index", "status", "--json"]))["behind"] is False
+    assert "index update" not in runner.invoke(app, ["search", "Quillfeather"]).output
+
+
 def test_get_works_after_the_index_is_removed(workspace: Path) -> None:
     """Acceptance 9 at the CLI: `get` reads the store, so the index can be gone."""
     runner.invoke(app, ["index", "build"])

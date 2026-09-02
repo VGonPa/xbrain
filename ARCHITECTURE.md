@@ -821,7 +821,7 @@ corruption: it is *you ran `enrich` and did not reindex*.
 
 | signal | cost | where | what it answers |
 |---|---|---|---|
-| `store_signal` — `mtime_ns` + size of `items.json` | one `os.stat` | **every** `search` / `get` / `index status` | "the store moved" |
+| `store_signal` — `mtime_ns` + size of `items.json`, `vocab.yaml` **and** `topics.json` (three files since round 05, P1a: the index derives from all three, and `xbrain topics` writes the third without touching the first) | three `os.stat` | **every** `search` / `index status` | "an input moved" |
 | `store_fingerprint` — sha256 per item | loads the store | `index build` / `update` / `status` | "**which** items changed, and how many" |
 
 The cheap one can give false positives and that is accepted: a false positive costs one warning,

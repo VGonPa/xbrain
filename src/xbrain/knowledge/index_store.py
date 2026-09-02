@@ -93,7 +93,12 @@ class OpenIndex:
 
 
 def open_for_query(
-    index_dir: Path, items_path: Path, *, params: ChunkerParams | None = None
+    index_dir: Path,
+    items_path: Path,
+    *,
+    vocab_path: Path | None = None,
+    topics_path: Path | None = None,
+    params: ChunkerParams | None = None,
 ) -> OpenIndex:
     """Open the index read-only, refusing anything the code cannot answer honestly.
 
@@ -111,13 +116,15 @@ def open_for_query(
     """
     database = require_database(index_dir)
     manifest = load_compatible_manifest(index_dir, params=params)
-    degraded = _degraded(manifest, items_path)
+    degraded = _degraded(manifest, items_path, vocab_path, topics_path)
     connection = open_index(database, read_only=True)
     require_consistent(connection, manifest)
     return OpenIndex(lexical=LexicalIndex(connection), manifest=manifest, degraded=degraded)
 
 
-def _degraded(manifest: Manifest, items_path: Path) -> tuple[str, ...]:
+def _degraded(
+    manifest: Manifest, items_path: Path, vocab_path: Path | None, topics_path: Path | None
+) -> tuple[str, ...]:
     """Which degradations apply right now, in `DEGRADED_ORDER`.
 
     `index_behind_store` is ONE `os.stat` (B3). A `touch` with no edit is a false positive
@@ -133,7 +140,7 @@ def _degraded(manifest: Manifest, items_path: Path) -> tuple[str, ...]:
     flags = set()
     if manifest.embeddings is None:
         flags.add("no_embeddings")
-    if manifest.store_signal != StoreSignal.of(items_path):
+    if manifest.store_signal != StoreSignal.of(items_path, vocab_path, topics_path):
         flags.add("index_behind_store")
     return tuple(flag for flag in DEGRADED_ORDER if flag in flags)
 

@@ -63,14 +63,29 @@ def workspace(tmp_path: Path, corpus) -> Path:
 def _build(workspace: Path, corpus, **kwargs) -> index_build.BuildReport:
     store, vocab, pages = corpus
     return index_build.build(
-        workspace / "index", store, vocab, pages, workspace / "items.json", **kwargs
+        workspace / "index",
+        store,
+        vocab,
+        pages,
+        workspace / "items.json",
+        vocab_path=workspace / "vocab.yaml",
+        topics_path=workspace / "topics.json",
+        **kwargs,
     )
 
 
 def _status(workspace: Path, store, corpus) -> index_build.StatusReport:
     """`status` takes the vocabulary and the pages like `build`/`update` do (H1)."""
     _store, vocab, pages = corpus
-    return index_build.status(workspace / "index", store, vocab, pages, workspace / "items.json")
+    return index_build.status(
+        workspace / "index",
+        store,
+        vocab,
+        pages,
+        workspace / "items.json",
+        vocab_path=workspace / "vocab.yaml",
+        topics_path=workspace / "topics.json",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -122,18 +137,43 @@ def test_the_manifest_records_the_tokenizer_and_the_connective(workspace, corpus
 
 
 def test_the_manifest_records_the_cheap_store_signal(workspace, corpus) -> None:
-    """Step 7c (B3): mtime and size of `data/items.json` at build time.
+    """Step 7c (B3): mtime and size of the THREE inputs at build time (P1a, round 05).
 
     This is what lets a QUERY notice the store moved without loading 17 MB. Seen red by
     omitting it: `search` then has nothing to compare and `index_behind_store` can never fire.
+
+    THREE FILES, NOT ONE (P1a, gate Codex round 05). The index derives from `items.json`,
+    `vocab.yaml` AND `topics.json` — topic descriptions enter every assigned item's profile,
+    overviews and notes are chunks the index serves — and the signal covered the first only,
+    so `xbrain topics` (which writes `topics.json` and never touches `items.json`) left every
+    later `search` answering over the old topic plane with no `index_behind_store`. Seen red
+    before the fix: the vocab and topics entries were `0` with both files on disk.
     """
+    _write_inputs(workspace, corpus)
     _build(workspace, corpus)
     raw = json.loads(manifest_path(workspace / "index").read_text(encoding="utf-8"))
-    stat = (workspace / "items.json").stat()
+    items, vocab, topics = (
+        (workspace / name).stat() for name in ("items.json", "vocab.yaml", "topics.json")
+    )
     assert raw["store_signal"] == {
-        "items_json_mtime_ns": stat.st_mtime_ns,
-        "items_json_size": stat.st_size,
+        "items_json_mtime_ns": items.st_mtime_ns,
+        "items_json_size": items.st_size,
+        "vocab_yaml_mtime_ns": vocab.st_mtime_ns,
+        "vocab_yaml_size": vocab.st_size,
+        "topics_json_mtime_ns": topics.st_mtime_ns,
+        "topics_json_size": topics.st_size,
     }
+    assert vocab.st_size and topics.st_size, "both files exist, or the zeros mean nothing"
+
+
+def _write_inputs(workspace: Path, corpus) -> None:
+    """`vocab.yaml` and `topics.json` beside `items.json`, written as the CLI writes them."""
+    from xbrain.rubrics import save_vocab
+    from xbrain.store import save_topic_pages
+
+    _store, vocab, pages = corpus
+    save_vocab(vocab, workspace / "vocab.yaml")
+    save_topic_pages(pages, workspace / "topics.json")
 
 
 def test_the_skipped_counters_say_what_they_counted(workspace, corpus) -> None:
@@ -546,16 +586,24 @@ def test_status_and_update_see_the_corruption_search_would_hit(workspace, corpus
         )
 
 
-def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(workspace, corpus) -> None:
+@pytest.mark.parametrize("moved", ["items.json", "vocab.yaml", "topics.json"])
+def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(
+    workspace, corpus, moved: str
+) -> None:
     """B3: the mtime/size signal, read with an `os.stat`, on an explicit command too.
 
     A `touch` with no edit is a FALSE POSITIVE and that is accepted: the cost of one extra
     warning is a warning, and the cost of a false negative is serving stale evidence as
     fresh. It fails towards the warning, like `origin: unknown -> llm_synthesis`.
+
+    Over the THREE inputs (P1a, round 05): `vocab.yaml` and `topics.json` move the index as
+    surely as `items.json` does, and until round 05 only the first one tripped this.
+    Seen red before the fix on `vocab.yaml` and `topics.json`: `behind is False`.
     """
+    _write_inputs(workspace, corpus)
     _build(workspace, corpus)
     assert _status(workspace, corpus[0], corpus).behind is False
-    path = workspace / "items.json"
+    path = workspace / moved
     path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
     assert _status(workspace, corpus[0], corpus).behind is True
 

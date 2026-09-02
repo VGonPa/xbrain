@@ -318,11 +318,17 @@ one way and half the other, with every id still resolving, so nothing would rais
 ranking would quietly become a blend of two chunkers.
 
 **`⚠ El índice va por detrás del store`** (`degraded: ["index_behind_store"]`) — you ran
-`enrich`, `topics`, `digest-video` or `fetch` and did not reindex. The answer is still given —
-possibly-stale evidence is usable as long as it says so — but run `xbrain index update`. This is
-the failure that actually happens, because indexing is manual by decision. `xbrain index status`
-tells you **how many** items changed. A `touch` on `items.json` with no edit also trips it: a
-false positive costs one warning, a false negative costs serving stale evidence as fresh.
+`enrich`, `topics`, `vocab`, `digest-video` or `fetch` and did not reindex. The answer is still
+given — possibly-stale evidence is usable as long as it says so — but run `xbrain index update`.
+This is the failure that actually happens, because indexing is manual by decision. `xbrain index
+status` tells you **how many** items changed. The signal is the mtime+size of **all three** inputs
+— `items.json`, `vocab.yaml`, `topics.json` — since round 05 (P1a): until then only the first was
+watched, so a `topics` or `vocab` run, which never touches `items.json`, left `search` answering
+over the old topic plane with nothing declared. A `touch` on any of the three with no edit also
+trips it: a false positive costs one warning, a false negative costs serving stale evidence as
+fresh. **After upgrading across round 05 every `search` says this once**: a manifest written
+before it carries no vocab/topics signal, which compares unequal until the next `index update`
+re-seals it.
 
 **`N topics con miembros desfasados`** from `index status` (`topics_changed` in `--json`) — the
 topic rows in the base do not list the members the store implies now, or their `stale` bit is

@@ -34,6 +34,8 @@ from xbrain.knowledge.index_schema import (
 from xbrain.knowledge.search_service import QueryContext, search
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Item, Topic, TopicPage, VerificationVerdict
+from xbrain.rubrics import save_vocab
+from xbrain.store import save_topic_pages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -56,18 +58,35 @@ def _write_store(path: Path, store: dict[str, Item]) -> None:
 
 @pytest.fixture()
 def context(tmp_path: Path, corpus) -> QueryContext:
-    """A built index plus the live store — the two halves every query needs."""
+    """A built index plus the live store — the two halves every query needs.
+
+    All THREE inputs are on disk, as the CLI has them (P1a): the cheap signal covers
+    `vocab.yaml` and `topics.json` as well as `items.json`, and a fixture with only the
+    first would pass the signal tests for a reason unrelated to their name (rule 1).
+    """
     store, vocab, pages = corpus
     data = tmp_path / "data"
     data.mkdir()
     _write_store(data / "items.json", store)
-    index_build.build(data / "index", store, vocab, pages, data / "items.json")
+    save_vocab(vocab, data / "vocab.yaml")
+    save_topic_pages(pages, data / "topics.json")
+    index_build.build(
+        data / "index",
+        store,
+        vocab,
+        pages,
+        data / "items.json",
+        vocab_path=data / "vocab.yaml",
+        topics_path=data / "topics.json",
+    )
     return QueryContext(
         store=store,
         vocab=vocab,
         topic_pages=pages,
         index_dir=data / "index",
         items_path=data / "items.json",
+        vocab_path=data / "vocab.yaml",
+        topics_path=data / "topics.json",
     )
 
 
@@ -584,6 +603,68 @@ def test_editing_the_store_without_reindexing_declares_the_index_behind(
 
     assert "index_behind_store" in response.index.degraded
     assert response.results, "a behind index still ANSWERS; it just says so"
+
+
+@pytest.mark.parametrize("moved", ["topics.json", "vocab.yaml"])
+def test_editing_topics_or_vocab_without_reindexing_declares_the_index_behind(
+    context: QueryContext, moved: str
+) -> None:
+    """P1a (gate Codex, round 05 — probes B and C, reproduced verbatim on HEAD `0312634`).
+
+    The index derives from THREE inputs. `topic_overview`, `topic_note` and
+    `topic_description` are chunks it serves, and every topic description enters the
+    profile of each item assigned to it (spec §5.1.A). The manifest recorded all three
+    fingerprints, but the query door compared `StoreSignal.of(items_path)` and nothing
+    else — so `xbrain topics`, which writes `topics.json` and never touches `items.json`
+    (`cli.py`), and a `vocab.yaml` edit both left every later `search` answering over the
+    old plane with `degraded: ("no_embeddings",)`. The gate's probes: a term added to a
+    topic note or a topic description, byte-identical `items.json`, `search` -> 0 results,
+    no `index_behind_store`, while `status` reported `topics_changed=1`. Spec §5.6 / §9.3:
+    *nunca se sirve evidencia obsoleta en silencio*; `docs/tutorial.md` promised that
+    forgetting the update after `topics` is something `search` tells you.
+
+    The file is rewritten the way the CLI rewrites it (`save_topic_pages` / `save_vocab`),
+    and the assertion is on the FLAG: the answer is still given (possibly-stale evidence is
+    usable as long as it says so), it just cannot stay quiet. Seen red before the fix:
+    `"index_behind_store" not in ("no_embeddings",)` on both parametrisations.
+    """
+    assert "index_behind_store" not in search("agents", context).index.degraded
+
+    if moved == "topics.json":
+        slug = sorted(context.topic_pages)[0]
+        page = context.topic_pages[slug]
+        pages = {
+            **context.topic_pages,
+            slug: page.model_copy(update={"notes": [*page.notes, "topicfreshonlytoken"]}),
+        }
+        save_topic_pages(pages, context.topics_path)
+        live = QueryContext(**{**context.__dict__, "topic_pages": pages})
+        term = "topicfreshonlytoken"
+    else:
+        vocab = list(context.vocab)
+        vocab[0] = vocab[0].model_copy(
+            update={"description": vocab[0].description + " vocabfreshonlytoken"}
+        )
+        save_vocab(vocab, context.vocab_path)
+        live = QueryContext(**{**context.__dict__, "vocab": vocab})
+        term = "vocabfreshonlytoken"
+
+    response = search(term, live)
+    assert "index_behind_store" in response.index.degraded, response.index.degraded
+    assert "index_behind_store" in search("agents", live).index.degraded
+    # And the deep instrument agrees with the cheap one on the same state.
+    assert (
+        index_build.status(
+            live.index_dir,
+            live.store,
+            live.vocab,
+            live.topic_pages,
+            live.items_path,
+            vocab_path=live.vocab_path,
+            topics_path=live.topics_path,
+        ).behind
+        is True
+    )
 
 
 # ---------------------------------------------------------------------------

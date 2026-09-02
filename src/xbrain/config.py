@@ -122,6 +122,16 @@ class Config:
         return self.data_dir / "topics.json"
 
     @property
+    def vocab_path(self) -> Path:
+        """`data/vocab.yaml` — the third input the knowledge index derives from (P1a).
+
+        A property beside `items_path` and `topics_path` so the three files the index
+        fingerprints and signals on are named in ONE place; the CLI used to spell this one
+        as `cfg.data_dir / "vocab.yaml"` at every call site.
+        """
+        return self.data_dir / "vocab.yaml"
+
+    @property
     def storage_state_path(self) -> Path:
         return self.repo_root / "auth" / "storage_state.json"
 

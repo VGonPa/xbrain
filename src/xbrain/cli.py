@@ -1981,7 +1981,7 @@ def enrich(
     """Enriquece los items con resumen + topics."""
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab_topics = load_vocab(cfg.data_dir / "vocab.yaml")
+    vocab_topics = load_vocab(cfg.vocab_path)
     if not vocab_topics:
         raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
 
@@ -2368,8 +2368,8 @@ def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> Non
     # Mark the store first: a crash here leaves items pending (a re-run re-marks
     # idempotently) — safer than vocab.yaml updated while items stay stale.
     _mark_for_regenerate(store, cfg, regenerate)
-    save_vocab(topics, cfg.data_dir / "vocab.yaml")
-    typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    save_vocab(topics, cfg.vocab_path)
+    typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.vocab_path}")
 
 
 def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool) -> None:
@@ -2390,9 +2390,9 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
     if regenerate:
         _auto_snapshot(cfg, "vocab-regenerate")
     topics = induce_vocab(store, cfg.vocab_target_count, cfg.enrich_model, cfg.output_language)
-    save_vocab(topics, cfg.data_dir / "vocab.yaml")
+    save_vocab(topics, cfg.vocab_path)
     _mark_for_regenerate(store, cfg, regenerate)
-    typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.vocab_path}")
 
 
 @app.command()
@@ -2478,7 +2478,7 @@ def topics(
     """Genera las páginas de topic: listas de posts + overviews sintetizados."""
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    vocab = load_vocab(cfg.vocab_path)
     if not vocab:
         raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
     if apply is not None:
@@ -2806,9 +2806,7 @@ def _knowledge_corpus():
     from xbrain.knowledge.evaluation import load_corpus_from_store
 
     cfg = _config()
-    return cfg, load_corpus_from_store(
-        cfg.items_path, load_vocab(cfg.data_dir / "vocab.yaml"), cfg.topics_path
-    )
+    return cfg, load_corpus_from_store(cfg.items_path, load_vocab(cfg.vocab_path), cfg.topics_path)
 
 
 def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: bool) -> dict:
@@ -3014,10 +3012,12 @@ def _query_context(cfg: Config):
     options = _index_options(cfg)
     return QueryContext(
         store=load_store(cfg.items_path),
-        vocab=load_vocab(cfg.data_dir / "vocab.yaml"),
+        vocab=load_vocab(cfg.vocab_path),
         topic_pages=load_topic_pages(cfg.topics_path),
         index_dir=cfg.index_path,
         items_path=cfg.items_path,
+        vocab_path=cfg.vocab_path,
+        topics_path=cfg.topics_path,
         vault_dir=cfg.output_dir,
         language=cfg.output_language,
         max_matches_per_item=cfg.index_max_matches_per_item,
@@ -3046,9 +3046,11 @@ def index_build_command(
     report = build_module.build(
         cfg.index_path,
         load_store(cfg.items_path),
-        load_vocab(cfg.data_dir / "vocab.yaml"),
+        load_vocab(cfg.vocab_path),
         load_topic_pages(cfg.topics_path),
         cfg.items_path,
+        vocab_path=cfg.vocab_path,
+        topics_path=cfg.topics_path,
         options=_index_options(cfg),
         dry_run=dry_run,
         force=force,
@@ -3073,9 +3075,11 @@ def index_update_command(
     report = build_module.update(
         cfg.index_path,
         load_store(cfg.items_path),
-        load_vocab(cfg.data_dir / "vocab.yaml"),
+        load_vocab(cfg.vocab_path),
         load_topic_pages(cfg.topics_path),
         cfg.items_path,
+        vocab_path=cfg.vocab_path,
+        topics_path=cfg.topics_path,
         options=_index_options(cfg),
         dry_run=dry_run,
     )
@@ -3102,9 +3106,11 @@ def index_status_command(
     report = build_module.status(
         cfg.index_path,
         load_store(cfg.items_path),
-        load_vocab(cfg.data_dir / "vocab.yaml"),
+        load_vocab(cfg.vocab_path),
         load_topic_pages(cfg.topics_path),
         cfg.items_path,
+        vocab_path=cfg.vocab_path,
+        topics_path=cfg.topics_path,
         options=_index_options(cfg),
     )
     if json_out:

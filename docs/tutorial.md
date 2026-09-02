@@ -216,9 +216,10 @@ xbrain search "..." --topic agent-evaluation --kind x_video --author karpathy --
 ```
 
 After the next `enrich` or `topics`, run `xbrain index update` — it touches only what changed.
-If you forget, `search` tells you: it compares the store's timestamp against the one it was
-built from and warns before showing you a single result. `xbrain index status` says how many
-items have moved.
+If you forget, `search` tells you: it compares the timestamp and size of `items.json`,
+`vocab.yaml` and `topics.json` against the ones it was built from and warns before showing you a
+single result — all three files, because `topics` and `vocab` rewrite the last two without
+touching the first. `xbrain index status` says how many items and topic rows have moved.
 
 Costs, limits and the measured baseline: [`docs/knowledge-index.md`](./knowledge-index.md).
 
