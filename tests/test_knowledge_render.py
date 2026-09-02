@@ -407,10 +407,12 @@ def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
 
     Every C0 control except TAB and LF, plus DEL and the C1 range (U+009B is CSI on a
     terminal that honours 8-bit controls), is removed from every body line, title, summary
-    and excerpt. The text is otherwise shown whole and the fence intact; the tab survives.
-    Asserted on the ABSENCE of the bytes in the rendered text and on the fence still being
-    the only thing at column 0. Seen red before the fix: `\x1b` and `\x07` present in both
-    renderings.
+    and excerpt. The text is otherwise shown whole and the fence intact; the tab survives —
+    and so do the PARAMETERS of a sequence (`[2K`, `31m`): without their `ESC` they are inert
+    printable text, and leaving them visible shows the reader what the body carried instead
+    of pretending it did not. Asserted on the ABSENCE of the bytes in the rendered text and
+    on the fence still being the only thing at column 0. Seen red before the fix: `\x1b`
+    and `\x07` present in both renderings.
     """
     from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface
 
@@ -447,7 +449,7 @@ def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
     for byte in ("\x1b", "\x07", "\x00", "\x9b", "\x7f"):
         assert byte not in text, repr(byte)
     lines = text.splitlines()
-    assert lines.count("│ Real quote. erased?") == 2, lines
+    assert lines.count("│ Real quote.[2K[1A erased?") == 2, lines
     assert lines.count("│ \tindented nul 31m c1 del") == 2, "the tab survives, the controls do not"
     assert [h.split("]")[0] for h in lines if h.startswith("[")] == [
         "[post",
@@ -460,7 +462,7 @@ def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
     )
     searched = render_search(_response(results=(result,)))
     assert "\x1b" not in searched and "\x07" not in searched
-    assert "resumen (llm): ok  bad" in searched or "resumen (llm): ok bad" in searched
+    assert "resumen (llm): ok [2K bad" in searched, searched
 
 
 def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
