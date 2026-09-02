@@ -24,6 +24,7 @@ recorded in the execution report as a finding for Plan 01, not closed by a quiet
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 
 from xbrain.knowledge.contracts import (
@@ -150,7 +151,12 @@ def _verify_lines(result: SearchResult) -> list[str]:
     return [f"   → verifica con: xbrain get {result.item_id} {surfaces}"]
 
 
-def render_get(bundle: EvidenceBundle) -> str:
+def render_get(
+    bundle: EvidenceBundle,
+    *,
+    surfaces: Sequence[str] = (),
+    query: str | None = None,
+) -> str:
     """The human rendering of an evidence bundle (spec §7.3, §7.6).
 
     THIS VIEW IS FOR A HUMAN, NOT FOR AN AGENT. The surface for agents is `--json`, where
@@ -161,6 +167,15 @@ def render_get(bundle: EvidenceBundle) -> str:
     of its own — a forged header, byte-identical to the renderer's — stays visibly inside
     the body instead of standing where a header stands. The text is still shown whole; it is
     evidence. It just cannot impersonate the label above it.
+
+    `surfaces` and `query` are the REQUEST the bundle answers, and they are here for one
+    line: the continuation (H2). The cursor is an offset into a sequence — the chunks of the
+    selected surfaces in emitter order, or their ranking for a query — and the frozen bundle
+    does not carry what defined that sequence. A continuation printed without them resumed
+    inside the default selection and returned an empty page, or was refused by the cursor
+    decoder: a truncation whose only published continuation cannot be run is the silent cut
+    spec §9.3 forbids. The budget is not echoed: it bounds a page, it does not define the
+    sequence, and the pages stay disjoint and complete under any budget.
     """
     item = bundle.item
     lines = [
@@ -194,9 +209,26 @@ def render_get(bundle: EvidenceBundle) -> str:
     if bundle.truncated:
         lines += [
             "",
-            f"⚠ Truncado. Continúa con: xbrain get {item.item_id} --cursor {bundle.cursor}",
+            "⚠ Truncado. Continúa con: " + _continuation(item.item_id, bundle, surfaces, query),
         ]
     return "\n".join(lines)
+
+
+def _continuation(
+    item_id: str, bundle: EvidenceBundle, surfaces: Sequence[str], query: str | None
+) -> str:
+    """The `xbrain get` that resumes THIS sequence at `bundle.cursor`, runnable as printed.
+
+    Every `--surface` repeated in the order given, `--query` shell-quoted (a query is free
+    text and may carry spaces or quotes), then the cursor. Nothing else: what is not in
+    this line does not change which chunk comes next.
+    """
+    parts = [f"xbrain get {item_id}"]
+    parts += [f"--surface {name}" for name in surfaces]
+    if query:
+        parts.append(f"--query {shlex.quote(query)}")
+    parts.append(f"--cursor {bundle.cursor}")
+    return " ".join(parts)
 
 
 def _failure_lines(bundle: EvidenceBundle) -> list[str]:

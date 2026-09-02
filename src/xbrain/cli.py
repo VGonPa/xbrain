@@ -3219,7 +3219,9 @@ def get_command(
     if json_out:
         typer.echo(json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2))
     else:
-        typer.echo(render_get(bundle))
+        # The request travels with the bundle (H2): the continuation line has to repeat the
+        # surfaces and the query that define the sequence the cursor indexes.
+        typer.echo(render_get(bundle, surfaces=surface, query=query))
 
 
 def _run_sweep(cfg, cases, corpus, axes, strategy: str, report, *, json_out: bool) -> None:

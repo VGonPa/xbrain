@@ -301,6 +301,36 @@ def test_the_get_rendering_offers_the_cursor_when_truncated() -> None:
     assert "xbrain get 1884 --cursor 0:3" in text
 
 
+def test_the_continuation_command_reproduces_the_surfaces_and_the_query() -> None:
+    """H2 (gate Codex, round 04 — spec §9.3, acceptance 9): the cursor is an OFFSET into a
+    sequence, and the sequence is defined by `--surface` and `--query`. The printed
+    continuation carried neither, so followed literally it either resumed inside the DEFAULT
+    selection (`summary`) and returned an empty page without a word, or — with a query —
+    was refused by the cursor decoder. A continuation nobody can run is a silent cut with
+    extra steps.
+
+    The renderer receives the request's surfaces and query and echoes them; the query is
+    shell-quoted so the line is copy-pasteable as printed. `--budget` is deliberately NOT
+    echoed: it bounds a page, it does not define the sequence, and the pages stay disjoint
+    and complete under any budget.
+
+    Seen red before the fix: `TypeError` on the keyword arguments, and the line read
+    `xbrain get 1884 --cursor 0:3` for both requests.
+    """
+    positional = render_get(
+        _bundle(truncated=True, cursor="0:3"), surfaces=("external_article", "post")
+    )
+    assert "xbrain get 1884 --surface external_article --surface post --cursor 0:3" in positional
+
+    ranked = render_get(
+        _bundle(truncated=True, cursor="q:1"), surfaces=("external_article",), query="Alpha beta"
+    )
+    assert "xbrain get 1884 --surface external_article --query 'Alpha beta' --cursor q:1" in ranked
+
+    default = render_get(_bundle(truncated=True, cursor="0:3"))
+    assert "xbrain get 1884 --cursor 0:3" in default, "no surface asked for: none to repeat"
+
+
 def test_the_get_rendering_lists_the_surfaces_you_can_ask_for() -> None:
     """The body is withheld by default, so the NAMES are what make it reachable."""
     text = render_get(_bundle())

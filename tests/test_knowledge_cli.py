@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import shutil
 from pathlib import Path
 
@@ -570,6 +571,63 @@ def test_get_works_after_the_index_is_removed(workspace: Path) -> None:
         runner.invoke(app, ["get", "k03", "--surface", "external_article", "--json"])
     )
     assert payload["surfaces"][0]["surface_type"] == "external_article"
+
+
+@pytest.mark.parametrize(
+    "request_args",
+    [
+        pytest.param(["--surface", "external_article"], id="positional"),
+        pytest.param(["--surface", "external_article", "--query", "retrieval"], id="query"),
+    ],
+)
+def test_the_printed_continuation_command_continues_the_same_sequence(
+    workspace: Path, request_args: list[str]
+) -> None:
+    """H2 at the CLI: the continuation `get` prints is FOLLOWED LITERALLY, page after page.
+
+    The gate did exactly this and got an empty page on the positional route and a refused
+    cursor on the query route, because the printed line was `xbrain get ID --cursor C` with
+    no `--surface` and no `--query`. Each page's line is parsed with `shlex`, run as printed
+    (plus `--json` to read it back), and the walk must deliver something on every page,
+    repeat nothing, and reassemble what one unbounded call returns: the surface's text
+    verbatim on the positional route, the ranked chunk list on the query route.
+
+    Seen red before the fix: `the printed command led to an empty page` (positional) and
+    exit code 1 with `Cursor inválido` (query).
+    """
+    request = ["get", "k03", *request_args, "--budget", "500"]
+    first = runner.invoke(app, request)
+    assert first.exit_code == 0, first.output
+    first_page = _json_stdout(runner.invoke(app, [*request, "--json"]))
+    assert first_page["truncated"] is True, "the budget must force a continuation"
+    pages = [first_page]
+
+    line = first.output.splitlines()[-1]
+    for _ in range(20):
+        assert "Continúa con: xbrain get " in line, line
+        command = shlex.split(line.split("Continúa con: ", 1)[1])[1:]
+        followed = runner.invoke(app, [*command, "--json"])
+        assert followed.exit_code == 0, f"{command}: {followed.output}"
+        page = json.loads(followed.stdout)
+        assert page["chunks"] or page["surfaces"], f"{command} led to an empty page"
+        pages.append(page)
+        if not page["truncated"]:
+            break
+        line = runner.invoke(app, command).output.splitlines()[-1]
+    else:
+        pytest.fail("the printed continuations never finished paginating")
+
+    ids = [chunk["chunk_id"] for page in pages for chunk in page["chunks"]]
+    assert len(ids) == len(set(ids)), "a page repeated a chunk"
+    whole = _json_stdout(
+        runner.invoke(app, ["get", "k03", *request_args, "--budget", "10000000", "--json"])
+    )
+    if "--query" in request_args:
+        assert ids == [chunk["chunk_id"] for chunk in whole["chunks"]]
+    else:
+        texts = [chunk["text"] for page in pages for chunk in page["chunks"]]
+        texts += [surface["text"] for page in pages for surface in page["surfaces"]]
+        assert "".join(texts) == whole["surfaces"][0]["text"]
 
 
 def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:

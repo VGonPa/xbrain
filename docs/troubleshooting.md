@@ -332,6 +332,13 @@ which rewrote `item_topics` on a topic move and never the `topics` rows (then ev
 fingerprint matches and only this count is non-zero — H1). Either way `xbrain index update`:
 it rewrites exactly those rows and reports them as `N topics con miembros recalculados`.
 
+**The continuation `get` printed returned an empty page, or `Cursor inválido: 'q:N' es un cursor
+de --query`.** A cursor is an offset into a sequence, and the sequence is defined by the
+`--surface`s and the `--query` of the call that produced it: resuming without them lands
+inside the default selection (an empty page) or is refused by the decoder. Since round 04 the
+printed line repeats both (`xbrain get ID --surface … --query '…' --cursor C`, H2); if you typed
+the continuation by hand, pass the same `--surface` and `--query` as the first call.
+
 **`⚠ N chunk(s) excluido(s): su fingerprint no cuadra con su texto`** — a row whose fingerprint
 does not recompute over its own text: a hand-edited database, or a row written by a different
 chunker. Those chunks are **not returned** and are counted in `corrupt_chunks_excluded`, never

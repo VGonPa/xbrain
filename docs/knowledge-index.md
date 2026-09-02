@@ -300,6 +300,15 @@ the retriever.
 - **`get --query` paginates with a cursor (A-2).** The ranking is deterministic, so the cursor is
   `q:<offset>` into it; `truncated: true` always comes with one, and the two cursor shapes
   (`q:<offset>` for a query, `<surface>:<chunk>` positional) refuse each other by name.
+- **The human continuation repeats the request (H2, round 04).** A cursor is an offset into a
+  sequence, and the sequence is defined by `--surface` and `--query`; the frozen bundle carries
+  neither, so the line `get` printed — `xbrain get ID --cursor C` — resumed inside the DEFAULT
+  selection and returned an empty page on the positional route, and was refused by the cursor
+  decoder on the query route (the round-04 gate followed it literally). It now reads
+  `xbrain get ID --surface … [--query '…'] --cursor C`, shell-quoted, runnable as printed; a CLI
+  test follows each printed line page after page and reassembles the surface (positional) or
+  the ranked chunk list (query). `--budget` is not repeated: it bounds a page and does not
+  define the sequence.
 - **`get` keeps the ASR/VLM producer (A-4).** `transcribe_command` and `vision_command` travel in
   `QueryContext` from the same config definition the build uses, so a transcript's `producer` is
   the configured transcriber in `get` exactly as in the index.
