@@ -994,6 +994,111 @@ def test_status_search_and_update_ask_one_function_whether_the_base_exists(
     assert report.incomplete is True and report.advice == sentinel
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [("tokenize", "porter"), ("connective", "AND")],
+)
+def test_a_manifest_with_another_tokenizer_or_connective_is_refused_by_every_door(
+    built: Path, corpus, field: str, value: str
+) -> None:
+    """F7-8 (gate Fable, round 07): the manifest records `tokenize` and `connective`
+    «because they DECIDE every recall number» — and no door compared them. A manifest
+    edited to `tokenize: porter` / `connective: AND` was accepted by `status`, `search`
+    and `update` on the real index. The tokenizer is baked into the FTS DDL, so an index
+    built under one and queried under another is the M-1 shape (identical ids over rows
+    the code would not produce) with no guard; the connective moved mean recall@10 from
+    0.1429 to 0.8099 in Plan 01 M3. Both are compared where the other four versions are,
+    `load_compatible_manifest`, so the three doors refuse together.
+
+    Seen red on `9dfa34e`: every door accepted both values.
+    """
+    from xbrain.knowledge.search_service import QueryContext, search
+
+    store, vocab, pages = corpus
+    path = manifest_path(built / "index")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document[field] = value
+    path.write_text(json.dumps(document), encoding="utf-8")
+    context = QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=built / "index",
+        items_path=built / "items.json",
+    )
+
+    report = _status(built, store, corpus)
+    assert report.incomplete is True
+    assert field in report.advice and "xbrain index build --force" in report.advice
+    with pytest.raises(IndexIncompatibleError, match=field):
+        search("Quillfeather", context)
+    with pytest.raises(IndexIncompatibleError, match=field):
+        _update(built, store, corpus, dry_run=True)
+
+
+@pytest.mark.parametrize("read", ["_stored_fingerprints", "stored_topic_rows"])
+def test_a_database_error_past_quick_check_is_the_rebuild_advice_on_status_and_update(
+    built: Path, corpus, monkeypatch, read: str
+) -> None:
+    """F7-5 (gate Fable, round 07): the conversion `reading_base` performs — a
+    `DatabaseError` raised by a MAINTENANCE read after a clean `quick_check` becomes the
+    rebuild sentence — had no test of its own: with its body reduced to a bare `yield`,
+    495 tests stayed green, because what was pinned was the conversion INSIDE
+    `describe_base`, never the one around `_stored_fingerprints`, `stored_topic_rows` and
+    the update transaction. A guard that can be hollowed out with nothing red is the
+    fail-open cell of rule 11.
+
+    Staged as the read itself raising — the page it touches is not one `quick_check` or
+    the five counts read, which is exactly D-1's case — and asserted on both doors that
+    make the read. Both RAISE the converted sentence (D-1 wrapped `_index_contents` whole,
+    so `status` names the rebuild as an error rather than as a report — the CLI prints it
+    with exit 1, `test_a_damaged_root_page_never_reaches_the_operator_as_a_traceback`).
+    Seen red under the bare-`yield` mutation in an isolated copy: a raw
+    `sqlite3.DatabaseError` out of both doors.
+    """
+    from xbrain.knowledge.index_schema import REBUILD_ADVICE
+
+    store, _vocab, _pages = corpus
+
+    def torn(connection):
+        raise sqlite3.DatabaseError("database disk image is malformed (staged past page 1)")
+
+    monkeypatch.setattr(index_build, read, torn)
+
+    with pytest.raises(IndexIncompatibleError, match="staged past page 1") as refused:
+        _status(built, store, corpus)
+    assert REBUILD_ADVICE in str(refused.value)
+
+    if read == "_stored_fingerprints":
+        with pytest.raises(IndexIncompatibleError, match="staged past page 1") as refused:
+            _update(built, store, corpus, dry_run=True)
+        assert REBUILD_ADVICE in str(refused.value)
+
+
+def test_a_database_error_inside_the_update_transaction_is_the_rebuild_advice(
+    built: Path, corpus, monkeypatch
+) -> None:
+    """F7-5, the third read `reading_base` wraps: the transaction itself. A `DatabaseError`
+    raised while rewriting rows — a torn page under a table the deltas touch — is the
+    rebuild sentence, and the base is left as it was (the transaction rolls back).
+    Seen red under the bare-`yield` mutation: a raw `sqlite3.DatabaseError`.
+    """
+    from xbrain.knowledge.index_schema import REBUILD_ADVICE
+
+    store, _vocab, _pages = corpus
+    before = _db_counts(built)
+
+    def torn(*args, **kwargs):
+        raise sqlite3.DatabaseError("database disk image is malformed (staged in the transaction)")
+
+    monkeypatch.setattr(index_build, "_apply_update", torn)
+
+    with pytest.raises(IndexIncompatibleError, match="staged in the transaction") as refused:
+        _update(built, store, corpus)
+    assert REBUILD_ADVICE in str(refused.value)
+    assert _db_counts(built) == before
+
+
 def test_the_update_report_counts_the_topic_chunks_it_deletes(built: Path, corpus) -> None:
     """N-1 (gate Fable, round 06): `chunks_deleted` omitted what `_clear_topics` removed, so
     after a `topics.json`-only update the report read `+22,287 / -21,583` (net +704) while

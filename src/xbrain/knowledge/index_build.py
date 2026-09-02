@@ -1317,12 +1317,17 @@ def load_manifest(index_dir: Path) -> Manifest:
 def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = None) -> Manifest:
     """The manifest, REFUSED unless every version the code depends on matches (step 29).
 
-    Spec §9.3: *manifest incompatible: no se consulta parcialmente.* Four checks, not three.
+    Spec §9.3: *manifest incompatible: no se consulta parcialmente.* Six checks, not three.
     The plan names the schema, the emitter and the chunker; the fourth is the chunker
     PARAMETERS, because Plan 02 §7 sweeps `target x overlap` and a sweep that lands on new
     parameters without bumping `CHUNKER_VERSION` produces chunks cut differently under
     IDENTICAL ids — the worst case, since the id resolves and the text behind it is not what
-    it was.
+    it was. The fifth and sixth are the TOKENIZER and the CONNECTIVE (F7-8, round 07): the
+    manifest recorded them «because they decide every recall number» and no door compared
+    them — `tokenize: porter` / `connective: AND` were accepted by all three on the real
+    index. The tokenizer is baked into the FTS DDL, so a base built under one and queried
+    under another is the M-1 shape with no guard; the connective moved recall@10 from
+    0.1429 to 0.8099 in Plan 01 M3.
     """
     manifest = load_manifest(index_dir)
     mismatches = []
@@ -1334,6 +1339,10 @@ def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = 
         mismatches.append(f"chunker_version {manifest.chunker_version} != {CHUNKER_VERSION}")
     if params is not None and manifest.chunker_params != _params_dict(params):
         mismatches.append(f"chunker_params {manifest.chunker_params} != {_params_dict(params)}")
+    if manifest.tokenize != FTS_TOKENIZE:
+        mismatches.append(f"tokenize {manifest.tokenize!r} != {FTS_TOKENIZE!r}")
+    if manifest.connective != FTS_CONNECTIVE:
+        mismatches.append(f"connective {manifest.connective!r} != {FTS_CONNECTIVE!r}")
     if mismatches:
         raise IndexIncompatibleError(
             "El índice fue construido con otra versión: "
