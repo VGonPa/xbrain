@@ -26,13 +26,14 @@ Reindex after anything that changes indexable text:
 | you ran | what changed | run |
 |---|---|---|
 | `extract` / `fetch` / `import-archive` | new items, new bodies | `xbrain index update` |
-| `enrich` | summaries and topic assignments | `xbrain index update` |
+| `enrich` | summaries and topic assignments — and with the assignments, the MEMBERS and the `stale` bit of every topic row they enter or leave (H1) | `xbrain index update` |
 | `topics` | overviews and topic notes | `xbrain index update` |
 | `digest-video` / `describe` / `redescribe-frames` | transcripts, captions, image prose | `xbrain index update` |
 | `vocab` | topic descriptions — which enter every assigned item's PROFILE | `xbrain index update` (it rebuilds the profiles) |
 | `refresh-quoted` / any repair of a source's author, title, language or URL that leaves its body untouched | the attribution and locator `search` serves on every match (A-1) | `xbrain index update` — since round 03 the item fingerprint covers every column `surfaces` stores, not the text alone (G-5); before, this repair left `update` at «0 cambiados» and `search` serving the old author |
 | upgraded xbrain and `index update` refuses | the emitter, the chunker or the SCHEMA moved (schema **2** since round 02) | `xbrain index build --force` |
 | upgraded xbrain across round 03 and `index update` reports **every** item changed | the fingerprint's definition moved (G-5), so an index built before it compares unequal on all items — a ONE-TIME full rewrite (2,404 items, measured), after which the next `update` is back to 0 | nothing: let it run once |
+| upgraded xbrain across round 04 and `index status` reports `N topics con miembros desfasados` with 0 items changed | an index updated by the pre-H1 code kept the topic rows of every topic an `enrich` moved an item into or out of; `status` now reads those rows back and compares them | `xbrain index update` — it rewrites exactly those rows (`N topics con miembros recalculados`) and nothing else |
 
 **You do not have to remember.** Two independent signals say so for you:
 
@@ -41,7 +42,8 @@ Reindex after anything that changes indexable text:
   query, and it still ANSWERS, because possibly-stale evidence is usable as long as it says so;
 - `xbrain index status` loads the store and reports **how many** items changed, added or
   disappeared — a number, not a flag, because "something changed" does not distinguish a
-  `touch` from a hundred re-enriched items.
+  `touch` from a hundred re-enriched items — and, since round 04, **how many topic rows** the
+  base holds that are not what the store implies (`topics_changed`, H1).
 
 A `touch` with no edit is a false positive on the cheap signal, and that is accepted: a false
 positive costs one warning, a false negative costs serving stale evidence as fresh.
@@ -163,6 +165,27 @@ but `build` creates the file, `update` refuses before touching the disk, and eve
 five `COUNT(*)` (0.04 ms on the real index) against the manifest. With a manifest standing beside
 a missing database the advice names `xbrain index build --force`, because plain `build` refuses
 while a manifest exists.
+
+### The topic plane follows the assignments, or `status` says it does not (H1)
+
+`topics` stores each topic's primary and secondary members and its `stale` bit, and all three
+are functions of the items' assignments — which `enrich` rewrites. Until round 04 `update`
+decided the whole topic plane from the vocabulary and page fingerprints alone: an item moved
+from one topic to another rewrote the item and `item_topics`, and left `topics` listing the
+old members with the old `stale` bit under a manifest and a `status` that called the index
+healthy (the round-04 gate reproduced it on the fixture: k02 moved to `ai-policy`,
+`item_topics` said so, `topics` did not). CLAUDE.md rule 6, with the diagnostic instrument
+lying on top. Now the topic row is ONE projection (`topic_row`) shared by the writer and a
+comparator, the way the surface row is since G-5: `update` rewrites the rows whose members,
+`stale` bit, description or synthesis are not what the store implies (`topics_refreshed`, a
+row-only write — the topic surfaces and chunks depend on nothing in the membership and are
+left alone; a full `topics_rebuilt` still follows a vocabulary or page change), and `status`
+reads the rows back from the BASE and reports `topics_changed`, so an index whose item
+fingerprints all match and whose topic plane is behind anyway is declared, not blessed.
+`status` takes `vocab.yaml` and `topics.json` for that, exactly like `build` and `update`.
+Neither `search` nor `get` read those columns today — both derive membership from the live
+store — so the immediate consumer of the repair is the operator's instrument and Plan 04's
+graph, which will.
 
 ---
 

@@ -3102,6 +3102,8 @@ def index_status_command(
     report = build_module.status(
         cfg.index_path,
         load_store(cfg.items_path),
+        load_vocab(cfg.data_dir / "vocab.yaml"),
+        load_topic_pages(cfg.topics_path),
         cfg.items_path,
         options=_index_options(cfg),
     )
@@ -3124,6 +3126,7 @@ def _status_json(report) -> dict:
         "items_added": report.items_added,
         "items_changed": report.items_changed,
         "items_removed": report.items_removed,
+        "topics_changed": report.topics_changed,
         "behind": report.behind,
         "incomplete": report.incomplete,
         "advice": report.advice,

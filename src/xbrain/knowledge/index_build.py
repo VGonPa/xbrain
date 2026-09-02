@@ -63,7 +63,7 @@ from xbrain.knowledge.index_schema import (
 )
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.lexical_fts import FTS_CONNECTIVE, FTS_TOKENIZE
-from xbrain.knowledge.models import KnowledgeSurface
+from xbrain.knowledge.models import KnowledgeSurface, TopicRecord
 from xbrain.knowledge.profile import profile_text
 from xbrain.knowledge.surfaces import (
     CONTENT_KIND_TO_SURFACE_TYPES,
@@ -264,6 +264,9 @@ class UpdateReport:
     profiles_inserted: int
     profiles_deleted: int
     topics_rebuilt: bool
+    # H1: the topic ROWS rewritten because their members or `stale` bit moved while the
+    # vocabulary and the pages did not. 0 when `topics_rebuilt` took the whole plane.
+    topics_refreshed: int
     duration_seconds: float
     dry_run: bool
 
@@ -282,6 +285,10 @@ class StatusReport:
     items_added: int
     items_changed: int
     items_removed: int
+    # H1: topics whose stored row (members, `stale`, description, synthesis) is not the row
+    # the store implies now — read from the BASE, so an index whose item fingerprints all
+    # match and whose topic plane is behind anyway is still declared.
+    topics_changed: int
     behind: bool
     incomplete: bool
     advice: str
@@ -391,6 +398,49 @@ def surface_row(surface: KnowledgeSurface) -> SurfaceRow:
         surface.language,
         surface.fingerprint,
         len(surface.text),
+    )
+
+
+# The column order of `topics`, as ONE tuple type shared by the writer and the comparator (H1).
+TopicRow = tuple[
+    str,
+    str,
+    str | None,
+    str,
+    str | None,
+    int | None,
+    int,
+    str,
+    str,
+    str,
+    str | None,
+]
+
+
+def topic_row(record: TopicRecord) -> TopicRow:
+    """What the index STORES about a topic — the row `_write_topic_row` inserts, verbatim.
+
+    The same pattern as `surface_row` (G-5), for the same reason: one projection, two
+    readers. The writer binds it to the `INSERT`; `topic_rows_behind` compares it against
+    what the base holds. A membership-derived column — `primary_item_ids_json`,
+    `secondary_item_ids_json`, `stale` — therefore cannot be stored without being compared,
+    which is exactly what H1 lacked: `update` decided the whole topic plane from the
+    vocabulary and page fingerprints and never asked whether the members it had written were
+    still the members the store implies, so a topic move done by `enrich` rewrote
+    `item_topics` and left `topics` holding the old members under a healthy manifest.
+    """
+    return (
+        record.slug,
+        record.description.text,
+        record.overview.text if record.overview else None,
+        json.dumps([note.text for note in record.notes], ensure_ascii=False),
+        record.synthesized_at.isoformat() if record.synthesized_at else None,
+        record.post_count_at_synth,
+        int(record.stale),
+        json.dumps(list(record.primary_item_ids)),
+        json.dumps(list(record.secondary_item_ids)),
+        record.vocab_fingerprint,
+        record.synthesis_fingerprint,
     )
 
 
@@ -596,26 +646,7 @@ def write_topic(
     options: IndexOptions,
 ) -> None:
     """One topic's record and its three surfaces (spec §3.6)."""
-    record = topic_record(topic, page, primary_ids, secondary_ids)
-    index.connection.execute(
-        "INSERT OR REPLACE INTO topics (slug, description, overview, notes_json, "
-        "synthesized_at, post_count_at_synth, stale, primary_item_ids_json, "
-        "secondary_item_ids_json, vocab_fingerprint, synthesis_fingerprint) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            topic.slug,
-            record.description.text,
-            record.overview.text if record.overview else None,
-            json.dumps([note.text for note in record.notes], ensure_ascii=False),
-            record.synthesized_at.isoformat() if record.synthesized_at else None,
-            record.post_count_at_synth,
-            int(record.stale),
-            json.dumps(list(primary_ids)),
-            json.dumps(list(secondary_ids)),
-            record.vocab_fingerprint,
-            record.synthesis_fingerprint,
-        ),
-    )
+    _write_topic_row(index, topic_record(topic, page, primary_ids, secondary_ids))
     surfaces = topic_surfaces(topic, page)
     _write_surfaces(index, surfaces, counters)
     chunks = chunk_surfaces(surfaces, params=options.params)
@@ -661,6 +692,67 @@ def topic_membership(
         )
     )
     return primary, secondary
+
+
+def _write_topic_row(index: LexicalIndex, record: TopicRecord) -> None:
+    """The one `INSERT` into `topics` — the full writer and the membership refresh share it."""
+    index.connection.execute(
+        "INSERT OR REPLACE INTO topics (slug, description, overview, notes_json, "
+        "synthesized_at, post_count_at_synth, stale, primary_item_ids_json, "
+        "secondary_item_ids_json, vocab_fingerprint, synthesis_fingerprint) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        topic_row(record),
+    )
+
+
+def stored_topic_rows(connection: sqlite3.Connection) -> dict[str, TopicRow]:
+    """`{slug: the row the base holds}`, in `topic_row` column order — the comparison's left side."""
+    return {
+        row[0]: cast("TopicRow", tuple(row))
+        for row in connection.execute(
+            "SELECT slug, description, overview, notes_json, synthesized_at, "
+            "post_count_at_synth, stale, primary_item_ids_json, secondary_item_ids_json, "
+            "vocab_fingerprint, synthesis_fingerprint FROM topics"
+        )
+    }
+
+
+def expected_topic_records(
+    store: Mapping[str, Item], vocab: Sequence[Topic], topic_pages: Mapping[str, TopicPage]
+) -> dict[str, TopicRecord]:
+    """`{slug: the record the writer would insert NOW}` — the comparison's right side.
+
+    Built exactly as `build` builds it: the page from `topics.json`, the members from the
+    store, `stale` derived by `topic_record` from the live primary count. One derivation,
+    consumed by the build, the refresh and `status`.
+    """
+    return {
+        topic.slug: topic_record(
+            topic, topic_pages.get(topic.slug), *topic_membership(store, topic.slug)
+        )
+        for topic in vocab
+    }
+
+
+def topic_rows_behind(
+    connection: sqlite3.Connection,
+    store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
+) -> list[str]:
+    """The topics whose stored row is not the row the store implies, sorted (H1).
+
+    Members, `stale`, description, synthesis — the whole row, compared with `topic_row`. A
+    row that is missing from the base counts as behind. This is what `status` reports as
+    `topics_changed` and what `update` rewrites when the vocabulary and pages did not move.
+    """
+    return _topics_behind(
+        stored_topic_rows(connection), expected_topic_records(store, vocab, topic_pages)
+    )
+
+
+def _topics_behind(stored: Mapping[str, TopicRow], records: Mapping[str, TopicRecord]) -> list[str]:
+    return sorted(slug for slug, record in records.items() if stored.get(slug) != topic_row(record))
 
 
 # ---------------------------------------------------------------------------
@@ -1051,13 +1143,21 @@ def _apply_update(
     *,
     topics_rebuilt: bool,
     options: IndexOptions,
-) -> tuple[int, int]:
-    """Delete then rewrite, inside the CALLER'S transaction. Returns `(chunks, profiles)` gone.
+) -> tuple[int, int, int]:
+    """Delete then rewrite, inside the CALLER'S transaction.
+
+    Returns `(chunks gone, profiles gone, topic rows refreshed)`.
 
     THE VOCABULARY DRAGS THE ITEM PLANE WITH IT. The profile composes each assigned topic's
     DESCRIPTION (spec §5.1.A), so a `vocab.yaml` edit rewrites indexed text on every affected
     item — not only on the topic plane. Rebuilding the topic tables alone would leave the
     profiles quoting a description the vocabulary no longer holds, and nothing would say so.
+
+    AND THE ITEMS DRAG THE TOPIC ROWS WITH THEM (H1). `topics` stores who the members are
+    and whether the page is stale, and both are functions of the items' assignments — which
+    `enrich` rewrites. When the plane is not rebuilt, the rows whose members or `stale` bit
+    moved are rewritten through the same projection the full writer uses; the topic
+    surfaces and chunks are left alone, because nothing they hold depends on membership.
     """
     rewrite = sorted(store) if topics_rebuilt else delta.added + delta.changed
     deleted_chunks = 0
@@ -1080,7 +1180,26 @@ def _apply_update(
                 counters,
                 options=options,
             )
-    return deleted_chunks, deleted_profiles
+        return deleted_chunks, deleted_profiles, 0
+    return deleted_chunks, deleted_profiles, _refresh_topic_rows(index, store, vocab, topic_pages)
+
+
+def _refresh_topic_rows(
+    index: LexicalIndex,
+    store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
+) -> int:
+    """Rewrite ONLY the topic rows the store no longer agrees with (H1). Returns how many.
+
+    Compared before written — the same comparison `status` reports — so a store that did
+    not move rewrites no row, and `update` with no changes stays at zero writes.
+    """
+    records = expected_topic_records(store, vocab, topic_pages)
+    behind = _topics_behind(stored_topic_rows(index.connection), records)
+    for slug in behind:
+        _write_topic_row(index, records[slug])
+    return len(behind)
 
 
 def _update_report(
@@ -1089,6 +1208,7 @@ def _update_report(
     deleted_chunks: int,
     deleted_profiles: int,
     topics_rebuilt: bool,
+    topics_refreshed: int,
     started: float,
     *,
     dry_run: bool,
@@ -1102,6 +1222,7 @@ def _update_report(
         profiles_inserted=counters.profiles,
         profiles_deleted=deleted_profiles,
         topics_rebuilt=topics_rebuilt,
+        topics_refreshed=topics_refreshed,
         duration_seconds=time.perf_counter() - started,
         dry_run=dry_run,
     )
@@ -1146,7 +1267,14 @@ def _next_manifest(
     )
 
 
-def _status_advice(incomplete: bool, delta: _Delta, *, behind: bool, unusable: str = "") -> str:
+def _status_advice(
+    incomplete: bool,
+    delta: _Delta,
+    *,
+    behind: bool,
+    unusable: str = "",
+    topics_changed: int = 0,
+) -> str:
     """The command that fixes what `status` just found — never a bare diagnosis.
 
     `unusable` is the sentence for a manifest that EXISTS but cannot be used — another
@@ -1161,7 +1289,7 @@ def _status_advice(incomplete: bool, delta: _Delta, *, behind: bool, unusable: s
             "El índice está incompleto o no tiene manifest: ninguna consulta lo usará. "
             "Constrúyelo con `xbrain index build`."
         )
-    if delta.added or delta.removed or delta.changed or behind:
+    if delta.added or delta.removed or delta.changed or behind or topics_changed:
         return UPDATE_ADVICE
     return ""
 
@@ -1203,10 +1331,11 @@ def update(
     counters = WriteCounters()
     deleted_chunks = 0
     deleted_profiles = 0
+    topics_refreshed = 0
 
     try:
         with connection:
-            deleted_chunks, deleted_profiles = _apply_update(
+            deleted_chunks, deleted_profiles, topics_refreshed = _apply_update(
                 connection,
                 index,
                 store,
@@ -1223,7 +1352,14 @@ def update(
     except _DryRun:
         connection.close()
         return _update_report(
-            delta, counters, deleted_chunks, deleted_profiles, topics_rebuilt, started, dry_run=True
+            delta,
+            counters,
+            deleted_chunks,
+            deleted_profiles,
+            topics_rebuilt,
+            topics_refreshed,
+            started,
+            dry_run=True,
         )
     finally:
         if not connection_closed(connection):
@@ -1234,7 +1370,14 @@ def update(
         _next_manifest(manifest, store, vocab, topic_pages, items_path, tallies, options=options),
     )
     return _update_report(
-        delta, counters, deleted_chunks, deleted_profiles, topics_rebuilt, started, dry_run=False
+        delta,
+        counters,
+        deleted_chunks,
+        deleted_profiles,
+        topics_rebuilt,
+        topics_refreshed,
+        started,
+        dry_run=False,
     )
 
 
@@ -1312,13 +1455,23 @@ def _status_manifest(index_dir: Path, options: IndexOptions) -> tuple[Manifest |
     return manifest, ""
 
 
-def _index_contents(index_dir: Path) -> tuple[dict[str, int], dict[str, str]]:
-    """`(row counts per plane, {item_id: stored fingerprint})`, or two empties with no base."""
+def _index_contents(
+    index_dir: Path,
+) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow]]:
+    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row})`.
+
+    Three empties when there is no base: with nothing stored, every item is "added" and
+    every topic is "behind", which is the truthful reading of an index that does not exist.
+    """
     if not db_path(index_dir).exists():
-        return {}, {}
+        return {}, {}, {}
     connection = open_index(db_path(index_dir), read_only=True)
     try:
-        return count_rows(connection), _stored_fingerprints(connection)
+        return (
+            count_rows(connection),
+            _stored_fingerprints(connection),
+            stored_topic_rows(connection),
+        )
     finally:
         connection.close()
 
@@ -1337,6 +1490,8 @@ def _mismatch_advice(manifest: Manifest, counts: Mapping[str, int]) -> str:
 def status(
     index_dir: Path,
     store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
     items_path: Path,
     *,
     options: IndexOptions | None = None,
@@ -1347,15 +1502,25 @@ def status(
     and computing a fingerprint per item. That is what lets it answer *how many* items
     changed instead of merely *something did* — and the difference decides whether a rebuild
     is worth its minutes.
+
+    It takes the vocabulary and the pages like `build` and `update` do (H1), because the
+    topic plane is derived from all three, and it reads the TOPIC ROWS back from the base:
+    `topics_changed` counts the topics whose stored members, `stale` bit, description or
+    synthesis are not what the store implies now. An index whose item fingerprints all
+    match can still be behind on that plane — the pre-H1 `update` left it that way on every
+    topic move — and an instrument that only compared item fingerprints called it healthy.
     """
     options = options or IndexOptions()
     manifest, unusable = _status_manifest(index_dir, options)
-    counts, stored = _index_contents(index_dir)
+    counts, stored, stored_topics = _index_contents(index_dir)
     if manifest is not None and not unusable:
         unusable = _mismatch_advice(manifest, counts)
 
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
     delta = _classify(current, stored)
+    topics_changed = len(
+        _topics_behind(stored_topics, expected_topic_records(store, vocab, topic_pages))
+    )
     behind = manifest is not None and manifest.store_signal != StoreSignal.of(items_path)
     incomplete = manifest is None or bool(unusable)
     return StatusReport(
@@ -1364,7 +1529,10 @@ def status(
         items_added=len(delta.added),
         items_changed=len(delta.changed),
         items_removed=len(delta.removed),
+        topics_changed=topics_changed,
         behind=behind,
         incomplete=incomplete,
-        advice=_status_advice(incomplete, delta, behind=behind, unusable=unusable),
+        advice=_status_advice(
+            incomplete, delta, behind=behind, unusable=unusable, topics_changed=topics_changed
+        ),
     )

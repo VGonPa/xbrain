@@ -67,6 +67,12 @@ def _build(workspace: Path, corpus, **kwargs) -> index_build.BuildReport:
     )
 
 
+def _status(workspace: Path, store, corpus) -> index_build.StatusReport:
+    """`status` takes the vocabulary and the pages like `build`/`update` do (H1)."""
+    _store, vocab, pages = corpus
+    return index_build.status(workspace / "index", store, vocab, pages, workspace / "items.json")
+
+
 # ---------------------------------------------------------------------------
 # 3 — the manifest records everything spec §5.6 asks for
 # ---------------------------------------------------------------------------
@@ -288,7 +294,7 @@ def test_an_interrupted_forced_rebuild_leaves_no_manifest_behind(workspace, corp
     assert not manifest_path(workspace / "index").exists(), (
         "the OLD manifest survived a forced rebuild: a query would trust it over an empty base"
     )
-    report = index_build.status(workspace / "index", store, workspace / "items.json")
+    report = _status(workspace, store, corpus)
     assert report.incomplete is True
     assert "xbrain index build" in report.advice
 
@@ -314,7 +320,7 @@ def test_status_calls_an_index_without_a_manifest_incomplete(workspace, corpus) 
     """The other half of step 9: the state is REPORTED, not merely absent."""
     _build(workspace, corpus)
     manifest_path(workspace / "index").unlink()
-    report = index_build.status(workspace / "index", corpus[0], workspace / "items.json")
+    report = _status(workspace, corpus[0], corpus)
     assert report.incomplete is True
     assert "xbrain index build" in report.advice
 
@@ -427,7 +433,7 @@ def test_status_reports_how_many_items_changed(workspace, corpus) -> None:
     """
     store, vocab, pages = corpus
     _build(workspace, corpus)
-    clean = index_build.status(workspace / "index", store, workspace / "items.json")
+    clean = _status(workspace, store, corpus)
     assert clean.items_changed == 0 and clean.items_added == 0 and clean.items_removed == 0
 
     def reenriched(item: Item) -> Item:
@@ -449,11 +455,68 @@ def test_status_reports_how_many_items_changed(workspace, corpus) -> None:
     del changed["k04"]
     changed["k98"] = store["k05"].model_copy(update={"id": "k98"})
     changed["k99"] = store["k06"].model_copy(update={"id": "k99"})
-    after = index_build.status(workspace / "index", changed, workspace / "items.json")
+    after = _status(workspace, changed, corpus)
     assert after.items_changed == 2
     assert after.items_removed == 2
     assert after.items_added == 2
     assert "xbrain index update" in after.advice
+
+
+def test_status_declares_topic_rows_that_do_not_hold_what_the_store_implies(
+    workspace, corpus
+) -> None:
+    """H1's other half (gate Codex, round 04): the diagnostic instrument said HEALTHY.
+
+    Two states, both of which `status` must name. First, the store moved an item's topic
+    and nobody reindexed: `status` already counted the item, and it now also counts the
+    TOPICS whose stored membership differs from what the store implies — two of them, since
+    k02 leaves one and joins the other. Second, and the one that proves `status` reads the
+    BASE rather than re-deriving everything from item fingerprints: every item fingerprint
+    matches and a topic row is behind anyway — the state the pre-fix `update` produced on
+    every topic move, and the state any index updated by that code is in today. The base is
+    edited by hand to reach it, the way C-3 amputates the topic plane behind the manifest.
+    The `update` it names repairs exactly that row and nothing else.
+
+    Seen red before the fix: `advice == ''` and no `topics_changed` in the report.
+    """
+    from xbrain.knowledge.index_schema import db_path, open_index
+
+    store, _vocab, _pages = corpus
+    _build(workspace, corpus)
+    clean = _status(workspace, store, corpus)
+    assert clean.advice == ""
+
+    changed = dict(store)
+    changed["k02"] = store["k02"].model_copy(
+        update={
+            "enriched": store["k02"].enriched.model_copy(
+                update={"primary_topic": "ai-policy", "topics": ["ai-policy"]}
+            )
+        }
+    )
+    moved = _status(workspace, changed, corpus)
+    assert "xbrain index update" in moved.advice
+
+    connection = open_index(db_path(workspace / "index"))
+    with connection:
+        connection.execute(
+            "UPDATE topics SET primary_item_ids_json = '[]', stale = 1 WHERE slug = 'ai-policy'"
+        )
+    connection.close()
+    behind = _status(workspace, store, corpus)
+    assert "xbrain index update" in behind.advice, "status read the base and found it behind"
+    assert behind.items_changed == 0, "every item fingerprint still matches"
+
+    assert clean.topics_changed == 0
+    assert (moved.items_changed, moved.topics_changed) == (1, 2)
+    assert behind.topics_changed == 1
+
+    report = index_build.update(
+        workspace / "index", store, corpus[1], corpus[2], workspace / "items.json"
+    )
+    assert (report.items_changed, report.topics_refreshed) == (0, 1)
+    repaired = _status(workspace, store, corpus)
+    assert repaired.advice == "" and repaired.topics_changed == 0
 
 
 def test_status_and_update_see_the_corruption_search_would_hit(workspace, corpus) -> None:
@@ -476,7 +539,7 @@ def test_status_and_update_see_the_corruption_search_would_hit(workspace, corpus
     connection.close()
 
     with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
-        index_build.status(workspace / "index", store, workspace / "items.json")
+        _status(workspace, store, corpus)
     with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
         index_build.update(
             workspace / "index", store, vocab, pages, workspace / "items.json", dry_run=True
@@ -491,14 +554,10 @@ def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(workspa
     fresh. It fails towards the warning, like `origin: unknown -> llm_synthesis`.
     """
     _build(workspace, corpus)
-    assert (
-        index_build.status(workspace / "index", corpus[0], workspace / "items.json").behind is False
-    )
+    assert _status(workspace, corpus[0], corpus).behind is False
     path = workspace / "items.json"
     path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
-    assert (
-        index_build.status(workspace / "index", corpus[0], workspace / "items.json").behind is True
-    )
+    assert _status(workspace, corpus[0], corpus).behind is True
 
 
 # ---------------------------------------------------------------------------

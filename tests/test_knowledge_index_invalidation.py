@@ -75,6 +75,12 @@ def _update(data: Path, store, corpus, **kwargs) -> index_build.UpdateReport:
     return index_build.update(data / "index", store, vocab, pages, data / "items.json", **kwargs)
 
 
+def _status(data: Path, store, corpus) -> index_build.StatusReport:
+    """`status` takes the vocabulary and the pages like `build`/`update` do (H1)."""
+    _vocab_store, vocab, pages = corpus
+    return index_build.status(data / "index", store, vocab, pages, data / "items.json")
+
+
 def _edit_summary(item: Item, text: str) -> Item:
     """The change `enrich` actually makes: a new summary and a new `enriched_at`."""
     return item.model_copy(
@@ -87,6 +93,27 @@ def _edit_summary(item: Item, text: str) -> Item:
             )
         }
     )
+
+
+def _reassign(item: Item, slug: str) -> Item:
+    """The OTHER change `enrich` makes: a new topic assignment, text untouched (H1)."""
+    return item.model_copy(
+        update={
+            "enriched": item.enriched.model_copy(update={"primary_topic": slug, "topics": [slug]})
+        }
+    )
+
+
+def _topic_rows(data: Path) -> dict[str, tuple[list[str], list[str], int]]:
+    """`{slug: (primary ids, secondary ids, stale)}` as the BASE holds them."""
+    return {
+        slug: (json.loads(primary), json.loads(secondary), stale)
+        for slug, primary, secondary, stale in _rows(
+            data,
+            "SELECT slug, primary_item_ids_json, secondary_item_ids_json, stale FROM topics "
+            "ORDER BY slug",
+        )
+    }
 
 
 def _rows(data: Path, sql: str, *params) -> list:
@@ -108,10 +135,15 @@ def test_update_with_no_changes_writes_nothing(built: Path, corpus) -> None:
     """
     store, _vocab, _pages = corpus
     before = _rows(built, "SELECT chunk_id, rowid FROM chunks ORDER BY rowid")
+    topics_before = _rows(built, "SELECT * FROM topics ORDER BY slug")
     report = _update(built, store, corpus)
     assert (report.items_added, report.items_changed, report.items_removed) == (0, 0, 0)
     assert (report.chunks_inserted, report.chunks_deleted) == (0, 0)
     assert _rows(built, "SELECT chunk_id, rowid FROM chunks ORDER BY rowid") == before
+    # The topic ROWS too (H1): the membership refresh compares before it writes, so a
+    # store that did not move rewrites no topic row either.
+    assert _rows(built, "SELECT * FROM topics ORDER BY slug") == topics_before
+    assert report.topics_refreshed == 0
 
 
 def test_update_touches_only_the_changed_item(built: Path, corpus) -> None:
@@ -357,11 +389,11 @@ def test_update_refreshes_the_manifest_signals(built: Path, corpus) -> None:
     changed = dict(store)
     changed["k02"] = _edit_summary(store["k02"], "otro resumen")
     _write_store(built / "items.json", changed)
-    assert index_build.status(built / "index", changed, built / "items.json").behind is True
+    assert _status(built, changed, corpus).behind is True
 
     _update(built, changed, corpus)
 
-    after = index_build.status(built / "index", changed, built / "items.json")
+    after = _status(built, changed, corpus)
     assert after.behind is False and after.items_changed == 0
 
 
@@ -375,7 +407,7 @@ def test_a_dry_run_update_does_not_refresh_the_manifest(built: Path, corpus) -> 
 
     _update(built, changed, corpus, dry_run=True)
 
-    assert index_build.status(built / "index", changed, built / "items.json").behind is True
+    assert _status(built, changed, corpus).behind is True
 
 
 def test_update_does_not_touch_items_json(built: Path, corpus) -> None:
@@ -527,7 +559,7 @@ def test_update_refuses_a_database_that_disagrees_with_its_manifest(built: Path,
         _update(built, store, corpus)
     assert "topics" in str(caught.value), "names WHICH plane disagrees"
 
-    report = index_build.status(built / "index", store, built / "items.json")
+    report = _status(built, store, corpus)
     assert report.incomplete is True
     assert "xbrain index build --force" in report.advice
     assert "topics" in report.advice
@@ -668,7 +700,7 @@ def test_update_refuses_an_index_missing_a_table_instead_of_recreating_it_empty(
         _update(built, store, corpus)
     assert table in str(caught.value), "names WHAT is missing, not only that something is"
     with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
-        index_build.status(built / "index", store, built / "items.json")
+        _status(built, store, corpus)
     assert table in str(caught.value)
 
 
@@ -689,6 +721,58 @@ def test_status_declares_a_manifest_the_code_cannot_use(built: Path, corpus) -> 
     raw["chunker_version"] = "xbrain-knowledge-chunker/v0"
     path.write_text(json.dumps(raw), encoding="utf-8")
 
-    report = index_build.status(built / "index", store, built / "items.json")
+    report = _status(built, store, corpus)
     assert report.incomplete is True
     assert "xbrain index build --force" in report.advice
+
+
+# ---------------------------------------------------------------------------
+# H1 — a changed topic ASSIGNMENT reaches the topic plane, not only `item_topics`
+# ---------------------------------------------------------------------------
+
+
+def test_update_refreshes_the_topic_rows_when_an_items_topics_move(built: Path, corpus) -> None:
+    """H1 (gate Codex, round 04 — CLAUDE.md rule 6 on the topic plane).
+
+    `topics` stores `primary_item_ids_json`, `secondary_item_ids_json` and `stale`, but
+    `topics_rebuilt` looked ONLY at the vocabulary and topic-page fingerprints, so a change
+    of `Item.enriched.primary_topic` / `topics` — exactly what `enrich` writes — rewrote the
+    item and `item_topics` and left the topic rows holding the OLD members and the OLD
+    `stale` bit, while the manifest and `status` declared the index healthy. Reproduced on
+    the fixture: k02 moved from `agent-evaluation` to `ai-policy`, `item_topics` said
+    `ai-policy`, `topics` still listed k02 under `agent-evaluation`, `stale=0` on both.
+
+    The fix is NARROW on purpose: the vocabulary and the pages did not move, so the topic
+    SURFACES and CHUNKS are untouched (their rowids prove it) and only the rows whose
+    membership or staleness differs are rewritten — through the same row projection the
+    full writer uses. `stale` flips on both topics because the live primary count no longer
+    equals `post_count_at_synth` (2 and 4 in the fixture pages).
+
+    Seen red before the fix: the `topics` rows after the update were identical to before.
+    """
+    store, _vocab, _pages = corpus
+    before = _topic_rows(built)
+    assert before["agent-evaluation"] == (["k02", "k08"], [], 0)
+    assert before["ai-policy"] == (["k03", "k04", "k07", "k11"], [], 0)
+    topic_chunks_before = _rows(
+        built, "SELECT chunk_id, rowid FROM chunks WHERE owner_type = 'topic' ORDER BY rowid"
+    )
+
+    changed = dict(store)
+    changed["k02"] = _reassign(store["k02"], "ai-policy")
+    _write_store(built / "items.json", changed)
+    report = _update(built, changed, corpus)
+
+    after = _topic_rows(built)
+    assert after["ai-policy"] == (["k02", "k03", "k04", "k07", "k11"], [], 1)
+    assert after["agent-evaluation"] == (["k08"], [], 1)
+    assert (
+        _rows(built, "SELECT chunk_id, rowid FROM chunks WHERE owner_type = 'topic' ORDER BY rowid")
+        == topic_chunks_before
+    ), "the topic surfaces and chunks did not change, so they must not be rewritten"
+    assert report.topics_rebuilt is False, "vocabulary and pages did not move"
+    assert report.topics_refreshed == 2
+
+    status = _status(built, changed, corpus)
+    assert status.items_changed == 0 and status.topics_changed == 0
+    assert status.advice == ""

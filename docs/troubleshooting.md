@@ -324,6 +324,14 @@ the failure that actually happens, because indexing is manual by decision. `xbra
 tells you **how many** items changed. A `touch` on `items.json` with no edit also trips it: a
 false positive costs one warning, a false negative costs serving stale evidence as fresh.
 
+**`N topics con miembros desfasados`** from `index status` (`topics_changed` in `--json`) — the
+topic rows in the base do not list the members the store implies now, or their `stale` bit is
+wrong. Two ways in: an `enrich` moved items between topics and nobody reindexed (then
+`items_changed` is non-zero too), or the index was last updated by a version before round 04,
+which rewrote `item_topics` on a topic move and never the `topics` rows (then every item
+fingerprint matches and only this count is non-zero — H1). Either way `xbrain index update`:
+it rewrites exactly those rows and reports them as `N topics con miembros recalculados`.
+
 **`⚠ N chunk(s) excluido(s): su fingerprint no cuadra con su texto`** — a row whose fingerprint
 does not recompute over its own text: a hand-edited database, or a row written by a different
 chunker. Those chunks are **not returned** and are counted in `corrupt_chunks_excluded`, never

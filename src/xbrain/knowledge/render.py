@@ -236,6 +236,7 @@ def render_status(report: StatusReport) -> str:
         f"  respecto al store: +{report.items_added} nuevos"
         f" · {report.items_changed} cambiados"
         f" · -{report.items_removed} borrados"
+        f" · {report.topics_changed} topics con miembros desfasados"
         f" · señal barata {'DESFASADA' if report.behind else 'al día'}"
     )
     if report.incomplete:
@@ -269,7 +270,12 @@ def render_update(report: UpdateReport) -> str:
         [
             f"{prefix}+{report.items_added} nuevos · {report.items_changed} cambiados"
             f" · -{report.items_removed} borrados"
-            + (" · topics y perfiles recalculados" if report.topics_rebuilt else ""),
+            + (" · topics y perfiles recalculados" if report.topics_rebuilt else "")
+            + (
+                f" · {report.topics_refreshed} topics con miembros recalculados"
+                if report.topics_refreshed
+                else ""
+            ),
             f"  chunks +{report.chunks_inserted} / -{report.chunks_deleted}"
             f" · perfiles +{report.profiles_inserted} / -{report.profiles_deleted}",
             f"  {report.duration_seconds:.1f}s",

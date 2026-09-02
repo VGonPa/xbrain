@@ -527,6 +527,41 @@ def test_index_status_reports_the_store_delta(workspace: Path) -> None:
     assert payload["items_changed"] == 2 and payload["behind"] is True
 
 
+def test_index_status_and_update_report_the_topic_rows_behind(workspace: Path) -> None:
+    """H1 at the CLI: a topic move is declared by `status` and repaired by `update`.
+
+    Editing two SUMMARIES leaves `topics_changed` at 0 — the count is about the topic plane,
+    not a copy of `items_changed`; moving k02's assignment puts it at 2. Then `update`
+    reports the two rows it refreshed, and `status` is clean again. The human `status` line
+    carries the number too, because a count only the JSON shows is a count nobody reads.
+
+    Seen red before the fix: `topics_changed` absent from the JSON, `status` clean after
+    the move, and `update` reporting nothing about the topic plane.
+    """
+    runner.invoke(app, ["index", "build"])
+    items_path = workspace / "data" / "items.json"
+    raw = json.loads(items_path.read_text(encoding="utf-8"))
+    for item_id in ("k03", "k04"):
+        raw[item_id]["enriched"]["summary"] = f"un resumen completamente distinto para {item_id}"
+    items_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert payload["items_changed"] == 2 and payload["topics_changed"] == 0
+
+    raw["k02"]["enriched"]["primary_topic"] = "ai-policy"
+    raw["k02"]["enriched"]["topics"] = ["ai-policy"]
+    items_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert payload["items_changed"] == 3 and payload["topics_changed"] == 2
+    human = runner.invoke(app, ["index", "status"])
+    assert "2 topics" in human.output, human.output
+
+    updated = _json_stdout(runner.invoke(app, ["index", "update", "--json"]))
+    assert updated["items_changed"] == 3 and updated["topics_refreshed"] == 2
+    assert updated["topics_rebuilt"] is False
+    payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert payload["items_changed"] == 0 and payload["topics_changed"] == 0
+
+
 def test_get_works_after_the_index_is_removed(workspace: Path) -> None:
     """Acceptance 9 at the CLI: `get` reads the store, so the index can be gone."""
     runner.invoke(app, ["index", "build"])

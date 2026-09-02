@@ -836,6 +836,16 @@ stamp; and a timestamp is a proxy, so a summary edited by hand changes the index
 leaves it unmoved. Hashing the surface fingerprints plus the filterable metadata asks the
 question directly and reaches every item.
 
+**And the items drag the topic ROWS with them (H1, round 04).** `topics` stores each topic's
+members and its `stale` bit, both functions of the items' assignments, and `update` used to
+decide the whole topic plane from the vocabulary and page fingerprints alone — so an `enrich`
+that moved an item rewrote `item_topics` and left `topics` holding the old members under a
+healthy manifest. The row is now one projection (`topic_row`) shared by the writer and a
+comparator, like `surface_row`: `update` rewrites only the rows the store no longer agrees with
+(`topics_refreshed`), and `status` reads them back and reports `topics_changed` — taking
+`vocab.yaml` and `topics.json` like `build` and `update`, because the plane is derived from all
+three.
+
 A chunk whose fingerprint does not recompute over its own text is **not returned** and is counted
 in `corrupt_chunks_excluded`. A query never repairs the index — the connection is opened
 `file:…?mode=ro`, so a write raises rather than being a promise.
