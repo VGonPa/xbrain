@@ -297,6 +297,14 @@ the retriever.
   with the chunk's character range on top. The human view prints `autor: @handle (Name)` under a
   match whose author is not the item's. Until round 02 the index stored both and `search` threw
   them away: k07's quoted post came back with `attribution: null` under the poster's name.
+- **And `get` names it on every surface AND every chunk it renders (H3, round 04).** The chunk
+  branch of `render_get` printed type, offsets and origin only, under a bundle header naming the
+  ITEM's author — so k07's quoted post, which arrives as a CHUNK when it is paged or prioritised
+  by `--query`, sat under `@vgonpa` with nothing saying `@othervoice` wrote it, while the JSON was
+  right. The rule is now ONE function for the search match, the surface header and the chunk
+  header: the text's own author is named whenever it differs from the item's
+  (`[quoted_post 0:188] origin=source · autor: @othervoice (Other Voice)`). The poster is not the
+  author of what they quote.
 - **`get --query` paginates with a cursor (A-2).** The ranking is deterministic, so the cursor is
   `q:<offset>` into it; `truncated: true` always comes with one, and the two cursor shapes
   (`q:<offset>` for a query, `<surface>:<chunk>` positional) refuse each other by name.

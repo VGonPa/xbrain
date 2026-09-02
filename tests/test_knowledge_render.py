@@ -421,3 +421,54 @@ def test_a_match_with_its_own_author_is_rendered_with_that_author() -> None:
     assert not any(line.startswith("autor: @karpathy") for line in lines), (
         "the poster's own surfaces carry no separate author line"
     )
+
+
+def test_a_chunk_with_its_own_author_is_rendered_with_that_author() -> None:
+    """H3 (gate Codex, round 04) — the attribution rule CLAUDE.md says was paid for in blood,
+    reintroduced on the chunk branch of `render_get`. The JSON was right
+    (`KnowledgeChunk.attribution` carries the quoted author) and the whole-surface branch
+    showed it, but a CHUNK — what a quoted post becomes when it is paginated or prioritised
+    by `--query` — printed only type, offsets and origin under a bundle header that names
+    the ITEM's author. A quoted post read as the poster's words. The poster is not the
+    author of what they quote.
+
+    One rule for both branches, the one `render_search` already applies: the surface's or
+    chunk's own author is named on its header whenever it differs from the item's. Asserted
+    on the `autor:` label on the CHUNK's header line — not on the handle appearing somewhere,
+    which the JSON would satisfy — and on its absence when the author is the item's own.
+
+    Seen red before the fix: the chunk header carried no `autor:`.
+    """
+    from xbrain.knowledge.models import KnowledgeChunk
+
+    def chunk(surface_type, attribution, chunk_id):
+        return KnowledgeChunk(
+            chunk_id=chunk_id,
+            surface_id=chunk_id.rsplit(":", 2)[0],
+            owner_type="item",
+            owner_id="1884",
+            surface_type=surface_type,
+            text="Lo que dijo la persona citada.",
+            chunk_index=0,
+            char_start=0,
+            char_end=30,
+            origin="source",
+            trust_class="primary_source",
+            derived=False,
+            attribution=attribution,
+            fingerprint="c" * 64,
+        )
+
+    quoted = chunk(
+        "quoted_post",
+        Author(handle="othervoice", name="Other Voice"),
+        "item:1884:quoted_post:abc:0:v2",
+    )
+    own = chunk("post", AUTHOR, "item:1884:post:0:0:v2")
+    lines = render_get(_bundle(chunks=(quoted, own))).splitlines()
+    headers = [line for line in lines if line.startswith("[")]
+    assert len(headers) == 2, lines
+    assert headers[0].startswith("[quoted_post 0:30]")
+    assert "autor: @othervoice (Other Voice)" in headers[0], headers[0]
+    assert headers[1].startswith("[post 0:30]")
+    assert "autor:" not in headers[1], "the poster's own chunk carries no separate author"

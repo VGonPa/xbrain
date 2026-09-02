@@ -630,6 +630,23 @@ def test_the_printed_continuation_command_continues_the_same_sequence(
         assert "".join(texts) == whole["surfaces"][0]["text"]
 
 
+def test_a_quoted_chunk_from_get_query_names_the_quoted_author(workspace: Path) -> None:
+    """H3 at the CLI, on the fixture the gate used: `get k07 --surface quoted_post --query
+    weights` returns the quoted post as a CHUNK, and the human view placed it under
+    `@vgonpa` with no author of its own. `@othervoice` wrote it. The header of the chunk must
+    say so, on the same line as the surface label, while the bundle header keeps naming the
+    poster — a reader sees both in two seconds (CLAUDE.md rule 7).
+
+    Seen red before the fix: no line of the output mentioned `othervoice`.
+    """
+    result = runner.invoke(app, ["get", "k07", "--surface", "quoted_post", "--query", "weights"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].startswith("k07  @vgonpa (Victor Gonzalez)"), lines[0]
+    (header,) = [line for line in lines if line.startswith("[quoted_post")]
+    assert "autor: @othervoice (Other Voice)" in header, header
+
+
 def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
     """Step 27 at the CLI: the human view is rendered from the SAME response model."""
     runner.invoke(app, ["index", "build"])

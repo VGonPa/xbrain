@@ -36,6 +36,7 @@ from xbrain.knowledge.contracts import (
 )
 from xbrain.knowledge.index_build import BuildReport, StatusReport, UpdateReport
 from xbrain.knowledge.search_service import no_underlying_source
+from xbrain.models import Author
 
 # What each degradation MEANS and what to do about it. A flag a reader has to look up is a
 # flag they will ignore; spec §9.3 asks the response to NAME the command that fixes it.
@@ -120,11 +121,11 @@ def _result_lines(result: SearchResult) -> list[str]:
             f"   · [{match.surface_type}] origin={match.origin} trust={match.trust_class}"
             f" · via {'+'.join(match.matched_by)}"
         )
-        if match.attribution is not None and match.attribution != result.author:
+        if label := _own_author(match.attribution, result.author):
             # The surface's own author, when it is not the item's (A-1): a quoted post is
             # somebody else's words, and the cheapest guard against reading them as the
             # poster's is to say whose they are next to the excerpt (CLAUDE.md rule 7).
-            lines.append(f"     autor: @{match.attribution.handle} ({match.attribution.name})")
+            lines.append(f"     {label}")
         lines.append(f"     {_one_line(match.excerpt)}")
     if not result.matches:
         # A profile-only candidate. Saying so matters: the profile is a composed string
@@ -193,17 +194,17 @@ def render_get(
             "",
             f"[{surface.surface_type}] origin={surface.origin} trust={surface.trust_class}"
             + (f" · {_one_line(surface.title)}" if surface.title else "")
-            + (
-                f" · @{surface.attribution.handle}"
-                if surface.attribution and surface.surface_type == "quoted_post"
-                else ""
-            ),
+            + _author_suffix(surface.attribution, item.author),
             *_fenced(surface.text),
         ]
     for chunk in bundle.chunks:
+        # The chunk's OWN author on its header (H3): a quoted post paginated or prioritised
+        # by `--query` arrives here as a chunk, and this header is the only line between it
+        # and the bundle header that names the poster.
         lines += [
             "",
-            f"[{chunk.surface_type} {chunk.char_start}:{chunk.char_end}] origin={chunk.origin}",
+            f"[{chunk.surface_type} {chunk.char_start}:{chunk.char_end}] origin={chunk.origin}"
+            + _author_suffix(chunk.attribution, item.author),
             *_fenced(chunk.text),
         ]
     if bundle.truncated:
@@ -229,6 +230,27 @@ def _continuation(
         parts.append(f"--query {shlex.quote(query)}")
     parts.append(f"--cursor {bundle.cursor}")
     return " ".join(parts)
+
+
+def _own_author(attribution: Author | None, item_author: Author) -> str:
+    """`autor: @handle (Name)` when the text has an author of its own, else ``.
+
+    ONE rule for a search match, a whole surface and a chunk (A-1, H3): the text's author is
+    named whenever it is not the item's. Spec §3.7.3 — a quoted tweet keeps its own author —
+    is enforceable in the human view only if every place that shows a body applies the same
+    test; the chunk branch of `render_get` did not, and the surface branch had a different
+    one (`surface_type == "quoted_post"`), so a quoted post that arrived as a CHUNK — paged,
+    or prioritised by `--query` — sat under the poster's name with nothing saying otherwise.
+    """
+    if attribution is None or attribution == item_author:
+        return ""
+    return f"autor: @{attribution.handle} ({attribution.name})"
+
+
+def _author_suffix(attribution: Author | None, item_author: Author) -> str:
+    """The `_own_author` label as a header suffix, or `` — the `get` placement of the rule."""
+    label = _own_author(attribution, item_author)
+    return f" · {label}" if label else ""
 
 
 def _failure_lines(bundle: EvidenceBundle) -> list[str]:
