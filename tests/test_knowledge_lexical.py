@@ -614,14 +614,44 @@ def test_the_filter_is_applied_before_scoring_not_after(filtered_index: LexicalI
     `SEARCH chunks USING INTEGER PRIMARY KEY (rowid=?)` — the step an external-content FTS5
     join emits UNCONDITIONALLY, filter or no filter. Measured on this very fixture, the
     predicate was `True` with `SearchFilters()`, with `SearchFilters(source=...)` and with
-    `SearchFilters(origins=...)` alike, so it distinguished nothing. Naming `chunks_source` is
-    the falsifiable form: the unfiltered plan does not contain it (seen red by driving this
-    same assertion with `SearchFilters()`), and neither does the plan of a DIFFERENT filter —
-    `origins` narrows through `chunks_origin` — so the assertion is tied to the filter under
-    test, and it goes red if the `source` clause stops reaching the `WHERE` (also seen red).
+    `SearchFilters(origins=...)` alike, so it distinguished nothing. So piece 1 must name an
+    index that the unfiltered plan does NOT contain — and it must name one the planner cannot
+    talk itself out of.
+
+    IT NAMES `sqlite_autoindex_items_1`, VIA `author`, AND NOT `chunks_source` VIA `source`,
+    BECAUSE A QUERY PLAN IS A COST DECISION AND COST DECISIONS ARE NOT PORTABLE. Measured on
+    this same fixture across the two interpreters this project supports:
+
+        filter      SQLite 3.51.2 (py3.13)              SQLite 3.50.4 (py3.12, CI)
+        source      SEARCH chunks USING INDEX           (no such step — the plan is
+                    chunks_source                        BYTE-IDENTICAL to unfiltered)
+        origins     SEARCH chunks USING INDEX           (idem)
+                    chunks_origin
+        author      SEARCH items ... USING INDEX        SEARCH items USING INDEX
+                    sqlite_autoindex_items_1            sqlite_autoindex_items_1
+
+    On 3.50.4 the planner drives the MATCH and applies `source` as a RESIDUAL filter on the
+    rowid lookup: the predicate still reaches the `WHERE`, it simply does not drive an index,
+    and the plan it produces is the one MUTATING THIS MODULE TO FILTER AFTER SCORING produces
+    on 3.51.2. An assertion that cannot separate the correct implementation from that mutant
+    on the very interpreter CI runs is not a guard, and `ANALYZE` does not rescue it — it
+    degrades both versions to a plain `SCAN chunks`.
+
+    `author` is stable across both because its clause is an `EXISTS` subquery keyed on
+    `items.item_id`, so reaching `items` by its primary key is STRUCTURAL rather than a
+    cost-model preference: whatever strategy the planner picks, it must look the row up.
+
+    Falsifiability is asserted rather than asserted-about: the unfiltered plan is required NOT
+    to name that index, so the pair goes red if the `author` clause stops reaching the `WHERE`
+    (seen red by mutation, on both interpreters). Pieces 2 and 3 stay on `source` — they read
+    row counts and results, never a plan, so they are planner-agnostic by construction, and
+    piece 2 is what catches the filter-moved-after-scoring mutant (scored rows 2 -> 2 under
+    the mutant against 2 -> 1 correct, with the user-visible answer identical in both).
     """
-    plan = filtered_index.explain("marrowgate", SearchFilters(source="own_tweet"))
-    assert any(step.startswith("SEARCH chunks USING INDEX chunks_source") for step in plan), plan
+    plan = filtered_index.explain("marrowgate", SearchFilters(author="karpathy"))
+    assert any("sqlite_autoindex_items_1" in step for step in plan), plan
+    unfiltered_plan = filtered_index.explain("marrowgate", SearchFilters())
+    assert not any("sqlite_autoindex_items_1" in step for step in unfiltered_plan), unfiltered_plan
 
     unfiltered_rows = filtered_index.scored_row_count("marrowgate", SearchFilters())
     filtered_rows = filtered_index.scored_row_count("marrowgate", SearchFilters(source="own_tweet"))
