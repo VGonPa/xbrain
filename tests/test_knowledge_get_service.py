@@ -522,30 +522,35 @@ def test_a_query_cursor_is_refused_without_its_query_and_vice_versa(
 
 
 # ---------------------------------------------------------------------------
-# A-4 — `get` keeps the ASR/VLM producer
+# F7-7 (round 08) — `get` claims no producer the store cannot prove
 # ---------------------------------------------------------------------------
 
 
-def test_get_keeps_the_transcriber_and_vision_command_that_produced_a_surface(
+def test_get_declares_no_producer_for_a_transcript_the_store_does_not_attribute(
     tmp_path: Path, corpus
 ) -> None:
-    """A-4 (round 02, Codex F-06): the build received `transcribe_command` and
-    `vision_command` from one CLI definition, but `QueryContext` did not carry them and
-    `get` called `item_surfaces(item, transcribe_command=None, vision_command=None)`, so the
-    same transcript surface the index was built with `producer="review-transcriber"` came
-    out of `get` with `producer=None`. Spec §3.4 requires *el método o componente que la
-    produjo* to be conserved, and CLAUDE.md records why it is not bookkeeping: parakeet does
-    not fail on Spanish audio, it invents, and a reader must be able to recover what wrote
-    the words they are reading.
+    """The consumer-side half of the surfaces test: A-4 (round 02) made `get` serve the
+    CONFIGURED transcriber as the transcript's `producer`, and F7-7 (round 07) measured
+    what that means — change `[transcribe].command` and `get` serves a different producer
+    for the same bytes, fingerprints identical. Gate Codex (round 08) read it against spec
+    §3.4 as a provenance claim the store cannot back, and it is: a configured command is
+    the transcriber this installation WOULD use, not the one that wrote the text.
 
-    Seen red before the fix: `QueryContext` had no such fields (`TypeError`), and with them
-    ignored, `producer is None`.
+    `QueryContext` no longer carries the two commands, so no adapter can reintroduce the
+    claim; the transcript and the frame come out with `producer: None`, their origin
+    still declared. Seen red on `36f694b`: `QueryContext` had the fields and `get` served
+    `producer="review-transcriber"`.
     """
+    from dataclasses import fields
+
     store, vocab, pages = corpus
     data = tmp_path / "data"
     data.mkdir()
     (data / "items.json").write_text(
         json.dumps({k: v.model_dump(mode="json") for k, v in store.items()}), encoding="utf-8"
+    )
+    assert {f.name for f in fields(QueryContext)}.isdisjoint(
+        {"transcribe_command", "vision_command"}
     )
     context = QueryContext(
         store=store,
@@ -553,13 +558,12 @@ def test_get_keeps_the_transcriber_and_vision_command_that_produced_a_surface(
         topic_pages=pages,
         index_dir=data / "index",
         items_path=data / "items.json",
-        transcribe_command="review-transcriber",
-        vision_command="review-vision",
     )
     transcript = get("k08", context, surfaces=("video_transcript",)).surfaces[0]
-    assert transcript.producer == "review-transcriber"
+    assert transcript.producer is None and transcript.origin == "asr"
+    assert transcript.produced_at is not None
     frame = get("k08", context, surfaces=("video_frame",)).surfaces[0]
-    assert frame.producer == "review-vision"
+    assert frame.producer is None and frame.origin == "vlm"
 
 
 # ---------------------------------------------------------------------------

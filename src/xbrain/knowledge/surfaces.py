@@ -189,12 +189,7 @@ def _surface(
     )
 
 
-def item_surfaces(
-    item: Item,
-    *,
-    transcribe_command: str | None = None,
-    vision_command: str | None = None,
-) -> tuple[KnowledgeSurface, ...]:
+def item_surfaces(item: Item) -> tuple[KnowledgeSurface, ...]:
     """Every indexable surface of one item, in a deterministic order.
 
     Order: the post, then each content source in `content.sources` order (a video
@@ -203,10 +198,17 @@ def item_surfaces(
     because two runs over the same store must produce the same ids and the same ranking
     (spec §3.7.8).
 
-    `transcribe_command` and `vision_command` are the only producers that do NOT live in the
-    store, so they are passed in. Which backend produced a transcript is not bookkeeping:
-    CLAUDE.md records that parakeet does not fail on Spanish audio, it INVENTS — so a reader
-    must be able to recover, after the fact, what wrote the words they are reading.
+    NO PRODUCER IS PASSED IN, ON PURPOSE (F7-7, round 08). The first version took
+    `transcribe_command` and `vision_command` and stamped them on the transcript and frame
+    surfaces as `producer` — the command CONFIGURED at emission time, which is not the one
+    that wrote the words: changing `[transcribe].command` changed the served provenance of
+    every transcript with text and fingerprints identical (measured on the real corpus).
+    Spec §3.4: *lo desconocido no se rellena por intuición*. The store records no
+    transcriber, so those two surfaces carry `producer=None`, and there is no parameter
+    through which an adapter could reintroduce the claim. Which backend wrote a transcript
+    matters — CLAUDE.md records that parakeet does not fail on Spanish audio, it INVENTS —
+    which is exactly why it has to be RECORDED where the text is attached (`digest-video`,
+    the `caption_contract` pattern), a store change Plan 03 owns, not inferred here.
     """
     surfaces: list[KnowledgeSurface] = []
     fetched_at = item.content.fetched_at if item.content else None
@@ -226,15 +228,7 @@ def item_surfaces(
         )
 
     for index, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES)):
-        surfaces += _content_source_surfaces(
-            item,
-            index,
-            source,
-            keys[index],
-            fetched_at,
-            transcribe_command=transcribe_command,
-            vision_command=vision_command,
-        )
+        surfaces += _content_source_surfaces(item, index, source, keys[index], fetched_at)
 
     for media_index, photo in iter_described_photos(item):
         surfaces.append(
@@ -336,9 +330,6 @@ def _content_source_surfaces(
     source: ContentSourceSuccess,
     source_key: str,
     fetched_at: datetime | None,
-    *,
-    transcribe_command: str | None,
-    vision_command: str | None,
 ) -> list[KnowledgeSurface]:
     """The surfaces one content source contributes.
 
@@ -384,7 +375,8 @@ def _content_source_surfaces(
                 source_key=source_key,
                 text=source.text,
                 title=source.title,
-                producer=transcribe_command,
+                # The store records no transcriber: unknown stays unknown (F7-7, spec §3.4).
+                producer=None,
                 produced_at=fetched_at,
                 language=source.language,
                 locator=Locator(**locator_base, url=source.url),  # type: ignore[arg-type]
@@ -401,7 +393,8 @@ def _content_source_surfaces(
                 source_key=video_frame_source_key(source_key, frame_index),
                 text=frame.description,
                 title=source.title,
-                producer=vision_command,
+                # Nor which vision command captioned the frame (F7-7).
+                producer=None,
                 produced_at=fetched_at,
                 locator=Locator(
                     kind="video_frame",

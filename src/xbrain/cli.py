@@ -2833,11 +2833,7 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
         )
     from xbrain.knowledge.surfaces import knowledge_item
 
-    surfaces = item_surfaces(
-        item,
-        transcribe_command=cfg.transcribe_command,
-        vision_command=cfg.vision_command,
-    )
+    surfaces = item_surfaces(item)
     from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
 
     payload: dict = {
@@ -2958,17 +2954,13 @@ def _index_options(cfg: Config):
     """The build options, from config. One place, so build/update/status cannot disagree.
 
     Three different `IndexOptions` built at three call sites is the divergence CLAUDE.md rule
-    5 is about, and the field that would go wrong first is `transcribe_command`: it lands in
-    `KnowledgeSurface.producer`, so an update that omitted it would rewrite every transcript
-    surface with a null producer and the fingerprint would change for no reason at all.
+    5 is about. The configured transcribe/vision commands are NOT passed any more (F7-7,
+    round 08): they used to land in `KnowledgeSurface.producer` as a provenance claim the
+    store cannot back, and the emitter no longer takes them.
     """
     from xbrain.knowledge.index_build import IndexOptions
 
-    return IndexOptions(
-        vault_dir=cfg.output_dir,
-        transcribe_command=cfg.transcribe_command,
-        vision_command=cfg.vision_command or None,
-    )
+    return IndexOptions(vault_dir=cfg.output_dir)
 
 
 def _index_inputs(cfg: Config):
@@ -2993,9 +2985,6 @@ def _query_context(cfg: Config):
     """
     from xbrain.knowledge.search_service import QueryContext
 
-    # The producers are read off `_index_options`, not off `cfg` a second time (A-4): the
-    # build and `get` must agree on what wrote a transcript, and two readings of the same
-    # config are the divergence rule 5 is about.
     options = _index_options(cfg)
     inputs = _index_inputs(cfg)
     return QueryContext(
@@ -3009,8 +2998,6 @@ def _query_context(cfg: Config):
         vault_dir=cfg.output_dir,
         language=cfg.output_language,
         max_matches_per_item=cfg.index_max_matches_per_item,
-        transcribe_command=options.transcribe_command,
-        vision_command=options.vision_command,
         # The chunker parameters the build used (M-1): `search` refuses a manifest cut with
         # other ones, exactly as `update` and `status` do, instead of answering over it.
         params=options.params,

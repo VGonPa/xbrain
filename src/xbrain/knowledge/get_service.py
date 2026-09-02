@@ -105,13 +105,9 @@ def get(
             f"No existe el item {item_id!r} en el store. "
             "Comprueba el id con `xbrain search` o `xbrain knowledge inspect <id>`."
         )
-    # The SAME producers the build stamped (A-4): without them a transcript the index holds
-    # with `producer="parakeet-mlx"` came back from `get` with `producer=None`.
-    emitted = item_surfaces(
-        item,
-        transcribe_command=context.transcribe_command,
-        vision_command=context.vision_command,
-    )
+    # The emitter takes no producer (F7-7): an ASR/VLM surface declares `producer: None`
+    # here exactly as the build saw it, because the store records no transcriber.
+    emitted = item_surfaces(item)
     projection = knowledge_item(item, vault_dir=context.vault_dir)
     wanted = _select(surfaces, emitted, projection.available_surfaces, projection.failed_sources)
 

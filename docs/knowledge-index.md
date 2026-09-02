@@ -499,19 +499,30 @@ the retriever.
   test follows each printed line page after page and reassembles the surface (positional) or
   the ranked chunk list (query). `--budget` is not repeated: it bounds a page and does not
   define the sequence.
-- **`get` keeps the ASR/VLM producer (A-4) — and that producer is the CONFIGURED command, not
-  necessarily the one that wrote the text (F7-7, round 07, declared, not fixed).**
-  `transcribe_command` and `vision_command` travel in `QueryContext` from the same config
-  definition the build uses, so a transcript's `producer` is the configured transcriber in `get`
-  exactly as in the index. But the store's `x_video` source records no transcriber: measured on
-  the real corpus, after changing `[transcribe].command` from `xbrain-transcribe-auto` to
-  `whisper-large-v3`, `get` served `producer: whisper-large-v3` for a transcript parakeet wrote,
-  with text, `surface_fingerprint` and `item_fingerprint` identical — a provenance claim the
-  store cannot back. The fix is to stamp the producer on the source when `digest-video` attaches
-  the transcript (the `caption_contract` pattern) and is a store change outside Plan 02; it is
-  recorded as an open issue, and `KnowledgeSurface.producer`'s docstring says which two surface
-  types carry this reading. The fingerprint deliberately does not hash it (a binary rename must
-  not rewrite every ASR item), which is the right decision over the wrong data.
+- **An ASR/VLM surface declares NO producer, because the store records none (F7-7 → round 08;
+  gate Codex F1).** A-4 (round 02) made `get` serve the transcriber the build had stamped, and
+  what both stamped was the command CONFIGURED at the time: measured on the real corpus, after
+  changing `[transcribe].command` from `xbrain-transcribe-auto` to `whisper-large-v3`, `get`
+  served `producer: whisper-large-v3` for a transcript parakeet wrote, with text,
+  `surface_fingerprint` and `item_fingerprint` identical — a provenance claim the store cannot
+  back, presented as if it were historical. Round 07 declared it; the blind gate of round 08
+  read it against spec §3.4 (*método o componente que la produjo … lo desconocido no se rellena
+  por intuición*) and blocked on it, and it was right about the presentation: the field looked
+  like evidence and was configuration. So `video_transcript` and `video_frame` now carry
+  `producer: None` — Plan 01 M4's own last row for a format that does not conserve it — with
+  `produced_at` still `content.fetched_at` (which the store does record) and the origin still
+  declared (`asr`/`vlm`, `machine_generated`). The emitter takes no transcribe/vision command
+  any more, so no door can reintroduce the claim (`IndexOptions` and `QueryContext` lost the two
+  fields; `get`, `knowledge inspect` and the build agree by construction). Re-derived 2026-09-02
+  on the 2,404 items: 4,575 item surfaces carry a producer the store records
+  (`enriched.executor`, `description_version`, `fetch`) and 4,969 carry none (`post` 2,404,
+  `video_transcript` 152, `video_frame` 2,197, `video_digest` 216). No fingerprint moved: `index
+  update --dry-run` on the real index reports 0 changed. **The fix that recovers the
+  information — stamping the producer on the `x_video` source when `digest-video` attaches the
+  transcript and when frames are captioned, the `caption_contract` pattern — is a STORE change
+  outside Plan 02 and is recorded as an open issue for Plan 03.** Which backend wrote a transcript
+  matters exactly as CLAUDE.md says (parakeet invents on Spanish audio), which is why it has to be
+  recorded where the text is attached, not inferred at read time.
 - **The spec's `matched_surface` is the contract's `surface_type` (M-6).** Spec §7.2 names the
   field `matched_surface` in its illustrative JSON and says the example *defines semantics, not
   final property names*; Plan 01 froze `SearchMatch.surface_type` at `schema_version: "1"` and

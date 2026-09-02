@@ -324,16 +324,13 @@ def _read_bound(path: Path | None) -> tuple[str | None, int, int]:
 class IndexOptions:
     """Everything a build needs that is not the corpus itself.
 
-    `transcribe_command` and `vision_command` travel here for the reason `item_surfaces`
-    takes them: they are the only PRODUCERS that do not live in the store, and CLAUDE.md
-    records why that matters — parakeet does not fail on Spanish audio, it invents, so a
-    reader must be able to recover what wrote the words they are reading.
+    The configured transcribe/vision commands no longer travel here (F7-7, round 08): they
+    were stamped on the ASR/VLM surfaces as `producer`, a provenance claim the store cannot
+    back, and the emitter no longer takes them. See `surfaces.item_surfaces`.
     """
 
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
     vault_dir: Path | None = None
-    transcribe_command: str | None = None
-    vision_command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -567,21 +564,17 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     rule this repo paid for in blood. Sharing the writer's projection is what makes "every
     stored column is hashed" structural rather than a list kept in step by hand.
 
-    What is NOT hashed, and why: `producer`. The index has no producer column — `get` reads
-    it from the configured transcribe/vision command at read time — so hashing a config
-    value here would rewrite every ASR/VLM item on a binary rename for a field no query
-    serves from the index.
+    What is NOT hashed, and why: `producer`. The index has no producer column, and the
+    producers the store records (`enriched.executor`, `description_version`) travel with
+    the surface `get` re-emits; the ASR/VLM surfaces carry none since round 08 (F7-7),
+    because the store records no transcriber and a configured command is not evidence.
 
     Deliberately NOT `(item_id, content.fetched_at, enriched.enriched_at)`: see the module
     docstring for why a timestamp proxy both misses hand edits and cannot reach the 40 % of
     the corpus with no `content` at all.
     """
     options = options or IndexOptions()
-    surfaces = item_surfaces(
-        item,
-        transcribe_command=options.transcribe_command,
-        vision_command=options.vision_command,
-    )
+    surfaces = item_surfaces(item)
     parts = [
         SURFACE_VERSION,
         item.id,
@@ -763,11 +756,7 @@ def write_item(
     there is no second walk that could emit a slightly different corpus and make the measured
     baseline describe something other than what `search` queries (rule 5).
     """
-    surfaces = item_surfaces(
-        item,
-        transcribe_command=options.transcribe_command,
-        vision_command=options.vision_command,
-    )
+    surfaces = item_surfaces(item)
     fingerprint = item_fingerprint(item, options=options)
     _write_item_metadata(index, item, fingerprint, options=options, counters=counters)
     _write_surfaces(index, surfaces, counters)

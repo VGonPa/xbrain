@@ -111,11 +111,12 @@ class QueryContext:
     metadata from the index and verdicts from the store would have two answers to *who wrote
     this*, which is the divergence rule 5 is about.
 
-    `transcribe_command` and `vision_command` are the two PRODUCERS that do not live in the
-    store (A-4). The build stamps them on every transcript and frame surface; a `get` that
-    re-emitted those surfaces without them answered `producer: null` for the very data the
-    index had just been built with — spec §3.4's *método o componente que la produjo*, lost
-    on the hydration path. They come from the same config definition as `IndexOptions`.
+    The configured transcribe/vision commands are NOT here any more (F7-7, round 08). A-4
+    (round 02) threaded them through so `get` would serve the same `producer` the build
+    had stamped — and what both stamped was the command configured at the time, not the
+    one that wrote the text (measured: `[transcribe].command` changed, `producer` changed,
+    text and fingerprints identical). The ASR/VLM surfaces now declare no producer, so
+    there is nothing for the two doors to disagree on.
 
     `params` are the chunker parameters the CODE would cut with (M-1, round 05), and they
     come from the same `IndexOptions` too. `open_for_query` compares them against the
@@ -136,8 +137,6 @@ class QueryContext:
     vault_dir: Path | None = None
     language: str = "English"
     max_matches_per_item: int = 3
-    transcribe_command: str | None = None
-    vision_command: str | None = None
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
 
 

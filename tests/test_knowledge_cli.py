@@ -934,25 +934,35 @@ def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
     assert "xbrain get " in result.output
 
 
-def test_get_reports_the_configured_transcriber_as_the_transcripts_producer(
+def test_a_configured_transcriber_is_not_served_as_the_producer_of_a_transcript(
     workspace: Path,
 ) -> None:
-    """A-4 at the adapter: the ONE place the producer is defined is `config.toml`, and both
-    `index build` and `get` must read it from there (rule 5). Before the fix `_query_context`
-    dropped it and `get` answered `producer: null` for a transcript the build had stamped.
+    """F7-7 / gate Codex F1 at the adapter (round 08): with `[transcribe].command` set in
+    `config.toml`, `get` and `knowledge inspect` used to serve it as the transcript's
+    `producer` — a value that changed with the config and not with the text. The store
+    records no transcriber, so the honest answer is `null` (spec §3.4: unknown stays
+    unknown), and the config value must not reach the contract by any door.
 
-    Seen red before the fix: `producer` was `None`.
+    Seen red on `36f694b`: `producer == "review-transcriber"` on both commands.
     """
     config = workspace / "config.toml"
     config.write_text(
-        config.read_text(encoding="utf-8") + '[transcribe]\ncommand = "review-transcriber"\n',
+        config.read_text(encoding="utf-8")
+        + '[transcribe]\ncommand = "review-transcriber"\n[vision]\ncommand = "review-vision"\n',
         encoding="utf-8",
     )
     bundle = _json_stdout(
         runner.invoke(app, ["get", "k08", "--surface", "video_transcript", "--json"])
     )
     assert bundle["surfaces"][0]["surface_type"] == "video_transcript"
-    assert bundle["surfaces"][0]["producer"] == "review-transcriber"
+    assert bundle["surfaces"][0]["producer"] is None
+    assert bundle["surfaces"][0]["origin"] == "asr"
+    payload = _json_stdout(
+        runner.invoke(app, ["knowledge", "inspect", "k08", "--surfaces", "--json"])
+    )
+    served = {s["surface_type"]: s["producer"] for s in payload["surfaces"]}
+    assert served["video_transcript"] is None and served["video_frame"] is None
+    assert "review-transcriber" not in json.dumps(payload) + json.dumps(bundle)
 
 
 @pytest.mark.parametrize(

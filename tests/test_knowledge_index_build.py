@@ -764,9 +764,10 @@ def test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface(
     Four axes, one parametrised test, each changing ONE field of k07's quoted post and
     nothing else. The url moves the locator too (`locator.url`), which is the point: the
     locator is what the consumer resolves the evidence through. `producer` is deliberately
-    NOT here — the index has no producer column and `get` reads it from the configured
-    command at read time, so hashing it would rewrite every ASR/VLM item on a binary
-    rename for a field no query serves from the index.
+    NOT here — the index has no producer column, and since round 08 (F7-7) the ASR/VLM
+    surfaces carry none at all, because the store records no transcriber; the producers
+    that ARE recorded (`enriched.executor`, `description_version`) travel with the surface
+    and are not stored columns either.
 
     Seen red before the fix on all four: the fingerprint did not move.
     """
