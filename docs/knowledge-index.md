@@ -183,6 +183,22 @@ five `COUNT(*)` (0.04 ms on the real index) against the manifest. With a manifes
 a missing database the advice names `xbrain index build --force`, because plain `build` refuses
 while a manifest exists.
 
+### The manifest describes the snapshot that was indexed, not the file at commit time (P1b)
+
+The cheap signal sealed into the manifest is the one of the bytes the three inputs were **read
+from**, never a `stat` of the paths taken after the rows were committed. Until round 05 `build`
+and `update` stat'ed `items.json` at the END — a TOCTOU the round-05 gate reproduced (probe A): the
+CLI loads the store, a save lands, the base is built from the old objects and the manifest
+records the new file's mtime and size, so `search` compared equal signals and answered over
+stale rows with `degraded: ["no_embeddings"]` while `status` counted `items_changed=1`.
+`require_consistent` cannot see it: the counts agree. Now `load_index_inputs` reads each input
+through its own handle, takes `fstat` of that handle **before** reading, and hands the signal
+over with the objects (`IndexInputs`); `build`/`update` seal that one. The store's writers replace
+files atomically, so the handle keeps the inode it opened and the signal describes exactly the
+bytes parsed; a replacement that lands mid-load leaves the path on a newer inode, which every
+later query reports as `index_behind_store`. A caller that passes no signal gets the paths
+stat'ed before the first write — honest only when it wrote the files itself a moment ago.
+
 ### The topic plane follows the assignments, or `status` says it does not (H1)
 
 `topics` stores each topic's primary and secondary members and its `stale` bit, and all three

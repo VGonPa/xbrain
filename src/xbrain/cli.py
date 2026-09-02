@@ -2997,6 +2997,19 @@ def _index_options(cfg: Config):
     )
 
 
+def _index_inputs(cfg: Config):
+    """The three inputs of the index, read ONCE, with the signal of the bytes read (P1b).
+
+    `index build`/`update` seal that signal into the manifest, so the manifest describes the
+    snapshot the base was built from and never the file that happened to be on disk when the
+    commit finished. `status` and every query load through the same function so the four
+    commands read the corpus one way.
+    """
+    from xbrain.knowledge.index_build import load_index_inputs
+
+    return load_index_inputs(cfg.items_path, cfg.vocab_path, cfg.topics_path)
+
+
 def _query_context(cfg: Config):
     """The store, the vocabulary and the topic pages — what every query needs.
 
@@ -3010,10 +3023,11 @@ def _query_context(cfg: Config):
     # build and `get` must agree on what wrote a transcript, and two readings of the same
     # config are the divergence rule 5 is about.
     options = _index_options(cfg)
+    inputs = _index_inputs(cfg)
     return QueryContext(
-        store=load_store(cfg.items_path),
-        vocab=load_vocab(cfg.vocab_path),
-        topic_pages=load_topic_pages(cfg.topics_path),
+        store=inputs.store,
+        vocab=inputs.vocab,
+        topic_pages=inputs.topic_pages,
         index_dir=cfg.index_path,
         items_path=cfg.items_path,
         vocab_path=cfg.vocab_path,
@@ -3043,14 +3057,16 @@ def index_build_command(
     from xbrain.knowledge.render import render_build
 
     cfg = _config()
+    inputs = _index_inputs(cfg)
     report = build_module.build(
         cfg.index_path,
-        load_store(cfg.items_path),
-        load_vocab(cfg.vocab_path),
-        load_topic_pages(cfg.topics_path),
+        inputs.store,
+        inputs.vocab,
+        inputs.topic_pages,
         cfg.items_path,
         vocab_path=cfg.vocab_path,
         topics_path=cfg.topics_path,
+        signal=inputs.signal,
         options=_index_options(cfg),
         dry_run=dry_run,
         force=force,
@@ -3072,14 +3088,16 @@ def index_update_command(
     from xbrain.knowledge.render import render_update
 
     cfg = _config()
+    inputs = _index_inputs(cfg)
     report = build_module.update(
         cfg.index_path,
-        load_store(cfg.items_path),
-        load_vocab(cfg.vocab_path),
-        load_topic_pages(cfg.topics_path),
+        inputs.store,
+        inputs.vocab,
+        inputs.topic_pages,
         cfg.items_path,
         vocab_path=cfg.vocab_path,
         topics_path=cfg.topics_path,
+        signal=inputs.signal,
         options=_index_options(cfg),
         dry_run=dry_run,
     )
@@ -3103,11 +3121,12 @@ def index_status_command(
     from xbrain.knowledge.render import render_status
 
     cfg = _config()
+    inputs = _index_inputs(cfg)
     report = build_module.status(
         cfg.index_path,
-        load_store(cfg.items_path),
-        load_vocab(cfg.vocab_path),
-        load_topic_pages(cfg.topics_path),
+        inputs.store,
+        inputs.vocab,
+        inputs.topic_pages,
         cfg.items_path,
         vocab_path=cfg.vocab_path,
         topics_path=cfg.topics_path,

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
@@ -75,6 +76,8 @@ from xbrain.knowledge.surfaces import (
     topic_surfaces,
 )
 from xbrain.models import Item, MediaPhotoDescribed, Topic, TopicPage
+from xbrain.rubrics import parse_vocab
+from xbrain.store import parse_store, parse_topic_pages
 
 # Spec §5.6, field by field, in one place. The suite asserts the written document's key set
 # equals this, so writer and contract cannot drift apart.
@@ -188,6 +191,103 @@ def _stat_signal(path: Path | None) -> tuple[int, int]:
     except OSError:
         return 0, 0
     return stat.st_mtime_ns, stat.st_size
+
+
+@dataclass(frozen=True)
+class IndexInputs:
+    """The three inputs of the index AND the cheap signal of the snapshot they were read from.
+
+    The signal travels WITH the objects because it describes them (P1b): a signal taken from
+    the path at any other moment describes whatever file is there at that moment, which is
+    what let the manifest certify an `items.json` the base had never seen.
+    """
+
+    store: dict[str, Item]
+    vocab: list[Topic]
+    topic_pages: dict[str, TopicPage]
+    signal: StoreSignal
+
+
+def load_index_inputs(
+    items_path: Path, vocab_path: Path | None = None, topics_path: Path | None = None
+) -> IndexInputs:
+    """Read the three inputs and return them WITH the signal of the bytes that were read.
+
+    THE SIGNAL IS BOUND TO THE SNAPSHOT, NOT TO THE PATH (P1b, gate Codex round 05). `build`
+    and `update` used to seal the manifest with `StoreSignal.of(items_path)` taken AFTER the
+    rows were committed — a `stat` of whatever file the path pointed at by then. The caller
+    had loaded the store minutes earlier (the CLI loads it before calling in), so a save that
+    landed in that window put the base under the OLD objects and the manifest under the NEW
+    file's mtime and size: `search` then compared equal signals and answered over stale rows
+    with nothing declared, while `status` — which loads the store — saw the changed item.
+    The gate's probe A: `raceonlytoken` in the file, not in the base, `degraded:
+    ("no_embeddings",)`, `items_changed=1`, `behind=False`.
+
+    Every file is read through ITS OWN HANDLE and the signal is `os.fstat` of that handle,
+    taken BEFORE the read. The store's writers replace files atomically (`os.replace`), so an
+    open handle keeps the inode it opened and the bytes parsed are the bytes that inode holds:
+    the signal describes exactly what was parsed, by construction, and a replacement that
+    lands during the read leaves the path pointing at a NEWER inode, which the query-time
+    `StoreSignal.of` then reports as different — the index declares itself behind. For a
+    writer that rewrites in place instead (`save_vocab` uses `write_text`), taking the stat
+    before the read means a write that lands mid-read produces an older signal than the
+    content, so the index is again declared behind rather than certified fresh: the same
+    direction, the warning.
+
+    A missing file reads as its empty value and a zero signal, exactly as `load_store`,
+    `load_vocab`, `load_topic_pages` and `StoreSignal.of` treat it.
+    """
+    items_text, items_mtime, items_size = _read_bound(items_path)
+    vocab_text, vocab_mtime, vocab_size = _read_bound(vocab_path)
+    topics_text, topics_mtime, topics_size = _read_bound(topics_path)
+    return IndexInputs(
+        store=parse_store(items_text) if items_text is not None else {},
+        vocab=parse_vocab(vocab_text) if vocab_text is not None else [],
+        topic_pages=parse_topic_pages(topics_text) if topics_text is not None else {},
+        signal=StoreSignal(
+            items_json_mtime_ns=items_mtime,
+            items_json_size=items_size,
+            vocab_yaml_mtime_ns=vocab_mtime,
+            vocab_yaml_size=vocab_size,
+            topics_json_mtime_ns=topics_mtime,
+            topics_json_size=topics_size,
+        ),
+    )
+
+
+def _bound_signal(
+    signal: StoreSignal | None, items_path: Path, vocab_path: Path | None, topics_path: Path | None
+) -> StoreSignal:
+    """The signal `build`/`update` seal into the manifest: the caller's, or a stat taken NOW.
+
+    The caller who LOADED the objects is the only one who can say which snapshot they are —
+    `load_index_inputs` hands the signal over with them, and the CLI passes it through. A
+    caller that passes none gets the three paths stat'ed HERE, before the first row is
+    written — never after the commit, which is where the first version took it and how the
+    manifest came to certify a file the base had never seen (P1b). That fallback binds
+    nothing to the objects; it is honest only for a caller that wrote the files itself a
+    moment ago (the suite's fixtures), and the docstring of `build` says so.
+    """
+    if signal is not None:
+        return signal
+    return StoreSignal.of(items_path, vocab_path, topics_path)
+
+
+def _read_bound(path: Path | None) -> tuple[str | None, int, int]:
+    """`(text, mtime_ns, size)` of one input, the stat taken on the handle the text came from.
+
+    `(None, 0, 0)` for an absent or unnamed file, matching `_stat_signal`.
+    """
+    if path is None:
+        return None, 0, 0
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None, 0, 0
+    with handle:
+        stat = os.fstat(handle.fileno())
+        data = handle.read()
+    return data.decode("utf-8"), stat.st_mtime_ns, stat.st_size
 
 
 @dataclass(frozen=True)
@@ -816,11 +916,21 @@ def build(
     *,
     vocab_path: Path | None = None,
     topics_path: Path | None = None,
+    signal: StoreSignal | None = None,
     options: IndexOptions | None = None,
     dry_run: bool = False,
     force: bool = False,
 ) -> BuildReport:
     """Build `data/index/` from scratch. Read-only with respect to the store.
+
+    `signal` IS THE CHEAP SIGNAL OF THE SNAPSHOT `store`/`vocab`/`topic_pages` WERE READ FROM
+    (P1b), and the manifest is sealed with it: pass the one `load_index_inputs` returned
+    beside the objects. Without it the three paths are stat'ed before the first write —
+    which describes the files at that moment, not the objects — so omit it only when you
+    wrote those files yourself a moment ago. The first version stat'ed `items_path` AFTER
+    the commit, and a save landing between the caller's load and that stat produced a
+    manifest certifying a store the base had never seen: `search` compared equal signals
+    and answered over stale rows with nothing declared (the round-05 gate's probe A).
 
     ONE TRANSACTION, AND THE MANIFEST LAST — AND, ON A FORCED REBUILD, THE OLD MANIFEST
     REMOVED FIRST. A `Ctrl-C` or a full disk mid-build rolls the rows back and leaves no
@@ -855,6 +965,7 @@ def build(
             f"Ya existe un índice en {index_dir}. {UPDATE_ADVICE} "
             "Si de verdad quieres reconstruirlo desde cero, usa `xbrain index build --force`."
         )
+    signal = _bound_signal(signal, items_path, vocab_path, topics_path)
     started = time.perf_counter()
     counters = WriteCounters()
     failed: list[dict[str, str]] = []
@@ -894,7 +1005,6 @@ def build(
         if not connection_closed(connection):
             connection.close()
 
-    signal = StoreSignal.of(items_path, vocab_path, topics_path)
     write_manifest(
         index_dir,
         _fresh_manifest(store, vocab, topic_pages, signal, tallies, failed, options=options),
@@ -1353,10 +1463,15 @@ def update(
     *,
     vocab_path: Path | None = None,
     topics_path: Path | None = None,
+    signal: StoreSignal | None = None,
     options: IndexOptions | None = None,
     dry_run: bool = False,
 ) -> UpdateReport:
     """Bring the index up to date, touching only what changed (spec §5.6).
+
+    `signal` is the cheap signal of the snapshot the objects were read from, exactly as in
+    `build` (P1b): the manifest an update writes is sealed with it, never with a stat taken
+    after the commit.
 
     ONE TRANSACTION for the whole run. Committing per item would leave a partial application
     of a change nobody can name after a failure — and the index would look fine, because
@@ -1364,6 +1479,7 @@ def update(
     """
     options = options or IndexOptions()
     manifest = load_compatible_manifest(index_dir, params=options.params)
+    signal = _bound_signal(signal, items_path, vocab_path, topics_path)
     started = time.perf_counter()
 
     # BEFORE the write door (G-2): an update over a database that is not there has nothing
@@ -1417,7 +1533,6 @@ def update(
         if not connection_closed(connection):
             connection.close()
 
-    signal = StoreSignal.of(items_path, vocab_path, topics_path)
     write_manifest(
         index_dir,
         _next_manifest(manifest, store, vocab, topic_pages, signal, tallies, options=options),

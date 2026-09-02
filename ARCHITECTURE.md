@@ -826,7 +826,11 @@ corruption: it is *you ran `enrich` and did not reindex*.
 
 The cheap one can give false positives and that is accepted: a false positive costs one warning,
 a false negative costs serving stale evidence as fresh. It fails towards the warning, the same
-direction `origin: unknown → llm_synthesis` fails.
+direction `origin: unknown → llm_synthesis` fails. And it is the signal of the **snapshot the base
+was built from** (P1b, round 05): `load_index_inputs` reads each input through its own handle and
+takes `fstat` of that handle before reading, and `build`/`update` seal that signal — not a `stat`
+of the path after the commit, which certified whatever file had landed there since the caller
+loaded the store.
 
 **The per-item fingerprint hashes the emitted SURFACES**, not `(content.fetched_at,
 enriched.enriched_at)`. Two reasons, both CLAUDE.md rule 6: `content.fetched_at` cannot reach an

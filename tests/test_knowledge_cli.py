@@ -607,6 +607,43 @@ def test_topics_or_vocab_rewritten_on_disk_makes_search_warn_and_status_say_behi
     assert "index update" not in runner.invoke(app, ["search", "Quillfeather"]).output
 
 
+@pytest.mark.parametrize("command", [["index", "build"], ["index", "update"]])
+def test_index_build_and_update_seal_the_manifest_with_the_snapshot_they_loaded(
+    workspace: Path, monkeypatch, command: list[str]
+) -> None:
+    """P1b at the CLI: the window is between the CLI's load and the writer's commit, and the
+    CLI is the caller that has to hand the loader's signal through. Staged by replacing
+    `data/items.json` from inside the store parser, i.e. after the bytes were read and before
+    the command builds — the same race the gate ran by hand. Afterwards `search` must warn
+    and `status` must count the one item the base never saw.
+
+    Seen red before the fix: `search --json` carried no `index_behind_store` and `status`
+    said `behind: false` with `items_changed: 1` — two instruments, opposite answers.
+    """
+    from xbrain.knowledge import index_build
+
+    if command == ["index", "update"]:
+        assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    items_path = workspace / "data" / "items.json"
+    real = index_build.parse_store
+
+    def replace_then_parse(text: str):
+        raw = json.loads(items_path.read_text(encoding="utf-8"))
+        raw["k01"]["text"] = raw["k01"]["text"] + " raceonlytoken"
+        items_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        monkeypatch.setattr(index_build, "parse_store", real)
+        return real(text)
+
+    monkeypatch.setattr(index_build, "parse_store", replace_then_parse)
+    result = runner.invoke(app, command)
+    assert result.exit_code == 0, result.output
+
+    payload = _json_stdout(runner.invoke(app, ["search", "Quillfeather", "--json"]))
+    assert "index_behind_store" in payload["index"]["degraded"], payload["index"]
+    status = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert status["behind"] is True and status["items_changed"] == 1
+
+
 def test_get_works_after_the_index_is_removed(workspace: Path) -> None:
     """Acceptance 9 at the CLI: `get` reads the store, so the index can be gone."""
     runner.invoke(app, ["index", "build"])

@@ -781,6 +781,123 @@ def test_the_store_fingerprint_is_order_independent(corpus) -> None:
     assert index_build.store_fingerprint(reversed_store) == index_build.store_fingerprint(store)
 
 
+def test_the_manifest_signal_is_bound_to_the_snapshot_that_was_indexed(workspace, corpus) -> None:
+    """P1b (gate Codex, round 05 — probe A, reproduced verbatim on HEAD `0312634`): a TOCTOU
+    between loading the store and sealing the manifest.
+
+    `build` and `update` stat'ed `items_path` AFTER committing the rows, so the manifest
+    certified whatever file the path pointed at by then — not the objects the base was built
+    from. The CLI loads the store before calling in; a save landing in that window put the
+    base under the OLD objects and the manifest under the NEW file's signal, and the next
+    `search` compared equal signals and answered over stale rows with nothing declared:
+    `raceonlytoken` in the file, not in the base, `degraded: ("no_embeddings",)`, while
+    `status` — which loads the store — saw `items_changed=1`. `require_consistent` cannot
+    see it either: the counts agree. Spec §5.6's cheap signal has to describe the snapshot
+    that was indexed, or it describes nothing.
+
+    The signal now travels WITH the objects, from the loader that read them
+    (`load_index_inputs`), and `build`/`update` seal THAT one. Staged exactly as the probe:
+    load, save a different store to the same path, build from the loaded objects. Seen red
+    before the fix, on both `build` and `update`: `'index_behind_store' not in
+    ('no_embeddings',)` and `behind is False`.
+    """
+    from xbrain.knowledge.index_store import open_for_query
+    from xbrain.store import save_store
+
+    store, vocab, pages = corpus
+    _write_inputs(workspace, corpus)
+    paths = {"vocab_path": workspace / "vocab.yaml", "topics_path": workspace / "topics.json"}
+    items = workspace / "items.json"
+
+    def raced(loaded: index_build.IndexInputs, marker: str) -> dict[str, Item]:
+        """The file moves under the caller's feet: a store the loaded objects never saw."""
+        old = loaded.store["k01"]
+        newer = {**loaded.store, "k01": old.model_copy(update={"text": old.text + marker})}
+        save_store(newer, items)
+        return newer
+
+    loaded = index_build.load_index_inputs(items, **paths)
+    newer = raced(loaded, " raceonlytoken")
+    index_build.build(
+        workspace / "index",
+        loaded.store,
+        loaded.vocab,
+        loaded.topic_pages,
+        items,
+        signal=loaded.signal,
+        **paths,
+    )
+    opened = open_for_query(workspace / "index", items, **paths)
+    opened.close()
+    assert "index_behind_store" in opened.degraded, opened.degraded
+    report = index_build.status(workspace / "index", newer, vocab, pages, items, **paths)
+    assert report.behind is True and report.items_changed == 1
+
+    # And the incremental path, which sealed the manifest the same way.
+    loaded = index_build.load_index_inputs(items, **paths)
+    newer = raced(loaded, " secondracetoken")
+    index_build.update(
+        workspace / "index",
+        loaded.store,
+        loaded.vocab,
+        loaded.topic_pages,
+        items,
+        signal=loaded.signal,
+        **paths,
+    )
+    opened = open_for_query(workspace / "index", items, **paths)
+    opened.close()
+    assert "index_behind_store" in opened.degraded, opened.degraded
+    assert index_build.status(workspace / "index", newer, vocab, pages, items, **paths).behind
+
+
+def test_load_index_inputs_binds_the_signal_to_the_bytes_it_read(workspace, corpus) -> None:
+    """The mechanism behind P1b, at the loader: the signal is `fstat` of the handle the
+    text came from, taken BEFORE the read — so a replacement that lands during the read
+    leaves the objects and the signal describing the same snapshot (the handle keeps the
+    inode it opened; the store's writers replace atomically), and leaves the path pointing
+    at a newer inode the query-time `StoreSignal.of` reports as different.
+
+    Staged INSIDE the read: the handle `load_index_inputs` opens replaces the file on disk
+    the moment it is read from, which is the only place a stat of the path and a stat of
+    the handle can disagree. Seen red under the mutation `stat = path.stat()` taken after
+    the read: the signal then described the replacement, not the bytes parsed.
+    """
+    from xbrain.store import save_store
+
+    store, _vocab, _pages = corpus
+    items = workspace / "items.json"
+    before = index_build.StoreSignal.of(items)
+    newer = {**store, "k01": store["k01"].model_copy(update={"text": "replaced during the load"})}
+
+    class RacingHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def fileno(self):
+            return self._handle.fileno()
+
+        def read(self):
+            save_store(newer, items)  # the race: a save lands while the loader is reading
+            return self._handle.read()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+    class RacingPath(type(items)):
+        def open(self, *args, **kwargs):
+            return RacingHandle(super().open(*args, **kwargs))
+
+    loaded = index_build.load_index_inputs(RacingPath(items))
+
+    assert loaded.store["k01"].text == store["k01"].text, "the parse saw the bytes it read"
+    assert loaded.signal == before, "the signal describes the snapshot that was parsed"
+    assert index_build.StoreSignal.of(items) != loaded.signal, "the path now points elsewhere"
+
+
 def test_the_store_signal_is_one_stat_and_nothing_else(workspace) -> None:
     """The cheap signal must stay cheap, or it is the expensive one with a different name."""
     signal = index_build.StoreSignal.of(workspace / "items.json")
