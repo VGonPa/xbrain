@@ -2,8 +2,9 @@
 """The three inputs of the index, the signal bound to them, and their fingerprints
 (Plan 02 §2, §3, steps 3, 4, 9).
 
-TWO SIGNALS, TWO COSTS, TWO PLACES (B3). `store_signal` is an `os.stat` — mtime and size of
-`data/items.json` — and it is what a QUERY can afford on every call. `store_fingerprint` is a
+TWO SIGNALS, TWO COSTS, TWO PLACES (B3). `StoreSignal` is three `os.stat` — mtime and size of
+`data/items.json`, `data/vocab.yaml` and `data/topics.json` (P1a, gate Codex round 05) — and it
+is what a QUERY can afford on every call. `store_fingerprint` is a
 sha256 per item and costs loading the store, so it is paid only by `build`, `update` and
 `status`. The cheap one says *the store moved*; the expensive one says *which items changed,
 and how many*. A false positive on the cheap one costs one warning; a false negative costs
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from xbrain.knowledge import index_build
-from xbrain.knowledge.surfaces import item_surfaces
+from xbrain.knowledge.surfaces import item_surfaces, item_topics
 from xbrain.models import Item, Topic, TopicPage
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -212,6 +213,108 @@ def test_the_item_fingerprint_covers_the_locator_not_only_the_url_the_id_hashes(
     assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item)
 
 
+# The positions of three `surfaces` columns inside `SurfaceRow`, written out BY HAND — which is
+# exactly what `surface_row`'s docstring says the correspondence with the persisted DDL still is
+# in this child. 02.7 owes the writer that binds the tuple to the `INSERT` and the readback that
+# makes it structural; naming the positions here only lets an assertion say WHICH column it pins
+# instead of pointing at a bare integer, and it adds no guard `surface_row` does not have.
+URL_COLUMN = 10
+LOCATOR_JSON_COLUMN = 11
+FINGERPRINT_COLUMN = 13
+CHAR_LENGTH_COLUMN = 14
+
+
+def test_the_row_carries_the_url_column_the_schema_persists_beside_the_locator_json(
+    corpus,
+) -> None:
+    """`surfaces.url` is a persisted column of its own, and no test in this file pinned it.
+
+    Two independent reviews reached OPPOSITE readings of the same green mutant, and the
+    disagreement is why this test exists. Dropping `surface.locator.url` from `surface_row`
+    leaves the whole file green: one review read that as an unprotected persisted column,
+    the other as an EQUIVALENT mutant, because the same url is serialised a second time
+    inside `locator_json` and the hash therefore cannot see the first copy disappear. Both
+    measured correctly, and only the second is a statement about the FINGERPRINT. The column
+    is unobservable in the hash and perfectly observable in the PROJECTION, so it is pinned
+    here, on the row, and never through `item_fingerprint` — a test claiming the hash sees it
+    would be pinning the json (rule 1, backwards).
+
+    What is asserted is the very redundancy the second reading rests on, turned from a
+    rationale into an invariant: the two persisted columns must carry the SAME url, on every
+    surface of the corpus. `search` serves `url` on every match (A-1), so a reader resolves a
+    hit back to its bytes through the column without deserialising the locator; a projection
+    that dropped it while `locator_json` kept it would leave the two disagreeing, which is
+    precisely what the mutant does and what this assertion refuses.
+
+    The two preconditions are what stop it passing for the wrong reason: a corpus whose
+    locators all carried `None` would pass with the column deleted, and one where none did
+    would never exercise the `NULL` the DDL allows on it. The fixture holds both — a `post`
+    locates by url, a `summary` by nothing — and that is asserted before anything else is.
+
+    Seen red under the mutant `surface.locator.url` -> `None`, on every surface that has one.
+    """
+    store, _vocab, _pages = corpus
+    rows = [
+        index_build.surface_row(surface)
+        for item in store.values()
+        for surface in item_surfaces(item)
+    ]
+    located = [row for row in rows if json.loads(row[LOCATOR_JSON_COLUMN])["url"] is not None]
+    unlocated = [row for row in rows if json.loads(row[LOCATOR_JSON_COLUMN])["url"] is None]
+    assert located, "some surface must locate by url, or the column is asserted against nothing"
+    assert unlocated, "and some by none, or the NULL the schema allows is never exercised"
+
+    for row in rows:
+        assert row[URL_COLUMN] == json.loads(row[LOCATOR_JSON_COLUMN])["url"], row[0]
+
+
+def test_the_item_fingerprint_covers_the_surface_fingerprint_column_not_its_length(
+    corpus,
+) -> None:
+    """The column that carries the BODY, isolated from the column that carries its length.
+
+    `surface_row` has no text column — the last one is `len(surface.text)` (spec §10.8) — so
+    `surface.fingerprint` is the only thing standing between *the body changed* and an index
+    reporting nothing to do. Nothing pinned it: `surface.fingerprint` -> `None` in
+    `surface_row` left this whole file green. The reason is rule 1's first row, an assertion
+    satisfied by another column — the flagship text test replaces a 48-character summary with
+    a 12-character one, so it moves the fingerprint column AND the length column, and passes
+    through the second when the first is gone.
+
+    So the edit here KEEPS THE LENGTH: 48 characters of summary become 48 different ones, one
+    word swapped for another of the same width. Measured on the shipped code that moves
+    exactly one row and exactly one column of it; with the mutant applied it moves none, and
+    a hand-corrected summary would leave `update` reporting the item current while the index
+    goes on serving the old body — rule 6, on the only column that carries the text.
+
+    Seen red under the mutant `surface.fingerprint` -> `None`: no column moves at all, so the
+    "exactly one column" assertion fails before the fingerprint assertion is reached.
+    """
+    store, _vocab, _pages = corpus
+    item = store["k02"]
+    summary = item.enriched.summary
+    rewritten = summary.replace("recall", "sesgos")
+    assert len(rewritten) == len(summary) and rewritten != summary, (
+        "a body edit that leaves the length untouched is the whole construction"
+    )
+
+    edited = item.model_copy(
+        update={"enriched": item.enriched.model_copy(update={"summary": rewritten})}
+    )
+    before = [index_build.surface_row(s) for s in item_surfaces(item)]
+    after = [index_build.surface_row(s) for s in item_surfaces(edited)]
+    moved = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if a != b]
+    assert len(moved) == 1, "exactly one surface row moves: the summary whose body was rewritten"
+    row_before, row_after = before[moved[0]], after[moved[0]]
+    columns = [i for i, (a, b) in enumerate(zip(row_before, row_after, strict=True)) if a != b]
+    assert columns == [FINGERPRINT_COLUMN], "and exactly one column of it: the fingerprint"
+    assert row_after[CHAR_LENGTH_COLUMN] == row_before[CHAR_LENGTH_COLUMN], (
+        "the length column did not move, so it cannot be what carries this edit"
+    )
+
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item)
+
+
 @pytest.mark.parametrize(
     "axis, value",
     [
@@ -257,6 +360,101 @@ def test_the_item_fingerprint_covers_the_item_plane_no_surface_carries(
     rows = [index_build.surface_row(s) for s in surfaces]
 
     edited = item.model_copy(update={axis: Author(**value) if axis == "author" else value})
+    assert [index_build.surface_row(s) for s in item_surfaces(edited)] == rows, (
+        "no surface row may move, or the fingerprint could differ for another reason"
+    )
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), axis
+
+
+@pytest.mark.parametrize("half, value", [("handle", "otravoz"), ("name", "Otra Voz")])
+def test_the_item_fingerprint_covers_the_author_handle_and_the_name_apart(
+    corpus, half: str, value: str
+) -> None:
+    """`items.author_handle` and `items.author_name` are TWO columns, so they need two cases.
+
+    The parametrised test above changes both halves of the author at once, so either half
+    could vanish from `item_fingerprint` and its assertion would still be satisfied by the
+    other — rule 1's first row again, hiding inside a case that does look isolated. Measured:
+    deleting `item.author.name` alone leaves this file green, and so does deleting
+    `item.author.handle` alone; only deleting the pair goes red.
+
+    Each case here moves exactly ONE of them and leaves the other byte-identical, so a case
+    can only pass through the half it names. The construction is the one the test above
+    documents: k02's text is blanked so no `post` surface is emitted and its `enriched`
+    carries no `user_notes`, leaving one `summary` surface attributed to nobody — otherwise
+    `item.author` is also the surface's attribution and the assertion would move through
+    `surface_row` with the metadata half deleted.
+
+    It is observable, and on the repair this repo has already paid for: `refresh-quoted`
+    corrects a display name without touching the handle, and with the name unhashed `update`
+    would report `0 cambiados` while `search` keeps serving the old attribution (rule 6).
+
+    Seen red under two mutants applied separately: `item.author.name` deleted from
+    `item_fingerprint` (the `name` case, the `handle` case still green) and
+    `item.author.handle` deleted (the `handle` case, the `name` case still green).
+    """
+    store, _vocab, _pages = corpus
+    item = store["k02"].model_copy(update={"text": ""})
+    surfaces = item_surfaces(item)
+    assert [s.surface_type for s in surfaces] == ["summary"], (
+        "the base item must carry a surface, and not one that repeats the item's author"
+    )
+    rows = [index_build.surface_row(s) for s in surfaces]
+
+    author = item.author.model_copy(update={half: value})
+    assert getattr(author, half) != getattr(item.author, half), "the half under test moved"
+    other = "name" if half == "handle" else "handle"
+    assert getattr(author, other) == getattr(item.author, other), "and the other did not"
+
+    edited = item.model_copy(update={"author": author})
+    assert [index_build.surface_row(s) for s in item_surfaces(edited)] == rows, (
+        "no surface row may move, or the fingerprint could differ for another reason"
+    )
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), half
+
+
+@pytest.mark.parametrize(
+    "axis, patch, topics_after",
+    [
+        ("topics", {"topics": ["agent-evaluation"]}, ("agent-evaluation",)),
+        (
+            "primary_topic",
+            {"primary_topic": "observability"},
+            ("observability", "agent-evaluation"),
+        ),
+    ],
+)
+def test_the_item_fingerprint_covers_the_topics_the_item_plane_persists(
+    corpus, axis: str, patch: dict[str, object], topics_after: tuple[str, ...]
+) -> None:
+    """`topics` is the sixth member of the list `item_fingerprint`'s own docstring enumerates.
+
+    That docstring names the filterable metadata as «source, author, date, topics, content
+    kinds». Five of the six have a test; `topics` had none — `*item_topics(item)` could be
+    deleted from `parts` with this whole file green, because every topic in the fixture
+    belongs to an item whose surfaces move for some other reason.
+
+    It is observable, and it is a repair the pipeline performs routinely: re-run `xbrain
+    topics`, reassign an item, and with the block deleted `update` reports `0 cambiados`
+    while `--topic` goes on serving the old assignment out of `item_topics` (rule 6).
+
+    TWO AXES, BECAUSE THE TABLE PERSISTS TWO THINGS. `item_topics` (`index_schema`) stores
+    `slug` and `is_primary`, and `item_topics()` encodes the second as ORDER — primary first,
+    then the rest, deduplicated. So one case changes the membership with the primary fixed,
+    the other changes the primary with the membership fixed, and each names the tuple it
+    expects: a hash over the set alone would pass the first and fail the second.
+
+    Guarded like the item-plane cases above: not one surface row may move, so the fingerprint
+    cannot have moved through the surfaces instead. Seen red under the mutant that deletes
+    `*item_topics(item)` from `parts` — both cases, and nothing else in the file.
+    """
+    store, _vocab, _pages = corpus
+    item = store["k02"]
+    rows = [index_build.surface_row(s) for s in item_surfaces(item)]
+
+    edited = item.model_copy(update={"enriched": item.enriched.model_copy(update=patch)})
+    assert item_topics(edited) == topics_after, "the case moved the axis it names"
+    assert item_topics(item) != topics_after, "and the base item did not already read that way"
     assert [index_build.surface_row(s) for s in item_surfaces(edited)] == rows, (
         "no surface row may move, or the fingerprint could differ for another reason"
     )
@@ -533,6 +731,54 @@ def test_an_unnamed_vocab_or_topics_path_reads_as_empty_with_a_zero_signal(
     assert loaded.topic_pages == {}
     assert (loaded.signal.vocab_yaml_mtime_ns, loaded.signal.vocab_yaml_size) == (0, 0)
     assert (loaded.signal.topics_json_mtime_ns, loaded.signal.topics_json_size) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "filename, mtime_field, size_field",
+    [
+        ("items.json", "items_json_mtime_ns", "items_json_size"),
+        ("vocab.yaml", "vocab_yaml_mtime_ns", "vocab_yaml_size"),
+        ("topics.json", "topics_json_mtime_ns", "topics_json_size"),
+    ],
+)
+def test_the_query_time_signal_watches_each_of_the_three_inputs(
+    three_inputs: Path, filename: str, mtime_field: str, size_field: str
+) -> None:
+    """P1a's OTHER half: `StoreSignal.of` is the side a query pays, and it had one file tested.
+
+    The loader half is covered — a `load_index_inputs` that defaulted the vocabulary and the
+    topic pages to empty goes red above. `StoreSignal.of` is the comparison every `search`
+    makes against what the manifest sealed, and only `items.json` was ever asserted on it, so
+    `of` could be returned to watching one file — the exact pre-round-05 defect P1a records,
+    where `xbrain topics` wrote `topics.json`, never touched `items.json`, and every later
+    query answered over the old topic plane with nothing declared (spec §9.3 forbids that
+    silence). Measured: zeroing the vocab and topics stats inside `of` left this file green.
+
+    One case per input, each asserting only its own file's two entries, so zeroing ONE stat
+    reddens exactly one case and names which input lost its watch.
+
+    THE THREE SIZES MUST DIFFER, and that is asserted first (rule 1). Compared against its own
+    file's `stat`, an entry that had been filled from a DIFFERENT input's stat would still
+    pass wherever the two files happened to agree; distinct sizes make each assertion
+    answerable only by the file it names. A zero cannot be right either, which the non-empty
+    precondition states.
+
+    Seen red under three mutants applied separately, one per line of `of`: `_stat_signal(…)`
+    -> `(0, 0)` for the items, the vocabulary and the topic pages, each reddening its own case
+    and leaving the other two green.
+    """
+    sizes = [
+        (three_inputs / name).stat().st_size for name in ("items.json", "vocab.yaml", "topics.json")
+    ]
+    assert len(set(sizes)) == 3, "distinct sizes, or one file's stat could satisfy another's entry"
+    assert all(sizes), "and none empty, or a zeroed entry would be indistinguishable from the truth"
+
+    signal = index_build.StoreSignal.of(
+        three_inputs / "items.json", three_inputs / "vocab.yaml", three_inputs / "topics.json"
+    )
+    stat = (three_inputs / filename).stat()
+    assert getattr(signal, mtime_field) == stat.st_mtime_ns, filename
+    assert getattr(signal, size_field) == stat.st_size, filename
 
 
 @pytest.mark.parametrize(

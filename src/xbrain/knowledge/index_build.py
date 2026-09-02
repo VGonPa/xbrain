@@ -5,7 +5,7 @@ TWO SIGNALS, TWO COSTS, TWO PLACES (B3). Indexing is MANUAL BY DECISION (spec §
 failure that actually happens is not corruption — it is *you ran `enrich` and did not
 reindex*. Two different instruments answer two different questions:
 
-| `StoreSignal` — mtime + size | one `os.stat` | EVERY query | "the store moved" |
+| `StoreSignal` — mtime + size of the THREE inputs | three `os.stat` | EVERY query | "an input moved" |
 | `store_fingerprint` — sha256 per item | loads the store | build/update/status | "WHICH items changed, and how many" |
 
 The cheap one can give false positives (a `touch` with no edit) and that is accepted: a false
@@ -209,6 +209,14 @@ class IndexOptions:
     The configured transcribe/vision commands no longer travel here (F7-7, round 08): they
     were stamped on the ASR/VLM surfaces as `producer`, a provenance claim the store cannot
     back, and the emitter no longer takes them. See `surfaces.item_surfaces`.
+
+    CARRIED INERT IN THIS CHILD, AND SAYING SO IS THE POINT. Neither `params` nor `vault_dir`
+    is read anywhere in this tree: `options` is a NO-OP today, so `item_fingerprint(item,
+    options=X)` silently discards `X`, and a caller who passes the chunker's parameters
+    expecting the fingerprint to cover them would be wrong. The dataclass travels here so the
+    ported signature stays stable and 02.7 — its first consumer, the builder that actually
+    reads `params` and `vault_dir` — does not have to re-type it, never because anything
+    already reads it.
     """
 
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
@@ -243,6 +251,10 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     Deliberately NOT `(item_id, content.fetched_at, enriched.enriched_at)`: see the module
     docstring for why a timestamp proxy both misses hand edits and cannot reach the 40 % of
     the corpus with no `content` at all.
+
+    `options` IS NOT READ HERE. It is accepted so the signature 02.7 consumes is already the
+    ported one, and discarded — see `IndexOptions`. Nothing in this fingerprint depends on the
+    chunker's parameters or on the vault, and a caller must not assume it does.
     """
     options = options or IndexOptions()
     surfaces = item_surfaces(item)
