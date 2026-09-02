@@ -15,10 +15,24 @@ on:
   # (require branches up to date before merging), which forces the merge ref to be
   # recomputed against the current base first. They are complementary: `strict` stops the
   # stale merge landing; `push` catches whatever lands anyway. Neither replaces the other.
+  #
+  # `VGonPa/umbrella-*` is the third gated shape, and it is gated for a DIFFERENT reason than
+  # develop/main. A large initiative is delivered as a sequence of small child PRs onto a
+  # long-lived umbrella branch, and a PR whose base is a feature branch runs NO gate at all
+  # while GitHub still reports `mergeStateStatus: CLEAN` — rule 14. `CLEAN` there does not mean
+  # "everything required passed", it means "nothing was required". Listing the umbrella under
+  # `pull_request` is what creates the `quality` check that the umbrella's own branch protection
+  # then REQUIRES; without this line that protection would wait forever for a check that never
+  # appears, and every child PR would be permanently unmergeable (the shape of rule 12).
+  #
+  # And under `push` for the same reason develop has it: merging child 4 and child 5, each green
+  # against the umbrella it saw, can leave the umbrella RED with no textual conflict anywhere —
+  # rule 4, one level down. The push run IS that merge result. Cost is bounded:
+  # announce_red_branch.sh keys its issue on `ci-red-<branch>`, one per branch, auto-closed.
   push:
-    branches: [develop, main]
+    branches: [develop, main, "VGonPa/umbrella-*"]
   pull_request:
-    branches: [develop, main]
+    branches: [develop, main, "VGonPa/umbrella-*"]
 jobs:
   # The job id IS the required status check name on develop/main. Renaming it (or giving it
   # a `name:`) makes the required check never appear, and GitHub then waits for it forever:

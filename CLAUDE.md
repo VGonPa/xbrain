@@ -831,6 +831,50 @@ and unmerged — a permission boundary that was never there. `develop` is the *i
 branch: merging into it is the ordinary end of the loop, not a release. The cheapest fix
 for a stacked PR is usually to merge the one below it.
 
+### 15. A big initiative ships as child PRs onto a PROTECTED umbrella — never as one PR
+
+A plan is a unit of product. **A PR is a unit of review**, and the two are not the same size.
+Measured, 2026-09-02: Plan 02 of the knowledge initiative was implemented as one branch — **78
+commits, 43 files, +16,656/−902** — and took **nine review rounds and 615,938 bytes of review
+prose** (**9.0×** Plan 01, which merged) to converge. Round **8**, on a tree with `check.sh`
+green and **98%** coverage in `knowledge/`, still surfaced **two NEW HIGHs**, one of them a
+`build --force` that destroyed a good index and sealed it with exit 0. Nothing was wrong with the
+code — `b61e04b` ends green at 2,549 tests. What was wrong is that **a review of 16,656 lines does
+not converge**: each pass picks a subset, and the subset it did not pick stays unlooked-at.
+
+**So: `develop` → `umbrella` → child PRs, merged one at a time.** A child PR targets the umbrella,
+never `develop`; children are sequential, so each is read against a tree containing its
+predecessors; **each must be green on its own**, and if a boundary cannot produce a coherent state,
+move the boundary and write down why. Only the umbrella opens a PR to `develop`, and its gate looks
+for integration regressions, not unit defects.
+
+**The umbrella gets a REAL gate — this is not optional, and not a social rule.** Rule 14 says a PR
+onto a feature branch runs nothing and GitHub still reports `CLEAN`. Close it, in this order:
+
+1. `.github/workflows/quality.yml` lists `"VGonPa/umbrella-*"` under **both** `push` and
+   `pull_request` (guarded by `tests/test_ci_workflow.py`);
+2. **classic branch protection on the umbrella's EXACT name**, created **before the first child**
+   and removed only after the final merge: `quality` required · `strict: true` ·
+   `enforce_admins: true` · **approvals 0** (rule 12 — one collaborator, so a 1 blocks everything
+   forever). Measured available here: the repo is **public** with `admin: true`, and `develop`
+   itself is a **non-default** branch carrying exactly this. `rulesets` is `[]` — rule 13's
+   GHEC-only finding is about rulesets, not about classic protection;
+3. **verify by API and read the response**, not the exit code. If it cannot be created, that is a
+   **BLOCKER**, not a compensation to remember.
+
+**`strict` on the umbrella does NOT tell you `develop` moved** — it only compares a child to its
+umbrella base. So **checkpoint `origin/develop`'s SHA before every child**, and when it has moved,
+integrate it with a **sync child PR**: never a direct push (skips the gate) and never a rebase
+(rewrites merged children). When a monolith is being **redistributed** rather than written, freeze
+its tip as a snapshot, branch the umbrella from the snapshot's **historical base**, port bytes with
+`git checkout <snapshot> -- <paths>` instead of retyping them, and prove `tree == snapshot` **before**
+the first sync — after a sync the only honest reference is the synthetic `merge-tree` of current
+`develop` + snapshot.
+
+Full procedure, PR matrix and roles:
+`zz-support-files/docs/implementation-plans/2026-09-02-plan-entrega-atomica-umbrellas.md`
+(and `AGENTS.md`, which carries the same topology for Codex).
+
 ### Branch protection: the live settings, and what each one cost
 
 Live on **`develop` and `main`** (`gh api repos/VGonPa/xbrain/branches/develop/protection`):
