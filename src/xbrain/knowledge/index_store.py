@@ -148,6 +148,20 @@ def _degraded(
     return tuple(flag for flag in DEGRADED_ORDER if flag in flags)
 
 
+def resolvable_hits(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, ...], int]:
+    """Drop every hit whose surface row holds no locator. Returns `(kept, excluded)` (B-k).
+
+    Invariant 1 of spec §3.7: every chunk resolves to a surface. A chunk whose surface row is
+    missing, or whose `locator_json` a `Locator` cannot hold, cannot be served with a locator
+    — and `search._match` used to FABRICATE one for it (`content_source`, the ITEM's URL, no
+    source index), which points a reader at the wrong bytes with confidence. Excluded and
+    counted in the same counter as a fingerprint that does not recompute, because it is the
+    same operator situation: a row this code cannot serve honestly, repaired by a rebuild.
+    """
+    kept = tuple(hit for hit in hits if hit.surface_locator is not None)
+    return kept, len(hits) - len(kept)
+
+
 def verify_fingerprints(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, ...], int]:
     """Drop every hit whose fingerprint does not recompute. Returns `(kept, excluded)`.
 

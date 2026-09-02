@@ -49,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from xbrain.knowledge.ids import CHUNKER_VERSION, chunk_fingerprint, chunk_id
-from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, SurfaceType
+from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, Locator, SurfaceType
 from xbrain.models import ARTICLE_PARAGRAPH_SEP, Author
 
 
@@ -320,6 +320,22 @@ def _oversize_spans(start: int, end: int, params: ChunkerParams) -> list[tuple[i
     return spans
 
 
+def fragment_locator(surface_locator: Locator, char_start: int, char_end: int) -> Locator:
+    """The locator of a FRAGMENT of a surface: the surface's, narrowed to the range (seam b).
+
+    ONE function for any served fragment — the chunk `get` delivers, the match `search`
+    returns — because the attribution/locator family reappeared by four routes in five
+    rounds (a search without the surfaces join, a fingerprint blind to the author, the human
+    chunk header, the chunks of `get`), each time through a consumer building its own. The
+    surface's locator says where the surface lives in the original data (source index and
+    kind, media or frame index, the source's own URL); the range says which bytes of it
+    this fragment is. Nothing else is derived, and nothing is invented: a surface with no
+    resolvable locator yields no fragment (`index_store.resolvable_hits`), never a
+    fabricated one.
+    """
+    return surface_locator.model_copy(update={"char_start": char_start, "char_end": char_end})
+
+
 def _chunk(
     surface: KnowledgeSurface,
     index: int,
@@ -347,8 +363,12 @@ def _chunk(
     their own. The fallback is deleted rather than reached, because the two are not
     interchangeable: a `video_transcript`'s locator holds a SIGNED, EXPIRING
     `video.twimg.com` URL, and a `quoted_post`'s would still be the poster's page. Serving
-    either as the chunk's citable link buys nothing and rots. The precise position stays
-    where it belongs — on `surface.locator`, which the consumer already receives.
+    either as the chunk's citable link buys nothing and rots.
+
+    The precise position travels on `locator` (B2, round 06): `fragment_locator` narrows the
+    surface's locator to this range. It used to stay on `surface.locator` alone — "which the
+    consumer already receives" — and the consumer did NOT receive it whenever `get` delivered
+    chunks instead of the surface, which is exactly when a chunk exists.
     """
     text = surface.text[start:end]
     cid = chunk_id(surface.surface_id, index, chunker_version=chunker_version)
@@ -370,6 +390,7 @@ def _chunk(
         attribution=attribution,
         topics=topics,
         url=url,
+        locator=fragment_locator(surface.locator, start, end),
         language=surface.language,
         fingerprint=chunk_fingerprint(
             surface.surface_id, index, text, chunker_version=chunker_version

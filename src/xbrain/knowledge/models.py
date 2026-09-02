@@ -232,6 +232,19 @@ class KnowledgeChunk(BaseModel):
     with the title only on the surface, a `SearchMatch` on chunk 7 of a long article would
     reach the consumer as an orphan paragraph. It is accompanying metadata, not a chunk of
     its own, so it adds nothing to the indexed corpus.
+
+    `locator` travels with the chunk too, and it is REQUIRED (B2, round 06). Spec §3.7
+    invariant 2 — *todo texto devuelto incluye origin, surface_type y localizador* — and
+    §3.8 make a fragment nobody can resolve back to its source a number rather than
+    evidence, and a chunk is exactly what `get` delivers when a surface does not fit the
+    budget or a `--query` prioritises inside it: the surface, which held the only locator,
+    was then not in the bundle at all. `url` keeps its one meaning (where a human opens the
+    OWNER); `locator` is the surface's, narrowed to `char_start`/`char_end` by
+    `chunking.fragment_locator`, the same function `search` applies to a match, so the two
+    services agree by construction. On the frozen `schema_version: "1"`: this is an
+    additive key a JSON consumer of version 1 can ignore, and it is a field the spec
+    required of the chunk from the start — its absence was a defect of the contract, not
+    a property of it — which is why it is added here rather than behind a version bump.
     """
 
     model_config = _FROZEN
@@ -252,6 +265,7 @@ class KnowledgeChunk(BaseModel):
     attribution: Author | None = None
     topics: tuple[str, ...] = ()
     url: str | None = None
+    locator: Locator
     language: str | None = None
     fingerprint: str = Field(pattern=_SHA256)
 

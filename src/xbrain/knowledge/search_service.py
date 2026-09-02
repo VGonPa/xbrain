@@ -53,7 +53,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams
+from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, fragment_locator
 from xbrain.knowledge.contracts import (
     SearchFilters,
     SearchMatch,
@@ -62,9 +62,10 @@ from xbrain.knowledge.contracts import (
     Strategy,
     resolve_strategy,
 )
-from xbrain.knowledge.index_store import open_for_query, verify_fingerprints
+from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
+from xbrain.knowledge.index_store import open_for_query, resolvable_hits, verify_fingerprints
 from xbrain.knowledge.lexical import LexicalHit
-from xbrain.knowledge.models import DerivedText, Locator, SurfaceType
+from xbrain.knowledge.models import DerivedText, SurfaceType
 from xbrain.knowledge.provenance import DEFAULT_EVIDENCE_CLASSES
 from xbrain.knowledge.surfaces import (
     SURFACE_ORIGIN,
@@ -174,7 +175,11 @@ def search(
     )
     try:
         depth = min(limit * CANDIDATE_MULTIPLIER * context.max_matches_per_item, MAX_CANDIDATES)
-        hits, excluded = verify_fingerprints(index.lexical.search(query, depth, filters=filters))
+        hits, corrupt = verify_fingerprints(index.lexical.search(query, depth, filters=filters))
+        # A hit without a resolvable surface locator is excluded and counted too (B-k):
+        # the alternative was a locator invented from the chunk's own columns.
+        hits, unresolvable = resolvable_hits(hits)
+        excluded = corrupt + unresolvable
         profile_ids = [
             hit.item_id for hit in index.lexical.search_profiles(query, limit, filters=filters)
         ]
@@ -364,11 +369,16 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
     was served under the poster's name and pointed at the poster's tweet: the exact defect
     CLAUDE.md lists as paid for in blood, on a new LLM surface (spec §3.7 invariant 3, §3.8).
     The surface's locator says where the surface lives; the chunk's range narrows it to the
-    match. A chunk indexed without its surface row keeps the previous, honest fallback.
+    match — through `fragment_locator`, the SAME function that builds the locator of the
+    chunk `get` serves (seam b, round 06), so the two services cannot disagree on where a
+    fragment lives. And no fallback (B-k): a hit with no resolvable surface locator was
+    excluded by `resolvable_hits` upstream; the guard below is what keeps a fabrication
+    from ever being reachable again, not a path a caller takes.
     """
-    base = hit.surface_locator or Locator(
-        kind="content_source" if hit.owner_type == "item" else "topic_page", url=hit.url
-    )
+    if hit.surface_locator is None:
+        raise IndexIncompatibleError(
+            f"El chunk {hit.chunk_id} no resuelve a su superficie. {REBUILD_ADVICE}"
+        )
     return SearchMatch(
         chunk_id=hit.chunk_id,
         surface_type=hit.surface_type,
@@ -380,7 +390,7 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
         matched_by=("lexical",),
         lexical_rank=position,
         score=hit.score,
-        locator=base.model_copy(update={"char_start": hit.char_start, "char_end": hit.char_end}),
+        locator=fragment_locator(hit.surface_locator, hit.char_start, hit.char_end),
     )
 
 

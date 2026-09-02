@@ -382,6 +382,7 @@ def test_the_get_rendering_fences_the_untrusted_body() -> None:
         origin="source",
         trust_class="primary_source",
         derived=False,
+        locator=Locator(kind="content_source", char_start=0, char_end=len(forged)),
         fingerprint="b" * 64,
     )
     lines = render_get(_bundle(surfaces=(surface,), chunks=(chunk,))).splitlines()
@@ -443,6 +444,7 @@ def test_control_characters_in_a_body_never_reach_the_terminal() -> None:
         origin="source",
         trust_class="primary_source",
         derived=False,
+        locator=Locator(kind="content_source", char_start=0, char_end=len(hostile)),
         fingerprint="b" * 64,
     )
     text = render_get(_bundle(surfaces=(surface,), chunks=(chunk,)))
@@ -527,6 +529,7 @@ def test_a_chunk_with_its_own_author_is_rendered_with_that_author() -> None:
             trust_class="primary_source",
             derived=False,
             attribution=attribution,
+            locator=Locator(kind="content_source", char_start=0, char_end=30),
             fingerprint="c" * 64,
         )
 

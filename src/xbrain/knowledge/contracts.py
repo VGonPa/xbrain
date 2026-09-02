@@ -171,7 +171,9 @@ class IndexStatusRef(BaseModel):
     """What the response says about the index that answered it (spec §5.6, §9.3).
 
     TWO SIGNALS WITH TWO NAMES (B3). `corrupt_chunks_excluded` counts rows whose fingerprint
-    does not recompute — corruption, or a row written by a different chunker version. That is
+    does not recompute — corruption, or a row written by a different chunker version — and,
+    since round 06 (B-k), rows whose surface cannot be resolved to a locator (spec §3.7
+    invariant 1), which are the same operator situation. That is
     an INTERNAL consistency check and it does not detect the failure that actually happens:
     *you ran `enrich` and did not reindex*. That one is a `degraded` flag
     (`"index_behind_store"`), raised by comparing the manifest's cheap store signal against

@@ -69,6 +69,7 @@ def _chunk(**overrides) -> KnowledgeChunk:
         origin="source",
         trust_class="primary_source",
         derived=False,
+        locator=Locator(kind="item_text", char_start=0, char_end=13),
         fingerprint=HEX64,
     )
     return KnowledgeChunk(**{**defaults, **overrides})

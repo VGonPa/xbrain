@@ -591,3 +591,47 @@ def test_get_with_a_query_closes_its_scratch_database(context: QueryContext) -> 
         if issubclass(w.category, ResourceWarning) and "unclosed database" in str(w.message)
     ]
     assert not leaks, [str(w.message) for w in leaks]
+
+
+# ---------------------------------------------------------------------------
+# B2 (gate Codex, round 06) — a chunk `get` delivers names the source it came from
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", ["paged", "query"])
+def test_a_chunk_from_get_carries_the_locator_of_the_source_whose_text_it_delivers(
+    context: QueryContext, route: str
+) -> None:
+    """The gate's reproduction, both routes. k03's external article paged at a 100-char
+    budget, and prioritised by `--query Quillfeather`: `surfaces == ()` on both, and the
+    chunk carried `url = https://x.com/vgonpa/status/k03` — the ITEM's — with offsets into
+    a surface not in the bundle. `surface_id` did not substitute: it is opaque and holds
+    neither `source_index` nor `content_kind` nor the source's URL.
+
+    Every chunk now carries the SURFACE's locator narrowed to its own range: kind,
+    `source_index`, `content_kind` and the source's URL, plus `char_start`/`char_end`.
+    `chunk.url` keeps its one meaning — where a human opens the owner. Seen red before the
+    fix: `AttributeError: 'KnowledgeChunk' object has no attribute 'locator'`.
+    """
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item = context.store["k03"]
+    source = next(s for s in item_surfaces(item) if s.surface_type == "external_article")
+    kwargs = {"limits": GetLimits(char_budget=100)}
+    if route == "query":
+        kwargs["query"] = "Quillfeather"
+    bundle = get("k03", context, surfaces=("external_article",), **kwargs)
+
+    assert bundle.surfaces == (), "the route under test delivers chunks, not the surface"
+    assert bundle.chunks
+    for chunk in bundle.chunks:
+        assert chunk.locator.kind == "content_source"
+        assert chunk.locator.source_index == source.locator.source_index is not None
+        assert chunk.locator.content_kind == "external_article"
+        assert chunk.locator.url == source.locator.url == "https://example.org/essay"
+        assert (chunk.locator.char_start, chunk.locator.char_end) == (
+            chunk.char_start,
+            chunk.char_end,
+        )
+        assert source.text[chunk.char_start : chunk.char_end] == chunk.text
+        assert chunk.url == item.url, "the owner's URL keeps its one meaning"

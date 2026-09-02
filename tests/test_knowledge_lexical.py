@@ -116,6 +116,7 @@ def _chunk(chunk_id: str, text: str, surface_id: str = "item:x:post:0", **kwargs
         "origin": "source",
         "trust_class": "primary_source",
         "derived": False,
+        "locator": Locator(kind="item_text", char_start=0, char_end=len(text)),
         "fingerprint": "f" * 64,
     }
     fields.update(kwargs)

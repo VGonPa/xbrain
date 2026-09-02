@@ -994,3 +994,112 @@ def test_a_match_locator_is_the_surface_locator_plus_the_character_range(
     )
     assert image.locator.kind == "media"
     assert image.locator.media_index == described[1].locator.media_index is not None
+
+
+# ---------------------------------------------------------------------------
+# Round 06 — ONE locator and ONE attribution for any served fragment (seam b)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "item_id, surface_type, term",
+    [("k07", "quoted_post", "audit"), ("k03", "external_article", "Quillfeather")],
+)
+def test_a_search_match_and_the_chunk_get_serves_share_one_locator_and_one_attribution(
+    context: QueryContext, item_id: str, surface_type: str, term: str
+) -> None:
+    """The attribution/locator family reappeared by four routes in five rounds — a search
+    without the surfaces join, a fingerprint blind to the author, the human chunk header,
+    and now the chunks of `get` (B2) — because each consumer built its own locator. Rule 5.
+
+    The SAME fragment reached through the two services: a `SearchMatch` from `search` and
+    the `KnowledgeChunk` `get --query` returns for the same `chunk_id` must carry an
+    identical `locator` (the surface's, narrowed by `fragment_locator`) and an identical
+    `attribution` (the surface's author — the quoted author on k07, not the poster). A
+    consumer that re-derives either goes red here. Seen red before the fix: the chunk
+    had no `locator`.
+    """
+    from xbrain.knowledge.get_service import get
+
+    response = search(term, context, limit=20)
+    match = next(
+        m
+        for r in response.results
+        if r.item_id == item_id
+        for m in r.matches
+        if m.surface_type == surface_type
+    )
+    bundle = get(item_id, context, surfaces=(surface_type,), query=term)
+    chunk = next(c for c in bundle.chunks if c.chunk_id == match.chunk_id)
+
+    assert match.locator == chunk.locator
+    assert match.attribution == chunk.attribution
+    assert (match.locator.char_start, match.locator.char_end) == (chunk.char_start, chunk.char_end)
+    if surface_type == "quoted_post":
+        assert chunk.attribution is not None and chunk.attribution.handle == "othervoice"
+
+
+def test_a_chunk_whose_surface_row_holds_no_locator_is_excluded_and_counted(
+    context: QueryContext,
+) -> None:
+    """B-k (gate round 05, recommended fail-closed in round 06): `_match` FABRICATED a
+    locator — `kind=content_source`, the item's URL, no source index — whenever the
+    surface row carried none a `Locator` could hold. Spec §3.7 invariant 1 says every
+    chunk resolves to its surface; a chunk that cannot be resolved is the shape of
+    invariant 6, *falla cerrado para el chunk afectado y reporta la exclusión*, and a
+    manufactured locator is the one thing worse than a missing one: it points a reader at
+    the wrong bytes with confidence.
+
+    Staged as the only way it can happen without SQLite corruption: the surface row's
+    `locator_json` is emptied by hand. The chunk is excluded from the results and counted
+    in `corrupt_chunks_excluded`, the same counter and the same rendering as a fingerprint
+    that does not recompute. Seen red before the fix: the chunk was returned under a
+    locator holding the poster's URL.
+    """
+    connection = sqlite3.connect(db_path(context.index_dir))
+    victim, surface_id = connection.execute(
+        "SELECT chunk_id, surface_id FROM chunks WHERE text LIKE '%Quillfeather%' LIMIT 1"
+    ).fetchone()
+    connection.execute(
+        "UPDATE surfaces SET locator_json = '{}' WHERE surface_id = ?", (surface_id,)
+    )
+    connection.commit()
+    connection.close()
+
+    response = search("Quillfeather", context)
+
+    assert response.index.corrupt_chunks_excluded >= 1
+    assert victim not in {m.chunk_id for r in response.results for m in r.matches}
+    assert all(
+        m.locator.url != context.store[r.item_id].url or m.surface_type == "post"
+        for r in response.results
+        for m in r.matches
+    ), "no match points at the owner's page unless the surface IS the post"
+
+
+def test_search_and_get_build_every_fragment_locator_through_one_function(
+    context: QueryContext, monkeypatch
+) -> None:
+    """The seam asserted STRUCTURALLY, not by value (rule 5, the G-5 pattern): the test
+    above proves the two services agree today; this one proves they agree because they
+    ask the same function. `fragment_locator` is swapped for a sentinel in both modules
+    that bind it, and every match `search` returns and every chunk `get --query` returns
+    must carry the sentinel. A consumer that narrows the surface locator itself — a
+    `model_copy` of its own, the shape `_match` had before — stays honest by value and
+    goes red here.
+
+    Seen red under exactly that mutation of `_match`: the match carried a real locator.
+    """
+    from xbrain.knowledge import chunking, search_service
+    from xbrain.knowledge.get_service import get
+    from xbrain.knowledge.models import Locator
+
+    sentinel = Locator(kind="vocab", note_index=999_999)
+    monkeypatch.setattr(chunking, "fragment_locator", lambda *args: sentinel)
+    monkeypatch.setattr(search_service, "fragment_locator", lambda *args: sentinel)
+
+    response = search("Quillfeather", context)
+    matches = [m for r in response.results for m in r.matches]
+    assert matches and all(m.locator == sentinel for m in matches)
+    bundle = get("k03", context, surfaces=("external_article",), query="Quillfeather")
+    assert bundle.chunks and all(c.locator == sentinel for c in bundle.chunks)
