@@ -895,6 +895,31 @@ def test_the_sweep_reports_the_chunk_count_so_a_tie_can_be_broken(corpus) -> Non
     assert counts[400] > counts[2400], "a smaller target must produce more chunks"
 
 
+def test_the_sweep_publishes_recall_at_1_and_names_the_criterion_that_decided(corpus) -> None:
+    """S-1 (gate Fable round 08): the published winner of the real sweep — 800/0 over
+    1200/0 — was decided by MRR after a tie on `recall@10`, while Plan 02 §7 and the README
+    said the tie-break is FEWER CHUNKS (which would have chosen 1200/0). The rule the code
+    applies is `recall@k`, then MRR, then fewer chunks; it is now written where the plan and
+    the README can be checked against it, and the report says WHICH criterion decided, so a
+    reader never has to infer it from the table. `recall@1` is published on every row: it is
+    the depth-independent figure the decision rests on and was not re-derivable from the
+    sweep's own output.
+
+    Seen red on `36f694b`: no `recall@1` key on a row; the verdict named no criterion.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [400, 2400]}, k=10)
+    rows = report.to_dict()["rows"]
+    assert all("recall@1" in row and "recall@10" in row for row in rows), rows
+    assert all(row["recall@1"] is None or 0.0 <= row["recall@1"] <= 1.0 for row in rows)
+    text = render_sweep_markdown(report)
+    assert "| recall@1 |" in text.splitlines()[2] or "recall@1" in text.splitlines()[2]
+    assert "decidió" in text or "PLANO" in text, text
+    assert "recall@10" in text and "MRR" in text and "menos chunks" in text
+
+
 def test_a_flat_sweep_says_it_is_flat(corpus) -> None:
     """The negative result, published as one (spec §13.15).
 

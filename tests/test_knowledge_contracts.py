@@ -1,7 +1,8 @@
 # tests/test_knowledge_contracts.py
 """The frozen external schemas (Plan 01 §3.5, spec §7, steps 19-20).
 
-These shapes are frozen at `schema_version: "1"` NOW, while the services that fill them do
+These shapes are frozen per envelope NOW (`SearchResponse` "1", `EvidenceBundle` "2" since
+U-1, the graph envelope "1"), while the services that fill them do
 not exist yet. That is the point: spec §7.1 says CLI JSON and MCP are adapters over the same
 service and must not implement two formats, and the way two formats appear is that the
 second adapter is written months after the first, against whatever the first happened to

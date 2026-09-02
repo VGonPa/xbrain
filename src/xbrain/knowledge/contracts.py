@@ -1,4 +1,5 @@
-"""The external response schemas, frozen at `schema_version: "1"` (spec §7).
+"""The external response schemas, frozen per envelope — `SearchResponse` at `"1"`,
+`EvidenceBundle` at `"2"`, the graph envelope at `"1"` (spec §7; the policy below).
 
 FROZEN NOW, ON PURPOSE, before the services that fill them exist. Spec §7.1 says CLI JSON
 and MCP are two adapters over ONE service and must not implement two formats — and the way

@@ -385,26 +385,34 @@ for a different answer to come out) — but read it as *the filter runs*, never 
 perfect there*. Its effect on the aggregate, said out loud (re-derived 2026-09-02 in owners):
 `precision@10` 0.2429 → **0.3087** and `recall@10` 0.8099 → **0.8264**.
 
-### The chunker sweep, regenerated in owners (Plan 02 §7, U-6)
+### The chunker sweep, regenerated in owners (Plan 02 §7, U-6) — with `recall@1` and the criterion that decided (S-1, round 08)
 
 `xbrain eval --strategy lexical --limit 10 --sweep-chunker 'target=800,1200,1600,2400
-overlap=0,150,300'`, 2026-09-02, same corpus, 23 cases, **depth 10 owners** (published on the
-report as `limit`):
+overlap=0,150,300'`, re-run 2026-09-02 (round 08), same corpus, 23 cases, **depth 10 owners**
+(published on the report as `limit`). **Criterion, in order: `recall@10`, then MRR, then fewer
+chunks** — printed on the report since round 08, and applied by `evaluation.sweep_chunker`
+since before any measurement existed.
 
-| target | overlap | chunks | recall@10 | MRR |
-|---:|---:|---:|---:|---:|
-| 800 | 0 | 22,286 | **0.8264** | **0.8179** |
-| 800 | 150 | 22,987 | 0.8264 | 0.7961 |
-| 800 | 300 | 24,110 | 0.8264 | 0.7725 |
-| 1200 | 0 | 18,036 | 0.8264 | 0.7667 |
-| 1200 | 150 | 18,320 | 0.8264 | 0.7449 |
-| 1200 | 300 | 18,696 | 0.8264 | 0.7449 |
-| 2400 | 0 | 13,850 | 0.7955 | 0.7315 |
-| 2400 | 150 | 13,912 | 0.7955 | 0.7305 |
-| 2400 | 300 | 13,984 | 0.7955 | 0.7283 |
-| 1600 | 0 | 15,905 | 0.7684 | 0.7710 |
-| 1600 | 150 | 16,059 | 0.7684 | 0.7493 |
-| 1600 | 300 | 16,245 | 0.7684 | 0.7493 |
+| target | overlap | chunks | recall@10 | recall@1 | MRR |
+|---:|---:|---:|---:|---:|---:|
+| 800 | 0 | 22,286 | **0.8264** | **0.6034** | **0.8179** |
+| 800 | 150 | 22,987 | 0.8264 | 0.5599 | 0.7961 |
+| 800 | 300 | 24,110 | 0.8264 | 0.5165 | 0.7725 |
+| 1200 | 0 | 18,036 | 0.8264 | 0.5165 | 0.7667 |
+| 1200 | 150 | 18,320 | 0.8264 | 0.4730 | 0.7449 |
+| 1200 | 300 | 18,696 | 0.8264 | 0.4730 | 0.7449 |
+| 2400 | 0 | 13,850 | 0.7955 | 0.4730 | 0.7315 |
+| 2400 | 150 | 13,912 | 0.7955 | 0.4730 | 0.7305 |
+| 2400 | 300 | 13,984 | 0.7955 | 0.4730 | 0.7283 |
+| 1600 | 0 | 15,905 | 0.7684 | 0.5165 | 0.7710 |
+| 1600 | 150 | 16,059 | 0.7684 | 0.4730 | 0.7493 |
+| 1600 | 300 | 16,245 | 0.7684 | 0.4730 | 0.7493 |
+
+The report's own verdict line: *«Gana target=800, overlap=0: empate en recall@10 (0.8264) con
+800/150, 800/300, 1200/0, 1200/150, 1200/300; decidió MRR (0.8179 frente a 0.7961; recall@1
+0.6034 frente a 0.5599).»* The `recall@10` and MRR columns are identical to round 07's table
+cell for cell; `recall@1` is new on the report (it was quoted in prose from the depth-20
+baseline and was not re-derivable from the sweep's own output).
 
 **What this retracts.** The round-03 sweep, scored at a depth of ten CHUNKS, published 800/0
 winning on `recall@10` (0.8119 against 0.8027 for the provisional 1200/150) with gains in exactly
@@ -417,12 +425,25 @@ chunker (rule 2, the gate's own reading). The `--limit` the CLI advertised was n
 the sweep, so `--limit 10` and `--limit 150` produced byte-identical reports; the same cell at
 `--limit 150` now reads `recall@10 0.8264 · MRR 0.8190`.
 
-**What survives, and the decision stands.** 800/0 still wins, by MRR — 0.8179 against 0.7449 —
-and by `recall@1` (0.6034 against 0.4730, a figure that is depth-independent by construction:
-one chunk is always one owner); the two larger targets lose on recall as before; overlap still
-moves only MRR and never recall (this retriever cannot phrase). So `DEFAULT_CHUNKER_PARAMS`
-stays `800/0` and `CHUNKER_VERSION` stays `v2`: the winner is the same, the reason is narrower
-than the one first published, and Plan 03 inherits the narrower one.
+**What survives, and WHICH RULE decided it (S-1, gate Fable round 08).** After the owners tie
+the tie-break is the whole decision — and Plan 02 §7 said *«si empata, se escoge el que produzca
+menos chunks»*, the README said *«tie-broken by fewer chunks»*, and that rule would have chosen
+**1200/0** (18,036 chunks), not 800/0 (22,286): the published winner contradicted the published
+rule. The rule the code applies is `recall@k` → MRR → fewer chunks, and it has since `d8c07cd`,
+before any measurement, so it is not a criterion renegotiated with the result in front of it;
+the fault was that nobody had written it where the plan and the README could be checked
+against it. It is written there now (Plan 02 §7 carries a dated amendment; the README the same
+sentence), with the reason: `recall@k` and MRR are both retrieval QUALITY — whether the
+relevant item is on the page, and where on it — and the consumer of `search` is an agent that
+reads the top of the page, so rank position is not a tie-breaking nicety; the chunk count is a
+COST (disk, build time), and a cost breaks a tie in quality only when quality is flat, which is
+what the plan's «flat result» clause means and still means. On that rule 800/0 wins by MRR —
+0.8179 against 0.7961 (800/150) and 0.7667 (1200/0) — and by `recall@1` (0.6034 against 0.5165
+for 1200/0 and 0.4730 for 1200/150, depth-independent by construction: one chunk is always one
+owner); the two larger targets lose on recall as before; overlap still moves only MRR and never
+recall (this retriever cannot phrase). So `DEFAULT_CHUNKER_PARAMS` stays `800/0` and
+`CHUNKER_VERSION` stays `v2`: the winner is unchanged, the reason is narrower than the one
+first published, and the rule is now the same in the code, the plan and the README.
 
 ---
 

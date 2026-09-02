@@ -852,6 +852,10 @@ class SweepRow:
     recall: float | None
     mrr: float | None
     by_stratum: dict[str, Any]
+    # `recall@1` is depth-independent by construction (one chunk is always one owner) and is
+    # the figure the real decision rested on (S-1, round 08); published so the reader can
+    # check the tie-break without re-running the sweep at another k.
+    recall_at_1: float | None = None
 
 
 @dataclass(frozen=True)
@@ -880,6 +884,7 @@ class SweepReport:
                     "min_chars": row.params.min_chars,
                     "chunks": row.chunks,
                     f"recall@{self.k}": row.recall,
+                    "recall@1": row.recall_at_1,
                     "mrr": row.mrr,
                     "by_stratum": row.by_stratum,
                 }
@@ -924,9 +929,21 @@ def sweep_chunker(
 ) -> SweepReport:
     """Score every combination in `grid` against the golden set (Plan 02 §7).
 
-    Ranked by `recall@k`, tie-broken by MRR and then by FEWER CHUNKS — spec §13.15 says a flat
-    result is documented rather than hidden, and "if they tie, take the one that produces less
-    index" is the honest tie-break rather than a preference dressed as a finding.
+    THE CRITERION, IN ORDER (S-1, round 08): `recall@k` first, MRR second, FEWER CHUNKS last.
+    Plan 02 §7 wrote «si empata, se escoge el que produzca menos chunks» and the README
+    repeated it, while this function has ordered by MRR before the chunk count since before
+    any measurement existed (`d8c07cd`) — and on the real sweep, once U-6 counted the depth
+    in owners, `800/*` and `1200/*` tied on `recall@10` and the tie-break was the whole
+    decision: the written rule chose 1200/0 (18,036 chunks), the applied one 800/0 (MRR
+    0.8179 against 0.7667). The gate found the published winner contradicting the published
+    rule. The rule that stands is this one, and the plan and the README now say it, with the
+    reason: `recall@k` and MRR are both retrieval QUALITY — whether the relevant item is on
+    the page, and where on it — and the consumer of `search` is an agent that reads the top
+    of the page, so rank position is not a tie-breaking nicety; the chunk count is a COST
+    (disk, build time) and a cost breaks a tie in quality only when quality is flat, which is
+    what spec §13.15's «flat result» means. `recall@1` is published on every row because it
+    is the depth-independent form of the same argument. The report names WHICH criterion
+    decided, so the reader never infers it from the table.
 
     A combination that scores nothing measurable sorts last instead of sorting first, which is
     what a `None` would do under a naive `max`.
@@ -939,8 +956,9 @@ def sweep_chunker(
     depth = limit if limit is not None else k
     rows: list[SweepRow] = []
     for params in _combinations(grid, base):
-        report = evaluate(cases, corpus, strategy=strategy, ks=(k,), params=params, limit=depth)
+        report = evaluate(cases, corpus, strategy=strategy, ks=(1, k), params=params, limit=depth)
         overall = _overall(report, k)
+        first = _measured(report, "recall@1")
         rows.append(
             SweepRow(
                 params=params,
@@ -948,6 +966,7 @@ def sweep_chunker(
                 recall=overall[0],
                 mrr=overall[1],
                 by_stratum=report.by_stratum,
+                recall_at_1=sum(first) / len(first) if first else None,
             )
         )
     rows.sort(key=lambda row: (-(row.recall or -1.0), -(row.mrr or -1.0), row.chunks))
@@ -1014,25 +1033,44 @@ def render_sweep_markdown(report: SweepReport) -> str:
     """
     lines = [
         f"Profundidad: {report.limit} owners por caso (U-6).",
-        "",
-        f"| target | overlap | chunks | recall@{report.k} | MRR |",
-        "|---:|---:|---:|---:|---:|",
+        f"Criterio: recall@{report.k}, luego MRR, luego menos chunks (S-1).",
+        f"| target | overlap | chunks | recall@{report.k} | recall@1 | MRR |",
+        "|---:|---:|---:|---:|---:|---:|",
     ]
     for row in report.rows:
         lines.append(
             f"| {row.params.target} | {row.params.overlap} | {row.chunks} "
-            f"| {_number(row.recall)} | {_number(row.mrr)} |"
+            f"| {_number(row.recall)} | {_number(row.recall_at_1)} | {_number(row.mrr)} |"
         )
-    winner = report.winner
-    if winner is not None:
-        distinct = {(_number(r.recall), _number(r.mrr)) for r in report.rows}
-        verdict = (
-            "PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks."
-            if len(distinct) == 1
-            else f"Gana target={winner.params.target}, overlap={winner.params.overlap}."
-        )
-        lines += ["", verdict]
+    if report.winner is not None:
+        lines += ["", _sweep_verdict(report)]
     return "\n".join(lines)
+
+
+def _sweep_verdict(report: SweepReport) -> str:
+    """Which criterion DECIDED, said in the report (S-1): a tie on `recall@k` is named, with
+    the rows it spans, and the criterion that broke it is named with its two values."""
+    winner = report.winner
+    assert winner is not None
+    distinct = {(_number(r.recall), _number(r.mrr)) for r in report.rows}
+    if len(distinct) == 1:
+        return "PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks."
+    label = f"target={winner.params.target}, overlap={winner.params.overlap}"
+    tied = [r for r in report.rows[1:] if _number(r.recall) == _number(winner.recall)]
+    if not tied:
+        return f"Gana {label}: decidió recall@{report.k} ({_number(winner.recall)})."
+    names = ", ".join(f"{r.params.target}/{r.params.overlap}" for r in tied)
+    runner_up = tied[0]
+    if _number(runner_up.mrr) != _number(winner.mrr):
+        return (
+            f"Gana {label}: empate en recall@{report.k} ({_number(winner.recall)}) con {names}; "
+            f"decidió MRR ({_number(winner.mrr)} frente a {_number(runner_up.mrr)}; "
+            f"recall@1 {_number(winner.recall_at_1)} frente a {_number(runner_up.recall_at_1)})."
+        )
+    return (
+        f"Gana {label}: empate en recall@{report.k} y en MRR con {names}; "
+        f"decidió menos chunks ({winner.chunks} frente a {runner_up.chunks})."
+    )
 
 
 def _number(value: float | None) -> str:
