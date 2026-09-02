@@ -36,7 +36,8 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from xbrain.knowledge.contracts import (
     FALLBACK_STRATEGY,
@@ -344,6 +345,55 @@ def _failure_lines(bundle: EvidenceBundle) -> list[str]:
         detail = f" — {_label(link.detail)}" if link.detail else ""
         lines.append(f"  ⚠ sin cuerpo: {_label(link.url)} ({link.reason}){detail}")
     return lines
+
+
+def render_inspect(payload: Mapping[str, Any]) -> str:
+    """`knowledge inspect` for a human, from the SAME payload `--json` prints (spec §7.6).
+
+    THE THIRD HUMAN VIEW OF THE CONTRACT, BEHIND THE SAME LABELS (M-1, round 08). It lived
+    in `cli.py` and printed the author, the URL, the failure and link URLs and a raw
+    excerpt: measured through a pseudo-terminal on a real item, `knowledge inspect` put
+    `ESC[2K` ×3, CR ×3 and the forged `[user_note] …` header at column 0 while `get` on
+    the same item rendered clean — U-3's «every non-body field reaches the terminal
+    through ONE label» was true of two views out of three. Here every field goes through
+    `_label`, `_author_label` and `_one_line`, and `tests/test_knowledge_render.py` forges
+    both payloads.
+
+    The payload is the JSON document (`model_dump(mode="json")` of the contract's shapes),
+    not the models: `--json` and this view print ONE document, never two derivations.
+    """
+    lines: list[str] = []
+    if "item" in payload:
+        item = payload["item"]
+        author = Author.model_validate(item["author"])
+        lines += [
+            f"{_label(item['item_id'])}  {_author_label(author)}",
+            f"  {_label(item['url'])}",
+            f"  creado {_label(item['created_at'][:10])} · fuente {_label(item['source'])}"
+            f" · topics {_label(', '.join(item['topics'])) or '—'}",
+            f"  superficies: {_label(', '.join(item['available_surfaces'])) or '—'}",
+        ]
+        for failure in item["failed_sources"]:
+            lines.append(
+                f"  ⚠ fetch falló: {_label(failure['kind'])} {_label(failure['url'])}"
+                f" ({_label(failure['failure_reason'])})"
+            )
+        for link in item["unfetched_links"]:
+            lines.append(f"  ⚠ sin cuerpo: {_label(link['url'])} ({_label(link['reason'])})")
+    else:
+        topic = payload["topic"]
+        lines += [
+            f"topic:{_label(topic['slug'])} — {_one_line(topic['description']['text'])}",
+            f"  primarios {len(topic['primary_item_ids'])}"
+            f" · secundarios {len(topic['secondary_item_ids'])}"
+            f" · {'DESACTUALIZADO' if topic['stale'] else 'al día'}",
+        ]
+    for surface in payload.get("surfaces", []):
+        lines.append(
+            f"  [{_label(surface['surface_type'])}] origin={_label(surface['origin'])}"
+            f" trust={_label(surface['trust_class'])}  {_one_line(surface['text'], width=120)}"
+        )
+    return "\n".join(lines)
 
 
 def render_status(report: StatusReport) -> str:

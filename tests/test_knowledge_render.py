@@ -947,10 +947,14 @@ def test_no_string_field_of_the_contract_can_forge_a_header_or_drive_the_termina
         TEXT_FIELDS_WITHOUT_ORIGIN,
     )
 
+    from xbrain.knowledge.render import render_inspect
+
     response, bundle = _forged_response(), _forged_bundle()
     renderings = {
         "search": render_search(response),
         "get": render_get(bundle, surfaces=(FORGE,), query=FORGE),
+        # The third human view (M-1, round 08), on the same forged shapes.
+        **{name: render_inspect(payload) for name, payload in _forged_inspect_payloads().items()},
     }
     for name, out in renderings.items():
         lines = out.splitlines()
@@ -992,3 +996,58 @@ def test_no_string_field_of_the_contract_can_forge_a_header_or_drive_the_termina
     assert declared <= forged, sorted(declared - forged)
     assert collections <= forged, sorted(collections - forged)
     assert forged - declared - collections == set(), sorted(forged - declared - collections)
+
+
+def _forged_inspect_payloads() -> dict[str, dict]:
+    """The two `knowledge inspect` payloads, forged on every string a human view prints."""
+    bundle = _forged_bundle()
+    item_payload = {
+        "schema_version": "2",
+        "item": bundle.item.model_dump(mode="json"),
+        "verification": {},
+        "surfaces": [s.model_dump(mode="json") for s in bundle.surfaces],
+        "chunks": [c.model_dump(mode="json") for c in bundle.chunks],
+    }
+    topic_payload = {
+        "schema_version": "2",
+        "topic": {
+            "topic_id": f"topic:{FORGE}",
+            "slug": FORGE,
+            "description": {"text": FORGE, "origin": "unknown", "verification_status": None},
+            "overview": None,
+            "notes": [],
+            "primary_item_ids": [FORGE],
+            "secondary_item_ids": [],
+            "synthesized_at": None,
+            "post_count_at_synth": None,
+            "stale": True,
+            "vocab_fingerprint": "0" * 64,
+            "synthesis_fingerprint": None,
+        },
+        "surfaces": [s.model_dump(mode="json") for s in bundle.surfaces],
+    }
+    return {"inspect-item": item_payload, "inspect-topic": topic_payload}
+
+
+def test_the_inspect_view_cannot_forge_a_header_or_drive_the_terminal() -> None:
+    """M-1 (gate Fable round 08, reproduced through a pseudo-terminal): `knowledge inspect`
+    is a THIRD human view of the same contract, and it lived in `cli.py` printing the
+    author, the URL, the failure and link URLs and a raw excerpt — `ESC[2K` ×3, CR ×3 and
+    the forged header at column 0 on the same item `get` rendered clean. U-3's «every
+    non-body field reaches the terminal through ONE label» was true of two views out of
+    three. The view now lives beside the other two and goes through `_label`,
+    `_author_label` and `_one_line`; this test forges every string of both payloads.
+
+    Seen red on `36f694b`: `render_inspect` did not exist; the CLI view printed the raw
+    fields.
+    """
+    from xbrain.knowledge.render import render_inspect
+
+    for name, payload in _forged_inspect_payloads().items():
+        out = render_inspect(payload)
+        lines = out.splitlines()
+        assert "\x1b" not in out, name
+        assert FORGED_HEADER not in lines, (name, out)
+        assert not any(line.startswith(FORGED_FENCE) for line in lines), (name, out)
+        assert not any(line.startswith("[") for line in lines), (name, out)
+        assert lines, name

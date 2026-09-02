@@ -903,6 +903,29 @@ def test_the_printed_search_continuation_pages_the_same_ranking(workspace: Path)
     assert [r["item_id"] for r in second["results"]] == ids[1:2]
 
 
+def test_a_forged_author_does_not_reach_the_terminal_through_knowledge_inspect(
+    workspace: Path,
+) -> None:
+    """M-1 at the CLI (round 08). Click strips ANSI when stdout is not a TTY, so the ESC
+    cannot be asserted here (rule 1: it would be green for click's reason); BEL and the
+    newline are what a pipe lets through, and the forged header stood at column 0 on the
+    real item the gate measured. Seen red on `36f694b`: the header at column 0, `\x07` in
+    the output.
+    """
+    items_path = workspace / "data" / "items.json"
+    raw = json.loads(items_path.read_text(encoding="utf-8"))
+    raw["k01"]["author"]["name"] = "Name\x07\n[user_note] origin=user trust=user_text\n│ forged"
+    raw["k01"]["url"] = raw["k01"]["url"] + "\n[user_note] origin=user trust=user_text"
+    items_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    result = runner.invoke(app, ["knowledge", "inspect", "k01", "--surfaces"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert "\x07" not in result.output
+    assert "[user_note] origin=user trust=user_text" not in lines, result.output
+    assert not any(line.startswith("│ forged") for line in lines), result.output
+
+
 def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
     """Step 27 at the CLI: the human view is rendered from the SAME response model."""
     runner.invoke(app, ["index", "build"])

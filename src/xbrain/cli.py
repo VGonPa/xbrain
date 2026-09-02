@@ -2940,42 +2940,10 @@ def knowledge_inspect(
     if json_out:
         typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        typer.echo(_render_inspect(payload))
+        # The human view lives beside the other two, behind the same labels (M-1).
+        from xbrain.knowledge.render import render_inspect
 
-
-def _render_inspect(payload: dict) -> str:
-    """The human rendering. Same model as `--json` (spec §7.6), never a second shape."""
-    lines: list[str] = []
-    if "item" in payload:
-        item = payload["item"]
-        lines += [
-            f"{item['item_id']}  @{item['author']['handle']} ({item['author']['name']})",
-            f"  {item['url']}",
-            f"  creado {item['created_at'][:10]} · fuente {item['source']}"
-            f" · topics {', '.join(item['topics']) or '—'}",
-            f"  superficies: {', '.join(item['available_surfaces']) or '—'}",
-        ]
-        for failure in item["failed_sources"]:
-            lines.append(
-                f"  ⚠ fetch falló: {failure['kind']} {failure['url']} ({failure['failure_reason']})"
-            )
-        for link in item["unfetched_links"]:
-            lines.append(f"  ⚠ sin cuerpo: {link['url']} ({link['reason']})")
-    else:
-        topic = payload["topic"]
-        lines += [
-            f"topic:{topic['slug']} — {topic['description']['text']}",
-            f"  primarios {len(topic['primary_item_ids'])}"
-            f" · secundarios {len(topic['secondary_item_ids'])}"
-            f" · {'DESACTUALIZADO' if topic['stale'] else 'al día'}",
-        ]
-    for surface in payload.get("surfaces", []):
-        excerpt = surface["text"][:120].replace("\n", " ")
-        lines.append(
-            f"  [{surface['surface_type']}] origin={surface['origin']}"
-            f" trust={surface['trust_class']}  {excerpt}"
-        )
-    return "\n".join(lines)
+        typer.echo(render_inspect(payload))
 
 
 # ============================================================================
