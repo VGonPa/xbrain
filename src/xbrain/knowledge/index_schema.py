@@ -55,7 +55,9 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
+from typing import NamedTuple
 
 from xbrain.knowledge.lexical_fts import FTS_TOKENIZE, fts5_table_sql
 from xbrain.models import _reject_local_path_traversal
@@ -414,8 +416,42 @@ def _prove_readable(connection: sqlite3.Connection, path: Path) -> sqlite3.Conne
     return connection
 
 
+class ColumnSpec(NamedTuple):
+    """What `PRAGMA table_info` says about one column: the parts a query depends on."""
+
+    type: str
+    notnull: int
+    pk: int
+
+
+@cache
+def declared_columns() -> dict[str, dict[str, ColumnSpec]]:
+    """`{table: {column: spec}}` of the DDL THIS code ships — read, never restated (U-4).
+
+    The reference is `create_schema` run on `:memory:` and read back through `PRAGMA
+    table_info`, so the door verifies exactly the schema the code creates and the two cannot
+    drift (rule 5): a column added to `_SCHEMA` is required of every base without anybody
+    remembering to list it here. `pk` is in the spec because the m1 guard — `chunks.rowid`
+    an explicit `INTEGER PRIMARY KEY`, or `VACUUM` may repoint every FTS entry — was «the
+    DDL assertion and not a behavioural test», and a base whose `chunks` was recreated
+    without it is one this code must not read. Cached: it costs one in-memory schema per
+    process and the answer is a constant of the code.
+    """
+    connection = open_memory_index()
+    try:
+        return {
+            table: {
+                row["name"]: ColumnSpec(str(row["type"]), int(row["notnull"]), int(row["pk"]))
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            for table in sorted(TABLES | FTS_TABLES)
+        }
+    finally:
+        connection.close()
+
+
 def _verify_schema(connection: sqlite3.Connection, path: Path) -> sqlite3.Connection:
-    """Refuse a database that lacks a table this code queries (C-2).
+    """Refuse a database that lacks a table — or a COLUMN — this code queries (C-2, U-4).
 
     `_prove_readable` proves the FILE is SQLite; it says nothing about what is inside. Both
     round-03 gates dropped `chunks_fts` behind a healthy manifest and got a normal answer:
@@ -425,6 +461,15 @@ def _verify_schema(connection: sqlite3.Connection, path: Path) -> sqlite3.Connec
     Spec §9.3 asks for an actionable error; Plan 02 §11 tabulates a base the code cannot
     read as *error accionable con `index build --force`*. Same operator situation as a
     corrupt file, same sentence.
+
+    AND THE COLUMNS (U-4, round 07 — gate Codex F3). Table names were the whole check, so
+    `ALTER TABLE surfaces DROP COLUMN attribution_name` — `quick_check: ok`, every table
+    present — passed every door: `status` certified the base healthy, `update` re-sealed the
+    manifest over it with exit 0, and `search` failed late in a raw `OperationalError: no
+    such column` naming no command. The effective schema is the columns the queries read;
+    they are compared against `declared_columns` — name, type, `NOT NULL` and the
+    primary-key flag — so a missing or redefined column is refused here, with its name.
+    Extra columns are tolerated: a base that holds more than this code reads is readable.
 
     Checked against `TABLES | FTS_TABLES`, the declared set, so a table added to the DDL is
     verified without anybody remembering to add it here.
@@ -440,7 +485,34 @@ def _verify_schema(connection: sqlite3.Connection, path: Path) -> sqlite3.Connec
             f"La base del índice en {path} está incompleta: faltan las tablas "
             f"{', '.join(missing)}. {REBUILD_ADVICE}"
         )
+    absent, redefined = _column_drift(connection)
+    if absent or redefined:
+        connection.close()
+        raise IndexIncompatibleError(
+            f"La base del índice en {path} está incompleta: "
+            + (f"faltan las columnas {', '.join(absent)}" if absent else "")
+            + ("; " if absent and redefined else "")
+            + (f"columnas con otra definición {', '.join(redefined)}" if redefined else "")
+            + f". {REBUILD_ADVICE}"
+        )
     return connection
+
+
+def _column_drift(connection: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """`(absent, redefined)` — `table.column` names, sorted — against `declared_columns`."""
+    absent: list[str] = []
+    redefined: list[str] = []
+    for table, columns in declared_columns().items():
+        stored = {
+            row["name"]: ColumnSpec(str(row["type"]), int(row["notnull"]), int(row["pk"]))
+            for row in connection.execute(f"PRAGMA table_info({table})")
+        }
+        for column, spec in columns.items():
+            if column not in stored:
+                absent.append(f"{table}.{column}")
+            elif stored[column] != spec:
+                redefined.append(f"{table}.{column}")
+    return sorted(absent), sorted(redefined)
 
 
 # One trivial `MATCH` per FTS plane — LITERALS keyed by table, like `_COUNT_STATEMENTS`, and

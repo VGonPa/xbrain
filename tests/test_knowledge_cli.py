@@ -467,6 +467,44 @@ def test_a_corrupt_fts_structure_names_the_rebuild_command_on_every_command(
     assert isinstance(result.exception, SystemExit), repr(result.exception)
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["search", "Quillfeather"],
+        ["index", "status"],
+        ["index", "update", "--dry-run"],
+    ],
+)
+def test_a_base_missing_a_column_names_the_rebuild_command_on_every_command(
+    workspace: Path, argv: list[str]
+) -> None:
+    """U-4 at the CLI (gate Codex F3, reproduced on the real corpus): `ALTER TABLE surfaces
+    DROP COLUMN attribution_name` — `quick_check: ok` — and `status` exited 0 healthy,
+    `update` exited 0 and re-sealed the manifest, `search` exited 1 with a raw
+    `OperationalError` traceback. The three now refuse at the door naming the column and
+    the rebuild, and no command certifies a base it cannot read.
+
+    Seen red on `9dfa34e` on all three parametrisations.
+    """
+    import sqlite3
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    connection = sqlite3.connect(workspace / "data" / "index" / "knowledge.db")
+    connection.execute("ALTER TABLE surfaces DROP COLUMN attribution_name")
+    connection.commit()
+    connection.close()
+    manifest = workspace / "data" / "index" / "manifest.json"
+    sealed = manifest.read_bytes()
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code != 0, result.output
+    assert "surfaces.attribution_name" in result.output, result.output
+    assert "xbrain index build --force" in result.output, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert manifest.read_bytes() == sealed, "no command may re-seal an unreadable base"
+
+
 def test_search_refuses_an_index_whose_chunker_parameters_moved_like_status_says(
     workspace: Path,
 ) -> None:

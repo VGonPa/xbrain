@@ -124,6 +124,38 @@ def _chunk(chunk_id: str, text: str, surface_id: str = "item:x:post:0", **kwargs
 
 
 # ---------------------------------------------------------------------------
+# U-4 (round 07) — a late SQLite failure at query time is the rebuild advice, never raw
+# ---------------------------------------------------------------------------
+
+
+def test_a_column_that_vanishes_after_the_door_is_the_rebuild_advice_not_a_traceback() -> None:
+    """Gate Codex F3: `_fetch` re-raised every `OperationalError` that was not an FTS parse
+    error, so a schema the door had not verified (columns, until U-4) reached the operator
+    as `OperationalError: no such column: surfaces.attribution_name` inside a 60-line
+    traceback. The door verifies columns now; this pins the OTHER half — whatever SQLite
+    raises past the door that is not the parser saying «I could not parse your query» is
+    a base this code cannot read, and it ends in the one sentence that names the rebuild.
+
+    Staged AFTER the door: the column is dropped on the open connection, which is the only
+    way a query can meet it. Seen red on `9dfa34e`: a raw `sqlite3.OperationalError`.
+    """
+    from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
+
+    index = _index()
+    index.add([_chunk("c1", "marrowgate body")])
+    index.connection.execute("ALTER TABLE surfaces DROP COLUMN attribution_name")
+
+    with pytest.raises(IndexIncompatibleError, match="no such column") as refused:
+        index.search("marrowgate", 5)
+    assert REBUILD_ADVICE in str(refused.value)
+    # The parser's own family still degrades to «no results» on a sound base — a query the
+    # parser refuses is data that held nothing, not a base this code cannot read (C-2).
+    sound = _index()
+    sound.add([_chunk("c1", "marrowgate body")])
+    assert sound.search("NEAR(a b", 5) == ()
+
+
+# ---------------------------------------------------------------------------
 # The engine — moved verbatim in substance from test_knowledge_lexical_memory.py
 # ---------------------------------------------------------------------------
 
@@ -943,13 +975,18 @@ def test_a_missing_table_is_an_error_not_an_empty_result() -> None:
     which is CLAUDE.md rule 9 in miniature.
 
     The catch now absorbs exactly what it was written for — an expression FTS5's parser
-    rejects — and everything else propagates. Seen red before the fix: `search` returned `()`
-    over an index whose `chunks_fts` had been dropped.
+    rejects — and everything else is an ERROR. Seen red before the fix: `search` returned
+    `()` over an index whose `chunks_fts` had been dropped. Since U-4 (round 07) the error
+    is the actionable one rather than the raw `OperationalError` this test used to pin: a
+    base missing a table past the door is the same operator situation as a corrupt one,
+    and the sentence names the rebuild — while still carrying SQLite's own words.
     """
+    from xbrain.knowledge.index_schema import IndexIncompatibleError
+
     index = _index()
     index.add(_corpus_chunks())
     index.connection.execute("DROP TABLE chunks_fts")
-    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+    with pytest.raises(IndexIncompatibleError, match="no such table"):
         index.search("marrowgate", 5)
 
 

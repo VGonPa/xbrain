@@ -300,6 +300,89 @@ def test_opening_a_missing_database_for_writing_does_not_create_it(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
+# U-4 (round 07) — the schema the door verifies is the EFFECTIVE one: columns too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "table, column",
+    # `chunks.trust_class` rather than `chunks.origin`: SQLite refuses to drop a column an
+    # index depends on, and `chunks_origin` is one — the staging must survive, or nothing
+    # is tested.
+    [("surfaces", "attribution_name"), ("chunks", "trust_class"), ("items", "store_fingerprint")],
+)
+def test_a_base_missing_a_column_this_code_reads_is_refused_at_the_door(
+    tmp_path: Path, table: str, column: str
+) -> None:
+    """Gate Codex F3 (round 07): `_verify_schema` compared TABLE names, so a base with a
+    column dropped (`ALTER TABLE surfaces DROP COLUMN attribution_name`, `quick_check: ok`)
+    passed the door — `status` certified it healthy, `update` re-sealed the manifest over
+    it with exit 0, and `search` died late in a raw `OperationalError: no such column`.
+    The schema this code needs is the DDL it ships, column by column; the reference is
+    read from that DDL on a `:memory:` connection, never restated, and a column missing
+    from the base names the table, the column and the rebuild.
+
+    Seen red on `9dfa34e`: the door opened.
+    """
+    from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
+
+    path = tmp_path / "knowledge.db"
+    open_index(path, create=True).close()
+    connection = sqlite3.connect(path)
+    connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    connection.commit()
+    connection.close()
+
+    for open_ in (lambda: open_index(path, read_only=True), lambda: open_index(path)):
+        with pytest.raises(IndexIncompatibleError) as refused:
+            open_()
+        assert f"{table}.{column}" in str(refused.value)
+        assert REBUILD_ADVICE in str(refused.value)
+
+
+def test_a_chunks_table_without_its_explicit_rowid_is_refused_at_the_door(tmp_path: Path) -> None:
+    """The m1 guard, MECHANISED. CLAUDE.md says the explicit `INTEGER PRIMARY KEY` on
+    `chunks` is «the DDL assertion and not a behavioural test that would pass for the wrong
+    reason» — a `VACUUM` MAY renumber an implicit rowid and repoint every FTS entry. The
+    column comparison sees the `pk` flag, so a base whose `chunks` lost the explicit key
+    (recreated by hand, or by a tool that rewrote the table) is refused before a query
+    could read text under the wrong rowid.
+    """
+    from xbrain.knowledge.index_schema import IndexIncompatibleError
+
+    path = tmp_path / "knowledge.db"
+    open_index(path, create=True).close()
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE chunks_implicit AS SELECT * FROM chunks WHERE 0;
+        DROP TABLE chunks;
+        ALTER TABLE chunks_implicit RENAME TO chunks;
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(IndexIncompatibleError, match="chunks.rowid"):
+        open_index(path, read_only=True)
+
+
+def test_the_declared_columns_are_read_from_the_ddl_this_code_ships() -> None:
+    """The reference has ONE definition — `create_schema` on `:memory:` — so the door and
+    the DDL cannot drift (rule 5): every declared table is in it, the two FTS planes have
+    their columns, and `chunks.rowid` carries the primary-key flag the m1 guard depends on.
+    """
+    from xbrain.knowledge.index_schema import declared_columns
+
+    reference = declared_columns()
+    assert set(reference) == TABLES | FTS_TABLES
+    assert set(reference["chunks_fts"]) == {"text", "title"}
+    assert reference["chunks"]["rowid"].pk == 1
+    assert reference["profiles"]["rowid"].pk == 1
+    assert reference["surfaces"]["attribution_name"].notnull == 0
+
+
+# ---------------------------------------------------------------------------
 # 2 — the index is derived data and lives outside Git
 # ---------------------------------------------------------------------------
 

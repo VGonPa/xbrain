@@ -451,14 +451,19 @@ class LexicalIndex:
         except sqlite3.OperationalError as error:
             # A MATCH expression FTS5's parser rejects degrades to "no results", HERE AND
             # ONLY HERE: the query was understood as data and simply held nothing FTS5
-            # could parse. Everything else propagates (C-2). The first version caught every
-            # `OperationalError` except a read-only one — chosen by substring, rule 9 in
-            # miniature — so `no such table`, `database is locked` and `disk I/O error`
-            # all came back as "the corpus holds nothing". The parser's own error family is
-            # the closed set the branch was written for, and it is matched positively.
+            # could parse. The first version caught every `OperationalError` except a
+            # read-only one — chosen by substring, rule 9 in miniature — so `no such table`,
+            # `database is locked` and `disk I/O error` all came back as "the corpus holds
+            # nothing" (C-2). The parser's own error family is the closed set the branch was
+            # written for, and it is matched positively. Everything else is a base this code
+            # cannot read and is CONVERTED like the rest of the family below (U-4): the C-2
+            # fix re-raised it raw, and `no such column: surfaces.attribution_name` reached
+            # the operator as a traceback naming no command.
             if _is_fts_parse_error(error):
                 return []
-            raise
+            raise IndexIncompatibleError(
+                f"La base del índice no se puede consultar ({error}). {REBUILD_ADVICE}"
+            ) from error
         except sqlite3.DatabaseError as error:
             # The REST of the family — `fts5: corruption found reading blob…`, `file is not
             # a database`, `database disk image is malformed` — is what a corrupt or
