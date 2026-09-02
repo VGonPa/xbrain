@@ -25,12 +25,15 @@ defaults live in `DEFAULT_CHUNKER_PARAMS`; the pinned test passes its own.
 THE VALUES ARE MEASURED NOW, and they moved (Plan 02 §7). The Plan 01 provisional was
 `target=1200, overlap=150`; the sweep over `target ∈ {800,1200,1600,2400} × overlap ∈
 {0,150,300}` against the 23 scorable golden-set cases on the real 2,404-item corpus put
-`target=800, overlap=0` first on `recall@10` (0.8119 vs 0.8027) and on MRR (0.8179 vs
-0.7449), improving exactly the three strata where chunking is supposed to matter —
-`enterrado` +2.1 pp (the stratum Plan 02 §7 says decides), `semantico` +2.4 pp,
-`cruzado_idioma` +0.9 pp — and regressing none. The cost is +21.6 % chunks (18,320 ->
-22,286). The chunk-size distribution does NOT return to the 194-character pathology that
-motivated packing: the median moves 658 -> 670 and `x_article` averages 661.
+`target=800, overlap=0` first. **On MRR** — 0.8179 vs 0.7449 — and on `recall@1` (0.6034 vs
+0.4730); the round-03 claim that it also won on `recall@10` (0.8119 vs 0.8027, with gains
+in `enterrado`, `semantico` and `cruzado_idioma`) was an artefact of scoring at a depth of
+ten CHUNKS, and it is retracted (U-6, round 07): with the depth counted in OWNERS the two
+targets tie on `recall@10` at every overlap (0.8264) and their per-stratum recalls are
+identical cell for cell. The winner is the same; the reason is narrower. The cost is
++21.6 % chunks (18,320 -> 22,286). The chunk-size distribution does NOT return to the
+194-character pathology that motivated packing: the median moves 658 -> 670 and
+`x_article` averages 661.
 
 **THE OVERLAP AXIS WAS DECIDED BY A RETRIEVER THAT CANNOT USE IT, AND THAT IS A DECLARED
 LIMIT, NOT A FINDING.** Overlap applies only to `video_transcript`, the one windowed surface,

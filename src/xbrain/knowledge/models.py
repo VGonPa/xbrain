@@ -199,6 +199,18 @@ class KnowledgeSurface(BaseModel):
     (`enriched.executor`, `MediaPhotoDescribed.description_version`/`described_at`, the
     configured transcribe/vision command, `TopicPage.synthesized_at`) and are `None` only
     where the format genuinely does not record it.
+
+    A DECLARED LIMIT, NOT A GUARANTEE, for `video_transcript` and `video_frame` (F7-7, round
+    07): the store's `x_video` source does not record which transcriber or vision command
+    wrote it, so `producer` on those two surfaces is the command CONFIGURED when the surface
+    is emitted — `[transcribe].command` / `[vision].command` at build or `get` time — not
+    necessarily the one that produced the text. Measured on the real corpus: after changing
+    `[transcribe].command` from `xbrain-transcribe-auto` to `whisper-large-v3`, `get` served
+    `producer: whisper-large-v3` for a transcript parakeet wrote, text and fingerprints
+    identical. The honest fix stamps the producer on the source when `digest-video` attaches
+    the transcript (as `caption_contract` does for frames) and is a STORE change outside
+    Plan 02; until then read the field on those surfaces as «the transcriber this
+    installation is configured with», which the fingerprint deliberately does not hash.
     """
 
     model_config = _FROZEN

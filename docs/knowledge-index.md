@@ -67,9 +67,10 @@ on an Apple-silicon laptop, with the shipped chunker (`target=800, overlap=0`, c
 |---|---|
 | `index build`, full | **1.37 s** median of 5 (1.20 – 1.54) |
 | loading the store (not counted above) | 0.22 s |
-| `index update`, 0 items changed | 0.15 s — 0 writes to the DATABASE (the manifest is always rewritten: it records the current cheap signal) |
-| `index update`, 1 item changed | 0.16 s — 3 chunks out, 3 in |
-| `index update`, 100 items changed (SYNTHETIC: 100 summaries rewritten in memory) | 0.26 s — 645 chunks out, 645 in |
+| `index update`, 0 items changed | **0.43 s** median of 5 (0.42 – 0.46), re-measured 2026-09-02 at load 8.8–9.7 — 0 writes to the DATABASE (the manifest is always rewritten: it records the current cheap signal). *Was 0.15 s until round 06 made `update` pay `PRAGMA quick_check` (D-1) and round 07 the column check (U-4); the old row stood for two rounds after the cost moved — F7-4, rule 6 in the measurement table itself.* |
+| `index update`, 1 item changed | **0.44 s** — 3 chunks out, 3 in (was 0.16 s, same population) |
+| `index update`, 100 items changed (SYNTHETIC: 100 summaries rewritten in memory) | **0.57 s** — 645 chunks out, 645 in (was 0.26 s, same population) |
+| cold `xbrain index status --json` / `index update --dry-run --json` / `search … --json` | 0.86–1.24 s / 0.85–0.88 s / 0.55–0.63 s wall, 3 runs each, 2026-09-02, load 8–10 |
 | `data/index/knowledge.db` | **52.4 MB** (manifest 1 KB) |
 | chunks | **22,286** — 10,160 surfaces, 2,404 profiles |
 | chunks per item | median 3, mean 9.0, max 712 |
@@ -291,6 +292,19 @@ build --force\``.
 
 Measured on the same corpus, against the 23 scorable cases of `eval/golden-set.yaml`
 (`xbrain eval`). All 23 score; none is unmeasurable, and none returned an empty result set.
+**Regenerated 2026-09-02 (round 07, U-6) with the depth counted in OWNERS**: until then
+`evaluate` asked the index for `max(limit, max(ks))` CHUNKS and deduplicated owners afterwards,
+so ten chunks dominated by one transcript held two owners and the real case F2 read
+`recall@10 = 0.6667` with `--k 10` alone and `1.0` with `k=20` beside it (the `filtros` stratum
+0.8333 → 1.0). Now the ranking is materialised until it holds the owners asked for, the report
+publishes that depth (`limit`), and every `recall@k` at or below it is ONE number: re-derived at
+depth 10, depth 20 and `--k 10` alone, the 23 per-case `recall@10` values are identical across
+the three runs (0 cases differ). What the regeneration MOVED, said before the table:
+`precision@10` 0.3152 → **0.3087**, because its denominator is now ten owners whenever ten exist
+(it used to be however many owners ten chunks happened to hold); `MRR` 0.8179 → **0.8188** at
+depth 20, because MRR is a reciprocal rank over the materialised list and is therefore bounded
+by the published depth (0.8179 at depth 10, 0.8190 at depth 150 — read it with its `limit`).
+Every `recall@k` in the tables below is unchanged from round 03's figures.
 
 **What ranking this number measures, said before the number (G-6).** `xbrain eval` scores
 `LexicalIndex.search` — the CHUNK plane, hits deduplicated by owner in rank order, a hit on a
@@ -298,8 +312,9 @@ topic surface counting as the owner `topic:<slug>`. That is NOT the ranking `xbr
 serves: the service expands each topic hit into up to `limit` supporting items (primary
 first), appends profile-plane candidates after the chunk-matched ones, and can never return a
 topic as a result. Re-derived 2026-09-01 on the same 23 cases at depth 10, harness against
-service: the top-10 differs in **17 of 23** cases; `recall@10` reads **0.8119** on the harness
-and **0.6924** on the service (the three `relevant_topics` cases cannot be hit by a service
+service: the top-10 differs in **17 of 23** cases; `recall@10` read **0.8119** on the harness
+and **0.6924** on the service *(both under the chunk-depth semantics retired by U-6 — the
+harness figure at depth 10 owners is 0.8264; the service comparison has not been re-derived)* (the three `relevant_topics` cases cannot be hit by a service
 that never returns a topic); on the 20 item-only cases the two are **0.7837** and **0.7962** —
 the service is not worse, it is differently shaped — and **42.8 %** of the service's match
 slots (140 of 327) are topic surfaces attached to expanded items. So the table below is the
@@ -310,26 +325,30 @@ carry three topic-surface matches and no match of its own), and whether the harn
 score the service's ranking beside the retriever's, are open, and the fusion sweep has to
 settle both before publishing a `hybrid` number as comparable to this one.
 
-| metric | mean |
+| metric | mean (depth 20 owners, 2026-09-02) |
 |---|---:|
 | `recall@1` | 0.6034 |
 | `recall@5` | 0.7665 |
 | `recall@10` | 0.8264 |
 | `recall@20` | 0.8300 |
-| `precision@10` | 0.3152 |
-| `MRR` | 0.8179 |
+| `precision@10` | 0.3087 *(0.3152 under chunk depth — see above)* |
+| `MRR` | 0.8188 *(0.8179 at depth 10; bounded by the depth)* |
 
 | stratum | cases | recall@1 | recall@10 | precision@10 | MRR |
 |---|---:|---:|---:|---:|---:|
-| `cruzado_idioma` | 5 | 0.6091 | 0.6182 | 0.130 | 0.800 |
-| `enterrado` | 8 | 0.3958 | 0.7396 | 0.269 | 0.601 |
-| `exacto` | 5 | 0.3667 | 0.8000 | 0.620 | 0.622 |
-| `filtros` | 2 | 0.4167 | 1.0000 | 1.000 | 1.000 |
-| `multimodal` | 6 | 0.7500 | 0.8333 | 0.233 | 0.833 |
-| `resumen` | 1 | 1.0000 | 1.0000 | 0.100 | 1.000 |
-| `semantico` | 9 | 0.4680 | 0.6675 | 0.144 | 0.744 |
-| `topic` | 3 | 1.0000 | 1.0000 | 0.100 | 1.000 |
+| `cruzado_idioma` | 5 | 0.6091 | 0.6182 | 0.1000 | 0.8000 |
+| `enterrado` | 8 | 0.3958 | 0.7396 | 0.2500 | 0.6014 |
+| `exacto` | 5 | 0.3667 | 0.8000 | 0.6200 | 0.6267 |
+| `filtros` | 2 | 0.4167 | 1.0000 | 1.0000 | 1.0000 |
+| `multimodal` | 6 | 0.7500 | 0.8333 | 0.2333 | 0.8370 |
+| `resumen` | 1 | 1.0000 | 1.0000 | 0.1000 | 1.0000 |
+| `semantico` | 9 | 0.4680 | 0.6675 | 0.1444 | 0.7444 |
+| `topic` | 3 | 1.0000 | 1.0000 | 0.1000 | 1.0000 |
 | `expansion` | — | *sin cobertura* | | | |
+
+*(Depth 20 owners, 2026-09-02. Against round 03's table the `recall` columns are identical; the
+`precision@10` and `MRR` cells moved on `cruzado_idioma`, `enterrado`, `exacto` and `multimodal`
+for the two reasons stated above.)*
 
 `recall@k` counts deduplicated **owners**; `surface_recall@k` counts **chunks**. Under the same
 `k` they do not measure the same population — compare each column with its own value in the next
@@ -346,7 +365,7 @@ computed and never published — B3, round 06).** Re-derived 2026-09-02 on the s
 
 | provenance | scorable cases | recall@1 | recall@10 | precision@10 | MRR |
 |---|---:|---:|---:|---:|---:|
-| `construido` | 23 | 0.6034 | 0.8264 | 0.3152 | 0.8179 |
+| `construido` | 23 | 0.6034 | 0.8264 | 0.3087 | 0.8188 |
 | `real` | 0 | *sin cobertura* | | | |
 
 **Read the aggregate table above as a mean over 23 CONSTRUCTED cases**, not as a measurement of
@@ -363,8 +382,47 @@ the filter selects (2 and 3 items), so a filter that reaches the backend returns
 and nothing else. The number is not vacuous — it can come out near 0 if the filter never reaches
 the `WHERE`, which is the defect that motivated the cases (rule 2 is satisfied: there is a way
 for a different answer to come out) — but read it as *the filter runs*, never as *ranking is
-perfect there*. Its effect on the aggregate, said out loud: `precision@10` 0.2500 → **0.3152**
-and `recall@10` 0.8099 → **0.8264**.
+perfect there*. Its effect on the aggregate, said out loud (re-derived 2026-09-02 in owners):
+`precision@10` 0.2429 → **0.3087** and `recall@10` 0.8099 → **0.8264**.
+
+### The chunker sweep, regenerated in owners (Plan 02 §7, U-6)
+
+`xbrain eval --strategy lexical --limit 10 --sweep-chunker 'target=800,1200,1600,2400
+overlap=0,150,300'`, 2026-09-02, same corpus, 23 cases, **depth 10 owners** (published on the
+report as `limit`):
+
+| target | overlap | chunks | recall@10 | MRR |
+|---:|---:|---:|---:|---:|
+| 800 | 0 | 22,286 | **0.8264** | **0.8179** |
+| 800 | 150 | 22,987 | 0.8264 | 0.7961 |
+| 800 | 300 | 24,110 | 0.8264 | 0.7725 |
+| 1200 | 0 | 18,036 | 0.8264 | 0.7667 |
+| 1200 | 150 | 18,320 | 0.8264 | 0.7449 |
+| 1200 | 300 | 18,696 | 0.8264 | 0.7449 |
+| 2400 | 0 | 13,850 | 0.7955 | 0.7315 |
+| 2400 | 150 | 13,912 | 0.7955 | 0.7305 |
+| 2400 | 300 | 13,984 | 0.7955 | 0.7283 |
+| 1600 | 0 | 15,905 | 0.7684 | 0.7710 |
+| 1600 | 150 | 16,059 | 0.7684 | 0.7493 |
+| 1600 | 300 | 16,245 | 0.7684 | 0.7493 |
+
+**What this retracts.** The round-03 sweep, scored at a depth of ten CHUNKS, published 800/0
+winning on `recall@10` (0.8119 against 0.8027 for the provisional 1200/150) with gains in exactly
+the strata where chunking is supposed to matter (`enterrado` +2.1 pp, `semantico` +2.4 pp,
+`cruzado_idioma` +0.9 pp). **In owners, that advantage does not exist**: `target=800` and
+`target=1200` tie on `recall@10` at every overlap (0.8264), and the eight per-stratum `recall@10`
+values of 800/0 and 1200/150 are identical cell for cell. The recall gain was a measurement of
+the depth applied — a smaller target packs less of one owner into ten chunks — and not of the
+chunker (rule 2, the gate's own reading). The `--limit` the CLI advertised was never passed to
+the sweep, so `--limit 10` and `--limit 150` produced byte-identical reports; the same cell at
+`--limit 150` now reads `recall@10 0.8264 · MRR 0.8190`.
+
+**What survives, and the decision stands.** 800/0 still wins, by MRR — 0.8179 against 0.7449 —
+and by `recall@1` (0.6034 against 0.4730, a figure that is depth-independent by construction:
+one chunk is always one owner); the two larger targets lose on recall as before; overlap still
+moves only MRR and never recall (this retriever cannot phrase). So `DEFAULT_CHUNKER_PARAMS`
+stays `800/0` and `CHUNKER_VERSION` stays `v2`: the winner is the same, the reason is narrower
+than the one first published, and Plan 03 inherits the narrower one.
 
 ---
 
@@ -441,9 +499,19 @@ the retriever.
   test follows each printed line page after page and reassembles the surface (positional) or
   the ranked chunk list (query). `--budget` is not repeated: it bounds a page and does not
   define the sequence.
-- **`get` keeps the ASR/VLM producer (A-4).** `transcribe_command` and `vision_command` travel in
-  `QueryContext` from the same config definition the build uses, so a transcript's `producer` is
-  the configured transcriber in `get` exactly as in the index.
+- **`get` keeps the ASR/VLM producer (A-4) — and that producer is the CONFIGURED command, not
+  necessarily the one that wrote the text (F7-7, round 07, declared, not fixed).**
+  `transcribe_command` and `vision_command` travel in `QueryContext` from the same config
+  definition the build uses, so a transcript's `producer` is the configured transcriber in `get`
+  exactly as in the index. But the store's `x_video` source records no transcriber: measured on
+  the real corpus, after changing `[transcribe].command` from `xbrain-transcribe-auto` to
+  `whisper-large-v3`, `get` served `producer: whisper-large-v3` for a transcript parakeet wrote,
+  with text, `surface_fingerprint` and `item_fingerprint` identical — a provenance claim the
+  store cannot back. The fix is to stamp the producer on the source when `digest-video` attaches
+  the transcript (the `caption_contract` pattern) and is a store change outside Plan 02; it is
+  recorded as an open issue, and `KnowledgeSurface.producer`'s docstring says which two surface
+  types carry this reading. The fingerprint deliberately does not hash it (a binary rename must
+  not rewrite every ASR item), which is the right decision over the wrong data.
 - **The spec's `matched_surface` is the contract's `surface_type` (M-6).** Spec §7.2 names the
   field `matched_surface` in its illustrative JSON and says the example *defines semantics, not
   final property names*; Plan 01 froze `SearchMatch.surface_type` at `schema_version: "1"` and
