@@ -1420,6 +1420,15 @@ def _apply_update(
     `enrich` rewrites. When the plane is not rebuilt, the rows whose members or `stale` bit
     moved are rewritten through the same projection the full writer uses; the topic
     surfaces and chunks are left alone, because nothing they hold depends on membership.
+
+    THE PAGES DRAG THE ITEM PLANE TOO, AND THAT IS A COST, NOT A NECESSITY (S-1, round 06).
+    `topics_rebuilt` fuses the vocabulary and the page fingerprints, so a `topics.json`-only
+    change rewrites every item as a `vocab.yaml` change must — measured on the real corpus,
+    an update for one added topic note costs what a `build --force` costs (11.6–31.8 s
+    depending on load) — although `profile_text` reads no `TopicPage`. What is served
+    afterwards is correct and byte-identical to a rebuild (the gate checked six queries), so
+    this is declared here rather than fixed here; separating the two triggers is the natural
+    follow-up and touches no contract.
     """
     rewrite = sorted(store) if topics_rebuilt else delta.added + delta.changed
     deleted_chunks = 0
@@ -1430,7 +1439,9 @@ def _apply_update(
     for item_id in rewrite:
         write_item(index, store[item_id], vocab, counters, options=options)
     if topics_rebuilt:
-        _clear_topics(connection)
+        # Counted (N-1): the report's `chunks_deleted` omitted the topic plane, so after a
+        # `topics.json`-only update it read `+22,287 / -21,583` while the base moved by one.
+        deleted_chunks += _clear_topics(connection)
         for topic in sorted(vocab, key=lambda t: t.slug):
             primary, secondary = topic_membership(store, topic.slug)
             write_topic(
@@ -1759,14 +1770,16 @@ def _delete_item(connection: sqlite3.Connection, item_id: str) -> int:
     return removed
 
 
-def _clear_topics(connection: sqlite3.Connection) -> None:
+def _clear_topics(connection: sqlite3.Connection) -> int:
+    """Remove the whole topic plane. Returns the chunks removed, so the report can count them."""
     chunk_ids = [
         row["chunk_id"]
         for row in connection.execute("SELECT chunk_id FROM chunks WHERE owner_type = 'topic'")
     ]
-    delete_chunk_rows(connection, chunk_ids)
+    removed = delete_chunk_rows(connection, chunk_ids)
     connection.execute("DELETE FROM surfaces WHERE owner_type = 'topic'")
     connection.execute("DELETE FROM topics")
+    return removed
 
 
 # ---------------------------------------------------------------------------

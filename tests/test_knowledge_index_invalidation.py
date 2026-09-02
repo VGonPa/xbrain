@@ -901,3 +901,27 @@ def test_status_search_and_update_ask_one_function_whether_the_manifest_describe
         _update(built, store, corpus)
     assert str(caught.value) == sentinel
     assert _status(built, store, corpus).advice == sentinel
+
+
+def test_the_update_report_counts_the_topic_chunks_it_deletes(built: Path, corpus) -> None:
+    """N-1 (gate Fable, round 06): `chunks_deleted` omitted what `_clear_topics` removed, so
+    after a `topics.json`-only update the report read `+22,287 / -21,583` (net +704) while
+    the base moved 22,286 -> 22,287 (net +1). A counter that does not count what its name
+    says (rule 2). Asserted against `COUNT(*)` before and after, so the net is the base's.
+
+    Seen red before the fix: the net disagreed by the number of topic chunks.
+    """
+    store, vocab, pages = corpus
+    before = _db_counts(built)["chunks"]
+    slug = next(iter(pages))
+    edited = {
+        **pages,
+        slug: pages[slug].model_copy(
+            update={"overview": pages[slug].overview + " nuevaobservacion"}
+        ),
+    }
+
+    report = index_build.update(built / "index", store, vocab, edited, built / "items.json")
+
+    assert report.topics_rebuilt is True
+    assert report.chunks_inserted - report.chunks_deleted == _db_counts(built)["chunks"] - before
