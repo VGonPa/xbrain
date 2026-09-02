@@ -185,6 +185,17 @@ five `COUNT(*)` (0.04 ms on the real index) against the manifest. With a manifes
 a missing database the advice names `xbrain index build --force`, because plain `build` refuses
 while a manifest exists.
 
+### `status` runs `PRAGMA quick_check`; the open door does not (B-1)
+
+The probes every door runs — page 1, `sqlite_master`, one `MATCH` per FTS plane — cost 0.01 ms
+and see what a query would see first. They do not see a damaged page none of them touches: 16 KB
+of `0xff` over pages 17–20 of the real index left `status` saying `incomplete: false` while
+`quick_check` reported «btreeInitPage() returns error code 11» (the round-05 gate, B-1). A query
+still fails closed the moment it reaches the page (G-4), so no instrument contradicted another;
+but `status` is the explicit command an operator runs to find out, and since round 05 it runs
+the whole-file check (~160 ms on the 52 MB index, measured by the gate) and declares the damage
+naming `xbrain index build --force`. `search` and `update` keep the cheap probes.
+
 ### The manifest describes the snapshot that was indexed, not the file at commit time (P1b)
 
 The cheap signal sealed into the manifest is the one of the bytes the three inputs were **read

@@ -60,6 +60,7 @@ from xbrain.knowledge.index_schema import (
     manifest_path,
     open_index,
     open_memory_index,
+    quick_check,
     require_database,
 )
 from xbrain.knowledge.lexical import LexicalIndex
@@ -1625,23 +1626,37 @@ def _status_manifest(index_dir: Path, options: IndexOptions) -> tuple[Manifest |
 
 def _index_contents(
     index_dir: Path,
-) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow]]:
-    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row})`.
+) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow], str]:
+    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row}, damage)`.
 
-    Three empties when there is no base: with nothing stored, every item is "added" and
-    every topic is "behind", which is the truthful reading of an index that does not exist.
+    Three empties and no damage when there is no base: with nothing stored, every item is
+    "added" and every topic is "behind", which is the truthful reading of an index that does
+    not exist. `damage` is `quick_check`'s first finding, or `` (B-1): `status` is the one
+    command that pays for the whole-file check, so a page the open door never reads is still
+    declared by the instrument an operator runs to find out.
     """
     if not db_path(index_dir).exists():
-        return {}, {}, {}
+        return {}, {}, {}, ""
     connection = open_index(db_path(index_dir), read_only=True)
     try:
         return (
             count_rows(connection),
             _stored_fingerprints(connection),
             stored_topic_rows(connection),
+            quick_check(connection),
         )
     finally:
         connection.close()
+
+
+def _damage_advice(index_dir: Path, damage: str) -> str:
+    """The B-1 sentence, or `` when `quick_check` found nothing."""
+    if not damage:
+        return ""
+    return (
+        f"La base del índice en {db_path(index_dir)} está dañada (quick_check: {damage}). "
+        f"{REBUILD_ADVICE}"
+    )
 
 
 def _mismatch_advice(manifest: Manifest, counts: Mapping[str, int]) -> str:
@@ -1673,6 +1688,13 @@ def status(
     changed instead of merely *something did* — and the difference decides whether a rebuild
     is worth its minutes.
 
+    And it runs `PRAGMA quick_check` over the whole file (B-1, round 05): the open door's
+    probes read page 1, `sqlite_master` and one `MATCH` per FTS plane, so damage on a page
+    none of them touches — measured: 16 KB of `0xff` over pages 17–20 of the real index — was
+    reported by `quick_check` and not by `status`. A query still fails closed the moment it
+    reaches the page (G-4); this is the explicit command paying ~160 ms so the operator
+    hears it first.
+
     It takes the vocabulary and the pages like `build` and `update` do (H1), because the
     topic plane is derived from all three, and it reads the TOPIC ROWS back from the base:
     `topics_changed` counts the topics whose stored members, `stale` bit, description or
@@ -1682,9 +1704,9 @@ def status(
     """
     options = options or IndexOptions()
     manifest, unusable = _status_manifest(index_dir, options)
-    counts, stored, stored_topics = _index_contents(index_dir)
+    counts, stored, stored_topics, damage = _index_contents(index_dir)
     if manifest is not None and not unusable:
-        unusable = _mismatch_advice(manifest, counts)
+        unusable = _damage_advice(index_dir, damage) or _mismatch_advice(manifest, counts)
 
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
     delta = _classify(current, stored)

@@ -442,6 +442,31 @@ def _probe_fts(connection: sqlite3.Connection, path: Path) -> sqlite3.Connection
     return connection
 
 
+def quick_check(connection: sqlite3.Connection) -> str:
+    """`PRAGMA quick_check` as one sentence: `` when the base is sound, else the first finding.
+
+    THE DIAGNOSTIC INSTRUMENT SEES MORE THAN THE OPEN DOOR (B-1, round 05). `_prove_readable`
+    reads page 1, `_verify_schema` reads `sqlite_master`, `_probe_fts` runs one `MATCH` per
+    FTS plane — and 16 KB of `0xff` written over pages 17–20 of the real 52 MB index sat where
+    none of them looks: `quick_check` reported «btreeInitPage() returns error code 11» while
+    `status` said `incomplete: false`. A query that touches the page still fails closed
+    (`_fetch`, G-4), so no instrument lied; but `status` is the EXPLICIT command an operator
+    runs to find out, and it can pay the 155–167 ms this costs on the real index where a
+    query cannot. `status` runs it; the open door does not, on purpose — `quick_check` reports
+    fts5 corruption as a ROW, not an exception, so the door keeps its positive `MATCH` probe
+    and this reader parses the answer here, once.
+
+    A `DatabaseError` raised by the pragma itself (a header too damaged to read) is the same
+    fact and is returned as the sentence.
+    """
+    try:
+        rows = connection.execute("PRAGMA quick_check(1)").fetchall()
+    except sqlite3.DatabaseError as error:
+        return str(error)
+    first = str(rows[0][0]) if rows else ""
+    return "" if first == "ok" else " ".join(first.split())
+
+
 def open_memory_index() -> sqlite3.Connection:
     """The SAME schema on `sqlite3(":memory:")` — what the evaluation harness measures on.
 

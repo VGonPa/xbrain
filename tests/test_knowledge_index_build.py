@@ -586,6 +586,42 @@ def test_status_and_update_see_the_corruption_search_would_hit(workspace, corpus
         )
 
 
+def test_status_runs_quick_check_and_declares_a_damaged_page_the_open_door_does_not_reach(
+    workspace, corpus
+) -> None:
+    """B-1 (gate Fable, round 05): 16 KB of `0xff` written over pages 17–20 of the real
+    `knowledge.db`; `PRAGMA quick_check` reported «btreeInitPage() returns error code 11»,
+    and `status --json` said `incomplete: false` with an empty advice — the open-door probes
+    read page 1, `sqlite_master` and one `MATCH` per FTS plane, and the damage sat where
+    none of them looks. Not the rule-9 shape (no instrument said the opposite; `search`
+    fails closed the moment a query touches the page, G-4) but the diagnostic instrument
+    could see more for the price of one `quick_check` (155–167 ms on the 52 MB real index,
+    measured by the gate), and `status` is the explicit command that can pay it.
+
+    Staged on the fixture base at the same offset (page 17 of 4096-byte pages). The
+    precondition — `quick_check` itself sees damage — is asserted first, so a layout change
+    that moved the pages under an unused region would fail loudly instead of passing for the
+    wrong reason (rule 1). Seen red before the fix: `incomplete is False`.
+    """
+    _write_inputs(workspace, corpus)
+    _build(workspace, corpus)
+    database = db_path(workspace / "index")
+    with database.open("r+b") as handle:
+        handle.seek(65536)
+        handle.write(b"\xff" * 16384)
+    connection = sqlite3.connect(database)
+    try:
+        verdict = connection.execute("PRAGMA quick_check").fetchall()
+    finally:
+        connection.close()
+    assert verdict != [("ok",)], "the damage must be where quick_check looks, or nothing is tested"
+
+    report = _status(workspace, corpus[0], corpus)
+
+    assert report.incomplete is True
+    assert "quick_check" in report.advice and "xbrain index build --force" in report.advice
+
+
 @pytest.mark.parametrize("moved", ["items.json", "vocab.yaml", "topics.json"])
 def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(
     workspace, corpus, moved: str
