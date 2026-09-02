@@ -565,12 +565,13 @@ def test_a_chunk_the_index_refuses_is_counted_not_silently_dropped() -> None:
     `add`'s public return value, because the emitter cannot produce either shape today: that
     is exactly why the number must be reported rather than assumed to be zero.
     """
-    from xbrain.knowledge.lexical_memory import InMemoryLexicalIndex
+    from xbrain.knowledge.index_schema import open_memory_index
+    from xbrain.knowledge.lexical import LexicalIndex
 
-    from tests.test_knowledge_lexical_memory import _corpus_chunks
+    from tests.test_knowledge_lexical import _corpus_chunks
 
     chunks = _corpus_chunks()
-    index = InMemoryLexicalIndex()
+    index = LexicalIndex(open_memory_index())
     assert index.add(chunks) == len(chunks)
     assert index.add(chunks) == 0, "a duplicate chunk_id must be refused, and countable"
 

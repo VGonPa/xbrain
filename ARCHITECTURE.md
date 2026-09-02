@@ -913,8 +913,12 @@ connectives apart, so the change would otherwise have passed the fixture in sile
 
 The remaining known limits, both declared rather than discovered later: there is **no
 stemming**, and **IDF is relative to this corpus**, so a word that reads as a function word
-can still be rare to the index and go undiscounted (`el` is 1 of 43 fixture chunks and 5,748
-of 18,319 real ones). Those are what the vector layer of Plan 03 has to beat.
+can still be rare to the index and go undiscounted: `el` is 1 of 49 fixture chunks and **6,070 of
+22,286** real ones (27.2 %), re-derived 2026-09-01 on the SHIPPED chunker (v2, `800/0`, store
+sha256 `f76341a3…`). *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
+chunker v1 and the store md5 `5aaf62f4…` — correct for that population, and left undated after
+the chunker moved; F-4 corrected the other three sites and missed this one.)* Those are what the
+vector layer of Plan 03 has to beat.
 
 **A threshold that reached no bucket fails closed.** `--min-recall` counts the
 `(bucket, metric)` comparisons it actually made; at zero it reports an explicit failure
@@ -1146,7 +1150,7 @@ xbrain/
 │   │   ├── surfaces.py      ← the emitter + the three totality maps
 │   │   ├── chunking.py      ← structural chunker (atomic beats MAX_CHARS)
 │   │   ├── profile.py       ← the item's retrieval profile (never a citation)
-│   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen per envelope (SearchResponse "2", EvidenceBundle "1", Graph "1")
+│   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen per envelope (SearchResponse "2", EvidenceBundle "2", Graph "1")
 │   │   ├── goldenset.py     ← two-stage loader: structure, then resolution
 │   │   ├── lexical_fts.py   ← the FTS5 DDL + scorer Plan 02 reuses
 │   │   ├── lexical_memory.py← that same FTS5 on sqlite3(":memory:")

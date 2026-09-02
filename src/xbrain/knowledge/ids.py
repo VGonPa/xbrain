@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 
 from xbrain.knowledge.provenance import Origin
 from xbrain.models import ContentSourceSuccess, Item
@@ -35,7 +36,11 @@ from xbrain.models import ContentSourceSuccess, Item
 # INTO the fingerprints (and the chunker version into the chunk id itself), so a rebuild
 # after a bump writes new ids rather than overwriting old ones with differently-cut text.
 SURFACE_VERSION = "xbrain-knowledge-surface/v1"
-CHUNKER_VERSION = "xbrain-knowledge-chunker/v1"
+# Bumped to v2 by Plan 02 §7's sweep: `target` moved 1200 -> 800 and `overlap` 150 -> 0, so
+# the same `(surface_id, chunk_index)` now holds DIFFERENT text. The version is in the chunk
+# id precisely so those two never collide — a v1 id and a v2 id are different chunks, and an
+# index built under either refuses to be updated by the other (`load_compatible_manifest`).
+CHUNKER_VERSION = "xbrain-knowledge-chunker/v2"
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -153,16 +158,23 @@ def surface_fingerprint(
     return _sha256("\0".join([surface_version, surface_type, str(origin), text]))
 
 
-def chunk_fingerprint(
-    surface: str, chunk_index: int, text: str, *, chunker_version: str = CHUNKER_VERSION
-) -> str:
-    """sha256 of `(chunker version, surface_id, chunk index, text)`.
+def chunk_fingerprint(evidence: Sequence[str], *, chunker_version: str = CHUNKER_VERSION) -> str:
+    """sha256 of `(chunker version, *evidence)` — the evidence being what the index SERVES.
 
     Spec §5.2: *the algorithm version is part of the fingerprint*, so changing the chunking
     forces the affected chunks to be regenerated instead of being served under ids whose
     text no longer matches how they were cut.
+
+    THE EVIDENCE IS A PROJECTION, NOT THREE FIELDS (U-5, round 07). Until then this hashed
+    `(surface_id, chunk_index, text)`, and the index served — beside the text, bound to
+    nothing — the chunk's provenance, its owner, its position, and the attribution and
+    locator of its surface row. A quoted post's row rewritten as the poster's own summary
+    (`origin: llm`, `@vgonpa`, a valid URL to the poster's page) was served with
+    `corrupt_chunks_excluded: 0` on the real index (gate Codex F4). `chunking.chunk_evidence`
+    is the ONE projection the emitter hashes and the verifier recomputes; this function only
+    prefixes the version and hashes, so it cannot decide what evidence is.
     """
-    return _sha256("\0".join([chunker_version, surface, str(chunk_index), text]))
+    return _sha256("\0".join([chunker_version, *evidence]))
 
 
 def _sha256(blob: str) -> str:

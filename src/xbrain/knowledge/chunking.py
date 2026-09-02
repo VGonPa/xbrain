@@ -22,8 +22,29 @@ module constant, that sweep would break the very fixture that exists to pin the 
 and the comfortable fix would be to regenerate it, at which point it pins nothing. The
 defaults live in `DEFAULT_CHUNKER_PARAMS`; the pinned test passes its own.
 
-The values below are PROVISIONAL and declared as such (Plan 01 §3.6). They are not measured
-— Plan 02 measures them.
+THE VALUES ARE MEASURED NOW, and they moved (Plan 02 §7). The Plan 01 provisional was
+`target=1200, overlap=150`; the sweep over `target ∈ {800,1200,1600,2400} × overlap ∈
+{0,150,300}` against the 23 scorable golden-set cases on the real 2,404-item corpus put
+`target=800, overlap=0` first. **On MRR** — 0.8179 vs 0.7449 — and on `recall@1` (0.6034 vs
+0.4730); the round-03 claim that it also won on `recall@10` (0.8119 vs 0.8027, with gains
+in `enterrado`, `semantico` and `cruzado_idioma`) was an artefact of scoring at a depth of
+ten CHUNKS, and it is retracted (U-6, round 07): with the depth counted in OWNERS the two
+targets tie on `recall@10` at every overlap (0.8264) and their per-stratum recalls are
+identical cell for cell. The winner is the same; the reason is narrower. The cost is
++21.6 % chunks (18,320 -> 22,286). The chunk-size distribution does NOT return to the
+194-character pathology that motivated packing: the median moves 658 -> 670 and
+`x_article` averages 661.
+
+**THE OVERLAP AXIS WAS DECIDED BY A RETRIEVER THAT CANNOT USE IT, AND THAT IS A DECLARED
+LIMIT, NOT A FINDING.** Overlap applies only to `video_transcript`, the one windowed surface,
+and it exists so a sentence spanning a boundary is complete in at least one window. But
+`lexical_fts.match_expression` quotes every TERM separately and never builds a phrase, so
+this retriever cannot benefit from a whole sentence — measured, `recall@10` is IDENTICAL for
+overlap 0 and 150 at every target, and only MRR moves (more overlap = more near-duplicate
+chunks competing). The golden set also contains no case that requires a sentence to survive a
+boundary. So the sweep chose 0 on the evidence it has, and Plan 03 MUST re-decide this axis
+with the vector retriever in front of it: an embedding of a truncated sentence is a worse
+vector, and that is a cost this measurement is blind to.
 """
 
 from __future__ import annotations
@@ -31,7 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from xbrain.knowledge.ids import CHUNKER_VERSION, chunk_fingerprint, chunk_id
-from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, SurfaceType
+from xbrain.knowledge.models import KnowledgeChunk, KnowledgeSurface, Locator, SurfaceType
 from xbrain.models import ARTICLE_PARAGRAPH_SEP, Author
 
 
@@ -39,9 +60,9 @@ from xbrain.models import ARTICLE_PARAGRAPH_SEP, Author
 class ChunkerParams:
     """Provisional chunking parameters, passed explicitly so a sweep cannot move a pin."""
 
-    target: int = 1200  # soft ceiling per chunk
+    target: int = 800  # soft ceiling per chunk — MEASURED, see the module docstring
     max_chars: int = 2000  # hard ceiling — SPLITTABLE surfaces only (see the module docstring)
-    overlap: int = 150  # windows only; a paragraph split never overlaps
+    overlap: int = 0  # windows only; a paragraph split never overlaps
     min_chars: int = 40  # below this a fragment is merged into a neighbour, not emitted
 
 
@@ -302,6 +323,79 @@ def _oversize_spans(start: int, end: int, params: ChunkerParams) -> list[tuple[i
     return spans
 
 
+def fragment_locator(surface_locator: Locator, char_start: int, char_end: int) -> Locator:
+    """The locator of a FRAGMENT of a surface: the surface's, narrowed to the range (seam b).
+
+    ONE function for any served fragment — the chunk `get` delivers, the match `search`
+    returns — because the attribution/locator family reappeared by four routes in five
+    rounds (a search without the surfaces join, a fingerprint blind to the author, the human
+    chunk header, the chunks of `get`), each time through a consumer building its own. The
+    surface's locator says where the surface lives in the original data (source index and
+    kind, media or frame index, the source's own URL); the range says which bytes of it
+    this fragment is. Nothing else is derived, and nothing is invented: a surface with no
+    resolvable locator yields no fragment (`index_store.resolvable_hits`), never a
+    fabricated one.
+    """
+    return surface_locator.model_copy(update={"char_start": char_start, "char_end": char_end})
+
+
+def chunk_evidence(
+    *,
+    surface_id: str,
+    chunk_index: int,
+    text: str,
+    owner_type: str,
+    owner_id: str,
+    surface_type: str,
+    origin: str,
+    trust_class: str,
+    derived: bool,
+    char_start: int,
+    char_end: int,
+    attribution: Author | None,
+    locator: Locator,
+) -> tuple[str, ...]:
+    """Everything the index SERVES about a chunk, as the ONE tuple its fingerprint hashes (U-5).
+
+    The second half of seam (b), extended to integrity. `fragment_locator` is the one
+    construction of a served fragment's locator; this is the one projection of a served
+    fragment's EVIDENCE — the text, the surface it came from and its position in it, the
+    owner the words are hydrated under, the provenance that qualifies them (`origin`,
+    `trust_class`, `derived`, `surface_type`), the attribution that says whose words they
+    are, and the narrowed locator that says where to check. `_chunk` hashes it at emission;
+    `index_store.verify_fingerprints` rebuilds it from the served row — the chunk's columns,
+    the surface row's attribution and locator, the locator narrowed through
+    `fragment_locator` — and a row on which any arm was rewritten no longer recomputes: it
+    is excluded and counted, exactly like a text that does not match its hash. Before this
+    the fingerprint covered three of these fields and the other nine were served on trust
+    (gate Codex F4: a quoted post served as the poster's own `summary`, `origin: llm`, with a
+    valid URL to the poster's page and `corrupt_chunks_excluded: 0`).
+
+    Attribution is hashed as its two stored columns, never as a model dump: the index keeps
+    `handle` and `name` and rebuilds the `Author` from them, so a field added to `Author`
+    upstream would otherwise make every fingerprint fail on the next query. `None` and an
+    author with an empty name are distinct arms. The locator IS a model dump — it is stored
+    as one (`locator_json`) and rebuilt by validation, and a round trip is byte-stable.
+    """
+    return (
+        surface_id,
+        str(chunk_index),
+        text,
+        owner_type,
+        owner_id,
+        surface_type,
+        str(origin),
+        str(trust_class),
+        "1" if derived else "0",
+        str(char_start),
+        str(char_end),
+        "author" if attribution is not None else "",
+        attribution.handle if attribution is not None else "",
+        attribution.name if attribution is not None else "",
+        locator.model_dump_json(),
+    )
+
+
 def _chunk(
     surface: KnowledgeSurface,
     index: int,
@@ -329,12 +423,17 @@ def _chunk(
     their own. The fallback is deleted rather than reached, because the two are not
     interchangeable: a `video_transcript`'s locator holds a SIGNED, EXPIRING
     `video.twimg.com` URL, and a `quoted_post`'s would still be the poster's page. Serving
-    either as the chunk's citable link buys nothing and rots. The precise position stays
-    where it belongs — on `surface.locator`, which the consumer already receives.
+    either as the chunk's citable link buys nothing and rots.
+
+    The precise position travels on `locator` (B2, round 06): `fragment_locator` narrows the
+    surface's locator to this range. It used to stay on `surface.locator` alone — "which the
+    consumer already receives" — and the consumer did NOT receive it whenever `get` delivered
+    chunks instead of the surface, which is exactly when a chunk exists.
     """
     text = surface.text[start:end]
     cid = chunk_id(surface.surface_id, index, chunker_version=chunker_version)
     attribution: Author | None = surface.attribution
+    locator = fragment_locator(surface.locator, start, end)
     return KnowledgeChunk(
         chunk_id=cid,
         surface_id=surface.surface_id,
@@ -352,8 +451,25 @@ def _chunk(
         attribution=attribution,
         topics=topics,
         url=url,
+        locator=locator,
         language=surface.language,
+        # Over the whole served evidence (U-5), through the projection the verifier shares.
         fingerprint=chunk_fingerprint(
-            surface.surface_id, index, text, chunker_version=chunker_version
+            chunk_evidence(
+                surface_id=surface.surface_id,
+                chunk_index=index,
+                text=text,
+                owner_type=surface.owner_type,
+                owner_id=surface.owner_id,
+                surface_type=surface.surface_type,
+                origin=surface.origin,
+                trust_class=surface.trust_class,
+                derived=surface.derived,
+                char_start=start,
+                char_end=end,
+                attribution=attribution,
+                locator=locator,
+            ),
+            chunker_version=chunker_version,
         ),
     )

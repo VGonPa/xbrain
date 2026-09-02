@@ -611,9 +611,12 @@ def test_a_chunk_carries_the_owner_url_and_the_surface_keeps_its_own_locator() -
     # And the AMBIGUITY cannot come back. The behaviour above was already correct before the
     # fallback was deleted — both callers pass a truthy `item.url` — so a purely behavioural
     # test here would be green before and after, which rule 1 says is the tell that it pins
-    # nothing. This asserts on the SOURCE (rule 9): `_chunk` must not reach for the
-    # surface's locator, because a reachable fallback would make `chunk.url` mean two
-    # different things depending on the caller.
+    # nothing. This asserts on the SOURCE (rule 9): the `url=` the chunk is built with must
+    # be the bare `url` argument, never an expression over the surface's locator, because a
+    # reachable fallback would make `chunk.url` mean two different things depending on the
+    # caller. (Since B2 the chunk ALSO carries `locator=`, built from the surface's; that is
+    # a second field with its own meaning, not the fallback — so the guard is on the `url`
+    # keyword, not on the word "locator" appearing anywhere in the function.)
     import ast
     import inspect
     import textwrap
@@ -621,11 +624,16 @@ def test_a_chunk_carries_the_owner_url_and_the_surface_keeps_its_own_locator() -
     from xbrain.knowledge import chunking
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(chunking._chunk))).body[0]
-    statements = [n for n in tree.body if not isinstance(n, ast.Expr)]  # drop the docstring
-    code = "\n".join(ast.unparse(n) for n in statements)
-    assert "locator" not in code, (
-        "`_chunk` reads the surface locator again: `chunk.url` would mean the owner's URL "
-        f"for one caller and an expiring asset URL for another\n{code}"
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "KnowledgeChunk"
+    ]
+    assert len(calls) == 1
+    (url_keyword,) = [kw for kw in calls[0].keywords if kw.arg == "url"]
+    assert isinstance(url_keyword.value, ast.Name) and url_keyword.value.id == "url", (
+        "`chunk.url` is derived from something other than the owner's URL argument: "
+        f"{ast.unparse(url_keyword.value)}"
     )
 
 
@@ -744,3 +752,44 @@ def test_the_harness_chunks_an_article_on_its_block_boundaries() -> None:
             "the block boundaries"
         )
         assert chunk.char_end in edges, f"the harness cut inside a block at {chunk.char_end}"
+
+
+# ---------------------------------------------------------------------------
+# B2 (gate Codex, round 06) — every chunk carries its surface's locator, narrowed
+# ---------------------------------------------------------------------------
+
+
+def test_every_chunk_carries_its_surface_locator_narrowed_to_its_own_range() -> None:
+    """Spec §3.7 invariant 2 — *todo texto devuelto incluye origin, surface_type y
+    localizador* — and §3.8: surface, owner and locator resolvable. A `KnowledgeChunk` had
+    no locator: it carried the OWNER's URL and offsets into a surface that, when `get`
+    paginated or prioritised by `--query`, was not in the bundle at all (`surfaces == ()`).
+    The gate's reproduction on k03: `chunk_url` the poster's tweet, `source_locator` the
+    essay's URL, `chunk_has_locator False`. A fragment nobody can resolve back to the bytes
+    it quotes is a number, not evidence.
+
+    ONE function narrows a surface locator to a fragment (`fragment_locator`), and every
+    chunk of every surface in the fixture corpus carries exactly that — the same function
+    `search` applies to a match, which is what makes the two consumers agree by
+    construction rather than by two copies of a `model_copy`. Seen red before the fix:
+    `KnowledgeChunk` had no `locator` field.
+    """
+    from xbrain.knowledge.chunking import fragment_locator
+    from xbrain.knowledge.evaluation import load_corpus
+
+    corpus = load_corpus(FIXTURES / "knowledge_corpus.json")
+    checked = 0
+    for item in corpus.items.values():
+        for surface in item_surfaces(item):
+            for chunk in chunk_surfaces((surface,), url=item.url):
+                assert chunk.locator == fragment_locator(
+                    surface.locator, chunk.char_start, chunk.char_end
+                )
+                narrowed = chunk.locator.model_dump(exclude={"char_start", "char_end"})
+                assert narrowed == surface.locator.model_dump(exclude={"char_start", "char_end"})
+                assert (chunk.locator.char_start, chunk.locator.char_end) == (
+                    chunk.char_start,
+                    chunk.char_end,
+                )
+                checked += 1
+    assert checked > 40, "the fixture corpus must exercise the property, or it pins nothing"
