@@ -96,6 +96,48 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5 (
 # the ranking would differ between two builds of the same data.
 RANK_ORDER = "ORDER BY bm25(chunk_fts) ASC, chunk.chunk_id ASC"
 
+# The INDEXED COLUMNS, in order, and they are part of the SCORER — not a layout detail.
+# `bm25()` weights every column of the table it is given, so adding or removing one changes
+# every score in the corpus. Exported for the same reason as the tokenizer: the in-memory
+# baseline and the persisted index MUST declare the identical set, or the characterization
+# fixture would be pinning two different scorers and would have to be regenerated the day
+# they diverged — at which point it pins nothing (Plan 01 §5.3, m16).
+FTS_COLUMNS: tuple[str, ...] = ("text", "title")
+
+
+def fts5_table_sql(
+    name: str, *, columns: tuple[str, ...] = FTS_COLUMNS, content: str | None = None
+) -> str:
+    """The `CREATE VIRTUAL TABLE … USING fts5(…)` for `name`, with the ONE tokenizer.
+
+    `content` names the EXTERNAL content table when there is one. An external-content table
+    stores no text of its own and reads it back from `content` by rowid, which halves the
+    on-disk footprint of a 12-million-character corpus — and is why the content table's
+    rowid must be an explicit `INTEGER PRIMARY KEY` (`VACUUM` renumbers an implicit one) and
+    why a delete must retract the OLD text before the row disappears.
+
+    `name` and `columns` are identifiers this module's own callers choose; they never carry a
+    user string, which is what keeps the f-string below a composition of constants rather
+    than SQL built from input.
+    """
+    parts = [*columns]
+    if content is not None:
+        parts += [f"content='{content}'", "content_rowid='rowid'"]
+    parts.append(f"tokenize = '{FTS_TOKENIZE}'")
+    body = ",\n    ".join(parts)
+    return f"CREATE VIRTUAL TABLE IF NOT EXISTS {name} USING fts5 (\n    {body}\n)"
+
+
+def rank_order(fts_table: str, meta_table: str) -> str:
+    """`ORDER BY bm25(<fts>) ASC, <meta>.chunk_id ASC` — the ONE ranking order.
+
+    The tie-break is EXPLICIT (spec §3.7.8). Two chunks with identical text score
+    identically, and sqlite's row order for a tie is an implementation detail — so without
+    the second key the ranking would differ between two builds of the same data.
+    """
+    return f"ORDER BY bm25({fts_table}) ASC, {meta_table}.chunk_id ASC"
+
+
 # FTS5 reads punctuation as syntax: `@`, `"`, `*`, `(`, `NEAR`, `-`. The golden set has
 # literal queries — `@simonw`, `11.37%` — whose characters would otherwise become operators
 # or a syntax error. Every term is therefore quoted as an FTS5 string literal, so the query
