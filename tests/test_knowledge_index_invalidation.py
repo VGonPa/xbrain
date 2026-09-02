@@ -804,3 +804,100 @@ def test_update_refreshes_the_topic_rows_when_an_items_topics_move(built: Path, 
     status = _status(built, changed, corpus)
     assert status.items_changed == 0 and status.topics_changed == 0
     assert status.advice == ""
+
+
+# ---------------------------------------------------------------------------
+# Round 06 — ONE answer to «does this manifest describe this base?» (B1, D-1, seam a)
+# ---------------------------------------------------------------------------
+
+
+def test_a_manifest_with_empty_counts_is_refused_by_every_door_not_sealed_as_healthy(
+    built: Path, corpus
+) -> None:
+    """B1 (gate Codex, round 06), the gate's reproduction verbatim: `counts: {}` in the
+    manifest and the rows of `chunks` and `profiles` deleted, tables kept, file readable.
+    Before: `status` `incomplete=False`, `advice=''` publishing `chunks=0`; `search` zero
+    results with `degraded: ["no_embeddings"]`, indistinguishable from a corpus with no
+    matches; and `update` — zero changes, zero writes — wrote a manifest declaring
+    `chunks=0`, `profiles=0`, sealing the amputation as sound. Three instruments converging
+    on an incomplete index presented as healthy: the FAIL-OPEN family, sixth route.
+
+    Every door now refuses the document itself — and nothing re-seals it. Seen red before
+    the fix on all three doors and on the last line.
+    """
+    from xbrain.knowledge.search_service import QueryContext, search
+
+    store, vocab, pages = corpus
+    path = manifest_path(built / "index")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["counts"] = {}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    connection = open_index(db_path(built / "index"))
+    try:
+        with connection:
+            connection.execute("DELETE FROM chunks")
+            connection.execute("DELETE FROM profiles")
+    finally:
+        connection.close()
+    context = QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=built / "index",
+        items_path=built / "items.json",
+    )
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        search("Quillfeather", context)
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        _update(built, store, corpus)
+    report = _status(built, store, corpus)
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice, report.advice
+    assert json.loads(path.read_text(encoding="utf-8"))["counts"] == {}, (
+        "a door re-sealed the amputated base as healthy"
+    )
+
+
+def test_status_search_and_update_ask_one_function_whether_the_manifest_describes_the_base(
+    built: Path, corpus, monkeypatch
+) -> None:
+    """The seam, asserted by IDENTITY across its three consumers (CLAUDE.md rule 5).
+
+    Six rounds closed the fail-open family one route at a time — an interrupted forced
+    rebuild, a missing table, a dry run creating an empty base, a signal covering one input
+    of three, a manifest with empty counts — because each door carried its own reading of
+    "the base is what the manifest says". There is now ONE function (`describe_base`), and
+    this test replaces its answer with a sentinel: every door must repeat the sentinel
+    verbatim. A door that re-derives the question stays silent under the sentinel and goes
+    red here; a door that stops asking goes red here.
+
+    Seen red before the fix: `describe_base` did not exist.
+    """
+    from xbrain.knowledge.search_service import QueryContext, search
+
+    store, vocab, pages = corpus
+    sentinel = (
+        "SENTINEL: esta base no es la que el manifest describe. "
+        "Reconstruye el índice con `xbrain index build --force`."
+    )
+    monkeypatch.setattr(
+        index_build,
+        "describe_base",
+        lambda *args, **kwargs: index_build.BaseVerdict(counts={}, sentence=sentinel),
+    )
+    context = QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=built / "index",
+        items_path=built / "items.json",
+    )
+
+    with pytest.raises(IndexIncompatibleError) as caught:
+        search("Quillfeather", context)
+    assert str(caught.value) == sentinel
+    with pytest.raises(IndexIncompatibleError) as caught:
+        _update(built, store, corpus)
+    assert str(caught.value) == sentinel
+    assert _status(built, store, corpus).advice == sentinel

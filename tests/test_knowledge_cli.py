@@ -798,3 +798,55 @@ def test_get_reports_the_configured_transcriber_as_the_transcripts_producer(
     )
     assert bundle["surfaces"][0]["surface_type"] == "video_transcript"
     assert bundle["surfaces"][0]["producer"] == "review-transcriber"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["index", "status"],
+        ["index", "update", "--dry-run"],
+        ["search", "Quillfeather"],
+    ],
+)
+def test_a_damaged_root_page_never_reaches_the_operator_as_a_traceback(
+    workspace: Path, argv: list[str]
+) -> None:
+    """D-1 (gate Fable, round 06) at the CLI: the root page of `items` — read from
+    `sqlite_master.rootpage`, not guessed — overwritten with `0xff`. Reproduced on the real
+    index: `index status`, `search` and `index update --dry-run` were a 61-line traceback
+    ending in `sqlite3.DatabaseError: database disk image is malformed`, exit 2, with no
+    mention of `xbrain index build --force`, while CLAUDE.md declared G-4 closed on the
+    three commands.
+
+    `status` reports the damage and names the rebuild; `update` refuses naming it. `search`
+    on this fixture reads `items` through no index and no filter, so it answers over the
+    intact chunk plane — or refuses naming the rebuild the moment a read touches the page;
+    what it may never do is escape as a raw `DatabaseError`, which is what the last
+    assertion pins on all three. Seen red before the fix on `status` and `update`:
+    `result.exception` was the raw `sqlite3.DatabaseError`.
+    """
+    import sqlite3
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    database = workspace / "data" / "index" / "knowledge.db"
+    connection = sqlite3.connect(database)
+    rootpage = connection.execute(
+        "SELECT rootpage FROM sqlite_master WHERE name = 'items'"
+    ).fetchone()[0]
+    page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    connection.close()
+    with database.open("r+b") as handle:
+        handle.seek((rootpage - 1) * page_size)
+        handle.write(b"\xff" * page_size)
+
+    result = runner.invoke(app, argv)
+
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    if argv[0] == "search":
+        assert result.exit_code == 0 or "xbrain index build --force" in result.output
+    else:
+        assert "xbrain index build --force" in result.output, result.output
+    if argv[:2] == ["index", "update"]:
+        assert result.exit_code != 0

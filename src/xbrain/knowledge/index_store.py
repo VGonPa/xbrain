@@ -118,7 +118,10 @@ def open_for_query(
     manifest = load_compatible_manifest(index_dir, params=params)
     degraded = _degraded(manifest, items_path, vocab_path, topics_path)
     connection = open_index(database, read_only=True)
-    require_consistent(connection, manifest)
+    # The SAME question the two maintenance doors ask, through the same function (round 06,
+    # `index_build.describe_base`); the query door does not pay `quick_check` (B-1) and a
+    # page it never read fails closed the moment a query touches it (`_fetch`, G-4).
+    require_consistent(connection, manifest, database, whole_file=False)
     return OpenIndex(lexical=LexicalIndex(connection), manifest=manifest, degraded=degraded)
 
 

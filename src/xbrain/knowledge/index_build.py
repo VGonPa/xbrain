@@ -40,10 +40,11 @@ import os
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
+from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from xbrain.executors.api import iter_content_sources
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
@@ -57,10 +58,12 @@ from xbrain.knowledge.index_schema import (
     delete_chunk_rows,
     delete_item_rows,
     delete_profile_rows,
+    corrupt_base_error,
     manifest_path,
     open_index,
     open_memory_index,
     quick_check,
+    reading_base,
     require_database,
 )
 from xbrain.knowledge.lexical import LexicalIndex
@@ -110,6 +113,20 @@ MANIFEST_FIELDS: frozenset[str] = frozenset(
 # corrupt database raises the same error with the same advice, and two copies of the sentence
 # would be two things that have to be kept in step (rule 5).
 UPDATE_ADVICE = "Actualiza el índice con `xbrain index update`."
+
+# The NESTED schema of the manifest, each set defined ONCE and read by the writer, the reader
+# and the consistency check (B1, round 06). `counts` holds exactly the five planes
+# `count_rows` counts; `skipped` exactly the four causes spec §5.6 names; `chunker_params`
+# exactly the fields of `ChunkerParams`. A plane added to `_COUNT_STATEMENTS` is therefore
+# required of every manifest, compared by `manifest_mismatch` and refused when absent, with
+# nobody remembering to add it in three places.
+COUNT_PLANES: frozenset[str] = frozenset({"items", "topics", "surfaces", "chunks", "profiles"})
+SKIPPED_CAUSES: frozenset[str] = frozenset(
+    {"empty_text", "decorative", "no_speech", "failed_sources"}
+)
+CHUNKER_PARAM_NAMES: frozenset[str] = frozenset(
+    field_.name for field_ in dataclass_fields(ChunkerParams)
+)
 
 
 @dataclass(frozen=True)
@@ -172,15 +189,16 @@ class StoreSignal:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, int]) -> StoreSignal:
-        return cls(
-            items_json_mtime_ns=int(raw.get("items_json_mtime_ns", 0)),
-            items_json_size=int(raw.get("items_json_size", 0)),
-            vocab_yaml_mtime_ns=int(raw.get("vocab_yaml_mtime_ns", 0)),
-            vocab_yaml_size=int(raw.get("vocab_yaml_size", 0)),
-            topics_json_mtime_ns=int(raw.get("topics_json_mtime_ns", 0)),
-            topics_json_size=int(raw.get("topics_json_size", 0)),
-        )
+    def from_dict(cls, raw: object) -> StoreSignal:
+        """The signal as a manifest recorded it — validated, never cast (B1).
+
+        The two `items.json` entries are REQUIRED; the four vocab/topics entries are the
+        round-05 additions and default to zero, which is the documented compatibility
+        promise: a pre-round-05 manifest compares unequal to the live files and is declared
+        behind until its first `update`. Required and optional are read off THIS dataclass
+        — a field with a default is optional — so the schema has one definition.
+        """
+        return cls(**_closed_int_mapping(raw, "store_signal", *_signal_keys()))
 
 
 def _stat_signal(path: Path | None) -> tuple[int, int]:
@@ -350,6 +368,17 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, object]) -> Manifest:
+        """The document, TOTALLY validated — every nested key, every value's type (B1).
+
+        The first version checked the top-level key set and cast what sat under it, so a
+        manifest whose `counts` was `{}` loaded as compatible, and `manifest_mismatch`,
+        iterating whatever `counts` offered, compared nothing: `status` called an amputated
+        base healthy, `search` answered zero results over it with `no_embeddings` and nothing
+        else, and `update` sealed the state as sound (the round-06 gate, reproduced). Spec
+        §9.3: an incompatible manifest is never queried partially — and a manifest that
+        declares less than the schema is incompatible, not lenient. Closed as well as total:
+        an undeclared plane or cause is refused, because nothing could compare it.
+        """
         missing = MANIFEST_FIELDS - set(raw)
         if missing:
             raise IndexIncompatibleError(
@@ -357,32 +386,93 @@ class Manifest:
             )
         return cls(
             schema_version=str(raw["schema_version"]),
-            built_at=datetime.fromisoformat(str(raw["built_at"])),
+            built_at=_instant(raw["built_at"]),
             store_fingerprint=str(raw["store_fingerprint"]),
-            store_signal=StoreSignal.from_dict(_mapping(raw["store_signal"])),
+            store_signal=StoreSignal.from_dict(raw["store_signal"]),
             vocab_fingerprint=str(raw["vocab_fingerprint"]),
             topics_fingerprint=str(raw["topics_fingerprint"]),
             surface_version=str(raw["surface_version"]),
             chunker_version=str(raw["chunker_version"]),
-            chunker_params={k: int(v) for k, v in _mapping(raw["chunker_params"]).items()},
+            chunker_params=_closed_int_mapping(
+                raw["chunker_params"], "chunker_params", CHUNKER_PARAM_NAMES
+            ),
             tokenize=str(raw["tokenize"]),
             connective=str(raw["connective"]),
-            embeddings=cast("dict[str, object] | None", raw["embeddings"]),
-            counts={k: int(v) for k, v in _mapping(raw["counts"]).items()},
-            skipped={k: int(v) for k, v in _mapping(raw["skipped"]).items()},
-            failed=cast("list[dict[str, str]]", raw["failed"]),
+            embeddings=_optional_mapping(raw["embeddings"], "embeddings"),
+            counts=_closed_int_mapping(raw["counts"], "counts", COUNT_PLANES),
+            skipped=_closed_int_mapping(raw["skipped"], "skipped", SKIPPED_CAUSES),
+            failed=_failures(raw["failed"]),
         )
 
 
-def _mapping(value: object) -> dict[str, Any]:
-    """A manifest sub-object, or an ACTIONABLE error instead of an `AttributeError`.
+def _malformed(field_name: str, detail: str) -> IndexIncompatibleError:
+    """One actionable sentence for every malformed field, naming the field and the reason.
 
     A hand-edited manifest is exactly the input this reader has to survive, and spec §9.3
     asks for a stable error rather than a traceback from inside a query.
     """
+    return IndexIncompatibleError(
+        f"El manifest tiene el campo {field_name!r} malformado: {detail}. {REBUILD_ADVICE}"
+    )
+
+
+def _closed_int_mapping(
+    value: object,
+    field_name: str,
+    required: frozenset[str],
+    optional: frozenset[str] = frozenset(),
+) -> dict[str, int]:
+    """A mapping with EXACTLY the declared keys, each a non-negative integer.
+
+    `type(count) is int` rather than `isinstance`: `True` is an `int` to `isinstance`, and a
+    JSON `true` where a count belongs is a malformed document, not a count of one. A string
+    `"56"` is refused for the same reason — `int("56")` accepted it silently before.
+    """
     if not isinstance(value, dict):
-        raise IndexIncompatibleError(f"El manifest tiene un campo malformado. {REBUILD_ADVICE}")
-    return value
+        raise _malformed(field_name, "no es un objeto")
+    keys = set(value)
+    if absent := sorted(required - keys):
+        raise _malformed(field_name, f"faltan {absent}")
+    if unknown := sorted(keys - required - optional):
+        raise _malformed(field_name, f"claves no declaradas {unknown}")
+    for key, count in value.items():
+        if type(count) is not int or count < 0:
+            raise _malformed(field_name, f"{key!r} debe ser un entero no negativo, es {count!r}")
+    return {str(key): int(count) for key, count in value.items()}
+
+
+def _signal_keys() -> tuple[frozenset[str], frozenset[str]]:
+    """`(required, optional)` entries of `store_signal`, read off `StoreSignal` itself."""
+    required = frozenset(f.name for f in dataclass_fields(StoreSignal) if f.default is MISSING)
+    optional = frozenset(f.name for f in dataclass_fields(StoreSignal)) - required
+    return required, optional
+
+
+def _optional_mapping(value: object, field_name: str) -> dict[str, object] | None:
+    """`null` or an object — the `embeddings` slot Plan 03 fills — never anything else."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _malformed(field_name, "no es null ni un objeto")
+    return {str(key): item for key, item in value.items()}
+
+
+def _failures(value: object) -> list[dict[str, str]]:
+    """The `failed` list: every entry a mapping of strings, or the document is refused."""
+    if not isinstance(value, list) or not all(
+        isinstance(entry, dict) and all(isinstance(v, str) for v in entry.values())
+        for entry in value
+    ):
+        raise _malformed("failed", "no es una lista de objetos de texto")
+    return [{str(k): str(v) for k, v in entry.items()} for entry in value]
+
+
+def _instant(value: object) -> datetime:
+    """`built_at` as an instant, or the malformed-field sentence instead of a `ValueError`."""
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as error:
+        raise _malformed("built_at", f"{value!r} no es un instante ISO") from error
 
 
 @dataclass(frozen=True)
@@ -1079,11 +1169,15 @@ def manifest_mismatch(manifest: Manifest, counts: Mapping[str, int]) -> str:
 
     Empty means consistent. Compared plane by plane rather than as one boolean so the
     error names WHAT is missing — `topics 0 != 45` is a diagnosis, `incomplete` is not.
+
+    The planes iterated are the REQUIRED ones (`COUNT_PLANES`), never `manifest.counts`
+    (B1): a `Manifest` holding `counts={}` used to compare nothing and agree with any base.
+    The reader refuses that document now; the comparison fails closed on its own as well.
     """
     differing = [
-        f"{plane} {counts.get(plane, 0)} != {declared}"
-        for plane, declared in sorted(manifest.counts.items())
-        if counts.get(plane, 0) != declared
+        f"{plane} {counts.get(plane, 0)} != {manifest.counts.get(plane, '—')}"
+        for plane in sorted(COUNT_PLANES)
+        if counts.get(plane, 0) != manifest.counts.get(plane)
     ]
     return ", ".join(differing)
 
@@ -1184,11 +1278,18 @@ def _build_report(
 
 
 def write_manifest(index_dir: Path, manifest: Manifest) -> None:
-    """Write the manifest LAST. Its presence is what says a build completed."""
+    """Write the manifest LAST. Its presence is what says a build completed.
+
+    THE WRITER ROUND-TRIPS THROUGH THE READER (B1). The document is serialised, parsed and
+    validated by `Manifest.from_dict` before one byte lands, so a build or an update cannot
+    seal a manifest every later door would refuse — and, the other direction, a writer whose
+    shape drifted from the reader's schema fails HERE, loudly, instead of producing a
+    document the reader happens to accept while comparing less than it should.
+    """
+    document = json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2)
+    Manifest.from_dict(json.loads(document))
     index_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path(index_dir).write_text(
-        json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    manifest_path(index_dir).write_text(document, encoding="utf-8")
 
 
 def load_manifest(index_dir: Path) -> Manifest:
@@ -1486,50 +1587,55 @@ def update(
     # BEFORE the write door (G-2): an update over a database that is not there has nothing
     # to be incremental over, and opening for writing used to create it — an empty base
     # under a standing manifest, which the next `search` answered as an empty corpus.
-    connection = open_index(require_database(index_dir))
-    require_consistent(connection, manifest)
-    index = LexicalIndex(connection)
-    stored = _stored_fingerprints(connection)
-    current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
-    delta = _classify(current, stored)
-
-    topics_rebuilt = (
-        vocab_fingerprint(vocab) != manifest.vocab_fingerprint
-        or topics_fingerprint(topic_pages) != manifest.topics_fingerprint
-    )
+    database = require_database(index_dir)
+    connection = open_index(database)
     counters = WriteCounters()
     deleted_chunks = 0
     deleted_profiles = 0
     topics_refreshed = 0
-
     try:
-        with connection:
-            deleted_chunks, deleted_profiles, topics_refreshed = _apply_update(
-                connection,
-                index,
-                store,
-                vocab,
-                topic_pages,
+        # The maintenance door pays the whole-file check (D-1): an update re-seals the
+        # manifest, and it must not seal it over a torn page its `COUNT(*)` never read.
+        require_consistent(connection, manifest, database, whole_file=True)
+        index = LexicalIndex(connection)
+        with reading_base(database):
+            stored = _stored_fingerprints(connection)
+        current = {
+            item_id: item_fingerprint(item, options=options) for item_id, item in store.items()
+        }
+        delta = _classify(current, stored)
+
+        topics_rebuilt = (
+            vocab_fingerprint(vocab) != manifest.vocab_fingerprint
+            or topics_fingerprint(topic_pages) != manifest.topics_fingerprint
+        )
+        try:
+            with reading_base(database), connection:
+                deleted_chunks, deleted_profiles, topics_refreshed = _apply_update(
+                    connection,
+                    index,
+                    store,
+                    vocab,
+                    topic_pages,
+                    delta,
+                    counters,
+                    topics_rebuilt=topics_rebuilt,
+                    options=options,
+                )
+                tallies = manifest_tallies(connection)
+                if dry_run:
+                    raise _DryRun
+        except _DryRun:
+            return _update_report(
                 delta,
                 counters,
-                topics_rebuilt=topics_rebuilt,
-                options=options,
+                deleted_chunks,
+                deleted_profiles,
+                topics_rebuilt,
+                topics_refreshed,
+                started,
+                dry_run=True,
             )
-            tallies = manifest_tallies(connection)
-            if dry_run:
-                raise _DryRun
-    except _DryRun:
-        connection.close()
-        return _update_report(
-            delta,
-            counters,
-            deleted_chunks,
-            deleted_profiles,
-            topics_rebuilt,
-            topics_refreshed,
-            started,
-            dry_run=True,
-        )
     finally:
         if not connection_closed(connection):
             connection.close()
@@ -1550,8 +1656,75 @@ def update(
     )
 
 
-def require_consistent(connection: sqlite3.Connection, manifest: Manifest) -> None:
-    """Refuse a base that does not hold what its manifest declares. Closes the connection.
+@dataclass(frozen=True)
+class BaseVerdict:
+    """The seam's answer: what the base holds, and why it is not what the manifest says (or ``).
+
+    `counts` is what was read before the answer was reached — `{}` when the base could not
+    be read at all — so `status` can publish it next to the sentence without a second read.
+    """
+
+    counts: dict[str, int]
+    sentence: str
+
+
+def describe_base(
+    connection: sqlite3.Connection, manifest: Manifest, database: Path, *, whole_file: bool
+) -> BaseVerdict:
+    """«Does this manifest describe this base?» — ONE function, asked by every door (round 06).
+
+    Six rounds closed the fail-open family one route at a time: an interrupted forced
+    rebuild (C-1), a missing table (C-2), a manifest that counted less than the base held
+    (C-3), a dry run that created an empty base (G-2), a cheap signal covering one input of
+    three (P1a), a manifest whose `counts` was `{}` (B1) — and a damaged page under the
+    maintenance reads was a raw traceback on the three commands (D-1). Each fix was right
+    and each door kept its own reading of the question, which is CLAUDE.md rule 5: one
+    definition, or five that silently diverge. This is the one definition. `status` reports
+    its sentence as advice, `search` and `update` raise it (`require_consistent`), and
+    `tests/test_knowledge_index_invalidation.py` replaces it with a sentinel and asserts the
+    three doors repeat it verbatim, so a door that re-derives the question goes red.
+
+    Three things, in order, and any `DatabaseError` raised by any of them IS the answer:
+
+    1. `whole_file` — `PRAGMA quick_check`, the reader that sees a page none of the open
+       door's probes touch (B-1). `status` and `update` pay it (155–850 ms on the 52 MB real
+       index depending on load, §8 of `docs/knowledge-index.md`): one is the instrument an
+       operator runs to find out, the other re-seals the manifest and must not seal it over
+       a torn page — measured in round 06, `update --dry-run` returned a normal report with
+       the root page of `chunks` overwritten, because `COUNT(*)` was answered from an index.
+       `search` does not pay it, by the B-1 decision: a query fails closed the moment it
+       reaches the page (`LexicalIndex._fetch`, G-4).
+    2. The five `COUNT(*)` against the five planes the manifest is REQUIRED to declare
+       (`manifest_mismatch`, 0.04 ms).
+    3. The conversion: `count_rows` on a damaged root page raises `sqlite3.DatabaseError`,
+       and before round 06 it escaped `status`, `search` and `update` as a traceback naming
+       no command while CLAUDE.md said G-4 had closed exactly that. The sentence is
+       `corrupt_base_error`'s — the same one the open door uses.
+    """
+    try:
+        if whole_file:
+            damage = quick_check(connection)
+            if damage:
+                return BaseVerdict(counts={}, sentence=_damage_advice(database, damage))
+        counts = count_rows(connection)
+    except sqlite3.DatabaseError as error:
+        return BaseVerdict(counts={}, sentence=str(corrupt_base_error(database, error)))
+    mismatch = manifest_mismatch(manifest, counts)
+    if mismatch:
+        return BaseVerdict(
+            counts=counts,
+            sentence=(
+                f"El índice no contiene lo que su manifest declara ({mismatch}): quedó "
+                f"incompleto. {REBUILD_ADVICE}"
+            ),
+        )
+    return BaseVerdict(counts=counts, sentence="")
+
+
+def require_consistent(
+    connection: sqlite3.Connection, manifest: Manifest, database: Path, *, whole_file: bool
+) -> dict[str, int]:
+    """`describe_base` as a refusal: raise its sentence, closing the connection first.
 
     C-3: `update` decided `topics_rebuilt` against the MANIFEST's fingerprints and never
     looked at the base, so a manifest declaring 45 topics over a base holding 0 produced an
@@ -1563,16 +1736,14 @@ def require_consistent(connection: sqlite3.Connection, manifest: Manifest) -> No
     Public since G-2 because `search` runs it too (`index_store.open_for_query`): it used to
     compare versions and schema only, so a base amputated behind the manifest's back — or
     the empty one a stray write door left behind — was answered as a corpus with no matches
-    while `update` and `status` refused it. Five `COUNT(*)`, 0.04 ms on the 52 MB real
-    index, and the three instruments say one thing.
+    while `update` and `status` refused it. Returns the counts it read, so a caller does not
+    count twice.
     """
-    mismatch = manifest_mismatch(manifest, count_rows(connection))
-    if mismatch:
+    verdict = describe_base(connection, manifest, database, whole_file=whole_file)
+    if verdict.sentence:
         connection.close()
-        raise IndexIncompatibleError(
-            f"El índice no contiene lo que su manifest declara ({mismatch}): quedó "
-            f"incompleto. {REBUILD_ADVICE}"
-        )
+        raise IndexIncompatibleError(verdict.sentence)
+    return verdict.counts
 
 
 def _delete_item(connection: sqlite3.Connection, item_id: str) -> int:
@@ -1625,49 +1796,46 @@ def _status_manifest(index_dir: Path, options: IndexOptions) -> tuple[Manifest |
 
 
 def _index_contents(
-    index_dir: Path,
+    index_dir: Path, manifest: Manifest | None, unusable: str
 ) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow], str]:
-    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row}, damage)`.
+    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row}, unusable)`.
 
-    Three empties and no damage when there is no base: with nothing stored, every item is
-    "added" and every topic is "behind", which is the truthful reading of an index that does
-    not exist. `damage` is `quick_check`'s first finding, or `` (B-1): `status` is the one
-    command that pays for the whole-file check, so a page the open door never reads is still
-    declared by the instrument an operator runs to find out.
+    Three empties when there is no base: with nothing stored, every item is "added" and every
+    topic is "behind", which is the truthful reading of an index that does not exist.
+
+    With a usable manifest the base is judged by `describe_base` FIRST — `quick_check`, then
+    the five counts, any `DatabaseError` converted (D-1) — and a base the manifest does not
+    describe is read no further: the deep reads below would raise on the same damage, and
+    the delta they feed is meaningless against a base that has to be rebuilt. A manifest the
+    code cannot use (another version) still gets its counts and its delta, because the base
+    itself is readable and the operator may want to know how far it moved.
     """
-    if not db_path(index_dir).exists():
-        return {}, {}, {}, ""
-    connection = open_index(db_path(index_dir), read_only=True)
+    database = db_path(index_dir)
+    if not database.exists():
+        return {}, {}, {}, unusable
+    connection = open_index(database, read_only=True)
     try:
-        return (
-            count_rows(connection),
-            _stored_fingerprints(connection),
-            stored_topic_rows(connection),
-            quick_check(connection),
-        )
+        with reading_base(database):
+            if manifest is not None and not unusable:
+                verdict = describe_base(connection, manifest, database, whole_file=True)
+                if verdict.sentence:
+                    return verdict.counts, {}, {}, verdict.sentence
+                counts = verdict.counts
+            else:
+                counts = count_rows(connection)
+            return (
+                counts,
+                _stored_fingerprints(connection),
+                stored_topic_rows(connection),
+                unusable,
+            )
     finally:
         connection.close()
 
 
-def _damage_advice(index_dir: Path, damage: str) -> str:
-    """The B-1 sentence, or `` when `quick_check` found nothing."""
-    if not damage:
-        return ""
-    return (
-        f"La base del índice en {db_path(index_dir)} está dañada (quick_check: {damage}). "
-        f"{REBUILD_ADVICE}"
-    )
-
-
-def _mismatch_advice(manifest: Manifest, counts: Mapping[str, int]) -> str:
-    """The C-3 sentence, or `` when the base holds what the manifest declares."""
-    mismatch = manifest_mismatch(manifest, counts)
-    if not mismatch:
-        return ""
-    return (
-        f"El índice está incompleto: la base no contiene lo que el manifest declara "
-        f"({mismatch}). {REBUILD_ADVICE}"
-    )
+def _damage_advice(database: Path, damage: str) -> str:
+    """The B-1 sentence for `quick_check`'s first finding."""
+    return f"La base del índice en {database} está dañada (quick_check: {damage}). {REBUILD_ADVICE}"
 
 
 def status(
@@ -1705,9 +1873,7 @@ def status(
     """
     options = options or IndexOptions()
     manifest, unusable = _status_manifest(index_dir, options)
-    counts, stored, stored_topics, damage = _index_contents(index_dir)
-    if manifest is not None and not unusable:
-        unusable = _damage_advice(index_dir, damage) or _mismatch_advice(manifest, counts)
+    counts, stored, stored_topics, unusable = _index_contents(index_dir, manifest, unusable)
 
     current = {item_id: item_fingerprint(item, options=options) for item_id, item in store.items()}
     delta = _classify(current, stored)

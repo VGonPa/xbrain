@@ -992,3 +992,239 @@ def test_the_manifest_built_at_is_an_instant_not_a_date(workspace, corpus) -> No
     built = datetime.fromisoformat(raw["built_at"])
     assert built.tzinfo is not None, "an instant with no timezone is a local guess"
     assert abs((datetime.now(timezone.utc) - built).total_seconds()) < 120
+
+
+# ---------------------------------------------------------------------------
+# B1 (gate Codex, round 06) — the manifest's NESTED schema is total and closed
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_manifest(workspace: Path, edit) -> None:
+    """Apply `edit(raw)` to the manifest on disk — the hand-edited document the reader survives."""
+    path = manifest_path(workspace / "index")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    edit(raw)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+_NESTED_KEYS = [
+    *(("counts", plane) for plane in sorted(index_build.COUNT_PLANES)),
+    *(("skipped", cause) for cause in sorted(index_build.SKIPPED_CAUSES)),
+    *(("chunker_params", name) for name in sorted(index_build.CHUNKER_PARAM_NAMES)),
+    ("store_signal", "items_json_mtime_ns"),
+    ("store_signal", "items_json_size"),
+]
+
+
+@pytest.mark.parametrize("field, key", _NESTED_KEYS)
+def test_a_manifest_missing_a_nested_key_is_refused_naming_the_rebuild(
+    workspace, corpus, field: str, key: str
+) -> None:
+    """B1: `Manifest.from_dict` checked the TOP-LEVEL key set and cast everything under it,
+    so a manifest whose `counts` was `{}` loaded as compatible — and the consistency check,
+    which iterated whatever `counts` offered, then compared NOTHING: `status` said healthy,
+    `search` answered zero results over a base with its chunks and profiles deleted, and
+    `update` sealed that state as sound (reproduced on the fixture: `incomplete=False`,
+    `chunks 0`, `profiles 0`). Spec §9.3: an incompatible manifest is never queried partially.
+
+    Every nested key is now REQUIRED, one parametrisation per key, derived from the same
+    constants the writer uses — so a plane, a cause or a chunker parameter added to the
+    writer is required of the reader without anybody remembering. Seen red before the fix
+    on all 15 parametrisations: `load_compatible_manifest` returned a `Manifest`.
+    """
+    _build(workspace, corpus)
+    _rewrite_manifest(workspace, lambda raw: raw[field].pop(key))
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as caught:
+        index_build.load_compatible_manifest(workspace / "index")
+    assert field in str(caught.value), "names the malformed field"
+
+
+def _set(field: str, value):
+    def edit(raw):
+        raw[field] = value
+
+    return edit
+
+
+def _set_nested(field: str, key: str, value):
+    def edit(raw):
+        raw[field][key] = value
+
+    return edit
+
+
+@pytest.mark.parametrize(
+    "label, edit",
+    [
+        ("counts empty", _set("counts", {})),
+        ("counts not a mapping", _set("counts", "12")),
+        ("a count that is a string", _set_nested("counts", "chunks", "56")),
+        ("a negative count", _set_nested("counts", "chunks", -1)),
+        ("a boolean count", _set_nested("counts", "chunks", True)),
+        ("an undeclared plane", _set_nested("counts", "vectors", 0)),
+        ("skipped not a mapping", _set("skipped", [])),
+        ("an undeclared cause", _set_nested("skipped", "vanished", 0)),
+        ("a chunker parameter that is a string", _set_nested("chunker_params", "target", "800")),
+        ("store_signal not a mapping", _set("store_signal", 5)),
+        ("a signal entry that is a string", _set_nested("store_signal", "items_json_size", "17")),
+        ("embeddings neither null nor a mapping", _set("embeddings", ["all-MiniLM"])),
+        ("failed not a list", _set("failed", {"k01": "boom"})),
+        ("a failure that is not a mapping of strings", _set("failed", [{"item_id": 1}])),
+        ("built_at not an instant", _set("built_at", "yesterday")),
+    ],
+)
+def test_a_malformed_nested_value_is_refused_naming_the_rebuild(
+    workspace, corpus, label: str, edit
+) -> None:
+    """B1, the values: a key that is present with the wrong shape is as vacuous as one that
+    is missing. `int("56")` silently accepted a string count; `True` is an `int` to
+    `isinstance`; an undeclared plane would be compared against a `COUNT(*)` that does not
+    exist. Closed means exactly the declared keys, each a non-negative integer.
+    """
+    _build(workspace, corpus)
+    _rewrite_manifest(workspace, edit)
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index_build.load_compatible_manifest(workspace / "index")
+
+
+def test_the_consistency_check_names_every_required_plane_the_manifest_does_not_declare(
+    workspace, corpus
+) -> None:
+    """B1's second half: `manifest_mismatch` iterated `manifest.counts.items()`, so a
+    `Manifest` holding `counts={}` compared nothing and every base agreed with it. The
+    reader now refuses that document, but a `Manifest` can still be built in Python; the
+    comparison iterates the REQUIRED planes, so the two guards fail closed independently.
+
+    Seen red before the fix: an empty sentence, meaning "consistent".
+    """
+    from dataclasses import replace
+
+    _build(workspace, corpus)
+    manifest = replace(index_build.load_manifest(workspace / "index"), counts={})
+
+    sentence = index_build.manifest_mismatch(
+        manifest, {"items": 12, "topics": 2, "surfaces": 43, "chunks": 56, "profiles": 12}
+    )
+
+    for plane in index_build.COUNT_PLANES:
+        assert plane in sentence, sentence
+
+
+def test_write_manifest_refuses_a_document_the_reader_would_refuse(workspace, corpus) -> None:
+    """The WRITER side of the seam: `write_manifest` round-trips the document through the
+    same reader every door uses, so a build or an update cannot seal a manifest that the
+    next `search` would then refuse — or, worse, one the reader would have accepted while
+    the writer's shape drifted. Seen red before the fix: the file was overwritten.
+    """
+    from dataclasses import replace
+
+    _build(workspace, corpus)
+    manifest = index_build.load_manifest(workspace / "index")
+    before = manifest_path(workspace / "index").read_bytes()
+
+    with pytest.raises(IndexIncompatibleError, match="counts"):
+        index_build.write_manifest(workspace / "index", replace(manifest, counts={}))
+
+    assert manifest_path(workspace / "index").read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# D-1 (gate Fable, round 06) — a damaged page under the maintenance reads
+# ---------------------------------------------------------------------------
+
+
+def _damage_root_page(database: Path, table: str) -> int:
+    """Overwrite the root page of `table` with `0xff`, at the page `sqlite_master` names."""
+    connection = sqlite3.connect(database)
+    try:
+        rootpage = connection.execute(
+            "SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)
+        ).fetchone()[0]
+        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    finally:
+        connection.close()
+    with database.open("r+b") as handle:
+        handle.seek((rootpage - 1) * page_size)
+        handle.write(b"\xff" * page_size)
+    return rootpage
+
+
+@pytest.mark.parametrize("table", ["items", "chunks"])
+def test_a_damaged_root_page_is_declared_by_status_and_refused_by_update_naming_the_rebuild(
+    workspace, corpus, table: str
+) -> None:
+    """D-1: the root page of `items` overwritten (read from `sqlite_master.rootpage`, not
+    guessed) made `status` and `update` a raw `sqlite3.DatabaseError` traceback naming no
+    command — `count_rows`, `_stored_fingerprints` and `stored_topic_rows` ran BEFORE
+    `quick_check` and converted nothing — while CLAUDE.md said G-4 was closed on all three
+    commands. And with the root page of `chunks` damaged `update --dry-run` returned a
+    normal `UpdateReport`: `COUNT(*)` was answered from an index, nothing read the table,
+    and the manifest would have been re-sealed over a damaged base.
+
+    Now `status` and `update` ask ONE function whether the manifest describes the base, and
+    that function runs `quick_check` FIRST and turns any `DatabaseError` of its reads into
+    the rebuild advice. Seen red before the fix: `items` — `sqlite3.DatabaseError` out of
+    `status` and out of `update`; `chunks` — `update` returned an `UpdateReport`.
+    """
+    store, vocab, pages = corpus
+    _write_inputs(workspace, corpus)
+    _build(workspace, corpus)
+    _damage_root_page(db_path(workspace / "index"), table)
+
+    report = _status(workspace, store, corpus)
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice, report.advice
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index_build.update(
+            workspace / "index",
+            store,
+            vocab,
+            pages,
+            workspace / "items.json",
+            vocab_path=workspace / "vocab.yaml",
+            topics_path=workspace / "topics.json",
+            dry_run=True,
+        )
+
+
+def test_a_database_error_while_reading_the_base_is_the_rebuild_advice_on_every_door(
+    workspace, corpus, monkeypatch
+) -> None:
+    """D-1 at the seam itself, on all THREE doors. Which page a given read touches depends
+    on the planner (a `COUNT(*)` is answered from the smallest index, so the fixture's
+    `search` never reads `items`), so the conversion is pinned where it lives: the reads
+    the seam performs raise `sqlite3.DatabaseError` and every door answers with the advice
+    — `status` as its report, `search` and `update` as the actionable error.
+
+    Seen red before the fix: the raw `DatabaseError` escaped all three.
+    """
+    from xbrain.knowledge.index_store import open_for_query
+
+    store, vocab, pages = corpus
+    _write_inputs(workspace, corpus)
+    _build(workspace, corpus)
+    paths = {"vocab_path": workspace / "vocab.yaml", "topics_path": workspace / "topics.json"}
+
+    def malformed(connection):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(index_build, "count_rows", malformed)
+
+    report = _status(workspace, store, corpus)
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice, report.advice
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        open_for_query(workspace / "index", workspace / "items.json", **paths)
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index_build.update(
+            workspace / "index",
+            store,
+            vocab,
+            pages,
+            workspace / "items.json",
+            **paths,
+            dry_run=True,
+        )

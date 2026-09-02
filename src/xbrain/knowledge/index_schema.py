@@ -53,7 +53,8 @@ over the output of `index build`, by a test.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from xbrain.knowledge.lexical_fts import FTS_TOKENIZE, fts5_table_sql
@@ -257,6 +258,42 @@ class IndexIncompatibleError(IndexError_):
 REBUILD_ADVICE = "Reconstruye el índice con `xbrain index build --force`."
 
 
+def corrupt_base_error(path: Path, error: sqlite3.DatabaseError) -> IndexIncompatibleError:
+    """The ONE sentence for a base this code cannot read — the open door and every later read.
+
+    Built here, beside `REBUILD_ADVICE`, so `_prove_readable` and `reading_base` cannot
+    drift into two wordings of one fact (rule 5). SQLite's own text rides in parentheses:
+    it is what distinguishes a torn page from a file that is not a database at all.
+    """
+    return IndexIncompatibleError(
+        f"La base del índice en {path} no se puede leer ({error}). {REBUILD_ADVICE}"
+    )
+
+
+@contextmanager
+def reading_base(path: Path) -> Iterator[None]:
+    """Turn a `sqlite3.DatabaseError` raised inside the block into the rebuild advice (D-1).
+
+    `sqlite3.connect` is lazy and the open door reads page 1, `sqlite_master` and one `MATCH`
+    per FTS plane — so a page damaged under `items`, `chunks` or `topics` surfaced at the
+    first MAINTENANCE read that touched it: `count_rows`, `_stored_fingerprints`,
+    `stored_topic_rows`, each a raw `DatabaseError` out of `status`, `search` and `update`,
+    a 61-line traceback naming no command, while CLAUDE.md declared G-4 closed on the three
+    (the round-06 gate, D-1). `LexicalIndex._fetch` already converts at QUERY time; this is
+    the same conversion for the reads that are not queries, in one place, wrapped around
+    them rather than remembered at each.
+
+    `DatabaseError` is the whole family on purpose — `OperationalError` included — because
+    the door already treats it so (`_fetch`, C-2): the index has no concurrent writer by
+    design (spec §9.2), so what the family means here is *the file is not what this code
+    can read*, and the honest remedy is the rebuild the sentence names.
+    """
+    try:
+        yield
+    except sqlite3.DatabaseError as error:
+        raise corrupt_base_error(path, error) from error
+
+
 def db_path(index_dir: Path) -> Path:
     """Where the SQLite database lives inside the index directory."""
     return index_dir / DB_FILENAME
@@ -369,9 +406,7 @@ def _prove_readable(connection: sqlite3.Connection, path: Path) -> sqlite3.Conne
         connection.execute("SELECT count(*) FROM sqlite_master")
     except sqlite3.DatabaseError as error:
         connection.close()
-        raise IndexIncompatibleError(
-            f"La base del índice en {path} no se puede leer ({error}). {REBUILD_ADVICE}"
-        ) from error
+        raise corrupt_base_error(path, error) from error
     return connection
 
 
