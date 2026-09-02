@@ -635,3 +635,64 @@ def test_a_chunk_from_get_carries_the_locator_of_the_source_whose_text_it_delive
         )
         assert source.text[chunk.char_start : chunk.char_end] == chunk.text
         assert chunk.url == item.url, "the owner's URL keeps its one meaning"
+
+
+# ---------------------------------------------------------------------------
+# S-7 (gate Fable, round 06) — the bundle's verification is the live store's, and current
+# ---------------------------------------------------------------------------
+
+
+def test_get_hydrates_a_current_verdict_and_drops_a_stale_one(context: QueryContext) -> None:
+    """Spec §3.4 / Plan 01 §3.4 (M5): `verification` is exposed on the `EvidenceBundle`,
+    hydrated from the live store with the freshness check `generate._verdict_badge`
+    applies. The conduct existed and was correct; no test knew: `verification={}` in
+    `get_service.get` left 443 tests green (the gate's mutation, reproduced), and what
+    would vanish in silence is every FAIL a consumer of `get` would see on a summary a
+    judge already called unfaithful.
+
+    Two halves, one item: a verdict whose contract fingerprint matches the current output
+    travels with its fingerprint; the same verdict over a regenerated summary is stale and
+    the bundle carries `{}` — never the old PASS. Seen red under `verification={}`: the
+    first assertion; under a hydration with no freshness check: the last.
+    """
+    from datetime import datetime, timezone
+
+    from xbrain.models import VerificationVerdict
+    from xbrain.verification import contract_fingerprint, fingerprint_output
+
+    item = context.store["k03"]
+    stamp = contract_fingerprint(item, "summary", context.language)
+    assert stamp is not None
+    judged = item.model_copy(
+        update={
+            "verification": {
+                "summary": VerificationVerdict(
+                    target="summary",
+                    verdict="FAIL",
+                    faithfulness="FAIL",
+                    adherence="PASS",
+                    output_fingerprint=fingerprint_output(item, "summary"),
+                    contract_fingerprint=stamp,
+                    verified_at=datetime.now(timezone.utc),
+                )
+            }
+        }
+    )
+    judged_context = QueryContext(**{**context.__dict__, "store": {**context.store, "k03": judged}})
+
+    bundle = get("k03", judged_context)
+    assert set(bundle.verification) == {"summary"}
+    assert bundle.verification["summary"].verdict == "FAIL"
+    assert bundle.verification["summary"].contract_fingerprint == stamp
+
+    regenerated = judged.model_copy(
+        update={
+            "enriched": judged.enriched.model_copy(
+                update={"summary": judged.enriched.summary + " Y una frase nueva."}
+            )
+        }
+    )
+    stale_context = QueryContext(
+        **{**context.__dict__, "store": {**context.store, "k03": regenerated}}
+    )
+    assert get("k03", stale_context).verification == {}, "a stale FAIL must not be shown as current"
