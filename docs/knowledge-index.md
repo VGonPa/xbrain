@@ -113,10 +113,20 @@ today's index (chunker v2):
 | 2026-07-05 | 333 | 6,572 | | | | |
 
 Leaving out the 2026-08-12 backfill, a **typical run re-enriches 31 items (median of 10 runs;
-4 – 333) and leaves 345 chunks stale (median; 34 – 6,572), i.e. 1.55 % of the 22,286** — well
-inside what `update` handles in a fraction of a second. What `enrich` would process if run
-today: **1** item (a re-enrichment), owning 3 chunks. The "100 items changed" row above is a
-SYNTHETIC population and is labelled as such; it sits between a typical run and the largest.
+4 – 725) and leaves 345 chunks stale (median; 34 – 6,572), i.e. 1.55 % of the 22,286** — well
+inside what `update` handles in a fraction of a second. *(Until round 04 this line read
+`4 – 333` for the same 10 runs — a range no population in the table produces: the 10 runs
+include the 725-item day of 2026-05-19, and `4 – 333` is the range of the 9 runs that exclude it
+too, whose median is 22, not 31 (H4). Re-derived 2026-09-02 on the same store: the median, the
+chunk median and the 1.55 % are all figures of the 10-run population and stand; only the range
+was wrong. The DECLARED population is kept and the range corrected, rather than the other way
+round, because the text names one exclusion — the backfill — and excluding the 725-item day as
+well would need a criterion the text never states; a range narrowed by an unstated exclusion is
+the number rule 2 exists to stop. For the reader who wants the sensitivity: the 9-run
+population gives a median of 22 items / 244 chunks, range 4 – 333 / 34 – 6,572, 1.09 %.)*
+What `enrich` would process if run today: **1** item (a re-enrichment), owning 3 chunks. The
+"100 items changed" row above is a SYNTHETIC population and is labelled as such; it sits
+between a typical run and the largest.
 
 ### Interruption
 
