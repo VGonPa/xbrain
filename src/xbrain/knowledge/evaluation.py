@@ -48,7 +48,12 @@ from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chu
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
 from xbrain.knowledge.contracts import SearchFilters, resolve_strategy
 from xbrain.knowledge.index_schema import open_memory_index
-from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
+from xbrain.knowledge.lexical import (
+    MAX_CHUNK_DEPTH as _MAX_CHUNK_DEPTH,
+    OWNER_CHUNK_MULTIPLIER as _OWNER_CHUNK_MULTIPLIER,
+    LexicalHit,
+    LexicalIndex,
+)
 from xbrain.knowledge.models import KnowledgeChunk
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -83,8 +88,10 @@ DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 # declared on the case, never read as «the owner was not there»). A prefix of a deeper FTS
 # ranking is the shallower ranking — one total order, `chunk_id` tie-break — so `recall@k`
 # for any k at or below the depth is one number, whatever else was asked for.
-OWNER_CHUNK_MULTIPLIER = 4
-MAX_CHUNK_DEPTH = 10_000
+# Re-exported from `lexical`, where the loop lives since M-4 (round 08): the search service
+# decides `truncated` over the SAME window this harness scores, through one function.
+OWNER_CHUNK_MULTIPLIER = _OWNER_CHUNK_MULTIPLIER
+MAX_CHUNK_DEPTH = _MAX_CHUNK_DEPTH
 
 # Which of spec §7.2's eight filters each strategy can actually push into the backend.
 #
@@ -471,23 +478,13 @@ def _search(
     `SUPPORTED_FILTERS` an honest declaration instead of a list that has to be kept in step
     with a second one here.
 
-    The chunk limit starts at `OWNER_CHUNK_MULTIPLIER` per owner and doubles while the
-    result set came back FULL and still holds fewer owners than asked — a set shorter than
-    its limit is the whole ranking, and there is nothing deeper to find. `MAX_CHUNK_DEPTH`
-    bounds the walk; reaching it short of owners is declared on the case.
+    The window is `LexicalIndex.search_owners` — ONE loop for the harness and for the
+    search service (M-4, round 08), so what this harness scores at depth N is the window the
+    service pages at depth N: `OWNER_CHUNK_MULTIPLIER` chunks per owner, doubling while the
+    result set came back full and short of owners, bounded by `MAX_CHUNK_DEPTH`; reaching
+    the bound short of owners is declared on the case.
     """
-    chunk_limit = max(owners * OWNER_CHUNK_MULTIPLIER, 1)
-    while True:
-        hits = index.search(case.query, limit=chunk_limit, filters=case.filters)
-        if _distinct_owners(hits) >= owners or len(hits) < chunk_limit:
-            return hits, False
-        if chunk_limit >= MAX_CHUNK_DEPTH:
-            return hits, True
-        chunk_limit = min(chunk_limit * 2, MAX_CHUNK_DEPTH)
-
-
-def _distinct_owners(hits: Sequence[LexicalHit]) -> int:
-    return len({_owner_key(hit.owner_type, hit.owner_id) for hit in hits})
+    return index.search_owners(case.query, owners, filters=case.filters)
 
 
 def _owner_key(owner_type: str, owner_id: str) -> str:

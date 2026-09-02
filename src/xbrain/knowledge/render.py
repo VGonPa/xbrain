@@ -95,8 +95,47 @@ def _index_lines(response: SearchResponse) -> list[str]:
             "Reconstruye con `xbrain index build --force`."
         )
     if response.truncated:
-        lines.append("⚠ Resultado truncado.")
+        lines.append(_search_truncation(response))
     return lines
+
+
+def _search_truncation(response: SearchResponse) -> str:
+    """The truncation line of a search: the continuation that resumes it, or why there is
+    none (M-4, round 08).
+
+    A cursor is an offset into the ranking the query AND the filters define, so the printed
+    command repeats every filter, the page size and the cursor — the H2 lesson of `get`, on
+    the other service: a continuation that dropped a filter would resume inside a different
+    ranking. Every value is labelled (U-3) and the query shell-quoted AFTER labelling.
+    """
+    if response.cursor is None:
+        return (
+            "⚠ Resultado truncado: la clasificación no se pudo materializar a la profundidad "
+            "que pedía la página, así que puede haber más resultados y no se puede paginar "
+            "hasta ellos — acota la consulta o añade filtros."
+        )
+    return "⚠ Resultado truncado. Continúa con: " + _search_continuation(response)
+
+
+def _search_continuation(response: SearchResponse) -> str:
+    """The `xbrain search` that returns the NEXT page of this response, runnable as printed."""
+    filters = response.filters
+    parts = [f"xbrain search {shlex.quote(_label(response.query))}"]
+    parts.append(f"--limit {len(response.results)}")
+    if filters.created_from is not None:
+        parts.append(f"--from {filters.created_from.date().isoformat()}")
+    if filters.created_to is not None:
+        parts.append(f"--to {filters.created_to.date().isoformat()}")
+    if filters.source is not None:
+        parts.append(f"--source {_label(filters.source)}")
+    if filters.author is not None:
+        parts.append(f"--author {shlex.quote(_label(filters.author))}")
+    parts += [f"--topic {shlex.quote(_label(slug))}" for slug in filters.topics]
+    parts += [f"--kind {_label(kind)}" for kind in filters.content_kinds]
+    parts += [f"--origin {_label(origin)}" for origin in filters.origins]
+    parts += [f"--has-surface {_label(surface)}" for surface in filters.has_surfaces]
+    parts.append(f"--cursor {_label(response.cursor or '')}")
+    return " ".join(parts)
 
 
 def _degraded_line(flag: str) -> str:

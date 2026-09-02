@@ -3183,6 +3183,9 @@ def search_command(
     has_surface: list[str] = typer.Option(
         [], "--has-surface", help="El item tiene esta superficie (repetible)."
     ),
+    cursor: str | None = typer.Option(
+        None, "--cursor", help="Continúa desde donde truncó la respuesta anterior (`s:<n>`)."
+    ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
     """Busca en el corpus y devuelve items con sus fragmentos citables.
@@ -3207,7 +3210,7 @@ def search_command(
         origins=tuple(origin),  # type: ignore[arg-type]
         has_surfaces=tuple(has_surface),  # type: ignore[arg-type]
     )
-    response = run_search(query, _query_context(cfg), filters=filters, limit=limit)
+    response = run_search(query, _query_context(cfg), filters=filters, limit=limit, cursor=cursor)
     if json_out:
         typer.echo(json.dumps(response.model_dump(mode="json"), ensure_ascii=False, indent=2))
     else:

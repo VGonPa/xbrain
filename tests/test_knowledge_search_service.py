@@ -1296,3 +1296,102 @@ def test_search_and_get_build_every_fragment_locator_through_one_function(
     assert matches and all(m.locator == sentinel for m in matches)
     bundle = get("k03", context, surfaces=("external_article",), query="Quillfeather")
     assert bundle.chunks and all(c.locator == sentinel for c in bundle.chunks)
+
+
+# ---------------------------------------------------------------------------
+# M-4 (gate Fable round 08) — a page smaller than the ranking is DECLARED, with a cursor
+# ---------------------------------------------------------------------------
+
+
+def _ids(response: SearchResponse) -> list[str]:
+    return [result.item_id for result in response.results]
+
+
+def test_a_page_shorter_than_the_ranking_is_truncated_with_a_cursor_that_continues(
+    context: QueryContext,
+) -> None:
+    """Spec §9.3: *resultado demasiado grande: truncamiento explícito + cursor, nunca corte
+    silencioso*. `SearchResponse.truncated` and `cursor` were declared in the frozen
+    envelope and NEVER set: `search the --limit 2` on the real index answered two results,
+    `truncated: false`, `cursor: null`, while `--limit 50` answered fifty (gate Fable round
+    08 M-4, reproduced) — a field of the contract that could not come out any other way
+    (rule 2), and the «⚠ Resultado truncado.» line of the renderer was dead code.
+
+    The pages are DISJOINT and COMPLETE: following the cursor page after page reassembles,
+    in order, exactly the list one large page returns, and the last page says it is the
+    last. Seen red on `36f694b`: `truncated is False` on the first page.
+    """
+    whole = _ids(search("the", context, limit=20))
+    assert len(whole) >= 4, "the fixture must rank at least four items for this to measure"
+
+    first = search("the", context, limit=2)
+    assert _ids(first) == whole[:2]
+    assert first.truncated is True
+    assert first.cursor == "s:2"
+
+    second = search("the", context, limit=2, cursor=first.cursor)
+    assert _ids(second) == whole[2:4]
+    assert set(_ids(first)).isdisjoint(_ids(second))
+
+    pages, cursor, seen = [], None, 0
+    while True:
+        page = search("the", context, limit=2, cursor=cursor)
+        pages += _ids(page)
+        seen += 1
+        if not page.truncated:
+            assert page.cursor is None
+            break
+        cursor = page.cursor
+        assert seen < 20, "the cursor never reached the last page"
+    assert pages == whole
+
+
+def test_a_page_that_holds_the_whole_ranking_is_not_truncated(context: QueryContext) -> None:
+    """The negative control: a limit at or above the ranking's length is the whole
+    ranking, `truncated: false`, no cursor — so `truncated` is a MEASUREMENT of the ranking
+    against the page, not a flag that is always on."""
+    response = search("the", context, limit=50)
+    assert response.truncated is False and response.cursor is None
+
+
+def test_a_get_cursor_is_refused_by_search_by_name(context: QueryContext) -> None:
+    """The two services page DIFFERENT sequences: `get`'s positional `<surface>:<chunk>` and
+    `q:<offset>` cursors index one item's chunks; `search`'s `s:<offset>` indexes a ranking of
+    items. Each decoder refuses the other's shape by name rather than restarting from zero,
+    which would loop a paginating consumer forever while looking like progress."""
+    for foreign in ("q:2", "0:3"):
+        with pytest.raises(ValueError, match="cursor"):
+            search("agents", context, limit=2, cursor=foreign)
+    with pytest.raises(ValueError, match="Cursor inválido"):
+        search("agents", context, limit=2, cursor="s:-1")
+
+
+def test_the_service_and_the_harness_materialise_the_candidate_window_through_one_function(
+    context: QueryContext, monkeypatch
+) -> None:
+    """Rule 5: «deep enough to hold N owners» is ONE definition (`LexicalIndex.search_owners`,
+    the U-6 loop), shared by `search` and by the evaluation harness — not two loops that
+    drift. A sentinel replaces it and both consumers must return what the sentinel returned.
+    """
+    from xbrain.knowledge import evaluation
+    from xbrain.knowledge.lexical import LexicalIndex
+
+    calls: list[tuple[str, int]] = []
+    real = LexicalIndex.search_owners
+
+    def sentinel(self, query, owners, *, filters=None):
+        calls.append((query, owners))
+        return real(self, query, owners, filters=filters)
+
+    monkeypatch.setattr(LexicalIndex, "search_owners", sentinel)
+    search("agents", context, limit=2)
+    assert calls == [("agents", 3)], "search asks for one owner more than the page needs"
+
+    calls.clear()
+    index = LexicalIndex(open_index(db_path(context.index_dir), read_only=True))
+    try:
+        case = type("Case", (), {"query": "agents", "filters": SearchFilters()})()
+        evaluation._search(index, case, owners=4)
+    finally:
+        index.connection.close()
+    assert calls == [("agents", 4)]

@@ -880,6 +880,29 @@ def test_a_bell_stored_in_a_post_does_not_reach_the_terminal_through_get(workspa
     assert "│ Quiet post with two bells" in result.output.splitlines()
 
 
+def test_the_printed_search_continuation_pages_the_same_ranking(workspace: Path) -> None:
+    """M-4 at the CLI: `search --limit 1` declares the truncation and prints a continuation
+    that is followed LITERALLY (shell-split) and yields the next item of the same ranking;
+    `--json` carries `truncated` and `cursor`. Seen red on `36f694b`: `truncated: false`,
+    no continuation line."""
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    whole = _json_stdout(runner.invoke(app, ["search", "the", "--limit", "20", "--json"]))
+    ids = [r["item_id"] for r in whole["results"]]
+    assert len(ids) >= 3
+
+    first = _json_stdout(runner.invoke(app, ["search", "the", "--limit", "1", "--json"]))
+    assert first["truncated"] is True and first["cursor"] == "s:1"
+    assert [r["item_id"] for r in first["results"]] == ids[:1]
+
+    human = runner.invoke(app, ["search", "the", "--limit", "1"])
+    assert human.exit_code == 0, human.output
+    line = next(row for row in human.output.splitlines() if "Continúa con:" in row)
+    argv = shlex.split(line.split("Continúa con: ", 1)[1])
+    assert argv[:2] == ["xbrain", "search"]
+    second = _json_stdout(runner.invoke(app, [*argv[1:], "--json"]))
+    assert [r["item_id"] for r in second["results"]] == ids[1:2]
+
+
 def test_the_human_search_output_names_the_get_command(workspace: Path) -> None:
     """Step 27 at the CLI: the human view is rendered from the SAME response model."""
     runner.invoke(app, ["index", "build"])

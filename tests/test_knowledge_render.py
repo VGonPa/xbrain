@@ -298,6 +298,57 @@ def test_the_get_rendering_shows_failures_and_unfetched_links_apart() -> None:
     assert "sin cuerpo: https://nope.example (http_error) — 404" in text
 
 
+def test_the_search_rendering_offers_a_runnable_continuation_when_truncated() -> None:
+    """M-4 (round 08): a truncated search prints the `xbrain search` that resumes it — the
+    query shell-quoted, every filter repeated, the page size, the cursor — because a cursor
+    is an offset into the sequence the query AND the filters define, and a continuation
+    that dropped a filter would resume inside a different ranking (the H2 lesson of `get`)."""
+    from datetime import date
+
+    response = _response(
+        query="agent evaluation",
+        filters=SearchFilters(
+            created_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            created_to=datetime(2026, 3, 31, 23, 59, 59, tzinfo=timezone.utc),
+            source="own_tweet",
+            author="karpathy",
+            topics=("agent-evaluation",),
+            content_kinds=("x_video",),
+            origins=("asr",),
+            has_surfaces=("video_transcript",),
+        ),
+        truncated=True,
+        cursor="s:1",
+    )
+    out = render_search(response)
+    line = next(row for row in out.splitlines() if "Continúa con:" in row)
+    assert "⚠ Resultado truncado" in line
+    command = line.split("Continúa con: ", 1)[1]
+    assert command.startswith("xbrain search 'agent evaluation' --limit 1 ")
+    for flag in (
+        f"--from {date(2026, 1, 1).isoformat()}",
+        "--to 2026-03-31",
+        "--source own_tweet",
+        "--author karpathy",
+        "--topic agent-evaluation",
+        "--kind x_video",
+        "--origin asr",
+        "--has-surface video_transcript",
+        "--cursor s:1",
+    ):
+        assert flag in command, (flag, command)
+
+
+def test_a_truncation_with_no_continuation_says_why() -> None:
+    """The one truncation that has no cursor: the ranking could not be materialised to the
+    depth the page needed (the U-6 bound). Declared as a truncation with the reason and the
+    remedy, never as a complete page."""
+    out = render_search(_response(truncated=True, cursor=None))
+    assert any(
+        "⚠ Resultado truncado" in row and "acota la consulta" in row for row in out.splitlines()
+    )
+
+
 def test_the_get_rendering_offers_the_cursor_when_truncated() -> None:
     """Spec §9.3: a truncated answer says how to continue, never cuts in silence."""
     text = render_get(_bundle(truncated=True, cursor="0:3"))

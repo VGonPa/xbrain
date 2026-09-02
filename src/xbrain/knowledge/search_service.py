@@ -76,13 +76,11 @@ from xbrain.knowledge.surfaces import (
 from xbrain.knowledge.provenance import ORIGIN_TRUST
 from xbrain.models import Item, Topic, TopicPage
 
-# How deep to go into the chunk plane before grouping. Grouping collapses many chunks into
-# one item, so retrieving exactly `limit` chunks would return far fewer than `limit` items
-# whenever one item matches well — the failure mode grouping exists to prevent, reappearing
-# as a short answer. Four matches' worth of headroom per requested item is enough on the real
-# corpus and is bounded so a `--limit 100` cannot ask for 1,200 rows.
-CANDIDATE_MULTIPLIER = 4
-MAX_CANDIDATES = 500
+# The search cursor is an OFFSET into the ranking (M-4, round 08): `s:<offset>`. The other
+# two cursor shapes in this package (`get`'s positional `<surface>:<chunk>` and `q:<offset>`)
+# index one item's chunks; this one indexes a ranking of items, and each decoder refuses the
+# others' shape by name rather than restarting from zero.
+_SEARCH_CURSOR_PREFIX = "s"
 
 # WHICH SURFACE TO VERIFY A DERIVED CLAIM AGAINST, most decisive first.
 #
@@ -150,6 +148,7 @@ def search(
     filters: SearchFilters | None = None,
     limit: int = 10,
     strategy: Strategy = "lexical",
+    cursor: str | None = None,
 ) -> SearchResponse:
     """Run one query end to end and return the frozen envelope (spec §7.2).
 
@@ -162,10 +161,25 @@ def search(
     sigue operativo y el response declara estrategia degradada; no finge resultados
     vectoriales.* Echoing the request back was that pretence in the one field that names the
     retriever (F-2).
+
+    A PAGE SHORTER THAN THE RANKING IS DECLARED, AND CAN BE CONTINUED (M-4, round 08).
+    `truncated` and `cursor` were declared in the frozen envelope and never set: `--limit 2`
+    cut a fifty-item ranking to two with `truncated: false` — the silent cut spec §9.3
+    forbids, on a field that could not come out any other way (rule 2). Now the candidate
+    window is materialised until it holds ONE OWNER MORE than the page needs
+    (`LexicalIndex.search_owners`, the same U-6 loop the evaluation harness scores with —
+    one definition, rule 5), so `truncated` is a measurement of the ranking against the
+    page; the cursor is the offset of the next page (`s:<offset>`), and the pages are
+    disjoint and reassemble the ranking in order, because every window is a prefix of the
+    same ranking and a topic hit expands to the same sorted members under any page. The
+    one truncation that has no cursor is a window that reached `MAX_CHUNK_DEPTH` short of
+    owners: more may exist and cannot be paged to, and the response says so instead of
+    calling the page complete.
     """
     filters = filters or SearchFilters()
     _validate(query, filters, limit, context)
     executed, strategy_degradation = resolve_strategy(strategy)
+    offset = _decode_search_cursor(cursor)
     index = open_for_query(
         context.index_dir,
         context.items_path,
@@ -174,23 +188,28 @@ def search(
         params=context.params,
     )
     try:
-        depth = min(limit * CANDIDATE_MULTIPLIER * context.max_matches_per_item, MAX_CANDIDATES)
+        # One owner beyond the page: what decides `truncated` without guessing.
+        beyond = offset + limit + 1
+        candidates, exhausted = index.lexical.search_owners(query, beyond, filters=filters)
         # A hit without a resolvable surface locator is excluded and counted FIRST (B-k):
         # the alternative was a locator invented from the chunk's own columns — and since
         # U-5 the fingerprint is recomputed over the narrowed locator, so a hit that has
         # none cannot be verified at all. Then every survivor's evidence must recompute.
-        hits, unresolvable = resolvable_hits(index.lexical.search(query, depth, filters=filters))
+        hits, unresolvable = resolvable_hits(candidates)
         hits, corrupt = verify_fingerprints(hits)
         excluded = corrupt + unresolvable
         profile_ids = [
-            hit.item_id for hit in index.lexical.search_profiles(query, limit, filters=filters)
+            hit.item_id for hit in index.lexical.search_profiles(query, beyond, filters=filters)
         ]
-        grouped = _group_by_item(hits, context, limit=limit)
-        _append_profile_candidates(grouped, profile_ids, context, limit=limit)
+        grouped = _group_by_item(hits, context, limit=beyond)
+        _append_profile_candidates(grouped, profile_ids, context, limit=beyond)
+        ordered = list(grouped.items())
+        page = ordered[offset : offset + limit]
         results = tuple(
             _hydrate(rank, item_id, matches, context)
-            for rank, (item_id, matches) in enumerate(list(grouped.items())[:limit], start=1)
+            for rank, (item_id, matches) in enumerate(page, start=offset + 1)
         )
+        truncated = len(ordered) > offset + limit or exhausted
         return SearchResponse(
             query=query,
             strategy=executed,
@@ -199,9 +218,41 @@ def search(
                 corrupt_chunks_excluded=excluded, strategy_degradation=strategy_degradation
             ),
             results=results,
+            truncated=truncated,
+            cursor=_encode_search_cursor(offset + limit) if len(ordered) > offset + limit else None,
         )
     finally:
         index.close()
+
+
+def _encode_search_cursor(offset: int) -> str:
+    """The cursor of the page starting at `offset` in the ranking. Opaque to the caller."""
+    return f"{_SEARCH_CURSOR_PREFIX}:{offset}"
+
+
+def _decode_search_cursor(cursor: str | None) -> int:
+    """The offset a search cursor names — refusing `get`'s two shapes and anything malformed.
+
+    Restarting from zero on a bad cursor would loop a paginating consumer forever while
+    looking like progress; the refusal names which sequence the cursor belongs to.
+    """
+    if not cursor:
+        return 0
+    head, _, tail = cursor.partition(":")
+    if head != _SEARCH_CURSOR_PREFIX:
+        raise ValueError(
+            f"Cursor inválido: {cursor!r} no es un cursor de `search` (esos son `s:<offset>`); "
+            "los cursores de `get` no indexan esta secuencia."
+        )
+    try:
+        offset = int(tail)
+    except ValueError as error:
+        raise ValueError(
+            f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior."
+        ) from error
+    if offset < 0:
+        raise ValueError(f"Cursor inválido: {cursor!r}. Usa el que devolvió la respuesta anterior.")
+    return offset
 
 
 def no_underlying_source(result: SearchResult) -> bool:

@@ -48,6 +48,18 @@ from xbrain.models import Author
 # that a log or a report never carries an article (spec §10.8).
 EXCERPT_CHARS = 300
 
+# The candidate window of a query is counted in OWNERS, never in chunks (U-6, round 07): a
+# transcript matching in seven windows at the top of the ranking held ten chunks and two
+# owners, so a depth of ten CHUNKS answered a question about ten ITEMS with two. The window
+# starts at `OWNER_CHUNK_MULTIPLIER` chunks per owner asked for and DOUBLES while the result
+# set came back full and still holds fewer owners than asked — a set shorter than its limit
+# is the whole ranking, and there is nothing deeper to find — up to `MAX_CHUNK_DEPTH`.
+# Reaching the bound short of owners is DECLARED to the caller, never absorbed. ONE loop,
+# here, for the two consumers that need it (rule 5): the evaluation harness (`_search`) and
+# the search service (M-4, round 08), which decides `truncated` over this window.
+OWNER_CHUNK_MULTIPLIER = 4
+MAX_CHUNK_DEPTH = 10_000
+
 # The fixed SELECT skeletons. Module constants rather than inline literals so the only thing
 # the query builder concatenates at call time is a WHERE clause of bound `?` placeholders
 # plus the `rank_order` string — which is what makes the `# nosec B608` below a statement of
@@ -115,6 +127,11 @@ class LexicalHit:
     score: float
     attribution: Author | None = None
     surface_locator: Locator | None = None
+
+
+def _distinct_owners(hits: Sequence[LexicalHit]) -> int:
+    """How many distinct `(owner_type, owner_id)` a ranking prefix holds."""
+    return len({(hit.owner_type, hit.owner_id) for hit in hits})
 
 
 @dataclass(frozen=True)
@@ -328,6 +345,27 @@ class LexicalIndex:
         sql = f"{_SELECT_CHUNKS} WHERE {' AND '.join(clauses)} {_CHUNK_RANK_ORDER} LIMIT ?"  # nosec B608
         rows = self._fetch(sql, (*params, limit))
         return tuple(_hit(row) for row in rows)
+
+    def search_owners(
+        self, query: str, owners: int, *, filters: SearchFilters | None = None
+    ) -> tuple[tuple[LexicalHit, ...], bool]:
+        """The ranking's prefix deep enough to hold `owners` DISTINCT owners, in rank order.
+
+        Returns `(hits, depth_exhausted)`. `hits` is a prefix of the full ranking — the
+        same rows `search` returns for the chunk limit reached — so a caller that groups
+        by owner sees a list that is prefix-consistent across depths: a deeper window only
+        appends. `depth_exhausted` is True when `MAX_CHUNK_DEPTH` was reached with fewer
+        owners than asked; the harness declares it on the case and the service declares
+        a truncation it cannot page (both say so, neither guesses).
+        """
+        chunk_limit = max(owners * OWNER_CHUNK_MULTIPLIER, 1)
+        while True:
+            hits = self.search(query, chunk_limit, filters=filters)
+            if _distinct_owners(hits) >= owners or len(hits) < chunk_limit:
+                return hits, False
+            if chunk_limit >= MAX_CHUNK_DEPTH:
+                return hits, True
+            chunk_limit = min(chunk_limit * 2, MAX_CHUNK_DEPTH)
 
     def search_profiles(
         self, query: str, limit: int, *, filters: SearchFilters | None = None
