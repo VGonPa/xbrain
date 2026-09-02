@@ -1149,6 +1149,14 @@ def test_forged_provenance_attribution_and_locator_are_excluded_and_counted(
         ("chunks", "owner_type", "topic"),
         ("chunks", "char_start", 5),
         ("chunks", "chunk_index", 7),
+        # M-2 (gate Fable round 08): the id is the ONE field a `--json`/MCP consumer has to
+        # walk back from a match to its surface (spec §3.3, reversibility), and it was
+        # served bound to nothing — forged on the real index, `corrupt_chunks_excluded 0`.
+        (
+            "chunks",
+            "chunk_id",
+            "item:9999999999999999999:quoted_post:deadbeefdead:0:xbrain-knowledge-chunker/v2",
+        ),
     ],
 )
 def test_every_served_metadata_field_is_bound_to_the_fingerprint(
@@ -1161,7 +1169,10 @@ def test_every_served_metadata_field_is_bound_to_the_fingerprint(
     fingerprint hashes, through the ONE projection `chunking.chunk_evidence` the emitter
     and the verifier share. Edit any one of them and the chunk is excluded and counted.
 
-    Seen red on `9dfa34e` on every parametrisation: the forged row was served, counter 0.
+    Seen red on `9dfa34e` on ten of the first eleven parametrisations — the forged row was
+    served, counter 0; `chunk_index` was already in the old three-field hash, and the
+    round-07 docstring's «every parametrisation» overstated it (gate Fable round 08, TESTS
+    subagent §8.2). `chunk_id` seen red on `36f694b`: the forged id was served, counter 0.
     """
     victim, surface_id = _quoted_victim(context)
     connection = sqlite3.connect(db_path(context.index_dir))

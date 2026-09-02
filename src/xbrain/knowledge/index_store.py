@@ -36,7 +36,7 @@ from pathlib import Path
 
 from xbrain.knowledge.chunking import ChunkerParams, chunk_evidence, fragment_locator
 from xbrain.knowledge.contracts import IndexStatusRef
-from xbrain.knowledge.ids import chunk_fingerprint
+from xbrain.knowledge.ids import chunk_fingerprint, chunk_id
 from xbrain.knowledge.index_build import (
     Manifest,
     StoreSignal,
@@ -185,6 +185,14 @@ def verify_fingerprints(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, .
     here too (`resolvable_hits` counts it first, and a caller that skipped that step is
     still closed).
 
+    AND THE ID (M-2, round 08 — gate Fable). `chunk_id` is not an arm of the evidence: it is
+    DERIVED from two arms that are (`surface_id`, `chunk_index`) and the chunker version the
+    door already proved, through the same `ids.chunk_id` the emitter uses — so it is
+    recomputed here and compared rather than hashed a second time. It is the ONE field a
+    `--json`/MCP consumer has to walk back from a match to its surface (spec §3.3,
+    reversibility), and until this check a forged id was served with the right text under
+    a wrong name and `corrupt_chunks_excluded: 0` (reproduced on the real index).
+
     Excluded rather than repaired, and counted rather than logged: spec §5.6 forbids the
     query from repairing the index, and a silent exclusion would make the corpus look smaller
     than it is with nothing saying why.
@@ -192,7 +200,7 @@ def verify_fingerprints(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, .
     kept: list[LexicalHit] = []
     excluded = 0
     for hit in hits:
-        if hit.surface_locator is None:
+        if hit.surface_locator is None or hit.chunk_id != chunk_id(hit.surface_id, hit.chunk_index):
             excluded += 1
             continue
         expected = chunk_fingerprint(
