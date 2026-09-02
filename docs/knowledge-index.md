@@ -183,7 +183,11 @@ before the consistency check raised, and the next `search` exited 0 over zero ro
 but `build` creates the file, `update` refuses before touching the disk, and every `search` runs
 five `COUNT(*)` (0.04 ms on the real index) against the manifest. With a manifest standing beside
 a missing database the advice names `xbrain index build --force`, because plain `build` refuses
-while a manifest exists.
+while a manifest exists — **on all three doors since round 07 (U-2)**: until then `status` tested
+`exists()` by itself and read that state as an index never built, answering `incomplete: false`,
+`+2404 nuevos` and «actualiza con `xbrain index update`», the advice `update` then refused (both
+round-07 gates, independently). `status` now asks `require_database` like `search` and `update`
+and publishes its sentence, and `get` — which reads the store — keeps answering.
 
 ### `status` runs `PRAGMA quick_check`; the open door does not (B-1)
 

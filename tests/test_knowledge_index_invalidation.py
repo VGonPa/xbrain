@@ -644,6 +644,52 @@ def test_update_over_a_missing_database_creates_nothing_and_leaves_search_closed
         search("Quillfeather", context)
 
 
+def test_status_declares_a_standing_manifest_over_a_missing_database_as_every_door_does(
+    built: Path, corpus
+) -> None:
+    """U-2 (round 07, gates Fable F7-1 and Codex F2, found independently): the ONE state
+    the seam's docstring lists first — a manifest standing over a base that is not there
+    (C-1's interruption, G-2's clean-up) — and the one door that did not ask the question.
+    `search` and `update` ask `require_database`, whose sentence names `build --force`
+    because plain `build` refuses while a manifest exists; `status` checked `exists()` by
+    itself, read "no base" as "never built", and answered `incomplete: False`, `+2404
+    nuevos`, «actualiza con `xbrain index update`» — the advice `update` then refused. Two
+    instruments, one state, opposite answers (rule 9), on the diagnostic instrument.
+
+    Asserted by VALUE across the doors: `status` reports incomplete and repeats, verbatim,
+    the sentence `search` raises; `update` raises it too; `get` — which reads the store —
+    keeps answering, because the index was never its source (spec §3.7 invariant 7).
+
+    Seen red on `9dfa34e`: `incomplete is False` and the advice named `index update`.
+    """
+    from xbrain.knowledge.get_service import get
+    from xbrain.knowledge.index_schema import IndexMissingError
+    from xbrain.knowledge.index_store import open_for_query
+
+    store, vocab, pages = corpus
+    db_path(built / "index").unlink()
+    assert manifest_path(built / "index").exists(), "the manifest is what makes this state"
+
+    with pytest.raises(IndexMissingError, match="xbrain index build --force") as refused:
+        open_for_query(built / "index", built / "items.json")
+    sentence = str(refused.value)
+
+    report = _status(built, store, corpus)
+    assert report.incomplete is True
+    assert report.advice == sentence
+    assert "xbrain index build --force" in report.advice
+
+    with pytest.raises(IndexMissingError) as refused:
+        _update(built, store, corpus, dry_run=True)
+    assert str(refused.value) == sentence
+    assert not db_path(built / "index").exists(), "no door may create the base but `build`"
+
+    from xbrain.knowledge.search_service import QueryContext
+
+    context = QueryContext(store=store, vocab=vocab, topic_pages=pages, index_dir=built / "index")
+    assert get("k03", context, surfaces=("external_article",)).surfaces, "get reads the store"
+
+
 def test_update_sees_a_quoted_author_repaired_without_touching_the_body(
     built: Path, corpus
 ) -> None:
@@ -901,6 +947,51 @@ def test_status_search_and_update_ask_one_function_whether_the_manifest_describe
         _update(built, store, corpus)
     assert str(caught.value) == sentinel
     assert _status(built, store, corpus).advice == sentinel
+
+
+def test_status_search_and_update_ask_one_function_whether_the_base_exists(
+    built: Path, corpus, monkeypatch
+) -> None:
+    """The OTHER half of the seam's question — «is there a base at all?» — by identity
+    (U-2, round 07). `describe_base` answers «does this manifest describe this base?» and
+    presupposes a base; `require_database` answers whether there is one, and its docstring
+    promised «one function, called by every door» while `status` was not among them, which
+    is exactly how F7-1/F2 stayed open with the seam in place. The sentinel is raised from
+    `require_database` in every module that binds the name; `search` and `update` must
+    raise it verbatim and `status` must publish it as its advice. A door that tests
+    `exists()` by itself stays silent under the sentinel and goes red here.
+
+    Seen red on `9dfa34e`: `status` answered `advice == ''` under the sentinel, because it
+    never asked.
+    """
+    from xbrain.knowledge import index_schema, index_store
+    from xbrain.knowledge.index_schema import IndexMissingError
+    from xbrain.knowledge.search_service import QueryContext, search
+
+    store, vocab, pages = corpus
+    sentinel = "SENTINEL: no hay base. Reconstruye el índice con `xbrain index build --force`."
+
+    def refuse(index_dir):
+        raise IndexMissingError(sentinel)
+
+    for module in (index_schema, index_build, index_store):
+        monkeypatch.setattr(module, "require_database", refuse)
+    context = QueryContext(
+        store=store,
+        vocab=vocab,
+        topic_pages=pages,
+        index_dir=built / "index",
+        items_path=built / "items.json",
+    )
+
+    with pytest.raises(IndexMissingError) as caught:
+        search("Quillfeather", context)
+    assert str(caught.value) == sentinel
+    with pytest.raises(IndexMissingError) as caught:
+        _update(built, store, corpus)
+    assert str(caught.value) == sentinel
+    report = _status(built, store, corpus)
+    assert report.incomplete is True and report.advice == sentinel
 
 
 def test_the_update_report_counts_the_topic_chunks_it_deletes(built: Path, corpus) -> None:

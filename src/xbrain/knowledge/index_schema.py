@@ -337,8 +337,12 @@ def require_database(index_dir: Path) -> Path:
     standing — the operator deleted the 52 MB database by hand and kept the 1 KB document —
     plain `build` REFUSES (*Ya existe un índice*), so naming it would send the operator into
     a dead end in two hops; the honest command is the forced rebuild. One function, called by
-    every door (`open_index`, `update`, `open_for_query`), so the three cannot disagree on
-    which command that is.
+    every door — `open_index`, `update`, `open_for_query` and, since round 07 (U-2),
+    `status` (`index_build._index_contents`), which used to test `exists()` by itself and
+    read a standing manifest over a missing base as an index never built — so the doors
+    cannot disagree on which command that is. `tests/test_knowledge_seams.py` enumerates the
+    doors structurally and `test_knowledge_index_invalidation.py` swaps this function for a
+    sentinel that every door must repeat.
     """
     database = db_path(index_dir)
     if database.exists():

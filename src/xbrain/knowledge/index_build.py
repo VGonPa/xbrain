@@ -1813,8 +1813,18 @@ def _index_contents(
 ) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow], str]:
     """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row}, unusable)`.
 
-    Three empties when there is no base: with nothing stored, every item is "added" and every
-    topic is "behind", which is the truthful reading of an index that does not exist.
+    THE BASE'S EXISTENCE IS ASKED OF `require_database`, LIKE EVERY OTHER DOOR (U-2, round
+    07 — gates Fable F7-1 and Codex F2, found independently). This function used to test
+    `exists()` by itself and return three empties, "the truthful reading of an index that
+    does not exist" — true of an index never built, and FALSE of the first state the seam's
+    docstring lists: a manifest standing over a base that is gone (an interrupted `--force`,
+    a 52 MB clean-up). There `search` and `update` refuse naming `build --force`, and
+    `status` — the instrument an operator runs to find out — answered `incomplete: False`,
+    `+2404 nuevos` and «actualiza con `xbrain index update`», the advice `update` then
+    refused: two instruments, one state, opposite answers (rule 9), on the diagnostic one.
+    `require_database` knows both readings and names the right command for each; its
+    sentence is published as `unusable`, so `incomplete` is true and the advice is the one
+    the other doors give. Three empties still follow, for the same reason as before.
 
     With a usable manifest the base is judged by `describe_base` FIRST — `quick_check`, then
     the five counts, any `DatabaseError` converted (D-1) — and a base the manifest does not
@@ -1823,9 +1833,10 @@ def _index_contents(
     code cannot use (another version) still gets its counts and its delta, because the base
     itself is readable and the operator may want to know how far it moved.
     """
-    database = db_path(index_dir)
-    if not database.exists():
-        return {}, {}, {}, unusable
+    try:
+        database = require_database(index_dir)
+    except IndexMissingError as error:
+        return {}, {}, {}, unusable or str(error)
     connection = open_index(database, read_only=True)
     try:
         with reading_base(database):

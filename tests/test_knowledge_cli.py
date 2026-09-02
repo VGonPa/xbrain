@@ -531,6 +531,13 @@ def test_update_dry_run_over_a_deleted_database_leaves_search_closed(workspace: 
     assert "xbrain index build --force" in result.output, result.output
     assert not database.exists(), "the dry run created the database"
 
+    # And the diagnostic instrument agrees (U-2, round 07): the gate's own test, seen red on
+    # `9dfa34e` — `{'incomplete': False, 'items_added': 12, 'advice': '…index update…'}`.
+    payload = _json_stdout(runner.invoke(app, ["index", "status", "--json"]))
+    assert payload["incomplete"] is True, payload["advice"]
+    assert "xbrain index build --force" in payload["advice"], payload["advice"]
+    assert not database.exists(), "status must not create the database either"
+
     result = runner.invoke(app, ["search", "Quillfeather"])
     assert result.exit_code != 0, result.output
     assert "xbrain index build --force" in result.output, result.output
