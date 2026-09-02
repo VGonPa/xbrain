@@ -356,7 +356,7 @@ class Manifest:
         }
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, object]) -> Manifest:
+    def from_dict(cls, raw: object) -> Manifest:
         """The document, TOTALLY validated — every nested key, every value's type (B1).
 
         The first version checked the top-level key set and cast what sat under it, so a
@@ -367,7 +367,24 @@ class Manifest:
         §9.3: an incompatible manifest is never queried partially — and a manifest that
         declares less than the schema is incompatible, not lenient. Closed as well as total:
         an undeclared plane or cause is refused, because nothing could compare it.
+
+        THE DOCUMENT IS A JSON OBJECT BEFORE IT IS ANYTHING ELSE. The totality check was
+        `MANIFEST_FIELDS - set(raw)`, and `set()` of a non-mapping is not an error — it is
+        the ELEMENTS. A hand-edited `manifest.json` holding the JSON LIST
+        `["schema_version", "built_at", …]` therefore passed the guard with `missing`
+        empty, because a list of the field NAMES has exactly the field names as its
+        elements, and the first subscript below raised `TypeError: list indices must be
+        integers` — out of `load_manifest`, out of `load_compatible_manifest`, out of every
+        door, as a traceback. Spec §9.3 asks for an actionable error; a `TypeError` from
+        inside a query is the shape this reader exists to remove. A top-level `3`, `null`
+        or `true` was worse still: `set()` of them raises `TypeError: not iterable` from
+        the guard LINE ITSELF, before one field was read. The type is checked first, so
+        every non-object document leaves by the same door as every other malformed one.
         """
+        if not isinstance(raw, Mapping):
+            raise IndexIncompatibleError(
+                f"El manifest no es un objeto JSON, es {type(raw).__name__}. {REBUILD_ADVICE}"
+            )
         missing = MANIFEST_FIELDS - set(raw)
         if missing:
             raise IndexIncompatibleError(
