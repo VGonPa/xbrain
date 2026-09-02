@@ -952,6 +952,56 @@ def test_the_store_signal_of_a_missing_store_is_zeroed_not_an_exception(tmp_path
     assert signal == index_build.StoreSignal(items_json_mtime_ns=0, items_json_size=0)
 
 
+def _obstruct(path: Path, obstacle: str) -> None:
+    """Make `path` UNREADABLE without removing it — the two shapes an operator meets."""
+    if obstacle == "chmod000":
+        path.chmod(0)
+    else:
+        path.unlink()
+        path.mkdir()
+
+
+@pytest.mark.parametrize(
+    ("obstacle", "error"), [("chmod000", PermissionError), ("directory", IsADirectoryError)]
+)
+def test_an_unreadable_store_is_an_error_never_an_empty_store(
+    workspace: Path, obstacle: str, error: type[OSError]
+) -> None:
+    """A-2 (gate Fable §5.2, round 08 — the DIFF subagent's A-1, reproduced by the gate in
+    two variants): `_read_bound` caught EVERY `OSError` and answered `(None, 0, 0)`, the
+    reading reserved for a file that is ABSENT — so an `items.json` with `chmod 000`, or a
+    directory standing where the file was, loaded as an EMPTY store. On the real index:
+    `status` healthy with `items_removed 2404`, `search` «0 resultados» exit 0 with nothing
+    declared, `update` planning `-2404 items`, and `build --force` replacing 22,286 chunks
+    with the 703 of the topic plane, sealed consistent, exit 0. The loader is the route
+    BEFORE seam (a), the one no door asks, and through it the whole fail-open family came
+    back with a destruction on top.
+
+    `load_store` (`store.py`) reads only an ABSENT file as `{}`; every other `OSError`
+    propagates. The loader now agrees: only `FileNotFoundError` is the empty store, and
+    `EACCES`/`EISDIR`/`EIO` raise, which the CLI prints as `Error: …` with exit 1.
+
+    Seen red on `36f694b`: `loaded.store == {}` on both obstacles, no exception.
+    """
+    _obstruct(workspace / "items.json", obstacle)
+    try:
+        with pytest.raises(error):
+            index_build.load_index_inputs(workspace / "items.json")
+    finally:
+        # Leave the temp dir removable whatever the outcome.
+        if obstacle == "chmod000":
+            (workspace / "items.json").chmod(0o644)
+
+
+def test_an_absent_store_still_reads_as_an_empty_store(tmp_path: Path) -> None:
+    """The positive control for the test above: ABSENT is the one reading that stays empty —
+    `load_store`'s own semantics, and what `StoreSignal.of` reports as zeros — so a fresh
+    checkout with no `data/` still loads, and only what EXISTS and cannot be read raises."""
+    loaded = index_build.load_index_inputs(tmp_path / "nope.json")
+    assert loaded.store == {}
+    assert loaded.signal == index_build.StoreSignal(items_json_mtime_ns=0, items_json_size=0)
+
+
 # ---------------------------------------------------------------------------
 # 28 — nothing here writes to the store
 # ---------------------------------------------------------------------------

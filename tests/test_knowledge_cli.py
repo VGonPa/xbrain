@@ -595,6 +595,52 @@ def test_update_dry_run_over_a_deleted_database_leaves_search_closed(workspace: 
     assert "xbrain index build --force" in result.output, result.output
 
 
+@pytest.mark.parametrize("obstacle", ["chmod000", "directory"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["index", "status", "--json"],
+        ["search", "Quillfeather", "--json"],
+        ["index", "update", "--dry-run", "--json"],
+        ["index", "build", "--force", "--json"],
+    ],
+)
+def test_an_unreadable_store_closes_every_door_and_destroys_nothing(
+    workspace: Path, argv: list[str], obstacle: str
+) -> None:
+    """A-2 at the CLI (gate Fable §5.2, round 08), the operator sequence the gate ran on the
+    real index: `chmod 000 data/items.json` (or a directory in its place) and then the four
+    doors. Each answered as if the store were EMPTY — `status` `incomplete: false`,
+    `items_removed 2404`; `search` 0 results, exit 0; `update --dry-run` planning
+    `-2404 items / -21,583 chunks`; `build --force` writing `items 0 · chunks 703` and
+    sealing it as consistent — all with exit 0. An unreadable store must close every door
+    with the error that names the file, and the index on disk must be the one that was
+    there before, byte for byte.
+
+    Seen red on `36f694b`: exit 0 on all eight cells, and the forced rebuild rewrote the
+    index down to the topic plane.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    index_dir = workspace / "data" / "index"
+    before = {p.name: p.read_bytes() for p in index_dir.iterdir()}
+    items = workspace / "data" / "items.json"
+    if obstacle == "chmod000":
+        items.chmod(0)
+    else:
+        items.unlink()
+        items.mkdir()
+    try:
+        result = runner.invoke(app, argv)
+    finally:
+        if obstacle == "chmod000":
+            items.chmod(0o644)
+    assert result.exit_code != 0, result.output
+    assert "items.json" in result.output, result.output
+    assert {p.name: p.read_bytes() for p in index_dir.iterdir()} == before, (
+        "the index on disk moved under an unreadable store"
+    )
+
+
 def test_index_status_reports_the_store_delta(workspace: Path) -> None:
     """Step 10c at the CLI: `status --json` says HOW MANY items changed — a number.
 

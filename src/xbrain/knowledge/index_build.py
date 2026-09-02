@@ -253,8 +253,10 @@ def load_index_inputs(
     content, so the index is again declared behind rather than certified fresh: the same
     direction, the warning.
 
-    A missing file reads as its empty value and a zero signal, exactly as `load_store`,
-    `load_vocab`, `load_topic_pages` and `StoreSignal.of` treat it.
+    A MISSING file reads as its empty value and a zero signal, exactly as `load_store`,
+    `load_vocab`, `load_topic_pages` and `StoreSignal.of` treat it. A file that exists and
+    cannot be read RAISES (A-2): an unreadable store is not an empty one, and every door
+    that loads through here closes on the error instead of answering over nothing.
     """
     items_text, items_mtime, items_size = _read_bound(items_path)
     vocab_text, vocab_mtime, vocab_size = _read_bound(vocab_path)
@@ -295,13 +297,22 @@ def _bound_signal(
 def _read_bound(path: Path | None) -> tuple[str | None, int, int]:
     """`(text, mtime_ns, size)` of one input, the stat taken on the handle the text came from.
 
-    `(None, 0, 0)` for an absent or unnamed file, matching `_stat_signal`.
+    `(None, 0, 0)` for an ABSENT or unnamed file — and for nothing else (A-2, round 08).
+    The first version caught every `OSError`, so a file that EXISTS and cannot be read — a
+    `chmod 000`, a directory standing in its place, an `EIO` from a failing mount — loaded
+    as the empty store reserved for a missing one: the cheap signal still stat'ed fine, so
+    no door saw anything wrong, and on the real index `status` reported `items_removed
+    2404` as healthy, `search` answered zero results with exit 0, `update` planned the
+    deletion of every item and `build --force` replaced 22,286 chunks with the topic plane's
+    703, sealed consistent, exit 0. `load_store` (`store.py`) only ever read an absent file
+    as `{}`; this loader now agrees, and any other `OSError` propagates — the CLI prints it
+    as `Error: …` with exit 1, and the index on disk is not touched.
     """
     if path is None:
         return None, 0, 0
     try:
         handle = path.open("rb")
-    except OSError:
+    except FileNotFoundError:
         return None, 0, 0
     with handle:
         stat = os.fstat(handle.fileno())
