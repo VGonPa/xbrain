@@ -8,16 +8,14 @@ DECISION (spec §9.2), so the failure that actually happens is not corruption �
 - The CHEAP one, `StoreSignal`, is `mtime_ns` and size of the THREE inputs: three `os.stat`,
   cheap enough for EVERY query, answering *an input moved*. It cannot say WHICH items.
 - The DEEP ones, `item_fingerprint` and `store_fingerprint`, walk the corpus and emit every
-  surface to answer *which items changed, and how many*. They are paid ONLY by
-  `build` / `update` / `status`, and by nothing a query touches. No path in this module makes
-  a cheap reader pay a deep one, and none may — that separation is 02.6a1's contract and this
-  child inherits it unchanged.
+  surface to answer *which items changed*. They are paid ONLY by `build`/`update`/`status`.
+  No path here makes a cheap reader pay a deep one, and none may — 02.6a1's contract.
 
 WHAT IS NOT HERE, AND WHY IT IS NOT A HOLE. `vocab_fingerprint` and `topics_fingerprint` are
-the other two planes and are the NEXT child's (02.6a2b); they will consume `_canonical` and
-`_sha256` from here and nothing else. The manifest that seals any of the four is 02.6b's.
-Nothing in this tree consumes a fingerprint yet, which is exactly why the coverage gaps
-review #161 named are being closed HERE — free before a manifest exists, expensive after.
+the other two planes and are 02.6a2b's; they will consume `_canonical` and `_sha256` from here
+and nothing else, and the manifest that seals any of the four is 02.6b's. Nothing in this tree
+consumes a fingerprint yet, which is why the coverage gaps review #161 named are closed HERE —
+free before a manifest exists, expensive after.
 
 The cheap signal can give false positives (a `touch` with no edit) and that is accepted: a
 false positive costs one warning, a false negative costs serving stale evidence as fresh. It
@@ -49,8 +47,9 @@ from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams
 from xbrain.knowledge.ids import SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface
 from xbrain.knowledge.surfaces import (
-    CONTENT_KIND_TO_SURFACE_TYPES,
+    article_block_texts,
     failed_sources,
+    item_content_kinds,
     item_surfaces,
     item_topics,
     unfetched_links,
@@ -275,18 +274,14 @@ class IndexOptions:
     were stamped on the ASR/VLM surfaces as `producer`, a provenance claim the store cannot
     back, and the emitter no longer takes them. See `surfaces.item_surfaces`.
 
-    CARRIED INERT IN THIS CHILD, AND SAYING SO IS THE POINT. Neither `params` nor `vault_dir`
-    is read ANYWHERE in this tree, so `item_fingerprint(item, options=X)` silently discards
-    `X`: a caller who passes the chunker's parameters expecting the fingerprint to cover them
-    would be wrong today. The dataclass travels here so the signature 02.7 consumes is already
-    the ported one — never because anything already reads it. Two persisted columns are
-    unreachable for exactly this reason and are named where they are missed:
-    `items.note_path` (needs `vault_dir`) and `items.skipped_empty_text` (needs `params`),
-    both in `item_fingerprint`.
-
-    `tests/test_knowledge_index_build.py` pins the inertness by BEHAVIOUR — two different
-    `IndexOptions` hashing alike — so 02.7's first consumer cannot land without that test
-    going red and being changed on purpose.
+    CARRIED INERT IN THIS CHILD, AND SAYING SO IS THE POINT. Neither field is read ANYWHERE in
+    this tree, so `item_fingerprint(item, options=X)` silently discards `X` and a caller who
+    passed the chunker's parameters expecting them to be covered would be wrong. The dataclass
+    travels so the signature 02.7 consumes is already the ported one, never because anything
+    reads it; two persisted columns are unreachable for exactly this reason and are named in
+    `item_fingerprint` (`items.note_path` needs `vault_dir`, `items.skipped_empty_text` needs
+    `params`). The tests pin the inertness by BEHAVIOUR — two different `IndexOptions` hashing
+    alike — so 02.7's first consumer cannot land without reddening that test on purpose.
     """
 
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
@@ -318,20 +313,16 @@ def surface_row(surface: KnowledgeSurface) -> SurfaceRow:
     """What the index STORES about a surface — the projection of one `surfaces` row.
 
     ONE PROJECTION, AND 02.7's WRITER HAS TO CONSUME IT — WHICH IT DOES NOT YET.
-    `item_fingerprint` hashes this tuple today; the writer that binds it to the `INSERT` into
-    `surfaces` lands in 02.7, and no writer exists in this tree at all. So the correspondence
-    with the persisted DDL (`index_schema._SCHEMA`: fifteen columns, this tuple's order and
-    types) is kept BY HAND: nothing FORCES a column added to `surfaces` to be hashed here.
-    What this child ships instead of that force is a totality test that reads the fifteen
-    column names straight out of the DDL and compares the arity — it catches a column ADDED
-    to the schema, and it cannot catch a column REORDERED into a same-typed neighbour.
-    Making the binding structural is 02.7's job: its writer binds THIS function instead of
-    assembling a second tuple, and it writes the readback test — red first — proving the
-    stored and the hashed row cannot drift. Read any claim of that guard here as 02.7's
-    obligation, never as one discharged.
+    `item_fingerprint` hashes this tuple today; the writer that binds it to the `INSERT` lands
+    in 02.7, and no writer exists in this tree at all, so the correspondence with the persisted
+    DDL (`index_schema._SCHEMA`: fifteen columns, this order and these types) is kept BY HAND.
+    What ships instead of that force is a totality test reading the column names straight out
+    of the DDL: it catches a column ADDED, and cannot catch one REORDERED into a same-typed
+    neighbour. Making the binding structural is 02.7's — its writer binds THIS function rather
+    than assembling a second tuple, and writes the readback test, red first. Read any claim of
+    that guard here as 02.7's obligation, never as one discharged.
 
-    The last column is a LENGTH, never the body (spec §10.8); the body is covered by
-    `fingerprint`, which hashes it.
+    The last column is a LENGTH, never the body (spec §10.8), which `fingerprint` hashes.
     """
     return (
         surface.surface_id,
@@ -359,19 +350,16 @@ def declined_media(item: Item) -> tuple[int, int]:
     produce, and `items.skipped_decorative` / `items.skipped_no_speech` are where the index
     records that it declined them rather than that it found nothing.
 
-    HASHED, BECAUSE OTHERWISE THEY MOVE UNSEEN. Both are persisted columns and both are pure
-    functions of the item, so leaving them out reproduces HIGH-1's exact shape one plane
-    over: `xbrain describe` classifying a photo as decorative flips `skipped_decorative`
-    0 -> 1 while emitting NO surface, changing no other hashed atom — the row on disk moves
-    and `update` reports the item unchanged (rule 6).
-
-    DEFINED HERE ONCE SO 02.7 CONSUMES IT. The writer that fills those two columns has to
-    produce the same pair; deriving it a second time next to the `UPDATE` is the five-hands
-    divergence of rule 5, and this is the seam that stops it.
+    HASHED, BECAUSE OTHERWISE THEY MOVE UNSEEN. Both are persisted columns and pure functions
+    of the item, so leaving them out reproduces HIGH-1's shape one plane over: `xbrain describe`
+    classifying a photo as decorative flips `skipped_decorative` 0 -> 1 while emitting NO
+    surface and changing no other hashed atom — the row on disk moves and `update` reports the
+    item unchanged (rule 6). DEFINED HERE ONCE SO 02.7 CONSUMES IT: deriving the pair a second
+    time next to the `UPDATE` is rule 5's five-hands divergence.
 
     The third counter, `skipped_empty_text`, is NOT here and cannot be: it is
-    `len(chunks) - stored`, a property of the chunker's parameters, which reach this module
-    only through the inert `IndexOptions`. See `item_fingerprint`.
+    `len(chunks) - stored`, under the chunker parameters that reach this module only through
+    the inert `IndexOptions`. See `item_fingerprint`.
     """
     decorative = sum(
         1
@@ -389,15 +377,13 @@ def declined_media(item: Item) -> tuple[int, int]:
 def _model_atoms(model: BaseModel) -> list[list[object]]:
     """One pydantic projection as `[[field_name, value], ...]`, in field-definition order.
 
-    STRUCTURAL ON PURPOSE, and it is the difference between this child and the review that
-    named HIGH-1. A hand-written field list is what let `source_failures` and
-    `unfetched_links` change on disk while every fingerprint stood still; walking
-    `model_fields` means a field ADDED to `SourceFailure` or `UnfetchedLink` enters the hash
-    the moment it exists, with nobody having to remember. The NAME is hashed beside the value
-    so a rename — which is a schema change — moves the fingerprint too.
-
-    It fails CLOSED on a field this encoder cannot represent: `json.dumps` raises `TypeError`
-    on a `datetime` or a `set`, loudly, at the first build, rather than dropping it.
+    STRUCTURAL ON PURPOSE, and the difference between this child and the review that named
+    HIGH-1. A hand-written field list is what let `source_failures` and `unfetched_links` change
+    on disk while every fingerprint stood still; walking `model_fields` means a field ADDED to
+    `SourceFailure` or `UnfetchedLink` enters the hash the moment it exists, with nobody having
+    to remember, and the NAME is hashed beside the value so a rename moves it too. It fails
+    CLOSED on a field this encoder cannot represent: `json.dumps` raises `TypeError` on a
+    `datetime` or a `set`, loudly, at the first build, rather than dropping it.
     """
     return [[name, getattr(model, name)] for name in type(model).model_fields]
 
@@ -405,103 +391,101 @@ def _model_atoms(model: BaseModel) -> list[list[object]]:
 def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     """sha256 over everything about this item that the INDEX PERSISTS.
 
-    Four planes, because four tables carry a row keyed by this item and every one of them can
-    change without the others moving:
+    Five planes, because five tables carry a row keyed by this item and each can move alone:
 
-    - **`surfaces`** — the SURFACE ROWS, `surface_row` being the projection of every column
-      that table holds. That covers the surface fingerprint (emitter version, type, origin,
-      body) AND the attribution, title, url, locator and language `search` serves on every
-      match (A-1).
+    - **`surfaces`** — the SURFACE ROWS. `surface_row` is every column that table holds, so
+      this covers the surface fingerprint AND the attribution, title, url, locator and
+      language `search` serves on every match (A-1).
     - **`items`** / **`item_topics`** / **`item_content_kinds`** — the filterable METADATA. A
       changed author changes what `--author` returns with no text moved.
     - **`source_failures`** and **`unfetched_links`** — HIGH-1 of review #161, and the reason
-      this child exists. Both tables are written per item, both are read back by `get`, and
-      before this neither moved any fingerprint: a link that started returning 404, or a fetch
-      that began failing, rewrote the row on disk while `update` reported the item unchanged.
+      this child exists. Both are written per item and read back by `get`, and before this
+      neither moved any fingerprint: a link that started returning 404, or a fetch that began
+      failing, rewrote the row on disk while `update` reported the item unchanged.
+    - **`chunks`** — the BLOCK PARTITION of every X Article, as the ordered LENGTHS of its
+      `ArticleTextBlock` bodies, keyed by `surface_id` (never by position: `fetch` rewrites
+      `content.sources`). `ContentSourceSuccess` validates `text == "".join(blocks)`, so the
+      flattened body is a function of the partition and NOT the reverse: two block lists that
+      concatenate alike leave `surface_row` and `surface.fingerprint` identical while
+      `chunk_surfaces(..., blocks_by_surface_id=article_block_texts(item))` — called today by
+      `cli.py` and `evaluation.py` — cuts different `chunk_id`s, offsets, bodies and
+      `chunks_fts` rows. Measured 2026-09-03 on the live store: **41** items carry usable
+      blocks and **41 of 41** carry more than one. LENGTHS, never the bodies: the
+      concatenation is already hashed by `surface.fingerprint`, so only the cuts were
+      missing, and a second copy of the text is what spec §10.8 forbids.
 
     THE ROW, NOT THE SURFACE FINGERPRINT ALONE (G-5). `surface_fingerprint` is
-    `(version, type, origin, text)` by design and must stay so; but hashing only that here
-    meant a `refresh-quoted` that filled in the author of a quoted post without touching its
-    body left `update` reporting `0 cambiados` and `search` serving the old attribution — the
-    evidence repaired, the derivative standing (rule 6), on the attribution rule this repo
-    paid for in blood. `producer` is NOT hashed: the index has no producer column, and the
-    producers the store records travel with the surface `get` re-emits (F7-7). Deliberately
-    NOT `(item_id, content.fetched_at, enriched.enriched_at)` — a timestamp is a claim about
-    when something was written, never about what it says.
+    `(version, type, origin, text)` by design and must stay so; hashing only that here meant a
+    `refresh-quoted` that filled in a quoted post's author without touching its body left
+    `update` reporting `0 cambiados` and `search` serving the old attribution — rule 6, on the
+    attribution rule this repo paid for in blood. `producer` is NOT hashed (no producer column;
+    the producers travel with the surface `get` re-emits, F7-7), and neither is any timestamp:
+    a timestamp claims when something was written, never what it says.
 
-    `primary_topic` IS ITS OWN ATOM, beside the topics tuple and not folded into it. It is a
-    persisted `items` column and a persisted `item_topics.is_primary` flag, and
-    `item_topics()` puts the primary first and then DEDUPLICATES — so an enrichment with
-    `primary_topic=None, topics=["a", "b"]` and one with `primary_topic="a", topics=["b"]`
-    produce the identical tuple `("a", "b")` while the stored column reads `NULL` against
-    `"a"`. `Enrichment.primary_topic` is `str | None`, so both states load from a real
-    `items.json` — and measured 2026-09-03 on the live store (2,404 items, sha256
-    `f76341a3...`), **0** of them sit in the colliding class. Constructible, not present:
-    what keeps them absent is `guardrails.yaml`, which the model does not enforce, so read
-    the zero as today's corpus and never as an invariant.
-
-    02.7 INHERITS A SECOND HALF OF THIS, worth knowing before it writes the row: the two
-    obsolete writers derive `item_topics.is_primary` differently — one compares the slug to
-    `primary_topic`, the other takes position 0 with a `or topics[0]` fallback — and they
-    disagree on exactly the falsy-primary states this atom now separates. A fingerprint that
-    distinguishes two states while the writer stores them alike is worse than one that
-    distinguishes neither, so collapsing those two derivations is 02.7's, not a detail.
+    `primary_topic` IS ITS OWN ATOM, beside the topics tuple and not folded into it: it is a
+    persisted `items` column AND a persisted `item_topics.is_primary` flag, and `item_topics()`
+    puts the primary first and then DEDUPLICATES, so `primary_topic=None, topics=["a", "b"]`
+    and `primary_topic="a", topics=["b"]` produce the identical tuple `("a", "b")` while the
+    stored column reads `NULL` against `"a"`. Both states load from a real `items.json`;
+    measured 2026-09-03 (2,404 items, sha256 `f76341a3...`), **0** sit in that class — what
+    keeps them absent is `guardrails.yaml`, which the model does not enforce, so read the zero
+    as today's corpus and never as an invariant. 02.7 inherits the second half: the two
+    obsolete writers derive `item_topics.is_primary` differently (slug-vs-`primary_topic`, and
+    position 0 with a `or topics[0]` fallback) and disagree on exactly the falsy-primary states
+    this atom separates. A fingerprint that distinguishes two states the writer stores alike is
+    worse than one that distinguishes neither, so collapsing them is 02.7's, not a detail.
 
     ONE KNOWN FALSE POSITIVE, AND IT IS THE DIRECTION THIS MODULE FAILS IN ON PURPOSE. The
-    topics region keeps the order `Enrichment.topics` was written in, while the `item_topics`
-    plane on disk is a SET keyed `(item_id, slug)` plus `is_primary` — so a re-enrichment
-    that returns the same topics in a different order re-hashes an item whose rows do not
-    move. Measured 2026-09-03: 2,073 of 2,404 items carry more than one topic, so the
-    population is most of the corpus. It costs one wasted rewrite and never a stale row,
-    which is the trade the cheap signal already makes. `kinds` is the opposite case and is
-    `sorted()`: `item_content_kinds` is a set too, and there the normalisation is free.
+    topics region keeps the order `Enrichment.topics` was written in, while `item_topics` on
+    disk is a SET keyed `(item_id, slug)` — so a re-enrichment returning the same topics in a
+    different order re-hashes an item whose rows do not move (2,073 of 2,404 items carry more
+    than one topic). One wasted rewrite, never a stale row, the trade the cheap signal already
+    makes. `kinds` needs no such trade: `surfaces.item_content_kinds` — the ONE derivation
+    `knowledge_item` also reads — deduplicates, so the region and the rows are the same object.
 
-    THE VARIADIC REGIONS ARE NESTED, NEVER SPLICED. Flattening `topics`, `kinds`, `rows`,
-    the failures and the links into one delimited list is NOT injective: `topics=("thread",)`
-    with no sources serialised exactly like no topics with one blank `thread` source, so two
-    item states hashed alike and `update` called the item unchanged — rule 6, failing OPEN.
-    Each region is its own JSON array, so the boundary is STRUCTURAL, and `_canonical` makes
-    the atoms inside them unforgeable too.
+    THE VARIADIC REGIONS ARE NESTED, NEVER SPLICED. Flattening them into one delimited list is
+    NOT injective: `topics=("thread",)` with no sources serialised exactly like no topics with
+    one blank `thread` source, so two item states hashed alike and `update` called the item
+    unchanged — rule 6, failing OPEN. Each region is its own JSON array, so the boundary is
+    STRUCTURAL, and `_canonical` makes the atoms inside them unforgeable too.
 
-    **THE TWO PERSISTED COLUMNS THIS CANNOT REACH, named rather than left to be discovered.**
-    Neither is a defect of the encoding; both are inputs this child does not have:
+    **WHAT THIS STILL CANNOT REACH, named rather than left to be discovered.** None is a defect
+    of the encoding; all are inputs this child does not have.
 
-    - `items.note_path` is not a projection of the STORE at all. `surfaces._note_path` stats
-      the VAULT (`candidate.exists()`) under `IndexOptions.vault_dir`, so generating a note
-      changes that column while nothing about the item moves. A store fingerprint cannot see
-      it by construction; the invalidation has to come from a vault-side signal, and that is
-      02.6b's (manifest) and 02.7's (writer) obligation, not a hole to be plugged here.
-    - `items.skipped_empty_text` is `len(chunks) - stored` — the chunker's arithmetic, under
-      `IndexOptions.params`, which is inert here. Measured in the obsolete monolith it is
-      structurally 0 today (the emitters drop a blank surface at `_blank` before chunking),
-      but "0 today" is not "covered".
+    - `items.note_path` — `surfaces._note_path` stats the VAULT under `IndexOptions.vault_dir`,
+      so generating a note moves that column while nothing about the item does. 02.6b / 02.7.
+    - `items.skipped_empty_text` — `len(chunks) - stored`, the chunker's arithmetic under the
+      inert `IndexOptions.params`; structurally 0 today, and "0 today" is not "covered". 02.7.
+    - `CHUNKER_VERSION` (`ids.py:43`) and `ChunkerParams` — the first is stamped into every
+      `chunk_id` and `chunks.fingerprint`, the second decides where every span falls (measured,
+      `800/0` against `400/0`: 5 rows against 9 over one body). A bump of either rewrites the
+      whole `chunks` plane with this fingerprint unmoved, and that is CORRECT: a manifest
+      refusing the query outright beats per-item invalidation. 02.6b's — and `ids.py:42` names
+      `load_compatible_manifest` as its home, a function that does not exist in this tree yet.
+    - `profiles.profile_text` — a `vocab.yaml` edit splices each assigned topic's DESCRIPTION
+      into it (spec §5.1.A) and rewrites `profiles`/`profiles_fts` for every assigned item while
+      this fingerprint, which takes no vocabulary, cannot move: 02.6a2b's, reaching the item
+      plane through 02.7's rebuild. Its OTHER half is NOT, and filing it there would record a
+      debt under an owner who cannot discharge it — `profile.py:_titles` gates on
+      `if source.title`, so a title on a blank-bodied source reaches the profile while the
+      emitter produces nothing (a whitespace-only `summary`/`digest` is the same shape: profile
+      on truthiness, emitter on `_blank()`, which strips). Constructible, 0 of 2,404 today, and
+      02.7's — the only writer that sees both sides.
 
-    **A fourth, on the `profiles` plane, and it is not an omission here.**
-    `profile.profile_text` splices each assigned topic's DESCRIPTION into the item's profile
-    (spec §5.1.A), so a `vocab.yaml` edit rewrites `profiles.profile_text` — and its
-    `profiles_fts` row — for every assigned item, while this fingerprint, which takes no
-    vocabulary, cannot move; the obsolete monolith even stored THIS hash in
-    `profiles.fingerprint`. The invalidation is `vocab_fingerprint`'s (02.6a2b) and it
-    reaches the item plane only through the update's rebuild (02.7). Read this fingerprint as
-    *what changed about the item*, never as *what changed about its indexed rows*.
+    Read this fingerprint as *what changed about the item*, never as *what changed about its
+    indexed rows*.
 
-    A fifth, on the plane below: `source_failures.attempts` is a DDL column with no field on
-    the knowledge `SourceFailure`, so nothing here can hash it and nothing here emits it.
-    02.7 either adds the field — `_model_atoms` then picks it up with no change, but
-    `SourceFailure` also travels in `EvidenceBundle.failures`, and `contracts.py` holds that
-    an optional field with a default is NOT exempt, so that door costs an
-    `EvidenceBundle.schema_version` bump — or drops the column, which costs a
-    `SCHEMA_VERSION` bump instead. It may not do neither, and neither door is free.
+    `source_failures.attempts` USED TO BE ON THAT LIST and is not any more: it was the only
+    column across both failure planes with no field on the knowledge projection this hashes,
+    and `index_schema.SCHEMA_VERSION` "4" drops it rather than adding the field. The reasoning,
+    and the test that stops either side moving alone, are recorded there.
 
     `options` IS NOT READ HERE. It is accepted so the signature 02.7 consumes is already the
     ported one, and discarded — see `IndexOptions`.
     """
     options = options or IndexOptions()
     decorative, no_speech = declined_media(item)
-    kinds = sorted(
-        source.kind
-        for _index, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
-    )
+    kinds = sorted(item_content_kinds(item))
     return _sha256(
         _canonical(
             "item",
@@ -519,6 +503,7 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
                 list(item_topics(item)),
                 kinds,
                 [surface_row(surface) for surface in item_surfaces(item)],
+                [[s, [len(t) for t in b]] for s, b in sorted(article_block_texts(item).items())],
                 [_model_atoms(failure) for failure in failed_sources(item)],
                 [_model_atoms(link) for link in unfetched_links(item)],
                 [decorative, no_speech],
@@ -536,13 +521,13 @@ def store_fingerprint(store: Mapping[str, Item], *, options: IndexOptions | None
     id ending in a hex run from re-cutting the boundary and presenting a different store as
     this one.
 
-    NOT PAID BY A QUERY. This walks every item and emits every surface; the cheap
-    `StoreSignal` above is what a query affords on every call, and keeping the two apart is
-    the whole point of 02.6a1's contract. Nothing in this module makes a status path read
-    deeply, and nothing may. The tempting shape is a fingerprint computed beside
-    `IndexInputs.signal`, *since we have already parsed the store*: measured 2026-09-03 on
-    the live store (2,404 items, sha256 `f76341a3...`), the parse is ~130 ms and this walk
-    adds ~134 ms — a 2x on a door `status` calls.
+    NOT PAID BY A QUERY. This walks every item and emits every surface; the cheap `StoreSignal`
+    above is what a query affords on every call, and keeping the two apart is 02.6a1's whole
+    contract. The tempting shape is a fingerprint computed beside `IndexInputs.signal`, *since
+    we have already parsed the store*: measured on the live store (2,404 items, sha256
+    `f76341a3...`), this walk costs the same ORDER as the parse itself, so folding it in
+    roughly doubles a door `status` calls. Read that as a ratio and not as a millisecond
+    figure — three measurements on this machine gave three answers.
     """
     return _sha256(
         _canonical(
@@ -557,41 +542,31 @@ def _canonical(domain: str, value: object) -> str:
     INJECTIVE ON THE PAYLOAD DOMAIN THESE FINGERPRINTS ACTUALLY BUILD, and the scope of that
     claim is the claim. JSON is NOT injective over Python values in general — `(1, 2)` and
     `[1, 2]` encode identically, and so do `{1: "a"}` and `{"1": "a"}` — so an unqualified
-    *injective by round trip* would be false the moment someone believed it. What holds, and
-    what the payloads here are built out of, is: `str`, `int`, `None`, and SEQUENCES of those
-    nested to any depth. Over that domain `json.loads` recovers the exact structure, so two
-    different structures cannot encode alike and no argument about which strings may appear
-    is left. Three consequences a future payload must respect:
+    *injective by round trip* would be false the moment someone believed it. What holds is the
+    domain these payloads are built out of: `str`, `int`, `None`, and SEQUENCES of those nested
+    to any depth, over which `json.loads` recovers the exact structure. Three consequences a
+    future payload must respect: `list` and `tuple` are the SAME value here (`surface_row`
+    returns a tuple and is safe only because its position is what carries it); no `dict` may
+    enter, its keys being coerced to strings, which is why `_model_atoms` emits
+    `[[name, value], ...]`; and no `float` may enter, `allow_nan=False` making a stray
+    `NaN`/`Infinity` RAISE rather than emit a literal no reader could parse back.
 
-    - **`list` and `tuple` are the same value here.** `surface_row` returns a tuple and the
-      regions around it are lists; that is fine because they are POSITIONAL, never because
-      the encoder tells them apart. Nothing may distinguish two item states by sequence type.
-    - **No `dict` may enter.** Its keys are coerced to strings, which collides. `_model_atoms`
-      exists partly for this: it turns a pydantic projection into `[[name, value], ...]`
-      instead of a mapping.
-    - **No `float` may enter.** `allow_nan=False` is here so a stray `NaN`/`Infinity` RAISES
-      instead of emitting the non-JSON literals `NaN`/`Infinity`, which no reader could parse
-      back — fail closed, at the first build, rather than a blob that only looks canonical.
-
-    This replaced a NUL-JOIN, which framed nothing below the region: both store writers
-    persist a NUL, so a stored value could re-split the stream and move every later boundary,
-    including the count tags meant to fix them. Measured before the change: two topic lists,
-    two vocabularies and two topic planes, each pair distinct after `save`/`load` and each
-    pair hashing alike.
+    This replaced a NUL-JOIN, which framed nothing below the region: both store writers persist
+    a NUL, so a stored value could re-split the stream and move every later boundary, including
+    the count tags meant to fix them. Measured before the change: two topic lists, two
+    vocabularies and two topic planes, each pair distinct after `save`/`load` and hashing alike.
 
     `ensure_ascii=False` IS THE INJECTIVE SETTING, a correctness choice: with `True` a lone
-    surrogate PAIR and the astral character it spells serialise to the same escape, which is
-    a collision; with `False` they differ and a lone surrogate raises at `.encode("utf-8")`.
-    That raise is REACHABLE from a real `items.json` and not only from a constructed model:
-    the escape is pure ASCII on disk, so `_read_bound`'s decode succeeds and `json.loads`
-    hands back the lone surrogate intact. It surfaces as a raw `UnicodeEncodeError` — a
-    `ValueError`, so no `OSError` handler at any door will catch it — and turning it into a
-    named message is the first consumer's obligation, exactly as `_read_bound`'s is.
-    `domain` is hashed IN so two planes cannot serialise alike — `store_fingerprint({"a": i})`
-    and a one-entry vocabulary with slug `a` and description `i`'s fingerprint were both
-    `[["a", <64 hex>]]`, measured EQUAL. Closed because it costs one argument. (NUL is spelled
-    in words here: as an escape in a non-raw docstring it puts a real one in `__doc__` —
-    three, in the first version of this text.)
+    surrogate PAIR and the astral character it spells serialise to the same escape, which is a
+    collision; with `False` they differ and a lone surrogate raises at `.encode("utf-8")`. That
+    raise is REACHABLE from a real `items.json` — the escape is pure ASCII on disk, so
+    `_read_bound`'s decode succeeds and `json.loads` hands back the surrogate intact — and it
+    surfaces as a raw `UnicodeEncodeError`, a `ValueError` no `OSError` handler will catch;
+    naming it is the first consumer's obligation, exactly as `_read_bound`'s is. `domain` is
+    hashed IN so two planes cannot serialise alike: `store_fingerprint({"a": i})` and a
+    one-entry vocabulary with slug `a` and description `i`'s fingerprint were both
+    `[["a", <64 hex>]]`, measured EQUAL. (NUL is spelled in words here: as an escape in a
+    non-raw docstring it puts a real one in `__doc__` — three, in the first version.)
     """
     return json.dumps([domain, value], ensure_ascii=False, allow_nan=False)
 

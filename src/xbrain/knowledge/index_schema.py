@@ -73,7 +73,18 @@ from xbrain.models import _reject_local_path_traversal
 # and a v2 base's fingerprints were computed over the text alone, so every one of its rows
 # would fail verification. The door refuses it by name, with the rebuild, rather than
 # answering «22,286 chunks excluded».
-SCHEMA_VERSION = "3"
+# "4" since the 02.6a2a review: `source_failures.attempts` is GONE. It was the one column
+# across both failure planes with no field on the knowledge `SourceFailure`, so the versioned
+# public projection and the DDL disagreed and `item_fingerprint`, which hashes the projection,
+# could not see it — the shape review #161 exists to close. Of the two doors, ADDING the field
+# would put fetch bookkeeping inside the hash, and `fetch._source_signature` excludes
+# `attempts` for exactly that reason: a persistently-failing link re-fetched every run would
+# re-index an item whose evidence did not move. It would also bump `EvidenceBundle`'s public
+# version for a number no consumer asked for. So the column goes instead: the only writer that
+# ever existed bound it to a literal `None` (`b61e04b:index_build.py:838`) and nothing has ever
+# read it back. `tests/test_knowledge_index_build.py` binds the two DDLs to their projections
+# by NAME, so neither side can move again without the other.
+SCHEMA_VERSION = "4"
 
 DB_FILENAME = "knowledge.db"
 MANIFEST_FILENAME = "manifest.json"
@@ -218,8 +229,7 @@ CREATE TABLE IF NOT EXISTS source_failures (
     url            TEXT NOT NULL,
     failure_reason TEXT NOT NULL,
     error          TEXT,
-    http_status    INTEGER,
-    attempts       INTEGER
+    http_status    INTEGER
 );
 CREATE INDEX IF NOT EXISTS source_failures_item ON source_failures (item_id);
 
