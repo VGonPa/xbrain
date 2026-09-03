@@ -1111,9 +1111,12 @@ def test_a_bookmark_folder_that_is_absent_is_not_one_that_is_empty() -> None:
 def test_the_item_fingerprint_covers_the_filterable_metadata_no_surface_carries() -> None:
     """A changed author changes what `--author` returns with no text moved (A-1). Handle and
     name are hashed APART: they are two columns, and one person renaming themselves is not
-    the same row as a different account.
+    the same row as a different account. On an item with NO surface, because the default one
+    emits a `post` carrying `attribution=item.author` and `locator.url=item.url`: three of the
+    six cells moved through the SURFACE region, and a mutant replacing an atom with the
+    FIXTURE'S OWN VALUE reddened nothing anywhere.
     """
-    base = _item()
+    base = _item(text="")
     for update in (
         {"author": Author(handle="b", name="A")},
         {"author": Author(handle="a", name="B")},
@@ -1171,7 +1174,7 @@ def test_the_index_options_are_carried_inert_and_02_7_is_what_must_redden_this()
     assert index_build.IndexOptions().vault_dir is None
 
 
-def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all() -> None:
+def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all(monkeypatch) -> None:
     """`SURFACE_VERSION` leads the payload so a bump invalidates even an item whose surface rows
     are empty — there is nothing else on such an item for a bump to move.
 
@@ -1180,9 +1183,19 @@ def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all() -
     claim that it was is WITHDRAWN: on a bare item the last seven atoms degenerate to
     `None, None, [], [], [], [], []`, and four same-shaped region swaps were measured leaving
     this file and the full suite green. Position is pinned by the populated literal below.
+
+    The version is also VARIED, not merely read back: every guard read it by VALUE — the
+    expected side imports the symbol, the populated literal bakes the string in — so replacing
+    `SURFACE_VERSION` with its own current literal survived both, and the bump this docstring
+    promises would have moved no fingerprint while every `surface.fingerprint` moved. Rule 6,
+    failing OPEN, on the atom whose whole job is to invalidate.
     """
     bare = _item(text="")
     assert item_surfaces(bare) == ()
+    before = index_build.item_fingerprint(bare)
+    monkeypatch.setattr(index_build, "SURFACE_VERSION", "xbrain-knowledge-surface/v99")
+    assert index_build.item_fingerprint(bare) != before
+    monkeypatch.undo()
     assert index_build.item_fingerprint(bare) == index_build._sha256(
         index_build._canonical(
             "item",
@@ -1209,12 +1222,14 @@ def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all() -
     )
 
 
-def _rich(*, parts: tuple[str, ...] = ("abc", "defg"), **overrides) -> Item:
+def _rich(*, parts: tuple[str, ...] = ("abcd", "efg"), **overrides) -> Item:
     """An item that populates EVERY variadic region, each with a DIFFERENT value — which is
     what the bare item above cannot do. The sources are inserted in the order `sorted()` does
     NOT produce and the topics in the order `item_topics` does NOT return, so both deliberate
     normalisations are pinned; and every variadic region carries TWO entries, so truncating one
-    to its first is visible.
+    to its first is visible. The block lengths DESCEND (`4, 3`) for the same reason: ascending,
+    `sorted()` over them is a no-op, and the mutant sorting them — which hashes two different
+    cuts of one article alike, the defect the region exists to catch — passed.
     """
     defaults = dict(
         bookmark_folder="THE-FOLDER",
@@ -1278,7 +1293,7 @@ def test_the_whole_payload_is_pinned_by_value_on_an_item_that_populates_every_re
     assert re.fullmatch(r"[0-9a-f]{64}", fingerprint), fingerprint
     assert (
         fingerprint
-        == "83d6407b9c518db6fb72d12db66a755a16e8b9d5c3fab1662d99a56f9798a20e"  # pragma: allowlist secret
+        == "a5352e1fb8977a9d5a72f32b84ed3f9d58ed9e259bcf50f4610771db997dc510"  # pragma: allowlist secret
     )
 
 
