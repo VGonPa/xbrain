@@ -368,16 +368,15 @@ def _canonical(domain: str, value: object) -> str:
     Measured before the change: two topic lists, two vocabularies and two topic planes, each
     pair distinct after `save`/`load` and each pair hashing alike. `json.loads` recovers the
     exact structure, so two different structures cannot encode alike and no argument about
-    which strings can appear is left. (Said in words, not escapes: written as an escape in a
-    non-raw docstring it puts a real NUL in `__doc__` — three of them, in the first version.)
+    which strings can appear is left. (NUL is spelled in words here: as an escape in a non-raw
+    docstring it puts a real one in `__doc__` — three, in the first version of this text.)
 
     `ensure_ascii=False` IS THE INJECTIVE SETTING, a correctness choice: with `True` a lone
-    surrogate PAIR and the astral character it spells serialise to the same escape, which is
-    a collision; with `False` they differ and a lone surrogate raises at `.encode("utf-8")`.
+    surrogate PAIR and the astral character it spells serialise to the same escape, which is a
+    collision; with `False` they differ and a lone surrogate raises at `.encode("utf-8")`.
     `domain` is hashed IN so two planes cannot serialise alike — `store_fingerprint({"a": i})`
-    and a one-entry vocabulary with slug `a` and description `i`'s fingerprint are both
-    `[["a", <64 hex>]]`, measured EQUAL before the tag. Not consequential while the manifest
-    keeps the planes in separate columns, and closed anyway: it costs one argument.
+    and a one-entry vocabulary with slug `a` and description `i`'s fingerprint were both
+    `[["a", <64 hex>]]`, measured EQUAL. Closed because it costs one argument.
     """
     return json.dumps([domain, value], ensure_ascii=False)
 

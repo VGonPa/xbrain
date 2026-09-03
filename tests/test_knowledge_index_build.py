@@ -421,9 +421,10 @@ def test_the_item_fingerprint_covers_the_topics_the_item_plane_persists(
 def test_the_item_fingerprint_covers_a_content_kind_that_emits_no_surface(corpus) -> None:
     """`item_content_kinds` is a persisted plane, and a kind can arrive with no text at all.
 
-    A no-speech `x_video` (107 of 259 in the corpus) fetched without `--frames` has an empty
-    transcript, no frames and no digest, so it emits NOT ONE surface — and it is still a video
-    the index records in `item_content_kinds` and a kind filter answers from. Measured under
+    A no-speech `x_video` (108 of 260, re-derived 2026-09-03 on store `f76341a3…`; the 107 of
+    259 this replaces was undated, and the corpus moved) fetched without `--frames` has an
+    empty transcript, no frames and no digest, so it emits NOT ONE surface — and it is still a
+    video the index records in `item_content_kinds` and a kind filter answers from. Measured
     the mutant that deletes the sorted-kinds region: green, because every kind in the fixture
     arrives attached to a surface that moves the hash on its own.
 
