@@ -83,7 +83,16 @@ from xbrain.models import _reject_local_path_traversal
 # version for a number no consumer asked for. So the column goes instead: the only writer that
 # ever existed bound it to a literal `None` (`b61e04b:index_build.py:838`) and nothing has ever
 # read it back. `tests/test_knowledge_index_build.py` binds the two DDLs to their projections
-# by NAME, so neither side can move again without the other.
+# by NAME and pins their declarations by VALUE, so neither side can move again without the other.
+# WHAT THE BUMP DOES AND DOES NOT DO IN THIS TREE, because the paragraph opening this block
+# reads like an enforcement and here it is an intention: NOTHING consumes this constant. The
+# manifest that would compare it is 02.6b's — `load_compatible_manifest` has one hit repo-wide,
+# a comment at `ids.py:42` — and `_verify_schema` tolerates EXTRA columns by design, so an
+# existing v3 base, which differs from v4 only by carrying `attempts`, is ACCEPTED today
+# (verified by opening one). The bump's only live effect is the other direction: v3 code reading
+# a v4 base finds `source_failures.attempts` missing and refuses it. The table also diverges
+# from Plan 02's frozen DDL in TWO cells now — that DDL still declares `attempts` and still
+# omits the `http_status` an earlier child added — so 02.7's writer is built against THIS file.
 SCHEMA_VERSION = "4"
 
 DB_FILENAME = "knowledge.db"

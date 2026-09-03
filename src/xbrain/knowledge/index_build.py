@@ -435,12 +435,17 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     this atom separates. A fingerprint that distinguishes two states the writer stores alike is
     worse than one that distinguishes neither, so collapsing them is 02.7's, not a detail.
 
-    ONE KNOWN FALSE POSITIVE, AND IT IS THE DIRECTION THIS MODULE FAILS IN ON PURPOSE. The
-    topics region keeps the order `Enrichment.topics` was written in, while `item_topics` on
-    disk is a SET keyed `(item_id, slug)` — so a re-enrichment returning the same topics in a
-    different order re-hashes an item whose rows do not move (2,073 of 2,404 items carry more
-    than one topic). One wasted rewrite, never a stale row, the trade the cheap signal already
-    makes. `kinds` needs no such trade: `surfaces.item_content_kinds` — the ONE derivation
+    THREE KNOWN FALSE POSITIVES, ALL IN THE DIRECTION THIS MODULE FAILS IN ON PURPOSE — and
+    this said ONE until someone reordered the other two and watched the hash move. The topics
+    region keeps the order `Enrichment.topics` was written in while `item_topics` on disk is a
+    SET keyed `(item_id, slug)`, so a re-enrichment returning the same topics in a different
+    order re-hashes an item whose rows do not move (2,073 of 2,404 items carry more than one
+    topic). The failures and links regions are order-sensitive the same way, and neither
+    `source_failures` nor `unfetched_links` has a primary key or an order column either;
+    `fetch` rewriting `content.sources` is how the first of those becomes reachable. All three
+    cost one wasted rewrite and never a stale row — the trade the cheap signal already makes,
+    and the reason the count being wrong was cheap and being unstated would not have been.
+    `kinds` needs no such trade: `surfaces.item_content_kinds` — the ONE derivation
     `knowledge_item` also reads — deduplicates, so the region and the rows are the same object.
 
     THE VARIADIC REGIONS ARE NESTED, NEVER SPLICED. Flattening them into one delimited list is
@@ -471,6 +476,11 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
       emitter produces nothing (a whitespace-only `summary`/`digest` is the same shape: profile
       on truthiness, emitter on `_blank()`, which strips). Constructible, 0 of 2,404 today, and
       02.7's — the only writer that sees both sides.
+
+    `items.store_fingerprint` IS THIS VALUE, which is why it appears in neither list above: a
+    hash cannot be inside itself. The NAME is historical and is a trap for 02.7's writer — the
+    only writer that ever existed put a PER-ITEM digest in that column
+    (`b61e04b:index_build.py:760-761`), never a store-level one.
 
     Read this fingerprint as *what changed about the item*, never as *what changed about its
     indexed rows*.
