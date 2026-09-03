@@ -1964,16 +1964,30 @@ def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) 
 
 
 @pytest.mark.parametrize(
-    "domain, expected", [("vocab", "data/vocab.yaml"), ("topics", "data/topics.json")]
+    "domain, expected", [("vocab", "vocab.yaml"), ("topics", "topics.json")]
 )
 def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, expected) -> None:
-    """Actionable, not merely named: the message carries the path. A lone surrogate reaches
+    """Actionable, not merely named: the message carries the FILE. A lone surrogate reaches
     these planes from a file of PURE ASCII bytes — the escape decodes cleanly and the parser
     hands the surrogate back — so the operator has no other way to know which input to open.
+
+    A BASENAME AND NOT A PATH. `Config.data_dir` is configurable (`config.py`, every input
+    path derived from it), and this module never sees a directory at all: `load_index_inputs`
+    takes `items_path`, `vocab_path` and `topics_path` as ARGUMENTS. A hardcoded `data/...`
+    therefore names a file that does not exist under any non-default data directory — and
+    under a test's `tmp_path`, one that never existed anywhere. The filename is the fixed half
+    of the answer, so it is the half that is quoted, and the message says the directory is the
+    configured one rather than asserting which.
+
+    THE SUBSTRING ASSERTION ALONE CANNOT SEE THIS: `"data/vocab.yaml"` CONTAINS
+    `"vocab.yaml"`, so it stays green under the defect. The absence of the fabricated
+    directory is what the guard has to be about, and that is the assertion that reddens.
     """
     with pytest.raises(index_build.FingerprintError) as caught:
         index_build._fingerprint(domain, ["\ud800"])
-    assert expected in str(caught.value)
+    message = str(caught.value)
+    assert expected in message
+    assert "data/" not in message
 
 
 def test_a_plane_with_no_table_entry_still_raises_the_named_error_and_keeps_the_cause() -> None:

@@ -560,12 +560,17 @@ TOPICS_VERSION = "xbrain-knowledge-topics/v1"
 
 # Which live input each plane is a projection OF. ONE table (rule 5), so the refusal in
 # `_fingerprint` can name the file an operator has to repair instead of making them guess
-# which of the three inputs carried the byte.
+# which of the three inputs carried the byte. FILENAMES AND NOT PATHS: `Config.data_dir` is
+# configurable (`config.py`, every input path derived from it), and this module never sees a
+# directory at all — `load_index_inputs` takes `items_path`, `vocab_path` and `topics_path` as
+# arguments. A hardcoded `data/...` would name a file that does not exist under any
+# non-default data directory, and under a test's `tmp_path` one that never existed anywhere.
+# The filename is the fixed half of the answer, so it is the half that is quoted.
 _PLANE_INPUT = {
-    "item": "data/items.json",
-    "store": "data/items.json",
-    "vocab": "data/vocab.yaml",
-    "topics": "data/topics.json",
+    "item": "items.json",
+    "store": "items.json",
+    "vocab": "vocab.yaml",
+    "topics": "topics.json",
 }
 
 
@@ -613,8 +618,9 @@ def _fingerprint(domain: str, value: object) -> str:
         # plane, which is the half of the answer the table is not needed for.
         source = _PLANE_INPUT.get(domain, f"the {domain} input")
         raise FingerprintError(
-            f"{domain}: {source} holds {offender}, which UTF-8 cannot encode "
-            f"({exc.reason}). Repair the input — the index cannot store it either."
+            f"{domain}: {source} (under the configured data directory) holds {offender}, "
+            f"which UTF-8 cannot encode ({exc.reason}). Repair the input — the index cannot "
+            f"store it either."
         ) from exc
 
 
