@@ -9,15 +9,43 @@ fails in — is stated once, in `index_build.py`'s module docstring; it is not r
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge import index_build
-from xbrain.models import Item, Topic, TopicPage
+from xbrain.knowledge import index_build, index_schema
+from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
+from xbrain.knowledge.ids import SURFACE_VERSION
+from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
+from xbrain.executors.api import iter_content_sources, iter_described_photos
+from xbrain.knowledge.surfaces import (
+    article_block_texts,
+    failed_sources,
+    item_content_kinds,
+    item_surfaces,
+    item_topics,
+    unfetched_links,
+)
+from xbrain.models import (
+    ArticleTextBlock,
+    Author,
+    Content,
+    ContentSourceFailure,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Link,
+    MediaPhotoDescribed,
+    Topic,
+    TopicPage,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
+UTC = timezone.utc
 
 ZERO = index_build.StoreSignal(0, 0, 0, 0, 0, 0)
 
@@ -612,3 +640,985 @@ def test_the_stat_guard_is_no_broader_than_os_error() -> None:
     """
     with pytest.raises(AttributeError):
         index_build.StoreSignal.of(None, Path("v"), Path("t"))  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# The DEEP plane (Plan 02 §2, child 02.6a2a). Every encoder guard below is asserted ON THE
+# ENCODER, not through a fingerprint that happens to differ: two hashes differing tells you
+# nothing about WHY, and rule 1's fourth row is the assertion whose two sides both come out
+# of the thing under test.
+# ---------------------------------------------------------------------------
+
+
+def _item(**overrides) -> Item:
+    """The smallest real item, so a guard can vary ONE field and nothing else."""
+    defaults = dict(
+        id="42",
+        source="bookmark",
+        url="https://x.com/a/status/42",
+        author=Author(handle="a", name="A"),
+        text="the post body",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    return Item(**{**defaults, **overrides})
+
+
+def _photo(**overrides) -> MediaPhotoDescribed:
+    """A described photo, so a guard can vary only what makes it CONTENT-bearing."""
+    defaults = dict(
+        url="https://pbs.example/1.jpg",
+        local_path="42/0.jpg",
+        width=1,
+        height=1,
+        bytes_size=1,
+        downloaded_at=datetime(2026, 1, 3, tzinfo=UTC),
+        description="a described photo",
+        description_lang="Spanish",
+        is_decorative=False,
+        description_version="v1",
+        described_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    return MediaPhotoDescribed(**{**defaults, **overrides})
+
+
+def _video_content(text: str = "", has_speech: bool | None = False) -> Content:
+    """One `x_video` source, the only shape `no_speech` is derived from."""
+    return Content(
+        fetched_at=datetime(2026, 1, 3, tzinfo=UTC),
+        sources=[
+            ContentSourceSuccess(
+                kind="x_video", url="https://video.example/1", text=text, has_speech=has_speech
+            )
+        ],
+    )
+
+
+def _surface(**overrides) -> KnowledgeSurface:
+    """A surface whose fifteen persisted values are all DISTINCT and self-naming."""
+    defaults = dict(
+        surface_id="item:42:post:0",
+        owner_type="item",
+        owner_id="42",
+        surface_type="post",
+        text="0123456789",
+        title="THE-TITLE",
+        origin="source",
+        trust_class="primary_source",
+        derived=True,
+        attribution=Author(handle="THE-HANDLE", name="THE-NAME"),
+        locator=Locator(kind="item_text", url="THE-LOCATOR-URL"),
+        fingerprint="a" * 64,
+        language="THE-LANGUAGE",
+    )
+    return KnowledgeSurface(**{**defaults, **overrides})
+
+
+# ---------------------------------------------------------------------------
+# `_canonical` — what the injectivity claim covers, and where it stops
+# ---------------------------------------------------------------------------
+
+
+def test_the_canonical_encoding_is_injective_where_ensure_ascii_would_not_be() -> None:
+    """`ensure_ascii=True` collides a lone surrogate PAIR with the astral character it spells —
+    `json.dumps` emits the same escape for both — so the setting is a correctness choice, and
+    prose alone never held it: the mutant `False` -> `True` left the whole file GREEN. Asserted
+    on the ENCODER because the surrogate side raises at `_sha256`'s `.encode("utf-8")`, which
+    is fail-closed and not a hash to compare.
+    """
+    assert index_build._canonical("t", ["\ud83d\ude00"]) != index_build._canonical(
+        "t", ["\U0001f600"]
+    )
+
+
+def test_the_domain_travels_at_the_head_so_two_planes_cannot_serialise_alike() -> None:
+    """The collision the `domain` argument closed, reproduced on the ENCODER: a one-item store
+    and a one-entry vocabulary both encoded as `[["a", <64 hex>]]`, measured EQUAL. Asserting
+    two *fingerprints* differ would not pin it — they differ for many reasons and would keep
+    differing if the domain moved somewhere it does not separate — so the payload is fixed, the
+    domains vary, and the position of the domain is read back out of the blob. Which domain
+    each FUNCTION passes is pinned separately, by reading it off a real call.
+    """
+    collided = [["a", "0" * 64]]
+    assert index_build._canonical("store", collided) != index_build._canonical("vocab", collided)
+    assert json.loads(index_build._canonical("store", collided))[0] == "store"
+
+
+def test_the_variadic_regions_are_nested_so_a_splice_cannot_reproduce_them() -> None:
+    """Two item states that a FLATTENED payload encodes identically: `topics=("thread",)` with
+    no sources, against no topics with one blank `thread` source — spliced into one list both
+    read `[..., "thread", ...]`, nested the boundary is structural. An ENCODER property: it
+    shows why nesting is sufficient, not that `item_fingerprint` nests, which the atom-by-atom
+    guard below is what reddens under the splice.
+    """
+    spliced_alike = (["thread"], []), ([], ["thread"])
+    first, second = spliced_alike
+    assert sum(first, []) == sum(second, [])
+    assert index_build._canonical("item", list(first)) != index_build._canonical(
+        "item", list(second)
+    )
+
+
+def test_a_nul_inside_a_hashed_value_cannot_forge_the_boundary_between_two_atoms() -> None:
+    """The delimiter family, and why the join this encoder replaced had to go: it joined atoms
+    with a NUL and framed nothing below the region, and both store writers persist a NUL, so a
+    stored value could re-split the stream and move every later boundary. These two payloads
+    collide under that join and separate under `_canonical`; the quote and the bracket are the
+    same attack in the characters JSON itself uses.
+    """
+    forged = ["a\0b", "c"]
+    honest = ["a", "b\0c"]
+    assert "\0".join(forged) == "\0".join(honest)
+    assert index_build._canonical("t", forged) != index_build._canonical("t", honest)
+    assert index_build._canonical("t", ['a"],["b']) != index_build._canonical("t", ["a", "b"])
+
+
+def test_the_injectivity_claim_is_scoped_to_the_domain_the_payloads_build() -> None:
+    """The three limits the docstring names, pinned so nobody builds a payload assuming
+    otherwise. JSON is NOT injective over Python values in general: a sequence's TYPE is not a
+    distinguishing feature, a mapping's KEY TYPE is not either, and a float has values no
+    reader could parse back. The first two are why the claim is SCOPED rather than stated flat;
+    the third is why `allow_nan=False` is there.
+    """
+    assert index_build._canonical("t", (1, 2)) == index_build._canonical("t", [1, 2])
+    assert index_build._canonical("t", {1: "a"}) == index_build._canonical("t", {"1": "a"})
+    with pytest.raises(ValueError):
+        index_build._canonical("t", [float("nan")])
+
+
+def test_a_lone_surrogate_is_refused_by_the_hash_and_never_replaced() -> None:
+    """Fail closed. `errors="replace"` would hash U+FFFD and call two different strings the
+    same content — the fail-open family the whole module exists to close.
+    """
+    with pytest.raises(UnicodeEncodeError):
+        index_build._sha256(index_build._canonical("t", ["\ud800"]))
+
+
+def test_absent_and_empty_are_not_the_same_atom() -> None:
+    """`None` is a column that holds NULL; `""` is a column that holds a string. The index
+    persists both, `search` serves both, and an encoder that folded them would make a
+    repaired-to-blank value read as never-set.
+    """
+    assert index_build._canonical("t", [None]) != index_build._canonical("t", [""])
+    assert index_build._canonical("t", [None]) != index_build._canonical("t", [[]])
+
+
+# ---------------------------------------------------------------------------
+# `surface_row` — the fifteen columns, by value and by arity
+# ---------------------------------------------------------------------------
+
+
+def _schema_columns(table: str) -> dict[str, str]:
+    """`{column: declaration}` for one table, read out of `_SCHEMA` itself.
+
+    Read from the schema string rather than from a hand-copied list: a column added to
+    `surfaces` has to reach this test without anyone remembering to edit it. A MAPPING and not
+    a list of names, so a caller can pin a TYPE or a `NOT NULL` without a second parser, while
+    `set(...)` and `len(...)` over it still read the NAMES — which is all the totality and
+    arity guards below ask of it.
+    """
+    body = index_schema._SCHEMA.split(f"CREATE TABLE IF NOT EXISTS {table} (", 1)[1]
+    body = body.split(");", 1)[0]
+    declarations: dict[str, str] = {}
+    for line in body.splitlines():
+        stripped = line.strip().rstrip(",")
+        if stripped and not stripped.startswith("--"):
+            name, _sep, rest = stripped.partition(" ")
+            declarations[name] = " ".join(rest.split())
+    return declarations
+
+
+def test_the_surface_row_is_the_fifteen_values_the_schema_persists_in_order() -> None:
+    """Every column pinned BY VALUE, against a literal written by hand.
+
+    Review #161 measured seven of the fifteen unpinned: a swap between two same-typed
+    neighbours (title/url, handle/name, language/fingerprint) moved what the index STORES and
+    reddened nothing. The expected side is a literal, not `surface_row` recomputed, so the two
+    sides do not come out of one function (rule 1, fourth row). EVERY VALUE IS THE ONE A MUTANT
+    WOULD NOT INSTALL — which is why `derived` is True and not the False a surface usually
+    carries: pinned at False the column reads 0, a constant-0 mutant installs 0, and the guard
+    passes. The count is a property of the mutant and not of the test: under column DELETION an
+    arity assertion catches all fifteen and says nothing about any value, so "N unpinned"
+    without the mutant beside it is the error rule 2 exists to stop. Nullability and cell TYPE
+    are pinned separately below — `None` folded to `""`, and `True`/`1.0` for `1`, are what
+    this literal cannot see. One cell is ALSO varied: `_surface()`'s `owner_id` is `"42"`,
+    which is `_item()`'s id too, so the constant mutant `surface.owner_id -> "42"` installed
+    exactly the value this literal expects and survived. A literal cannot catch a constant
+    equal to its own fixture — only varying the input can, which is the whole of rule 1.
+    """
+    surface = _surface()
+    assert index_build.surface_row(surface) == (
+        "item:42:post:0",
+        "item",
+        "42",
+        "post",
+        "source",
+        "primary_source",
+        1,
+        "THE-HANDLE",
+        "THE-NAME",
+        "THE-TITLE",
+        "THE-LOCATOR-URL",
+        surface.locator.model_dump_json(),
+        "THE-LANGUAGE",
+        "a" * 64,
+        10,
+    )
+    assert index_build.surface_row(_surface(owner_id="99"))[2] == "99"
+
+
+def test_the_row_has_one_value_per_column_the_schema_declares() -> None:
+    """A totality guard, and the only mechanical one this child can offer.
+
+    It catches a column ADDED to `surfaces` without a value beside it. It does NOT catch a
+    column REORDERED into a same-typed neighbour — that needs the readback test 02.7 owes,
+    written against a writer that does not exist in this tree yet.
+    """
+    assert len(_schema_columns("surfaces")) == 15
+    assert len(index_build.surface_row(_surface())) == len(_schema_columns("surfaces"))
+
+
+def test_the_last_column_is_a_length_and_never_the_body() -> None:
+    """Spec §10.8: the index stores what it needs to filter, not a second copy of the text.
+    The body is covered by `fingerprint`, which hashes it — so two bodies of the same length
+    still separate.
+    """
+    row = index_build.surface_row(_surface(text="x" * 10))
+    assert row[-1] == 10
+    assert "x" * 10 not in row
+    assert index_build.surface_row(
+        _surface(text="abcdefghij", fingerprint="b" * 64)
+    ) != index_build.surface_row(_surface(text="0123456789", fingerprint="a" * 64))
+
+
+def test_the_rows_region_is_a_set_because_one_item_cannot_emit_a_surface_id_twice(
+    corpus,
+) -> None:
+    """What the rows region actually rests on — and it is NOT its order.
+
+    `surface_id` is `<owner>:<id>:<type>:<source_key>` and unique per item, so the rows are a
+    SET and their sequence carries nothing the set does not: the mutant `sorted(...)` around
+    the region leaves this file GREEN, which is correct rather than a gap.
+
+    WHAT MAKES THAT UNIQUENESS TRUE IS STRUCTURAL, NOT THE CORPUS. `content_source_key` appends
+    an occurrence ORDINAL, so two sources with an identical `(kind, url)` produce `…699b` and
+    `…699b#1` — a duplicate is unrepresentable and this sweep could not come out any other way
+    (rule 2, in the repo that wrote it). It is kept as a corpus-wide CHARACTERIZATION of the
+    ordinal's effect, not as evidence for the argument above, which the ordinal carries.
+    """
+    store, _vocab, _pages = corpus
+    for item in store.values():
+        ids = [surface.surface_id for surface in item_surfaces(item)]
+        assert len(ids) == len(set(ids)), item.id
+
+
+# ---------------------------------------------------------------------------
+# `item_fingerprint` — the four persisted planes it must reach (rule 6)
+#
+# Each guard varies ONE field and asserts what the projection does with it, so a green run
+# says which plane is covered rather than that two hex strings differ.
+# ---------------------------------------------------------------------------
+
+
+def test_the_item_fingerprint_changes_when_indexable_text_changes(corpus) -> None:
+    """The floor: the body the index serves is inside the hash."""
+    store, _vocab, _pages = corpus
+    item = next(iter(store.values()))
+    assert index_build.item_fingerprint(item) != index_build.item_fingerprint(
+        item.model_copy(update={"text": item.text + " edited"})
+    )
+
+
+def test_the_item_fingerprint_covers_the_source_failures_plane() -> None:
+    """HIGH-1 of review #161, half one — and the reason this child exists.
+
+    `source_failures` is written per item and read back by `get`, and before this nothing about
+    it moved a fingerprint: a fetch whose recorded error changed rewrote the row on disk while
+    `update` reported the item unchanged (rule 6). The two items differ in NOTHING else — a
+    failure emits no surface and appears in no content kind — so the moved plane is the only
+    thing that can move the hash.
+
+    TWO failures, and only the SECOND one varies. The region is variadic and the mutant
+    truncating it to `[:1]` used to be killed by the 64-hex characterization literal and by
+    NOTHING ELSE — a guard that disappears the moment 02.7 re-derives that literal for
+    `items.note_path`. A plane whose second row is a fabrication is the same defect as one
+    whose first row is.
+    """
+
+    def failed(error: str) -> Item:
+        return _item(
+            content=Content(
+                fetched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                sources=[
+                    ContentSourceFailure(
+                        kind="external_article",
+                        url="https://e.example",
+                        failure_reason="not_found",
+                        error="the first failure, held equal",
+                    ),
+                    ContentSourceFailure(
+                        kind="quoted_tweet",
+                        url="https://x.com/b/status/9",
+                        failure_reason="forbidden",
+                        error=error,
+                    ),
+                ],
+            )
+        )
+
+    failing, repaired = failed("one"), failed("two")
+    assert item_surfaces(failing) == item_surfaces(repaired)
+    assert failed_sources(failing) != failed_sources(repaired)
+    assert index_build.item_fingerprint(failing) != index_build.item_fingerprint(repaired)
+
+
+def test_the_item_fingerprint_covers_the_unfetched_links_plane() -> None:
+    """HIGH-1 of review #161, half two.
+
+    `item.links` reaches the index through `unfetched_links` and through NOTHING else — no
+    surface, no content kind, no other hashed atom — so a link that changed and a
+    fingerprint that did not was the whole defect, and this pair isolates it exactly.
+
+    TWO links, the first held equal, for the reason the failures guard above states: `[:1]`
+    over this region was killed by the characterization literal alone.
+    """
+    kept = Link(url="https://a.example", domain="a.example")
+    before = _item(links=[kept, Link(url="https://b.example", domain="b.example")])
+    after = _item(links=[kept, Link(url="https://c.example", domain="c.example")])
+    assert item_surfaces(before) == item_surfaces(after)
+    assert unfetched_links(before) != unfetched_links(after)
+    assert index_build.item_fingerprint(before) != index_build.item_fingerprint(after)
+
+
+def test_a_field_added_to_either_failure_projection_is_hashed_without_being_remembered() -> None:
+    """The structural half of the HIGH-1 fix, asserted as a totality: a hand-written field list
+    is what let those two planes drift, so `_model_atoms` walks `model_fields`. This pins that
+    it walks ALL of them, in order, with the name beside the value — a rename is a schema
+    change and has to move the hash too.
+    """
+    failure = SourceFailure(
+        kind="external_article", url="u", failure_reason="not_found", http_status=404
+    )
+    assert [name for name, _value in index_build._model_atoms(failure)] == list(
+        SourceFailure.model_fields
+    )
+    assert index_build._model_atoms(failure)[-1] == ["http_status", 404]
+    link = UnfetchedLink(url="u", reason="not_attempted")
+    assert [name for name, _value in index_build._model_atoms(link)] == list(
+        UnfetchedLink.model_fields
+    )
+
+
+def test_each_failure_plane_persists_exactly_what_its_public_projection_carries() -> None:
+    """The binding that makes the two failure DDLs and the ONE versioned projection agree.
+
+    `item_fingerprint` hashes the projection, so a column the DDL declares and the projection
+    does not carry is one no fingerprint can ever see: `source_failures` declared `attempts`,
+    `SourceFailure` had no field for it, and an item whose attempt count moved certified as
+    unchanged. The column is gone (`SCHEMA_VERSION` "4") and this stops the gap reopening from
+    EITHER side. The DDL side is read out of `_SCHEMA` and the model side off `model_fields`,
+    so neither is hand-copied and the two come from different modules; `item_id` is the join
+    key, carried by `store_fingerprint`'s `(key, hash)` pair rather than by the projection.
+
+    THE NAME BINDING'S POPULATION IS NAMES, and saying so is the point: a column added,
+    removed or renamed on either side goes red — measured four ways — while a column RETYPED,
+    or stripped of its `NOT NULL`, is invisible to it. That difference is not academic. Under a
+    `TEXT` `http_status`, SQLite's affinity stores `"404"` and `get` reads a string back into a
+    field typed `int | None`. So both failure DDLs are ALSO pinned BY DECLARATION below: the
+    mapping is what the name binding walks, and the literal is what a retype has to meet.
+    `surfaces` keeps only its arity guard — its fifteen values are pinned by the by-value row
+    test, and binding either table to a WRITER is the readback test 02.7 owes.
+    """
+    for table, model in (("source_failures", SourceFailure), ("unfetched_links", UnfetchedLink)):
+        assert set(_schema_columns(table)) == {"item_id", *model.model_fields}, table
+    assert _schema_columns("source_failures") == {
+        "item_id": "TEXT NOT NULL",
+        "kind": "TEXT NOT NULL",
+        "url": "TEXT NOT NULL",
+        "failure_reason": "TEXT NOT NULL",
+        "error": "TEXT",
+        "http_status": "INTEGER",
+    }
+    assert _schema_columns("unfetched_links") == {
+        "item_id": "TEXT NOT NULL",
+        "url": "TEXT NOT NULL",
+        "reason": "TEXT NOT NULL",
+        "detail": "TEXT",
+    }
+
+
+def test_the_item_fingerprint_covers_the_primary_topic_the_topics_tuple_hides() -> None:
+    """Two enrichments the persisted `items.primary_topic` column separates and
+    `item_topics()` does not.
+
+    `item_topics` puts the primary first and then DEDUPLICATES, so `(None, ["a", "b"])` and
+    `("a", ["b"])` both collapse to `("a", "b")`. The equal side is asserted on purpose:
+    without it a green run would not say the tuple hides anything, and the guard would read as
+    a restatement of "different enrichment, different hash".
+    """
+
+    def enriched(primary: str | None, topics: list[str]) -> Item:
+        return _item(
+            enriched=Enrichment(
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                executor="manual",
+                primary_topic=primary,
+                topics=topics,
+            )
+        )
+
+    hidden, declared = enriched(None, ["a", "b"]), enriched("a", ["b"])
+    assert item_topics(hidden) == item_topics(declared) == ("a", "b")
+    assert index_build.item_fingerprint(hidden) != index_build.item_fingerprint(declared)
+
+
+def test_the_item_fingerprint_covers_the_media_the_emitter_declined_to_surface() -> None:
+    """`items.skipped_decorative` moves with no surface behind it.
+
+    `xbrain describe` classifying a photo as decorative flips the counter 0 -> 1 and emits
+    NOTHING — no surface, no content kind — so before the counters were hashed the row on disk
+    changed and the item read as unchanged. The equal `item_surfaces` is what makes this a
+    measurement rather than a restatement. The mutant that DROPS `entry.is_decorative or` and
+    keeps `not entry.description` survives, and no test can kill it: `MediaPhotoDescribed`
+    validates `is_decorative => not description` at the TYPE boundary (`models.py:318`), so the
+    input that would separate the two clauses cannot be constructed. An equivalent mutant, not
+    a gap — the clause is kept because the emitter's own filter reads the flag.
+    """
+    bare = _item()
+    decorated = _item(media=[_photo(description="", is_decorative=True)])
+    assert item_surfaces(bare) == item_surfaces(decorated)
+    assert index_build.declined_media(bare) == (0, 0)
+    assert index_build.declined_media(decorated) == (1, 0)
+    assert index_build.item_fingerprint(bare) != index_build.item_fingerprint(decorated)
+
+
+def test_a_silent_video_is_counted_by_the_predicate_the_store_records() -> None:
+    """`items.skipped_no_speech`, pinned against the two mutants that leave it silent.
+
+    Asserting only that a silent video moves the hash passes under a swapped predicate —
+    `has_speech is False` traded for "the transcript is blank" — because on an ordinary fixture
+    the two agree. The `[music]` case is where they part: a transcriber that heard no speech
+    and wrote a marker anyway is `has_speech=False` with non-blank text, and only the recorded
+    flag gets it right. `has_speech=None` is where `is False` parts from truthiness: UNKNOWN is
+    not KNOWN-SILENT, the emitter declines it and this counter must not claim it — the shape
+    the corpus-complement guard below names, and 0 of 2,404 today. The counter is asserted
+    NON-ZERO, because a slot only ever asserted at 0 is asserted against the constant a mutant
+    installs.
+    """
+    silent = _item(content=_video_content(text="", has_speech=False))
+    speaking = _item(content=_video_content(text="hello", has_speech=True))
+    assert index_build.declined_media(silent) == (0, 1)
+    assert index_build.declined_media(speaking) == (0, 0)
+    assert index_build.declined_media(_item(content=_video_content("[music]", False))) == (0, 1)
+    assert index_build.declined_media(_item(content=_video_content("", None))) == (0, 0)
+    assert index_build.item_fingerprint(silent) != index_build.item_fingerprint(_item())
+
+
+def test_a_photo_described_as_nothing_is_declined_like_a_decorative_one() -> None:
+    """The second clause of the decorative sum, which makes it the COMPLEMENT of
+    `iter_described_photos`'s seam rather than a reading of one flag: a photo the vision pass
+    had nothing to say about emits no surface either, so dropping `or not entry.description`
+    would leave it declined by the emitter and recorded by neither.
+    """
+    empty = _item(media=[_photo(description="", is_decorative=False)])
+    assert list(iter_described_photos(empty)) == []
+    assert index_build.declined_media(empty) == (1, 0)
+    assert index_build.item_fingerprint(empty) != index_build.item_fingerprint(_item())
+
+
+def test_the_declined_counters_are_the_emitters_complement_over_the_corpus(corpus) -> None:
+    """The rule-5 guard: two hand-written readings of one fact, held to each other.
+
+    `declined_media` decides a photo by `is_decorative or not description` and a video by
+    `has_speech is False`; the EMITTER decides by `iter_described_photos`'s filter and by a
+    blank transcript. Nothing in code binds the two, so this asserts the property that makes
+    them one — declined plus emitted equals present — over every item. They agree on the live
+    store too: measured 2026-09-03 over 2,404 items (sha256 `f76341a3...`), 14 declined photos,
+    108 silent videos, 0 items where either sum fails. The agreement is CONTINGENT: an
+    `x_video` with `has_speech=None` and no text (the HLS path, or a transcriber exiting clean
+    with nothing) is declined by the emitter and not seen by this counter. Zero today — a fact
+    about the corpus, not an invariant.
+    """
+    store, _vocab, _pages = corpus
+    for item in store.values():
+        decorative, no_speech = index_build.declined_media(item)
+        described = sum(1 for entry in item.media if isinstance(entry, MediaPhotoDescribed))
+        assert decorative + sum(1 for _i, _p in iter_described_photos(item)) == described, item.id
+        videos = [source for _i, source in iter_content_sources(item, {"x_video"})]
+        emitted = sum(1 for source in videos if source.text and source.text.strip())
+        assert no_speech + emitted == len(videos), item.id
+
+
+def test_a_bookmark_folder_that_is_absent_is_not_one_that_is_empty() -> None:
+    """The mutation two reviewers measured reddening NOT ONE test on the snapshot:
+    `item.bookmark_folder` -> `item.bookmark_folder or ""`. It is a nullable column and the two
+    states are different rows — folding them means a bookmark moved OUT of every folder reads
+    as one that was never in a folder, and `update` reports the item unchanged.
+    """
+    assert index_build.item_fingerprint(
+        _item(bookmark_folder=None)
+    ) != index_build.item_fingerprint(_item(bookmark_folder=""))
+
+
+def test_a_primary_topic_that_is_absent_is_not_one_that_is_empty() -> None:
+    """The same argument, carried to the THIRD nullable `items` column, which the round that
+    carried it to the five `surfaces` ones did not reach.
+
+    `item_topics()` filters falsy topics, so `primary_topic=None` and `primary_topic=""` build
+    the IDENTICAL tuple — asserted beside the hash, because that is what makes the topics atom
+    unable to separate them and the `primary_topic` atom the only thing that can. Both mutants
+    (`... or ""` and `... or None`) left the whole file green. The persisted cell reads `NULL`
+    against `''`: two different rows, and `item_topics.is_primary` follows the same value.
+    0 of 2,404 on the live store — today's corpus, kept so by `guardrails.yaml` and not by the
+    model, which is the same standing as every other class this payload separates.
+    """
+
+    def with_primary(primary: str | None) -> Item:
+        return _item(
+            enriched=Enrichment(
+                summary="",
+                topics=["t"],
+                primary_topic=primary,
+                enriched_at=datetime(2026, 1, 4, tzinfo=UTC),
+                executor="manual",
+            )
+        )
+
+    assert item_topics(with_primary(None)) == item_topics(with_primary("")) == ("t",)
+    assert index_build.item_fingerprint(with_primary(None)) != index_build.item_fingerprint(
+        with_primary("")
+    )
+
+
+def test_the_item_fingerprint_covers_the_filterable_metadata_no_surface_carries() -> None:
+    """A changed author changes what `--author` returns with no text moved (A-1). Handle and
+    name are hashed APART: they are two columns, and one person renaming themselves is not
+    the same row as a different account. On an item with NO surface, because the default one
+    emits a `post` carrying `attribution=item.author` and `locator.url=item.url`: three of the
+    six cells moved through the SURFACE region, and a mutant replacing an atom with the
+    FIXTURE'S OWN VALUE reddened nothing anywhere.
+
+    `item.id` is the SEVENTH cell of that kind and was not in the loop: on a surfaceless item
+    nothing else carries it, so `item.id -> "42"` — the constant a careless refactor actually
+    writes, the fixture's own value — survived the whole file. It never changes for a given
+    item and `store_fingerprint` carries the key separately, so the impact was bounded; the
+    atom is claimed by the docstring above, which is why it is pinned rather than argued away.
+    """
+    base = _item(text="")
+    for update in (
+        {"id": "99"},
+        {"author": Author(handle="b", name="A")},
+        {"author": Author(handle="a", name="B")},
+        {"source": "own_tweet"},
+        {"url": "https://x.com/a/status/43"},
+        {"created_at": datetime(2026, 1, 9, tzinfo=UTC)},
+        {"captured_at": datetime(2026, 1, 9, tzinfo=UTC)},
+    ):
+        assert index_build.item_fingerprint(base) != index_build.item_fingerprint(
+            base.model_copy(update=update)
+        ), update
+
+
+def test_the_item_fingerprint_moves_when_the_content_sources_are_permuted(corpus) -> None:
+    """M4. Order is not decoration: `locator.source_index` points at a position in
+    `content.sources`, so permuting them repoints every locator the index serves.
+
+    The mechanism is asserted beside the hash, because the hash alone would also move if the
+    rows had merely been reordered — and this property is about the locators, which is the
+    half a reader has to be able to check by hand.
+    """
+    store, _vocab, _pages = corpus
+    item = next(i for i in store.values() if i.content is not None and len(i.content.sources) > 1)
+    flipped = item.model_copy(
+        update={
+            "content": item.content.model_copy(
+                update={"sources": list(reversed(item.content.sources))}
+            )
+        }
+    )
+    assert [(s.surface_id, s.locator.source_index) for s in item_surfaces(item)] != [
+        (s.surface_id, s.locator.source_index) for s in item_surfaces(flipped)
+    ]
+    assert index_build.item_fingerprint(item) != index_build.item_fingerprint(flipped)
+
+
+def test_the_index_options_are_carried_inert_and_02_7_is_what_must_redden_this() -> None:
+    """A CHARACTERIZATION of a deliberate hole, not a property anyone wants to keep.
+    `IndexOptions` travels so the signature 02.7 consumes is already the ported one and is read
+    NOWHERE — two options differing in both fields hash alike. When 02.7 gives them their first
+    consumer this goes RED and the change is made on purpose, which is why it is written down.
+
+    THE STORE HALF OF THAT TRIPWIRE IS BLIND, so this name is true of the item half only. Both
+    cells assert EQUALITY, so dropping `options=options` from `store_fingerprint`'s
+    pass-through is invisible today (measured: SURVIVED) and stays invisible AFTER 02.7 makes
+    options live: the item cell reddens, the store cell reports the equality it always did.
+    Binding it needs the pass-through asserted by EFFECT, beside the consumer 02.7 gives it.
+    """
+    item = _item()
+    assert index_build.item_fingerprint(
+        item, options=index_build.IndexOptions(params=ChunkerParams(target=1), vault_dir=Path("/x"))
+    ) == index_build.item_fingerprint(item)
+    assert index_build.store_fingerprint(
+        {item.id: item}, options=index_build.IndexOptions(params=ChunkerParams(target=1))
+    ) == index_build.store_fingerprint({item.id: item})
+    assert [f.name for f in dataclasses.fields(index_build.IndexOptions)] == [
+        "params",
+        "vault_dir",
+    ]
+    assert index_build.IndexOptions().params == DEFAULT_CHUNKER_PARAMS
+    assert index_build.IndexOptions().vault_dir is None
+
+
+def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all(monkeypatch) -> None:
+    """`SURFACE_VERSION` leads the payload so a bump invalidates even an item whose surface rows
+    are empty — there is nothing else on such an item for a bump to move.
+
+    The expected side is the payload ATOM BY ATOM, so this is the ARITY guard and the readable
+    account of what a fingerprint is made of. It is NOT a positional guard, and the earlier
+    claim that it was is WITHDRAWN: on a bare item the last seven atoms degenerate to
+    `None, None, [], [], [], [], []`, and four same-shaped region swaps were measured leaving
+    this file and the full suite green. Position is pinned by the populated literal below.
+
+    The version is also VARIED, not merely read back: every guard read it by VALUE — the
+    expected side imports the symbol, the populated literal bakes the string in — so replacing
+    `SURFACE_VERSION` with its own current literal survived both, and the bump this docstring
+    promises would have moved no fingerprint while every `surface.fingerprint` moved. Rule 6,
+    failing OPEN, on the atom whose whole job is to invalidate.
+    """
+    bare = _item(text="")
+    assert item_surfaces(bare) == ()
+    before = index_build.item_fingerprint(bare)
+    monkeypatch.setattr(index_build, "SURFACE_VERSION", "xbrain-knowledge-surface/v99")
+    assert index_build.item_fingerprint(bare) != before
+    monkeypatch.undo()
+    assert index_build.item_fingerprint(bare) == index_build._sha256(
+        index_build._canonical(
+            "item",
+            [
+                SURFACE_VERSION,
+                "42",
+                "bookmark",
+                "https://x.com/a/status/42",
+                "a",
+                "A",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-02T00:00:00+00:00",
+                None,
+                None,
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                [0, 0],
+            ],
+        )
+    )
+
+
+def _rich(*, parts: tuple[str, ...] = ("abc ", "efg"), **overrides) -> Item:
+    """An item that populates EVERY variadic region, each with a DIFFERENT value — which is
+    what the bare item above cannot do. The sources are inserted in the order `sorted()` does
+    NOT produce and the topics in the order `item_topics` does NOT return, so both deliberate
+    normalisations are pinned; and every variadic region carries TWO entries, so truncating one
+    to its first is visible. The default parts are chosen against TWO mutants at once: the
+    lengths DESCEND (`4, 3`), so `sorted()` over them is not a no-op, and the first part ENDS
+    IN A SPACE, so `len(t.strip())` collapses both to `3`. Each hashes two different cuts of
+    one article alike — the defect the region exists to catch — and each used to pass. Boundary
+    whitespace is not an exotic fixture: 2,672 of 2,710 real blocks (98.6 %) carry it, so a
+    `strip` normalisation would erase a real cut on every article in the corpus.
+    """
+    defaults = dict(
+        bookmark_folder="THE-FOLDER",
+        links=[
+            Link(url="https://one.example/", domain="one.example"),
+            Link(url="https://two.example/", domain="two.example"),
+        ],
+        enriched=Enrichment(
+            summary="",
+            topics=["t-one", "t-two"],
+            primary_topic="t-two",
+            enriched_at=datetime(2026, 1, 4, tzinfo=UTC),
+            executor="manual",
+        ),
+        content=Content(
+            fetched_at=datetime(2026, 1, 3, tzinfo=UTC),
+            sources=[
+                ContentSourceSuccess(
+                    kind="x_video", url="https://v.example/1", text="", has_speech=False
+                ),
+                ContentSourceSuccess(
+                    kind="x_article",
+                    url="https://x.com/i/article/1",
+                    text="".join(parts),
+                    blocks=[ArticleTextBlock(text=p) for p in parts],
+                ),
+                ContentSourceFailure(
+                    kind="external_article",
+                    url="https://one.example/",
+                    failure_reason="not_found",
+                    http_status=404,
+                    attempts=1,
+                ),
+                ContentSourceFailure(
+                    kind="quoted_tweet",
+                    url="https://x.com/b/status/9",
+                    failure_reason="forbidden",
+                    attempts=2,
+                ),
+            ],
+        ),
+    )
+    return _item(**{**defaults, **overrides})
+
+
+def test_the_whole_payload_is_pinned_by_value_on_an_item_that_populates_every_region() -> None:
+    """The POSITIONAL and CHARACTERIZATION guard the belt above is not, in one literal.
+
+    Two holes close here. The belt's expected side runs the same `_canonical` and `_sha256` as
+    its actual side, so an ENCODER change moves both together — rule 1's fourth row — and
+    `separators=(",", ":")`, `hexdigest()[:16]` and `sha256 -> sha1` were each measured leaving
+    the file green. And on a BARE item the last seven atoms are indistinguishable by position,
+    so `kinds`<->`rows`, `failures`<->`links`, `topics`<->`kinds` and
+    `bookmark_folder`<->`primary_topic` all survived. A digest written down as a LITERAL is on
+    neither side of the encoder and sees both. Same instrument, and same reason, as
+    `tests/test_evidence_characterization.py`'s pin on `contract_fingerprint`: one byte of
+    drift retires every stored fingerprint, so a DELIBERATE change re-derives this literal in
+    the commit that makes it. The belt above stays the readable account of the payload.
+    """
+    fingerprint = index_build.item_fingerprint(_rich())
+    assert re.fullmatch(r"[0-9a-f]{64}", fingerprint), fingerprint
+    assert (
+        fingerprint
+        == "837d4e3a39610526fa0d9de1dce4d164ef583e7ac9be536d9ff7dbfa28967276"  # pragma: allowlist secret
+    )
+
+
+def test_the_serialisation_itself_is_pinned_and_the_digest_is_a_real_sha256() -> None:
+    """Both pinned against a value computed OUTSIDE this module — the only way an assertion on
+    an encoder is not the encoder asserting itself. `_sha256("abc")` is the published SHA-256
+    of `abc`, so `sha1` and a truncation both redden without this file owning the oracle.
+    """
+    assert index_build._canonical("t", ["a", 1, None]) == '["t", ["a", 1, null]]'
+    assert index_build._sha256("abc") == hashlib.sha256(b"abc").hexdigest()
+
+
+def _cuts(item: Item) -> list[tuple[str, int, int]]:
+    """The `chunks` rows a repartition moves — id and span — through the ONE batch entry point
+    `cli.py` and `evaluation.py` call, so the claim is about what the index would STORE.
+    """
+    return [
+        (c.chunk_id, c.char_start, c.char_end)
+        for c in chunk_surfaces(item_surfaces(item), blocks_by_surface_id=article_block_texts(item))
+    ]
+
+
+def test_an_article_block_repartition_moves_a_hash_no_surface_value_can_see() -> None:
+    """The `chunks` plane. `ContentSourceSuccess` validates `text == "".join(blocks)`, so the
+    flattened body is a function of the partition and NOT the reverse: these items are one
+    article cut in different places. Every persisted SURFACE value is identical — asserted
+    beside the hash, because two hashes differing would not say the CUTS are what moved.
+
+    THE FIXTURE IS 1,800 CHARACTERS BECAUSE SEVEN COULD NOT COME OUT ANY OTHER WAY. The old
+    pair — `("abcdefg",)` against `("abc", "defg")` — is packed by the chunker into ONE
+    seven-character chunk either way (measured: identical ids, spans and bodies), so the test
+    named a repartition `chunk_surfaces` cannot see and its stated property never went red
+    (rule 2). At 1,800 the cuts reach the chunker and the emitted rows differ.
+
+    THE SAME-MULTISET PAIR IS WHY THE REGION HASHES AN ORDERED LIST. `[1200, 600]` against
+    `[600, 1200]` emits chunks whose `chunk_id`s are IDENTICAL — the id is
+    `<surface_id>:<index>:<chunker_version>` and carries no content — over different
+    `char_start`/`char_end` and different bodies. `sorted()` over the lengths hashes the two
+    alike, so `update` would leave rows whose ids still RESOLVE serving the wrong text: the
+    worst shape available, because nothing downstream errors. The small pairs are that defect
+    at fixture scale, and the second carries the whitespace costume too — `("ab ", "cd")` and
+    `("ab", " cd")` are different cuts of one body that `len(t.strip())` folds to `[2, 2]`.
+    41 of 2,404 items carry usable blocks, 41 of 41 more than one (2026-09-03).
+    """
+    body = ("parrafo de relleno para el troceador. " * 60)[:1800]
+    one, two = _rich(parts=(body[:1200], body[1200:])), _rich(parts=(body[:600], body[600:]))
+    thrice = _rich(parts=(body[:600], body[600:1200], body[1200:]))
+    assert [index_build.surface_row(s) for s in item_surfaces(one)] == [
+        index_build.surface_row(s) for s in item_surfaces(thrice)
+    ]
+    assert [[len(t) for t in v] for v in article_block_texts(one).values()] == [[1200, 600]]
+    assert [[len(t) for t in v] for v in article_block_texts(two).values()] == [[600, 1200]]
+    assert [[len(t) for t in v] for v in article_block_texts(thrice).values()] == [[600, 600, 600]]
+    assert _cuts(one) != _cuts(thrice)
+    assert index_build.item_fingerprint(one) != index_build.item_fingerprint(thrice)
+    assert [chunk_id for chunk_id, _s, _e in _cuts(one)] == [c for c, _s, _e in _cuts(two)]
+    assert _cuts(one) != _cuts(two)
+    assert index_build.item_fingerprint(one) != index_build.item_fingerprint(two)
+    for left, right in ((("abcd", "efg"), ("abc", "defg")), (("ab ", "cd"), ("ab", " cd"))):
+        assert [index_build.surface_row(s) for s in item_surfaces(_rich(parts=left))] == [
+            index_build.surface_row(s) for s in item_surfaces(_rich(parts=right))
+        ], left
+        assert index_build.item_fingerprint(_rich(parts=left)) != index_build.item_fingerprint(
+            _rich(parts=right)
+        ), left
+
+
+def test_the_item_fingerprint_covers_the_topics_plane_the_primary_atom_does_not() -> None:
+    """`item_topics` is a persisted table, `chunks.topics` is copied from it, `--topic` filters
+    on it, and 2,404 of 2,404 items populate it — yet the region could be a constant `[]` with
+    the file green, because the only test that varied topics separated its items by the
+    `primary_topic` atom. Here the primary is HELD EQUAL, so the tuple is all that can move.
+    """
+    assert index_build.item_fingerprint(
+        _rich(
+            enriched=Enrichment(
+                summary="",
+                topics=["t-one", "t-two"],
+                primary_topic="t-two",
+                enriched_at=datetime(2026, 1, 4, tzinfo=UTC),
+                executor="manual",
+            )
+        )
+    ) != index_build.item_fingerprint(
+        _rich(
+            enriched=Enrichment(
+                summary="",
+                topics=["t-one", "t-three"],
+                primary_topic="t-two",
+                enriched_at=datetime(2026, 1, 4, tzinfo=UTC),
+                executor="manual",
+            )
+        )
+    )
+
+
+def test_the_item_fingerprint_covers_the_content_kinds_no_surface_and_no_counter_moves() -> None:
+    """`item_content_kinds` is a persisted table with 1,387 of 2,404 items in it, and its atom
+    could be a constant `[]` with nothing red. Isolated: the added source is an `x_video` with
+    `has_speech=None` and no text, so it emits NO surface, counts in NEITHER declined counter
+    (unknown is not known-silent), and moves nothing but the kinds region.
+
+    The region is a SET, and that is a behaviour and not a comment: `item_content_kinds` is the
+    ONE derivation `knowledge_item` also reads, and the plane on disk is keyed
+    `(item_id, kind)`, so two sources of one kind are ONE row. A derivation that stopped
+    deduplicating would re-hash every item that gains a second source of a kind it already had
+    — 10 of 2,404 on the live store, measured 2026-09-03 — with no row moved.
+    """
+    without = _item()
+    with_video = _item(content=_video_content("", None))
+    doubled = _item(
+        content=_video_content("", None).model_copy(
+            update={
+                "sources": [*_video_content("", None).sources, *_video_content("", None).sources]
+            }
+        )
+    )
+    assert item_content_kinds(doubled) == ("x_video",)
+    assert item_surfaces(without) == item_surfaces(with_video)
+    assert index_build.declined_media(without) == index_build.declined_media(with_video) == (0, 0)
+    assert index_build.item_fingerprint(without) != index_build.item_fingerprint(with_video)
+
+
+def test_a_nullable_surface_column_that_is_absent_is_not_one_that_is_empty() -> None:
+    """The `bookmark_folder` argument, carried across to the five columns it was never applied
+    to. `surfaces.title`, `.url`, `.language` and the two attribution cells are nullable exactly
+    as `items.bookmark_folder` is, and NULL is a different row from `''`; the by-value literal
+    pins every cell NON-null, so a `... or ""` mutant never meets a `None` and all five
+    survived. The INTEGER cells are pinned by TYPE beside them: `True == 1` and `1.0 == 1`, so
+    tuple equality cannot see `int(derived)` become a bool or a float — and `_canonical`, which
+    states that no float may enter, hashes all three differently.
+    """
+    bare = _surface(title=None, language=None, attribution=None, locator=Locator(kind="item_text"))
+    row = index_build.surface_row(bare)
+    assert row[7:11] == (None, None, None, None)
+    assert row[12] is None
+    assert type(row[6]) is int and type(row[14]) is int
+
+
+# ---------------------------------------------------------------------------
+# `store_fingerprint` — the outer atom, and what an id may not forge
+# ---------------------------------------------------------------------------
+
+
+def test_the_store_fingerprint_is_independent_of_how_the_store_was_loaded(corpus) -> None:
+    """A dict's iteration order is a property of the load, not of the contents. The ids are
+    sorted, so two loads of the same corpus certify the same store.
+    """
+    store, _vocab, _pages = corpus
+    assert index_build.store_fingerprint(store) == index_build.store_fingerprint(
+        dict(reversed(list(store.items())))
+    )
+
+
+def test_the_outer_store_atom_is_a_pair_and_not_a_concatenation() -> None:
+    """The boundary between an id and the hash beside it is STRUCTURAL, not arithmetic.
+
+    Said exactly, because the overclaim is tempting: a flat `id + hex` join is injective
+    TODAY, and only because the second half is always 64 characters, so a reader can cut it
+    off the end. Measured — the mutant `[[k, hex]]` -> `[k + hex]` leaves the door's own
+    guards GREEN. What the pair buys is that the separation stops depending on that width:
+    the day an atom of variable length joins it, `["a", "b" + h]` and `["ab", h]` are the
+    same stream and two different stores certify as one. Asserted on the ENCODER, which is
+    where that forgery lives and the only place it can be shown.
+    """
+    forged, honest = ["a", "b" + "0" * 64], ["ab", "0" * 64]
+    assert "".join(forged) == "".join(honest)
+    assert index_build._canonical("store", [forged]) != index_build._canonical("store", [honest])
+
+
+def test_the_store_plane_survives_a_nul_inside_an_id() -> None:
+    """The pre-fix NUL join, on the plane where a real `items.json` can reach it. `Item.id` is a
+    bare `str` with no pattern and no validator, and a NUL travels through `save_store` /
+    `parse_store` as a plain ASCII escape, so the key `a=<hex>` + NUL + `b` round-trips and
+    under the join produced exactly the stream a two-item store produces — two different
+    stores, one certificate. The encoder guard above shows why the pair is safe; this shows the
+    reversion that removes it.
+    """
+    item = _item(id="X")
+    two = {"a": item, "b": item}
+    forged = {f"a={index_build.item_fingerprint(item)}\0b": item}
+    assert index_build.store_fingerprint(two) != index_build.store_fingerprint(forged)
+
+
+def test_the_store_fingerprint_covers_the_key_an_item_is_filed_under() -> None:
+    """The store is a MAPPING and the key is half of each entry. `item_fingerprint` hashes
+    `item.id`, normally the same string, so this is what keeps the key in the atom for its own
+    sake rather than by luck and reddens under dropping `k` from the pair. The DOMAIN is pinned
+    beside it: `"store"` is a hand-written literal here, so the mutant that hashes this plane
+    under `"item"` — which no other test could see — reddens.
+    """
+    item = _item(id="42")
+    assert index_build.store_fingerprint({"42": item}) != index_build.store_fingerprint(
+        {"filed-elsewhere": item}
+    )
+    assert index_build.store_fingerprint({}) == index_build._sha256(
+        index_build._canonical("store", [])
+    )
+
+
+def test_the_store_fingerprint_moves_when_any_one_item_moves(corpus) -> None:
+    """The deep signal's whole promise, and the one the cheap `StoreSignal` cannot make.
+
+    BOTH ENDS OF THE ORDER, because "any" is the word this name makes load-bearing. Every
+    store-plane guard varied `sorted(store)[0]`, and the mutant `[...][:1]` — hash the FIRST
+    item and no other — left the whole file green: under it every item but one certifies as
+    unchanged forever, the open-failing direction rule 6 exists for. The complement `[1:]` was
+    already killed, and that asymmetry is the tell that the test measured position 0, not any.
+    """
+    store, _vocab, _pages = corpus
+    for key in (sorted(store)[0], sorted(store)[-1]):
+        edited = dict(store)
+        edited[key] = store[key].model_copy(update={"text": store[key].text + " edited"})
+        assert index_build.store_fingerprint(store) != index_build.store_fingerprint(edited), key
+
+
+def test_the_deep_fingerprints_stay_out_of_the_cheap_signal(three_inputs: Path) -> None:
+    """02.6a1's contract, inherited unchanged: a query pays three `os.stat` and nothing else. A
+    deep read leaking into `StoreSignal.of` or `load_index_inputs` would put a full corpus walk
+    behind every `search`; asserted by counting calls into the deep plane while both doors run.
+    """
+    calls: list[str] = []
+    original = index_build.item_fingerprint
+    index_build.item_fingerprint = lambda *a, **k: calls.append("deep") or original(*a, **k)
+    try:
+        index_build.StoreSignal.of(*_paths(three_inputs))
+        index_build.load_index_inputs(*_paths(three_inputs))
+    finally:
+        index_build.item_fingerprint = original
+    assert calls == []

@@ -438,7 +438,7 @@ def item_topics(item: Item) -> tuple[str, ...]:
     return tuple(dict.fromkeys(topic for topic in ordered if topic))
 
 
-def _failed_sources(item: Item) -> tuple[SourceFailure, ...]:
+def failed_sources(item: Item) -> tuple[SourceFailure, ...]:
     return tuple(
         SourceFailure(
             kind=source.kind,
@@ -452,7 +452,7 @@ def _failed_sources(item: Item) -> tuple[SourceFailure, ...]:
     )
 
 
-def _unfetched_links(item: Item) -> tuple[UnfetchedLink, ...]:
+def unfetched_links(item: Item) -> tuple[UnfetchedLink, ...]:
     """The URLs in `item.links` with no recovered body, each with its recorded reason (m7).
 
     Spec §4: these are metadata the consumer must SEE, together with why there is no body —
@@ -537,6 +537,28 @@ def _note_path(item: Item, vault_dir: Path | None) -> str | None:
     return relative.as_posix()
 
 
+def item_content_kinds(item: Item) -> tuple[ContentKind, ...]:
+    """The kinds with a READABLE body, deduplicated, in the order `content.sources` carries them.
+
+    ONE DERIVATION, BECAUSE THERE WERE TWO. `knowledge_item` served this walk to the consumer
+    and `index_build.item_fingerprint` re-derived it to hash the `item_content_kinds` plane —
+    two hands on the filter `--content-kind` reads, which is rule 5's shape. They also
+    DISAGREED: the second was a sorted MULTISET while the table is keyed `(item_id, kind)`, so
+    an item with two sources of one kind hashed two entries against one row and every added
+    duplicate re-hashed an item whose rows do not move (10 of 2,404 on the live store,
+    measured 2026-09-03). Deduplicating here makes the hash the plane it is hashing.
+
+    A failed fetch appears in `failed_sources` instead (spec §3.2): listing its kind as
+    available would tell a consumer to ask `get` for a body that does not exist.
+    """
+    return tuple(
+        dict.fromkeys(
+            source.kind
+            for _i, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
+        )
+    )
+
+
 def knowledge_item(item: Item, *, vault_dir: Path | None = None) -> KnowledgeItem:
     """The read projection of one item (spec §3.2).
 
@@ -545,12 +567,7 @@ def knowledge_item(item: Item, *, vault_dir: Path | None = None) -> KnowledgeIte
     to ask `get` for a body that does not exist.
     """
     surfaces = item_surfaces(item)
-    kinds = tuple(
-        dict.fromkeys(
-            source.kind
-            for _i, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
-        )
-    )
+    kinds = item_content_kinds(item)
     return KnowledgeItem(
         item_id=item.id,
         source=item.source,
@@ -562,8 +579,8 @@ def knowledge_item(item: Item, *, vault_dir: Path | None = None) -> KnowledgeIte
         topics=item_topics(item),
         available_surfaces=tuple(dict.fromkeys(s.surface_type for s in surfaces)),
         content_kinds=kinds,
-        failed_sources=_failed_sources(item),
-        unfetched_links=_unfetched_links(item),
+        failed_sources=failed_sources(item),
+        unfetched_links=unfetched_links(item),
         note_path=_note_path(item, vault_dir),
         bookmark_folder=item.bookmark_folder,
     )

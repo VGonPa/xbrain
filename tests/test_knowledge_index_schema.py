@@ -97,10 +97,12 @@ def test_the_schema_version_is_declared() -> None:
     `chunks.fingerprint` hashes the whole evidence projection — provenance, ownership,
     position, attribution, narrowed locator — and a v2 base's fingerprints were computed
     over the text alone, so every row of it would fail verification: the door must refuse
-    it by name rather than answer «22,286 chunks excluded». The pin exists so a layout
-    change cannot ship without the bump that makes an existing index refuse the query.
+    it by name rather than answer «22,286 chunks excluded». "4" since the 02.6a2a review
+    dropped the dead `source_failures.attempts` column so the DDL and the versioned public
+    `SourceFailure` hold the same fields. The pin exists so a layout change cannot ship
+    without the bump that makes an existing index refuse the query.
     """
-    assert SCHEMA_VERSION == "3"
+    assert SCHEMA_VERSION == "4"
 
 
 # ---------------------------------------------------------------------------

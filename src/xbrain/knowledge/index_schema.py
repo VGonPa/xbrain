@@ -73,7 +73,27 @@ from xbrain.models import _reject_local_path_traversal
 # and a v2 base's fingerprints were computed over the text alone, so every one of its rows
 # would fail verification. The door refuses it by name, with the rebuild, rather than
 # answering «22,286 chunks excluded».
-SCHEMA_VERSION = "3"
+# "4" since the 02.6a2a review: `source_failures.attempts` is GONE. It was the one column
+# across both failure planes with no field on the knowledge `SourceFailure`, so the versioned
+# public projection and the DDL disagreed and `item_fingerprint`, which hashes the projection,
+# could not see it — the shape review #161 exists to close. Of the two doors, ADDING the field
+# would put fetch bookkeeping inside the hash, and `fetch._source_signature` excludes
+# `attempts` for exactly that reason: a persistently-failing link re-fetched every run would
+# re-index an item whose evidence did not move. It would also bump `EvidenceBundle`'s public
+# version for a number no consumer asked for. So the column goes instead: the only writer that
+# ever existed bound it to a literal `None` (`b61e04b:index_build.py:838`) and nothing has ever
+# read it back. `tests/test_knowledge_index_build.py` binds the two DDLs to their projections
+# by NAME and pins their declarations by VALUE, so neither side can move again without the other.
+# WHAT THE BUMP DOES AND DOES NOT DO IN THIS TREE, because the paragraph opening this block
+# reads like an enforcement and here it is an intention: NOTHING consumes this constant. The
+# manifest that would compare it is 02.6b's — `load_compatible_manifest` has one hit repo-wide,
+# a comment at `ids.py:42` — and `_verify_schema` tolerates EXTRA columns by design, so an
+# existing v3 base, which differs from v4 only by carrying `attempts`, is ACCEPTED today
+# (verified by opening one). The bump's only live effect is the other direction: v3 code reading
+# a v4 base finds `source_failures.attempts` missing and refuses it. The table also diverges
+# from Plan 02's frozen DDL in TWO cells now — that DDL still declares `attempts` and still
+# omits the `http_status` an earlier child added — so 02.7's writer is built against THIS file.
+SCHEMA_VERSION = "4"
 
 DB_FILENAME = "knowledge.db"
 MANIFEST_FILENAME = "manifest.json"
@@ -218,8 +238,7 @@ CREATE TABLE IF NOT EXISTS source_failures (
     url            TEXT NOT NULL,
     failure_reason TEXT NOT NULL,
     error          TEXT,
-    http_status    INTEGER,
-    attempts       INTEGER
+    http_status    INTEGER
 );
 CREATE INDEX IF NOT EXISTS source_failures_item ON source_failures (item_id);
 
