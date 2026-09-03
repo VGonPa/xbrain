@@ -3,29 +3,25 @@
 
 TWO SIGNALS, TWO COSTS, TWO PLACES (B3). Indexing is MANUAL BY DECISION (spec §9.2), so the
 failure that actually happens is not corruption — it is *you ran `enrich` and did not
-reindex*. Two different instruments answer two different questions:
-
-| `StoreSignal` — mtime + size of the THREE inputs | three `os.stat` | EVERY query | "an input moved" |
-| `store_fingerprint` — sha256 per item | loads the store | build/update/status | "WHICH items changed, and how many" |
-
+reindex*. `StoreSignal` is mtime + size of the THREE inputs: three `os.stat`, cheap enough
+for EVERY query, and it answers *an input moved*. `store_fingerprint` is a sha256 per item:
+it loads the store, is paid only by build/update/status, and answers *WHICH items changed*.
 The cheap one can give false positives (a `touch` with no edit) and that is accepted: a false
 positive costs one warning, a false negative costs serving stale evidence as fresh. It fails
 towards the warning, the same direction `origin: unknown -> llm_synthesis` fails.
 
 THE PER-ITEM FINGERPRINT IS OVER THE SURFACES, NOT OVER `(fetched_at, enriched_at)` as Plan
 01 §10 sketched, and CLAUDE.md rule 6 is both reasons. First, `content.fetched_at` cannot
-reach an item whose `content` is `None` — 960 of 2,404 in the real store, measured
-2026-09-01 on sha256 `f76341a3…` — because there is
-nothing to stamp. Second, a timestamp is a PROXY: a summary edited by hand, or any repair
-that rewrites text without touching a clock, changes the indexable corpus and leaves the
-proxy unmoved, so the index would keep serving the old body under a fingerprint asserting it
-is current. Hashing the emitted surface fingerprints asks the question directly — *did the
-text this index holds change?* — and it reaches every item. The cost is one emitter pass over
-the store per `update`/`status`, which is measured and published in the execution report.
+reach an item whose `content` is `None` — 960 of 2,404 in the real store, measured 2026-09-01
+on sha256 `f76341a3…` — because there is nothing to stamp. Second, a timestamp is a PROXY: a
+summary edited by hand, or any repair that rewrites text without touching a clock, changes
+the indexable corpus and leaves the proxy unmoved, so the index would keep serving the old
+body under a fingerprint asserting it is current. Hashing the emitted surface fingerprints
+asks the question directly and reaches every item, for one emitter pass per `update`/`status`.
 
-NOTHING HERE WRITES TO THE STORE. `items.json`, `vocab.yaml` and `topics.json` are read and
-never touched, and no command of this plan takes a snapshot, because none of them is
-destructive: `data/index/` is derived and reconstructible by definition (spec §5.6).
+NOTHING HERE WRITES TO THE STORE. The three inputs are read and never touched, and no command
+of this plan snapshots, because none is destructive: `data/index/` is derived and
+reconstructible by definition (spec §5.6).
 """
 
 from __future__ import annotations
@@ -56,24 +52,19 @@ class StoreSignal:
     """The CHEAP change signal: `mtime_ns` and size of the THREE inputs (spec §5.6, P1a).
 
     Three `os.stat`, so a query can afford it on every call. A missing file yields zeros
-    rather than raising: a query must still be able to say *the index is behind* when the
-    store has been moved away, and raising from inside `search` is the wrong place to learn
-    it.
+    rather than raising: a query must still say *the index is behind* when the store has been
+    moved away, and `search` is the wrong place to learn it by exception.
 
-    THREE FILES, NOT ONE (P1a, gate Codex round 05). Spec §5.6 names `data/items.json` as
-    the file the cheap signal watches, and that is what the first version stat'ed — but the
-    index derives from `vocab.yaml` and `topics.json` too: a topic description enters every
-    assigned item's PROFILE (spec §5.1.A), and overviews and notes are chunks the index
-    serves. The manifest already recorded their deep fingerprints; the query door never
-    compared them, so `xbrain topics` — which writes `topics.json` and never `items.json` —
-    left every later `search` answering over the old topic plane with nothing declared, the
-    silent staleness spec §9.3 forbids, on two of the three inputs. One signal over the
-    three files, one comparison, three `stat` calls.
-
-    A manifest written before round 05 carries no vocab/topics entries: they read back as
-    zeros, compare unequal to the live files, and the index is declared behind until the
-    next `update` re-seals the manifest. That is the direction this signal is meant to
-    fail in — towards the warning — and it costs one `index update`.
+    THREE FILES, NOT ONE (P1a, gate Codex round 05). Spec §5.6 names `data/items.json`, and
+    that is what the first version stat'ed — but the index derives from `vocab.yaml` and
+    `topics.json` too: a topic description enters every assigned item's PROFILE (spec §5.1.A),
+    and overviews and notes are chunks the index serves. The manifest already recorded their
+    deep fingerprints; the query door never compared them, so `xbrain topics` — which writes
+    `topics.json` and never `items.json` — left every later `search` answering over the old
+    topic plane with nothing declared, the silent staleness spec §9.3 forbids, on two of the
+    three inputs. A manifest written before round 05 carries no vocab/topics entries: they
+    read back as zeros, compare unequal, and the index is declared behind until the next
+    `update` re-seals it — the direction this signal is meant to fail in, at one `update`.
     """
 
     items_json_mtime_ns: int
@@ -116,9 +107,9 @@ def _stat_signal(path: Path | None) -> tuple[int, int]:
 class IndexInputs:
     """The three inputs of the index AND the cheap signal of the snapshot they were read from.
 
-    The signal travels WITH the objects because it describes them (P1b): a signal taken from
-    the path at any other moment describes whatever file is there at that moment, which is
-    what let the manifest certify an `items.json` the base had never seen.
+    The signal travels WITH the objects because it describes them (P1b): taken from the path
+    at any other moment it describes whatever file is there then, which is what let the
+    manifest certify an `items.json` the base had never seen.
     """
 
     store: dict[str, Item]
@@ -135,23 +126,20 @@ def load_index_inputs(
     THE SIGNAL IS BOUND TO THE SNAPSHOT, NOT TO THE PATH (P1b, gate Codex round 05). `build`
     and `update` used to seal the manifest with `StoreSignal.of(items_path)` taken AFTER the
     rows were committed — a `stat` of whatever file the path pointed at by then. The caller
-    had loaded the store minutes earlier (the CLI loads it before calling in), so a save that
-    landed in that window put the base under the OLD objects and the manifest under the NEW
-    file's mtime and size: `search` then compared equal signals and answered over stale rows
-    with nothing declared, while `status` — which loads the store — saw the changed item.
-    The gate's probe A: `raceonlytoken` in the file, not in the base, `degraded:
-    ("no_embeddings",)`, `items_changed=1`, `behind=False`.
+    had loaded the store minutes earlier, so a save landing in that window put the base under
+    the OLD objects and the manifest under the NEW file's mtime and size: `search` compared
+    equal signals and answered over stale rows with nothing declared, while `status` — which
+    loads the store — saw the changed item. The gate's probe A: `raceonlytoken` in the file,
+    not in the base, `degraded: ("no_embeddings",)`, `items_changed=1`, `behind=False`.
 
     Every file is read through ITS OWN HANDLE and the signal is `os.fstat` of that handle,
     taken BEFORE the read. The store's writers replace files atomically (`os.replace`), so an
     open handle keeps the inode it opened and the bytes parsed are the bytes that inode holds:
-    the signal describes exactly what was parsed, by construction, and a replacement that
-    lands during the read leaves the path pointing at a NEWER inode, which the query-time
-    `StoreSignal.of` then reports as different — the index declares itself behind. For a
-    writer that rewrites in place instead (`save_vocab` uses `write_text`), taking the stat
-    before the read means a write that lands mid-read produces an older signal than the
-    content, so the index is again declared behind rather than certified fresh: the same
-    direction, the warning.
+    the signal describes exactly what was parsed, by construction, and a replacement landing
+    during the read leaves the path on a NEWER inode, which query-time `StoreSignal.of`
+    reports as different — the index declares itself behind. For a writer that rewrites in
+    place instead (`save_vocab` uses `write_text`), stat-before-read yields an older signal
+    than the content, so the index is again declared behind: the same direction, the warning.
 
     A MISSING file reads as its empty value and a zero signal, exactly as `load_store`,
     `load_vocab`, `load_topic_pages` and `StoreSignal.of` treat it. A file that exists and
@@ -181,14 +169,13 @@ def _read_bound(path: Path | None) -> tuple[str | None, int, int]:
 
     `(None, 0, 0)` for an ABSENT or unnamed file — and for nothing else (A-2, round 08).
     The first version caught every `OSError`, so a file that EXISTS and cannot be read — a
-    `chmod 000`, a directory standing in its place, an `EIO` from a failing mount — loaded
-    as the empty store reserved for a missing one: the cheap signal still stat'ed fine, so
-    no door saw anything wrong, and on the real index `status` reported `items_removed
-    2404` as healthy, `search` answered zero results with exit 0, `update` planned the
-    deletion of every item and `build --force` replaced 22,286 chunks with the topic plane's
-    703, sealed consistent, exit 0. `load_store` (`store.py`) only ever read an absent file
-    as `{}`; this loader now agrees, and any other `OSError` propagates — the CLI prints it
-    as `Error: …` with exit 1, and the index on disk is not touched.
+    `chmod 000`, a directory standing in its place, an `EIO` from a failing mount — loaded as
+    the empty store reserved for a missing one: the cheap signal still stat'ed fine, so no
+    door saw anything wrong, and on the real index `status` reported `items_removed 2404` as
+    healthy, `search` answered zero results with exit 0, `update` planned the deletion of
+    every item and `build --force` replaced 22,286 chunks with the topic plane's 703, sealed
+    consistent, exit 0. `load_store` only ever read an ABSENT file as `{}`; this loader now
+    agrees, and any other `OSError` propagates to `Error: …` with exit 1, index untouched.
     """
     if path is None:
         return None, 0, 0
@@ -211,12 +198,10 @@ class IndexOptions:
     back, and the emitter no longer takes them. See `surfaces.item_surfaces`.
 
     CARRIED INERT IN THIS CHILD, AND SAYING SO IS THE POINT. Neither `params` nor `vault_dir`
-    is read anywhere in this tree: `options` is a NO-OP today, so `item_fingerprint(item,
-    options=X)` silently discards `X`, and a caller who passes the chunker's parameters
-    expecting the fingerprint to cover them would be wrong. The dataclass travels here so the
-    ported signature stays stable and 02.7 — its first consumer, the builder that actually
-    reads `params` and `vault_dir` — does not have to re-type it, never because anything
-    already reads it.
+    is read anywhere in this tree, so `item_fingerprint(item, options=X)` silently discards
+    `X` and a caller who passes the chunker's parameters expecting the fingerprint to cover
+    them would be wrong. The dataclass travels here so the ported signature stays stable for
+    02.7 — its first consumer — never because anything already reads it.
     """
 
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
@@ -226,44 +211,34 @@ class IndexOptions:
 def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     """sha256 over everything about this item that the INDEX holds.
 
-    Two halves, and both are needed. The SURFACE ROWS answer *did what the index holds about
-    each surface change?* — `surface_row` is the projection of every column the `surfaces`
-    table holds, so it covers the surface fingerprint (emitter version, type, origin, body)
-    AND the attribution, title, url, locator and language the index stores and `search`
-    serves on every match (A-1). The filterable METADATA of the item (source, author, date,
-    topics, content kinds) answers the other half: a changed author changes what `--author`
-    returns even though not one character of text moved.
+    Two halves, both needed. The SURFACE ROWS answer *did what the index holds about each
+    surface change?* — `surface_row` is the projection of every column `surfaces` holds, so it
+    covers the surface fingerprint (emitter version, type, origin, body) AND the attribution,
+    title, url, locator and language `search` serves on every match (A-1). The filterable
+    METADATA (source, author, date, topics, content kinds) answers the other half: a changed
+    author changes what `--author` returns with no text moved.
 
     THE ROW, NOT THE SURFACE FINGERPRINT ALONE (G-5). `surface_fingerprint` is
     `(version, type, origin, text)` by design and must stay so; but hashing only that here
-    meant a `refresh-quoted` that filled in the author of a quoted post without touching
-    its body left `update` reporting `0 cambiados` and `search` serving the old attribution
-    — the evidence repaired, the derivative standing (CLAUDE.md rule 6), on the attribution
-    rule this repo paid for in blood. Hashing the projection itself is what keeps "every
-    stored column is hashed" ONE list instead of two — see `surface_row` for what still
-    binds that list to the persisted schema by hand today, and what 02.7 owes it.
+    meant a `refresh-quoted` that filled in the author of a quoted post without touching its
+    body left `update` reporting `0 cambiados` and `search` serving the old attribution — the
+    evidence repaired, the derivative standing (rule 6), on the attribution rule this repo
+    paid for in blood. Hashing the projection keeps "every stored column is hashed" ONE list
+    instead of two — see `surface_row` for what binds it to the schema by hand, and what 02.7
+    owes it. `producer` is NOT hashed: the index has no producer column, and the producers
+    the store records travel with the surface `get` re-emits (F7-7). Deliberately NOT
+    `(item_id, content.fetched_at, enriched.enriched_at)` — see the module docstring.
 
-    What is NOT hashed, and why: `producer`. The index has no producer column, and the
-    producers the store records (`enriched.executor`, `description_version`) travel with
-    the surface `get` re-emits; the ASR/VLM surfaces carry none since round 08 (F7-7),
-    because the store records no transcriber and a configured command is not evidence.
-
-    Deliberately NOT `(item_id, content.fetched_at, enriched.enriched_at)`: see the module
-    docstring for why a timestamp proxy both misses hand edits and cannot reach the 40 % of
-    the corpus with no `content` at all.
-
-    EACH VARIADIC REGION DECLARES ITS LENGTH. `topics`, `kinds` and `rows` are three
-    variable-length regions inside one flat `\0`-joined list, and with no count in front of
-    each the join is NOT injective: `topics=("thread",)` with no sources serialised exactly
-    like no topics with one blank `thread` source, so two different item states hashed the
-    same and `update` called the item unchanged — rule 6, failing OPEN. The framing is what
-    makes the stream decodable. It deliberately replaces an earlier argument from
-    `Topic.slug`'s pattern, which governs the VOCABULARY and not `Enrichment.topics` — the
-    unrestricted `list[str]` this actually hashes.
+    THE THREE VARIADIC REGIONS ARE NESTED, NEVER SPLICED. Flattening `topics`, `kinds` and
+    `rows` into one delimited list is NOT injective: `topics=("thread",)` with no sources
+    serialised exactly like no topics with one blank `thread` source, so two item states
+    hashed alike and `update` called the item unchanged — rule 6, failing OPEN. Each is its
+    own JSON array, so the boundary is STRUCTURAL, and `_canonical` makes the atoms inside
+    them unforgeable too. Both retire an older argument from `Topic.slug`'s pattern, which
+    governs the VOCABULARY and not the `Enrichment.topics` this hashes.
 
     `options` IS NOT READ HERE. It is accepted so the signature 02.7 consumes is already the
-    ported one, and discarded — see `IndexOptions`. Nothing in this fingerprint depends on the
-    chunker's parameters or on the vault, and a caller must not assume it does.
+    ported one, and discarded — see `IndexOptions`.
     """
     options = options or IndexOptions()
     topics = item_topics(item)
@@ -271,25 +246,25 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
         source.kind
         for _index, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
     )
-    rows = [json.dumps(surface_row(surface), ensure_ascii=False) for surface in item_surfaces(item)]
-    parts = [
-        SURFACE_VERSION,
-        item.id,
-        item.source,
-        item.url,
-        item.author.handle,
-        item.author.name,
-        item.created_at.isoformat(),
-        item.captured_at.isoformat(),
-        item.bookmark_folder or "",
-        f"topics:{len(topics)}",
-        *topics,
-        f"kinds:{len(kinds)}",
-        *kinds,
-        f"rows:{len(rows)}",
-        *rows,
-    ]
-    return _sha256("\0".join(parts))
+    return _sha256(
+        _canonical(
+            "item",
+            [
+                SURFACE_VERSION,
+                item.id,
+                item.source,
+                item.url,
+                item.author.handle,
+                item.author.name,
+                item.created_at.isoformat(),
+                item.captured_at.isoformat(),
+                item.bookmark_folder,
+                topics,
+                kinds,
+                [surface_row(surface) for surface in item_surfaces(item)],
+            ],
+        )
+    )
 
 
 # The column order of `surfaces`, as ONE tuple type: hashed here, and bound to the `INSERT`
@@ -316,17 +291,14 @@ SurfaceRow = tuple[
 def surface_row(surface: KnowledgeSurface) -> SurfaceRow:
     """What the index STORES about a surface — the projection of one `surfaces` row.
 
-    ONE PROJECTION, AND 02.7's WRITER HAS TO CONSUME IT. `item_fingerprint` hashes this
-    tuple today; the writer that binds it to the `INSERT` into `surfaces` lands in 02.7 and
-    does not exist in this tree. Until it does, the correspondence with the persisted DDL
-    (`index_schema`: fifteen columns, this tuple's order and types) is kept BY HAND —
-    nothing here forces a column added to `surfaces` to be hashed, and this docstring is the
-    contract, not the guard.
-
-    Making it structural is 02.7's job, in two parts: its writer binds THIS function instead
-    of assembling a second tuple, and it writes the readback test — red first — that proves
-    the stored row and the hashed row cannot drift. Read any claim of that guard here as a
-    statement of 02.7's obligation, never as one already discharged.
+    ONE PROJECTION, AND 02.7's WRITER HAS TO CONSUME IT. `item_fingerprint` hashes this tuple
+    today; the writer that binds it to the `INSERT` into `surfaces` lands in 02.7. Until it
+    does, the correspondence with the persisted DDL (`index_schema`: fifteen columns, this
+    tuple's order and types) is kept BY HAND — nothing forces a column added to `surfaces` to
+    be hashed, and this docstring is the contract, not the guard. Making it structural is
+    02.7's job: its writer binds THIS function instead of assembling a second tuple, and it
+    writes the readback test — red first — proving the stored and hashed rows cannot drift.
+    Read any claim of that guard here as 02.7's obligation, never as one discharged.
 
     The last column is a LENGTH, never the body (spec §10.8); the body is covered by
     `fingerprint`, which hashes it.
@@ -354,13 +326,14 @@ def store_fingerprint(store: Mapping[str, Item], *, options: IndexOptions | None
     """The DEEP store signal: one sha256 over every item's fingerprint, in id order.
 
     Order-independent by construction — the ids are sorted — because a dict's iteration order
-    is a property of how the store was loaded, not of what it contains.
+    is a property of how the store was loaded, not of what it contains. Each `(id, hash)` is
+    its own array, so an id cannot run into the hash beside it.
     """
-    parts = [
-        f"{item_id}={item_fingerprint(store[item_id], options=options)}"
-        for item_id in sorted(store)
-    ]
-    return _sha256("\0".join(parts))
+    return _sha256(
+        _canonical(
+            "store", [[k, item_fingerprint(store[k], options=options)] for k in sorted(store)]
+        )
+    )
 
 
 def vocab_fingerprint(vocab: Sequence[Topic]) -> str:
@@ -369,19 +342,44 @@ def vocab_fingerprint(vocab: Sequence[Topic]) -> str:
     The descriptions are in because they enter every assigned item's PROFILE (spec §5.1.A):
     editing one changes indexed text on the item plane, not only on the topic plane.
     """
-    parts = [f"{topic.slug}={topic.description}" for topic in sorted(vocab, key=lambda t: t.slug)]
-    return _sha256("\0".join(parts))
+    ordered = sorted(vocab, key=lambda topic: topic.slug)
+    return _sha256(_canonical("vocab", [[t.slug, t.description] for t in ordered]))
 
 
 def topics_fingerprint(pages: Mapping[str, TopicPage]) -> str:
     """sha256 over each topic page's overview and notes — the synthesised text."""
-    parts = []
-    for slug in sorted(pages):
-        page = pages[slug]
-        parts.append(surface_fingerprint("topic_overview", "llm", page.overview))
-        parts += [surface_fingerprint("topic_note", "llm", note) for note in page.notes]
-        parts.append(slug)
-    return _sha256("\0".join(parts))
+    plane = [
+        [
+            slug,
+            surface_fingerprint("topic_overview", "llm", pages[slug].overview),
+            [surface_fingerprint("topic_note", "llm", note) for note in pages[slug].notes],
+        ]
+        for slug in sorted(pages)
+    ]
+    return _sha256(_canonical("topics", plane))
+
+
+def _canonical(domain: str, value: object) -> str:
+    """The ONE serialisation every fingerprint here hashes, and the only one (rule 5).
+
+    INJECTIVE BY ROUND TRIP, which the NUL-join it replaces was not. That join framed nothing
+    below the region, and both writers persist a NUL, so a stored value could re-split the
+    stream and move every later boundary — including the count tags meant to fix them.
+    Measured before the change: two topic lists, two vocabularies and two topic planes, each
+    pair distinct after `save`/`load` and each pair hashing alike. `json.loads` recovers the
+    exact structure, so two different structures cannot encode alike and no argument about
+    which strings can appear is left. (Said in words, not escapes: written as an escape in a
+    non-raw docstring it puts a real NUL in `__doc__` — three of them, in the first version.)
+
+    `ensure_ascii=False` IS THE INJECTIVE SETTING, a correctness choice: with `True` a lone
+    surrogate PAIR and the astral character it spells serialise to the same escape, which is
+    a collision; with `False` they differ and a lone surrogate raises at `.encode("utf-8")`.
+    `domain` is hashed IN so two planes cannot serialise alike — `store_fingerprint({"a": i})`
+    and a one-entry vocabulary with slug `a` and description `i`'s fingerprint are both
+    `[["a", <64 hex>]]`, measured EQUAL before the tag. Not consequential while the manifest
+    keeps the planes in separate columns, and closed anyway: it costs one argument.
+    """
+    return json.dumps([domain, value], ensure_ascii=False)
 
 
 def _sha256(blob: str) -> str:
