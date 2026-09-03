@@ -1630,9 +1630,8 @@ def test_the_deep_fingerprints_stay_out_of_the_cheap_signal(three_inputs: Path) 
 
 # ---------------------------------------------------------------------------
 # The VOCABULARY and TOPIC planes (Plan 02 §2, child 02.6a2b). The item plane answers *which
-# items changed*; these two answer *did the vocabulary or the synthesis move*, and they exist
-# apart because a description edit rewrites indexed text on the ITEM plane while
-# `item_fingerprint`, which takes no vocabulary, cannot move.
+# items changed*; these two answer *did the vocabulary or the synthesis move* — why they are
+# apart is ASSERTED below rather than restated here.
 # ---------------------------------------------------------------------------
 
 
@@ -2016,13 +2015,10 @@ def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, exp
     these planes from a file of PURE ASCII bytes — the escape decodes cleanly and the parser
     hands the surrogate back — so the operator has no other way to know which input to open.
 
-    A BASENAME AND NOT A PATH. `Config.data_dir` is configurable (`config.py`, every input
-    path derived from it), and this module never sees a directory at all: `load_index_inputs`
-    takes `items_path`, `vocab_path` and `topics_path` as ARGUMENTS. A hardcoded `data/...`
-    therefore names a file that does not exist under any non-default data directory — and
-    under a test's `tmp_path`, one that never existed anywhere. The filename is the fixed half
-    of the answer, so it is the half that is quoted, and the message says the directory is the
-    configured one rather than asserting which.
+    A BASENAME AND NOT A PATH, for the reason recorded once beside `_PLANE_INPUT`:
+    `Config.data_dir` is configurable and this module is handed the three paths as ARGUMENTS,
+    so a hardcoded `data/...` names a file that need not exist anywhere — under a test's
+    `tmp_path`, one that never did. The message says the directory is the configured one.
 
     THE SUBSTRING ASSERTION ALONE CANNOT SEE THIS: `"data/vocab.yaml"` CONTAINS
     `"vocab.yaml"`, so it stays green under the defect. The absence of the fabricated

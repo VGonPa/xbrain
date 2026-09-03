@@ -12,11 +12,10 @@ DECISION (spec §9.2), so the failure that actually happens is not corruption �
   answer the same of the other two inputs. All four are paid ONLY by `build`/`update`/`status`.
   No path here makes a cheap reader pay a deep one, and none may — 02.6a1's contract.
 
-THE FOUR PLANES ARE FOUR BECAUSE THEY MOVE APART, and the vocabulary is the one that proves it:
-a description edit rewrites the `profiles` and `profiles_fts` rows of every item carrying that
-slug, and `item_fingerprint` — which takes no vocabulary — cannot see it. One fused signal
-would either rebuild everything for a topic-note typo or miss that, and the manifest that seals
-the four separately is 02.6b's.
+THE FOUR PLANES ARE FOUR BECAUSE THEY MOVE APART, and the vocabulary proves it: a description
+edit rewrites rows that `item_fingerprint`, which takes no vocabulary, cannot see (the rows and
+the measurement are under `vocab_fingerprint`). One fused signal would rebuild everything for a
+topic-note typo or miss that; the manifest sealing the four separately is 02.6b's.
 
 WHAT IS NOT HERE. Nothing in this tree CONSUMES a fingerprint yet, which is why the coverage
 gaps review #161 named were closed here — free before a manifest exists, expensive after.
@@ -473,9 +472,8 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
       `load_compatible_manifest` as its home, a function that does not exist in this tree yet.
     - `profiles.profile_text` — a `vocab.yaml` edit splices each assigned topic's DESCRIPTION
       into it (spec §5.1.A) and rewrites `profiles`/`profiles_fts` for every assigned item while
-      this fingerprint, which takes no vocabulary, cannot move. DISCHARGED by
-      `vocab_fingerprint` below, which is why that plane exists; the rebuild it obliges still
-      reaches the item plane through 02.7. Its OTHER half is NOT, and filing it there would record a
+      this fingerprint, which takes no vocabulary, cannot move: DISCHARGED by `vocab_fingerprint`
+      below, via 02.7's rebuild. Its OTHER half is NOT, and filing it there would record a
       debt under an owner who cannot discharge it — `profile.py:_titles` gates on
       `if source.title`, so a title on a blank-bodied source reaches the profile while the
       emitter produces nothing (a whitespace-only `summary`/`digest` is the same shape: profile
