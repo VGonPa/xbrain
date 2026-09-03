@@ -554,26 +554,18 @@ def store_fingerprint(store: Mapping[str, Item], *, options: IndexOptions | None
 # `Topic` gaining a field is not a `TopicPage` gaining one. Bump the relevant one whenever the
 # corresponding payload below changes shape, or every fingerprint sealed under the old shape
 # keeps comparing EQUAL to one taken under the new — the fail-open direction, and the whole
-# reason a projection carries a version at all. THE RULE IS NOT UNIVERSAL IN THIS MODULE, and
-# saying so is the point: `item_fingerprint` and `store_fingerprint` carry NO projection-version
-# arm, so a change to THEIR payload shape retires nothing automatically. That asymmetry is
-# inherited, not endorsed — it predates this child and closing it would move every stored item
-# digest, which is free only while no manifest seals one (02.6b).
+# reason a projection carries a version at all.
 VOCAB_VERSION = "xbrain-knowledge-vocab/v1"
 TOPICS_VERSION = "xbrain-knowledge-topics/v1"
 
 # Which live input each plane is a projection OF. ONE table (rule 5), so the refusal in
-# `_fingerprint` can name the file an operator has to repair instead of making them guess which
-# of the three inputs carried the byte. FILENAMES AND NOT PATHS: `Config.data_dir` is
-# configurable (`config.py:30`, the paths derived at `:81` onwards), so a hardcoded `data/...`
-# would name a file that does not exist under any non-default data directory — and under a
-# test's `tmp_path` it would name one that never existed at all. The basenames are the fixed
-# half, so they are what is quoted.
+# `_fingerprint` can name the file an operator has to repair instead of making them guess
+# which of the three inputs carried the byte.
 _PLANE_INPUT = {
-    "item": "items.json",
-    "store": "items.json",
-    "vocab": "vocab.yaml",
-    "topics": "topics.json",
+    "item": "data/items.json",
+    "store": "data/items.json",
+    "vocab": "data/vocab.yaml",
+    "topics": "data/topics.json",
 }
 
 
@@ -615,14 +607,9 @@ def _fingerprint(domain: str, value: object) -> str:
         return _sha256(_canonical(domain, value))
     except UnicodeEncodeError as exc:
         offender = ascii(exc.object[exc.start : exc.end])
-        # `.get`, never `[...]`: a plane added later without an entry would raise `KeyError`
-        # from INSIDE this handler, chaining a lookup bug on top of the fault being reported
-        # and losing the only message that names the cause.
-        source = _PLANE_INPUT.get(domain, f"the {domain} input")
         raise FingerprintError(
-            f"{domain}: {source} (under the configured data directory) holds {offender}, "
-            f"which UTF-8 cannot encode ({exc.reason}). Repair the input — the index cannot "
-            f"store it either."
+            f"{domain}: {_PLANE_INPUT[domain]} holds {offender}, which UTF-8 cannot encode "
+            f"({exc.reason}). Repair the input — the index cannot store it either."
         ) from exc
 
 
@@ -657,28 +644,10 @@ def vocab_fingerprint(vocab: Sequence[Topic]) -> str:
     in. Replacing the stable sort with a set, a dict or a sort on `(slug, description)` reddens
     the guard that pins this.
 
-    AND THE WINNER IS NOT ONE WINNER — WHICH IS WHY THE WHOLE SEQUENCE IS HASHED, not the
-    `{slug: description}` dict that actually reaches the profile. Measured on a real in-memory
-    schema, a duplicate slug leaves the index SPLIT-BRAINED: `profiles`, the `topics` row and
-    the `surfaces` row take the LAST entry (`INSERT OR REPLACE`), while the `chunks` row takes
-    the FIRST, because `LexicalIndex.add` is `INSERT OR IGNORE` and both entries cut the
-    identical `chunk_id`. So `[a=FIRST, a=SECOND]` and `[a=SECOND]` persist DIFFERENTLY, and
-    hashing only the winning dict — the tempting simplification, since that dict is what the
-    profile reads — maps them to the SAME value. Two false negatives, one sort key apart.
-    (The split brain itself is the WRITER'S defect and 02.7's to fix; it is recorded here
-    because it constrains what this fingerprint is allowed to collapse.)
-
     THE ACCEPTED FALSE POSITIVE, named rather than discovered: an exactly-repeated entry
-    (`[(a, x), (a, x)]`) persists identically on every plane and hashes differently, so it costs
-    one wasted rebuild. That is the warning direction, and it is the same trade the cheap signal
-    and the item plane's three variadic regions already make.
-
-    THE SIZE OF THE OBLIGATION, measured on the live store (2,404 items, 45 vocabulary entries,
-    45 distinct — 0 duplicate slugs TODAY, which is this `vocab.yaml` and not an invariant,
-    since `parse_vocab` has no guard): one description edit rewrites between 16 and 320
-    `profiles` rows, median 95. And `profiles.fingerprint` holds `item_fingerprint` VERBATIM, so
-    no row-level detector for a stale profile exists anywhere in the schema — this plane's
-    fingerprint is the ONLY thing that can drive that rebuild.
+    (`[(a, x), (a, x)]`) persists as the single row `[(a, x)]` and hashes differently, so it
+    costs one wasted rebuild. That is the warning direction, and it is the same trade the cheap
+    signal and the item plane's three variadic regions already make.
 
     NESTED, NEVER JOINED. Each entry is its own array, so no description can re-cut the
     boundary of the next atom — a NUL survives `save_vocab`/`parse_vocab` intact (measured), so

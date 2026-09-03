@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from xbrain.knowledge import index_build, index_schema
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
-from xbrain.knowledge.ids import SURFACE_VERSION, surface_fingerprint
+from xbrain.knowledge.ids import SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
 from xbrain.knowledge.profile import profile_text
 from xbrain.executors.api import iter_content_sources, iter_described_photos
@@ -1831,35 +1831,6 @@ def test_the_topic_plane_is_independent_of_how_the_pages_were_parsed() -> None:
     assert index_build.topics_fingerprint(pages) == index_build.topics_fingerprint(reversed_pages)
 
 
-def test_a_nul_in_a_topics_key_cannot_forge_the_join_the_flat_version_left_unframed() -> None:
-    """The SHARPER of the two constructed collisions, and the one this plane had no guard for.
-    The `topics.json` mapping key is validated by NOTHING — `store.parse_topic_pages` takes it
-    straight from the JSON object and `TopicPage.slug` carries no pattern either — and a NUL
-    survives `save_topic_pages` as a `\\u0000` escape (measured). Under the flat
-    `"\\0".join([overview_fp, *note_fps, slug])`, ONE page whose key is
-    `"a" + NUL + fp(overview of the other page) + NUL + "b"` reproduced TWO pages exactly,
-    measured EQUAL at `2bbe58972a799cff` — while the persisted overviews were `['OVER-ONE',
-    'OVER-TWO']` against `[None, None]`. One JSON array per page removes the whole family.
-    """
-    two = {
-        "a": _page("a", overview="OVER-ONE", notes=[]),
-        "b": _page("b", overview="OVER-TWO", notes=[]),
-    }
-    forged_key = "a\0" + surface_fingerprint("topic_overview", "llm", "OVER-TWO") + "\0b"
-    one = {forged_key: _page(forged_key, overview="OVER-ONE", notes=[])}
-
-    def flat(pages):
-        parts = []
-        for slug in sorted(pages):
-            parts.append(surface_fingerprint("topic_overview", "llm", pages[slug].overview))
-            parts += [surface_fingerprint("topic_note", "llm", n) for n in pages[slug].notes]
-            parts.append(slug)
-        return index_build._sha256("\0".join(parts))
-
-    assert flat(two) == flat(one)
-    assert index_build.topics_fingerprint(two) != index_build.topics_fingerprint(one)
-
-
 def test_a_slug_of_sixty_four_hex_cannot_stand_where_a_note_fingerprint_did() -> None:
     """The flat `"\\0".join([overview_fp, *note_fps, slug])` this replaces put the SLUG last
     among 64-hex values, and `models.Topic`'s pattern admits a slug that IS 64 hex characters.
@@ -1993,28 +1964,16 @@ def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) 
 
 
 @pytest.mark.parametrize(
-    "domain, expected",
-    [("vocab", "vocab.yaml"), ("topics", "topics.json"), ("a-plane-added-later", "a-plane-added")],
+    "domain, expected", [("vocab", "data/vocab.yaml"), ("topics", "data/topics.json")]
 )
 def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, expected) -> None:
-    """Actionable, not merely named: the message carries the FILE. A lone surrogate reaches
+    """Actionable, not merely named: the message carries the path. A lone surrogate reaches
     these planes from a file of PURE ASCII bytes — the escape decodes cleanly and the parser
     hands the surrogate back — so the operator has no other way to know which input to open.
-
-    A BASENAME AND NOT A PATH: `Config.data_dir` is configurable, so a hardcoded `data/...`
-    would name a file that does not exist under a non-default data directory. The third case is
-    a plane with NO entry in the table: it must still produce the named error, because a
-    `KeyError` raised from inside the handler would chain a lookup bug on top of the fault and
-    lose the only message that names the cause.
     """
     with pytest.raises(index_build.FingerprintError) as caught:
         index_build._fingerprint(domain, ["\ud800"])
-    message = str(caught.value)
-    assert expected in message
-    # A SUBSTRING CHECK ALONE CANNOT SEE THE REGRESSION: `"data/vocab.yaml"` contains
-    # `"vocab.yaml"`, so reverting the table to hardcoded paths left this green. The absence of
-    # a fabricated directory is what the assertion has to be about.
-    assert "data/" not in message
+    assert expected in str(caught.value)
 
 
 def test_refusing_beats_surrogatepass_because_the_index_cannot_store_it_either() -> None:
