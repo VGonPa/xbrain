@@ -8,6 +8,7 @@ fails in — is stated once, in `index_build.py`'s module docstring; it is not r
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -312,6 +313,29 @@ def test_neither_door_can_be_called_without_the_vocabulary_and_the_topic_pages()
             index_build.StoreSignal(*range(arity))  # type: ignore[call-arg]
 
 
+def test_the_signal_has_six_fields_in_order_none_defaulted_and_is_frozen() -> None:
+    """A DEFAULTED SEVENTH FIELD IS THE ROUND-05 DEFECT BACK, AND THE SWEEP ABOVE CANNOT SEE IT.
+
+    Measured: `guardrails_yaml_mtime_ns: int = 0` left 20 of 20 GREEN, because a default changes
+    no REQUIRED arity — so the sweep catches the SAFE variant (a required seventh field, red on
+    collection) and misses the dangerous one, this child's own thesis failing on itself one input
+    later. Zeros are what an ABSENT file reads as, so a defaulted field is a signal that compares
+    EQUAL forever over an input nobody passed. ORDER is pinned in the same breath because 02.6b
+    serialises this into a manifest, where a reorder that keeps the arity re-binds every value in
+    silence; and FROZEN, because a signal re-bindable after the read is not sealed (also 20/20).
+    """
+    fields = dataclasses.fields(index_build.StoreSignal)
+    inputs = ("items_json", "vocab_yaml", "topics_json")
+    assert [f.name for f in fields] == [f"{i}_{k}" for i in inputs for k in ("mtime_ns", "size")]
+    assert all(f.default is dataclasses.MISSING for f in fields), "no field may carry a default"
+    assert all(f.default_factory is dataclasses.MISSING for f in fields)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        index_build.StoreSignal(*range(6)).items_json_size = 1  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        index_build.IndexInputs({}, [], {}, ZERO).store = {}  # type: ignore[misc]
+
+
 def test_an_input_that_is_not_utf8_is_refused_not_repaired(three_inputs: Path) -> None:
     """Undecodable bytes are a REFUSAL, and the refusal is the only thing standing there.
 
@@ -326,18 +350,16 @@ def test_an_input_that_is_not_utf8_is_refused_not_repaired(three_inputs: Path) -
     here — unlike `ENOTDIR` and `ELOOP`, where it is deliberately stricter — and a claim of
     agreement is worth exactly what the assertion that both raise is worth.
 
-    And the raised object is asserted NOT to be an `OSError`: that is what puts it outside the
-    `FileNotFoundError` guard by TYPE and not merely by intent, which is the sentence
-    `_read_bound` uses to explain why the guard cannot swallow it.
+    A third assertion stood here — `not isinstance(caught.value, OSError)` — and it is gone:
+    `pytest.raises(UnicodeDecodeError)` already fixes the type, so it could not fail (rule 1).
     """
     from xbrain.rubrics import load_vocab
 
     items, vocab, topics = _paths(three_inputs)
     vocab.write_bytes(b"topics:\n- slug: a\n  description: \xff\xfe not utf-8\n")
 
-    with pytest.raises(UnicodeDecodeError) as caught:
+    with pytest.raises(UnicodeDecodeError):
         index_build.load_index_inputs(items, vocab, topics)
-    assert not isinstance(caught.value, OSError), "outside the FileNotFoundError guard by type"
 
     with pytest.raises(UnicodeDecodeError):
         load_vocab(vocab)
@@ -371,14 +393,16 @@ def test_a_missing_input_is_zeroed_on_the_query_side_and_empty_on_the_load_side(
         (2, "topics_json_mtime_ns", "topics_json_size"),
     ],
 )
-def test_an_input_that_cannot_be_stat_ed_is_zeroed_for_a_query_and_raises_for_a_load(
+def test_an_input_that_cannot_be_stat_ed_answers_for_a_query_and_raises_for_a_load(
     three_inputs: Path, index: int, mtime_field: str, size_field: str
 ) -> None:
     """The two directions of A-2, on ONE obstruction, which is the only way to see the pair.
 
     `_stat_signal` swallows every `OSError`, not only `FileNotFoundError`, and this is the
     test that holds it: a query must be able to ANSWER — declaring the index behind — instead
-    of learning about the filesystem by exception from inside `search`. The obstruction is a
+    of learning about the filesystem by exception from inside `search`. What it answers is
+    `UNSTATTABLE`, NOT the zeros an absent input reads as — the round-09 split, whose
+    consequence is the transition test below. The obstruction is a
     path standing INSIDE a regular file, which raises `NotADirectoryError` (`ENOTDIR`); the
     two obstacles the loader test below uses cannot reach this promise, because `stat` needs
     neither read permission on a file nor the file to be a file, so both of them stat fine and
@@ -398,7 +422,8 @@ def test_an_input_that_cannot_be_stat_ed_is_zeroed_for_a_query_and_raises_for_a_
     paths[index] = paths[index] / "not-a-directory"
 
     signal = index_build.StoreSignal.of(*paths)
-    assert (getattr(signal, mtime_field), getattr(signal, size_field)) == (0, 0), "zeroed"
+    obstructed = (getattr(signal, mtime_field), getattr(signal, size_field))
+    assert obstructed == index_build.UNSTATTABLE, "obstructed, and not the ABSENT zeros"
     others = [
         (m, s)
         for k, (m, s) in enumerate(
@@ -410,10 +435,45 @@ def test_an_input_that_cannot_be_stat_ed_is_zeroed_for_a_query_and_raises_for_a_
         )
         if k != index
     ]
-    assert all(m and s for m, s in others), f"the other two inputs still stat'ed: {others}"
+    assert all(m > 0 and s > 0 for m, s in others), f"the other two still stat'ed: {others}"
 
     with pytest.raises(NotADirectoryError):
         index_build.load_index_inputs(*paths)
+
+
+def test_a_signal_sealed_over_an_absent_input_is_unequal_once_it_cannot_be_stat_ed(
+    tmp_path: Path,
+) -> None:
+    """ABSENT AND OBSTRUCTED MUST NOT BE THE SAME VALUE (Codex round 09, the blocking HIGH).
+
+    Both read `(0, 0)` before the split, and `_read_bound` SEALS zeros for an absent input — so
+    an index built while an input was missing compared EQUAL to a query taken once that same path
+    could no longer be stat'ed, certifying itself current over an input it never opened. Seen red
+    at `8febb37`: `sealed == current`, both all-zero, while the loader raised on the same path.
+
+    The obstruction is a self-referential symlink AT THE SEALED PATH (`ELOOP`), so the only thing
+    that moves between the two readings is whether that input can be stat'ed. The pair is one
+    promise, so it is one test: the query ANSWERS (what `search` pays on every call must never
+    raise from inside the filesystem) and the load RAISES (an unreadable input is not an empty).
+
+    THE SENTINEL'S SAFETY IS ASSERTED ON THE SIZE, NEVER ON THE MTIME, and asserting only
+    `== UNSTATTABLE` would be rule 1's row 4 — both sides out of the same module, satisfied by
+    whatever the constant says. Measured: an empty file at `os.utime(p, ns=(-1, -1))` stats to
+    exactly `(-1, 0)`, so a `-1` MTIME is forgeable by a real input and `UNSTATTABLE = (-1, 0)`
+    left this file GREEN at 26 of 26. A negative SIZE is not forgeable, which is the contract.
+    """
+    items, vocab, topics = _paths(tmp_path)
+    sealed = index_build.load_index_inputs(items, vocab, topics).signal
+    assert sealed == ZERO, "an absent input still seals zeros, and that stays true"
+
+    items.symlink_to(items)
+
+    current = index_build.StoreSignal.of(items, vocab, topics)
+    assert current != sealed, "absent at seal must not read as unchanged once obstructed"
+    assert (current.items_json_mtime_ns, current.items_json_size) == index_build.UNSTATTABLE
+    assert index_build.UNSTATTABLE[1] < 0, "the SIZE half is what a real `st_size` cannot be"
+    with pytest.raises(OSError):
+        index_build.load_index_inputs(items, vocab, topics)
 
 
 def _obstruct(path: Path, obstacle: str) -> None:
@@ -500,3 +560,55 @@ def test_the_index_loader_and_the_store_doors_parse_through_one_parser_each(
     assert loaded.store == load_store(items)
     assert loaded.vocab == load_vocab(vocab)
     assert loaded.topic_pages == load_topic_pages(topics)
+
+
+@pytest.mark.parametrize(
+    "name, door, key",
+    [
+        ("parse_store", "load_store", "store"),
+        ("parse_vocab", "load_vocab", "vocab"),
+        ("parse_topic_pages", "load_topic_pages", "topic_pages"),
+    ],
+)
+def test_the_door_and_the_index_loader_share_one_parser_object(
+    three_inputs: Path, monkeypatch: pytest.MonkeyPatch, name: str, door: str, key: str
+) -> None:
+    """Rule 5 BOUND IN CODE: re-inlining EITHER side left the test above at 20 of 20 GREEN.
+
+    That test compares the two readers' OUTPUTS, so a byte-identical second copy satisfies it.
+    Three legs here, each reddening a mutation the other two miss, all three measured. The DOOR
+    resolves its parser in its own module at call time, so a re-inlined `load_store` fails leg 1.
+    The LOADER is unreachable that way at all — `from xbrain.store import parse_store` binds the
+    OBJECT into `index_build`'s namespace at IMPORT time — so leg 2 needs its own patch. And
+    neither can tell ONE parser from TWO that behave alike, which is what rule 5 forbids, so leg
+    3 is identity: NOT rule 1's banned tautology precisely because legs 1 and 2 patch two
+    DIFFERENT names — measured, `index_build` shadowing `parse_store` with its own byte-identical
+    copy passes both of them and reddens exactly here.
+    """
+    import xbrain.rubrics as rubrics
+    import xbrain.store as store
+
+    home = rubrics if name == "parse_vocab" else store
+    path = dict(zip(("store", "vocab", "topic_pages"), _paths(three_inputs)))[key]
+    marker = object()
+
+    monkeypatch.setattr(home, name, lambda text: marker)
+    assert getattr(home, door)(path) is marker, "the door re-inlined its parse"
+
+    monkeypatch.setattr(index_build, name, lambda text: marker)
+    loaded = index_build.load_index_inputs(*_paths(three_inputs))
+    assert getattr(loaded, key) is marker, "the index loader re-inlined its parse"
+
+    monkeypatch.undo()
+    assert getattr(index_build, name) is getattr(home, name), "two parsers, not one"
+
+
+def test_the_stat_guard_is_no_broader_than_os_error() -> None:
+    """Widening `_stat_signal`'s `except OSError` to `except Exception` left 20 of 20 GREEN.
+
+    The breadth is deliberate but BOUNDED: under `except Exception` a `None` path — #161's own
+    signature defect — is swallowed into a signal instead of raising, the fail-open family this
+    module exists to close. Reached through the public door, so it pins observable behaviour.
+    """
+    with pytest.raises(AttributeError):
+        index_build.StoreSignal.of(None, Path("v"), Path("t"))  # type: ignore[arg-type]
