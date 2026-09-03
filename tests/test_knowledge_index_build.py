@@ -2010,9 +2010,7 @@ def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) 
     assert isinstance(caught.value.__cause__, UnicodeEncodeError)
 
 
-@pytest.mark.parametrize(
-    "domain, expected", [("vocab", "vocab.yaml"), ("topics", "topics.json")]
-)
+@pytest.mark.parametrize("domain, expected", [("vocab", "vocab.yaml"), ("topics", "topics.json")])
 def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, expected) -> None:
     """Actionable, not merely named: the message carries the FILE. A lone surrogate reaches
     these planes from a file of PURE ASCII bytes — the escape decodes cleanly and the parser
