@@ -269,6 +269,80 @@ def test_the_store_signal_is_one_stat_per_input_and_nothing_else(
     assert len(set(calls)) == len(calls) == 3, f"one stat per input, all distinct: {calls}"
 
 
+def test_neither_door_can_be_called_without_the_vocabulary_and_the_topic_pages() -> None:
+    """THE FIX THIS CHILD EXISTS FOR, AND WITHOUT THIS TEST IT CAN BE REVERTED IN SILENCE.
+
+    Measured on the tree before this test was written: restoring `Path | None = None` on both
+    doors, or restoring the four `= 0` defaults on the dataclass, left **18 of 18 GREEN**.
+    Every other test passes all three paths explicitly, so every one of them is satisfied just
+    as happily by the OPTIONAL signature — and `mypy` runs on `src/` alone (`scripts/check.sh`),
+    where a restored default is type-correct at every call site. A hundred per cent of
+    statements were covered and not one assertion died when the defect came back. Rule 1 in
+    its purest form: the fix could not be made to go red.
+
+    WHAT IS BEING PREVENTED, once more, because it is the whole point: zeros are also what an
+    ABSENT file reads as, so a signal that OMITTED the vocabulary was byte-identical to one
+    taken over a vocabulary that is not there — and two such signals compare EQUAL forever,
+    however `vocab.yaml` changes. The false-negative direction this module is built never to
+    fail in, reachable by leaving one argument off the shortest call.
+
+    Each case names the parameter it is missing, so a failure says WHICH half regressed: the
+    two doors are the `Path | None` mutant, the constructor is the `= 0` mutant.
+
+    THE CONSTRUCTOR IS SWEPT OVER EVERY ARITY, not probed at one. A first version asserted
+    only `StoreSignal(1, 2)`, and a mutant that restored the defaults on the LAST THREE fields
+    — leaving `vocab_yaml_mtime_ns` required — still raised there, naming that field, and the
+    suite stayed GREEN at 20 of 20. A default on any TRAILING subset is the same defect, so
+    the assertion has to be that a signal of fewer than six values does not exist at all.
+    """
+    path = Path("items.json")
+
+    with pytest.raises(TypeError, match="vocab_path"):
+        index_build.StoreSignal.of(path)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="topics_path"):
+        index_build.StoreSignal.of(path, path)  # type: ignore[call-arg]
+
+    with pytest.raises(TypeError, match="vocab_path"):
+        index_build.load_index_inputs(path)  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="topics_path"):
+        index_build.load_index_inputs(path, path)  # type: ignore[call-arg]
+
+    for arity in range(6):
+        with pytest.raises(TypeError, match="required positional argument"):
+            index_build.StoreSignal(*range(arity))  # type: ignore[call-arg]
+
+
+def test_an_input_that_is_not_utf8_is_refused_not_repaired(three_inputs: Path) -> None:
+    """Undecodable bytes are a REFUSAL, and the refusal is the only thing standing there.
+
+    Measured before this test existed: `data.decode("utf-8")` weakened to
+    `errors="replace"` left **18 of 18 GREEN**. That mutation does not fail — it SUCCEEDS,
+    turning undecodable bytes into U+FFFD and handing them on to be indexed as if they were
+    the corpus. It is the fail-open family this module exists to close, one layer below the
+    one the rest of the file guards: not an unreadable file read as empty, but a corrupt file
+    read as CONTENT.
+
+    The two doors are asserted TOGETHER because `_read_bound`'s docstring claims they agree
+    here — unlike `ENOTDIR` and `ELOOP`, where it is deliberately stricter — and a claim of
+    agreement is worth exactly what the assertion that both raise is worth.
+
+    And the raised object is asserted NOT to be an `OSError`: that is what puts it outside the
+    `FileNotFoundError` guard by TYPE and not merely by intent, which is the sentence
+    `_read_bound` uses to explain why the guard cannot swallow it.
+    """
+    from xbrain.rubrics import load_vocab
+
+    items, vocab, topics = _paths(three_inputs)
+    vocab.write_bytes(b"topics:\n- slug: a\n  description: \xff\xfe not utf-8\n")
+
+    with pytest.raises(UnicodeDecodeError) as caught:
+        index_build.load_index_inputs(items, vocab, topics)
+    assert not isinstance(caught.value, OSError), "outside the FileNotFoundError guard by type"
+
+    with pytest.raises(UnicodeDecodeError):
+        load_vocab(vocab)
+
+
 # ---------------------------------------------------------------------------
 # A-2 — the asymmetry: a query always ANSWERS, a load never invents an empty store
 # ---------------------------------------------------------------------------
@@ -371,6 +445,12 @@ def test_an_unreadable_input_is_an_error_never_an_empty_one(
 
     Seen red under the mutation `except FileNotFoundError` -> `except OSError` in
     `_read_bound`: `DID NOT RAISE` on all six cases.
+
+    `chmod000` ASSUMES A NON-ROOT RUNNER — root ignores the permission bits and the open would
+    succeed, so the case would report `DID NOT RAISE`. That is a FALSE RED, which is the safe
+    direction, and it does not arise here: `quality.yml` runs on `ubuntu-latest` with no
+    `container:`, so the job is the unprivileged `runner` user. The `directory` case needs no
+    such caveat.
     """
     _obstruct(three_inputs / filename, obstacle)
     try:
@@ -405,6 +485,11 @@ def test_the_index_loader_and_the_store_doors_parse_through_one_parser_each(
     values instead. What this one pins is the property it names, DIVERGENCE: seen red under a
     loader that parsed the store with a bare `json.loads` (`Item` out of one door, dicts out
     of the other) and under a loader that defaulted the vocabulary and the topic pages away.
+
+    AND IT COMPARES THE DOORS ONLY ON FILES THAT EXIST, which is the whole domain where they
+    are meant to agree. On a path standing inside a regular file, or on a symlink loop, they
+    DIVERGE BY DESIGN — `load_store` gates on `Path.exists()` and reads both as `{}`, while
+    this loader raises — and `_read_bound`'s docstring is where that asymmetry is argued.
     """
     from xbrain.rubrics import load_vocab
     from xbrain.store import load_store, load_topic_pages

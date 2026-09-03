@@ -89,10 +89,18 @@ def _stat_signal(path: Path) -> tuple[int, int]:
     EVERY `OSError` IS SWALLOWED HERE, and the breadth is the contract, not laziness: this is
     the function a query pays on every call, and its whole promise is that a query can always
     ANSWER — declaring the index behind — instead of learning about the filesystem by
-    exception from inside `search`. Absence is the common case; a path standing inside a
-    regular file, a directory whose permissions were dropped, an `EIO` from a failing mount
-    are the same answer to the only question asked here, *did this input move*, and zeros make
-    the comparison unequal, which is the warning.
+    exception from inside `search`. Absence is the common case; measured, the two other
+    reachable ones are a path standing INSIDE a regular file (`NotADirectoryError`, `ENOTDIR`)
+    and a PARENT directory whose permissions were dropped (`PermissionError`, `EACCES`), and
+    an `EIO` from a failing mount is the same shape without a way to stage it here. All of
+    them are one answer to the only question this asks — *did this input move* — and zeros
+    make the comparison unequal, which is the warning.
+
+    WHAT DOES NOT REACH THIS `except`, and it is worth knowing which: `stat` needs neither
+    read permission on the file nor the file to be a file, so a `chmod 000` FILE and a
+    directory standing in its place both stat FINE. They are exactly the obstacles that reach
+    `_read_bound` instead, which is why the test that holds this breadth had to be built on
+    `ENOTDIR` and not on either of those.
 
     `_read_bound` is the DELIBERATE opposite and the pair is the design: what the loader
     cannot read is an error, because an unreadable store is not an empty one.
@@ -173,14 +181,25 @@ def _read_bound(path: Path) -> tuple[str | None, int, int]:
     so no door saw anything wrong, and on the real index `status` reported `items_removed
     2404` as healthy, `search` answered zero results with exit 0, `update` planned the deletion
     of every item and `build --force` replaced 22,286 chunks with the topic plane's 703, sealed
-    consistent, exit 0. `load_store` only ever read an ABSENT file as `{}`; this loader agrees,
-    and every other `OSError` propagates to the caller unswallowed. Turning it into
-    `Error: <file>` and exit 1 is the door's job and no door in this tree loads through here
-    yet: read that as the obligation the first consumer owes, never as behaviour shipped here.
+    consistent, exit 0. Every other `OSError` propagates to the caller unswallowed. Turning it
+    into `Error: <file>` and exit 1 is the door's job and no door in this tree loads through
+    here yet: read that as the obligation the first consumer owes, never as behaviour shipped.
+
+    THIS LOADER IS STRICTER THAN THE THREE DOORS, ON EXACTLY TWO SHAPES, AND DELIBERATELY.
+    `load_store` / `load_vocab` / `load_topic_pages` gate on `Path.exists()`, which swallows
+    every `OSError` from its own `stat` and answers False for more than a missing file:
+    measured, a path standing inside a regular file (`ENOTDIR`) and a symlink loop (`ELOOP`)
+    both read back as `{}` / `[]` / `{}` through those doors, while opening either RAISES
+    here. That is the A-2 direction — an unreadable input is not an empty one — so the
+    divergence is the feature. It is also not hypothetical: `ENOTDIR` is the very obstruction
+    this module's own `_stat_signal` test builds, and it asserts this raise.
 
     A file that exists and is not UTF-8 raises `UnicodeDecodeError`, which is a `ValueError`
     and not an `OSError` at all, so it is outside the `FileNotFoundError` guard by type as
-    well as by intent — the same thing `load_store` does at the same seam.
+    well as by intent — and there the three doors agree, because they decode too. It is a
+    REFUSAL, not a repair: decoding with `errors="replace"` would turn undecodable bytes into
+    U+FFFD and index them as if they were the corpus, which is the fail-open family this whole
+    module exists to close, one layer lower.
     """
     try:
         handle = path.open("rb")
