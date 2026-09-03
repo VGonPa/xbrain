@@ -1976,6 +1976,28 @@ def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, exp
     assert expected in str(caught.value)
 
 
+def test_a_plane_with_no_table_entry_still_raises_the_named_error_and_keeps_the_cause() -> None:
+    """`_PLANE_INPUT[domain]` was a direct subscript evaluated INSIDE the handler, so the next
+    plane added without a table entry raised a LOOKUP BUG on top of the fault being reported.
+    Measured before the fix: `_fingerprint("a-plane-added-later", ["\ud800"])` raised
+    `KeyError: 'a-plane-added-later'` and the `UnicodeEncodeError` it was reporting was LOST —
+    the operator got a `KeyError` naming a domain string instead of the message naming the
+    byte. The four current call sites all pass literals, so this is latent; but `_fingerprint`
+    exists precisely so the NEXT plane cannot regress the refusal, and a handler that can raise
+    its own bug does not give that.
+
+    Asserted on the CAUSE and not only on the type: what the defect destroyed is the chained
+    `UnicodeEncodeError` and the reason it carries, so a fix that swallowed those while raising
+    a `FingerprintError` would still be the defect.
+    """
+    with pytest.raises(index_build.FingerprintError) as caught:
+        index_build._fingerprint("a-plane-added-later", ["\ud800"])
+    message = str(caught.value)
+    assert "a-plane-added-later" in message
+    assert "surrogates not allowed" in message
+    assert isinstance(caught.value.__cause__, UnicodeEncodeError)
+
+
 def test_refusing_beats_surrogatepass_because_the_index_cannot_store_it_either() -> None:
     """The measurement that decided the refusal. `surrogatepass` would hash deterministically,
     but `sqlite3` raises the SAME error binding the value as `TEXT`, so the fingerprint would

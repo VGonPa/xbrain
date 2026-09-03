@@ -607,8 +607,13 @@ def _fingerprint(domain: str, value: object) -> str:
         return _sha256(_canonical(domain, value))
     except UnicodeEncodeError as exc:
         offender = ascii(exc.object[exc.start : exc.end])
+        # `.get`, never `[...]`: a plane added later without a table entry would raise
+        # `KeyError` from INSIDE this handler, chaining a lookup bug on top of the fault being
+        # reported and destroying the only message that names the cause. The fallback names the
+        # plane, which is the half of the answer the table is not needed for.
+        source = _PLANE_INPUT.get(domain, f"the {domain} input")
         raise FingerprintError(
-            f"{domain}: {_PLANE_INPUT[domain]} holds {offender}, which UTF-8 cannot encode "
+            f"{domain}: {source} holds {offender}, which UTF-8 cannot encode "
             f"({exc.reason}). Repair the input — the index cannot store it either."
         ) from exc
 
