@@ -709,12 +709,23 @@ def topics_fingerprint(pages: Mapping[str, TopicPage]) -> str:
     the vocabulary) and still moves this hash. 45 of 45 keys agree with their field today, by
     the convention of the single writer that builds pages — not by construction.
 
-    `synthesized_at` IS HASHED AS ITS `isoformat()`, WHICH IS WHAT IS ON DISK.
-    `save_topic_pages` writes `model_dump(mode="json")`, i.e. that same string, and `TopicPage`
-    carries NO UTC validator (measured: a naive datetime and a `+02:00` one are both accepted
-    and their `isoformat()` differ). So two pages at the same INSTANT under different offsets
-    are two different files and two different `topics.synthesized_at` values, and hashing the
-    rendered string tracks the bytes rather than an instant nobody stored.
+    EVERY ATOM IS THE WRITER'S OWN RENDERING, TAKEN FROM THE WRITER (rule 5). `save_topic_pages`
+    persists `page.model_dump(mode="json")`, so that dump is what this hashes — one call per
+    page, all six atoms read out of it, rather than a second rendering built beside it here.
+    The version this replaces hashed `synthesized_at.isoformat()` and CLAIMED it was what is on
+    disk; measured, it is not, for UTC: pydantic renders `2026-01-20T00:00:00Z` where
+    `isoformat()` renders `2026-01-20T00:00:00+00:00` (the naive and `+02:00` cases DO agree,
+    which is what kept the guard green). Two renderings of one value, only one of them stored,
+    and nothing bound them — so a serialiser change could move the bytes with this hash
+    unmoved. Now the hashed atom IS the persisted atom, asserted against a file `save_topic_pages`
+    actually wrote, and INJECTIVITY FOLLOWS FROM THAT: `_canonical` is injective on this payload
+    domain, so two distinct persisted values cannot reach one digest.
+
+    What is deliberately NOT normalised is the offset. `TopicPage` carries no UTC validator
+    (measured: a naive datetime and a `+02:00` one are both accepted), so two pages at the same
+    INSTANT under different offsets persist as two different strings and are two different
+    files; collapsing them to one instant before hashing would be a false negative, the
+    direction this module never fails in.
 
     WHAT THIS PLANE DOES NOT REACH, in the same boat as the item plane and for the same reason:
     `CHUNKER_VERSION` and `ChunkerParams` decide every topic chunk's id, span, body and
@@ -729,24 +740,20 @@ def topics_fingerprint(pages: Mapping[str, TopicPage]) -> str:
     `models.Topic`'s pattern, so one page's slug could stand where another's note fingerprint
     did.
     """
-    return _fingerprint(
-        "topics",
-        [
-            TOPICS_VERSION,
-            SURFACE_VERSION,
+    rows = []
+    for key, page in sorted(pages.items()):
+        persisted = page.model_dump(mode="json")
+        rows.append(
             [
-                [
-                    key,
-                    page.slug,
-                    page.overview,
-                    list(page.notes),
-                    page.synthesized_at.isoformat(),
-                    page.post_count_at_synth,
-                ]
-                for key, page in sorted(pages.items())
-            ],
-        ],
-    )
+                key,
+                persisted["slug"],
+                persisted["overview"],
+                persisted["notes"],
+                persisted["synthesized_at"],
+                persisted["post_count_at_synth"],
+            ]
+        )
+    return _fingerprint("topics", [TOPICS_VERSION, SURFACE_VERSION, rows])
 
 
 def _canonical(domain: str, value: object) -> str:

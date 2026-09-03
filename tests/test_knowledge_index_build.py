@@ -24,6 +24,7 @@ from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chu
 from xbrain.knowledge.ids import SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
 from xbrain.knowledge.profile import profile_text
+from xbrain.store import save_topic_pages
 from xbrain.executors.api import iter_content_sources, iter_described_photos
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -1890,17 +1891,63 @@ def test_the_mapping_key_and_the_slug_field_are_hashed_apart_because_they_can_di
     )
 
 
-def test_the_synthesis_timestamp_is_hashed_as_the_string_the_writer_persists() -> None:
-    """`save_topic_pages` writes `model_dump(mode="json")`, i.e. `isoformat()`, and `TopicPage`
-    carries NO UTC validator — a naive datetime and a `+02:00` one are both accepted. Two pages
-    at the same INSTANT under different offsets are two different files and two different
-    `topics.synthesized_at` values, so tracking the rendered string is tracking the bytes.
+def test_two_offsets_at_the_same_instant_are_two_files_and_must_be_two_digests() -> None:
+    """`TopicPage` carries NO UTC validator — a naive datetime and a `+02:00` one are both
+    accepted — so two pages at the same INSTANT under different offsets persist as two
+    DIFFERENT `topics.synthesized_at` strings and are two different files. Normalising to a
+    single instant before hashing (`astimezone(UTC)`, the tempting simplification when the
+    docstring said `isoformat()`) would map them to ONE digest while the bytes on disk differ:
+    a false negative, the direction this module never fails in. What must be hashed is the
+    rendering, and the test below pins WHICH rendering by reading it off the writer.
     """
     offset = timezone(timedelta(hours=2))
     same_instant = {"a": _page(synthesized_at=datetime(2026, 1, 20, 2, 0, tzinfo=offset))}
     utc = {"a": _page(synthesized_at=datetime(2026, 1, 20, 0, 0, tzinfo=UTC))}
     assert same_instant["a"].synthesized_at == utc["a"].synthesized_at
     assert index_build.topics_fingerprint(same_instant) != index_build.topics_fingerprint(utc)
+
+
+def test_every_topic_atom_hashed_is_the_atom_the_writer_puts_on_disk(tmp_path) -> None:
+    """THE BINDING, READ OFF A REAL FILE, and the claim it replaces was measurably false.
+    The docstring said `synthesized_at` is hashed as its `isoformat()`, "WHICH IS WHAT IS ON
+    DISK". It is not, for UTC: `save_topic_pages` writes `model_dump(mode="json")`, and
+    pydantic renders a UTC datetime as `2026-01-20T00:00:00Z` while `.isoformat()` renders
+    `2026-01-20T00:00:00+00:00` (measured; the `+02:00` and naive cases DO agree, which is what
+    kept this green). So the plane hashed a rendering nothing persists, and the two could drift
+    apart further with a serialiser change and nothing would go red.
+
+    This asserts the whole hashed ROW — every one of the five persisted fields plus the mapping
+    key — against the record `save_topic_pages` actually wrote to a real file, so the payload is
+    bound to the WRITER by execution and not to a literal a future serialiser change would
+    leave standing. Injectivity of the two synthesis columns follows from the binding: `_sha256`
+    over `_canonical` is injective on this payload domain, so once the hashed atom IS the
+    persisted atom, two distinct persisted values cannot reach one digest.
+    """
+    pages = {"a": _page(synthesized_at=datetime(2026, 1, 20, tzinfo=UTC))}
+    path = tmp_path / "topics.json"
+    save_topic_pages(pages, path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))["a"]
+
+    captured: list = []
+    real = index_build._canonical
+
+    def spy(domain, value):
+        captured.append(value)
+        return real(domain, value)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_build, "_canonical", spy)
+        index_build.topics_fingerprint(pages)
+
+    (row,) = captured[0][2]
+    assert row == [
+        "a",
+        persisted["slug"],
+        persisted["overview"],
+        persisted["notes"],
+        persisted["synthesized_at"],
+        persisted["post_count_at_synth"],
+    ]
 
 
 # --- missing versus empty ---------------------------------------------------
