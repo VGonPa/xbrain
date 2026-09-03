@@ -438,7 +438,7 @@ def item_topics(item: Item) -> tuple[str, ...]:
     return tuple(dict.fromkeys(topic for topic in ordered if topic))
 
 
-def _failed_sources(item: Item) -> tuple[SourceFailure, ...]:
+def failed_sources(item: Item) -> tuple[SourceFailure, ...]:
     return tuple(
         SourceFailure(
             kind=source.kind,
@@ -452,7 +452,7 @@ def _failed_sources(item: Item) -> tuple[SourceFailure, ...]:
     )
 
 
-def _unfetched_links(item: Item) -> tuple[UnfetchedLink, ...]:
+def unfetched_links(item: Item) -> tuple[UnfetchedLink, ...]:
     """The URLs in `item.links` with no recovered body, each with its recorded reason (m7).
 
     Spec §4: these are metadata the consumer must SEE, together with why there is no body —
@@ -562,8 +562,8 @@ def knowledge_item(item: Item, *, vault_dir: Path | None = None) -> KnowledgeIte
         topics=item_topics(item),
         available_surfaces=tuple(dict.fromkeys(s.surface_type for s in surfaces)),
         content_kinds=kinds,
-        failed_sources=_failed_sources(item),
-        unfetched_links=_unfetched_links(item),
+        failed_sources=failed_sources(item),
+        unfetched_links=unfetched_links(item),
         note_path=_note_path(item, vault_dir),
         bookmark_folder=item.bookmark_folder,
     )
