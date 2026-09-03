@@ -12,15 +12,18 @@ import dataclasses
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from xbrain.knowledge import index_build, index_schema
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
+from xbrain.knowledge.profile import profile_text
 from xbrain.executors.api import iter_content_sources, iter_described_photos
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -1622,3 +1625,386 @@ def test_the_deep_fingerprints_stay_out_of_the_cheap_signal(three_inputs: Path) 
     finally:
         index_build.item_fingerprint = original
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# The VOCABULARY and TOPIC planes (Plan 02 §2, child 02.6a2b). The item plane answers *which
+# items changed*; these two answer *did the vocabulary or the synthesis move*, and they exist
+# apart because a description edit rewrites indexed text on the ITEM plane while
+# `item_fingerprint`, which takes no vocabulary, cannot move.
+# ---------------------------------------------------------------------------
+
+
+def _topic(slug: str = "a", description: str = "D") -> Topic:
+    return Topic(slug=slug, description=description)
+
+
+def _page(slug: str = "a", **overrides) -> TopicPage:
+    """One synthesized page whose five persisted fields are all DISTINCT and self-naming."""
+    defaults = dict(
+        slug=slug,
+        overview="THE-OVERVIEW",
+        notes=["THE-NOTE"],
+        synthesized_at=datetime(2026, 1, 20, tzinfo=UTC),
+        post_count_at_synth=7,
+    )
+    return TopicPage(**{**defaults, **overrides})
+
+
+# --- domain separation ------------------------------------------------------
+
+
+def test_the_four_planes_pass_four_different_domains_read_off_a_real_call() -> None:
+    """Which domain each FUNCTION passes, read back out of the blob it actually hashes. The
+    encoder guard above pins that the domain SEPARATES; nothing pinned that these four callers
+    pass four different ones, so all four could have shipped `"item"` and stayed green.
+    """
+    seen = []
+    real = index_build._canonical
+
+    def spy(domain, value):
+        seen.append(domain)
+        return real(domain, value)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_build, "_canonical", spy)
+        index_build.item_fingerprint(_item())
+        index_build.store_fingerprint({"42": _item()})
+        index_build.vocab_fingerprint([_topic()])
+        index_build.topics_fingerprint({"a": _page()})
+    assert seen == ["item", "item", "store", "vocab", "topics"]
+
+
+def test_a_vocabulary_and_a_topic_plane_that_carry_the_same_payload_hash_apart() -> None:
+    """The cross-plane collision the `domain` arm closes, at the FINGERPRINT level: two planes
+    whose payloads could serialise alike must never produce one digest, because a manifest
+    stores them in different fields and compares each to the input it claims to describe.
+    """
+    assert index_build.vocab_fingerprint([_topic()]) != index_build.topics_fingerprint(
+        {"a": _page()}
+    )
+    assert index_build.vocab_fingerprint([]) != index_build.topics_fingerprint({})
+    assert index_build.vocab_fingerprint([]) != index_build.store_fingerprint({})
+
+
+# --- the version arms -------------------------------------------------------
+
+
+def test_each_plane_carries_its_own_projection_version_and_a_bump_retires_only_it() -> None:
+    """Two constants, not one. A `Topic` gaining a field is not a `TopicPage` gaining one, so
+    bumping either must retire the fingerprints of THAT plane and leave the other's standing —
+    a single shared constant would force a needless rebuild of the whole other plane.
+    """
+    vocab, pages = [_topic()], {"a": _page()}
+    before = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_build, "VOCAB_VERSION", "xbrain-knowledge-vocab/v2")
+        bumped_vocab = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
+    assert bumped_vocab[0] != before[0]
+    assert bumped_vocab[1] == before[1]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_build, "TOPICS_VERSION", "xbrain-knowledge-topics/v2")
+        bumped_topics = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
+    assert bumped_topics[1] != before[1]
+    assert bumped_topics[0] == before[0]
+
+
+def test_the_emitter_version_reaches_both_planes_because_two_columns_derive_from_it() -> None:
+    """`topics.vocab_fingerprint` and `topics.synthesis_fingerprint` are `surface_fingerprint`
+    values, which stamp `SURFACE_VERSION`. A bump rewrites both columns with every description
+    and every overview byte unmoved, so the emitter version is an arm of both planes.
+    """
+    vocab, pages = [_topic()], {"a": _page()}
+    before = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(index_build, "SURFACE_VERSION", "xbrain-knowledge-surface/v2")
+        assert (index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)) != (
+            before
+        )
+        assert index_build.vocab_fingerprint(vocab) != before[0]
+        assert index_build.topics_fingerprint(pages) != before[1]
+
+
+# --- the description, and the profile rebuild it obliges ---------------------
+
+
+def test_a_description_edit_moves_the_vocabulary_plane_no_item_plane_can_see() -> None:
+    """The reason this plane exists (rule 6). `profile.profile_text` splices the description
+    into every assigned item's `profiles.profile_text`, so one edited word rewrites
+    `profiles`/`profiles_fts` for every item carrying the slug — and `item_fingerprint` takes no
+    vocabulary, so it CANNOT move. Both halves are asserted: the item plane standing still is
+    what makes the vocabulary plane's movement load-bearing rather than redundant.
+    """
+    item = _item(
+        enriched=Enrichment(
+            summary="s",
+            topics=["a"],
+            primary_topic="a",
+            enriched_at=datetime(2026, 1, 2, tzinfo=UTC),
+            model="m",
+            executor="api",
+        )
+    )
+    before, after = [_topic(description="OLD")], [_topic(description="NEW")]
+    assert profile_text(item, before) != profile_text(item, after)
+    assert index_build.item_fingerprint(item) == index_build.item_fingerprint(item)
+    assert index_build.vocab_fingerprint(before) != index_build.vocab_fingerprint(after)
+
+
+def test_the_equals_join_was_safe_only_because_the_slug_pattern_forbids_an_equals() -> None:
+    """A DECLARED RESIDUE, asserted where the safety actually lives. Reverting the entry to
+    `f"{slug}={description}"` reddens NOTHING in this file, and that is correct rather than a
+    gap: a collision needs an `=` on both sides of the delimiter, and `models.Topic` rejects a
+    slug carrying one, so the pair is not constructible from a valid vocabulary. What holds the
+    property is therefore the MODEL'S PATTERN and not the encoder — so it is pinned there, and
+    this goes red the day that pattern loosens. The nesting is still what ships, because it
+    needs no such argument; the NUL guard beside this is the half that was a live defect.
+    """
+    with pytest.raises(ValidationError):
+        Topic(slug="a=b", description="c")
+    assert Topic(slug="a-b", description="c").slug == "a-b"
+
+
+def test_a_nul_in_a_description_cannot_forge_the_boundary_between_two_entries() -> None:
+    """The NUL join, at the plane level and reachable from a REAL `vocab.yaml`: PyYAML accepts
+    the escape and `save_vocab`/`parse_vocab` round-trip the byte intact (measured), so the flat
+    `"\\0".join(f"{slug}={description}")` this replaces could be re-cut by a stored value.
+
+    The pair is the CONSTRUCTED collision, verified EQUAL at `755851876951afa8` under the prior
+    art: ONE topic against TWO, which persist as one `topics` row against two and one profile
+    splice against two.
+    """
+    forged = [_topic(slug="a", description="x\0b=y")]
+    honest = [_topic(slug="a", description="x"), _topic(slug="b", description="y")]
+    assert index_build.vocab_fingerprint(forged) != index_build.vocab_fingerprint(honest)
+
+
+# --- ordering and duplicate slugs -------------------------------------------
+
+
+def test_reordering_distinct_topics_does_not_move_the_vocabulary_plane() -> None:
+    """`save_vocab` writes with `sort_keys=False`, so the file order is whatever the caller
+    held. Two files that persist the same rows must not force a rebuild between them.
+    """
+    a, b, c = _topic("a", "A"), _topic("b", "B"), _topic("c", "C")
+    assert index_build.vocab_fingerprint([a, b, c]) == index_build.vocab_fingerprint([c, a, b])
+
+
+def test_swapping_two_duplicate_slugs_moves_the_plane_because_the_profile_moves() -> None:
+    """THE STABLE SORT IS LOAD-BEARING. `parse_vocab` accepts duplicate slugs and
+    `profile_text` resolves them through a dict comprehension, so the LAST entry wins: the two
+    orderings below persist DIFFERENT profile text. A sort that discarded input order among
+    equal slugs — a set, a dict, or a key of `(slug, description)` — would hash them alike and
+    fail OPEN. The persisted difference is asserted FIRST, so this pins the ground truth and
+    not merely the implementation's own habit.
+    """
+    item = _item(
+        enriched=Enrichment(
+            summary="s",
+            topics=["a"],
+            primary_topic="a",
+            enriched_at=datetime(2026, 1, 2, tzinfo=UTC),
+            model="m",
+            executor="api",
+        )
+    )
+    first, second = _topic("a", "FIRST"), _topic("a", "SECOND")
+    assert profile_text(item, [first, second]) != profile_text(item, [second, first])
+    assert index_build.vocab_fingerprint([first, second]) != index_build.vocab_fingerprint(
+        [second, first]
+    )
+
+
+def test_a_repeated_entry_is_the_declared_false_positive_and_not_a_collision() -> None:
+    """`[(a, x), (a, x)]` persists as the single row `[(a, x)]`, so hashing them apart costs
+    one wasted rebuild. Named here as the ACCEPTED direction — the warning, never a stale row.
+    """
+    one = [_topic("a", "x")]
+    assert index_build.vocab_fingerprint(one + one) != index_build.vocab_fingerprint(one)
+
+
+def test_the_topic_plane_is_independent_of_how_the_pages_were_parsed() -> None:
+    """A dict's iteration order is a property of the parse, not of the file."""
+    pages = {"a": _page("a"), "b": _page("b")}
+    reversed_pages = {k: pages[k] for k in reversed(list(pages))}
+    assert list(reversed_pages) != list(pages)
+    assert index_build.topics_fingerprint(pages) == index_build.topics_fingerprint(reversed_pages)
+
+
+def test_a_slug_of_sixty_four_hex_cannot_stand_where_a_note_fingerprint_did() -> None:
+    """The flat `"\\0".join([overview_fp, *note_fps, slug])` this replaces put the SLUG last
+    among 64-hex values, and `models.Topic`'s pattern admits a slug that IS 64 hex characters.
+    Nesting each page makes the position structural, so a slug cannot occupy a note's place.
+    """
+    hexish = "0" * 64
+    assert index_build.topics_fingerprint(
+        {hexish: _page(hexish, notes=[])}
+    ) != index_build.topics_fingerprint({hexish: _page(hexish, notes=[hexish])})
+
+
+# --- every persisted topic field, and the two the prior version omitted ------
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("slug", "b"),
+        ("overview", "MOVED"),
+        ("notes", ["MOVED"]),
+        ("synthesized_at", datetime(2026, 1, 21, tzinfo=UTC)),
+        ("post_count_at_synth", 8),
+    ],
+)
+def test_every_persisted_topic_field_moves_the_topic_plane(field, value) -> None:
+    """One case per column of the `topics` table this plane is the sole cover for. The last two
+    are the ones the prior implementation OMITTED: it hashed the overview and the notes only.
+    """
+    base = {"a": _page()}
+    moved = {"a": _page(**{field: value})}
+    assert index_build.topics_fingerprint(base) != index_build.topics_fingerprint(moved)
+
+
+def test_a_resynthesis_to_the_same_prose_against_a_moved_count_still_moves_the_plane() -> None:
+    """The defect the two added fields close, stated as the event that produces it: `xbrain
+    topics` re-synthesising a page whose overview and notes come back IDENTICAL, against a post
+    count that has moved. Two persisted columns are rewritten and `stale` flips, and the prior
+    fingerprint — overview and notes only — could not see any of it.
+    """
+    before = {"a": _page(post_count_at_synth=7, synthesized_at=datetime(2026, 1, 20, tzinfo=UTC))}
+    after = {"a": _page(post_count_at_synth=9, synthesized_at=datetime(2026, 2, 1, tzinfo=UTC))}
+    assert before["a"].overview == after["a"].overview
+    assert before["a"].notes == after["a"].notes
+    assert index_build.topics_fingerprint(before) != index_build.topics_fingerprint(after)
+
+
+def test_the_mapping_key_and_the_slug_field_are_hashed_apart_because_they_can_diverge() -> None:
+    """`store.parse_topic_pages` takes the key from the JSON object and `TopicPage.slug` from
+    the value, so a hand-edited `topics.json` can carry two different values. Hashing one would
+    let the other move unseen, and which one 02.7's writer files the row under is ITS choice.
+    """
+    aligned = {"a": _page("a")}
+    diverged = {"a": _page("b")}
+    assert index_build.topics_fingerprint(aligned) != index_build.topics_fingerprint(diverged)
+    assert index_build.topics_fingerprint({"b": _page("b")}) != index_build.topics_fingerprint(
+        diverged
+    )
+
+
+def test_the_synthesis_timestamp_is_hashed_as_the_string_the_writer_persists() -> None:
+    """`save_topic_pages` writes `model_dump(mode="json")`, i.e. `isoformat()`, and `TopicPage`
+    carries NO UTC validator — a naive datetime and a `+02:00` one are both accepted. Two pages
+    at the same INSTANT under different offsets are two different files and two different
+    `topics.synthesized_at` values, so tracking the rendered string is tracking the bytes.
+    """
+    offset = timezone(timedelta(hours=2))
+    same_instant = {"a": _page(synthesized_at=datetime(2026, 1, 20, 2, 0, tzinfo=offset))}
+    utc = {"a": _page(synthesized_at=datetime(2026, 1, 20, 0, 0, tzinfo=UTC))}
+    assert same_instant["a"].synthesized_at == utc["a"].synthesized_at
+    assert index_build.topics_fingerprint(same_instant) != index_build.topics_fingerprint(utc)
+
+
+# --- missing versus empty ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "empty, absent",
+    [
+        ({"a": _page(notes=[])}, {"a": _page(notes=[""])}),
+        ({"a": _page(overview="")}, {}),
+    ],
+)
+def test_an_absent_topic_value_is_not_an_empty_one(empty, absent) -> None:
+    """A note list with nothing in it is not a list holding a blank note, and a page that does
+    not exist is not a page whose overview was cleared. Both pairs are real states of a
+    `topics.json`, and the index persists them as different rows.
+    """
+    assert index_build.topics_fingerprint(empty) != index_build.topics_fingerprint(absent)
+
+
+def test_an_empty_vocabulary_is_not_one_holding_an_empty_description() -> None:
+    """An absent `vocab.yaml` parses to `[]`; a topic whose description was cleared is a row.
+    Folding them would make a deleted vocabulary read as one that is merely blank.
+    """
+    assert index_build.vocab_fingerprint([]) != index_build.vocab_fingerprint(
+        [_topic(description="")]
+    )
+
+
+# --- the encoding refusal, named once for all four planes -------------------
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: index_build.vocab_fingerprint([_topic(description="\ud800")]), id="v"),
+        pytest.param(
+            lambda: index_build.topics_fingerprint({"a": _page(overview="\ud800")}), id="t"
+        ),
+        pytest.param(lambda: index_build.item_fingerprint(_item(bookmark_folder="\ud800")), id="i"),
+        pytest.param(
+            lambda: index_build.store_fingerprint({"42": _item(bookmark_folder="\ud800")}), id="s"
+        ),
+    ],
+)
+def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) -> None:
+    """ONE definition of what happens when THIS MODULE's payload cannot be encoded (rule 5),
+    asserted across all four consumers so the next plane cannot be added with a bare
+    `UnicodeEncodeError` again. The bare exception names a byte offset into a JSON blob nobody
+    wrote; this one names the FILE. `errors="replace"` is never the answer — it would hash
+    U+FFFD and call two different strings the same content.
+
+    THE ATOM IS `bookmark_folder` AND NOT `text` ON PURPOSE, and the test below says why: a
+    surrogate in surface TEXT never reaches this module. The claim is scoped to the payload
+    `_fingerprint` encodes, which is the only payload this child owns.
+    """
+    with pytest.raises(index_build.FingerprintError) as caught:
+        call()
+    assert "surrogates not allowed" in str(caught.value)
+    assert isinstance(caught.value.__cause__, UnicodeEncodeError)
+
+
+@pytest.mark.parametrize(
+    "domain, expected", [("vocab", "data/vocab.yaml"), ("topics", "data/topics.json")]
+)
+def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, expected) -> None:
+    """Actionable, not merely named: the message carries the path. A lone surrogate reaches
+    these planes from a file of PURE ASCII bytes — the escape decodes cleanly and the parser
+    hands the surrogate back — so the operator has no other way to know which input to open.
+    """
+    with pytest.raises(index_build.FingerprintError) as caught:
+        index_build._fingerprint(domain, ["\ud800"])
+    assert expected in str(caught.value)
+
+
+def test_refusing_beats_surrogatepass_because_the_index_cannot_store_it_either() -> None:
+    """The measurement that decided the refusal. `surrogatepass` would hash deterministically,
+    but `sqlite3` raises the SAME error binding the value as `TEXT`, so the fingerprint would
+    certify what 02.7's writer must then reject — unnamed, and far from the byte.
+    """
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE t (x TEXT)")
+    with pytest.raises(UnicodeEncodeError):
+        connection.execute("INSERT INTO t VALUES (?)", ("\ud800",))
+    connection.close()
+
+
+def test_the_named_error_is_a_value_error_so_no_os_error_handler_swallows_it() -> None:
+    """`_read_bound` raises `OSError` for an obstructed input, and callers guard that. An
+    encoding refusal is not an I/O failure: the bytes were read and decoded fine, and it is the
+    CONTENT that cannot be stored. Making it a `ValueError` keeps the two apart.
+    """
+    assert issubclass(index_build.FingerprintError, ValueError)
+    assert not issubclass(index_build.FingerprintError, OSError)
+
+
+def test_a_surrogate_in_surface_text_is_refused_one_layer_lower_and_is_not_named_there() -> None:
+    """THE LIMIT OF THE CLAIM ABOVE, pinned rather than left to be discovered. `item_surfaces`
+    calls `ids.surface_fingerprint`, which does its OWN `"\\0".join(...).encode("utf-8")`, so a
+    surrogate in a surface's text raises a BARE `UnicodeEncodeError` from `ids.py` before this
+    module's payload is ever built. Same fail-closed direction, no file named — `ids.py`'s debt
+    and not this child's, because naming it there would put a second definition of the refusal
+    in a module that emits no plane. Recorded so the next reader does not read the guard above
+    as covering more than it does.
+    """
+    with pytest.raises(UnicodeEncodeError):
+        index_build.item_fingerprint(_item(text="\ud800"))
