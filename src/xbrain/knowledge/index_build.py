@@ -252,12 +252,26 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     docstring for why a timestamp proxy both misses hand edits and cannot reach the 40 % of
     the corpus with no `content` at all.
 
+    EACH VARIADIC REGION DECLARES ITS LENGTH. `topics`, `kinds` and `rows` are three
+    variable-length regions inside one flat `\0`-joined list, and with no count in front of
+    each the join is NOT injective: `topics=("thread",)` with no sources serialised exactly
+    like no topics with one blank `thread` source, so two different item states hashed the
+    same and `update` called the item unchanged — rule 6, failing OPEN. The framing is what
+    makes the stream decodable. It deliberately replaces an earlier argument from
+    `Topic.slug`'s pattern, which governs the VOCABULARY and not `Enrichment.topics` — the
+    unrestricted `list[str]` this actually hashes.
+
     `options` IS NOT READ HERE. It is accepted so the signature 02.7 consumes is already the
     ported one, and discarded — see `IndexOptions`. Nothing in this fingerprint depends on the
     chunker's parameters or on the vault, and a caller must not assume it does.
     """
     options = options or IndexOptions()
-    surfaces = item_surfaces(item)
+    topics = item_topics(item)
+    kinds = sorted(
+        source.kind
+        for _index, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
+    )
+    rows = [json.dumps(surface_row(surface), ensure_ascii=False) for surface in item_surfaces(item)]
     parts = [
         SURFACE_VERSION,
         item.id,
@@ -268,12 +282,12 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
         item.created_at.isoformat(),
         item.captured_at.isoformat(),
         item.bookmark_folder or "",
-        *item_topics(item),
-        *sorted(
-            source.kind
-            for _index, source in iter_content_sources(item, set(CONTENT_KIND_TO_SURFACE_TYPES))
-        ),
-        *(json.dumps(surface_row(surface), ensure_ascii=False) for surface in surfaces),
+        f"topics:{len(topics)}",
+        *topics,
+        f"kinds:{len(kinds)}",
+        *kinds,
+        f"rows:{len(rows)}",
+        *rows,
     ]
     return _sha256("\0".join(parts))
 

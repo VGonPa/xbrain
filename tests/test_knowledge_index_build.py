@@ -501,6 +501,106 @@ def test_the_item_fingerprint_covers_a_content_kind_that_emits_no_surface(corpus
     assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item)
 
 
+def test_two_different_items_cannot_share_one_serialisation_across_the_variadic_regions(
+    corpus,
+) -> None:
+    """The topics region and the kinds region are ADJACENT, and nothing said where one ends.
+
+    `parts` splices three variable-length regions — `item_topics`, the sorted content kinds
+    and the surface rows — into one flat list joined by `\0`. With no length in front of each,
+    that join is NOT injective: two different item states serialise to the very same bytes.
+
+    Constructed here, and neither side is exotic — both are states the store can hold:
+    `primary_topic="thread"` with `topics=["thread"]` and no content at all, against no topics
+    and one `ContentSourceSuccess(kind="thread", text="")`. `thread` is both a `ContentKind`
+    and a legal topic string — `Enrichment.topics` is `list[str]` with no pattern, so nothing
+    in the TYPE forbids it — and a non-video source whose text is blank emits NO surface, so
+    the surface region is byte-identical on both sides and cannot break the tie.
+
+    IT FAILS OPEN, which is what makes it worth a test in a module whose every other staleness
+    path fails towards the warning: the two states hash the same, `update` reports the item
+    unchanged, and the persisted `item_topics` / `item_content_kinds` planes go on serving a
+    state the store no longer holds (rule 6). The reading this replaces measured how hard the
+    collision was to REACH and argued it from `Topic.slug`'s pattern — but `Topic.slug` is not
+    what is hashed, and "hard to reach" is not the same fact as "impossible to express".
+
+    MEASURED, AND STATED AS MEASURED. Seen RED at `bfbaf87`, both sides hashing
+    `bafd6ed7…`; red again under removal of the WHOLE framing (1 failed, 40 passed —
+    diagonal). Removing any ONE length tag alone leaves this file GREEN, because either
+    surviving tag still separates the two regions. So what this test pins is THE FRAMING,
+    never each tag independently, and no claim of per-tag protection is made for it.
+
+    The last assertion is the guard; the three before it prove the two states really do differ
+    on the axes they name, or an equal-hash assertion could pass on two identical items.
+    """
+    from xbrain.models import Content, ContentSourceSuccess
+
+    store, _vocab, _pages = corpus
+    item = store["k02"]
+    assert item.content is None, "the base item must start with no content source at all"
+
+    topic_side = item.model_copy(
+        update={
+            "enriched": item.enriched.model_copy(
+                update={"primary_topic": "thread", "topics": ["thread"]}
+            )
+        }
+    )
+    kind_side = item.model_copy(
+        update={
+            "enriched": item.enriched.model_copy(update={"primary_topic": None, "topics": []}),
+            "content": Content(
+                fetched_at=item.captured_at,
+                sources=[
+                    ContentSourceSuccess(kind="thread", url="https://x.com/i/status/2", text="")
+                ],
+            ),
+        }
+    )
+
+    assert item_topics(topic_side) == ("thread",), "one state carries `thread` as a TOPIC"
+    assert item_topics(kind_side) == (), "and the other carries no topic at all"
+    assert [index_build.surface_row(s) for s in item_surfaces(topic_side)] == [
+        index_build.surface_row(s) for s in item_surfaces(kind_side)
+    ], "the blank thread source emits no surface, so the surface region cannot break the tie"
+
+    assert index_build.item_fingerprint(topic_side) != index_build.item_fingerprint(kind_side), (
+        "a topic named like a content kind must not serialise as that content kind"
+    )
+
+
+def test_the_index_options_are_carried_inert_and_02_7_is_what_must_redden_this(corpus) -> None:
+    """`options` is accepted and DISCARDED, and until now only prose said so.
+
+    `item_fingerprint` binds `options = options or IndexOptions()` and then reads neither
+    `params` nor `vault_dir`, so `item_fingerprint(i, options=A) == item_fingerprint(i)` for
+    every A. Two docstrings say it and nothing executable saw it — `grep -n options` over this
+    file returned nothing, and `vulture` does not flag a parameter that is bound.
+
+    THIS IS A CHARACTERIZATION TEST: green before and after, repairing no defect, and no
+    mutation motivated it. What it buys is the other direction. 02.7's builder is the first
+    consumer that will genuinely read `params` and `vault_dir`, and the commit that makes the
+    fingerprint depend on them MUST turn this red. Reading the parameters while it stayed
+    green would mean the dependency never entered the hash — rule 6 armed: a re-chunk under
+    new parameters that `update` reports as `0 cambiados`.
+
+    So in 02.7 DELETE it, never weaken it.
+    """
+    from xbrain.knowledge.chunking import ChunkerParams
+
+    store, _vocab, _pages = corpus
+    item = store["k02"]
+    bare = index_build.item_fingerprint(item)
+
+    swept = index_build.IndexOptions(params=ChunkerParams(target=1, max_chars=2, min_chars=1))
+    vaulted = index_build.IndexOptions(vault_dir=Path("/nowhere"))
+    assert index_build.item_fingerprint(item, options=swept) == bare, "params are not read"
+    assert index_build.item_fingerprint(item, options=vaulted) == bare, "nor is the vault"
+    assert index_build.store_fingerprint(store, options=swept) == index_build.store_fingerprint(
+        store
+    ), "and `store_fingerprint` hands them to the same discard"
+
+
 def test_the_leading_surface_version_is_the_belt_for_an_item_with_no_surfaces(
     corpus, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -582,12 +682,45 @@ def test_load_index_inputs_binds_the_signal_to_the_bytes_it_read(workspace, corp
     assert index_build.StoreSignal.of(items) != loaded.signal, "the path now points elsewhere"
 
 
-def test_the_store_signal_is_one_stat_and_nothing_else(workspace) -> None:
-    """The cheap signal must stay cheap, or it is the expensive one with a different name."""
-    signal = index_build.StoreSignal.of(workspace / "items.json")
-    stat = (workspace / "items.json").stat()
-    assert signal.items_json_mtime_ns == stat.st_mtime_ns
-    assert signal.items_json_size == stat.st_size
+def test_the_store_signal_is_one_stat_per_named_input_and_nothing_else(
+    three_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cheap signal must stay cheap, or it is the expensive one with a different name.
+
+    THE NAME THIS REPLACES SAID «one stat» WHILE THE CODE DOES THREE. Round 10 corrected both
+    docstrings that carried the stale claim and left the test's own name, which is the most
+    widely read prose in a test file because it is what pytest prints. And the body asserted
+    nothing the name claimed — it compared the `items` entry against `path.stat()` and stayed
+    green under five stats, or none.
+
+    What is pinned instead is the contract as it actually is, and it is NOT «three»
+    unconditionally: `_stat_signal` answers `(0, 0)` for an unnamed path WITHOUT touching the
+    filesystem, so the cost is one stat PER NAMED INPUT. Both halves are asserted because a
+    signal that grew a second stat per file and a signal that stat'ed an unnamed path are
+    different regressions, and each moves a different number here.
+    """
+    real_stat = Path.stat
+    calls: list[Path] = []
+
+    def counted(self, *args, **kwargs):
+        calls.append(self)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", counted)
+    items = three_inputs / "items.json"
+
+    signal = index_build.StoreSignal.of(
+        items, three_inputs / "vocab.yaml", three_inputs / "topics.json"
+    )
+    assert len(calls) == 3, f"one stat per named input, and nothing else: {calls}"
+
+    calls.clear()
+    partial = index_build.StoreSignal.of(items)
+    assert len(calls) == 1, "an unnamed input costs no stat at all"
+    assert (partial.vocab_yaml_size, partial.topics_json_size) == (0, 0)
+
+    assert signal.items_json_mtime_ns == real_stat(items).st_mtime_ns
+    assert signal.items_json_size == real_stat(items).st_size
 
 
 def test_the_store_signal_of_a_missing_store_is_zeroed_not_an_exception(tmp_path: Path) -> None:
