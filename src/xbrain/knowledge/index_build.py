@@ -550,8 +550,9 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
       `chunk_id` and `chunks.fingerprint`, the second decides where every span falls (measured,
       `800/0` against `400/0`: 5 rows against 9 over one body). A bump of either rewrites the
       whole `chunks` plane with this fingerprint unmoved, and that is CORRECT: a manifest
-      refusing the query outright beats per-item invalidation. 02.6b's — and `ids.py:42` names
-      `load_compatible_manifest` as its home, a function that does not exist in this tree yet.
+      refusing the query outright beats per-item invalidation. `ids.py:42` names
+      `load_compatible_manifest` as its home and 02.6b landed it, below in this file: it
+      compares BOTH the version and the parameters. Still uncalled here — 02.7 wires it.
     - `profiles.profile_text` — a `vocab.yaml` edit splices each assigned topic's DESCRIPTION
       into it (spec §5.1.A) and rewrites `profiles`/`profiles_fts` for every assigned item while
       this fingerprint, which takes no vocabulary, cannot move: DISCHARGED by `vocab_fingerprint`

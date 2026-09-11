@@ -85,9 +85,15 @@ from xbrain.models import _reject_local_path_traversal
 # read it back. `tests/test_knowledge_index_build.py` binds the two DDLs to their projections
 # by NAME and pins their declarations by VALUE, so neither side can move again without the other.
 # WHAT THE BUMP DOES AND DOES NOT DO IN THIS TREE, because the paragraph opening this block
-# reads like an enforcement and here it is an intention: NOTHING consumes this constant. The
-# manifest that would compare it is 02.6b's — `load_compatible_manifest` has one hit repo-wide,
-# a comment at `ids.py:42` — and `_verify_schema` tolerates EXTRA columns by design, so an
+# reads like an enforcement and here it is still only half of one. This constant now HAS a
+# consumer: 02.6b landed `index_build.load_compatible_manifest`, which compares it against the
+# manifest's `schema_version` and refuses a mismatch entirely, with the rebuild advice. What it
+# does NOT yet have is a CALLER — that function has none in `src/` (`build`/`update`/`status`
+# are 02.7's), so the comparison runs on no live path and a consumer is not an enforcement. The
+# line this replaces said "NOTHING consumes this constant" and named `load_compatible_manifest`
+# a single comment at `ids.py:42`; both stopped being true the moment 02.6b merged, and the
+# distinction that survives is caller-vs-consumer, not presence-vs-absence. Meanwhile
+# `_verify_schema` still tolerates EXTRA columns by design, so an
 # existing v3 base, which differs from v4 only by carrying `attempts`, is ACCEPTED today
 # (verified by opening one). The bump's only live effect is the other direction: v3 code reading
 # a v4 base finds `source_failures.attempts` missing and refuses it. The table also diverges
