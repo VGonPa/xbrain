@@ -2399,3 +2399,188 @@ def test_the_depth_bound_applies_to_every_page_size_not_only_small_ones(
         assert observed[1] is widest[1], (
             f"--limit {limit} says truncated={observed[1]}, --limit 256 says {widest[1]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Review round 8 — B6: a corrupt row cost a citation SLOT, and the counter drifted
+# ---------------------------------------------------------------------------
+
+
+def _single_dense_item(ident: str, paragraphs: int, marker: str) -> dict[str, Item]:
+    """One item whose article repeats the marker, so it owns several citable chunks."""
+    return {
+        ident: Item(
+            id=ident,
+            source="bookmark",
+            url=f"https://x.com/a/status/{ident}",
+            author=Author(handle="a", name="A"),
+            text=f"Post {ident}.",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+            content=Content(
+                fetched_at=datetime(2026, 1, 2, tzinfo=UTC),
+                sources=[
+                    ContentSourceSuccess(
+                        kind="external_article",
+                        url=f"https://example.test/{ident}",
+                        title=f"Articulo {ident}",
+                        text="\n\n".join(
+                            f"{marker} parrafo {n} " + " ".join(f"w{k}" for k in range(60))
+                            for n in range(paragraphs)
+                        ),
+                    )
+                ],
+            ),
+            enriched=Enrichment(
+                summary=f"Resumen {ident}.",
+                topics=[],
+                primary_topic=None,
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                model="m",
+                executor="manual",
+            ),
+        )
+    }
+
+
+@pytest.mark.parametrize("corrupt", [1, 2, 3])
+def test_a_corrupt_row_costs_a_citation_not_a_citation_SLOT(tmp_path: Path, corrupt: int) -> None:
+    """B6: `_settle_evidence` asked for exactly `cap` rows and verified AFTERWARDS.
+
+    An excluded row therefore consumed a slot a VALID chunk of the same owner could have
+    filled. Measured on one item with six citable chunks and `cap=3`:
+
+        corrupt=1 -> 2 matches   corrupt=2 -> 1 match   corrupt=3 -> 0 matches
+
+    At three, the item is served at rank 1 with NO citations while three valid chunks of that
+    same owner sit in the index unasked — and `verify_with` flips to the derived branch, so the
+    consumer is handed an instruction to verify and nothing to verify with. `no_underlying_source`
+    cannot warn either: it tests `bool(result.matches)`, and matches is empty.
+
+    Exclusion must cost the row, never the slot. The scoped query now deepens until it has
+    `cap` SURVIVORS or the owner's rows run out, so the cap counts what can be served.
+
+    Seen red at `fb32b44`: `3 - corrupt` matches instead of `cap`.
+    """
+    marker = "Wrenfeather"
+    store = _single_dense_item("W000", 18, marker)
+    data = tmp_path / "data"
+    _persist(data, store, [], {})
+    _build(data)
+    context = _context(data, store, [], {})
+
+    connection = sqlite3.connect(db_path(context.index_dir))
+    ids = [
+        row[0]
+        for row in connection.execute(
+            "SELECT chunk_id FROM chunks WHERE owner_id = 'W000' "
+            "AND surface_type = 'external_article' ORDER BY chunk_index"
+        )
+    ]
+    assert len(ids) >= corrupt + context.max_matches_per_item, (
+        f"the owner must keep a full cap of VALID chunks after {corrupt} are forged: {len(ids)}"
+    )
+    with connection:
+        for chunk_id in ids[:corrupt]:
+            connection.execute(
+                "UPDATE chunks SET fingerprint = ? WHERE chunk_id = ?", ("0" * 64, chunk_id)
+            )
+    connection.close()
+
+    response = search(marker, context, limit=1)
+    served = response.results[0]
+
+    assert len(served.matches) == context.max_matches_per_item, (
+        f"{corrupt} forged rows cost {context.max_matches_per_item - len(served.matches)} "
+        f"citation slots that valid chunks of the same owner could have filled"
+    )
+    assert {m.chunk_id for m in served.matches}.isdisjoint(ids[:corrupt])
+    assert "external_article" in served.verify_with
+
+
+def test_the_exclusion_counter_counts_distinct_rows_not_visits(tmp_path: Path) -> None:
+    """The counter drifted because the same row was counted once per candidate set it appeared in.
+
+    Measured at `fb32b44` on one item with three forged rows: the counter read 2, 4, 6 and then
+    **7** for one, two, three and four forged rows — not a consistent multiple, so not a count of
+    anything. And it contradicted `_materialise`'s own docstring in the same file: *"THE COUNT IS
+    RECOMPUTED PER WINDOW, NEVER ACCUMULATED."*
+
+    `corrupt_chunks_excluded` answers ONE question — how many rows this response could not serve
+    — so it is the size of the UNION of the excluded ids across every candidate set the response
+    opened. A row the selection phase and the evidence phase both rejected is one row.
+
+    Seen red at `fb32b44`: 6 for three forged rows.
+    """
+    marker = "Wrenfeather"
+    store = _single_dense_item("W000", 18, marker)
+    data = tmp_path / "data"
+    _persist(data, store, [], {})
+    _build(data)
+    context = _context(data, store, [], {})
+
+    connection = sqlite3.connect(db_path(context.index_dir))
+    ids = [
+        row[0]
+        for row in connection.execute(
+            "SELECT chunk_id FROM chunks WHERE owner_id = 'W000' "
+            "AND surface_type = 'external_article' ORDER BY chunk_index"
+        )
+    ]
+    with connection:
+        for chunk_id in ids[:3]:
+            connection.execute(
+                "UPDATE chunks SET fingerprint = ? WHERE chunk_id = ?", ("0" * 64, chunk_id)
+            )
+    connection.close()
+
+    response = search(marker, context, limit=1)
+
+    assert response.index.corrupt_chunks_excluded == 3, (
+        f"three rows were forged; the counter says {response.index.corrupt_chunks_excluded}"
+    )
+
+
+def test_an_items_own_chunks_fill_its_citations_before_topic_prose(tmp_path: Path) -> None:
+    """B4's residue: synthesized topic prose won slots against the item's OWN evidence.
+
+    Round 8 made the evidence page-independent by widening the scoped universe to the item plus
+    its topics — and then the topic's description and overview beat the item's second article
+    chunk under `cap=3`, at EVERY page size:
+
+        before: ['external_article', 'external_article']            (small pages)
+        after : ['external_article', 'topic_description', 'topic_overview']   (all pages)
+
+    Consistent, and consistently less primary evidence. A topic note is synthesized prose about
+    a group of items; the item's own article is the thing a reader can check. Spec §3.5 makes
+    that distinction the whole point of `verify_with`, so it should decide slots too.
+
+    The item's own owner is asked first and topics only fill what is left. Still page-independent
+    — both halves are a function of the item, not of the window.
+
+    Seen red at `fb32b44`: topic prose occupying two of the three slots.
+    """
+    marker, slug = "Kestrelmark", "k-topic"
+    store, vocab, pages = _topic_bearing_corpus(25, marker, slug)
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    own_kinds = {"summary", "external_article", "post"}
+    for limit in (1, 5, 25):
+        response = search(marker, context, limit=limit)
+        served = next(r for r in response.results if r.item_id == "X000")
+        kinds = [m.surface_type for m in served.matches]
+
+        assert "external_article" in kinds, (
+            f"--limit {limit}: topic prose EVICTED the item's own primary citation: {kinds}"
+        )
+        # Topics top the list up, they never displace: every own chunk precedes every topic one.
+        from_topic = [k not in own_kinds for k in kinds]
+        assert from_topic == sorted(from_topic), (
+            f"--limit {limit}: a topic chunk sits ahead of the item's own evidence: {kinds}"
+        )
+        # And the top-up is real rather than a wasted slot: X000 owns only two matching chunks,
+        # so the third is the topic's, which is what filling the cap from the group is FOR.
+        assert len(served.matches) == context.max_matches_per_item, kinds

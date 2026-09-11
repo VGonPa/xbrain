@@ -203,7 +203,8 @@ def search(
         page, evidence_excluded = _settle_evidence(
             index, query, filters, context, ordered[offset : offset + limit]
         )
-        excluded += evidence_excluded
+        excluded |= evidence_excluded
+        corrupt_chunks_excluded = len(excluded)
         results = tuple(
             _hydrate(rank, item_id, matches, context)
             for rank, (item_id, matches) in enumerate(page, start=offset + 1)
@@ -214,7 +215,8 @@ def search(
             strategy=executed,
             filters=filters,
             index=index.status_ref(
-                corrupt_chunks_excluded=excluded, strategy_degradation=strategy_degradation
+                corrupt_chunks_excluded=corrupt_chunks_excluded,
+                strategy_degradation=strategy_degradation,
             ),
             results=results,
             truncated=truncated,
@@ -231,7 +233,7 @@ def _materialise(
     context: QueryContext,
     *,
     needed: int,
-) -> tuple[list[tuple[str, list[LexicalHit]]], int, bool]:
+) -> tuple[list[tuple[str, list[LexicalHit]]], set[str], bool]:
     """The candidate window, DEEPENED until it can answer — `(ordered, excluded, exhausted)`.
 
     THE WINDOW IS MEASURED IN CANDIDATES AND THE PAGE IN ANSWERS, and three stages sit between
@@ -292,7 +294,7 @@ def _chunk_owners(
     context: QueryContext,
     *,
     needed: int,
-) -> tuple[dict[str, list[LexicalHit]], int, bool]:
+) -> tuple[dict[str, list[LexicalHit]], set[str], bool]:
     """Deepen the CHUNK window until it yields `needed` owners the response can serve.
 
     THIS RUNS TO COMPLETION BEFORE A SINGLE PROFILE CANDIDATE IS CONSIDERED, and that ordering
@@ -342,31 +344,66 @@ def _chunk_owners(
     `P(n) = {1: 1, 2: 2, 3: 3, 4: 4, 8: 8, 12: 12, 16: 12, 32: 12}` — and a tie there can only
     mean saturation. One loop needed the change, not two.
 
-    The count is the FINAL window's, never accumulated: every window is a prefix of the same
-    ranking, so the deepest already holds every exclusion the shallower ones saw.
+    The exclusions are returned as IDS, not as a count, and the response reports the size of
+    their UNION with the evidence phase's. A row rejected by two candidate sets is one row that
+    could not be served; counting visits read 2, 4, 6 and then 7 for one, two, three and four
+    forged rows — not a consistent multiple, so not a count of anything. Within this loop the
+    final window's set is the whole answer anyway: every window is a prefix of the same ranking,
+    so the deepest already holds every exclusion the shallower ones saw.
     """
     depth = needed
     while True:
         candidates, exhausted = index.lexical.search_owners(query, depth, filters=filters)
-        hits, unresolvable = resolvable_hits(candidates)
-        hits, corrupt = verify_fingerprints(hits)
+        hits, _unresolvable = resolvable_hits(candidates)
+        hits, _corrupt = verify_fingerprints(hits)
+        excluded = {hit.chunk_id for hit in candidates} - {hit.chunk_id for hit in hits}
         grouped = _group_by_item(hits, context, limit=needed)
         if len(grouped) >= needed or exhausted or distinct_owners(candidates) < depth:
-            return grouped, corrupt + unresolvable, exhausted
+            return grouped, excluded, exhausted
         depth *= 2
 
 
-def _evidence_owners(item_id: str, context: QueryContext) -> tuple[str, ...]:
-    """The owners whose chunks may cite this item: itself, then the topics it belongs to.
+def _verified_top(
+    index: OpenIndex,
+    query: str,
+    filters: SearchFilters,
+    owners: tuple[str, ...],
+    wanted: int,
+    excluded: set[str],
+) -> list[LexicalHit]:
+    """The best `wanted` chunks of `owners` that SURVIVE verification, deepening to find them.
 
-    Read off the STORE so the answer is a property of the corpus rather than of the window
-    that happened to select the item. The item leads because its own words are the stronger
-    citation; the order is deterministic and `item_topics` already sorts primary-first.
+    EXCLUSION MUST COST THE ROW, NEVER THE SLOT, and that was the defect. This asked for exactly
+    `wanted` rows and verified afterwards, so a forged row consumed a citation slot a VALID chunk
+    of the same owner could have filled. Measured on one item with six citable chunks at `cap=3`:
+    one forged row left 2 matches, two left 1, three left NONE — the item served at rank 1 with
+    no citations while three valid chunks of its own sat in the index unasked, `verify_with`
+    flipped to the derived branch, and `no_underlying_source` could not warn because it tests
+    `bool(result.matches)`.
+
+    So the window doubles until `wanted` rows survive or the owners' rows run out. It is bounded
+    by the owners' own chunk count, which is why this is affordable where deepening the GLOBAL
+    window was not (round 7 measured that at 5-56x on the real corpus).
+
+    The ids it rejects go into `excluded`, a SET: `corrupt_chunks_excluded` answers how many rows
+    this response could not serve, and a row rejected by two candidate sets is one row. Counting
+    visits instead read 2, 4, 6 and then 7 for one, two, three and four forged rows — not a
+    consistent multiple, so not a count of anything.
     """
-    item = context.store.get(item_id)
-    if item is None:
-        return (item_id,)
-    return (item_id, *item_topics(item))
+    if not owners or wanted <= 0:
+        return []
+    depth = wanted
+    seen = -1
+    while True:
+        scoped = index.lexical.search(query, depth, filters=filters, owner_ids=owners)
+        kept, _ = resolvable_hits(scoped)
+        kept, _ = verify_fingerprints(kept)
+        survivors = {hit.chunk_id for hit in kept}
+        excluded |= {hit.chunk_id for hit in scoped} - survivors
+        if len(kept) >= wanted or len(scoped) == seen:
+            return list(kept[:wanted])
+        seen = len(scoped)
+        depth *= 2
 
 
 def _settle_evidence(
@@ -375,70 +412,54 @@ def _settle_evidence(
     filters: SearchFilters,
     context: QueryContext,
     page: list[tuple[str, list[LexicalHit]]],
-) -> tuple[list[tuple[str, list[LexicalHit]]], int]:
-    """Re-derive each SERVED item's matches from a query scoped to its own owners.
+) -> tuple[list[tuple[str, list[LexicalHit]]], set[str]]:
+    """Re-derive each SERVED item's matches, its OWN chunks first, then its topics'.
 
     THE EVIDENCE A RESULT CARRIES MUST NOT DEPEND ON THE PAGE SIZE, and it did. The candidate
     window is sized in OWNERS and `_group_by_item` filled each bucket from whatever that window
-    happened to hold, so an item's second-best chunk was included or not according to `limit`.
-    Measured on 25 items, no topics, nothing deleted and nothing corrupted:
+    happened to hold, so an item's second-best chunk was included or not according to `limit`:
 
-        --limit  5: X000 rank=1 matches=['summary']                    verify_with=('external_article', 'post')
+        --limit  5: X000 rank=1 matches=['summary']                    verify_with=('external_article','post')
         --limit 10: X000 rank=1 matches=['summary','external_article'] verify_with=('external_article',)
 
-    Same corpus, same query, same item, same rank. The consequence is not a shorter list: with
-    only a machine-written `summary` to cite, `_verify_with` takes the DERIVED branch and says
-    *go check the article and the post*; with the article matched it takes the primary branch
-    and says *check the article*. Two different verification instructions for one claim, and
-    spec §3.5 makes `verify_with` an instruction rather than a display detail.
+    Same corpus, same query, same item, same rank — and the consequence is not a shorter list.
+    With only a machine-written `summary` to cite, `_verify_with` takes the DERIVED branch and
+    says *go check the article and the post*; with the article matched it says *check the
+    article*. Two verification instructions for one claim, and spec §3.5 makes `verify_with` an
+    instruction rather than a display detail.
 
-    ONE SCOPED QUERY PER SERVED ITEM, AT `max_matches_per_item` ROWS. `LexicalIndex.search`
-    already narrows by `owner_ids` — the internal narrowing `get` and the evaluation harness
-    use, deliberately kept off the FROZEN `SearchFilters` — so the top `cap` chunks of an
-    item's own owners are one bounded question with one answer, whatever page asked it.
+    THE OWNER UNIVERSE COMES FROM THE STORE, NOT FROM THE BUCKET. Re-deriving from the hits
+    already collected reproduced the page-dependence one layer down: an item whose TOPIC hit fell
+    outside the smaller window offered only its own owner, a wider window offered the topic too.
+    `item_topics` reads the assignment off the ITEM, so the universe is a property of the corpus.
 
-    WHY NOT DEEPEN THE MAIN WINDOW UNTIL EVERY BUCKET IS FULL: that is also correct and it was
-    measured before this was written. It forces the window to full materialisation whenever a
-    served owner simply HAS fewer chunks than the cap, and on the real 2,474-item index that
-    cost 54 ms -> 592 ms for `agents` and 67 ms -> 3,723 ms for `de`, a 5-56x regression for an
-    answer that was already correct in all but the sparse case. Bounded work per served item
-    beats unbounded work per query.
-
-    THE OWNER SET COMES FROM THE STORE, NOT FROM THE BUCKET, and that was the second half of
-    this defect. Re-deriving from the hits already collected reproduces the page-dependence one
-    layer down: an item whose TOPIC hit fell outside the smaller window offered only its own
-    owner, a wider window offered the topic too, and the scoped query then faithfully answered
-    two different questions. Measured on 25 items all assigned to one matching topic:
-
-        --limit 5: ['summary', 'external_article']
-        --limit 8: ['summary', 'topic_description', 'topic_overview']   verify_with moved too
-
-    `item_topics` reads the assignment off the ITEM, so the universe — the item's own chunks
-    plus the chunks of the topics it belongs to — is a property of the corpus and cannot move
-    with the page. It is also the universe `_group_by_item` was approximating: a topic-owned
-    hit reaches an item precisely because the item is one of that topic's members.
+    AND THE ITEM'S OWN CHUNKS FILL THE SLOTS FIRST. Widening that universe let a topic's
+    description and overview beat the item's second article chunk under `cap=3` — page-independent
+    and consistently less primary evidence. A topic note is synthesized prose about a GROUP; the
+    item's article is the thing a reader can check, which is the distinction `verify_with` exists
+    to draw, so it decides slots too. Topics fill only what the item's own chunks leave.
 
     A profile-only candidate has no chunk evidence by construction and is left alone: an empty
     bucket means the chunk plane never selected this item, and giving it evidence here would
     invent a citation the ranking never made.
 
-    Exclusions found here are COUNTED. This is a second candidate set the response considered,
-    and a forged row dropped from the evidence with the counter reading zero is the silence
-    `corrupt_chunks_excluded` exists to break.
+    ONE SCOPED QUERY FAMILY PER SERVED ITEM, bounded by that item's own rows. `LexicalIndex.search`
+    already narrows by `owner_ids` — the internal narrowing `get` and the evaluation harness use,
+    deliberately kept off the FROZEN `SearchFilters`. Deepening the GLOBAL window to the same end
+    was measured at 5-56x on the real 2,474-item index (`de` 67 ms -> 3,723 ms); this is 0.7-2.0x.
     """
     cap = context.max_matches_per_item
     settled: list[tuple[str, list[LexicalHit]]] = []
-    excluded = 0
+    excluded: set[str] = set()
     for item_id, hits in page:
         if not hits:
             settled.append((item_id, hits))
             continue
-        owners = _evidence_owners(item_id, context)
-        scoped = index.lexical.search(query, cap, filters=filters, owner_ids=owners)
-        kept, unresolvable = resolvable_hits(scoped)
-        kept, corrupt = verify_fingerprints(kept)
-        excluded += corrupt + unresolvable
-        settled.append((item_id, list(kept[:cap])))
+        own = _verified_top(index, query, filters, (item_id,), cap, excluded)
+        if len(own) < cap:
+            topics = tuple(item_topics(context.store[item_id])) if item_id in context.store else ()
+            own += _verified_top(index, query, filters, topics, cap - len(own), excluded)
+        settled.append((item_id, own))
     return settled, excluded
 
 
