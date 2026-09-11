@@ -201,6 +201,22 @@ def test_search_returns_a_valid_frozen_response(context: QueryContext) -> None:
     tautology — that constant is READ OFF this field's default (`contracts.py`) — so the pin
     on the constant lives once, in `tests/test_knowledge_contracts.py`, and what is checked
     here is the different fact that a RESPONSE the service built carries it.
+
+    AND `title` IS ASSERTED POPULATED, WHICH IS THE ONLY WAY TO ASSERT IT AT ALL. It was the
+    one field of the envelope that was declared, hydrated and then dropped: `chunks` stores it,
+    `LexicalIndex` reads it back into `LexicalHit.title`, and the single production
+    `SearchMatch` constructor did not pass it — so every article fragment reached a consumer as
+    an orphan paragraph. Spec §4 requires the title to accompany its chunk, and the envelope
+    was bumped to `"2"` FOR this field, so the response advertised a capability the service did
+    not deliver.
+
+    Nothing caught it because a null is indistinguishable from a never-set until something
+    asserts the POPULATED case (rule 2) — this test pinned five other fields of the same match
+    and not this one, which is exactly how it reached a fourth review. The expected value is
+    the fixture's own article title rather than «is not None»: a constructor that passed some
+    other string would satisfy the weaker form.
+
+    Seen red before `title=hit.title` was passed: `None != 'On Controls and Thresholds'`.
     """
     response = search("Quillfeather", context)
     assert isinstance(response, SearchResponse)
@@ -212,6 +228,18 @@ def test_search_returns_a_valid_frozen_response(context: QueryContext) -> None:
     assert match.lexical_rank == 1
     assert match.locator.char_start is not None
     assert response.results[0].available_surfaces
+
+    matches = [m for result in response.results for m in result.matches]
+    article = next(m for m in matches if m.surface_type == "external_article")
+    assert article.title == "On Controls and Thresholds", article.title
+
+    # BOTH DIRECTIONS, because «carry the title» and «invent one» fail the same assertion set
+    # otherwise: a constructor emitting a placeholder for every surface satisfies the line
+    # above and was measured surviving it. A user note has no title and `None` is the honest
+    # value — the item's URL or a neighbour's title in its place is the fabrication A-1
+    # removed from the locator, one field over.
+    untitled = next(m for m in matches if m.surface_type == "user_note")
+    assert untitled.title is None, untitled.title
 
 
 def test_no_embeddings_is_read_off_the_manifest_not_hard_coded(context: QueryContext) -> None:

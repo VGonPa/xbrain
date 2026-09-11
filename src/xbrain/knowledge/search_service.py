@@ -561,6 +561,16 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
     as a RANKING SIGNAL rather than a probability, which spec §5.3 requires — a fused rank
     has no calibrated scale, and neither does an unfused one.
 
+    THE TITLE IS THE SURFACE'S TOO, AND LEAVING IT OUT WAS NOT A DEFAULT — IT WAS A DROP.
+    `chunks` stores it, `LexicalIndex` reads it back into `LexicalHit.title`, and this is the
+    only production `SearchMatch` constructor in the tree; omitting it here meant every article
+    fragment reached a consumer as an orphan paragraph, with `SearchResponse.schema_version`
+    already bumped to `"2"` FOR this field. Spec §4 asks the title to accompany its chunk, and
+    a chunk that cannot say which work it came from is the fragment problem the locator exists
+    to solve, one field over. `None` stays the honest value where the surface has none: a post
+    body, a summary and an image description have no title, and inventing the item's URL or a
+    neighbour's title for them is what this must not become.
+
     THE ATTRIBUTION AND THE LOCATOR ARE THE SURFACE'S (A-1). The first version left
     `attribution` at its default and fabricated a locator from the chunk's own columns —
     `source_index: null`, `content_kind: null`, the ITEM's url — so a quoted post's match
@@ -584,6 +594,7 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
         trust_class=hit.trust_class,  # type: ignore[arg-type]
         derived=hit.derived,
         excerpt=hit.excerpt,
+        title=hit.title,
         attribution=hit.attribution,
         matched_by=("lexical",),
         lexical_rank=position,
