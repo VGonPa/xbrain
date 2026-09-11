@@ -15,10 +15,13 @@ DECISION (spec §9.2), so the failure that actually happens is not corruption �
 THE FOUR PLANES ARE FOUR BECAUSE THEY MOVE APART, and the vocabulary proves it: a description
 edit rewrites rows that `item_fingerprint`, which takes no vocabulary, cannot see (the rows and
 the measurement are under `vocab_fingerprint`). One fused signal would rebuild everything for a
-topic-note typo or miss that; the manifest sealing the four separately is 02.6b's.
+topic-note typo or miss that, so `Manifest` seals the four in four separate fields (02.6b).
 
-WHAT IS NOT HERE. Nothing in this tree CONSUMES a fingerprint yet, which is why the coverage
-gaps review #161 named were closed here — free before a manifest exists, expensive after.
+AND THE MANIFEST IS THE CONTRACT, NOT A WRITER. `Manifest` / `write_manifest` / `load_manifest`
+/ `load_compatible_manifest` define the document those values are sealed into and refused by;
+nothing in this tree CALLS them, because the caller is `index build`, which is 02.7's. That
+ordering is deliberate and is the argument #161 made: the coverage gaps that review named were
+closed BEFORE anything could seal a manifest — free in this tree, expensive once one exists.
 
 The cheap signal can give false positives (a `touch` with no edit) and that is accepted: a
 false positive costs one warning, a false negative costs serving stale evidence as fresh. It
@@ -40,7 +43,9 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -48,7 +53,14 @@ from pydantic import BaseModel
 
 from xbrain.executors.api import iter_content_sources
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams
-from xbrain.knowledge.ids import SURFACE_VERSION
+from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
+from xbrain.knowledge.index_schema import (
+    REBUILD_ADVICE,
+    SCHEMA_VERSION,
+    IndexIncompatibleError,
+    IndexMissingError,
+    manifest_path,
+)
 from xbrain.knowledge.models import KnowledgeSurface
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -118,6 +130,56 @@ class StoreSignal:
             topics_json_mtime_ns=topics_mtime,
             topics_json_size=topics_size,
         )
+
+    def to_dict(self) -> dict[str, int]:
+        """The six fields, each under its own key — the half a manifest records (02.6b)."""
+        return {name: getattr(self, name) for name in SIGNAL_FIELDS}
+
+    @classmethod
+    def from_dict(cls, raw: object) -> StoreSignal:
+        """The signal as a manifest recorded it — VALIDATED, never cast, never rehydrated.
+
+        ALL SIX ARE REQUIRED AND THERE IS NO LEGACY RECORD TO BE LENIENT TOWARDS. Filling an
+        omitted entry with `0` declares that input ABSENT, and two manifests filled that way
+        compare EQUAL forever however the input moves — the round-05 defect reinstated by
+        omission, in the false-negative direction this signal exists never to fail in. The
+        implementation this replaces did exactly that: its four vocabulary/topic fields carried
+        `= 0` and `from_dict` read required-vs-optional off those defaults. Nothing in this tree
+        has ever SEALED a manifest, so tolerating a short one buys compatibility with nothing;
+        Plan 02 §2 already says what a document of another version gets, and it is a refusal.
+
+        THE SIZE AND THE MTIME ARE NOT VALIDATED ALIKE, AND THE ASYMMETRY IS THE CONTRACT.
+        `st_mtime_ns` IS negative for a pre-epoch file (measured), so refusing every negative
+        would make a legitimate corpus unbuildable. `st_size` never is, which is the half that
+        makes `UNSTATTABLE` unforgeable — and a hand-edited `manifest.json` is the ONE path
+        that bypasses `_read_bound`'s raise, so a sealed `-1` size would meet the live `-1` of
+        an obstructed input and certify the index current over a file nobody can stat. This is
+        where that is closed, because this is the only boundary a hand edit crosses.
+
+        `type(v) is int` and not `isinstance`: a JSON `true` is an `int` to `isinstance` and is
+        not a size, `int("17599352")` accepts a string, and a float compares unequal to what a
+        live stat returns — so a coerced value would declare the index behind for a reason no
+        operator could see.
+        """
+        values = _closed_keys(raw, "store_signal", frozenset(SIGNAL_FIELDS))
+        checked: dict[str, int] = {}
+        for name in SIGNAL_FIELDS:
+            value = values[name]
+            if type(value) is not int:
+                raise _malformed("store_signal", f"{name!r} debe ser un entero, es {value!r}")
+            if name in SIGNAL_SIZE_FIELDS and value < 0:
+                raise _malformed(
+                    "store_signal", f"{name!r} debe ser un tamaño no negativo, es {value!r}"
+                )
+            checked[name] = value
+        return cls(**checked)
+
+
+SIGNAL_FIELDS: tuple[str, ...] = tuple(f.name for f in dataclass_fields(StoreSignal))
+"""The six field names IN ORDER, read off the dataclass so the schema has ONE definition."""
+
+SIGNAL_SIZE_FIELDS: frozenset[str] = frozenset(n for n in SIGNAL_FIELDS if n.endswith("_size"))
+"""The three that a real `os.stat` can never report negative — see `StoreSignal.from_dict`."""
 
 
 def _stat_signal(path: Path) -> tuple[int, int]:
@@ -488,8 +550,9 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
       `chunk_id` and `chunks.fingerprint`, the second decides where every span falls (measured,
       `800/0` against `400/0`: 5 rows against 9 over one body). A bump of either rewrites the
       whole `chunks` plane with this fingerprint unmoved, and that is CORRECT: a manifest
-      refusing the query outright beats per-item invalidation. 02.6b's — and `ids.py:42` names
-      `load_compatible_manifest` as its home, a function that does not exist in this tree yet.
+      refusing the query outright beats per-item invalidation. `ids.py:42` names
+      `load_compatible_manifest` as its home and 02.6b landed it, below in this file: it
+      compares BOTH the version and the parameters. Still uncalled here — 02.7 wires it.
     - `profiles.profile_text` — a `vocab.yaml` edit splices each assigned topic's DESCRIPTION
       into it (spec §5.1.A) and rewrites `profiles`/`profiles_fts` for every assigned item while
       this fingerprint, which takes no vocabulary, cannot move: DISCHARGED by `vocab_fingerprint`
@@ -700,7 +763,11 @@ def topics_fingerprint(pages: Mapping[str, TopicPage]) -> str:
     different offsets are two different files; collapsing them would be a false negative.
 
     WHAT THIS PLANE DOES NOT REACH: `CHUNKER_VERSION` and `ChunkerParams` decide every topic
-    chunk's id, span, body and fingerprint and neither is an input here — 02.6b's.
+    chunk's id, span, body and fingerprint and neither is an input here. Both are covered where
+    they can be, which is the manifest: `load_compatible_manifest` refuses a base whose chunker
+    version OR whose parameters differ from the caller's, so a sweep that re-cuts every chunk
+    under unchanged ids cannot be queried. A plane's hash and a document's refusal are not the
+    same instrument, and this one is deliberately the second.
 
     Order-independent by construction — `sorted(pages.items())` — because a dict's iteration
     order is how the file was parsed, not what it holds. Each page is its own nested array: the
@@ -748,3 +815,337 @@ def _canonical(domain: str, value: object) -> str:
 
 def _sha256(blob: str) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# The manifest — the document that SEALS the four fingerprints and the cheap signal
+#
+# Spec §5.6 field by field, and Plan 02 §2's `manifest.json`. Its PRESENCE is what says a
+# build finished; its CONTENT is what every later door compares itself against. Two properties
+# decide whether it is worth anything, and both are enforced here rather than described:
+#
+# 1. IT IS TOTAL AND CLOSED. A document that declares LESS than the schema is incompatible,
+#    not lenient (spec §9.3) — the first version of this reader checked the top-level key set
+#    and cast what sat under it, so a manifest whose `counts` was `{}` loaded fine and the
+#    consistency check, iterating whatever `counts` offered, compared NOTHING: an amputated
+#    base reported healthy. And a document declaring MORE is a document from another version:
+#    dropping the extra key certifies the index current over something this code never looked
+#    at. Both directions refuse, with the command that repairs it.
+# 2. IT IS VALIDATED AT THE ONE BOUNDARY A HAND EDIT CROSSES. `manifest.json` is a small text
+#    file an operator can open, and everything the writer could never emit — a sealed
+#    `UNSTATTABLE`, a negative count, a `built_at` that is not an instant, a top-level JSON
+#    list — arrives HERE or nowhere. `write_manifest` round-trips through this same reader
+#    before a byte lands, so the two halves cannot drift apart either.
+#
+# WHAT IS DELIBERATELY NOT HERE. No `build`, no `update`, no `status`, no query door: this
+# child ships the contract those commands seal and read, and nothing that seals one. There is
+# no `tokenize` / `connective` field either — they decide every recall number and belong with
+# the query semantics, which this tree does not have yet; adding them later costs a
+# `SCHEMA_VERSION` bump and nothing else, because no manifest exists on disk anywhere today.
+# ---------------------------------------------------------------------------
+
+
+# Spec §5.6, field by field, in ONE place. The reader requires exactly this set, the writer
+# emits exactly this set, and `tests/test_knowledge_manifest.py` compares it against the names
+# written out by hand from the spec — the one side of that comparison not out of this module.
+MANIFEST_FIELDS: frozenset[str] = frozenset(
+    {
+        "schema_version",
+        "built_at",
+        "store_fingerprint",
+        "store_signal",
+        "vocab_fingerprint",
+        "topics_fingerprint",
+        "surface_version",
+        "chunker_version",
+        "chunker_params",
+        "embeddings",
+        "counts",
+        "skipped",
+        "failed",
+    }
+)
+
+# The NESTED schemas, each read off the thing it describes wherever one exists (rule 5), so a
+# plane renamed in the DDL or a parameter added to the chunker cannot leave the manifest
+# declaring a key nothing produces. `SKIPPED_CAUSES` is the exception and is enumerated: spec
+# §5.6 names the four causes and no code object carries them yet — the counters are 02.7's —
+# so the literal IS the contract until there is something to read it off.
+COUNT_PLANES: frozenset[str] = frozenset({"items", "topics", "surfaces", "chunks", "profiles"})
+SKIPPED_CAUSES: frozenset[str] = frozenset(
+    {"empty_text", "decorative", "no_speech", "failed_sources"}
+)
+CHUNKER_PARAM_NAMES: frozenset[str] = frozenset(f.name for f in dataclass_fields(ChunkerParams))
+
+
+@dataclass(frozen=True)
+class Manifest:
+    """The index's self-description. Written LAST, so its presence means the build finished."""
+
+    schema_version: str
+    built_at: datetime
+    store_fingerprint: str
+    store_signal: StoreSignal
+    vocab_fingerprint: str
+    topics_fingerprint: str
+    surface_version: str
+    chunker_version: str
+    chunker_params: dict[str, int]
+    counts: dict[str, int]
+    skipped: dict[str, int]
+    failed: list[dict[str, str]] = field(default_factory=list)
+    # The hole Plan 03 fills with `{model, dimension, normalized, command_version}`. Declared
+    # NOW so its arrival is not a manifest migration in the next plan. Its INSIDE is not
+    # validated: this child ships no embeddings, and a schema for a payload it cannot produce
+    # would be prose in the column where a guard belongs. The SLOT's shape is checked.
+    embeddings: dict[str, object] | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """The JSON document. `built_at` as ISO text, the signal as its six integers."""
+        return {
+            "schema_version": self.schema_version,
+            "built_at": self.built_at.isoformat(),
+            "store_fingerprint": self.store_fingerprint,
+            "store_signal": self.store_signal.to_dict(),
+            "vocab_fingerprint": self.vocab_fingerprint,
+            "topics_fingerprint": self.topics_fingerprint,
+            "surface_version": self.surface_version,
+            "chunker_version": self.chunker_version,
+            "chunker_params": dict(self.chunker_params),
+            "embeddings": self.embeddings,
+            "counts": dict(self.counts),
+            "skipped": dict(self.skipped),
+            "failed": [dict(entry) for entry in self.failed],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> Manifest:
+        """The document, validated TOTAL and CLOSED — and the second half was the bug.
+
+        BOTH DIRECTIONS, AND ONLY ONE OF THEM USED TO BE CHECKED HERE. Missing fields were
+        refused; an UNDECLARED one was silently dropped, so a manifest from a writer watching
+        a plane this code cannot see loaded as compatible through every door. `_closure_gap`
+        now answers both, and it is the same function the nested mappings ask — which is what
+        makes «total and closed» one rule rather than two that already disagreed.
+
+        THE DOCUMENT IS A JSON OBJECT BEFORE IT IS ANYTHING ELSE, and that ordering is not
+        style. The totality check is a set difference, and `set()` of a non-mapping
+        does not raise — it takes the ELEMENTS. A hand-edited `manifest.json` holding the JSON
+        LIST of the field NAMES therefore passed the guard with `missing` empty, and the first
+        subscript raised `TypeError: list indices must be integers` out of every door, as a
+        traceback. A top-level `3`, `null` or `true` was worse still: `set()` of them raises
+        from the guard LINE ITSELF, before one field is read. Spec §9.3 asks for an actionable
+        error, so the type is checked first and every malformed document leaves by one door.
+        """
+        if not isinstance(raw, Mapping):
+            raise IndexIncompatibleError(
+                f"El manifest no es un objeto JSON, es {type(raw).__name__}. {REBUILD_ADVICE}"
+            )
+        missing, unknown = _closure_gap(set(raw), MANIFEST_FIELDS)
+        if missing:
+            raise IndexIncompatibleError(f"El manifest no declara {missing}. {REBUILD_ADVICE}")
+        if unknown:
+            raise IndexIncompatibleError(
+                f"El manifest declara {unknown}, que este código no conoce. {REBUILD_ADVICE}"
+            )
+        return cls(
+            schema_version=str(raw["schema_version"]),
+            built_at=_instant(raw["built_at"]),
+            store_fingerprint=str(raw["store_fingerprint"]),
+            store_signal=StoreSignal.from_dict(raw["store_signal"]),
+            vocab_fingerprint=str(raw["vocab_fingerprint"]),
+            topics_fingerprint=str(raw["topics_fingerprint"]),
+            surface_version=str(raw["surface_version"]),
+            chunker_version=str(raw["chunker_version"]),
+            chunker_params=_counter_mapping(
+                raw["chunker_params"], "chunker_params", CHUNKER_PARAM_NAMES
+            ),
+            embeddings=_optional_mapping(raw["embeddings"], "embeddings"),
+            counts=_counter_mapping(raw["counts"], "counts", COUNT_PLANES),
+            skipped=_counter_mapping(raw["skipped"], "skipped", SKIPPED_CAUSES),
+            failed=_failures(raw["failed"]),
+        )
+
+
+def _malformed(field_name: str, detail: str) -> IndexIncompatibleError:
+    """ONE actionable sentence for every malformed field, naming the field and the reason.
+
+    A hand-edited manifest is exactly the input this reader has to survive, and spec §9.3 asks
+    for an error that names the command that fixes it rather than a traceback from inside a
+    query. `REBUILD_ADVICE` is imported from `index_schema`, beside the error that carries it:
+    a corrupt database ends with the same sentence, and two copies would be two things to keep
+    in step (rule 5).
+    """
+    return IndexIncompatibleError(
+        f"El manifest tiene el campo {field_name!r} malformado: {detail}. {REBUILD_ADVICE}"
+    )
+
+
+def _closed_keys(value: object, field_name: str, declared: frozenset[str]) -> dict[str, object]:
+    """A mapping carrying EXACTLY the declared keys — neither fewer nor more.
+
+    TOTAL because a reader that tolerates an absent key compares less than it should and calls
+    an amputated index healthy; CLOSED because a key this code does not know is a document from
+    another version, and dropping it certifies the index current over something never looked
+    at. Both are refusals for the same reason: nothing here could compare the difference.
+    """
+    if not isinstance(value, Mapping):
+        raise _malformed(field_name, f"no es un objeto, es {type(value).__name__}")
+    absent, unknown = _closure_gap(set(value), declared)
+    if absent:
+        raise _malformed(field_name, f"faltan {absent}")
+    if unknown:
+        raise _malformed(field_name, f"claves no declaradas {unknown}")
+    return dict(value)
+
+
+def _closure_gap(keys: set[str], declared: frozenset[str]) -> tuple[list[str], list[str]]:
+    """`(absent, unknown)` — the ONE definition of «exactly the declared keys» (rule 5).
+
+    THE DOCUMENT AND ITS MAPPINGS USED TO ANSWER THIS DIFFERENTLY, AND THAT IS THE BUG THIS
+    EXISTS TO MAKE IMPOSSIBLE. `_closed_keys` refused an undeclared key in `counts`,
+    `skipped`, `chunker_params` and `store_signal`, four tests pinned exactly that, and the
+    phrase «total and closed» therefore read as covered — while the TOP-LEVEL document only
+    ever checked what was MISSING. Measured: a valid manifest plus `"future_plane": {...}`
+    loaded through `Manifest.from_dict` and through `load_compatible_manifest`, which
+    returned it as COMPATIBLE with the key silently dropped, and a drifted `to_dict` carrying
+    it passed `write_manifest`'s round-trip and reached disk.
+
+    A key this code does not know was written by something watching a plane this code cannot
+    see, so accepting it certifies the index current over exactly that plane. Both callers now
+    compute the gap here and only the WORDING is theirs: the document says «no declara» /
+    «declara … que este código no conoce», a mapping says «faltan» / «claves no declaradas»,
+    because a caller reading `manifest.json` needs to be told which of the two it is.
+    """
+    return sorted(declared - keys), sorted(keys - declared)
+
+
+def _counter_mapping(value: object, field_name: str, declared: frozenset[str]) -> dict[str, int]:
+    """A closed mapping whose every value is a NON-NEGATIVE integer.
+
+    The rule that is right for a counter and WRONG for the cheap signal, which is why the
+    signal has its own (`StoreSignal.from_dict`): a plane holding minus one row, or a chunker
+    whose `max_chars` is minus one, is a malformed document, while a negative `mtime_ns` is a
+    pre-epoch file. `type(count) is int` for the reason spelled out there.
+    """
+    raw = _closed_keys(value, field_name, declared)
+    checked: dict[str, int] = {}
+    for key, count in raw.items():
+        if type(count) is not int or count < 0:
+            raise _malformed(field_name, f"{key!r} debe ser un entero no negativo, es {count!r}")
+        checked[str(key)] = count
+    return checked
+
+
+def _optional_mapping(value: object, field_name: str) -> dict[str, object] | None:
+    """`null` or an object — the `embeddings` slot Plan 03 fills — and nothing else."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise _malformed(field_name, f"no es null ni un objeto, es {type(value).__name__}")
+    return {str(key): item for key, item in value.items()}
+
+
+def _failures(value: object) -> list[dict[str, str]]:
+    """The `failed` list: every entry a mapping of TEXT, or the document is refused.
+
+    Spec §5.6's *chunks omitidos o fallidos*, and it reaches an operator's screen — a nested
+    structure where a string belongs prints as a Python repr from inside a command, so the
+    shape is fixed where it is read rather than where it happens to be shown.
+    """
+    if not isinstance(value, list) or not all(
+        isinstance(entry, Mapping) and all(isinstance(v, str) for v in entry.values())
+        for entry in value
+    ):
+        raise _malformed("failed", "no es una lista de objetos de texto")
+    return [{str(k): str(v) for k, v in entry.items()} for entry in value]
+
+
+def _instant(value: object) -> datetime:
+    """`built_at` as an instant, or the malformed-field sentence instead of a `ValueError`.
+
+    `datetime.fromisoformat` raises a bare `ValueError` naming the string and no command, which
+    is precisely the traceback-from-inside-a-query shape spec §9.3 rules out.
+    """
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError as error:
+        raise _malformed("built_at", f"{value!r} no es un instante ISO") from error
+
+
+def write_manifest(index_dir: Path, manifest: Manifest) -> None:
+    """Write the manifest LAST. Its presence is what says a build completed.
+
+    THE WRITER ROUND-TRIPS THROUGH THE READER, AND NOTHING LANDS UNTIL IT HAS. The document is
+    serialised, parsed and validated by `Manifest.from_dict` BEFORE one byte is written, so a
+    build cannot seal a manifest every later door would refuse — a state whose only exit is
+    `build --force` — and, the other direction, a writer whose shape drifted from the reader's
+    schema fails HERE, loudly, instead of producing a document the reader happens to accept
+    while comparing less than it should.
+    """
+    document = json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2)
+    Manifest.from_dict(json.loads(document))
+    index_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path(index_dir).write_text(document, encoding="utf-8")
+
+
+def load_manifest(index_dir: Path) -> Manifest:
+    """Read the manifest, turning any malformed document into an ACTIONABLE error.
+
+    An index that was never built is not a corrupt one, so the two get different advice:
+    `build` for the absence, `build --force` for everything else. Nothing is repaired here —
+    Plan 02 §11: a corrupt base is rebuilt, never patched.
+    """
+    path = manifest_path(index_dir)
+    if not path.exists():
+        raise IndexMissingError(
+            f"No hay manifest en {path}: el índice no está construido o quedó incompleto. "
+            "Constrúyelo con `xbrain index build`."
+        )
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise IndexIncompatibleError(
+            f"El manifest está corrupto ({error}). {REBUILD_ADVICE}"
+        ) from error
+    return Manifest.from_dict(raw)
+
+
+def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = None) -> Manifest:
+    """The manifest, REFUSED unless every version the code depends on matches (Plan 02 §2).
+
+    Spec §9.3: *manifest incompatible: no se consulta parcialmente.* Each of the three versions
+    names a real failure. A base written under another `SCHEMA_VERSION` has columns this code
+    cannot read; one under another `SURFACE_VERSION` holds surface fingerprints computed over a
+    different projection; one under another `CHUNKER_VERSION` holds chunk fingerprints that
+    would ALL fail verification, and the honest answer is the rebuild, never «22.286 chunks
+    excluded».
+
+    THE FOURTH CHECK IS THE CHUNKER'S PARAMETERS, AND IT IS NOT A DETAIL. Plan 02 §7 sweeps
+    `target x overlap`, and a sweep does not bump `CHUNKER_VERSION` — so a base cut at one
+    `target` and queried under another holds chunks whose ids RESOLVE and whose spans are not
+    what they were: nothing raises, and the text behind a citable id is a different text. It is
+    compared only when the caller SUPPLIES the parameters: a door that does not chunk has
+    nothing to compare against and must not invent the defaults.
+
+    `!r` ON EVERY MANIFEST STRING. The manifest is hand-editable and these strings are
+    interpolated into a sentence a command prints, so a raw newline in `schema_version` stands
+    at column 0 as a forged header and an ESC reaches the TTY. A repr carries neither.
+    """
+    manifest = load_manifest(index_dir)
+    mismatches = []
+    if manifest.schema_version != SCHEMA_VERSION:
+        mismatches.append(f"schema_version {manifest.schema_version!r} != {SCHEMA_VERSION!r}")
+    if manifest.surface_version != SURFACE_VERSION:
+        mismatches.append(f"surface_version {manifest.surface_version!r} != {SURFACE_VERSION!r}")
+    if manifest.chunker_version != CHUNKER_VERSION:
+        mismatches.append(f"chunker_version {manifest.chunker_version!r} != {CHUNKER_VERSION!r}")
+    if params is not None and manifest.chunker_params != asdict(params):
+        mismatches.append(f"chunker_params {manifest.chunker_params!r} != {asdict(params)!r}")
+    if mismatches:
+        raise IndexIncompatibleError(
+            "El índice fue construido con otra versión: "
+            + "; ".join(mismatches)
+            + f". {REBUILD_ADVICE}"
+        )
+    return manifest
