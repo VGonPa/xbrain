@@ -41,7 +41,8 @@ The freshness check is `verification.verdict_is_current`, the same one
 decirlo*. A match on a primary surface names that surface; a match on a derived surface names
 the item's primary surfaces; and an item that has none gets `()`. `verify_with == ()` is
 therefore reachable in exactly one case, which makes the empty tuple the structural form of
-the warning. `no_underlying_source()` is the predicate, `render.py` prints the word, and the
+the warning. `no_underlying_source()` is the predicate — the word is printed by whichever
+adapter Plan 02 §12 lands for the CLI, which does not exist in this package yet — and the
 gap — that the FROZEN `SearchResult` has no `warnings` field for a JSON consumer to read it
 from — is recorded in the execution report rather than closed by amending a contract Plan 01
 froze on purpose.
@@ -69,7 +70,7 @@ from xbrain.knowledge.index_store import (
     resolvable_hits,
     verify_fingerprints,
 )
-from xbrain.knowledge.lexical import LexicalHit, distinct_owners
+from xbrain.knowledge.lexical import LexicalHit, OwnerKey, distinct_owners
 from xbrain.knowledge.models import DerivedText, SurfaceType
 from xbrain.knowledge.provenance import DEFAULT_EVIDENCE_CLASSES, ORIGIN_TRUST
 from xbrain.knowledge.surfaces import (
@@ -176,8 +177,10 @@ def search(
     cut a fifty-item ranking to two with `truncated: false` — the silent cut spec §9.3
     forbids, on a field that could not come out any other way (rule 2). Now the candidate
     window is materialised until it holds ONE OWNER MORE than the page needs
-    (`LexicalIndex.search_owners`, the same U-6 loop the evaluation harness scores with —
-    one definition, rule 5), so `truncated` is a measurement of the ranking against the
+    (`LexicalIndex.search_owners`, whose ONLY caller this is — the evaluation harness was
+    named here as a second consumer and never called it, and the two therefore score
+    different retrievals; see `lexical.OWNER_CHUNK_MULTIPLIER`), so `truncated` is a
+    measurement of the ranking against the
     page; the cursor is the offset of the next page (`s:<offset>`), and the pages are
     disjoint and reassemble the ranking in order, because every window is a prefix of the
     same ranking and a topic hit expands to the same sorted members under any page. The
@@ -367,7 +370,7 @@ def _verified_top(
     index: OpenIndex,
     query: str,
     filters: SearchFilters,
-    owners: tuple[str, ...],
+    owners: tuple[OwnerKey, ...],
     wanted: int,
     excluded: set[str],
 ) -> list[LexicalHit]:
@@ -389,13 +392,16 @@ def _verified_top(
     this response could not serve, and a row rejected by two candidate sets is one row. Counting
     visits instead read 2, 4, 6 and then 7 for one, two, three and four forged rows — not a
     consistent multiple, so not a count of anything.
+
+    `owners` are `OwnerKey` PAIRS, and they have to be: an id alone does not say which plane
+    it names, and the two planes share an alphabet (C1, `lexical.owner_key`).
     """
     if not owners or wanted <= 0:
         return []
     depth = wanted
     seen = -1
     while True:
-        scoped = index.lexical.search(query, depth, filters=filters, owner_ids=owners)
+        scoped = index.lexical.search(query, depth, filters=filters, owners=owners)
         kept, _ = resolvable_hits(scoped)
         kept, _ = verify_fingerprints(kept)
         survivors = {hit.chunk_id for hit in kept}
@@ -444,9 +450,15 @@ def _settle_evidence(
     invent a citation the ranking never made.
 
     ONE SCOPED QUERY FAMILY PER SERVED ITEM, bounded by that item's own rows. `LexicalIndex.search`
-    already narrows by `owner_ids` — the internal narrowing `get` and the evaluation harness use,
-    deliberately kept off the FROZEN `SearchFilters`. Deepening the GLOBAL window to the same end
-    was measured at 5-56x on the real 2,474-item index (`de` 67 ms -> 3,723 ms); this is 0.7-2.0x.
+    narrows by `owners`, internal narrowing deliberately kept off the FROZEN `SearchFilters`; this
+    is its only caller in the package (it was documented as also serving `get` and the evaluation
+    harness, and `get` does not exist yet). Deepening the GLOBAL window to the same end was
+    measured at 5-56x on the real 2,474-item index (`de` 67 ms -> 3,723 ms); this is 0.7-2.0x.
+
+    THE TWO PHASES NARROW BY OWNER KEY, not by id. A topic slug may be all digits and so is every
+    tweet id, so `(item, X)` and `(topic, X)` are both representable and were both answered by an
+    id-only clause: the own-chunks phase served a same-named topic's prose in the PRIMARY slots,
+    and the top-up phase served another item's article under this item's name (C1, round 10).
     """
     cap = context.max_matches_per_item
     settled: list[tuple[str, list[LexicalHit]]] = []
@@ -455,9 +467,10 @@ def _settle_evidence(
         if not hits:
             settled.append((item_id, hits))
             continue
-        own = _verified_top(index, query, filters, (item_id,), cap, excluded)
+        own = _verified_top(index, query, filters, (("item", item_id),), cap, excluded)
         if len(own) < cap:
-            topics = tuple(item_topics(context.store[item_id])) if item_id in context.store else ()
+            slugs = tuple(item_topics(context.store[item_id])) if item_id in context.store else ()
+            topics = tuple(("topic", slug) for slug in slugs)
             own += _verified_top(index, query, filters, topics, cap - len(own), excluded)
         settled.append((item_id, own))
     return settled, excluded
@@ -767,7 +780,7 @@ def _verify_with(
 
 
 def supporting_item_ids(slug: str, context: QueryContext, *, limit: int = 10) -> tuple[str, ...]:
-    """The items a topic surface is supported by — public, for `render` and for Plan 04.
+    """The items a topic surface is supported by — public, for Plan 02 §12's CLI and Plan 04.
 
     Exposed rather than left private because Plan 02 §4 requires the consumer to be able to
     jump from a topic match to real items, and the CLI's human output has to name them.

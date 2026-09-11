@@ -2358,12 +2358,20 @@ def test_the_depth_bound_applies_to_every_page_size_not_only_small_ones(
     reproduction is recorded in the PR body — this test pins the property, that one pins that
     the property is reachable as configured.
 
-    What the bound COSTS is unchanged and is not what this asserts: an owner whose rows all lie
-    deeper stays unreachable, and `truncated` says so. What must not differ is WHICH corpus each
-    page size answered from.
+    What the bound COSTS is not what this asserts: an owner whose rows all lie deeper is out of
+    the chunk plane at every page size, and `truncated` says so. What must not differ is WHICH
+    corpus each page size answered from.
 
-    Seen red before the first window was capped: the widest page returned owners the narrow one
-    could not reach.
+    THIS ASSERTED A NESTED SUBSET, AND THE DEFECT SATISFIED IT BY CONSTRUCTION (round 10). A
+    wider page reaching MORE owners makes the narrow page's ids a subset of the wide one's, so
+    the `or` branch passed and only the `truncated` line could discriminate — on the one sparse
+    fixture where it happened to flip. Verified by execution: with the clamp REMOVED and the
+    corpus at 900 paragraphs, the round-8 version of this test passed. Rule 1, in the suite that
+    enforces it.
+
+    The assertion is now the property the paragraph above names. Page through to exhaustion at
+    each size and compare the SEQUENCE reassembled: a page size whose first window opened deeper
+    reaches owners the other sizes never see, and the walks diverge.
     """
     from xbrain.knowledge import lexical
 
@@ -2382,19 +2390,27 @@ def test_the_depth_bound_applies_to_every_page_size_not_only_small_ones(
     monkeypatch.setattr(lexical, "MAX_CHUNK_DEPTH", 24)
     assert rows > 24 * 4, f"the corpus must outrun the bound several times over: {rows}"
 
-    seen = {}
-    for limit in (1, 4, 16, 64, 256):
-        response = search(marker, context, limit=limit)
-        seen[limit] = (
-            tuple(r.item_id for r in response.results),
-            response.truncated,
-            response.cursor is not None,
-        )
+    def _walk(limit: int) -> tuple[tuple[str, ...], bool]:
+        """Every id this page size can reach, in order, by following its own cursor."""
+        ids: list[str] = []
+        cursor: str | None = None
+        for _ in range(len(store) + 2):
+            response = search(marker, context, limit=limit, cursor=cursor)
+            ids.extend(result.item_id for result in response.results)
+            cursor = response.cursor
+            if cursor is None:
+                return tuple(ids), response.truncated
+        raise AssertionError(f"--limit {limit} never stopped paging")
 
-    widest = seen[256]
-    for limit, observed in seen.items():
-        assert set(observed[0]) <= set(widest[0]) or set(widest[0]) <= set(observed[0]), (
-            f"--limit {limit} reached {observed[0]}; --limit 256 reached {widest[0]}"
+    walks = {limit: _walk(limit) for limit in (1, 4, 16, 64, 256)}
+
+    # Non-vacuous: the walk must actually reach several owners, or every size agreeing on
+    # nothing would pass (rule 1).
+    assert len(walks[256][0]) > 1, walks[256]
+    widest = walks[256]
+    for limit, observed in walks.items():
+        assert observed[0] == widest[0], (
+            f"--limit {limit} reassembles {observed[0]}; --limit 256 reassembles {widest[0]}"
         )
         assert observed[1] is widest[1], (
             f"--limit {limit} says truncated={observed[1]}, --limit 256 says {widest[1]}"
@@ -2584,3 +2600,196 @@ def test_an_items_own_chunks_fill_its_citations_before_topic_prose(tmp_path: Pat
         # And the top-up is real rather than a wasted slot: X000 owns only two matching chunks,
         # so the third is the topic's, which is what filling the cap from the group is FOR.
         assert len(served.matches) == context.max_matches_per_item, kinds
+
+
+# ---------------------------------------------------------------------------
+# C1 (round 10) — a topic slug and an item id are two namespaces in one column
+# ---------------------------------------------------------------------------
+
+# `Topic.slug` is `^[a-z0-9]+(?:-[a-z0-9]+)*$`, which admits an all-digit slug; every real
+# tweet id IS all digits. Nothing in either model keeps the two apart, so the index holds
+# `chunks.owner_id = '7001'` rows of BOTH owner types and only `owner_type` separates them.
+_SLUG = "7001"
+
+
+def _colliding_corpus(
+    marker: str,
+    *,
+    victim: str,
+    bystander: str,
+    victim_article: bool,
+    topic_prose_matches: bool,
+) -> tuple[dict[str, Item], list[Topic], dict[str, TopicPage]]:
+    """Two items and one topic whose SLUG is byte-identical to one of the item ids.
+
+    `victim` is the item assigned to that topic. `bystander` always owns a matching article,
+    so when the slug equals ITS id there is a foreign body for the narrowing to reach.
+    """
+    body = (
+        " ".join(f"relleno{n}" for n in range(120))
+        + f" {marker} "
+        + " ".join(f"cola{n}" for n in range(120))
+        + f" {marker} "
+        + " ".join(f"resto{n}" for n in range(120))
+    )
+
+    def _item(ident: str, *, summary: str, topics: list[str], article: str | None) -> Item:
+        return Item(
+            id=ident,
+            source="bookmark",
+            url=f"https://x.com/a/status/{ident}",
+            author=Author(handle="a", name="A"),
+            text=f"Post {ident} sin marcador.",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+            content=(
+                None
+                if article is None
+                else Content(
+                    fetched_at=datetime(2026, 1, 2, tzinfo=UTC),
+                    sources=[
+                        ContentSourceSuccess(
+                            kind="external_article",
+                            url=f"https://example.test/{ident}",
+                            title=f"Articulo {ident}",
+                            text=article,
+                        )
+                    ],
+                )
+            ),
+            enriched=Enrichment(
+                summary=summary,
+                topics=topics,
+                primary_topic=topics[0] if topics else None,
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                model="m",
+                executor="manual",
+            ),
+        )
+
+    store = {
+        victim: _item(
+            victim,
+            summary=f"Resumen propio de {victim} que menciona {marker} una sola vez.",
+            topics=[_SLUG],
+            article=body if victim_article else None,
+        ),
+        bystander: _item(
+            bystander,
+            summary="Resumen ajeno sin marcador alguno.",
+            topics=[],
+            article=body,
+        ),
+    }
+    # Short and marker-dense when it matches, so the topic's prose RANKS ABOVE the item's own
+    # article chunks under bm25. A topic that could never win a slot would make the assertion
+    # below green for a reason unrelated to its name (rule 1).
+    overview = f"{marker}. {marker} en pocas palabras." if topic_prose_matches else "Panorama mudo."
+    vocab = [
+        Topic(
+            slug=_SLUG,
+            label="K",
+            description=(f"{marker} y {marker}." if topic_prose_matches else "Sin marcador."),
+        )
+    ]
+    pages = {
+        _SLUG: TopicPage(
+            slug=_SLUG,
+            overview=overview,
+            notes=[],
+            synthesized_at=datetime(2026, 1, 4, tzinfo=UTC),
+            post_count_at_synth=1,
+        )
+    }
+    return store, vocab, pages
+
+
+def _served(response: SearchResponse, item_id: str):
+    return next(result for result in response.results if result.item_id == item_id)
+
+
+def _chunk_owner(chunk_id: str) -> tuple[str, str]:
+    """The `<owner_type>:<owner_id>` the chunk id itself carries (spec §3.3)."""
+    owner_type, owner_id, *_rest = chunk_id.split(":")
+    return owner_type, owner_id
+
+
+def test_a_topic_slug_equal_to_another_items_id_never_cites_that_items_body(
+    tmp_path: Path,
+) -> None:
+    """The attribution defect, in the phase that tops up an item's citations (C1).
+
+    The owner narrowing bound `chunks.owner_id IN (...)` with no `owner_type`, so passing a
+    topic slug asked for EVERY row carrying that id — including the article of the item whose
+    id it equals. Measured at `804b341` on this fixture, where the victim has no `content` at
+    all and therefore no article of its own to cite:
+
+        item A001 rank=1
+          [2] external_article  chunk_id=item:7001:external_article:...
+              title='Articulo 7001'  locator.url=https://example.test/7001
+
+    Another item's body, another item's title, another item's locator, served under this
+    item's name. CLAUDE.md rule 7 is that showing the evidence next to the claim is the
+    cheapest check there is; this hands the reader a locator that opens someone else's
+    article and says nothing happened.
+
+    Asserted on the OWNER the served chunk id carries, not on the excerpt: an excerpt
+    assertion would also be satisfied by the victim owning similar prose, which is the
+    "appears somewhere" assertion rule 1 forbids.
+    """
+    marker = "Zephyrquill"
+    store, vocab, pages = _colliding_corpus(
+        marker, victim="A001", bystander=_SLUG, victim_article=False, topic_prose_matches=False
+    )
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    response = search(marker, context, limit=10)
+    victim = _served(response, "A001")
+
+    foreign = [
+        match.chunk_id
+        for match in victim.matches
+        if _chunk_owner(match.chunk_id) != ("item", "A001")
+    ]
+    assert foreign == [], foreign
+    # And the bystander still answers for ITSELF, so the fix narrowed the citation rather
+    # than the corpus: this assertion is what keeps an index returning nothing from passing.
+    assert _served(response, _SLUG).matches
+
+
+def test_a_topic_slug_equal_to_the_items_own_id_never_takes_its_primary_slots(
+    tmp_path: Path,
+) -> None:
+    """The same collision through the OWN-chunks query — the half round 9 did not narrow.
+
+    Round 9 made an item's own owner fill its citation slots before its topics, and that was
+    read as confining this defect to the top-up phase. It is not: the own-chunks query passes
+    `item_id` into the same clause, so a topic whose slug equals the item's OWN id is answered
+    by that query and takes slots in the PRIMARY phase — ahead of the item's own article,
+    which is exactly what the item-first ordering exists to prevent. Measured at `804b341`
+    on this fixture, where the victim owns a summary and a three-chunk article:
+
+        item 7001  matches: [('item','7001'), ('topic','7001'), ('topic','7001')]
+
+    The topic's synthesized prose is short and marker-dense, so bm25 ranks it above the
+    article chunks and it wins the slots outright rather than filling leftovers.
+    """
+    marker = "Zephyrquill"
+    store, vocab, pages = _colliding_corpus(
+        marker, victim=_SLUG, bystander="B002", victim_article=True, topic_prose_matches=True
+    )
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    victim = _served(search(marker, context, limit=10), _SLUG)
+    owners = [_chunk_owner(match.chunk_id) for match in victim.matches]
+
+    # The item owns four matching chunks and the cap is three, so its own plane fills every
+    # slot and the topic top-up gets none. A topic row here came through the own query.
+    assert owners == [("item", _SLUG)] * len(owners), owners
+    assert len(owners) == context.max_matches_per_item, owners

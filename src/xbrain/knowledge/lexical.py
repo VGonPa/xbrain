@@ -54,9 +54,24 @@ EXCERPT_CHARS = 300
 # starts at `OWNER_CHUNK_MULTIPLIER` chunks per owner asked for and DOUBLES while the result
 # set came back full and still holds fewer owners than asked — a set shorter than its limit
 # is the whole ranking, and there is nothing deeper to find — up to `MAX_CHUNK_DEPTH`.
-# Reaching the bound short of owners is DECLARED to the caller, never absorbed. ONE loop,
-# here, for the two consumers that need it (rule 5): the evaluation harness (`_search`) and
-# the search service (M-4, round 08), which decides `truncated` over this window.
+# Reaching the bound short of owners is DECLARED to the caller, never absorbed.
+#
+# ONE CONSUMER, NOT TWO, and the comment said two (round 10). It claimed a rule-5 binding to
+# the evaluation harness; `evaluation.py` contains neither `search_owners` nor `exhausted`,
+# its `_search` calls `InMemoryLexicalIndex.search(q, limit)`, and that class has exactly two
+# methods, `add` and `search`. So the only caller is `search_service._chunk_owners` (M-4,
+# round 08), which decides `truncated` over this window.
+#
+# The two therefore score DIFFERENT retrievals, which is the part worth knowing. Measured on
+# a 31-item corpus where one item monopolises the head of the chunk ranking:
+#
+#     k= 5   harness search(q,k):  5 chunks /  1 owner    service:  20 chunks / 15 owners
+#     k=10   harness search(q,k): 10 chunks /  5 owners   service:  36 chunks / 31 owners
+#
+# The published lexical baseline is a chunk-limited retrieval and the service pages by
+# owners, so a recall@k from the harness is not a statement about what `search` returns.
+# Whether to unify them is a Plan-02 §11 question and is NOT settled here; what is settled
+# is that the comment no longer asserts a binding that does not exist.
 OWNER_CHUNK_MULTIPLIER = 4
 MAX_CHUNK_DEPTH = 10_000
 
@@ -129,15 +144,34 @@ class LexicalHit:
     surface_locator: Locator | None = None
 
 
+# An owner's IDENTITY. The PAIR, never the id alone: `surface_id` has carried
+# `<owner_type>:<owner_id>:…` since spec §3.3 because the two namespaces OVERLAP —
+# `Topic.slug` is `^[a-z0-9]+(?:-[a-z0-9]+)*$`, which admits an all-digit slug, and every
+# real tweet id is all digits. One alias, so the counting and the narrowing cannot drift.
+OwnerKey = tuple[str, str]
+
+
+def owner_key(hit: LexicalHit) -> OwnerKey:
+    """Which owner this hit belongs to — THE definition, for both readers (C1, round 10).
+
+    `distinct_owners` counted the pair; the owner narrowing matched the id alone. Two answers
+    to one question is the drift rule 5 exists to stop, and it survived nine rounds because
+    no corpus in the suite held two owner types sharing an id. When one does, half a
+    composite key is indistinguishable from all of it: a topic's synthesized prose is served
+    under an item's name, and another item's article is served with that item's locator.
+    """
+    return (hit.owner_type, hit.owner_id)
+
+
 def distinct_owners(hits: Sequence[LexicalHit]) -> int:
-    """How many distinct `(owner_type, owner_id)` a ranking prefix holds.
+    """How many distinct owners a ranking prefix holds.
 
     Public because `search_owners` STOPS on it and `search_service` has to read the same
     number to know whether a window shorter than it asked for is the whole ranking or just
     a shallow one (B1). Two readings of «how deep did we get» is how the window and its
     consumer drift apart, and the drift is invisible until the exclusions bite (rule 5).
     """
-    return len({(hit.owner_type, hit.owner_id) for hit in hits})
+    return len({owner_key(hit) for hit in hits})
 
 
 @dataclass(frozen=True)
@@ -331,14 +365,23 @@ class LexicalIndex:
         *,
         filters: SearchFilters | None = None,
         surface_types: tuple[SurfaceType, ...] = (),
-        owner_ids: tuple[str, ...] = (),
+        owners: tuple[OwnerKey, ...] = (),
     ) -> tuple[LexicalHit, ...]:
         """The top `limit` chunks for `query`, best first, deterministic under ties.
 
-        `surface_types` and `owner_ids` are NOT among spec §7.2's eight — they are internal
-        narrowing used by `get` (rank inside one item's long source) and by the evaluation
-        harness. They are kept off `SearchFilters` because that model is the FROZEN external
+        `surface_types` and `owners` are NOT among spec §7.2's eight — they are internal
+        narrowing, kept off `SearchFilters` because that model is the FROZEN external
         contract and adding to it would be the incompatible change the freeze prevents.
+        ONE consumer today, `search_service._verified_top`, which re-derives a served item's
+        citations from its own plane before its topics'.
+
+        `owners` takes `OwnerKey` PAIRS, and that is the whole of C1. It took bare ids, and
+        an id is not an identifier here: a topic slug may be all digits and so is every tweet
+        id, so `chunks.owner_id IN (…)` answered with whatever carried that id in EITHER
+        namespace. Measured at `804b341`, an item with no `content` at all was served citing
+        two chunks of another item's article, under its title and its locator; and a topic
+        whose slug equalled an item's own id took the first two of that item's three
+        citation slots, ahead of its own summary.
 
         An empty query is a validation error, not an empty result (spec §9.3): an empty
         result set claims something about the corpus, when the truth is that nothing was
@@ -347,7 +390,7 @@ class LexicalIndex:
         expression = self._expression(query, limit)
         if expression is None:
             return ()
-        clauses, params = self._where(expression, filters, surface_types, owner_ids)
+        clauses, params = self._where(expression, filters, surface_types, owners)
         sql = f"{_SELECT_CHUNKS} WHERE {' AND '.join(clauses)} {_CHUNK_RANK_ORDER} LIMIT ?"  # nosec B608
         rows = self._fetch(sql, (*params, limit))
         return tuple(_hit(row) for row in rows)
@@ -361,8 +404,9 @@ class LexicalIndex:
         same rows `search` returns for the chunk limit reached — so a caller that groups
         by owner sees a list that is prefix-consistent across depths: a deeper window only
         appends. `depth_exhausted` is True when `MAX_CHUNK_DEPTH` was reached with fewer
-        owners than asked; the harness declares it on the case and the service declares
-        a truncation it cannot page (both say so, neither guesses).
+        owners than asked, and the service declares it as a truncation it cannot page — it
+        says so rather than guessing. (The harness was named here too and never called this
+        method; see the note on `OWNER_CHUNK_MULTIPLIER`.)
 
         THE FIRST WINDOW IS CAPPED TOO, AND IT WAS NOT. `MAX_CHUNK_DEPTH` bounded only the
         DOUBLING path, so `owners * OWNER_CHUNK_MULTIPLIER` could open larger than the bound on
@@ -370,9 +414,21 @@ class LexicalIndex:
         pages. Measured on 11,200 matching rows over 16 items — `--limit 500` read 2,008 rows
         and stopped at the cap, while `--limit 2763` read 11,056, i.e. PAST a bound of 10,000,
         and the two pages therefore answered from different amounts of the corpus. Capping
-        here makes the bound mean one thing for every page size; what the bound COSTS — an
-        owner whose rows all lie deeper is unreachable — is unchanged, declared through
-        `depth_exhausted`, and is the documented price of bounding the work at all.
+        here makes the bound mean one thing for every page size.
+
+        WHAT IT COSTS DID CHANGE, and this docstring said it did not (round 10). Before the
+        cap, an owner past the bound was reachable at a page size large enough to open a
+        first window past it; after it, that owner is out of the chunk plane at EVERY page
+        size. Measured on the same corpus: `--limit 2763` returned 16 results before and 15
+        after, the sixteenth missing at 2763 and at 5000 alike. Consistency was the point and
+        it was bought with a capability, which is a trade worth naming rather than a cost
+        that stayed still.
+
+        Nor is such an owner simply gone: with no chunk of its own inside the window it is
+        usually re-admitted from the PROFILE plane, carrying zero citations and the derived
+        `verify_with` branch. That is pre-existing behaviour and not a consequence of the
+        cap, but "unreachable" was the wrong word for it. What the bound reaching its end
+        means is DECLARED through `depth_exhausted`, and is the price of bounding work.
         """
         chunk_limit = min(max(owners * OWNER_CHUNK_MULTIPLIER, 1), MAX_CHUNK_DEPTH)
         while True:
@@ -475,7 +531,7 @@ class LexicalIndex:
         expression: str,
         filters: SearchFilters | None,
         surface_types: tuple[SurfaceType, ...],
-        owner_ids: tuple[str, ...],
+        owners: tuple[OwnerKey, ...],
     ) -> tuple[list[str], list[object]]:
         """The WHERE clauses and their bound parameters — never an interpolated value."""
         clauses = ["chunks_fts MATCH ?"]
@@ -494,9 +550,10 @@ class LexicalIndex:
         if surface_types:
             clauses.append(f"chunks.surface_type IN ({_placeholders(len(surface_types))})")
             params += list(surface_types)
-        if owner_ids:
-            clauses.append(f"chunks.owner_id IN ({_placeholders(len(owner_ids))})")
-            params += list(owner_ids)
+        if owners:
+            clauses.append(f"({_owner_pairs(len(owners))})")
+            for owner_type, owner_id in owners:
+                params += [owner_type, owner_id]
         return clauses, params
 
     def _fetch(self, sql: str, params: tuple[object, ...]) -> list[sqlite3.Row]:
@@ -664,6 +721,19 @@ def _placeholders(count: int) -> str:
     promise attached to an f-string.
     """
     return ",".join("?" * count)
+
+
+def _owner_pairs(count: int) -> str:
+    """`(type = ? AND id = ?) OR (…)` for a variadic owner narrowing — from a COUNT (C1).
+
+    A disjunction of equalities on BOTH columns rather than one `IN` over ids, because an
+    owner is the pair. It also happens to be the shape the `chunks_owner (owner_type,
+    owner_id)` index serves best: each disjunct is an equality on the full key.
+
+    Built from an integer for the same reason as `_placeholders` — the fragment cannot carry
+    a caller's text into the statement no matter what was passed.
+    """
+    return " OR ".join(["(chunks.owner_type = ? AND chunks.owner_id = ?)"] * count)
 
 
 def _iso(value: datetime | None) -> str | None:
