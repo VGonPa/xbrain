@@ -356,6 +356,19 @@ def _chunk_owners(
         depth *= 2
 
 
+def _evidence_owners(item_id: str, context: QueryContext) -> tuple[str, ...]:
+    """The owners whose chunks may cite this item: itself, then the topics it belongs to.
+
+    Read off the STORE so the answer is a property of the corpus rather than of the window
+    that happened to select the item. The item leads because its own words are the stronger
+    citation; the order is deterministic and `item_topics` already sorts primary-first.
+    """
+    item = context.store.get(item_id)
+    if item is None:
+        return (item_id,)
+    return (item_id, *item_topics(item))
+
+
 def _settle_evidence(
     index: OpenIndex,
     query: str,
@@ -391,10 +404,23 @@ def _settle_evidence(
     answer that was already correct in all but the sparse case. Bounded work per served item
     beats unbounded work per query.
 
-    The owners are taken from the bucket rather than assumed to be the item: a topic-owned hit
-    expands to the topic's members, so the item's evidence is its own chunks OR the topic
-    chunks it was expanded from, and re-asking for exactly those keeps the expansion intact.
-    A profile-only candidate has no chunk evidence by construction and is left alone.
+    THE OWNER SET COMES FROM THE STORE, NOT FROM THE BUCKET, and that was the second half of
+    this defect. Re-deriving from the hits already collected reproduces the page-dependence one
+    layer down: an item whose TOPIC hit fell outside the smaller window offered only its own
+    owner, a wider window offered the topic too, and the scoped query then faithfully answered
+    two different questions. Measured on 25 items all assigned to one matching topic:
+
+        --limit 5: ['summary', 'external_article']
+        --limit 8: ['summary', 'topic_description', 'topic_overview']   verify_with moved too
+
+    `item_topics` reads the assignment off the ITEM, so the universe — the item's own chunks
+    plus the chunks of the topics it belongs to — is a property of the corpus and cannot move
+    with the page. It is also the universe `_group_by_item` was approximating: a topic-owned
+    hit reaches an item precisely because the item is one of that topic's members.
+
+    A profile-only candidate has no chunk evidence by construction and is left alone: an empty
+    bucket means the chunk plane never selected this item, and giving it evidence here would
+    invent a citation the ranking never made.
 
     Exclusions found here are COUNTED. This is a second candidate set the response considered,
     and a forged row dropped from the evidence with the counter reading zero is the silence
@@ -404,10 +430,10 @@ def _settle_evidence(
     settled: list[tuple[str, list[LexicalHit]]] = []
     excluded = 0
     for item_id, hits in page:
-        owners = tuple(dict.fromkeys(hit.owner_id for hit in hits))
-        if not owners:
+        if not hits:
             settled.append((item_id, hits))
             continue
+        owners = _evidence_owners(item_id, context)
         scoped = index.lexical.search(query, cap, filters=filters, owner_ids=owners)
         kept, unresolvable = resolvable_hits(scoped)
         kept, corrupt = verify_fingerprints(kept)

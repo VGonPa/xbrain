@@ -40,7 +40,19 @@ SURFACE_VERSION = "xbrain-knowledge-surface/v1"
 # the same `(surface_id, chunk_index)` now holds DIFFERENT text. The version is in the chunk
 # id precisely so those two never collide — a v1 id and a v2 id are different chunks, and an
 # index built under either refuses to be updated by the other (`load_compatible_manifest`).
-CHUNKER_VERSION = "xbrain-knowledge-chunker/v2"
+#
+# Bumped to v3 because `chunking.chunk_evidence` gained the `title` arm. THE CUTS DID NOT
+# MOVE THIS TIME, AND THE BUMP IS STILL REQUIRED: this constant versions the FINGERPRINT
+# CONTRACT, not only the span arithmetic — it is hashed into every `chunk_fingerprint` — so a
+# projection that hashes a different tuple under the same name makes byte-intact rows fail
+# verification as if they had been forged. Measured on an index built by the v2 projection and
+# read by this one: 2 results and 0 exclusions became 0 results and 2 exclusions, with
+# `truncated: false`, `cursor: null`, `status` reporting `behind=false, incomplete=false,
+# advice=''`, and `update` reporting nothing to do. A corpus reported empty, an integrity
+# counter blaming rows nobody touched, and no door naming a repair. With the bump,
+# `load_compatible_manifest` refuses the old index and names `index build --force`, which is
+# the honest answer: the fingerprints have to be recomputed and only a rebuild does that.
+CHUNKER_VERSION = "xbrain-knowledge-chunker/v3"
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 

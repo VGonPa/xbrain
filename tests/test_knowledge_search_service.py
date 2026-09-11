@@ -23,6 +23,7 @@ import pytest
 
 from xbrain.knowledge import contracts, index_build, index_store, search_service
 from xbrain.knowledge.contracts import SearchFilters, SearchResponse
+from xbrain.knowledge.ids import CHUNKER_VERSION
 from xbrain.knowledge.index_schema import (
     IndexIncompatibleError,
     IndexMissingError,
@@ -2176,3 +2177,225 @@ def test_a_forged_chunk_is_excluded_and_counted_in_the_EVIDENCE_phase_too(
     assert after.index.corrupt_chunks_excluded >= 1, (
         "the exclusion happened in the evidence phase and was not counted"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review round 7 — the fingerprint projection changed and the version did not
+# ---------------------------------------------------------------------------
+
+
+def test_an_index_built_under_the_previous_fingerprint_projection_is_refused(
+    context: QueryContext,
+) -> None:
+    """Adding `title` to `chunk_evidence` retired every stored chunk fingerprint, and the
+    compatibility identifier did not move with it.
+
+    The consequence measured by the review is the worst available shape: an index built by the
+    previous version has rows that are BYTE-INTACT and now fail verification as if forged.
+    Old reader: 2 results, 0 exclusions. New reader over the SAME index: 0 results, 2
+    exclusions, `truncated: false`, `cursor: null` — and `status` said `behind=false,
+    incomplete=false, advice=''` while `update` reported nothing to do. A corpus reported
+    empty, an integrity counter blaming rows nobody touched, and no door naming a repair.
+
+    `CHUNKER_VERSION` is hashed INTO every chunk fingerprint and id precisely so a projection
+    change and its data cannot be confused, and `load_compatible_manifest` already refuses a
+    manifest whose version it does not match. Using that mechanism turns the silent misreading
+    into the actionable refusal spec §9.3 asks for.
+
+    Pinned as a LITERAL, not derived: `"xbrain-knowledge-chunker/v2"` is the identifier the
+    previous projection shipped under, and asserting against the current constant would be a
+    tautology that passes at every future bump. This is the same characterization discipline
+    the manifest's digest pin uses.
+
+    Seen red before the bump: the v2 manifest was accepted and every door answered over it.
+    """
+    previous = "xbrain-knowledge-chunker/v2"
+    assert CHUNKER_VERSION != previous, (
+        "the projection that hashes `title` must not ship under the identifier of the one "
+        "that did not; every stored fingerprint it retires is a row this code would blame"
+    )
+
+    path = manifest_path(context.index_dir)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["chunker_version"] = previous
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as refused:
+        search("Quillfeather", context)
+    assert previous in str(refused.value), "the refusal names the version it found"
+
+
+def _topic_bearing_corpus(size: int, marker: str, slug: str):
+    """The two-surface corpus with every item assigned to ONE topic whose note also matches.
+
+    Three planes then compete for the same item's `max_matches_per_item` slots: its own
+    summary, its own article, and the topic's description and overview. That is the population
+    in which the evidence owner set — and therefore the citation list — could still move with
+    the page, because a topic hit lies deeper in the ranking than the item's own chunks.
+    """
+    store = {
+        k: v.model_copy(
+            update={
+                "enriched": v.enriched.model_copy(update={"topics": [slug], "primary_topic": slug})
+            }
+        )
+        for k, v in _two_surface_corpus(size, marker).items()
+    }
+    vocab = [Topic(slug=slug, label="K", description=f"Un topic sobre {marker} y su alcance.")]
+    pages = {
+        slug: TopicPage(
+            slug=slug,
+            overview=("padding " * 100 + f" {marker} ") * 3,
+            notes=[],
+            synthesized_at=datetime(2026, 1, 4, tzinfo=UTC),
+            post_count_at_synth=size,
+        )
+    }
+    return store, vocab, pages
+
+
+def test_topic_expanded_evidence_does_not_move_with_the_page_size(tmp_path: Path) -> None:
+    """The second half of B3, which the first fix reached and did not close.
+
+    `_settle_evidence` re-derived its scoped owner set from the hits already in the bucket —
+    and that bucket is page-dependent. An item whose TOPIC hit fell outside the smaller window
+    offered only its own owner; a wider window offered the topic too; the scoped query then
+    faithfully answered two different questions. Measured on this fixture at `ed39513`:
+
+        --limit 5: ['summary', 'external_article']
+        --limit 8: ['summary', 'topic_description', 'topic_overview']
+
+    and `verify_with` moved with it, from `('external_article',)` to
+    `('external_article', 'post')` — two verification instructions for one claim again, by a
+    different route than the one round 7 closed.
+
+    The owner universe now comes from the STORE (`item_topics`), so it is a property of the
+    corpus. Asserted across four page sizes and over the whole page, on both the match list AND
+    `verify_with`, because a fix that stabilised only the citation list would leave the
+    instruction free to move.
+
+    Seen red at `ed39513`: two distinct (matches, verify_with) pairs for X000.
+    """
+    marker, slug = "Kestrelmark", "k-topic"
+    store, vocab, pages = _topic_bearing_corpus(25, marker, slug)
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    seen: dict[int, dict[str, tuple]] = {}
+    for limit in (5, 8, 10, 25):
+        response = search(marker, context, limit=limit)
+        seen[limit] = {
+            r.item_id: (tuple(m.surface_type for m in r.matches), r.verify_with)
+            for r in response.results
+        }
+
+    widest = seen[25]
+    assert any("topic_" in s for v in widest.values() for s in v[0]), (
+        "a topic chunk must reach some item's evidence, or the topic plane is not in play"
+    )
+    for limit, page in seen.items():
+        for item_id, carried in page.items():
+            assert carried == widest[item_id], (
+                f"--limit {limit} gave {item_id} {carried}; the widest page gave {widest[item_id]}"
+            )
+
+
+def _dense_corpus(count: int, paragraphs: int, marker: str) -> dict[str, Item]:
+    """Items whose article repeats the marker across many paragraphs — many chunks each."""
+    return {
+        f"L{i:03d}": Item(
+            id=f"L{i:03d}",
+            source="bookmark",
+            url=f"https://x.com/a/status/L{i:03d}",
+            author=Author(handle="a", name="A"),
+            text=f"Post L{i:03d}.",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+            content=Content(
+                fetched_at=datetime(2026, 1, 2, tzinfo=UTC),
+                sources=[
+                    ContentSourceSuccess(
+                        kind="external_article",
+                        url=f"https://example.test/L{i:03d}",
+                        title=f"Articulo L{i:03d}",
+                        text="\n\n".join(
+                            f"{marker} parrafo {n} " + " ".join(f"w{k}" for k in range(60))
+                            for n in range(paragraphs)
+                        ),
+                    )
+                ],
+            ),
+            enriched=Enrichment(
+                summary=f"Resumen L{i:03d}.",
+                topics=[],
+                primary_topic=None,
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                model="m",
+                executor="manual",
+            ),
+        )
+        for i in range(count)
+    }
+
+
+def test_the_depth_bound_applies_to_every_page_size_not_only_small_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`MAX_CHUNK_DEPTH` bounded only the DOUBLING path, never the first window.
+
+    `search_owners` opened `owners * OWNER_CHUNK_MULTIPLIER` rows before any cap applied, so
+    the limit that exists to bound the work applied only to small pages. Measured on the
+    SHIPPED constant with 11,200 matching rows over 16 items: `--limit 500` read 2,008 rows and
+    stopped at the bound with 15 owners, while `--limit 2763` read 11,056 — PAST a bound of
+    10,000 — and came back with all 16. Two pages answering from different amounts of the same
+    corpus, and `truncated` describing two different rankings.
+
+    THE BOUND IS PATCHED DOWN HERE RATHER THAN REPRODUCED AT SCALE. Crossing 10,000 rows needs
+    a multi-megabyte fixture and a minute of build time; the mechanism is the arithmetic, not
+    the magnitude, so the constant is lowered and the corpus kept small. The shipped-constant
+    reproduction is recorded in the PR body — this test pins the property, that one pins that
+    the property is reachable as configured.
+
+    What the bound COSTS is unchanged and is not what this asserts: an owner whose rows all lie
+    deeper stays unreachable, and `truncated` says so. What must not differ is WHICH corpus each
+    page size answered from.
+
+    Seen red before the first window was capped: the widest page returned owners the narrow one
+    could not reach.
+    """
+    from xbrain.knowledge import lexical
+
+    marker = "Lodestarmark"
+    store = _dense_corpus(8, 60, marker)
+    data = tmp_path / "data"
+    _persist(data, store, [], {})
+    _build(data)
+    context = _context(data, store, [], {})
+
+    opened = index_store.open_for_query(data / "index", *_paths(data))
+    try:
+        rows = len(opened.lexical.search(marker, 100_000))
+    finally:
+        opened.close()
+    monkeypatch.setattr(lexical, "MAX_CHUNK_DEPTH", 24)
+    assert rows > 24 * 4, f"the corpus must outrun the bound several times over: {rows}"
+
+    seen = {}
+    for limit in (1, 4, 16, 64, 256):
+        response = search(marker, context, limit=limit)
+        seen[limit] = (
+            tuple(r.item_id for r in response.results),
+            response.truncated,
+            response.cursor is not None,
+        )
+
+    widest = seen[256]
+    for limit, observed in seen.items():
+        assert set(observed[0]) <= set(widest[0]) or set(widest[0]) <= set(observed[0]), (
+            f"--limit {limit} reached {observed[0]}; --limit 256 reached {widest[0]}"
+        )
+        assert observed[1] is widest[1], (
+            f"--limit {limit} says truncated={observed[1]}, --limit 256 says {widest[1]}"
+        )

@@ -363,8 +363,18 @@ class LexicalIndex:
         appends. `depth_exhausted` is True when `MAX_CHUNK_DEPTH` was reached with fewer
         owners than asked; the harness declares it on the case and the service declares
         a truncation it cannot page (both say so, neither guesses).
+
+        THE FIRST WINDOW IS CAPPED TOO, AND IT WAS NOT. `MAX_CHUNK_DEPTH` bounded only the
+        DOUBLING path, so `owners * OWNER_CHUNK_MULTIPLIER` could open larger than the bound on
+        its very first query: the limit that exists to cap the work applied only to small
+        pages. Measured on 11,200 matching rows over 16 items — `--limit 500` read 2,008 rows
+        and stopped at the cap, while `--limit 2763` read 11,056, i.e. PAST a bound of 10,000,
+        and the two pages therefore answered from different amounts of the corpus. Capping
+        here makes the bound mean one thing for every page size; what the bound COSTS — an
+        owner whose rows all lie deeper is unreachable — is unchanged, declared through
+        `depth_exhausted`, and is the documented price of bounding the work at all.
         """
-        chunk_limit = max(owners * OWNER_CHUNK_MULTIPLIER, 1)
+        chunk_limit = min(max(owners * OWNER_CHUNK_MULTIPLIER, 1), MAX_CHUNK_DEPTH)
         while True:
             hits = self.search(query, chunk_limit, filters=filters)
             if distinct_owners(hits) >= owners or len(hits) < chunk_limit:
