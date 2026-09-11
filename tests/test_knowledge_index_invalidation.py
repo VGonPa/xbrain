@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -47,8 +48,9 @@ from xbrain.knowledge.index_schema import (
     open_index,
 )
 from xbrain.knowledge.lexical import LexicalIndex
+from xbrain.knowledge.profile import profile_text
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
-from xbrain.models import Author, Item, Topic, TopicPage
+from xbrain.models import Author, Content, ContentSourceSuccess, Item, Topic, TopicPage
 from xbrain.rubrics import save_vocab
 from xbrain.store import save_store, save_topic_pages
 
@@ -141,6 +143,10 @@ def _topic_rows(data: Path) -> dict[str, tuple[list[str], list[str], int]]:
     }
 
 
+# The one profile-plane query these tests ask, written once.
+_FTS = "SELECT COUNT(*) FROM profiles_fts WHERE profiles_fts MATCH ?"
+
+
 def _rows(data: Path, sql: str, *params) -> list:
     connection = open_index(db_path(data / "index"), read_only=True)
     try:
@@ -160,9 +166,17 @@ def test_update_with_no_changes_writes_nothing(built: Path, corpus) -> None:
     Asserted on the REPORT and on the row identity: a rebuild that happened to produce the
     same ids would satisfy a count-only assertion while having rewritten everything. Seen red
     by dropping the fingerprint comparison — every item then re-indexes on every run.
+
+    THE TOPIC PLANE IS COMPARED BY ROWID, AND `SELECT *` WAS NOT ENOUGH. `_write_topic_row`
+    issues `INSERT OR REPLACE`, which on a `slug TEXT PRIMARY KEY` table DELETES and
+    re-inserts — the values come back identical and the rowid MOVES (measured: 1 -> 2). So a
+    refresh that rewrote every topic row on a no-op run was invisible to a `SELECT *`
+    comparison, and `topics_refreshed` stayed 0 because it counts `len(behind)`, not writes.
+    The rowid is the cheap witness; `test_a_no_op_update_issues_no_write_against_the_topic_plane`
+    is the direct one.
     """
     before = _rows(built, "SELECT chunk_id, rowid FROM chunks ORDER BY rowid")
-    topics_before = _rows(built, "SELECT * FROM topics ORDER BY slug")
+    topics_before = _rows(built, "SELECT rowid, * FROM topics ORDER BY slug")
 
     report = _update(built)
 
@@ -171,7 +185,7 @@ def test_update_with_no_changes_writes_nothing(built: Path, corpus) -> None:
     assert _rows(built, "SELECT chunk_id, rowid FROM chunks ORDER BY rowid") == before
     # The topic ROWS too (H1): the membership refresh compares before it writes, so a
     # store that did not move rewrites no topic row either.
-    assert _rows(built, "SELECT * FROM topics ORDER BY slug") == topics_before
+    assert _rows(built, "SELECT rowid, * FROM topics ORDER BY slug") == topics_before
     assert report.topics_refreshed == 0
 
 
@@ -1110,3 +1124,166 @@ def test_the_narrow_topic_refresh_refuses_a_row_it_cannot_rewrite_instead_of_cou
     assert _rows(built, "SELECT COUNT(*) FROM topics")[0][0] == len(stored), (
         "a refusal must not have rewritten anything on its way out"
     )
+
+
+# A write against the topic plane, matched by the statement's LEADING VERB rather than by its
+# effect. Anchoring on the verb is what separates a write from a read: the first version keyed
+# on `FROM topics` and flagged `SELECT COUNT(*) FROM topics`, which `manifest_tallies` runs on
+# every update. `item_topics` cannot match either — the pattern needs whitespace immediately
+# before `topics`, and there an underscore sits in its place. Both halves are asserted below,
+# because a detector nobody tested is the assertion passing for the wrong reason one level up.
+_TOPIC_WRITE = re.compile(
+    r"^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b.*\s+topics\b", re.IGNORECASE | re.DOTALL
+)
+
+
+def test_a_no_op_update_issues_no_write_against_the_topic_plane(
+    built: Path, corpus, monkeypatch
+) -> None:
+    """Zero writes asserted as ZERO STATEMENTS, because every assertion on the EFFECT is blind.
+
+    `_write_topic_row` issues `INSERT OR REPLACE`. Rewriting a row with the values it already
+    holds changes nothing a query can see — same columns, same count, same content — and
+    `topics_refreshed` counts `len(behind)`, so it stays 0 however many rows were written.
+    Measured: mutating `for slug in behind` to `for slug in records`, which writes the WHOLE
+    plane on every run including a no-op, left the entire suite green.
+
+    That is rule 1's shape — an assertion satisfied for the wrong reason — and the escape is to
+    stop asserting on the effect. `sqlite3.Connection.set_trace_callback` reports every
+    statement the connection executes, so the claim becomes "no write was ISSUED", which no
+    idempotent statement can satisfy quietly. The callback is attached by wrapping the door
+    `update` opens its connection through, so what is traced is the real run and not a
+    connection this test made.
+
+    The rowid comparison in `test_update_with_no_changes_writes_nothing` is the cheap witness
+    for the same fact and is kept: it needs no monkeypatch and catches the same mutation
+    through a completely different mechanism, so neither is the only thing standing between
+    this plane and a silent rewrite.
+
+    Seen red under that mutation: 2 `INSERT OR REPLACE INTO topics` statements on a run whose
+    report says nothing changed.
+    """
+    statements: list[str] = []
+    real_open = index_build.open_index
+
+    def tracing(*args, **kwargs):
+        connection = real_open(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(index_build, "open_index", tracing)
+
+    report = _update(built)
+
+    assert statements, "nothing was traced: the wrapper never ran, so this proves nothing"
+    assert (report.items_changed, report.topics_refreshed) == (0, 0)
+    assert [sql for sql in statements if _TOPIC_WRITE.search(sql)] == []
+    # An empty result means nothing unless the detector can SEE the statements it forbids and
+    # ignore the ones it must not flag. Both directions, on the real SQL of this module.
+    for writes in (
+        "INSERT OR REPLACE INTO topics (slug, description) VALUES (?,?)",
+        "DELETE FROM topics",
+        "UPDATE topics SET stale = 1 WHERE slug = ?",
+    ):
+        assert _TOPIC_WRITE.search(writes), writes
+    for reads in (
+        "SELECT COUNT(*) FROM topics",
+        "SELECT slug, description FROM topics",
+        "INSERT OR REPLACE INTO item_topics (item_id, slug, is_primary) VALUES (?,?,?)",
+    ):
+        assert not _TOPIC_WRITE.search(reads), reads
+    # And the trace really did carry topic reads, so the empty write list is a live result and
+    # not a connection that executed nothing against this plane.
+    assert [sql for sql in statements if "topics" in sql.lower()], "no topic statement traced"
+
+
+def _titled_blank_source(item: Item, title: str) -> Item:
+    """Add a source that carries a TITLE and an EMPTY body — the shape the two sides split on.
+
+    `profile.py:_titles` gates on `if source.title`, so this reaches `profiles_fts`.
+    `item_surfaces` drops a source whose body is blank, so it emits nothing. Everything in
+    this test hangs on those two gates disagreeing, and both are asserted before the act.
+    """
+    blank = ContentSourceSuccess(
+        kind="external_article", url="https://example.test/sin-cuerpo", title=title, text=""
+    )
+    content = (
+        Content(sources=[blank], fetched_at=item.captured_at)
+        if item.content is None
+        else item.content.model_copy(update={"sources": [*item.content.sources, blank]})
+    )
+    return item.model_copy(update={"content": content})
+
+
+def test_a_title_only_change_on_a_blank_bodied_source_invalidates_the_stale_profile(
+    built: Path, corpus
+) -> None:
+    """The profile plane, through the PUBLIC path, on the one shape no surface can carry.
+
+    THE TWO SIDES DISAGREE ABOUT WHAT IS EMPTY, and that is the whole defect. `_titles` gates
+    on `if source.title` while `item_surfaces` drops a source whose BODY is blank, so a source
+    with a title and no body reaches `profiles`/`profiles_fts` and emits no surface row —
+    leaving it outside every atom `item_fingerprint` hashed. `index_build` had this filed as a
+    known debt against 02.7, which shipped the writer and did not discharge it; 02.8 is where
+    it becomes observable, because 02.8 is what reports the index current.
+
+    Measured on this exact shape before the fix: `item_fingerprint` did not move, `update`
+    reported `items_changed=0` and `profiles_inserted=0`, `status` answered `advice=''`, and
+    `profiles_fts` went on matching the OLD title (1 row) while never matching the new one
+    (0 rows). A searchable string nobody can reach any more, under an index declaring itself
+    current — rule 6, failing open.
+
+    The stale term is asserted GONE and the fresh one PRESENT, both against `profiles_fts`
+    directly rather than through a count: a profile rewritten to the same bytes would satisfy
+    `profiles_inserted > 0` while the old term still matched.
+    """
+    store, vocab, _pages = corpus
+    victim = "k02"
+    old_title, new_title = "El titulo Quillfeatherbis ORIGINAL", "Un titulo Snapdragonbis nuevo"
+
+    _persist(built, store={**store, victim: _titled_blank_source(store[victim], old_title)})
+    _update(built)
+
+    seeded = _inputs(built).store[victim]
+    assert [s for s in item_surfaces(seeded) if (s.title or "") == old_title] == [], (
+        "the blank-bodied source must emit NO surface, or the defect is not staged"
+    )
+    assert old_title in profile_text(seeded, vocab), "but its title must reach the profile"
+    assert _rows(built, _FTS, '"Quillfeatherbis"')[0][0] == 1
+
+    _persist(built, store={**store, victim: _titled_blank_source(store[victim], new_title)})
+    report = _update(built)
+
+    assert report.items_changed == 1, "the item moved: only its title did, and that is enough"
+    assert report.profiles_inserted > 0
+    assert _rows(built, _FTS, '"Quillfeatherbis"')[0][0] == 0, "the stale term is still searchable"
+    assert _rows(built, _FTS, '"Snapdragonbis"')[0][0] == 1, "the new title never became findable"
+    assert _status(built).items_changed == 0, "and the index is current afterwards"
+
+
+def test_a_whitespace_only_summary_is_the_same_split_and_is_hashed_too(built: Path, corpus) -> None:
+    """The second of the three shapes the one atom closes, so the fix is not title-shaped.
+
+    `profile_text` appends the summary on truthiness (`if item.enriched.summary`), while the
+    emitter drops it through `_blank()`, which STRIPS. A summary of `"   "` is therefore
+    profile-bearing and surface-less, exactly as a titled blank-bodied source is. Asked of the
+    fingerprint directly, because the point is that the ATOM covers the family rather than the
+    one member a regression test happened to stage.
+
+    Seen red before the atom: the two fingerprints were equal.
+    """
+    store, _vocab, _pages = corpus
+    base = store["k02"]
+    assert base.enriched is not None
+
+    def with_summary(text: str) -> Item:
+        return base.model_copy(
+            update={"enriched": base.enriched.model_copy(update={"summary": text})}
+        )
+
+    one, two = with_summary("   "), with_summary(" \t ")
+    assert [s.text for s in item_surfaces(one)] == [s.text for s in item_surfaces(two)], (
+        "neither whitespace summary may reach a surface, or this stages nothing"
+    )
+    assert profile_text(one, []) != profile_text(two, []), "but both reach the profile"
+    assert index_build.item_fingerprint(one) != index_build.item_fingerprint(two)

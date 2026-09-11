@@ -1316,6 +1316,11 @@ def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all(mon
                 [],
                 [],
                 [0, 0],
+                # The profile atom. On a bare item it degenerates to the author's two
+                # fields, which is `profile_text`'s whole output when there is no text, no
+                # title, no summary, no digest and no topic — written as the VALUE rather
+                # than by calling the function, so the expected side is not the actual side.
+                "a\nA",
             ],
         )
     )
@@ -1390,12 +1395,17 @@ def test_the_whole_payload_is_pinned_by_value_on_an_item_that_populates_every_re
     `tests/test_evidence_characterization.py`'s pin on `contract_fingerprint`: one byte of
     drift retires every stored fingerprint, so a DELIBERATE change re-derives this literal in
     the commit that makes it. The belt above stays the readable account of the payload.
+
+    RE-DERIVED ONCE, DELIBERATELY, from `837d4e3a…` when the `profile_text(item, [])` atom was
+    appended to close the stale-profile fail-open. This guard did its job: it went red on the
+    same commit that changed the payload, which is the only moment a characterization pin is
+    worth anything. No stored fingerprint was retired, because no index exists on disk.
     """
     fingerprint = index_build.item_fingerprint(_rich())
     assert re.fullmatch(r"[0-9a-f]{64}", fingerprint), fingerprint
     assert (
         fingerprint
-        == "837d4e3a39610526fa0d9de1dce4d164ef583e7ac9be536d9ff7dbfa28967276"  # pragma: allowlist secret
+        == "967454c1d1b04a6d8a6a565fb50d2ac91d358209be881d1a4027f55bf632da26"  # pragma: allowlist secret
     )
 
 

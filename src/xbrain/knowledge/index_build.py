@@ -550,6 +550,29 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     `kinds` needs no such trade: `surfaces.item_content_kinds` — the ONE derivation
     `knowledge_item` also reads — deduplicates, so the region and the rows are the same object.
 
+    **THE PROFILE IS HASHED BY ASKING THE FUNCTION THAT WRITES IT, AND THE OTHER HALF OF THE
+    DEBT ABOVE IS WHY.** `profiles.profile_text` is a persisted, FTS-indexed column, and the
+    emitter and the profile disagree about what is empty: `profile.py:_titles` gates on
+    `if source.title`, while `item_surfaces` drops a source whose BODY is blank. A source with
+    a title and no body therefore reaches `profiles_fts` and emits no surface — so every atom
+    above was blind to it. Measured on that exact shape: change ONLY the title, and
+    `item_fingerprint` did not move, `update` reported `items_changed=0`, `status` answered
+    `advice=''`, and `profiles_fts` went on matching the OLD title (1 row) and never matched
+    the new one (0 rows). Repaired evidence, derivative standing, index declaring itself
+    current: rule 6, failing open, on a string a query can still reach. A whitespace-only
+    `summary` or `digest` is the same shape — profile on truthiness, emitter on `_blank()`,
+    which strips — and one atom closes all three at once.
+
+    It hashes `profile_text(item, [])` rather than re-deriving the composition here, because a
+    second list of "what goes into a profile" is a second definition that drifts the moment
+    `profile.py` gains a part (rule 5). The EMPTY vocabulary is the whole of the distinction
+    this fingerprint draws: the topic DESCRIPTIONS spliced from `vocab.yaml` belong to
+    `vocab_fingerprint`'s plane and are discharged by the rebuild, while the slug — which is
+    the item's own assignment — is kept by `profile_text` with no vocabulary at all. The atom
+    is deliberately REDUNDANT with the text, summary, topics and author already hashed above:
+    redundancy in a hash input can only cost a wasted rewrite, never a stale row, which is the
+    direction this module fails in on purpose.
+
     THE VARIADIC REGIONS ARE NESTED, NEVER SPLICED. Flattening them into one delimited list is
     NOT injective: `topics=("thread",)` with no sources serialised exactly like no topics with
     one blank `thread` source, so two item states hashed alike and `update` called the item
@@ -572,13 +595,9 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
       compares BOTH the version and the parameters. Still uncalled here — 02.7 wires it.
     - `profiles.profile_text` — a `vocab.yaml` edit splices each assigned topic's DESCRIPTION
       into it (spec §5.1.A) and rewrites `profiles`/`profiles_fts` for every assigned item while
-      this fingerprint, which takes no vocabulary, cannot move: DISCHARGED by `vocab_fingerprint`
-      below, via 02.7's rebuild. Its OTHER half is NOT, and filing it there would record a
-      debt under an owner who cannot discharge it — `profile.py:_titles` gates on
-      `if source.title`, so a title on a blank-bodied source reaches the profile while the
-      emitter produces nothing (a whitespace-only `summary`/`digest` is the same shape: profile
-      on truthiness, emitter on `_blank()`, which strips). Constructible, 0 of 2,404 today, and
-      02.7's — the only writer that sees both sides.
+      this fingerprint, which takes no vocabulary, cannot move: DISCHARGED by `vocab_fingerprint`,
+      via the rebuild. **Its OTHER half was the last entry on this list and is now hashed**,
+      which is what the `profile_text(item, [])` atom is for — see below.
 
     `items.store_fingerprint` IS THIS VALUE, which is why it appears in neither list above: a
     hash cannot be inside itself. The NAME is historical and is a trap for 02.7's writer — the
@@ -619,6 +638,7 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
             [_model_atoms(failure) for failure in failed_sources(item)],
             [_model_atoms(link) for link in unfetched_links(item)],
             [decorative, no_speech],
+            profile_text(item, []),
         ],
     )
 
