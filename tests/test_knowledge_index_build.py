@@ -24,7 +24,7 @@ from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chu
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
 from xbrain.knowledge.profile import profile_text
-from xbrain.store import save_topic_pages
+from xbrain.store import save_store, save_topic_pages
 from xbrain.executors.api import iter_content_sources, iter_described_photos
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -2517,3 +2517,360 @@ def test_the_build_walks_the_store_in_sorted_order_so_two_runs_cannot_diverge(
     index_build.build(tmp_path / "index", inputs)
 
     assert seen == sorted(ids), f"walked in dict order, not sorted order: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# 02.8 — `update` and `status`: the index knows it is old, and says so
+#
+# The incremental path itself is exercised in `tests/test_knowledge_index_invalidation.py`;
+# what is here is the DIAGNOSTIC half — `status` — plus the two states a build can leave
+# behind that only `status` and `update` can name. They live in this file because each one
+# starts from a real `build` and asks what the two later doors say about what it produced.
+# ---------------------------------------------------------------------------
+
+
+def _status(data: Path, index_dir: Path, **kwargs) -> index_build.StatusReport:
+    """`status` takes the SAME snapshot `build` and `update` take (P1b, H1)."""
+    return index_build.status(index_dir, index_build.load_index_inputs(*_paths(data)), **kwargs)
+
+
+def _update(data: Path, index_dir: Path, **kwargs) -> index_build.UpdateReport:
+    return index_build.update(index_dir, index_build.load_index_inputs(*_paths(data)), **kwargs)
+
+
+def _damage_root_page(database: Path, table: str) -> int:
+    """Overwrite the root page of `table` with `0xff`, at the page `sqlite_master` names."""
+    connection = sqlite3.connect(database)
+    try:
+        rootpage = connection.execute(
+            "SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)
+        ).fetchone()[0]
+        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    finally:
+        connection.close()
+    with database.open("r+b") as handle:
+        handle.seek((rootpage - 1) * page_size)
+        handle.write(b"\xff" * page_size)
+    return rootpage
+
+
+def test_an_interrupted_forced_rebuild_is_declared_by_status_and_refused_by_update(
+    tmp_path: Path, three_inputs: Path, corpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-1's OTHER half: removing the manifest is only half the property.
+
+    `test_a_forced_rebuild_removes_the_manifest_BEFORE_the_database` pins the ordering. What
+    it cannot pin — because neither door existed in 02.7 — is what the two later commands then
+    say. The failure C-1 names is not "a manifest survived"; it is that `status` reported
+    nothing wrong and a query answered «no results» over an EMPTY base, indistinguishable from
+    a corpus with no matches. Measured on the real corpus (2,404 items, 2026-09-01):
+    `old_manifest_survives=True`, `chunks_after_interrupt=0`, `status_incomplete=False`,
+    `query_returned_normally=True` with 0 results.
+
+    So: the state left by the interruption is DECLARED (`incomplete`, naming `index build`),
+    `update` REFUSES it (there is no manifest to be incremental against), and a fresh `build`
+    restores everything — including the topic plane C-3 lost. Seen red under a `status` that
+    reads `manifest is None` as "nothing to report".
+    """
+    _store, vocab, _pages = corpus
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+
+    def exploding(*args, **kwargs):
+        raise KeyboardInterrupt("Ctrl-C during the forced rebuild")
+
+    monkeypatch.setattr(index_build, "_write_everything", exploding)
+    with pytest.raises(KeyboardInterrupt):
+        _built(index_dir, three_inputs, force=True)
+    monkeypatch.undo()
+
+    report = _status(three_inputs, index_dir)
+    assert report.incomplete is True
+    assert "xbrain index build" in report.advice
+
+    with pytest.raises(index_schema.IndexMissingError):
+        _update(three_inputs, index_dir)
+
+    _built(index_dir, three_inputs)
+    connection = index_schema.open_index(index_schema.db_path(index_dir), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM topics").fetchone()[0] == len(vocab)
+        assert (
+            connection.execute("SELECT COUNT(*) FROM chunks WHERE owner_type = 'topic'").fetchone()[
+                0
+            ]
+            > 0
+        )
+    finally:
+        connection.close()
+    assert _status(three_inputs, index_dir).advice == ""
+
+
+def test_status_calls_an_index_without_a_manifest_incomplete(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """The other half of step 9: the state is REPORTED, not merely absent.
+
+    An index whose manifest is gone is refused by every door, so `status` calling it healthy
+    would be the diagnostic instrument disagreeing with every other one (rule 9). The advice
+    names plain `index build`, and that is correct HERE and only here: with no manifest
+    standing, plain `build` does not refuse.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    index_schema.manifest_path(index_dir).unlink()
+
+    report = _status(three_inputs, index_dir)
+
+    assert report.incomplete is True
+    assert "xbrain index build" in report.advice
+
+
+def test_status_reports_how_many_items_changed(tmp_path: Path, three_inputs: Path, corpus) -> None:
+    """Step 10c / §15.2: `status` is an explicit command, so it CAN afford to load the store.
+
+    "Something changed" is not actionable — it does not distinguish a touched file from a
+    hundred re-enriched items. So the fixture changes TWO items, removes TWO and adds TWO, and
+    asserts `== 2` on each: an earlier version changed one and removed one and asserted `== 1`
+    / `== 0`, which a BOOLEAN satisfies — and its docstring claimed *seen red by reporting a
+    boolean*, which was false (with `len(delta.x)` mutated to `int(bool(delta.x))`, every count
+    test stayed green). That is rule 1 in the shape it keeps coming back in.
+
+    Seen red, for real, under that same mutation: `2 == 1`.
+    """
+    store, _vocab, _pages = corpus
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    clean = _status(three_inputs, index_dir)
+    assert clean.items_changed == 0 and clean.items_added == 0 and clean.items_removed == 0
+
+    def reenriched(item: Item) -> Item:
+        assert item.enriched is not None
+        return item.model_copy(
+            update={
+                "enriched": item.enriched.model_copy(
+                    update={
+                        "summary": f"un resumen completamente distinto para {item.id}",
+                        "enriched_at": item.enriched.enriched_at + timedelta(hours=1),
+                    }
+                )
+            }
+        )
+
+    changed = dict(store)
+    changed["k02"] = reenriched(store["k02"])
+    changed["k03"] = reenriched(store["k03"])
+    del changed["k01"]
+    del changed["k04"]
+    changed["k98"] = store["k05"].model_copy(update={"id": "k98"})
+    changed["k99"] = store["k06"].model_copy(update={"id": "k99"})
+    save_store(changed, three_inputs / "items.json")
+
+    after = _status(three_inputs, index_dir)
+
+    assert after.items_changed == 2
+    assert after.items_removed == 2
+    assert after.items_added == 2
+    assert "xbrain index update" in after.advice
+
+
+def test_status_declares_topic_rows_that_do_not_hold_what_the_store_implies(
+    tmp_path: Path, three_inputs: Path, corpus
+) -> None:
+    """H1's other half: the diagnostic instrument said HEALTHY.
+
+    Two states, both of which `status` must name. First, the store moved an item's topic and
+    nobody reindexed: `status` already counted the item, and it now also counts the TOPICS
+    whose stored membership differs from what the store implies — two of them, since k02 leaves
+    one and joins the other. Second, and the one that proves `status` reads the BASE rather
+    than re-deriving everything from item fingerprints: every item fingerprint matches and a
+    topic row is behind anyway — the state the pre-H1 `update` produced on every topic move,
+    and the state any index updated by that code is in today. The base is edited by hand to
+    reach it, the way C-3 amputates the topic plane behind the manifest. The `update` it names
+    repairs exactly that row and nothing else.
+
+    Seen red before the fix: `advice == ''` and no `topics_changed` in the report.
+    """
+    store, _vocab, _pages = corpus
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    clean = _status(three_inputs, index_dir)
+    assert clean.advice == ""
+
+    changed = dict(store)
+    assert store["k02"].enriched is not None
+    changed["k02"] = store["k02"].model_copy(
+        update={
+            "enriched": store["k02"].enriched.model_copy(
+                update={"primary_topic": "ai-policy", "topics": ["ai-policy"]}
+            )
+        }
+    )
+    save_store(changed, three_inputs / "items.json")
+    moved = _status(three_inputs, index_dir)
+    assert "xbrain index update" in moved.advice
+
+    save_store(store, three_inputs / "items.json")
+    connection = index_schema.open_index(index_schema.db_path(index_dir))
+    with connection:
+        connection.execute(
+            "UPDATE topics SET primary_item_ids_json = '[]', stale = 1 WHERE slug = 'ai-policy'"
+        )
+    connection.close()
+    behind = _status(three_inputs, index_dir)
+    assert "xbrain index update" in behind.advice, "status read the base and found it behind"
+    assert behind.items_changed == 0, "every item fingerprint still matches"
+
+    assert clean.topics_changed == 0
+    assert (moved.items_changed, moved.topics_changed) == (1, 2)
+    assert behind.topics_changed == 1
+
+    report = _update(three_inputs, index_dir)
+    assert (report.items_changed, report.topics_refreshed) == (0, 1)
+    repaired = _status(three_inputs, index_dir)
+    assert repaired.advice == "" and repaired.topics_changed == 0
+
+
+def test_status_and_update_see_the_corruption_a_query_would_hit(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """G-4's other half: the diagnostic instrument said HEALTHY over a base a query crashed on.
+
+    `_prove_readable` touched only `sqlite_master`, so with `chunks_fts_data` dropped `status`
+    exited 0 with every count in place and `update --dry-run` returned normally — while a query
+    died with a `DatabaseError`. Two instruments, opposite answers on one state (rule 9), and
+    the one that lies is the one an operator runs to find out. The probe runs at the OPEN door,
+    so every door sees the same thing and names the same command — which is why the query door
+    landing in 02.9 needs nothing added here.
+
+    Seen red before the fix: `status` returned `incomplete=False` and `update` an `UpdateReport`.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    connection = sqlite3.connect(index_schema.db_path(index_dir))
+    connection.execute("DROP TABLE chunks_fts_data")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(index_schema.IndexIncompatibleError, match="xbrain index build --force"):
+        _status(three_inputs, index_dir)
+    with pytest.raises(index_schema.IndexIncompatibleError, match="xbrain index build --force"):
+        _update(three_inputs, index_dir, dry_run=True)
+
+
+def test_status_runs_quick_check_and_declares_a_damaged_page_the_open_door_does_not_reach(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """B-1: 16 KB of `0xff` written over pages 17–20 of the real `knowledge.db`;
+    `PRAGMA quick_check` reported «btreeInitPage() returns error code 11», and `status --json`
+    said `incomplete: false` with an empty advice — the open-door probes read page 1,
+    `sqlite_master` and one `MATCH` per FTS plane, and the damage sat where none of them looks.
+    Not the rule-9 shape (no instrument said the opposite; a query fails closed the moment it
+    touches the page, G-4) but the diagnostic instrument could see more for the price of one
+    `quick_check` (155–167 ms on the 52 MB real index, measured), and `status` is the explicit
+    command that can pay it.
+
+    Staged on the fixture base at the same offset (page 17 of 4096-byte pages). THE
+    PRECONDITION IS ASSERTED FIRST — `quick_check` itself sees damage — so a layout change that
+    moved the pages under an unused region would fail loudly instead of passing for the wrong
+    reason (rule 1). Seen red before the fix: `incomplete is False`.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    database = index_schema.db_path(index_dir)
+    with database.open("r+b") as handle:
+        handle.seek(65536)
+        handle.write(b"\xff" * 16384)
+    connection = sqlite3.connect(database)
+    try:
+        verdict = connection.execute("PRAGMA quick_check").fetchall()
+    finally:
+        connection.close()
+    assert verdict != [("ok",)], "the damage must be where quick_check looks, or nothing is tested"
+
+    report = _status(three_inputs, index_dir)
+
+    assert report.incomplete is True
+    assert "quick_check" in report.advice and "xbrain index build --force" in report.advice
+
+
+@pytest.mark.parametrize("moved", ["items.json", "vocab.yaml", "topics.json"])
+def test_status_reports_the_index_behind_the_store_from_the_cheap_signal(
+    tmp_path: Path, three_inputs: Path, moved: str
+) -> None:
+    """B3: the mtime/size signal, read with an `os.stat`, on an explicit command too.
+
+    A `touch` with no edit is a FALSE POSITIVE and that is accepted: the cost of one extra
+    warning is a warning, and the cost of a false negative is serving stale evidence as fresh.
+    It fails towards the warning, like `origin: unknown -> llm_synthesis`.
+
+    Over the THREE inputs (P1a): `vocab.yaml` and `topics.json` move the index as surely as
+    `items.json` does, and for a while only the first one tripped this. Seen red before the fix
+    on `vocab.yaml` and `topics.json`: `behind is False`.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    assert _status(three_inputs, index_dir).behind is False
+
+    path = three_inputs / moved
+    path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    assert _status(three_inputs, index_dir).behind is True
+
+
+@pytest.mark.parametrize("table", ["items", "chunks"])
+def test_a_damaged_root_page_is_declared_by_status_and_refused_by_update_naming_the_rebuild(
+    tmp_path: Path, three_inputs: Path, table: str
+) -> None:
+    """D-1: the root page of `items` overwritten (read from `sqlite_master.rootpage`, not
+    guessed) made `status` and `update` a raw `sqlite3.DatabaseError` traceback naming no
+    command — `count_rows`, `_stored_fingerprints` and `stored_topic_rows` ran BEFORE
+    `quick_check` and converted nothing — while CLAUDE.md said G-4 was closed on all three
+    commands. And with the root page of `chunks` damaged `update --dry-run` returned a normal
+    `UpdateReport`: `COUNT(*)` was answered from an index, nothing read the table, and the
+    manifest would have been re-sealed over a damaged base.
+
+    Now `status` and `update` ask ONE function whether the manifest describes the base, and
+    that function runs `quick_check` FIRST and turns any `DatabaseError` of its reads into the
+    rebuild advice. Seen red before the fix: `items` — `sqlite3.DatabaseError` out of `status`
+    and out of `update`; `chunks` — `update` returned an `UpdateReport`.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    _damage_root_page(index_schema.db_path(index_dir), table)
+
+    report = _status(three_inputs, index_dir)
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice, report.advice
+
+    with pytest.raises(index_schema.IndexIncompatibleError, match="xbrain index build --force"):
+        _update(three_inputs, index_dir, dry_run=True)
+
+
+def test_the_consistency_check_names_every_required_plane_the_manifest_does_not_declare(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """B1's second half, and the one a mutation found missing here.
+
+    `manifest_mismatch` iterated `manifest.counts.items()`, so a `Manifest` holding
+    `counts={}` compared NOTHING and every base agreed with it. 02.6b's reader refuses that
+    document at the boundary — which is why the end-to-end test
+    `test_a_manifest_with_empty_counts_is_refused_by_every_door_not_sealed_as_healthy` stays
+    GREEN under the `sorted(manifest.counts)` mutation: the door never reaches the comparison.
+    A guard whose only cover is another guard having run is one guard (rule 11's fail-open
+    cell), so this asks the function DIRECTLY, with a `Manifest` built in Python — which is
+    legal, and is exactly how the two guards are made to fail closed independently.
+
+    Seen red under `for plane in sorted(manifest.counts)`: an empty sentence, meaning
+    "consistent", over a base holding five populated planes.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    manifest = dataclasses.replace(index_build.load_manifest(index_dir), counts={})
+
+    sentence = index_build.manifest_mismatch(
+        manifest, {"items": 12, "topics": 2, "surfaces": 43, "chunks": 56, "profiles": 12}
+    )
+
+    for plane in index_build.COUNT_PLANES:
+        assert plane in sentence, sentence

@@ -49,7 +49,7 @@ from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel
 
@@ -61,10 +61,17 @@ from xbrain.knowledge.index_schema import (
     SCHEMA_VERSION,
     IndexIncompatibleError,
     IndexMissingError,
+    corrupt_base_error,
     db_path,
+    delete_chunk_rows,
+    delete_item_rows,
+    delete_profile_rows,
     manifest_path,
     open_index,
     open_memory_index,
+    quick_check,
+    reading_base,
+    require_database,
 )
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.models import KnowledgeSurface, TopicRecord
@@ -1240,6 +1247,54 @@ class BuildReport:
     dry_run: bool
 
 
+@dataclass(frozen=True)
+class UpdateReport:
+    """What an incremental update changed, counted per cause (02.8).
+
+    It sits beside `BuildReport` because the two are one family — what a run did to the
+    base — and because the difference between them IS the child: a build reports what it
+    wrote, an update reports what it wrote AND what it removed, which is the only pair that
+    can distinguish "nothing changed" from "everything was rewritten to the same bytes".
+    """
+
+    items_added: int
+    items_changed: int
+    items_removed: int
+    chunks_inserted: int
+    chunks_deleted: int
+    profiles_inserted: int
+    profiles_deleted: int
+    topics_rebuilt: bool
+    # H1: the topic ROWS rewritten because their members or `stale` bit moved while the
+    # vocabulary and the pages did not. 0 when `topics_rebuilt` took the whole plane.
+    topics_refreshed: int
+    duration_seconds: float
+    dry_run: bool
+
+
+@dataclass(frozen=True)
+class StatusReport:
+    """What `index status` reports (Plan 02 §15.2, step 10c).
+
+    `items_changed` is a NUMBER, not a flag: "something changed" does not distinguish a
+    touched file from a hundred re-enriched items, and the difference decides whether a
+    rebuild is worth its minutes.
+    """
+
+    manifest: Manifest | None
+    counts: dict[str, int]
+    items_added: int
+    items_changed: int
+    items_removed: int
+    # H1: topics whose stored row (members, `stale`, description, synthesis) is not the row
+    # the store implies now — read from the BASE, so an index whose item fingerprints all
+    # match and whose topic plane is behind anyway is still declared.
+    topics_changed: int
+    behind: bool
+    incomplete: bool
+    advice: str
+
+
 @dataclass
 class WriteCounters:
     """Mutable tally shared by the writers. Not frozen: it is a running total, not a result."""
@@ -1708,4 +1763,650 @@ def _build_report(
         failed=failed,
         duration_seconds=time.perf_counter() - started,
         dry_run=dry_run,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 02.8 — `update`, `status` and INVALIDATION: the index knows it is old, and says so
+#
+# Indexing is MANUAL BY DECISION (spec §9.2), so the failure this section exists for is not
+# corruption — it is *you ran `enrich` and did not reindex*. Everything below turns that state
+# into something declared instead of something silently answered.
+#
+# TWO QUESTIONS, TWO COSTS, AND THEY ARE NOT THE SAME QUESTION.
+#
+#   * «did an input move?» is the CHEAP signal, three `os.stat`, already sealed in the
+#     manifest. It is what `status` reports as `behind`, and it can be a false positive (a
+#     `touch` with no edit) — which is the direction it is allowed to fail in.
+#   * «WHICH items changed, and how many?» is the DEEP fingerprint, a walk of the corpus. Only
+#     `build`, `update` and `status` pay it, and paying it is what lets `status` answer a
+#     number instead of a flag — the difference that decides whether a rebuild is worth its
+#     minutes.
+#
+# ONE DEFINITION OF «DOES THIS MANIFEST DESCRIBE THIS BASE?» (`describe_base`), and that is
+# rule 5 made exigible rather than described. Six rounds of the monolith closed the same
+# fail-open family one route at a time — an interrupted forced rebuild, a missing table, a
+# manifest that counted less than the base held, a dry run that created an empty base, a
+# cheap signal covering one input of three, a manifest whose `counts` was `{}`, a damaged
+# page under the maintenance reads — and each fix was right while each door kept its own
+# reading of the question. `status` publishes the sentence as advice and `update` raises it
+# (`require_consistent`); 02.9's query door will run the same function with `whole_file=False`.
+#
+# WHAT IS NOT HERE. No query door, no CLI, no renderer: 02.9 and later. The two commands here
+# take an `IndexInputs` exactly as `build` does, because P1b is not a property of `build` — it
+# is a property of every door that seals a manifest.
+# ---------------------------------------------------------------------------
+
+
+def manifest_mismatch(manifest: Manifest, counts: Mapping[str, int]) -> str:
+    """The planes on which the base disagrees with its manifest, as one sentence, or ``.
+
+    Empty means consistent. Compared plane by plane rather than as one boolean so the error
+    names WHAT is missing — `topics 0 != 45` is a diagnosis, `incomplete` is not.
+
+    The planes iterated are the REQUIRED ones (`COUNT_PLANES`), never `manifest.counts`: a
+    `Manifest` holding `counts={}` used to compare nothing and agree with any base. 02.6b's
+    reader refuses that document at the boundary now; this comparison fails closed on its own
+    as well, because a guard that depends on another guard having run is one guard.
+    """
+    differing = [
+        f"{plane} {counts.get(plane, 0)} != {manifest.counts.get(plane, '—')}"
+        for plane in sorted(COUNT_PLANES)
+        if counts.get(plane, 0) != manifest.counts.get(plane)
+    ]
+    return ", ".join(differing)
+
+
+def _stored_fingerprints(connection: sqlite3.Connection) -> dict[str, str]:
+    """`{item_id: the fingerprint the index was built from}` — the comparison's left side."""
+    return {
+        row["item_id"]: row["store_fingerprint"]
+        for row in connection.execute("SELECT item_id, store_fingerprint FROM items")
+    }
+
+
+def stored_topic_rows(connection: sqlite3.Connection) -> dict[str, TopicRow]:
+    """`{slug: the row the base holds}`, in `topic_row` column order — the left side (H1)."""
+    return {
+        str(row[0]): cast("TopicRow", tuple(row))
+        for row in connection.execute(
+            "SELECT slug, description, overview, notes_json, synthesized_at, "
+            "post_count_at_synth, stale, primary_item_ids_json, secondary_item_ids_json, "
+            "vocab_fingerprint, synthesis_fingerprint FROM topics"
+        )
+    }
+
+
+def expected_topic_records(
+    store: Mapping[str, Item], vocab: Sequence[Topic], topic_pages: Mapping[str, TopicPage]
+) -> dict[str, TopicRecord]:
+    """`{slug: the record the writer would insert NOW}` — the comparison's right side.
+
+    Built exactly as `_write_everything` builds it: the page from `topics.json`, the members
+    from the store, `stale` derived by `topic_record` from the live primary count. ONE
+    derivation, consumed by the refresh and by `status` — two derivations would be two
+    answers to «is this plane behind?» that agree until they do not (rule 5).
+    """
+    return {
+        topic.slug: topic_record(
+            topic, topic_pages.get(topic.slug), *topic_membership(store, topic.slug)
+        )
+        for topic in vocab
+    }
+
+
+def _topics_behind(stored: Mapping[str, TopicRow], records: Mapping[str, TopicRecord]) -> list[str]:
+    """The topics whose stored row is not the row the store implies, sorted (H1).
+
+    Members, `stale`, description, synthesis — the WHOLE row, compared through `topic_row`, so
+    a column added to the projection is compared without anything here being edited. A row
+    missing from the base counts as behind.
+    """
+    return sorted(slug for slug, record in records.items() if stored.get(slug) != topic_row(record))
+
+
+@dataclass(frozen=True)
+class _Delta:
+    """Which items are new, gone or different — the whole decision an update makes."""
+
+    added: list[str]
+    removed: list[str]
+    changed: list[str]
+
+
+def _classify(current: Mapping[str, str], stored: Mapping[str, str]) -> _Delta:
+    """Compare the two fingerprint maps. Sorted, so an update is deterministic."""
+    return _Delta(
+        added=sorted(set(current) - set(stored)),
+        removed=sorted(set(stored) - set(current)),
+        changed=sorted(k for k in set(current) & set(stored) if current[k] != stored[k]),
+    )
+
+
+def _delete_item(connection: sqlite3.Connection, item_id: str) -> int:
+    """Every chunk and every metadata row of one item. Returns the chunks removed.
+
+    THE FTS RETRACTION IS NOT THIS FUNCTION'S CONTRACT, and saying so is the point. Plan 02
+    §10.7b is about the `'delete'` command that must reach `chunks_fts` before a chunk row
+    goes, and that lives inside `delete_chunk_rows` — where its own docstring records the
+    measurement: BOTH statement orders leave zero rows behind, and what is never harmless is
+    omitting the retraction. Here there is nothing to get wrong: `delete_item_rows` touches
+    six metadata tables and never `chunks`, there is no foreign key between them, so the two
+    calls below commute. Measured by swapping them: no test moves, because nothing changes.
+    A docstring claiming this line carries the ordering constraint would be a second, wrong
+    copy of a rule that already has one home (rule 5).
+    """
+    chunk_ids = [
+        row["chunk_id"]
+        for row in connection.execute(
+            "SELECT chunk_id FROM chunks WHERE owner_type = 'item' AND owner_id = ?", (item_id,)
+        )
+    ]
+    removed = delete_chunk_rows(connection, chunk_ids)
+    delete_item_rows(connection, [item_id])
+    return removed
+
+
+def _clear_topics(connection: sqlite3.Connection) -> int:
+    """Remove the whole topic plane. Returns the chunks removed, so the report can count them."""
+    chunk_ids = [
+        row["chunk_id"]
+        for row in connection.execute("SELECT chunk_id FROM chunks WHERE owner_type = 'topic'")
+    ]
+    removed = delete_chunk_rows(connection, chunk_ids)
+    connection.execute("DELETE FROM surfaces WHERE owner_type = 'topic'")
+    connection.execute("DELETE FROM topics")
+    return removed
+
+
+def _apply_update(
+    connection: sqlite3.Connection,
+    index: LexicalIndex,
+    inputs: IndexInputs,
+    delta: _Delta,
+    counters: WriteCounters,
+    *,
+    topics_rebuilt: bool,
+    options: IndexOptions,
+) -> tuple[int, int, int]:
+    """Delete then rewrite, inside the CALLER'S transaction.
+
+    Returns `(chunks gone, profiles gone, topic rows refreshed)`.
+
+    THE VOCABULARY DRAGS THE ITEM PLANE WITH IT. The profile composes each assigned topic's
+    DESCRIPTION (spec §5.1.A), so a `vocab.yaml` edit rewrites indexed text on every affected
+    item — not only on the topic plane. Rebuilding the topic tables alone would leave the
+    profiles quoting a description the vocabulary no longer holds, and nothing would say so.
+
+    AND THE ITEMS DRAG THE TOPIC ROWS WITH THEM (H1). `topics` stores who the members are and
+    whether the page is stale, and both are functions of the items' assignments — which
+    `enrich` rewrites. When the plane is not rebuilt, the rows whose members or `stale` bit
+    moved are rewritten through the same projection the full writer uses; the topic surfaces
+    and chunks are left alone, because nothing they hold depends on membership.
+
+    THE PAGES DRAG THE ITEM PLANE TOO, AND THAT IS A COST, NOT A NECESSITY. `topics_rebuilt`
+    fuses the vocabulary and the page fingerprints, so a `topics.json`-only change rewrites
+    every item as a `vocab.yaml` change must, although `profile_text` reads no `TopicPage`.
+    What is served afterwards is correct and byte-identical to a rebuild, so this is declared
+    here rather than fixed here; separating the two triggers touches no contract.
+    """
+    store = inputs.store
+    rewrite = sorted(store) if topics_rebuilt else delta.added + delta.changed
+    deleted_chunks = 0
+    deleted_profiles = 0
+    for item_id in delta.removed + [i for i in rewrite if i not in delta.added]:
+        deleted_chunks += _delete_item(connection, item_id)
+        deleted_profiles += delete_profile_rows(connection, [item_id])
+    for item_id in rewrite:
+        write_item(index, store[item_id], inputs.vocab, counters, options=options)
+    if topics_rebuilt:
+        # Counted: the report's `chunks_deleted` omitted the topic plane, so after a
+        # `topics.json`-only update it read `+22,287 / -21,583` while the base moved by one.
+        deleted_chunks += _clear_topics(connection)
+        for topic in sorted(inputs.vocab, key=lambda t: t.slug):
+            primary, secondary = topic_membership(store, topic.slug)
+            write_topic(
+                index,
+                topic,
+                inputs.topic_pages.get(topic.slug),
+                primary,
+                secondary,
+                counters,
+                options=options,
+            )
+        return deleted_chunks, deleted_profiles, 0
+    return deleted_chunks, deleted_profiles, _refresh_topic_rows(index, inputs)
+
+
+def _refresh_topic_rows(index: LexicalIndex, inputs: IndexInputs) -> int:
+    """Rewrite ONLY the topic rows the store no longer agrees with (H1). Returns how many.
+
+    Compared before written — the same comparison `status` reports — so a store that did not
+    move rewrites no row, and `update` with no changes stays at zero writes.
+    """
+    records = expected_topic_records(inputs.store, inputs.vocab, inputs.topic_pages)
+    behind = _topics_behind(stored_topic_rows(index.connection), records)
+    for slug in behind:
+        _write_topic_row(index, records[slug])
+    return len(behind)
+
+
+def _update_report(
+    delta: _Delta,
+    counters: WriteCounters,
+    deleted_chunks: int,
+    deleted_profiles: int,
+    topics_rebuilt: bool,
+    topics_refreshed: int,
+    started: float,
+    *,
+    dry_run: bool,
+) -> UpdateReport:
+    return UpdateReport(
+        items_added=len(delta.added),
+        items_changed=len(delta.changed),
+        items_removed=len(delta.removed),
+        chunks_inserted=counters.chunks,
+        chunks_deleted=deleted_chunks,
+        profiles_inserted=counters.profiles,
+        profiles_deleted=deleted_profiles,
+        topics_rebuilt=topics_rebuilt,
+        topics_refreshed=topics_refreshed,
+        duration_seconds=time.perf_counter() - started,
+        dry_run=dry_run,
+    )
+
+
+def _next_manifest(
+    previous: Manifest,
+    inputs: IndexInputs,
+    tallies: ManifestTallies,
+    *,
+    options: IndexOptions,
+) -> Manifest:
+    """The manifest after an update: NEW signals and tallies, the versions carried over.
+
+    THE VERSIONS ARE COPIED RATHER THAN RECOMPUTED because `load_compatible_manifest` has
+    already proved they match — recomputing them here would silently "fix" a mismatch that
+    was supposed to have refused the run. That is `_fresh_manifest`'s note read from the other
+    end: a build DEFINES the versions, an update INHERITS them.
+
+    THE COUNTS AND OMISSIONS ARE NOT COPIED. The first version of this carried `surfaces`,
+    `skipped` and `failed` over and adjusted the other four by hand, so after one update the
+    manifest published the previous population and `index status --json` exposed it as
+    current. They are read from the base now, through the same `manifest_tallies` a fresh
+    build uses.
+
+    `failed` IS copied, and that is not the same omission: it records the fetch failures the
+    BUILD met while emitting surfaces, and an incremental update that touched three items has
+    not re-met the other two thousand. Recomputing it from this run would publish three
+    failures where the corpus has two hundred.
+    """
+    return Manifest(
+        schema_version=previous.schema_version,
+        built_at=datetime.now(timezone.utc),
+        store_fingerprint=store_fingerprint(inputs.store, options=options),
+        store_signal=inputs.signal,
+        vocab_fingerprint=vocab_fingerprint(inputs.vocab),
+        topics_fingerprint=topics_fingerprint(inputs.topic_pages),
+        surface_version=previous.surface_version,
+        chunker_version=previous.chunker_version,
+        chunker_params=dict(previous.chunker_params),
+        embeddings=previous.embeddings,
+        counts=dict(tallies.counts),
+        skipped=dict(tallies.skipped),
+        failed=[dict(entry) for entry in previous.failed],
+    )
+
+
+def update(
+    index_dir: Path,
+    inputs: IndexInputs,
+    *,
+    options: IndexOptions | None = None,
+    dry_run: bool = False,
+) -> UpdateReport:
+    """Bring the index up to date, touching only what changed (spec §5.6, Plan 02 §15.3).
+
+    IT TAKES AN `IndexInputs`, FOR THE SAME REASON `build` DOES (P1b). The manifest an update
+    re-seals carries the cheap signal, and a signal taken after the commit describes whatever
+    file sits on the path by then: a save landing in that window produced a manifest
+    certifying a store the base had never seen, and the next query compared EQUAL and answered
+    over stale rows with nothing declared. There is no `signal=` keyword to forget.
+
+    ONE TRANSACTION for the whole run. Committing per item would leave a partial application
+    of a change nobody can name after a failure — and the index would look fine, because every
+    id it holds still resolves.
+
+    THE ORDER OF THE THREE REFUSALS IS ITSELF A DECISION. The manifest's compatibility is
+    checked FIRST (`load_compatible_manifest`), because an index cut by another chunker is not
+    a base to be incremental over at all; the database's EXISTENCE second (`require_database`),
+    because opening for writing used to create it — an empty base under a standing manifest,
+    which the next query answered as an empty corpus; and its CONSISTENCY third
+    (`require_consistent`, `whole_file=True`), because an update re-seals the manifest and
+    must not seal it over a torn page its own `COUNT(*)` never read.
+    """
+    options = options or IndexOptions()
+    manifest = load_compatible_manifest(index_dir, params=options.params)
+    started = time.perf_counter()
+
+    # BEFORE the write door (G-2): an update over a database that is not there has nothing to
+    # be incremental over, and opening for writing used to create it.
+    database = require_database(index_dir)
+    connection = open_index(database)
+    counters = WriteCounters()
+    deleted_chunks = 0
+    deleted_profiles = 0
+    topics_refreshed = 0
+    try:
+        # The maintenance door pays the whole-file check (D-1).
+        require_consistent(connection, manifest, database, whole_file=True)
+        index = LexicalIndex(connection)
+        with reading_base(database):
+            stored = _stored_fingerprints(connection)
+        current = {
+            item_id: item_fingerprint(item, options=options)
+            for item_id, item in inputs.store.items()
+        }
+        delta = _classify(current, stored)
+
+        topics_rebuilt = (
+            vocab_fingerprint(inputs.vocab) != manifest.vocab_fingerprint
+            or topics_fingerprint(inputs.topic_pages) != manifest.topics_fingerprint
+        )
+        try:
+            with reading_base(database), connection:
+                deleted_chunks, deleted_profiles, topics_refreshed = _apply_update(
+                    connection,
+                    index,
+                    inputs,
+                    delta,
+                    counters,
+                    topics_rebuilt=topics_rebuilt,
+                    options=options,
+                )
+                tallies = manifest_tallies(connection)
+                if dry_run:
+                    raise _DryRun
+        except _DryRun:
+            return _update_report(
+                delta,
+                counters,
+                deleted_chunks,
+                deleted_profiles,
+                topics_rebuilt,
+                topics_refreshed,
+                started,
+                dry_run=True,
+            )
+    finally:
+        if not connection_closed(connection):
+            connection.close()
+
+    write_manifest(index_dir, _next_manifest(manifest, inputs, tallies, options=options))
+    return _update_report(
+        delta,
+        counters,
+        deleted_chunks,
+        deleted_profiles,
+        topics_rebuilt,
+        topics_refreshed,
+        started,
+        dry_run=False,
+    )
+
+
+@dataclass(frozen=True)
+class BaseVerdict:
+    """The seam's answer: what the base holds, and why it is not what the manifest says (or ``).
+
+    `counts` is what was read before the answer was reached — `{}` when the base could not be
+    read at all — so `status` can publish it next to the sentence without a second read.
+    """
+
+    counts: dict[str, int]
+    sentence: str
+
+
+def describe_base(
+    connection: sqlite3.Connection, manifest: Manifest, database: Path, *, whole_file: bool
+) -> BaseVerdict:
+    """«Does this manifest describe this base?» — ONE function, asked by every door.
+
+    Six rounds of the monolith closed the fail-open family one route at a time: an interrupted
+    forced rebuild (C-1), a missing table (C-2), a manifest that counted less than the base
+    held (C-3), a dry run that created an empty base (G-2), a cheap signal covering one input
+    of three (P1a), a manifest whose `counts` was `{}` (B1) — and a damaged page under the
+    maintenance reads was a raw traceback on the three commands (D-1). Each fix was right and
+    each door kept its own reading of the question, which is CLAUDE.md rule 5: one definition,
+    or five that silently diverge. This is the one definition. `status` reports its sentence as
+    advice and `update` raises it (`require_consistent`); 02.9's query door runs the same
+    function with `whole_file=False`, and `tests/test_knowledge_index_invalidation.py`
+    replaces it with a sentinel and asserts the doors repeat it VERBATIM, so a door that
+    re-derives the question goes red.
+
+    Three things, in order, and any `DatabaseError` raised by any of them IS the answer:
+
+    1. `whole_file` — `PRAGMA quick_check`, the reader that sees a page none of the open
+       door's probes touch (B-1). `status` and `update` pay it (155–850 ms on the 52 MB real
+       index depending on load): one is the instrument an operator runs to find out, the other
+       re-seals the manifest and must not seal it over a torn page — `update --dry-run`
+       returned a normal report with the root page of `chunks` overwritten, because `COUNT(*)`
+       was answered from an index. A query does not pay it, by the B-1 decision: it fails
+       closed the moment it reaches the page (`LexicalIndex._fetch`, G-4).
+    2. The five `COUNT(*)` against the five planes the manifest is REQUIRED to declare
+       (`manifest_mismatch`, 0.04 ms).
+    3. The conversion: `count_rows` on a damaged root page raises `sqlite3.DatabaseError`, and
+       it used to escape as a traceback naming no command while CLAUDE.md said G-4 had closed
+       exactly that. The sentence is `corrupt_base_error`'s — the same one the open door uses.
+    """
+    try:
+        if whole_file:
+            damage = quick_check(connection)
+            if damage:
+                return BaseVerdict(counts={}, sentence=_damage_advice(database, damage))
+        counts = count_rows(connection)
+    except sqlite3.DatabaseError as error:
+        return BaseVerdict(counts={}, sentence=str(corrupt_base_error(database, error)))
+    mismatch = manifest_mismatch(manifest, counts)
+    if mismatch:
+        return BaseVerdict(
+            counts=counts,
+            sentence=(
+                f"El índice no contiene lo que su manifest declara ({mismatch}): quedó "
+                f"incompleto. {REBUILD_ADVICE}"
+            ),
+        )
+    return BaseVerdict(counts=counts, sentence="")
+
+
+def require_consistent(
+    connection: sqlite3.Connection, manifest: Manifest, database: Path, *, whole_file: bool
+) -> dict[str, int]:
+    """`describe_base` as a refusal: raise its sentence, closing the connection first.
+
+    C-3: `update` decided `topics_rebuilt` against the MANIFEST's fingerprints and never
+    looked at the base, so a manifest declaring 45 topics over a base holding 0 produced an
+    update that rewrote every item and silently dropped the topic plane for good — no later
+    update would find a fingerprint to disagree with. The manifest is the baseline an
+    incremental update reasons from; when the base contradicts it there is no baseline, and
+    the honest answer is the rebuild.
+
+    Public because 02.9's query door runs it too: that door used to compare versions and
+    schema only, so a base amputated behind the manifest's back — or the empty one a stray
+    write door left behind — was answered as a corpus with no matches while `update` and
+    `status` refused it. Returns the counts it read, so a caller does not count twice.
+    """
+    verdict = describe_base(connection, manifest, database, whole_file=whole_file)
+    if verdict.sentence:
+        connection.close()
+        raise IndexIncompatibleError(verdict.sentence)
+    return verdict.counts
+
+
+def _damage_advice(database: Path, damage: str) -> str:
+    """The B-1 sentence for `quick_check`'s first finding."""
+    return f"La base del índice en {database} está dañada (quick_check: {damage}). {REBUILD_ADVICE}"
+
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+
+def _status_manifest(index_dir: Path, options: IndexOptions) -> tuple[Manifest | None, str]:
+    """The manifest as `status` sees it: the document, and why the code cannot use it (or ``).
+
+    Applies the SAME compatibility check `update` applies. Without it `status` answered
+    `incomplete=False` over a manifest `update` refuses — two instruments, opposite answers on
+    one state (rule 9) — and its advice named plain `index build`, which refuses while a
+    manifest exists.
+    """
+    try:
+        manifest = load_manifest(index_dir)
+    except IndexMissingError:
+        return None, ""
+    except IndexIncompatibleError as error:
+        return None, str(error)
+    try:
+        load_compatible_manifest(index_dir, params=options.params)
+    except IndexIncompatibleError as error:
+        return manifest, str(error)
+    return manifest, ""
+
+
+def _index_contents(
+    index_dir: Path, manifest: Manifest | None, unusable: str
+) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow], str]:
+    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row}, unusable)`.
+
+    THE BASE'S EXISTENCE IS ASKED OF `require_database`, LIKE EVERY OTHER DOOR (U-2). This
+    function used to test `exists()` by itself and return three empties, "the truthful reading
+    of an index that does not exist" — true of an index never built, and FALSE of the first
+    state the seam's docstring lists: a manifest standing over a base that is gone (an
+    interrupted `--force`, a 52 MB clean-up). There `update` refuses naming `build --force`,
+    and `status` — the instrument an operator runs to find out — answered `incomplete: False`,
+    `+2404 nuevos` and «actualiza con `xbrain index update`», the advice `update` then
+    refused: two instruments, one state, opposite answers (rule 9), on the diagnostic one.
+    `require_database` knows both readings and names the right command for each; its sentence
+    is published as `unusable`, so `incomplete` is true and the advice is the one the other
+    doors give. Three empties still follow, for the same reason as before.
+
+    With a usable manifest the base is judged by `describe_base` FIRST — `quick_check`, then
+    the five counts, any `DatabaseError` converted (D-1) — and a base the manifest does not
+    describe is read no further: the deep reads below would raise on the same damage, and the
+    delta they feed is meaningless against a base that has to be rebuilt. A manifest the code
+    cannot use (another version) still gets its counts and its delta, because the base itself
+    is readable and the operator may want to know how far it moved.
+    """
+    try:
+        database = require_database(index_dir)
+    except IndexMissingError as error:
+        return {}, {}, {}, unusable or str(error)
+    connection = open_index(database, read_only=True)
+    try:
+        with reading_base(database):
+            if manifest is not None and not unusable:
+                verdict = describe_base(connection, manifest, database, whole_file=True)
+                if verdict.sentence:
+                    return verdict.counts, {}, {}, verdict.sentence
+                counts = verdict.counts
+            else:
+                counts = count_rows(connection)
+            return (
+                counts,
+                _stored_fingerprints(connection),
+                stored_topic_rows(connection),
+                unusable,
+            )
+    finally:
+        connection.close()
+
+
+def _status_advice(
+    incomplete: bool,
+    delta: _Delta,
+    *,
+    behind: bool,
+    unusable: str = "",
+    topics_changed: int = 0,
+) -> str:
+    """The command that fixes what `status` just found — never a bare diagnosis.
+
+    `unusable` is the sentence for a manifest that EXISTS but cannot be used — another
+    version, a malformed document, or a base that does not hold what it declares (C-3). It
+    already names `index build --force`, and it must, because plain `index build` refuses
+    while a manifest exists: the previous advice sent the operator into a dead end.
+    """
+    if unusable:
+        return unusable
+    if incomplete:
+        return (
+            "El índice está incompleto o no tiene manifest: ninguna consulta lo usará. "
+            "Constrúyelo con `xbrain index build`."
+        )
+    if delta.added or delta.removed or delta.changed or behind or topics_changed:
+        return UPDATE_ADVICE
+    return ""
+
+
+def status(
+    index_dir: Path,
+    inputs: IndexInputs,
+    *,
+    options: IndexOptions | None = None,
+) -> StatusReport:
+    """What the index holds, and how far behind the store it is (Plan 02 §15.2, step 10c).
+
+    `status` is an EXPLICIT command, so it can afford what a query cannot: loading the store
+    and computing a fingerprint per item. That is what lets it answer *how many* items changed
+    instead of merely *something did* — and the difference decides whether a rebuild is worth
+    its minutes.
+
+    AND `behind` IS ANSWERED AGAINST THE SNAPSHOT THE DELTA CAME FROM, not against a second
+    `stat` of the paths. The cheap signal travels on `IndexInputs` (P1b), so the two halves of
+    this report — *an input moved* and *these items changed* — describe ONE moment. Re-statting
+    here would let them describe two, and the disagreement would be invisible.
+
+    It runs `PRAGMA quick_check` over the whole file (B-1): the open door's probes read page 1,
+    `sqlite_master` and one `MATCH` per FTS plane, so damage on a page none of them touches —
+    measured: 16 KB of `0xff` over pages 17–20 of the real index — was reported by
+    `quick_check` and not by `status`. A query still fails closed the moment it reaches the
+    page (G-4); this is the explicit command paying the whole-file check so the operator hears
+    it first.
+
+    It takes the vocabulary and the pages like `build` and `update` do (H1), because the topic
+    plane is derived from all three, and it reads the TOPIC ROWS back from the base:
+    `topics_changed` counts the topics whose stored members, `stale` bit, description or
+    synthesis are not what the store implies now. An index whose item fingerprints all match
+    can still be behind on that plane, and an instrument that only compared item fingerprints
+    called it healthy.
+    """
+    options = options or IndexOptions()
+    manifest, unusable = _status_manifest(index_dir, options)
+    counts, stored, stored_topics, unusable = _index_contents(index_dir, manifest, unusable)
+
+    current = {
+        item_id: item_fingerprint(item, options=options) for item_id, item in inputs.store.items()
+    }
+    delta = _classify(current, stored)
+    topics_changed = len(
+        _topics_behind(
+            stored_topics, expected_topic_records(inputs.store, inputs.vocab, inputs.topic_pages)
+        )
+    )
+    behind = manifest is not None and manifest.store_signal != inputs.signal
+    incomplete = manifest is None or bool(unusable)
+    return StatusReport(
+        manifest=manifest,
+        counts=counts,
+        items_added=len(delta.added),
+        items_changed=len(delta.changed),
+        items_removed=len(delta.removed),
+        topics_changed=topics_changed,
+        behind=behind,
+        incomplete=incomplete,
+        advice=_status_advice(
+            incomplete, delta, behind=behind, unusable=unusable, topics_changed=topics_changed
+        ),
     )
