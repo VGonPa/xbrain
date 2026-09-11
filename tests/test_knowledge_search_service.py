@@ -34,11 +34,21 @@ from xbrain.knowledge.index_store import open_for_query
 from xbrain.knowledge.lexical import LexicalHit
 from xbrain.knowledge.search_service import QueryContext, search
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
-from xbrain.models import Item, Topic, TopicPage, VerificationVerdict
+from xbrain.models import (
+    Author,
+    Content,
+    ContentSourceSuccess,
+    Enrichment,
+    Item,
+    Topic,
+    TopicPage,
+    VerificationVerdict,
+)
 from xbrain.rubrics import save_vocab
 from xbrain.store import save_store, save_topic_pages
 
 FIXTURES = Path(__file__).parent / "fixtures"
+UTC = timezone.utc
 
 
 @pytest.fixture()
@@ -1601,3 +1611,118 @@ def test_paging_reassembles_the_ranking_when_both_planes_lose_candidates(
 
     assert cursor is None, "the walk must terminate rather than page forever"
     assert walked == whole, f"paging must reassemble the ranking: {walked} != {whole}"
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 — the walk invariant, on a corpus that populates BOTH planes
+# ---------------------------------------------------------------------------
+
+_MIXED_HANDLE = "pauthor"
+_MIXED_TOKEN = "Zephyrbloom"
+
+
+def _mixed_plane_corpus(size: int, chunked: int) -> dict[str, Item]:
+    """`size` items sharing one handle; the first `chunked` also carry a fetched ARTICLE BODY.
+
+    The handle reaches `profile_text` and never a chunk; the body reaches `chunks` and never
+    the profile. So one query lights BOTH candidate planes, which is the state a single-plane
+    fixture cannot produce and the state every pagination defect in this file has lived in.
+    """
+    store: dict[str, Item] = {}
+    for index in range(size):
+        ident = f"p{index:03d}"
+        content = None
+        if index < chunked:
+            body = " ".join(f"{_MIXED_TOKEN} parrafo {n} de {ident}." for n in range(40))
+            content = Content(
+                fetched_at=datetime(2026, 1, 2, tzinfo=UTC),
+                sources=[
+                    ContentSourceSuccess(
+                        kind="external_article",
+                        url=f"https://example.test/{ident}",
+                        title=f"Articulo {ident}",
+                        text=body,
+                    )
+                ],
+            )
+        store[ident] = Item(
+            id=ident,
+            source="bookmark",
+            url=f"https://x.com/{_MIXED_HANDLE}/status/{ident}",
+            author=Author(handle=_MIXED_HANDLE, name="P Author"),
+            text=f"Nota {ident} del autor.",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+            content=content,
+            enriched=Enrichment(
+                summary=f"Resumen de {ident}.",
+                topics=[],
+                primary_topic=None,
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                model="m",
+                executor="manual",
+            ),
+        )
+    return store
+
+
+def _walk(query: str, context: QueryContext, *, limit: int) -> list[str]:
+    """Every page the cursor reaches, concatenated — the round trip a consumer performs."""
+    walked: list[str] = []
+    cursor: str | None = None
+    for _ in range(200):
+        page = search(query, context, limit=limit, cursor=cursor)
+        walked += [result.item_id for result in page.results]
+        cursor = page.cursor
+        if cursor is None:
+            return walked
+    raise AssertionError("the walk did not terminate")
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_a_walk_across_both_candidate_planes_equals_the_unpaged_ranking(
+    tmp_path: Path, limit: int
+) -> None:
+    """THE INVARIANT, on a shape that DISCRIMINATES — which the first draft of this test did not.
+
+    Both planes are lit at once: `p000`/`p001` carry a fetched article body and reach `chunks`,
+    every item shares a handle and reaches `profile_text`, and one query hits both. Five owners
+    are then deleted from the store without reindexing, so the index still offers ids the
+    answer cannot use — the state in which the candidate window and the answer set diverge.
+
+    THE SHAPE WAS SEARCHED FOR, NOT GUESSED. A first version of this test seeded four chunked
+    items and no deletions; it passed against the PRE-FIX implementation, which makes it no
+    test at all (rule 1). A sweep over corpus shapes, run against `9da71f9`'s `_materialise`,
+    produced this one — and it fails there exactly as the review reported, `p008` among the
+    omitted:
+
+        whole (11): p000 p003 p004 p005 p007 p008 p011 p012 p013 p014 p015
+        walked (4): p000 p003 p004 p005
+
+    NO CORRUPTION IS STAGED, and that omission is deliberate. The shape was found with three
+    ids corrupted; removing them changes nothing — measured, identical `whole` and identical
+    `walked` — because those ids own no chunk row, so the `UPDATE` touches nothing. A step that
+    looks like it exercises the fingerprint path while exercising nothing is worse than its
+    absence; corruption has its own regressions above.
+
+    ASSERTED AS EQUALITY against one unpaged call. Equality catches an omission, a duplicate
+    and a reorder together; «no duplicates» and «same length» would each pass on the other two.
+    Parametrised over three page sizes because `needed = offset + limit + 1` — a defect visible
+    at one size only is one a single-size test would call fixed.
+    """
+    store = _mixed_plane_corpus(16, chunked=2)
+    data = tmp_path / "data"
+    _persist(data, store, [], {})
+    _build(data)
+
+    live = {k: v for k, v in store.items() if k not in {"p001", "p002", "p006", "p009", "p010"}}
+    context = _context(data, live, [], {})
+    query = f"{_MIXED_TOKEN} {_MIXED_HANDLE}"
+
+    results = search(query, context, limit=200).results
+    whole = [result.item_id for result in results]
+    assert any(r.matches for r in results), "the chunk plane must be lit"
+    assert any(not r.matches for r in results), "and the profile plane too"
+    assert len(whole) > 3 * limit, "the ranking must outlast several pages, or nothing is tested"
+
+    assert _walk(query, context, limit=limit) == whole
