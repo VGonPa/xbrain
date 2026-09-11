@@ -1987,9 +1987,7 @@ def test_an_empty_vocabulary_is_not_one_holding_an_empty_description() -> None:
             lambda: index_build.topics_fingerprint({"a": _page(overview="\ud800")}), id="t"
         ),
         pytest.param(lambda: index_build.item_fingerprint(_item(bookmark_folder="\ud800")), id="i"),
-        pytest.param(
-            lambda: index_build.store_fingerprint({"42": _item(bookmark_folder="\ud800")}), id="s"
-        ),
+        pytest.param(lambda: index_build.store_fingerprint({"\ud800": _item()}), id="s"),
     ],
 )
 def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) -> None:
@@ -1999,9 +1997,11 @@ def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) 
     wrote; this one names the FILE. `errors="replace"` is never the answer — it would hash
     U+FFFD and call two different strings the same content.
 
-    THE ATOM IS `bookmark_folder` AND NOT `text` ON PURPOSE, and the test below says why: a
-    surrogate in surface TEXT never reaches this module. The claim is scoped to the payload
-    `_fingerprint` encodes, which is the only payload this child owns.
+    EACH CASE CARRIES THE ATOM ITS OWN PLANE ENCODES, and the store's is the MAPPING KEY, never a
+    field of the item under it: `item_fingerprint` runs in `store_fingerprint`'s argument list, so
+    a surrogate in `bookmark_folder` is refused by the ITEM wrapper and this case passed on
+    another plane's handler — un-routing `store_fingerprint` left all 99 green (measured). NOT
+    `text`: a surrogate in surface TEXT never reaches this module, as the test below asserts.
     """
     with pytest.raises(index_build.FingerprintError) as caught:
         call()

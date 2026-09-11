@@ -600,8 +600,8 @@ def _fingerprint(domain: str, value: object) -> str:
 
     THE ONE PLACE THE TWO HELPERS ARE COMPOSED (rule 5). Every fingerprint in this module goes
     through here, so *what happens when a payload cannot be encoded* has ONE definition rather
-    than four that drift; the test asserts all four entry points raise the same error, which is
-    what stops the next plane from being added with a bare `UnicodeEncodeError` again.
+    than four that drift; the test asserts all four entry points raise the same error, each on an
+    atom its OWN plane encodes — so the next plane cannot arrive with a bare `UnicodeEncodeError`.
 
     HASH-NEUTRAL. It changes no digest — the success path is exactly the composition the item
     and store planes already performed — and only turns a raise into a named one.
