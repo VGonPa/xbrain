@@ -353,6 +353,7 @@ def chunk_evidence(
     char_start: int,
     char_end: int,
     attribution: Author | None,
+    title: str | None,
     locator: Locator,
 ) -> tuple[str, ...]:
     """Everything the index SERVES about a chunk, as the ONE tuple its fingerprint hashes (U-5).
@@ -376,6 +377,15 @@ def chunk_evidence(
     upstream would otherwise make every fingerprint fail on the next query. `None` and an
     author with an empty name are distinct arms. The locator IS a model dump — it is stored
     as one (`locator_json`) and rebuilt by validation, and a round trip is byte-stable.
+
+    TITLE IS HERE BECAUSE IT IS SERVED, AND IT WAS NOT FOR ONE ROUND. `SearchMatch.title`
+    became a served field and this tuple did not gain it, so the sentence above — *any arm
+    rewritten no longer recomputes* — was false about the field that says WHICH WORK a
+    quotation came from: `UPDATE chunks SET title = …` came back verbatim with
+    `corrupt_chunks_excluded: 0`. It is hashed as a PRESENCE MARKER plus the value, the same
+    shape attribution uses and for the same reason: a surface with no title and a surface
+    titled with the empty string are two different claims, and one delimiter-free
+    concatenation would hash them alike.
     """
     return (
         surface_id,
@@ -392,6 +402,8 @@ def chunk_evidence(
         "author" if attribution is not None else "",
         attribution.handle if attribution is not None else "",
         attribution.name if attribution is not None else "",
+        "title" if title is not None else "",
+        title if title is not None else "",
         locator.model_dump_json(),
     )
 
@@ -468,6 +480,7 @@ def _chunk(
                 char_start=start,
                 char_end=end,
                 attribution=attribution,
+                title=surface.title,
                 locator=locator,
             ),
             chunker_version=chunker_version,

@@ -14,8 +14,8 @@ the wrong version is a wrong answer wearing a right one's shape.
 
 **A chunk whose fingerprint does not recompute is NOT RETURNED, and is counted.** Invariant 6
 of spec §3.7. The check is cheap because the fingerprint is recomputed over what is already
-in the served row — the text AND, since U-5, the provenance, owner, position, attribution
-and locator served beside it, through the one projection `chunking.chunk_evidence`; what it
+in the served row — the text AND, since U-5, the provenance, owner, position, attribution,
+title and locator served beside it, through the one projection `chunking.chunk_evidence`; what it
 detects is a row written by a different chunker or edited by hand. It is counted in
 `corrupt_chunks_excluded`, whose name was `stale_chunks_excluded` until B3 pointed out that
 it sounded like the OTHER signal and measured this one.
@@ -225,6 +225,7 @@ def verify_fingerprints(hits: Sequence[LexicalHit]) -> tuple[tuple[LexicalHit, .
                 char_start=hit.char_start,
                 char_end=hit.char_end,
                 attribution=hit.attribution,
+                title=hit.title,
                 locator=fragment_locator(hit.surface_locator, hit.char_start, hit.char_end),
             )
         )

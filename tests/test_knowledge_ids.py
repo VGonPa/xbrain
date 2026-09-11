@@ -224,6 +224,12 @@ def test_chunk_fingerprint_hashes_the_whole_evidence_the_index_serves() -> None:
     `chunking.chunk_evidence`, so a served row whose author, origin or locator was rewritten
     behind a valid-looking value no longer recomputes. Each arm moves the hash; `None`
     attribution and an attribution with an empty name are distinct arms, never collapsed.
+
+    `title` JOINED THE PROJECTION WHEN IT BECAME A SERVED FIELD, and this test going red is
+    how that was noticed. It is pinned with the same three-way discipline attribution gets —
+    a different title, the EMPTY title, and no title at all must be three distinct hashes —
+    because the field says WHICH WORK a quotation came from, and a surface with no title and
+    one titled with the empty string are two different claims.
     """
     from xbrain.knowledge.chunking import chunk_evidence
     from xbrain.knowledge.models import Locator
@@ -242,6 +248,7 @@ def test_chunk_fingerprint_hashes_the_whole_evidence_the_index_serves() -> None:
             char_start=0,
             char_end=5,
             attribution=Author(handle="othervoice", name="Other Voice"),
+            title="On Controls and Thresholds",
             locator=Locator(kind="content_source", source_index=0, char_start=0, char_end=5),
         )
         fields.update(overrides)
@@ -261,6 +268,9 @@ def test_chunk_fingerprint_hashes_the_whole_evidence_the_index_serves() -> None:
         evidence(attribution=Author(handle="vgonpa", name="Other Voice")),
         evidence(attribution=Author(handle="othervoice", name="")),
         evidence(attribution=None),
+        evidence(title="A Wholly Different Work"),
+        evidence(title=""),
+        evidence(title=None),
         evidence(locator=Locator(kind="item_text", url="https://x.com/vgonpa/status/42")),
     ]
     hashes = {chunk_fingerprint(e) for e in moved}

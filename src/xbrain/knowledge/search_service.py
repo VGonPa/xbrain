@@ -200,7 +200,10 @@ def search(
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
         ordered, excluded, exhausted = _materialise(index, query, filters, context, needed=beyond)
-        page = ordered[offset : offset + limit]
+        page, evidence_excluded = _settle_evidence(
+            index, query, filters, context, ordered[offset : offset + limit]
+        )
+        excluded += evidence_excluded
         results = tuple(
             _hydrate(rank, item_id, matches, context)
             for rank, (item_id, matches) in enumerate(page, start=offset + 1)
@@ -351,6 +354,66 @@ def _chunk_owners(
         if len(grouped) >= needed or exhausted or distinct_owners(candidates) < depth:
             return grouped, corrupt + unresolvable, exhausted
         depth *= 2
+
+
+def _settle_evidence(
+    index: OpenIndex,
+    query: str,
+    filters: SearchFilters,
+    context: QueryContext,
+    page: list[tuple[str, list[LexicalHit]]],
+) -> tuple[list[tuple[str, list[LexicalHit]]], int]:
+    """Re-derive each SERVED item's matches from a query scoped to its own owners.
+
+    THE EVIDENCE A RESULT CARRIES MUST NOT DEPEND ON THE PAGE SIZE, and it did. The candidate
+    window is sized in OWNERS and `_group_by_item` filled each bucket from whatever that window
+    happened to hold, so an item's second-best chunk was included or not according to `limit`.
+    Measured on 25 items, no topics, nothing deleted and nothing corrupted:
+
+        --limit  5: X000 rank=1 matches=['summary']                    verify_with=('external_article', 'post')
+        --limit 10: X000 rank=1 matches=['summary','external_article'] verify_with=('external_article',)
+
+    Same corpus, same query, same item, same rank. The consequence is not a shorter list: with
+    only a machine-written `summary` to cite, `_verify_with` takes the DERIVED branch and says
+    *go check the article and the post*; with the article matched it takes the primary branch
+    and says *check the article*. Two different verification instructions for one claim, and
+    spec §3.5 makes `verify_with` an instruction rather than a display detail.
+
+    ONE SCOPED QUERY PER SERVED ITEM, AT `max_matches_per_item` ROWS. `LexicalIndex.search`
+    already narrows by `owner_ids` — the internal narrowing `get` and the evaluation harness
+    use, deliberately kept off the FROZEN `SearchFilters` — so the top `cap` chunks of an
+    item's own owners are one bounded question with one answer, whatever page asked it.
+
+    WHY NOT DEEPEN THE MAIN WINDOW UNTIL EVERY BUCKET IS FULL: that is also correct and it was
+    measured before this was written. It forces the window to full materialisation whenever a
+    served owner simply HAS fewer chunks than the cap, and on the real 2,474-item index that
+    cost 54 ms -> 592 ms for `agents` and 67 ms -> 3,723 ms for `de`, a 5-56x regression for an
+    answer that was already correct in all but the sparse case. Bounded work per served item
+    beats unbounded work per query.
+
+    The owners are taken from the bucket rather than assumed to be the item: a topic-owned hit
+    expands to the topic's members, so the item's evidence is its own chunks OR the topic
+    chunks it was expanded from, and re-asking for exactly those keeps the expansion intact.
+    A profile-only candidate has no chunk evidence by construction and is left alone.
+
+    Exclusions found here are COUNTED. This is a second candidate set the response considered,
+    and a forged row dropped from the evidence with the counter reading zero is the silence
+    `corrupt_chunks_excluded` exists to break.
+    """
+    cap = context.max_matches_per_item
+    settled: list[tuple[str, list[LexicalHit]]] = []
+    excluded = 0
+    for item_id, hits in page:
+        owners = tuple(dict.fromkeys(hit.owner_id for hit in hits))
+        if not owners:
+            settled.append((item_id, hits))
+            continue
+        scoped = index.lexical.search(query, cap, filters=filters, owner_ids=owners)
+        kept, unresolvable = resolvable_hits(scoped)
+        kept, corrupt = verify_fingerprints(kept)
+        excluded += corrupt + unresolvable
+        settled.append((item_id, list(kept[:cap])))
+    return settled, excluded
 
 
 def _fill_from_profiles(

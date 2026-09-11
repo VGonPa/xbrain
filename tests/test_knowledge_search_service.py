@@ -1957,3 +1957,222 @@ def test_the_refill_does_not_stop_on_a_ranking_it_never_materialised(
     assert page.truncated is True and page.cursor is not None
 
     assert _walk(marker, context, limit=limit) == whole
+
+
+# ---------------------------------------------------------------------------
+# Review round 6 — B2: the served title was outside the seal
+# ---------------------------------------------------------------------------
+
+
+def test_a_rewritten_title_is_excluded_and_counted_like_any_other_forged_arm(
+    context: QueryContext,
+) -> None:
+    """B2: `title` became a SERVED field in round 5 and was never added to the seal.
+
+    `chunk_evidence` is the one projection the emitter hashes and `verify_fingerprints`
+    rebuilds, and its docstring claims it is *"everything the index SERVES about a chunk"* and
+    that *"a row on which any arm was rewritten no longer recomputes"*. Both claims were false
+    the moment a title reached a consumer: the field that says WHICH WORK a quotation came
+    from was rewritable in the base with the integrity counter reading zero.
+
+    That is the U-5 defect one field over. U-5 closed it for provenance, owner, position,
+    attribution and locator after a quoted post was served as the poster's own summary with
+    `corrupt_chunks_excluded: 0`; a forged title is the same shape — a valid-looking value,
+    served on trust, attributing words to a work that never carried them.
+
+    Staged as the review staged it: rewrite the stored title and ask through the public door.
+
+    Seen red before `title` joined the projection: the forged title came back verbatim with
+    `corrupt_chunks_excluded: 0`.
+    """
+    forged = "A Wholly Different Work, By Someone Else"
+    before = search("Quillfeather", context)
+    titled = {
+        m.chunk_id for result in before.results for m in result.matches if m.title is not None
+    }
+    assert titled, "the query must serve a titled chunk, or nothing is tested"
+    assert before.index.corrupt_chunks_excluded == 0, "and the base must start clean"
+
+    connection = sqlite3.connect(db_path(context.index_dir))
+    with connection:
+        connection.execute("UPDATE chunks SET title = ? WHERE title IS NOT NULL", (forged,))
+    connection.close()
+
+    response = search("Quillfeather", context)
+
+    served = {m.title for result in response.results for m in result.matches}
+    assert forged not in served, "a rewritten title was served as if the index had written it"
+    assert {m.chunk_id for r in response.results for m in r.matches}.isdisjoint(titled), (
+        "the rows whose title was rewritten must no longer be served"
+    )
+    # BOUNDED BY THE WINDOW, NOT BY THE TABLE. `corrupt_chunks_excluded` counts what THIS
+    # response's candidate set held, so comparing it against every row rewritten in the base
+    # would assert something the counter never claims. What it must cover is the rows this
+    # query WAS serving a moment ago.
+    assert response.index.corrupt_chunks_excluded >= len(titled), (
+        f"{response.index.corrupt_chunks_excluded} excluded, {len(titled)} previously served"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review round 6 — B3: the evidence a result carries depended on the page size
+# ---------------------------------------------------------------------------
+
+
+def _two_surface_corpus(size: int, marker: str) -> dict[str, Item]:
+    """Items whose summary AND fetched article both match, so each has two citable chunks.
+
+    Two is the number that matters: with one the buckets cannot differ, and with the cap at
+    three the second chunk is exactly the one a shallower window drops.
+    """
+    body = (
+        " ".join(f"relleno{n}" for n in range(120))
+        + f" {marker} "
+        + " ".join(f"cola{n}" for n in range(120))
+    )
+    return {
+        f"X{i:03d}": Item(
+            id=f"X{i:03d}",
+            source="bookmark",
+            url=f"https://x.com/a/status/X{i:03d}",
+            author=Author(handle="a", name="A"),
+            text=f"Post X{i:03d} sin marcador.",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+            content=Content(
+                fetched_at=datetime(2026, 1, 2, tzinfo=UTC),
+                sources=[
+                    ContentSourceSuccess(
+                        kind="external_article",
+                        url=f"https://example.test/X{i:03d}",
+                        title=f"Articulo X{i:03d}",
+                        text=body,
+                    )
+                ],
+            ),
+            enriched=Enrichment(
+                summary=f"{marker} resumen de X{i:03d}.",
+                topics=[],
+                primary_topic=None,
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                model="m",
+                executor="manual",
+            ),
+        )
+        for i in range(size)
+    }
+
+
+def test_the_evidence_a_result_carries_does_not_depend_on_the_page_size(tmp_path: Path) -> None:
+    """B3: same corpus, same query, same item, same rank — different evidence per `limit`.
+
+    The candidate window is sized in OWNERS and `_group_by_item` filled each bucket from
+    whatever that window happened to hold, so an item's second-best chunk was included or not
+    according to the page size. Measured at `de5a390`, on 25 items with no topics, nothing
+    deleted and nothing corrupted:
+
+        --limit  5: X000 rank=1 matches=['summary']                    verify_with=('external_article', 'post')
+        --limit 10: X000 rank=1 matches=['summary','external_article'] verify_with=('external_article',)
+
+    THE CONSEQUENCE IS NOT A SHORTER LIST. With only a machine-written `summary` to cite,
+    `_verify_with` takes the DERIVED branch and answers *go check the article and the post*;
+    with the article matched it takes the primary branch and answers *check the article*. Two
+    different verification instructions for one claim — and spec §3.5 makes `verify_with` an
+    instruction, not a display detail.
+
+    Asserted across page sizes on BOTH fields, and on the whole page rather than the first
+    result: a fix that stabilised only rank 1 would pass a first-result assertion.
+
+    Seen red at `de5a390`: `('summary',)` against `('summary', 'external_article')`.
+    """
+    marker = "Kestrelmark"
+    store = _two_surface_corpus(25, marker)
+    data = tmp_path / "data"
+    _persist(data, store, [], {})
+    _build(data)
+    context = _context(data, store, [], {})
+
+    evidence: dict[int, dict[str, tuple]] = {}
+    for limit in (5, 10, 25):
+        response = search(marker, context, limit=limit)
+        assert len(response.results) == limit, (limit, len(response.results))
+        evidence[limit] = {
+            result.item_id: (
+                result.rank,
+                tuple(m.surface_type for m in result.matches),
+                result.verify_with,
+            )
+            for result in response.results
+        }
+
+    widest = evidence[25]
+    assert any(len(v[1]) > 1 for v in widest.values()), (
+        "some item must carry more than one match, or the page size cannot change anything"
+    )
+    for limit, seen in evidence.items():
+        for item_id, carried in seen.items():
+            assert carried == widest[item_id], (
+                f"--limit {limit} gave {item_id} {carried}, the widest page gave {widest[item_id]}"
+            )
+
+    # And the cap is still honoured — stability must not be bought by serving everything.
+    assert all(
+        len(v[1]) <= context.max_matches_per_item
+        for seen in evidence.values()
+        for v in seen.values()
+    )
+
+
+def test_a_forged_chunk_is_excluded_and_counted_in_the_EVIDENCE_phase_too(
+    tmp_path: Path,
+) -> None:
+    """The second candidate set is a door too, and it was a door with no guard tested.
+
+    `_settle_evidence` re-asks the index for each served item's own top chunks, so it meets
+    rows the owner-selection window never had to judge. An item selected on a surviving chunk
+    can carry a FORGED one into its evidence — and two mutations proved nothing was watching:
+    skipping verification there served the forged row, and not counting its exclusion left
+    `corrupt_chunks_excluded` at zero while a row was dropped. Both survived the whole suite.
+
+    Staged so the item stays on the page: X000 matches on both its summary and its article, and
+    only the article chunk is forged. Selection therefore still succeeds on the summary, the
+    scoped evidence query returns both, and the forged one must be excluded AND counted.
+
+    Seen red with `verify_fingerprints` skipped in that phase (the forged chunk is served) and
+    with its count discarded (`corrupt_chunks_excluded == 0` while a row was dropped).
+    """
+    marker = "Kestrelmark"
+    store = _two_surface_corpus(25, marker)
+    data = tmp_path / "data"
+    _persist(data, store, [], {})
+    _build(data)
+    context = _context(data, store, [], {})
+
+    # A `limit=1` page selects owners from a SHALLOW window. The chunk forged below is chosen
+    # from outside it, so only the evidence phase can meet it — otherwise the selection phase
+    # counts the exclusion and the assertion cannot tell the two phases apart.
+    selection = {hit.chunk_id for hit in _leading_chunk_hits(context, marker, 2)}
+    before = search(marker, context, limit=1)
+    served_first = before.results[0]
+    assert before.index.corrupt_chunks_excluded == 0, "the base starts clean"
+    victim = next(m for m in served_first.matches if m.chunk_id not in selection)
+    assert len(served_first.matches) > 1, "the item needs a second chunk to lose"
+
+    connection = sqlite3.connect(db_path(context.index_dir))
+    with connection:
+        connection.execute(
+            "UPDATE chunks SET fingerprint = ? WHERE chunk_id = ?", ("0" * 64, victim.chunk_id)
+        )
+    connection.close()
+
+    after = search(marker, context, limit=1)
+    served = after.results[0]
+
+    assert served.item_id == served_first.item_id, "the item is still selected"
+    assert victim.chunk_id not in {m.chunk_id for m in served.matches}, (
+        "a forged chunk was served as evidence because the second phase did not verify it"
+    )
+    assert served.matches, "the item keeps its surviving evidence"
+    assert after.index.corrupt_chunks_excluded >= 1, (
+        "the exclusion happened in the evidence phase and was not counted"
+    )
