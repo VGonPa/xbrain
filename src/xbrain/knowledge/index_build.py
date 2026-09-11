@@ -1856,13 +1856,30 @@ def expected_topic_records(
 
 
 def _topics_behind(stored: Mapping[str, TopicRow], records: Mapping[str, TopicRecord]) -> list[str]:
-    """The topics whose stored row is not the row the store implies, sorted (H1).
+    """Every topic the base and the store disagree on, sorted — IN BOTH DIRECTIONS (H1).
 
     Members, `stale`, description, synthesis — the WHOLE row, compared through `topic_row`, so
-    a column added to the projection is compared without anything here being edited. A row
-    missing from the base counts as behind.
+    a column added to the projection is compared without anything here being edited.
+
+    THE SET DIFFERENCE IS THE FIX, AND IT WAS A FAIL-OPEN. This iterated `records` alone, so it
+    could only see the two directions a RECORD reaches: a row that differs, and a row missing
+    from the base. The third — a row the BASE holds for a topic the vocabulary no longer
+    declares — was invisible, because there was no record to iterate from. Reproduced end to
+    end before the fix: delete a topic from `vocab.yaml`, pad the file back to its original
+    size and restore its `mtime_ns` (the deterministic blind spot Plan 02 §3 declares and §16
+    keeps), and `status` answered `behind=False`, `items_changed=0`, `topics_changed=0`,
+    `advice=''` — a clean bill of health over a base still serving `ai-policy` on the topic
+    plane. The cheap signal is what usually rescues that state, and freezing it is legal,
+    documented and free; the deep comparison is the one that is not allowed to miss it.
+
+    `update` was never the door at fault — a vocabulary edit moves `vocab_fingerprint`, so it
+    takes the rebuild path and the orphan goes. But the operator only runs `update` because
+    `status` said to, and `status` said nothing. Two instruments, one state, opposite answers
+    (rule 9), on the diagnostic one.
     """
-    return sorted(slug for slug, record in records.items() if stored.get(slug) != topic_row(record))
+    differing = {slug for slug, record in records.items() if stored.get(slug) != topic_row(record)}
+    orphaned = set(stored) - set(records)
+    return sorted(differing | orphaned)
 
 
 @dataclass(frozen=True)
@@ -1983,9 +2000,30 @@ def _refresh_topic_rows(index: LexicalIndex, inputs: IndexInputs) -> int:
 
     Compared before written — the same comparison `status` reports — so a store that did not
     move rewrites no row, and `update` with no changes stays at zero writes.
+
+    AN ORPHANED ROW IS REFUSED HERE RATHER THAN COUNTED. `_topics_behind` answers both
+    directions now, and one of them — a row for a topic the vocabulary no longer declares —
+    has no record to rewrite from. Writing the rest and returning `len(behind)` would report a
+    row as refreshed that nothing touched, which is a counter that does not count what its
+    name says (rule 2); skipping it silently would be the fail-open one layer down.
+
+    THIS PATH CANNOT REACH THAT STATE THROUGH THE PUBLIC API TODAY, and the guard is here
+    anyway. `update` only calls this when `topics_rebuilt` is False, i.e. when the current
+    vocabulary's fingerprint equals the manifest's — and a base whose topic rows came from
+    that same vocabulary has no orphan. The refusal is therefore a backstop for a base that
+    was edited behind the manifest's back (the C-3 family) or for a future caller with a
+    narrower trigger, and it is covered by a DIRECT test rather than through `update`, because
+    there is no honest way to stage it through `update`.
     """
     records = expected_topic_records(inputs.store, inputs.vocab, inputs.topic_pages)
     behind = _topics_behind(stored_topic_rows(index.connection), records)
+    orphaned = [slug for slug in behind if slug not in records]
+    if orphaned:
+        raise IndexIncompatibleError(
+            f"El plano de topics contiene filas que el vocabulario ya no declara ({orphaned}) "
+            f"y la huella del vocabulario no ha cambiado: no hay reparación incremental "
+            f"posible. {REBUILD_ADVICE}"
+        )
     for slug in behind:
         _write_topic_row(index, records[slug])
     return len(behind)
@@ -2037,10 +2075,18 @@ def _next_manifest(
     current. They are read from the base now, through the same `manifest_tallies` a fresh
     build uses.
 
-    `failed` IS copied, and that is not the same omission: it records the fetch failures the
-    BUILD met while emitting surfaces, and an incremental update that touched three items has
-    not re-met the other two thousand. Recomputing it from this run would publish three
-    failures where the corpus has two hundred.
+    `failed` IS COPIED, AND TODAY THAT COPIES AN EMPTY LIST. Nothing in this package ever
+    appends to it — `build` initialises `failed: list[dict[str, str]] = []` and hands it
+    straight to `_fresh_manifest` — so every manifest on disk carries `failed: []`, and the
+    fixture corpus confirms it. Do not read this line as a statement about the corpus: the
+    count of failed sources is a DIFFERENT field, `skipped["failed_sources"]`, it is derived
+    from the base by `manifest_tallies`, and on that same corpus it is 1, not 0.
+
+    It is copied rather than recomputed so that the shape is already right when a writer does
+    populate it: the list is spec §5.6's record of what a BUILD met while emitting surfaces,
+    and an incremental update that touched three items has not re-met the rest of the corpus,
+    so recomputing it from this run would shrink it to this run's population. That is a
+    statement about the contract, not a measurement — there is nothing yet to measure.
     """
     return Manifest(
         schema_version=previous.schema_version,

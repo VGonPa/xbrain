@@ -46,6 +46,7 @@ from xbrain.knowledge.index_schema import (
     manifest_path,
     open_index,
 )
+from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Author, Item, Topic, TopicPage
 from xbrain.rubrics import save_vocab
@@ -1061,3 +1062,51 @@ def test_a_database_error_from_the_counts_themselves_is_the_rebuild_advice_not_a
     with pytest.raises(IndexIncompatibleError, match="staged in count_rows") as refused:
         _update(built, dry_run=True)
     assert str(refused.value) == report.advice, "one sentence, two behaviours"
+
+
+def test_the_narrow_topic_refresh_refuses_a_row_it_cannot_rewrite_instead_of_counting_it(
+    built: Path, corpus
+) -> None:
+    """The guard the comparator's new direction made necessary, asked DIRECTLY.
+
+    `_topics_behind` now also names a row the base holds for a topic the vocabulary no longer
+    declares. The narrow refresh has no record to rewrite that from, so it has exactly two
+    honest options and took neither by default: writing the rest and returning `len(behind)`
+    reports a row as refreshed that nothing touched (rule 2), and skipping it silently is the
+    fail-open one layer down from the one just closed.
+
+    IT IS ASKED DIRECTLY BECAUSE THERE IS NO HONEST WAY TO STAGE IT THROUGH `update`, and that
+    is a property worth pinning rather than a limitation to apologise for: `update` reaches
+    this function only when `topics_rebuilt` is False, i.e. when the current vocabulary's
+    fingerprint equals the manifest's — and a base written under that same vocabulary has no
+    orphan. Dropping a topic from `vocab.yaml` moves the fingerprint and takes the rebuild
+    path, where `_clear_topics` removes the row. Staging it through `update` would mean
+    forging a manifest, which tests a state the writer cannot produce. So the guard is a
+    backstop for a base edited behind the manifest's back, and it is exercised where it can be
+    exercised truthfully.
+
+    The vocabulary is emptied to make every stored row an orphan, so the refusal cannot come
+    from a row that merely differs.
+
+    Seen red before the guard: `KeyError: 'agent-evaluation'` out of `_write_topic_row`.
+    """
+    _store, vocab, _pages = corpus
+    inputs = _inputs(built)
+    emptied = index_build.IndexInputs(
+        store=inputs.store, vocab=[], topic_pages=inputs.topic_pages, signal=inputs.signal
+    )
+    connection = open_index(db_path(built / "index"))
+    try:
+        stored = index_build.stored_topic_rows(connection)
+        assert stored, "the fixture base must hold topic rows, or nothing is tested"
+
+        with pytest.raises(IndexIncompatibleError, match="xbrain index build --force") as refused:
+            index_build._refresh_topic_rows(LexicalIndex(connection), emptied)
+    finally:
+        connection.close()
+
+    for slug in stored:
+        assert slug in str(refused.value), "the refusal names WHICH rows, not merely that some"
+    assert _rows(built, "SELECT COUNT(*) FROM topics")[0][0] == len(stored), (
+        "a refusal must not have rewritten anything on its way out"
+    )

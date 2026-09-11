@@ -2874,3 +2874,152 @@ def test_the_consistency_check_names_every_required_plane_the_manifest_does_not_
 
     for plane in index_build.COUNT_PLANES:
         assert plane in sentence, sentence
+
+
+def test_the_topic_comparator_answers_all_three_directions_a_plane_can_disagree_in(
+    tmp_path: Path, three_inputs: Path, corpus
+) -> None:
+    """`_topics_behind` DIRECTLY, on the three shapes, because two of them had no test.
+
+    The comparator is consumed twice — `status` reports its length, `_refresh_topic_rows`
+    rewrites what it names — so a direction it cannot see is a direction neither consumer can
+    see. Only the first of these three was covered end to end; a mutation restricting the
+    comparison to `slug in stored` survived the whole suite, and so did the version that
+    iterated `records` alone.
+
+    Asked of the function rather than through `status`, because the point is the SET, and a
+    door only ever shows its length.
+    """
+    store, vocab, pages = corpus
+    records = index_build.expected_topic_records(store, vocab, pages)
+    rows = {slug: index_build.topic_row(record) for slug, record in records.items()}
+    present, other = sorted(records)[0], sorted(records)[1]
+
+    assert index_build._topics_behind(rows, records) == [], "agreement is the empty answer"
+
+    moved = dict(rows)
+    moved[present] = (*rows[present][:-1], "una huella de sintesis distinta")
+    assert index_build._topics_behind(moved, records) == [present], "a row that DIFFERS"
+
+    absent = {k: v for k, v in rows.items() if k != present}
+    assert index_build._topics_behind(absent, records) == [present], "a row MISSING from base"
+
+    orphan = {**rows, "un-topic-que-el-vocabulario-ya-no-declara": rows[other]}
+    assert index_build._topics_behind(orphan, records) == [
+        "un-topic-que-el-vocabulario-ya-no-declara"
+    ], "a row the base holds for a topic the vocabulary no longer declares"
+
+
+def test_a_topic_dropped_from_the_vocabulary_is_declared_even_with_the_signal_frozen(
+    tmp_path: Path, three_inputs: Path, corpus
+) -> None:
+    """The fail-open the comparator's set difference closes, staged end to end.
+
+    THE CHEAP SIGNAL IS FROZEN ON PURPOSE, and freezing it is neither exotic nor a trick: a
+    same-size replacement with the `mtime` preserved is the deterministic blind spot Plan 02
+    §3 declares and §16 keeps as a known limit — `cp -p`, `rsync -t`, `tar -x`, a restore from
+    backup. The signal is allowed to miss it. What is NOT allowed is for the DEEP comparison,
+    the one `status` pays a corpus walk for, to miss it too: with both blind, `status`
+    answered `behind=False`, `items_changed=0`, `topics_changed=0` and an EMPTY advice over a
+    base still serving a topic the vocabulary had dropped.
+
+    The precondition is asserted first — same size, same `mtime_ns`, and the loaded signal
+    EQUAL to the sealed one — so a padding that stopped working would fail loudly here instead
+    of letting the test pass because `behind` rescued it (rule 1).
+
+    Seen red under `_topics_behind` iterating `records` alone: `topics_changed == 0` and
+    `advice == ''`.
+    """
+    import os
+
+    from xbrain.rubrics import save_vocab
+
+    _store, vocab, _pages = corpus
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    sealed = index_build.load_manifest(index_dir).store_signal
+
+    vocab_path = three_inputs / "vocab.yaml"
+    original, stat = vocab_path.read_bytes(), vocab_path.stat()
+    victim = sorted(t.slug for t in vocab)[-1]
+    save_vocab([t for t in vocab if t.slug != victim], vocab_path)
+    shrunk = vocab_path.read_bytes()
+    padding = len(original) - len(shrunk)
+    assert padding > 1, "removing a topic must shrink the file, or there is nothing to pad"
+    vocab_path.write_bytes(shrunk + b"\n" + b"#" * (padding - 1))
+    os.utime(vocab_path, ns=(stat.st_mtime_ns, stat.st_mtime_ns))
+
+    inputs = index_build.load_index_inputs(*_paths(three_inputs))
+    assert vocab_path.stat().st_size == stat.st_size
+    assert vocab_path.stat().st_mtime_ns == stat.st_mtime_ns
+    assert inputs.signal == sealed, "the cheap signal is frozen, which is the whole point"
+    assert victim not in {t.slug for t in inputs.vocab}, "the topic really is gone"
+
+    report = index_build.status(index_dir, inputs)
+
+    assert report.behind is False, "the cheap signal cannot see this, and is not asked to"
+    assert report.items_changed == 0, "no item moved: the topic plane is the only evidence"
+    assert report.topics_changed == 1
+    assert report.advice == index_build.UPDATE_ADVICE
+
+
+def test_a_stale_topic_row_is_the_only_thing_status_needs_to_speak(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """`topics_changed` ALONE must produce advice, and nothing else may be disturbed.
+
+    The `or topics_changed` clause of `_status_advice` had no test that could see it: the
+    existing topic-plane test rewrites `items.json` on its way to the state, so its `mtime`
+    moves, `behind` goes True, and the advice comes out of THAT clause. Removing
+    `or topics_changed` left the whole suite green.
+
+    A ROW IS EDITED, NOT DELETED, AND THE DIFFERENCE IS THE TEST. Deleting one was the first
+    staging tried and it never reaches this clause: `COUNT(*)` then reads `topics 1` against a
+    manifest declaring 2, `describe_base` answers the C-3 mismatch first, `status` returns
+    `unusable` with the rebuild advice and three empty maps. That is correct behaviour and a
+    different criterion, and it is why the MISSING-row direction of the comparator is pinned
+    directly in `test_the_topic_comparator_answers_all_three_directions…` instead: through
+    this door it is unreachable. An in-place edit leaves every count intact, so the row is the
+    only thing left disagreeing.
+
+    NOT ONE INPUT FILE IS TOUCHED — asserted by hashing all three before and after — so
+    `behind` is False and `items_changed` is 0. Whatever advice comes back can only have come
+    from the topic plane.
+
+    Seen red with `or topics_changed` removed: `advice == ''`.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in _paths(three_inputs)}
+
+    connection = index_schema.open_index(index_schema.db_path(index_dir))
+    with connection:
+        victim = connection.execute("SELECT slug FROM topics ORDER BY slug").fetchone()[0]
+        connection.execute(
+            "UPDATE topics SET primary_item_ids_json = '[]', stale = 1 WHERE slug = ?", (victim,)
+        )
+    connection.close()
+
+    report = index_build.status(index_dir, index_build.load_index_inputs(*_paths(three_inputs)))
+
+    assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in _paths(three_inputs)} == before
+    assert report.incomplete is False, "the counts are intact: this is not the C-3 state"
+    assert report.behind is False and report.items_changed == 0
+    assert report.topics_changed == 1
+    assert report.advice == index_build.UPDATE_ADVICE
+
+
+def test_status_advice_is_produced_by_the_topic_plane_on_its_own(tmp_path: Path) -> None:
+    """The same clause asked of the function, with every other input held at its quiet value.
+
+    The end-to-end test above reaches this through a real base; this one pins that no other
+    argument is doing the work, which is the half an integration test cannot show. Both are
+    kept: one proves the state is reachable, the other proves which input answers.
+    """
+    quiet = index_build._Delta(added=[], removed=[], changed=[])
+
+    assert index_build._status_advice(False, quiet, behind=False, topics_changed=0) == ""
+    assert (
+        index_build._status_advice(False, quiet, behind=False, topics_changed=1)
+        == index_build.UPDATE_ADVICE
+    )
