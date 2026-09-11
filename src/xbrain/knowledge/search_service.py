@@ -244,11 +244,24 @@ def _materialise(
     as answering an unknown topic with zero results. Both say *nothing is there* when the
     truth is *I did not look*.
 
-    So the window doubles until it holds `needed` owners the response can actually serve, or
-    until there is nothing deeper to find. THREE TERMINATIONS, and the third is the one that
-    keeps this finite: `exhausted` is `search_owners` reporting `MAX_CHUNK_DEPTH` reached, and
-    a window that did not GROW means the ranking is fully materialised — without that, a
-    corpus smaller than the window would double forever asking for owners that do not exist.
+    BOTH PLANES DEEPEN, AND THE TERMINATION READS BOTH. The first version of this loop
+    doubled the CHUNK window and asked `search_profiles` for a fixed `needed`, then stopped
+    when the chunk window stopped growing — so the profile plane could never be looked at
+    harder, and for a query answered by that plane ALONE (a handle lives in every profile and
+    in no chunk) the chunk window is empty at every depth and the very first shortfall ended
+    the search. Measured: delete the three top-ranked owners without reindexing and `limit=1`
+    answered `results: []`, `truncated: false`, `cursor: null` over nine owners still present;
+    paging the same state walked seven of ten and then handed back no cursor, so three valid
+    items were unreachable by paging at all. One plane deepening is not a refill, it is a
+    refill for half the corpus.
+
+    So both windows double until the response can serve `needed` owners, or until there is
+    nothing deeper to find. THREE TERMINATIONS, and the third is the one that keeps this
+    finite: `exhausted` is `search_owners` reporting `MAX_CHUNK_DEPTH` reached, and a pair of
+    windows that did not GROW means both rankings are fully materialised — without that, a
+    corpus smaller than the windows would double forever asking for owners that do not exist.
+    The pair is compared, not the chunk count alone, because a profile plane that can still
+    grow is a reason to keep looking even when the chunk plane is finished.
 
     THE COUNT IS RECOMPUTED PER WINDOW, NEVER ACCUMULATED. Every window is a PREFIX of the same
     ranking (`search_owners`: a deeper window only appends), so the deepest one already
@@ -256,29 +269,34 @@ def _materialise(
     once per doubling. `corrupt_chunks_excluded` is what THIS response's candidate set held,
     which is why a response that looked deeper honestly reports more.
 
-    Determinism survives (spec §3.7.8): each window is a prefix, so grouping is
-    prefix-consistent — a deeper window only appends owners — and the ordering a page slices
-    is the same ordering whatever depth was reached.
+    Determinism survives (spec §3.7.8), and it is now a property of BOTH rankings. Each window
+    is a prefix of its own plane, chunk-matched owners always precede profile-only ones, and
+    `_append_profile_candidates` skips an id already grouped — so a deeper pass only APPENDS,
+    and the ordering a page slices is the same ordering whatever depth was reached. That is
+    what makes the cursor a position in one ranking rather than an offset into a set that was
+    re-mixed per page: the round trip is asserted by walking a cursor to exhaustion and
+    requiring the concatenation to EQUAL a single unpaged call.
     """
-    owners = needed
-    previous = -1
+    depth = needed
+    seen = (-1, -1)
     while True:
-        candidates, exhausted = index.lexical.search_owners(query, owners, filters=filters)
+        candidates, exhausted = index.lexical.search_owners(query, depth, filters=filters)
         # A hit without a resolvable surface locator is excluded and counted FIRST (B-k): the
         # alternative was a locator invented from the chunk's own columns — and since U-5 the
         # fingerprint is recomputed over the narrowed locator, so a hit that has none cannot be
         # verified at all. Then every survivor's evidence must recompute.
         hits, unresolvable = resolvable_hits(candidates)
         hits, corrupt = verify_fingerprints(hits)
+        profiles = index.lexical.search_profiles(query, depth, filters=filters)
         grouped = _group_by_item(hits, context, limit=needed)
-        profile_ids = [
-            hit.item_id for hit in index.lexical.search_profiles(query, needed, filters=filters)
-        ]
-        _append_profile_candidates(grouped, profile_ids, context, limit=needed)
-        if len(grouped) >= needed or exhausted or len(candidates) == previous:
+        _append_profile_candidates(
+            grouped, [hit.item_id for hit in profiles], context, limit=needed
+        )
+        reached = (len(candidates), len(profiles))
+        if len(grouped) >= needed or exhausted or reached == seen:
             return list(grouped.items()), corrupt + unresolvable, exhausted
-        previous = len(candidates)
-        owners *= 2
+        seen = reached
+        depth *= 2
 
 
 def _encode_search_cursor(offset: int) -> str:

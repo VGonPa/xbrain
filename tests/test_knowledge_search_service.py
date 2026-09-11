@@ -1522,3 +1522,82 @@ def test_an_unknown_topic_is_refused_even_when_the_vocabulary_is_empty(
 
     known = context.vocab[0].slug
     assert search("Quillfeather", context, filters=SearchFilters(topics=(known,))) is not None
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 — the refill deepened ONE plane and terminated on it
+# ---------------------------------------------------------------------------
+
+
+def _without(store: dict[str, Item], gone) -> dict[str, Item]:
+    """The store after items were deleted and nobody reindexed — the index still holds them."""
+    return {k: v for k, v in store.items() if k not in set(gone)}
+
+
+def test_a_profile_only_page_refills_past_owners_the_store_no_longer_holds(
+    context: QueryContext,
+) -> None:
+    """A handle lives in every profile and in no chunk, so this query is answered by ONE plane.
+
+    Round 1 taught the refill to deepen the CHUNK window. It never taught it to deepen the
+    PROFILE one: `search_profiles(query, needed)` asked for a fixed depth, and the loop's
+    termination read `len(candidates) == previous` — the chunk window, which for a profile-only
+    query is empty at every depth and therefore never grows. So the FIRST shortfall the profile
+    plane produced ended the search.
+
+    Delete the three top-ranked owners without reindexing — `_append_profile_candidates` skips
+    an id the store no longer holds — and, before the fix, `limit=1` answered `results: []`,
+    `truncated: false`, `cursor: null` over nine owners that were still there. Same shape as
+    round 1's finding, reached through the plane round 1 did not touch.
+
+    Seen red before the fix: `results == []`.
+    """
+    store = context.store
+    whole = search("vgonpa", context, limit=50)
+    order = [r.item_id for r in whole.results]
+    assert len(order) > 4, "the profile plane must rank several owners, or nothing is tested"
+    assert all(not r.matches for r in whole.results), "a handle is never a citable chunk match"
+
+    shrunk = replace(context, store=_without(store, order[:3]))
+
+    page = search("vgonpa", shrunk, limit=1)
+
+    assert [r.item_id for r in page.results] == [order[3]], (
+        "the page must reach past the deleted head instead of reporting the corpus empty"
+    )
+    assert page.truncated is True and page.cursor is not None
+
+
+def test_paging_reassembles_the_ranking_when_both_planes_lose_candidates(
+    context: QueryContext,
+) -> None:
+    """ONE ordering, whatever page you slice it at — the cursor's whole promise.
+
+    `needed = offset + limit + 1`, so every page materialises its own candidate set, and both
+    planes drop rows between that set and the answer. With the refill keyed on one plane the
+    WALK stopped early: measured on this fixture with `k03` and `k07` deleted, paging `vgonpa`
+    at `limit=1` yielded seven owners and then handed back no cursor, while a single `limit=50`
+    call returned ten. Three valid items were unreachable by paging — omitted, not merely
+    reordered.
+
+    Asserted as the round trip a consumer actually performs: walk the cursor to exhaustion and
+    require the concatenation to EQUAL the whole ranking. Equality catches an omission, a
+    duplicate and a reorder in one assertion, which three separate counts would not.
+
+    Seen red before the fix: seven of ten, no cursor.
+    """
+    shrunk = replace(context, store=_without(context.store, ("k03", "k07")))
+    whole = [r.item_id for r in search("vgonpa", shrunk, limit=50).results]
+    assert len(whole) > 6, "the ranking must outlast a few pages, or nothing is tested"
+
+    walked: list[str] = []
+    cursor: str | None = None
+    for _ in range(len(whole) + 5):
+        page = search("vgonpa", shrunk, limit=1, cursor=cursor)
+        walked += [r.item_id for r in page.results]
+        cursor = page.cursor
+        if cursor is None:
+            break
+
+    assert cursor is None, "the walk must terminate rather than page forever"
+    assert walked == whole, f"paging must reassemble the ranking: {walked} != {whole}"
