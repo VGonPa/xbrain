@@ -643,9 +643,31 @@ def _item_clauses(filters: SearchFilters, owner_column: str) -> tuple[list[str],
     a profile has no origin (G-1). The totality test over both planes
     (`test_every_declared_filter_is_pushed_on_the_profile_plane_too`) is what keeps the two
     planes agreeing on all eight, this docstring only says where each one lives.
+
+    AN ITEM-SCOPED FILTER REQUIRES AN ITEM-OWNED ROW, ONCE, HERE (M2, round 12). Every clause
+    below joins an item table to `{owner_column}`, and on the chunk plane that column holds
+    BOTH namespaces: a topic whose slug equals an item's id inherited that item's author, its
+    content kinds and its surfaces, so `--author vgonpa` returned an item written by someone
+    else and `--has-surfaces external_article` returned an item with no `content` at all.
+
+    This is the module's own documented intent, not a new rule — *ITEM-SCOPED FILTERS FAIL
+    CLOSED ON TOPIC-OWNED CHUNKS*. Date and source already did, and only by luck: their columns
+    are NULL on a topic row, so the comparison fails. The three that route through `EXISTS`
+    joins had no such accident behind them.
+
+    ONE guard for all three rather than a predicate bolted onto each: they combine with `AND`,
+    so one clause is equivalent, and the sentence «an item filter means the owner is an item»
+    then exists in one place instead of three that can drift (rule 5). It is added only when an
+    item-scoped filter is actually present — an unfiltered query still sees both planes — and
+    only on the chunk plane, because `profiles` holds nothing but items and has no such column.
     """
     clauses: list[str] = []
     params: list[object] = []
+    if owner_column == "chunks.owner_id" and (
+        filters.author is not None or filters.content_kinds or filters.has_surfaces
+    ):
+        clauses.append("chunks.owner_type = ?")
+        params.append("item")
     if filters.author is not None:
         clauses.append(
             f"EXISTS (SELECT 1 FROM items WHERE items.item_id = {owner_column} "  # nosec B608
@@ -704,13 +726,22 @@ def _topic_clause(filters: SearchFilters) -> tuple[str, list[object]]:
     slug: without that branch, filtering by a topic would exclude exactly the surfaces that
     ARE the topic — a `topic_note` about `ai-policy` would vanish from `--topic ai-policy`,
     which reads as "the topic has no notes" rather than as a shape of the filter.
+
+    EACH ARM NAMES ITS OWN OWNER TYPE (M2, round 12). Arm 2 always did. Arm 1 asked only
+    whether the owner id belonged to an item in the topic, and asked it of every row — so a
+    chunk owned by topic `7001` matched `--topic kestrel` whenever ITEM `7001` was in
+    `kestrel`, which is one topic answering for another through a name it merely shares.
+
+    The fix is arm 1, never the clause: closing the whole thing to topics would pass a
+    regression about the collision and silently delete the feature arm 2 exists for, which is
+    why both arms are asserted together.
     """
     if not filters.topics:
         return "", []
     placeholders = _placeholders(len(filters.topics))
     clause = (
-        "(EXISTS (SELECT 1 FROM item_topics WHERE item_topics.item_id = chunks.owner_id "  # nosec B608
-        f"AND item_topics.slug IN ({placeholders})) "
+        "((chunks.owner_type = 'item' AND EXISTS (SELECT 1 FROM item_topics "  # nosec B608
+        f"WHERE item_topics.item_id = chunks.owner_id AND item_topics.slug IN ({placeholders}))) "
         f"OR (chunks.owner_type = 'topic' AND chunks.owner_id IN ({placeholders})))"
     )
     return clause, [*filters.topics, *filters.topics]

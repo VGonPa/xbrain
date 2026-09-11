@@ -2795,41 +2795,22 @@ def test_a_topic_slug_equal_to_the_items_own_id_never_takes_its_primary_slots(
     assert len(owners) == context.max_matches_per_item, owners
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M2, round 11: the four filter joins in `lexical._item_clauses` / `_topic_clause` "
-        "decide owner membership on `chunks.owner_id` with no `chunks.owner_type`, so a "
-        "colliding topic slug satisfies an item filter. Byte-identical at the umbrella tip "
-        "(child 02.4), therefore NOT this child's code to change. Strict, so the day it is "
-        "fixed this marker fails and the claim in `test_knowledge_lexical.py` is corrected "
-        "with it — a known defect that is merely written down rots into a defect nobody knows."
-    ),
-)
-def test_a_filter_still_matches_a_topic_by_a_colliding_item_id(tmp_path: Path) -> None:
-    """C1's family on the FILTER surface, which the narrowing fix does not reach.
+# ---------------------------------------------------------------------------
+# M2 (round 12) — the FILTER joins take the whole key too
+# ---------------------------------------------------------------------------
 
-    `_item_clauses` joins `items.item_id`, `item_content_kinds.item_id` and `surfaces.owner_id`
-    to `chunks.owner_id`, and `_topic_clause`'s first arm joins `item_topics.item_id` the same
-    way. None of them constrains `chunks.owner_type`, so a topic-owned chunk whose slug equals
-    an item's id inherits that ITEM's author, surfaces, content kinds and topics.
 
-    Measured at `a500cc6`, with a control corpus whose slug does not collide returning nothing:
+def _filter_corpus(marker: str, tmp_path: Path) -> QueryContext:
+    """The collision corpus with two DIFFERENT authors, so an author filter can separate.
 
-        --author vgonpa        -> A001, written by otherhandle, cited only from topic:7001
-        --has-surfaces article -> A001, which has no `content` at all
-        --content-kinds ...    -> A001, same
-        --topic kestrel        -> a chunk owned by topic:7001, which is not kestrel
-
-    This asserts the REPAIRED behaviour, so it fails today and passes the day the joins take
-    the whole key.
+    `7001` is the item whose id the topic slug equals: it has the article and is written by
+    `vgonpa`. `A001` is written by `otherhandle`, has no `content` at all, and its only topic
+    is the colliding slug — so every item-scoped filter below excludes it on the facts, and
+    anything that returns it returned it through the topic's chunks.
     """
-    marker = "Zephyrquill"
     store, vocab, pages = _colliding_corpus(
         marker, victim="A001", bystander=_SLUG, victim_article=False, topic_prose_matches=True
     )
-    # The bystander is the one with the article; give the two items different authors so the
-    # author filter has something to separate.
     store = {
         item_id: item.model_copy(
             update={
@@ -2841,8 +2822,120 @@ def test_a_filter_still_matches_a_topic_by_a_colliding_item_id(tmp_path: Path) -
     data = tmp_path / "data"
     _persist(data, store, vocab, pages)
     _build(data)
-    context = _context(data, store, vocab, pages)
+    return _context(data, store, vocab, pages)
 
-    served = search(marker, context, limit=10, filters=SearchFilters(author="vgonpa")).results
-    offenders = [r.item_id for r in served if store[r.item_id].author.handle != "vgonpa"]
-    assert offenders == [], offenders
+
+@pytest.mark.parametrize(
+    ("name", "filters"),
+    [
+        ("author", SearchFilters(author="vgonpa")),
+        ("has_surfaces", SearchFilters(has_surfaces=("external_article",))),
+        ("content_kinds", SearchFilters(content_kinds=("external_article",))),
+    ],
+)
+def test_an_item_scoped_filter_never_matches_a_topic_by_a_colliding_id(
+    tmp_path: Path, name: str, filters: SearchFilters
+) -> None:
+    """C1's family on the FILTER surface, which the owner narrowing does not reach (M2).
+
+    `_item_clauses` joins `items.item_id`, `item_content_kinds.item_id` and `surfaces.owner_id`
+    to `chunks.owner_id` and never constrains `chunks.owner_type`, so a topic-owned chunk whose
+    slug equals an item's id inherits that ITEM's author, content kinds and surfaces. Measured
+    at `0d48453`, with a control corpus whose slug does not collide returning nothing:
+
+        --author vgonpa          -> A001, written by otherhandle, cited only from topic:7001
+        --has-surfaces article   -> A001, which has no `content` at all
+        --content-kinds article  -> A001, same
+
+    This is the module's own documented intent, not a new rule: *ITEM-SCOPED FILTERS FAIL
+    CLOSED ON TOPIC-OWNED CHUNKS*. Date and source already did, because their columns are NULL
+    on a topic row; these three went through `EXISTS` joins on the id and did not.
+
+    Asserted on the STORE's own facts rather than on a count, so a filter that returned nothing
+    could not pass, and the positive half is asserted too.
+    """
+    marker = "Zephyrquill"
+    context = _filter_corpus(marker, tmp_path)
+
+    served = search(marker, context, limit=10, filters=filters).results
+    offenders = [
+        result.item_id
+        for result in served
+        if (
+            context.store[result.item_id].author.handle != "vgonpa"
+            if name == "author"
+            else context.store[result.item_id].content is None
+        )
+    ]
+    assert offenders == [], (name, offenders)
+    # Non-vacuous: the item that legitimately passes the filter is still served, so the fix
+    # narrowed the match rather than the corpus.
+    assert [result.item_id for result in served] == [_SLUG], (name, served)
+
+
+def test_the_topic_filter_matches_a_topic_by_its_slug_not_by_a_colliding_item_id(
+    tmp_path: Path,
+) -> None:
+    """`_topic_clause` has two arms, and only the SECOND one may see a topic (M2).
+
+    Arm 2 matches a topic-owned chunk against its own slug, and it must: without it,
+    `--topic ai-policy` would exclude exactly the notes that ARE `ai-policy`. Arm 1 asks
+    whether the OWNER is an item assigned to the topic, and it asked that of every row —
+    so a chunk owned by topic `7001` matched `--topic kestrel` whenever ITEM `7001` was in
+    `kestrel`. Measured at `0d48453` at the retriever, where it is visible before the service
+    masks it (a colliding topic resolves to no items and the result is dropped downstream):
+
+        --topic kestrel  ->  ['topic:7001/topic_description']     control: (nothing)
+
+    Both arms are asserted here, because fixing arm 1 by closing the clause to topics
+    altogether would pass the first assertion and silently delete the feature arm 2 exists for.
+    """
+    marker = "Zephyrquill"
+    item_id, other = "7001", "kestrel"
+    store = {
+        item_id: Item(
+            id=item_id,
+            source="bookmark",
+            url=f"https://x.com/a/status/{item_id}",
+            author=Author(handle="a", name="A"),
+            text=f"Post {item_id} sin marcador.",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+            enriched=Enrichment(
+                summary="Resumen sin marcador.",
+                topics=[other],
+                primary_topic=other,
+                enriched_at=datetime(2026, 1, 3, tzinfo=UTC),
+                model="m",
+                executor="manual",
+            ),
+        )
+    }
+    vocab = [
+        Topic(slug=other, label="K", description="Un topic sin el marcador."),
+        Topic(slug=item_id, label="Z", description=f"Topic {item_id} sobre {marker} y su alcance."),
+    ]
+    pages = {
+        slug: TopicPage(
+            slug=slug,
+            overview=f"Panorama de {slug}.",
+            notes=[],
+            synthesized_at=datetime(2026, 1, 4, tzinfo=UTC),
+            post_count_at_synth=1,
+        )
+        for slug in (other, item_id)
+    }
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    opened = index_store.open_for_query(data / "index", *_paths(data))
+    try:
+        by_other = opened.lexical.search(marker, 10, filters=SearchFilters(topics=(other,)))
+        by_own = opened.lexical.search(marker, 10, filters=SearchFilters(topics=(item_id,)))
+    finally:
+        opened.close()
+
+    # Arm 1: item `7001` is in `kestrel`, but TOPIC `7001` is not.
+    assert [(h.owner_type, h.owner_id) for h in by_other] == [], by_other
+    # Arm 2 still works: a topic's own prose is exactly what `--topic <slug>` is for.
+    assert [(h.owner_type, h.owner_id) for h in by_own] == [("topic", item_id)], by_own
