@@ -1,5 +1,5 @@
-"""The three inputs of the index read as ONE snapshot, and the DEEP fingerprints of the
-item/store plane (Plan 02 §2, §3; spec §5.6).
+"""The three inputs of the index read as ONE snapshot, and the DEEP fingerprints of all
+FOUR planes — item, store, vocabulary and topics (Plan 02 §2, §3; spec §5.6).
 
 TWO SIGNALS, AND THE WHOLE DESIGN IS THAT THEY COST DIFFERENT THINGS. Indexing is MANUAL BY
 DECISION (spec §9.2), so the failure that actually happens is not corruption — it is *you ran
@@ -8,14 +8,17 @@ DECISION (spec §9.2), so the failure that actually happens is not corruption �
 - The CHEAP one, `StoreSignal`, is `mtime_ns` and size of the THREE inputs: three `os.stat`,
   cheap enough for EVERY query, answering *an input moved*. It cannot say WHICH items.
 - The DEEP ones, `item_fingerprint` and `store_fingerprint`, walk the corpus and emit every
-  surface to answer *which items changed*. They are paid ONLY by `build`/`update`/`status`.
+  surface to answer *which items changed*, and `vocab_fingerprint` and `topics_fingerprint`
+  answer the same of the other two inputs. All four are paid ONLY by `build`/`update`/`status`.
   No path here makes a cheap reader pay a deep one, and none may — 02.6a1's contract.
 
-WHAT IS NOT HERE, AND WHY IT IS NOT A HOLE. `vocab_fingerprint` and `topics_fingerprint` are
-the other two planes and are 02.6a2b's; they will consume `_canonical` and `_sha256` from here
-and nothing else, and the manifest that seals any of the four is 02.6b's. Nothing in this tree
-consumes a fingerprint yet, which is why the coverage gaps review #161 named are closed HERE —
-free before a manifest exists, expensive after.
+THE FOUR PLANES ARE FOUR BECAUSE THEY MOVE APART, and the vocabulary proves it: a description
+edit rewrites rows that `item_fingerprint`, which takes no vocabulary, cannot see (the rows and
+the measurement are under `vocab_fingerprint`). One fused signal would rebuild everything for a
+topic-note typo or miss that; the manifest sealing the four separately is 02.6b's.
+
+WHAT IS NOT HERE. Nothing in this tree CONSUMES a fingerprint yet, which is why the coverage
+gaps review #161 named were closed here — free before a manifest exists, expensive after.
 
 The cheap signal can give false positives (a `touch` with no edit) and that is accepted: a
 false positive costs one warning, a false negative costs serving stale evidence as fresh. It
@@ -36,9 +39,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -388,6 +392,25 @@ def _model_atoms(model: BaseModel) -> list[list[object]]:
     return [[name, getattr(model, name)] for name in type(model).model_fields]
 
 
+def _persisted_atoms(model: BaseModel, *, mode: Literal["python", "json"]) -> list[list[object]]:
+    """One pydantic projection as `[[field_name, value], ...]`, READ OUT OF THE WRITER'S DUMP.
+
+    THE KEY SET COMES FROM THE DUMP, NOT FROM A HUMAN, so the hashed atom set is EQUAL to the
+    persisted one BY CONSTRUCTION: a field added to a model enters the hash the moment it is
+    persisted. The hand lists this replaces were HIGH-1 of review #161 reintroduced.
+
+    THE MODE IS THE WRITER'S, AND REQUIRED, BECAUSE THE TWO WRITERS DISAGREE (B3):
+    `save_topic_pages` dumps json, `save_vocab` PYTHON, and hashing one projection while the
+    writer persists the other is that same false negative one level down. Measured on a
+    `datetime | str` field: json renders BOTH sides to `2026-01-20T00:00:00Z` while `save_vocab`
+    writes a bare timestamp for one and a quoted string for the other — two `vocab.yaml` files
+    under one digest. Python mode keeps the type, so `_canonical` REFUSES what its declared
+    domain cannot hold rather than hash a rendering nobody stored. ORDER is the MODEL's, not the
+    file's: `save_topic_pages` sorts keys on disk, `save_vocab` keeps declaration order.
+    """
+    return [[name, value] for name, value in model.model_dump(mode=mode).items()]
+
+
 def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     """sha256 over everything about this item that the INDEX PERSISTS.
 
@@ -469,8 +492,8 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
       `load_compatible_manifest` as its home, a function that does not exist in this tree yet.
     - `profiles.profile_text` — a `vocab.yaml` edit splices each assigned topic's DESCRIPTION
       into it (spec §5.1.A) and rewrites `profiles`/`profiles_fts` for every assigned item while
-      this fingerprint, which takes no vocabulary, cannot move: 02.6a2b's, reaching the item
-      plane through 02.7's rebuild. Its OTHER half is NOT, and filing it there would record a
+      this fingerprint, which takes no vocabulary, cannot move: DISCHARGED by `vocab_fingerprint`
+      below, via 02.7's rebuild. Its OTHER half is NOT, and filing it there would record a
       debt under an owner who cannot discharge it — `profile.py:_titles` gates on
       `if source.title`, so a title on a blank-bodied source reaches the profile while the
       emitter produces nothing (a whitespace-only `summary`/`digest` is the same shape: profile
@@ -496,29 +519,27 @@ def item_fingerprint(item: Item, *, options: IndexOptions | None = None) -> str:
     options = options or IndexOptions()
     decorative, no_speech = declined_media(item)
     kinds = sorted(item_content_kinds(item))
-    return _sha256(
-        _canonical(
-            "item",
-            [
-                SURFACE_VERSION,
-                item.id,
-                item.source,
-                item.url,
-                item.author.handle,
-                item.author.name,
-                item.created_at.isoformat(),
-                item.captured_at.isoformat(),
-                item.bookmark_folder,
-                item.enriched.primary_topic if item.enriched else None,
-                list(item_topics(item)),
-                kinds,
-                [surface_row(surface) for surface in item_surfaces(item)],
-                [[s, [len(t) for t in b]] for s, b in sorted(article_block_texts(item).items())],
-                [_model_atoms(failure) for failure in failed_sources(item)],
-                [_model_atoms(link) for link in unfetched_links(item)],
-                [decorative, no_speech],
-            ],
-        )
+    return _fingerprint(
+        "item",
+        [
+            SURFACE_VERSION,
+            item.id,
+            item.source,
+            item.url,
+            item.author.handle,
+            item.author.name,
+            item.created_at.isoformat(),
+            item.captured_at.isoformat(),
+            item.bookmark_folder,
+            item.enriched.primary_topic if item.enriched else None,
+            list(item_topics(item)),
+            kinds,
+            [surface_row(surface) for surface in item_surfaces(item)],
+            [[s, [len(t) for t in b]] for s, b in sorted(article_block_texts(item).items())],
+            [_model_atoms(failure) for failure in failed_sources(item)],
+            [_model_atoms(link) for link in unfetched_links(item)],
+            [decorative, no_speech],
+        ],
     )
 
 
@@ -539,11 +560,155 @@ def store_fingerprint(store: Mapping[str, Item], *, options: IndexOptions | None
     roughly doubles a door `status` calls. Read that as a ratio and not as a millisecond
     figure — three measurements on this machine gave three answers.
     """
-    return _sha256(
-        _canonical(
-            "store", [[k, item_fingerprint(store[k], options=options)] for k in sorted(store)]
-        )
+    return _fingerprint(
+        "store", [[k, item_fingerprint(store[k], options=options)] for k in sorted(store)]
     )
+
+
+# The two PROJECTION versions of this child, one per plane, versioned APART from
+# `SURFACE_VERSION` (how a surface is EMITTED) and from each other, because bumping one must not
+# rebuild the other — a `Topic` gaining a field is not a `TopicPage` gaining one. Bump whenever
+# the payload below changes SHAPE, or one sealed under the old keeps comparing EQUAL to one under
+# the new; both read v2 from B-2's `[name, value]` re-cut (B3 moved a MODE, no digest).
+VOCAB_VERSION = "xbrain-knowledge-vocab/v2"
+TOPICS_VERSION = "xbrain-knowledge-topics/v2"
+
+# Which live input each plane is a projection OF. ONE table (rule 5), so the refusal in
+# `_fingerprint` can name the file an operator has to repair instead of making them guess which
+# of the three inputs carried the byte. FILENAMES AND NOT PATHS: `Config.data_dir` is
+# configurable and this module never sees a directory — `load_index_inputs` takes the three
+# paths as arguments. A hardcoded `data/...` would name a file that need not exist, and under a
+# test's `tmp_path` one that never did. The filename is the fixed half, so it is what is quoted.
+_PLANE_INPUT = {
+    "item": "items.json",
+    "store": "items.json",
+    "vocab": "vocab.yaml",
+    "topics": "topics.json",
+}
+
+
+class FingerprintError(ValueError):
+    """A plane could not be fingerprinted: an input holds text UTF-8 cannot encode.
+
+    NAMED HERE BECAUSE THIS CHILD IS THE FIRST CONSUMER, which is the obligation `_canonical`
+    records. `ensure_ascii=False` is an injectivity choice, and its cost is that a LONE
+    SURROGATE reaches `_sha256`'s `.encode("utf-8")` and raises a bare `UnicodeEncodeError` —
+    a `ValueError` naming a byte offset into a JSON blob nobody wrote, from a call stack that
+    says nothing about which of the three inputs is at fault.
+
+    REACHABLE FROM A REAL INPUT, measured on this tree for BOTH planes: the escape is pure ASCII
+    on disk, so `_read_bound`'s decode succeeds and the parser hands the surrogate back intact.
+
+    REFUSAL, NOT `surrogatepass`, AND THE MEASUREMENT IS WHAT DECIDES IT. `surrogatepass` would
+    hash deterministically — but `sqlite3` raises the SAME error binding the value as `TEXT`
+    (measured below), so the fingerprint would certify what the index can never store and the
+    failure would resurface inside 02.7's writer, unnamed and far from the byte.
+    """
+
+
+def _fingerprint(domain: str, value: object) -> str:
+    """`_sha256(_canonical(...))` for all four planes, with the encoding refusal named once.
+
+    THE ONE PLACE THE TWO HELPERS ARE COMPOSED (rule 5), so *what happens when a payload cannot
+    be encoded* has ONE definition rather than four that drift; the test asserts all four entry
+    points raise the same error, each on an atom its OWN plane encodes. HASH-NEUTRAL: the success
+    path is exactly the composition the item and store planes already performed.
+    """
+    try:
+        return _sha256(_canonical(domain, value))
+    except UnicodeEncodeError as exc:
+        offender = ascii(exc.object[exc.start : exc.end])
+        # `.get`, never `[...]`: a plane added later without a table entry would raise
+        # `KeyError` from INSIDE this handler, chaining a lookup bug on top of the fault being
+        # reported and destroying the only message that names the cause. The fallback names the
+        # plane, which is the half of the answer the table is not needed for.
+        source = _PLANE_INPUT.get(domain, f"the {domain} input")
+        raise FingerprintError(
+            f"{domain}: {source} (under the configured data directory) holds {offender}, "
+            f"which UTF-8 cannot encode ({exc.reason}). Repair the input — the index cannot "
+            f"store it either."
+        ) from exc
+
+
+def vocab_fingerprint(vocab: Sequence[Topic]) -> str:
+    """sha256 over the WHOLE persisted vocabulary projection — slugs AND descriptions.
+
+    THE DESCRIPTIONS ARE THE POINT, and they are why this plane needs a fingerprint of its own.
+    `profile.profile_text` splices each assigned topic's DESCRIPTION into that item's
+    `profiles.profile_text`, so editing one word of one description rewrites the `profiles` and
+    `profiles_fts` rows of EVERY item carrying that slug — while `item_fingerprint`, taking no
+    vocabulary, cannot move. Rule 6 exactly, and `item_fingerprint` names the gap as this one's.
+    Two persisted `topics` columns are functions of the description alone: `topics.description`,
+    and `topics.vocab_fingerprint`, which `surfaces.topic_record` derives through
+    `surface_fingerprint` — stamping `SURFACE_VERSION`, which is why that version is an arm here.
+
+    ORDER, AND THE DUPLICATE SLUG THAT MAKES IT SUBTLE. `sorted` by slug makes the hash
+    INDEPENDENT of the order distinct topics happen to sit in — `save_vocab` writes with
+    `sort_keys=False`, so the file order is the caller's. But `sorted` is STABLE, and that is
+    LOAD-BEARING: `parse_vocab` accepts DUPLICATE slugs and `profile_text` resolves them through
+    a dict comprehension, so the LAST entry wins (both measured). Two duplicate orderings
+    therefore persist DIFFERENT profile text, and a sort that discarded input order among equal
+    slugs would hash them ALIKE — fail-open. A set, a dict or a sort on `(slug, description)`
+    reddens the guard that pins this. The accepted false positive is the mirror: an
+    exactly-repeated entry persists as ONE row and hashes differently, costing one rebuild.
+
+    NESTED, NEVER JOINED, and each entry is `_persisted_atoms` so no description can re-cut the
+    boundary of the next atom — a NUL survives `save_vocab`/`parse_vocab` intact (measured), so
+    the flat `"\\0".join(f"{slug}={description}")` this replaces was collidable from a real
+    `vocab.yaml`, not only in theory.
+    """
+    return _fingerprint(
+        "vocab",
+        [
+            VOCAB_VERSION,
+            SURFACE_VERSION,
+            [_persisted_atoms(t, mode="python") for t in sorted(vocab, key=lambda t: t.slug)],
+        ],
+    )
+
+
+def topics_fingerprint(pages: Mapping[str, TopicPage]) -> str:
+    """sha256 over the WHOLE persisted topic-page projection — every field, not the text alone.
+
+    EVERY PERSISTED FIELD — now BY CONSTRUCTION (`_persisted_atoms`), never a list someone has
+    to keep exhaustive. `topics.synthesized_at` and `topics.post_count_at_synth` are persisted
+    columns, and `post_count_at_synth` is half the derivation of a THIRD: `surfaces.topic_record`
+    computes `stale` as `len(primary_item_ids) != page.post_count_at_synth`. The implementation
+    this replaces hashed overview and notes only, so re-synthesising to the SAME prose against a
+    moved post count rewrote two columns and flipped a third with this unmoved. `stale`'s other
+    half is an ITEM assignment riding in `item_fingerprint`; neither plane covers it alone.
+
+    `SURFACE_VERSION` is an arm for the same reason as on the vocabulary plane:
+    `topics.synthesis_fingerprint` is `surface_fingerprint("topic_overview", "llm", overview)`,
+    so a bump rewrites the column with the overview unmoved. Overview and notes are hashed as
+    THEMSELVES, so this plane keeps moving for a prose edit even if that derivation narrows.
+
+    THE KEY IS THE CONTRACT; THE FIELD IS HASHED AS A DECLARED FALSE POSITIVE, and getting that
+    round the wrong way is a false NEGATIVE. The two CAN diverge — `store.parse_topic_pages`
+    takes the key from the JSON object while `TopicPage.slug` is a bare `str` — and the MAPPING
+    KEY is the load-bearing one, the join being `topic_pages.get(topic.slug)`. The field rides in
+    the projection anyway, costing one rebuild on a hand edit; keying off it would hash two joins
+    alike the moment they diverge. The guard below pins both halves.
+
+    The version this replaces hashed `synthesized_at.isoformat()` and CLAIMED it was what is on
+    disk; measured it is not, for UTC: pydantic renders `2026-01-20T00:00:00Z` where
+    `isoformat()` renders `...+00:00` (naive and `+02:00` DO agree, which kept the guard green).
+    INJECTIVITY FOLLOWS from the atom BEING the persisted one; `_persisted_atoms` carries why.
+
+    What is deliberately NOT normalised is the offset. `TopicPage` carries no UTC validator
+    (measured: naive and `+02:00` are both accepted), so two pages at the same INSTANT under
+    different offsets are two different files; collapsing them would be a false negative.
+
+    WHAT THIS PLANE DOES NOT REACH: `CHUNKER_VERSION` and `ChunkerParams` decide every topic
+    chunk's id, span, body and fingerprint and neither is an input here — 02.6b's.
+
+    Order-independent by construction — `sorted(pages.items())` — because a dict's iteration
+    order is how the file was parsed, not what it holds. Each page is its own nested array: the
+    flat `"\\0".join([overview_fp, *note_fps, slug])` this replaces put the SLUG last among
+    64-hex fingerprints, and a slug may BE 64 hex, so one could stand where a note's did.
+    """
+    rows = [[key, _persisted_atoms(page, mode="json")] for key, page in sorted(pages.items())]
+    return _fingerprint("topics", [TOPICS_VERSION, SURFACE_VERSION, rows])
 
 
 def _canonical(domain: str, value: object) -> str:
