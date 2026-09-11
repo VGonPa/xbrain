@@ -1698,12 +1698,12 @@ def test_each_plane_carries_its_own_projection_version_and_a_bump_retires_only_i
     vocab, pages = [_topic()], {"a": _page()}
     before = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(index_build, "VOCAB_VERSION", "xbrain-knowledge-vocab/v2")
+        patch.setattr(index_build, "VOCAB_VERSION", index_build.VOCAB_VERSION + "-next")
         bumped_vocab = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
     assert bumped_vocab[0] != before[0]
     assert bumped_vocab[1] == before[1]
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(index_build, "TOPICS_VERSION", "xbrain-knowledge-topics/v2")
+        patch.setattr(index_build, "TOPICS_VERSION", index_build.TOPICS_VERSION + "-next")
         bumped_topics = index_build.vocab_fingerprint(vocab), index_build.topics_fingerprint(pages)
     assert bumped_topics[1] != before[1]
     assert bumped_topics[0] == before[0]
@@ -1907,20 +1907,18 @@ def test_two_offsets_at_the_same_instant_are_two_files_and_must_be_two_digests()
 
 
 def test_every_topic_atom_hashed_is_the_atom_the_writer_puts_on_disk(tmp_path) -> None:
-    """THE BINDING, READ OFF A REAL FILE, and the claim it replaces was measurably false.
-    The docstring said `synthesized_at` is hashed as its `isoformat()`, "WHICH IS WHAT IS ON
-    DISK". It is not, for UTC: `save_topic_pages` writes `model_dump(mode="json")`, and
-    pydantic renders a UTC datetime as `2026-01-20T00:00:00Z` while `.isoformat()` renders
-    `2026-01-20T00:00:00+00:00` (measured; the `+02:00` and naive cases DO agree, which is what
-    kept this green). So the plane hashed a rendering nothing persists, and the two could drift
-    apart further with a serialiser change and nothing would go red.
+    """THE BINDING, READ OFF A REAL FILE, and the claim it replaces was measurably false: the
+    plane hashed `synthesized_at.isoformat()` and called it what is on disk, which for UTC it
+    is not (`...Z` against `...+00:00`; the measurement is recorded once, beside
+    `topics_fingerprint`). It hashed a rendering nothing persists, and nothing bound the two.
 
-    This asserts the whole hashed ROW — every one of the five persisted fields plus the mapping
-    key — against the record `save_topic_pages` actually wrote to a real file, so the payload is
-    bound to the WRITER by execution and not to a literal a future serialiser change would
-    leave standing. Injectivity of the two synthesis columns follows from the binding: `_sha256`
-    over `_canonical` is injective on this payload domain, so once the hashed atom IS the
-    persisted atom, two distinct persisted values cannot reach one digest.
+    TWO SOURCES, ONE PER HALF, because the row has two and they are not the same source. VALUES
+    AND KEY SET come from the record `save_topic_pages` actually wrote to a real file, as a
+    whole-dict equality — so the day `TopicPage` grows a field the file carries six pairs and a
+    hand list carrying five goes red. ORDER comes from `model_fields`, because it is NOT the
+    file's: `save_topic_pages` writes `sort_keys=True`, so on disk the keys are alphabetical
+    (measured) while the dump is in declaration order. Injectivity follows: `_canonical` is
+    injective here, so once the hashed atom IS the persisted atom two values cannot collide.
     """
     pages = {"a": _page(synthesized_at=datetime(2026, 1, 20, tzinfo=UTC))}
     path = tmp_path / "topics.json"
@@ -1939,14 +1937,38 @@ def test_every_topic_atom_hashed_is_the_atom_the_writer_puts_on_disk(tmp_path) -
         index_build.topics_fingerprint(pages)
 
     (row,) = captured[0][2]
-    assert row == [
-        "a",
-        persisted["slug"],
-        persisted["overview"],
-        persisted["notes"],
-        persisted["synthesized_at"],
-        persisted["post_count_at_synth"],
-    ]
+    assert [row[0], dict(row[1])] == ["a", persisted]
+    assert [name for name, _value in row[1]] == list(TopicPage.model_fields)
+
+
+def test_a_field_added_to_either_new_projection_moves_its_plane(tmp_path) -> None:
+    """B-2 — HIGH-1 of review #161, reintroduced in the module that names it. Both planes hashed
+    a HAND-WRITTEN field list: exhaustive the day written, silently short the day a field is
+    added, so a grown model persists a new byte with the digest unmoved. A SUBCLASS stands in
+    for tomorrow's field, the shipped models not being growable in a test, and what is asserted
+    is that the two move TOGETHER — the bytes the REAL writer puts on disk, and the digest.
+    Measured under the hand lists: both files differ, both digests EQUAL. Fail-open.
+    """
+    from xbrain.rubrics import save_vocab
+
+    class FutureTopic(Topic):
+        colour: str = "red"
+
+    class FuturePage(TopicPage):
+        rubric_version: str = "r1"
+
+    thin = [FutureTopic(slug="a", description="D")]
+    grown = [FutureTopic(slug="a", description="D", colour="blue")]
+    save_vocab(thin, tmp_path / "a.yaml")
+    save_vocab(grown, tmp_path / "b.yaml")
+    dump = _page().model_dump()
+    before, after = {"a": FuturePage(**dump)}, {"a": FuturePage(**dump, rubric_version="r2")}
+    save_topic_pages(before, tmp_path / "a.json")
+    save_topic_pages(after, tmp_path / "b.json")
+    assert (tmp_path / "a.yaml").read_bytes() != (tmp_path / "b.yaml").read_bytes()
+    assert (tmp_path / "a.json").read_bytes() != (tmp_path / "b.json").read_bytes()
+    assert index_build.vocab_fingerprint(thin) != index_build.vocab_fingerprint(grown)
+    assert index_build.topics_fingerprint(before) != index_build.topics_fingerprint(after)
 
 
 # --- missing versus empty ---------------------------------------------------
