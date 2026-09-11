@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from xbrain.knowledge import index_build, index_schema
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
-from xbrain.knowledge.ids import SURFACE_VERSION
+from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
 from xbrain.knowledge.profile import profile_text
 from xbrain.store import save_topic_pages
@@ -2129,3 +2129,391 @@ def test_a_surrogate_in_surface_text_is_refused_one_layer_lower_and_is_not_named
     """
     with pytest.raises(UnicodeEncodeError):
         index_build.item_fingerprint(_item(text="\ud800"))
+
+
+# ---------------------------------------------------------------------------
+# 02.7 — `build`: write the index from scratch and SEAL it
+#
+# The manifest contract is 02.6b's and is tested in `test_knowledge_manifest.py`; nothing
+# here re-tests it. What is tested here is that a BUILD produces one — over rows it actually
+# wrote, with counts read back from the base — and that an interruption produces neither.
+# ---------------------------------------------------------------------------
+
+
+def _built(index_dir: Path, data: Path, **kwargs) -> tuple[index_build.BuildReport, Path]:
+    """Load the three inputs as ONE snapshot and build from it — the only supported call."""
+    inputs = index_build.load_index_inputs(*_paths(data))
+    return index_build.build(index_dir, inputs, **kwargs), index_dir
+
+
+def test_build_writes_a_manifest_with_every_field_the_spec_requires(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """STEP 3 OF PLAN 02 §10, AND THE ONE THAT SAYS THE INDEX IS USABLE AT ALL.
+
+    A manifest is what every later door trusts: an index without one is refused outright
+    (spec §9.3), so a build that writes rows and no manifest has produced nothing. The
+    assertion is on the FIELD SET against `MANIFEST_FIELDS` — the 02.6b contract, not a list
+    retyped here — because a build that omitted `chunker_version` would still write a file
+    that looks like a manifest, and the mutation Plan 02 §10 names is exactly that deletion.
+
+    The VERSIONS are asserted to come from the CODE, which is what makes this a build and not
+    a copy: a build DEFINES the versions the index was written under. And `built_at` must be
+    an instant from this run, not a default — asserted as a bounded window rather than a
+    value, which is the only way a clock can be pinned.
+
+    Seen red before `build` existed: `AttributeError: module has no attribute 'build'`.
+    """
+    before = datetime.now(UTC)
+    report, index_dir = _built(tmp_path / "index", three_inputs)
+    after = datetime.now(UTC)
+
+    manifest = index_build.load_manifest(index_dir)
+    assert set(manifest.to_dict()) == index_build.MANIFEST_FIELDS
+    assert manifest.schema_version == index_schema.SCHEMA_VERSION
+    assert manifest.surface_version == SURFACE_VERSION
+    assert manifest.chunker_version == CHUNKER_VERSION
+    assert manifest.chunker_params == dataclasses.asdict(DEFAULT_CHUNKER_PARAMS)
+    assert before <= manifest.built_at <= after, "built_at is this run's clock"
+    assert manifest.embeddings is None, "the Plan 03 slot is declared and empty"
+    assert not report.dry_run
+
+
+def test_an_interrupted_build_leaves_no_manifest_and_no_partial_rows(
+    tmp_path: Path, three_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE SECOND MANDATORY RED, AND THE REASON THE MANIFEST IS WRITTEN LAST.
+
+    A `Ctrl-C` or a full disk mid-build must leave a state every query REFUSES, never a small
+    index that looks valid — Plan 02 §11 («build interrumpido: transacción abortada; el
+    manifest no se actualiza») and spec §9.3. Two things have to hold together and they fail
+    differently, so both are asserted: the rows roll back (one transaction) AND no manifest
+    is sealed (it is written after the commit, outside it).
+
+    Asserting only «no manifest» would pass over a base holding half the corpus, which the
+    next `build --force` would silently rebuild but `index status` would have to explain; and
+    asserting only «no rows» would pass over a manifest standing on an empty base, which is
+    the C-1 shape where every query answers «no results» with exit 0.
+
+    The interruption is raised from inside the walk, at the SECOND item, so the first one has
+    already been written and the rollback has something real to undo — a failure on item zero
+    would pass against a build that never started.
+
+    Seen red before `build` existed: `AttributeError`.
+    """
+    calls: list[str] = []
+    real_write_item = index_build.write_item
+
+    def exploding(index, item, vocab, counters, *, options):
+        calls.append(item.id)
+        if len(calls) == 2:
+            raise KeyboardInterrupt("Ctrl-C mid-build")
+        return real_write_item(index, item, vocab, counters, options=options)
+
+    monkeypatch.setattr(index_build, "write_item", exploding)
+    index_dir = tmp_path / "index"
+
+    with pytest.raises(KeyboardInterrupt):
+        _built(index_dir, three_inputs)
+
+    assert len(calls) == 2, "the interruption landed after real work had been written"
+    assert not index_schema.manifest_path(index_dir).exists(), "no manifest was sealed"
+    database = index_schema.db_path(index_dir)
+    if database.exists():
+        connection = sqlite3.connect(database)
+        try:
+            counts = {
+                plane: connection.execute(f"SELECT COUNT(*) FROM {plane}").fetchone()[0]  # nosec B608
+                for plane in ("items", "surfaces", "chunks", "profiles", "topics")
+            }
+        finally:
+            connection.close()
+        assert counts == dict.fromkeys(counts, 0), f"rows survived the rollback: {counts}"
+
+
+def test_the_manifest_counts_are_read_BACK_from_the_base_not_from_the_run_counters(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """C-3: the manifest describes the base BY CONSTRUCTION, so a disagreement is detectable.
+
+    Counting what the writers *believe* they wrote and counting what the base *holds* are two
+    different numbers the moment one write is a no-op — `INSERT OR IGNORE` on a duplicate
+    profile, a chunk the chunker dropped — and the manifest is the one that must be true of
+    the rows. Asserted against a direct `SELECT COUNT(*)` per plane, which is the only side
+    of the comparison that does not come from `index_build`.
+    """
+    _, index_dir = _built(tmp_path / "index", three_inputs)
+    manifest = index_build.load_manifest(index_dir)
+
+    connection = sqlite3.connect(index_schema.db_path(index_dir))
+    try:
+        actual = {
+            plane: connection.execute(f"SELECT COUNT(*) FROM {plane}").fetchone()[0]  # nosec B608
+            for plane in sorted(index_build.COUNT_PLANES)
+        }
+    finally:
+        connection.close()
+
+    assert manifest.counts == actual
+    assert set(manifest.counts) == index_build.COUNT_PLANES
+    assert actual["items"] > 0 and actual["chunks"] > 0, "the corpus really was written"
+
+
+def test_the_manifest_seals_the_signal_BOUND_to_the_inputs_it_built_from(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """P1b, END TO END, AND THE TYPE IS WHAT ENFORCES IT.
+
+    `build` takes an `IndexInputs`, so the rows and the cheap signal come from ONE snapshot
+    and no caller can pair rows from one read with a `stat` from another. The defect that
+    shape closes: sealing `StoreSignal.of(paths)` AFTER the commit describes whatever file is
+    on that path by then, so a save landing in the window produces a manifest certifying a
+    store the base never saw, and the next query compares EQUAL and answers over stale rows
+    with nothing declared.
+
+    Here the vocabulary is rewritten between the load and the build. The sealed signal must
+    still be the loaded one, and must compare UNEQUAL to the live files.
+    """
+    from xbrain.rubrics import save_vocab
+
+    items, vocab, topics = _paths(three_inputs)
+    inputs = index_build.load_index_inputs(items, vocab, topics)
+    save_vocab([Topic(slug="moved", description="written after the load")], vocab)
+
+    index_build.build(tmp_path / "index", inputs)
+    sealed = index_build.load_manifest(tmp_path / "index").store_signal
+
+    assert sealed == inputs.signal, "the sealed signal is the snapshot's, not a later stat"
+    assert sealed != index_build.StoreSignal.of(items, vocab, topics)
+
+
+def test_two_builds_of_one_corpus_agree_on_every_count_and_every_fingerprint(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """DETERMINISM, which is what makes a rebuild a repair rather than a second opinion.
+
+    `_write_everything` walks `sorted(store)` and `sorted(vocab)` precisely so two builds of
+    identical inputs write the same rows in the same sequence; spec §3.7.8's `chunk_id`
+    tie-break is meaningless otherwise, and a measured baseline would describe a corpus that
+    no longer exists. `built_at` is the ONE field allowed to differ and is excluded by name,
+    never by comparing the whole document loosely.
+    """
+    first, _ = _built(tmp_path / "a", three_inputs)
+    second, _ = _built(tmp_path / "b", three_inputs)
+
+    one = index_build.load_manifest(tmp_path / "a").to_dict()
+    two = index_build.load_manifest(tmp_path / "b").to_dict()
+    assert one.pop("built_at") != "" and two.pop("built_at") != ""
+    assert one == two
+
+    assert (first.chunks_written, first.surfaces_written, first.profiles_written) == (
+        second.chunks_written,
+        second.surfaces_written,
+        second.profiles_written,
+    )
+    assert _chunk_ids(tmp_path / "a") == _chunk_ids(tmp_path / "b"), "same ids, same order"
+
+
+def _chunk_ids(index_dir: Path) -> list[str]:
+    connection = sqlite3.connect(index_schema.db_path(index_dir))
+    try:
+        return [r[0] for r in connection.execute("SELECT chunk_id FROM chunks ORDER BY rowid")]
+    finally:
+        connection.close()
+
+
+def test_every_surface_written_reads_back_as_the_row_the_projection_declares(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """WRITE/READ-BACK ON THE SURFACE PLANE, against `surface_row` and not against itself.
+
+    `surface_row` is the projection `item_fingerprint` hashes, so what is stored is what is
+    fingerprinted (G-5). The assertion re-emits the surfaces from the SAME corpus and compares
+    the projection tuples against the rows the base holds — so a writer binding the columns in
+    a different order, or dropping one, is caught by value rather than by row count.
+    """
+    _, index_dir = _built(tmp_path / "index", three_inputs)
+    store, vocab, pages = _loaded(three_inputs)
+
+    expected = {}
+    for item in store.values():
+        for surface in item_surfaces(item):
+            expected[surface.surface_id] = index_build.surface_row(surface)
+
+    connection = sqlite3.connect(index_schema.db_path(index_dir))
+    try:
+        stored = {
+            row[0]: tuple(row)
+            for row in connection.execute(
+                "SELECT surface_id, owner_type, owner_id, surface_type, origin, trust_class, "
+                "derived, attribution_handle, attribution_name, title, url, locator_json, "
+                "language, fingerprint, char_length FROM surfaces"
+            )
+        }
+    finally:
+        connection.close()
+
+    assert expected, "the corpus emits surfaces at all"
+    for surface_id, row in expected.items():
+        assert stored[surface_id] == row, surface_id
+    assert len(stored) >= len(expected), "topic surfaces are written too"
+
+
+def _loaded(data: Path):
+    inputs = index_build.load_index_inputs(*_paths(data))
+    return inputs.store, inputs.vocab, inputs.topic_pages
+
+
+def test_the_skipped_causes_are_recorded_on_the_item_and_summed_into_the_manifest(
+    tmp_path: Path,
+) -> None:
+    """A-3: `skipped` is a SUM over the item rows, so an update can keep it exact.
+
+    Counting the omissions ON THE ITEM is what lets the manifest name the CAUSE rather than
+    report a gap, and the two causes that can actually be non-zero are built here: a
+    DECORATIVE photo and a SILENT video, both surfaces the emitter deliberately declines.
+    Asserted on both surfaces of the same fact — the item's own columns and the manifest's
+    total — because a writer that stamped the row and a sum that ignored it would each look
+    right alone.
+    """
+    from xbrain.rubrics import save_vocab
+    from xbrain.store import save_store, save_topic_pages
+
+    item = _item(
+        media=[_photo(is_decorative=True, description="")],
+        content=_video_content(text="", has_speech=False),
+    )
+    data = tmp_path / "data"
+    save_store({item.id: item}, data / "items.json")
+    save_vocab([], data / "vocab.yaml")
+    save_topic_pages({}, data / "topics.json")
+
+    _, index_dir = _built(tmp_path / "index", data)
+
+    connection = sqlite3.connect(index_schema.db_path(index_dir))
+    try:
+        row = connection.execute(
+            "SELECT skipped_decorative, skipped_no_speech FROM items WHERE item_id = ?",
+            (item.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row == (1, 1)
+
+    skipped = index_build.load_manifest(index_dir).skipped
+    assert set(skipped) == index_build.SKIPPED_CAUSES
+    assert (skipped["decorative"], skipped["no_speech"]) == (1, 1)
+
+
+def test_a_dry_run_counts_the_whole_walk_and_touches_no_file_at_all(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """THE FLAG WHOSE WHOLE PROMISE IS THAT IT CHANGES NOTHING, measured rather than trusted.
+
+    The first version opened the REAL database (creating it when absent), rolled back, then
+    removed the file it believed it had created — so a dry run against a working index
+    DESTROYED it. A dry run now builds into `sqlite3(":memory:")`, so the assertion is that
+    the directory does not exist afterwards, not merely that the manifest is absent.
+
+    And the counts must be the counts a real build WOULD produce, not an estimate: the walk
+    happens in full and is thrown away, so they are compared against a real build's.
+    """
+    index_dir = tmp_path / "index"
+    dry, _ = _built(index_dir, three_inputs, dry_run=True)
+
+    assert dry.dry_run
+    assert not index_dir.exists(), "a dry run creates nothing, not even the directory"
+
+    real, _ = _built(tmp_path / "real", three_inputs)
+    assert (dry.chunks_written, dry.surfaces_written, dry.profiles_written) == (
+        real.chunks_written,
+        real.surfaces_written,
+        real.profiles_written,
+    )
+
+
+def test_building_over_an_existing_index_refuses_and_names_both_commands(
+    tmp_path: Path, three_inputs: Path
+) -> None:
+    """A rebuild throws away something that may have taken minutes, so it is opt-in.
+
+    The error names `index update` — what the operator usually wants — AND the forced
+    rebuild, because sending them to one of the two is what makes an error actionable.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+
+    with pytest.raises(ValueError) as caught:
+        _built(index_dir, three_inputs)
+    assert "index update" in str(caught.value)
+    assert "index build --force" in str(caught.value)
+
+
+def test_a_forced_rebuild_removes_the_manifest_BEFORE_the_database(
+    tmp_path: Path, three_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C-1: AN INTERRUPTED `--force` MUST NOT LEAVE THE OLD MANIFEST OVER A NEW EMPTY BASE.
+
+    The manifest is what every query trusts, so it must not outlive the database it
+    describes. With the old one standing while the new base was written, an interrupted
+    forced rebuild rolled the rows back and left a manifest whose versions and cheap signal
+    still matched: `status` reported nothing wrong and `search` answered «no results» over an
+    EMPTY base, indistinguishable from a corpus with no matches.
+
+    The order is asserted by OBSERVING it — the interruption fires at the first write, and
+    what must be true afterwards is that no manifest survived — rather than by reading the
+    two `unlink` calls in sequence.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    assert index_schema.manifest_path(index_dir).exists()
+
+    def exploding(*args, **kwargs):
+        raise KeyboardInterrupt("Ctrl-C during the forced rebuild")
+
+    monkeypatch.setattr(index_build, "_write_everything", exploding)
+    with pytest.raises(KeyboardInterrupt):
+        _built(index_dir, three_inputs, force=True)
+
+    assert not index_schema.manifest_path(index_dir).exists(), (
+        "the previous manifest must not survive an interrupted forced rebuild"
+    )
+
+
+def test_the_build_walks_the_store_in_sorted_order_so_two_runs_cannot_diverge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sorted is a CONTRACT, not an incidental: spec §3.7.8's tie-break needs a stable order.
+
+    THE STORE IS BUILT IN REVERSE ORDER ON PURPOSE, and that is the whole test. Written against
+    the JSON fixture this assertion passed under the mutation `sorted(store)` -> `list(store)`
+    — 112 of 112 green — because the fixture's insertion order already IS sorted, so "the walk
+    is sorted" and "the walk follows dict order" were the same sequence and the assertion could
+    not tell them apart (rule 1). A dict whose iteration order is the REVERSE of its sorted
+    order is the only input on which the two differ.
+
+    Pinned on the sequence `write_item` is actually called with, because a walk in a different
+    order still produces the identical row SET — which is exactly what a count-based or
+    set-based assertion cannot see.
+
+    Seen red under that mutation once the input was built this way: the call order came back
+    reversed.
+    """
+    ids = ["30", "20", "10"]
+    store = {i: _item(id=i, url=f"https://x.com/a/status/{i}") for i in ids}
+    inputs = index_build.IndexInputs(store=store, vocab=[], topic_pages={}, signal=ZERO)
+    assert list(store) != sorted(store), "the input really is out of order"
+
+    seen: list[str] = []
+    real = index_build.write_item
+    monkeypatch.setattr(
+        index_build,
+        "write_item",
+        lambda index, item, vocab, counters, *, options: (
+            seen.append(item.id),
+            real(index, item, vocab, counters, options=options),
+        )[1],
+    )
+    index_build.build(tmp_path / "index", inputs)
+
+    assert seen == sorted(ids), f"walked in dict order, not sorted order: {seen}"
