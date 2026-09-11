@@ -63,7 +63,12 @@ from xbrain.knowledge.contracts import (
     resolve_strategy,
 )
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
-from xbrain.knowledge.index_store import open_for_query, resolvable_hits, verify_fingerprints
+from xbrain.knowledge.index_store import (
+    OpenIndex,
+    open_for_query,
+    resolvable_hits,
+    verify_fingerprints,
+)
 from xbrain.knowledge.lexical import LexicalHit
 from xbrain.knowledge.models import DerivedText, SurfaceType
 from xbrain.knowledge.provenance import DEFAULT_EVIDENCE_CLASSES, ORIGIN_TRUST
@@ -194,20 +199,7 @@ def search(
     try:
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
-        candidates, exhausted = index.lexical.search_owners(query, beyond, filters=filters)
-        # A hit without a resolvable surface locator is excluded and counted FIRST (B-k):
-        # the alternative was a locator invented from the chunk's own columns — and since
-        # U-5 the fingerprint is recomputed over the narrowed locator, so a hit that has
-        # none cannot be verified at all. Then every survivor's evidence must recompute.
-        hits, unresolvable = resolvable_hits(candidates)
-        hits, corrupt = verify_fingerprints(hits)
-        excluded = corrupt + unresolvable
-        profile_ids = [
-            hit.item_id for hit in index.lexical.search_profiles(query, beyond, filters=filters)
-        ]
-        grouped = _group_by_item(hits, context, limit=beyond)
-        _append_profile_candidates(grouped, profile_ids, context, limit=beyond)
-        ordered = list(grouped.items())
+        ordered, excluded, exhausted = _materialise(index, query, filters, context, needed=beyond)
         page = ordered[offset : offset + limit]
         results = tuple(
             _hydrate(rank, item_id, matches, context)
@@ -227,6 +219,66 @@ def search(
         )
     finally:
         index.close()
+
+
+def _materialise(
+    index: OpenIndex,
+    query: str,
+    filters: SearchFilters,
+    context: QueryContext,
+    *,
+    needed: int,
+) -> tuple[list[tuple[str, list[LexicalHit]]], int, bool]:
+    """The candidate window, DEEPENED until it can answer — `(ordered, excluded, exhausted)`.
+
+    THE WINDOW IS MEASURED IN CANDIDATES AND THE PAGE IN ANSWERS, and three stages sit between
+    the two dropping rows: `resolvable_hits` (no locator), `verify_fingerprints` (evidence that
+    does not recompute), and `_group_by_item` (an owner the store no longer holds). Sizing the
+    window ONCE and treating the survivors as the ranking is what let every exclusion silently
+    shorten the corpus.
+
+    Measured before this loop existed, on two long documents monopolising the eight chunks a
+    `--limit 1` page materialises: corrupt the pair and `search` answered `results: []`,
+    `truncated: false`, `cursor: null` — a COMPLETE «the corpus has nothing» over a corpus
+    that still matched twice. Not a short page: a false claim about the corpus, the same shape
+    as answering an unknown topic with zero results. Both say *nothing is there* when the
+    truth is *I did not look*.
+
+    So the window doubles until it holds `needed` owners the response can actually serve, or
+    until there is nothing deeper to find. THREE TERMINATIONS, and the third is the one that
+    keeps this finite: `exhausted` is `search_owners` reporting `MAX_CHUNK_DEPTH` reached, and
+    a window that did not GROW means the ranking is fully materialised — without that, a
+    corpus smaller than the window would double forever asking for owners that do not exist.
+
+    THE COUNT IS RECOMPUTED PER WINDOW, NEVER ACCUMULATED. Every window is a PREFIX of the same
+    ranking (`search_owners`: a deeper window only appends), so the deepest one already
+    contains every exclusion the shallower ones saw; adding them up would count the same rows
+    once per doubling. `corrupt_chunks_excluded` is what THIS response's candidate set held,
+    which is why a response that looked deeper honestly reports more.
+
+    Determinism survives (spec §3.7.8): each window is a prefix, so grouping is
+    prefix-consistent — a deeper window only appends owners — and the ordering a page slices
+    is the same ordering whatever depth was reached.
+    """
+    owners = needed
+    previous = -1
+    while True:
+        candidates, exhausted = index.lexical.search_owners(query, owners, filters=filters)
+        # A hit without a resolvable surface locator is excluded and counted FIRST (B-k): the
+        # alternative was a locator invented from the chunk's own columns — and since U-5 the
+        # fingerprint is recomputed over the narrowed locator, so a hit that has none cannot be
+        # verified at all. Then every survivor's evidence must recompute.
+        hits, unresolvable = resolvable_hits(candidates)
+        hits, corrupt = verify_fingerprints(hits)
+        grouped = _group_by_item(hits, context, limit=needed)
+        profile_ids = [
+            hit.item_id for hit in index.lexical.search_profiles(query, needed, filters=filters)
+        ]
+        _append_profile_candidates(grouped, profile_ids, context, limit=needed)
+        if len(grouped) >= needed or exhausted or len(candidates) == previous:
+            return list(grouped.items()), corrupt + unresolvable, exhausted
+        previous = len(candidates)
+        owners *= 2
 
 
 def _encode_search_cursor(offset: int) -> str:
@@ -282,19 +334,27 @@ def _validate(query: str, filters: SearchFilters, limit: int, context: QueryCont
     about the corpus produced by a typo, and it would be indistinguishable from a topic that
     genuinely has no matches — so spec §3.7.5's *los topics no se inventan desde el texto del
     query* is enforced by listing the vocabulary instead.
+
+    AND AN EMPTY VOCABULARY IS NOT A REASON TO STOP CHECKING. The guard read `if filters.topics
+    and context.vocab`, so the one state in which EVERY topic is unknown was the one state it
+    skipped: a filter naming a topic that exists nowhere came back `0 results`, exit 0. The
+    sentence names that case rather than inviting the operator to read an empty list of valid
+    slugs as "none matched".
     """
     if not query.strip():
         raise ValueError("La consulta está vacía. Escribe algo que buscar.")
     if limit <= 0:
         raise ValueError(f"--limit debe ser >= 1, recibido {limit}.")
-    if filters.topics and context.vocab:
+    if filters.topics:
         known = {topic.slug for topic in context.vocab}
         unknown = [slug for slug in filters.topics if slug not in known]
         if unknown:
-            raise ValueError(
-                f"Topic(s) desconocido(s): {', '.join(unknown)}. "
+            valid = (
                 f"Los válidos son: {', '.join(sorted(known))}."
+                if known
+                else ("El vocabulario está vacío: no hay ningún topic válido todavía.")
             )
+            raise ValueError(f"Topic(s) desconocido(s): {', '.join(unknown)}. {valid}")
 
 
 # ---------------------------------------------------------------------------

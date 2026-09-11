@@ -1372,3 +1372,153 @@ def test_match_refuses_a_locatorless_hit_rather_than_fabricating_a_locator() -> 
     """
     with pytest.raises(IndexIncompatibleError, match="no resuelve a su superficie"):
         search_service._match(1, _locatorless_hit())
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 — the candidate window is not the answer set
+# ---------------------------------------------------------------------------
+
+
+def _seed_one_source(item: Item, body: str) -> Item:
+    """Replace the first content source's body, leaving every other field alone."""
+    assert item.content is not None
+    first, *rest = item.content.sources
+    return item.model_copy(
+        update={
+            "content": item.content.model_copy(
+                update={"sources": [first.model_copy(update={"text": body}), *rest]}
+            )
+        }
+    )
+
+
+def _long_and_short(
+    store: dict[str, Item], token: str
+) -> tuple[dict[str, Item], list[str], list[str]]:
+    """Two documents that monopolise the candidate window, and two that sit outside it.
+
+    A token in a fetched BODY reaches `chunks` and not `profile_text` — which carries the
+    item's own text, titles, summary, digests, topics and author, never a fetched body — so
+    the chunk plane alone decides this ranking and the profile plane cannot refill the page.
+    Sources carrying `blocks` are skipped: `ContentSourceSuccess` validates that `text` is the
+    concatenation of its blocks, so rewriting the body alone would not construct.
+    """
+    usable = [
+        k
+        for k, i in store.items()
+        if i.content
+        and i.content.sources
+        and getattr(i.content.sources[0], "text", None)
+        and not getattr(i.content.sources[0], "blocks", None)
+    ]
+    hogs, tail = usable[:2], usable[2:4]
+    long_body = " ".join(f"{token} parrafo {n} del documento largo." for n in range(300))
+    seeded = dict(store)
+    for k in hogs:
+        seeded[k] = _seed_one_source(store[k], long_body)
+    for k in tail:
+        seeded[k] = _seed_one_source(store[k], f"Una nota breve que menciona {token} una vez.")
+    return seeded, hogs, tail
+
+
+def test_a_page_refills_past_excluded_candidates_instead_of_reporting_the_corpus_empty(
+    tmp_path: Path, corpus
+) -> None:
+    """The candidate window is sized in CANDIDATES; the page is measured in ANSWERS.
+
+    `search_owners(q, N)` materialises `N * 4` chunks and stops as soon as they hold N distinct
+    owners. Everything after that drops rows — `resolvable_hits`, `verify_fingerprints`, and
+    `_group_by_item` for an owner no longer in the store — so a window sized for two owners can
+    survive into ZERO, and nothing re-deepened it.
+
+    Staged so the window is a genuine PREFIX: two long documents monopolise the first eight
+    chunks, two short ones sit outside. Corrupt the long pair and, before the fix, `limit=1`
+    answered `results=[]`, `truncated=False`, `cursor=None` — a COMPLETE "the corpus has
+    nothing" over a corpus that still matches twice. That is worse than a short page: spec
+    §9.3 forbids the silent cut, and this one claims something about the corpus that is false.
+
+    The exclusion count is asserted to GROW with the deepening rather than to stay at the old
+    window's 8, because `corrupt_chunks_excluded` counts what THIS response considered, and a
+    response that looked deeper considered more.
+
+    Seen red before the fix: `results == []` with `truncated is False`.
+    """
+    store, vocab, pages = corpus
+    token = "Thornwillow"
+    store, hogs, tail = _long_and_short(store, token)
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    clean = search(token, context, limit=50)
+    ranking = [r.item_id for r in clean.results]
+    # The pair leads; WHICH of the two leads is bm25's call and is not this test's claim.
+    assert set(ranking[:2]) == set(hogs), f"the long pair must lead the ranking: {ranking}"
+    assert set(tail) <= set(ranking), "and the short pair must be findable"
+
+    connection = sqlite3.connect(db_path(context.index_dir))
+    corrupted = sum(
+        connection.execute(
+            "UPDATE chunks SET fingerprint = ? WHERE owner_type = 'item' AND owner_id = ?",
+            ("0" * 64, victim),
+        ).rowcount
+        for victim in hogs
+    )
+    connection.commit()
+    connection.close()
+    assert corrupted > 8, "the corrupted set must exceed one window, or the refill is untested"
+
+    page = search(token, context, limit=1)
+    served = [r.item_id for r in page.results]
+
+    assert served and served[0] in tail, (
+        f"the page must refill past the excluded head, not come back empty: {served}"
+    )
+    assert page.truncated is True and page.cursor is not None
+    # BOUNDED BY THE ROWS THAT EXIST, which is what stops the count being accumulated across
+    # the doublings: every window is a PREFIX of the same ranking, so the deepest already holds
+    # every exclusion the shallower ones saw, and summing them counts rows once per doubling.
+    # Measured: accumulating puts the total ABOVE the number of rows actually corrupted.
+    assert 8 <= page.index.corrupt_chunks_excluded <= corrupted, (
+        f"excluded {page.index.corrupt_chunks_excluded} of {corrupted} corrupted rows"
+    )
+
+    rest = search(token, context, limit=1, cursor=page.cursor)
+    later = [r.item_id for r in rest.results]
+    assert later and later[0] in tail and later != served, (
+        "the next page continues the ranking rather than repeating it"
+    )
+    assert set(served + later) == set(tail), "the two pages reassemble the survivors"
+
+
+def test_an_unknown_topic_is_refused_even_when_the_vocabulary_is_empty(
+    context: QueryContext,
+) -> None:
+    """Spec §3.7.5: *los topics no se inventan desde el texto del query.*
+
+    The guard read `if filters.topics and context.vocab`, so an EMPTY vocabulary disabled it
+    entirely — and an empty vocabulary is the state in which EVERY topic is unknown, which
+    makes it the one case the check exists for. Measured before the fix: a filter naming a
+    topic that exists nowhere returned `0 results` with exit 0, indistinguishable from a topic
+    that genuinely has no matches. A typo answered as a fact about the corpus.
+
+    The two states are asserted apart, because «refuses when the vocabulary is empty» is only
+    half a rule: a KNOWN topic must still be accepted when the vocabulary holds it.
+
+    Seen red before the fix: the first call returned a `SearchResponse`.
+    """
+    bare = replace(context, vocab=[])
+
+    with pytest.raises(ValueError, match="El vocabulario está vacío") as empty:
+        search("Quillfeather", bare, filters=SearchFilters(topics=("no-such-topic",)))
+    assert "no-such-topic" in str(empty.value)
+    assert "Los válidos son" not in str(empty.value), (
+        "an empty list of valid slugs reads as «none matched», which is the wrong diagnosis"
+    )
+
+    with pytest.raises(ValueError, match="no-such-topic"):
+        search("Quillfeather", context, filters=SearchFilters(topics=("no-such-topic",)))
+
+    known = context.vocab[0].slug
+    assert search("Quillfeather", context, filters=SearchFilters(topics=(known,))) is not None
