@@ -38,6 +38,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from xbrain.knowledge.provenance import Origin, TrustClass
 from xbrain.models import Author, ContentKind, FailureReason, SourceName, Verdict
 
+# Who a surface or chunk belongs to. TWO values, and the CLOSURE is the point: an id alone
+# does not identify an owner, because the two namespaces overlap — `Topic.slug` admits an
+# all-digit slug and every tweet id is all digits (C1). Named once here so the chunker, the
+# writer and the retriever's `OwnerKey` cannot disagree about the set (rule 5), and so the
+# owner narrowing can bound its SQL by the number of TYPES rather than of owners (M1).
+OwnerType = Literal["item", "topic"]
+
 # Every kind of text this layer can surface. Spec §4, one row per physical surface.
 SurfaceType = Literal[
     "post",
@@ -215,7 +222,7 @@ class KnowledgeSurface(BaseModel):
     model_config = _FROZEN
 
     surface_id: str
-    owner_type: Literal["item", "topic"]
+    owner_type: OwnerType
     owner_id: str
     surface_type: SurfaceType
     text: str
@@ -264,7 +271,7 @@ class KnowledgeChunk(BaseModel):
 
     chunk_id: str
     surface_id: str
-    owner_type: Literal["item", "topic"]
+    owner_type: OwnerType
     owner_id: str
     surface_type: SurfaceType
     text: str

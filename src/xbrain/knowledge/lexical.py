@@ -41,7 +41,7 @@ from pydantic import ValidationError
 from xbrain.knowledge.contracts import SearchFilters
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.lexical_fts import match_expression, rank_order
-from xbrain.knowledge.models import KnowledgeChunk, Locator, SurfaceType
+from xbrain.knowledge.models import KnowledgeChunk, Locator, OwnerType, SurfaceType
 from xbrain.models import Author
 
 # How much of a matching chunk is shown back. Long enough to recognise the hit, short enough
@@ -124,7 +124,7 @@ class LexicalHit:
 
     chunk_id: str
     surface_id: str
-    owner_type: str
+    owner_type: OwnerType
     owner_id: str
     surface_type: SurfaceType
     origin: str
@@ -148,7 +148,11 @@ class LexicalHit:
 # `<owner_type>:<owner_id>:…` since spec §3.3 because the two namespaces OVERLAP —
 # `Topic.slug` is `^[a-z0-9]+(?:-[a-z0-9]+)*$`, which admits an all-digit slug, and every
 # real tweet id is all digits. One alias, so the counting and the narrowing cannot drift.
-OwnerKey = tuple[str, str]
+#
+# The type half is `OwnerType`, the SAME closed set `KnowledgeChunk` is written from, so a
+# caller cannot ask for `("items", id)` and get a silent empty answer, and so `_owner_clause`
+# can bound its expression tree by a set size it can name rather than by a caller's length.
+OwnerKey = tuple[OwnerType, str]
 
 
 def owner_key(hit: LexicalHit) -> OwnerKey:
@@ -551,9 +555,9 @@ class LexicalIndex:
             clauses.append(f"chunks.surface_type IN ({_placeholders(len(surface_types))})")
             params += list(surface_types)
         if owners:
-            clauses.append(f"({_owner_pairs(len(owners))})")
-            for owner_type, owner_id in owners:
-                params += [owner_type, owner_id]
+            owner_clause, owner_params = _owner_clause(owners)
+            clauses.append(owner_clause)
+            params += owner_params
         return clauses, params
 
     def _fetch(self, sql: str, params: tuple[object, ...]) -> list[sqlite3.Row]:
@@ -723,17 +727,50 @@ def _placeholders(count: int) -> str:
     return ",".join("?" * count)
 
 
-def _owner_pairs(count: int) -> str:
-    """`(type = ? AND id = ?) OR (…)` for a variadic owner narrowing — from a COUNT (C1).
+def _owner_clause(owners: tuple[OwnerKey, ...]) -> tuple[str, list[object]]:
+    """The owner narrowing: one `IN` PER TYPE, not one equality per owner (C1, then M1).
 
-    A disjunction of equalities on BOTH columns rather than one `IN` over ids, because an
-    owner is the pair. It also happens to be the shape the `chunks_owner (owner_type,
-    owner_id)` index serves best: each disjunct is an equality on the full key.
+    Both columns are constrained, because an owner is the pair — that is C1, and an id-only
+    clause served one owner's text under another owner's name.
 
-    Built from an integer for the same reason as `_placeholders` — the fragment cannot carry
-    a caller's text into the statement no matter what was passed.
+    ONE DISJUNCT PER TYPE, and the first version wrote one per OWNER. A left-deep `OR` tree of
+    equalities meets `SQLITE_MAX_EXPR_DEPTH` (1000) long before anything else: measured on
+    sqlite 3.50.4, 993 owners answered and 995 raised, where the `IN (…)` it replaced was a
+    single node and answered past 16,384. Grouping by type bounds the tree at the number of
+    distinct owner TYPES — two, and `OwnerType` makes that a closed set — so the width of the
+    request is carried by the `IN` list, whose ceiling is the variable budget that bounded the
+    old clause too. Correctness and the ceiling were never actually in tension; the first
+    shape just paid for one with the other.
+
+    Ids are deduplicated per type, preserving first-seen order: `IN` does not care, the
+    variable budget does, and a caller that asks for the same owner twice should not lose
+    headroom for it.
+
+    WHAT REMAINS, declared rather than discovered. Past roughly 32k owners the statement runs
+    out of bound parameters, and `_fetch` converts that into `IndexIncompatibleError` — telling
+    an operator to rebuild an index that is perfectly healthy when the truth is that the
+    REQUEST was too wide (rule 9, the instrument naming the wrong surface). That is unchanged
+    from the id-only clause this replaces and is not repaired here; it belongs with the filter
+    joins in `_item_clauses`, which have their own half-key defect and are umbrella code. It is
+    far outside anything the callers reach: measured on the live corpus, the top-up phase asks
+    for one item's topics, and that is at most 4 against a 45-topic vocabulary.
+
+    The fragment is still built from COUNTS alone (`_placeholders`), so no caller text reaches
+    the statement; the types and ids are bound values.
     """
-    return " OR ".join(["(chunks.owner_type = ? AND chunks.owner_id = ?)"] * count)
+    grouped: dict[OwnerType, list[str]] = {}
+    for owner_type, owner_id in owners:
+        grouped.setdefault(owner_type, []).append(owner_id)
+    parts: list[str] = []
+    params: list[object] = []
+    for owner_type, ids in grouped.items():
+        unique = list(dict.fromkeys(ids))
+        parts.append(
+            f"(chunks.owner_type = ? AND chunks.owner_id IN ({_placeholders(len(unique))}))"
+        )
+        params.append(owner_type)
+        params += unique
+    return f"({' OR '.join(parts)})", params
 
 
 def _iso(value: datetime | None) -> str | None:

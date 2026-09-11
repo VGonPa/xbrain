@@ -2793,3 +2793,56 @@ def test_a_topic_slug_equal_to_the_items_own_id_never_takes_its_primary_slots(
     # slot and the topic top-up gets none. A topic row here came through the own query.
     assert owners == [("item", _SLUG)] * len(owners), owners
     assert len(owners) == context.max_matches_per_item, owners
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "M2, round 11: the four filter joins in `lexical._item_clauses` / `_topic_clause` "
+        "decide owner membership on `chunks.owner_id` with no `chunks.owner_type`, so a "
+        "colliding topic slug satisfies an item filter. Byte-identical at the umbrella tip "
+        "(child 02.4), therefore NOT this child's code to change. Strict, so the day it is "
+        "fixed this marker fails and the claim in `test_knowledge_lexical.py` is corrected "
+        "with it — a known defect that is merely written down rots into a defect nobody knows."
+    ),
+)
+def test_a_filter_still_matches_a_topic_by_a_colliding_item_id(tmp_path: Path) -> None:
+    """C1's family on the FILTER surface, which the narrowing fix does not reach.
+
+    `_item_clauses` joins `items.item_id`, `item_content_kinds.item_id` and `surfaces.owner_id`
+    to `chunks.owner_id`, and `_topic_clause`'s first arm joins `item_topics.item_id` the same
+    way. None of them constrains `chunks.owner_type`, so a topic-owned chunk whose slug equals
+    an item's id inherits that ITEM's author, surfaces, content kinds and topics.
+
+    Measured at `a500cc6`, with a control corpus whose slug does not collide returning nothing:
+
+        --author vgonpa        -> A001, written by otherhandle, cited only from topic:7001
+        --has-surfaces article -> A001, which has no `content` at all
+        --content-kinds ...    -> A001, same
+        --topic kestrel        -> a chunk owned by topic:7001, which is not kestrel
+
+    This asserts the REPAIRED behaviour, so it fails today and passes the day the joins take
+    the whole key.
+    """
+    marker = "Zephyrquill"
+    store, vocab, pages = _colliding_corpus(
+        marker, victim="A001", bystander=_SLUG, victim_article=False, topic_prose_matches=True
+    )
+    # The bystander is the one with the article; give the two items different authors so the
+    # author filter has something to separate.
+    store = {
+        item_id: item.model_copy(
+            update={
+                "author": Author(handle="vgonpa" if item_id == _SLUG else "otherhandle", name="N")
+            }
+        )
+        for item_id, item in store.items()
+    }
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    served = search(marker, context, limit=10, filters=SearchFilters(author="vgonpa")).results
+    offenders = [r.item_id for r in served if store[r.item_id].author.handle != "vgonpa"]
+    assert offenders == [], offenders

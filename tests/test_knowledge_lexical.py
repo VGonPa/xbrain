@@ -1097,10 +1097,24 @@ def test_narrowing_to_an_owner_takes_its_TYPE_and_not_only_its_id() -> None:
 
     It bound `chunks.owner_id IN (...)` alone. An id is not an identifier here: `surface_id`
     has carried `<owner_type>:<owner_id>:...` since spec §3.3 precisely because the two
-    namespaces overlap, and the topic filter twelve lines below already constrains both
-    columns. Only the narrowing took half the key, and half a composite key is
-    indistinguishable from all of it until two values coincide — at which point one owner's
-    text is served under another owner's name.
+    namespaces overlap. Half a composite key is indistinguishable from all of it until two
+    values coincide — at which point one owner's text is served under another owner's name.
+
+    THE NARROWING IS NOT THE ONLY PLACE THAT TAKES HALF THE KEY, and this docstring said it
+    was (B2, round 11). Four live joins in this module decide owner membership on
+    `chunks.owner_id` with no `chunks.owner_type`, and all four are reproduced with a control
+    in `test_knowledge_search_service.py` — see
+    `test_a_filter_still_matches_a_topic_by_a_colliding_item_id`. Three of them are
+    consumer-visible: `--author`, `--has-surfaces` and `--content-kinds` each return an item
+    that fails the filter. The fourth, `item_topics.item_id = chunks.owner_id`, leaks at this
+    layer — `--topic kestrel` returns a chunk owned by topic `7001` — and is usually masked
+    downstream, because a colliding topic resolves to no items.
+
+    Those four arrived with child 02.4 and are byte-identical at the umbrella tip, so they are
+    not this child's to fix; they are pinned as a strict xfail rather than described in prose,
+    so the day someone closes them the marker fails and this comment gets corrected.
+
+    What IS closed here is the narrowing, and only the narrowing.
 
     Asserted in BOTH directions on one corpus of exactly two rows, so neither result can be
     satisfied by the corpus holding nothing of the other kind.
@@ -1141,3 +1155,41 @@ def test_the_narrowing_and_the_depth_loop_read_ONE_definition_of_owner() -> None
     assert [lexical.owner_key(hit) for hit in hits] == list(asked)
     assert lexical.distinct_owners(hits) == 1
     assert lexical.distinct_owners(index.search("Zephyrquill", 10)) == 2
+
+
+def test_the_owner_narrowing_scales_past_a_thousand_owners() -> None:
+    """The pair clause must not trade C1's correctness for a ceiling (M1, round 11).
+
+    The first pair clause was a left-deep `OR` tree of equalities, one node per owner, and
+    SQLite's `SQLITE_MAX_EXPR_DEPTH` is 1000. Measured at `a500cc6` on sqlite 3.50.4: 993
+    owners answered, 995 raised — where the id-only `IN (...)` it replaced was one node and
+    answered past 16,384. Worse than the ceiling was what the ceiling SAID. `_fetch` converts
+    any `DatabaseError` it cannot read into `IndexIncompatibleError`, so a HEALTHY index came
+    back as *«La base del índice no se puede consultar … Reconstruye el índice con `index
+    build --force`»* — an operator told to rebuild over a query that was merely too wide, and
+    a rebuild that would change nothing. Rule 9: the instrument named the wrong surface.
+
+    Grouping the ids by type restores it. There are two owner types, so the disjunction is at
+    most two nodes wide however many owners are asked for, and the bound goes back to being
+    the variable limit that bounded `IN` before.
+
+    16,384 is chosen because it is past the review's measured `IN` ceiling and inside
+    SQLite's default `SQLITE_MAX_VARIABLE_NUMBER`, so a failure here is the expression tree
+    and not the parameter budget.
+
+    THE ONE OWNER THAT MATTERS GOES LAST, IN THE CROWDED GROUP. It went first, among fillers
+    of the OTHER type, and a mutant that kept only the first hundred ids per type survived the
+    matrix: the target sat alone in its group, so truncation could not reach it. The ids are
+    grouped by type before they are bound, so a width test has to put the target deep inside
+    the group that is actually wide. Both types are present so the disjunction still has two
+    arms to get wrong.
+    """
+    index = _index()
+    index.add(_colliding_chunks())
+    wanted = ("topic", COLLIDING_OWNER_ID)
+
+    for width in (995, 5_000, 16_384):
+        fillers = tuple(("topic", f"absent-{n}") for n in range(width - 2))
+        owners = (("item", "absent-item"), *fillers, wanted)
+        hits = index.search("Zephyrquill", 10, owners=owners)
+        assert [hit.chunk_id for hit in hits] == ["topic:7001:topic_overview:0:0"], width

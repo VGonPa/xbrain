@@ -452,8 +452,29 @@ def _settle_evidence(
     ONE SCOPED QUERY FAMILY PER SERVED ITEM, bounded by that item's own rows. `LexicalIndex.search`
     narrows by `owners`, internal narrowing deliberately kept off the FROZEN `SearchFilters`; this
     is its only caller in the package (it was documented as also serving `get` and the evaluation
-    harness, and `get` does not exist yet). Deepening the GLOBAL window to the same end was
-    measured at 5-56x on the real 2,474-item index (`de` 67 ms -> 3,723 ms); this is 0.7-2.0x.
+    harness, and `get` does not exist yet).
+
+    WHAT THIS STAGE COSTS, measured rather than remembered (B1, round 11). The figure here read
+    "0.7-2.0x" for three rounds and no measurement ever reproduced it. Re-measured at round 11
+    on the population this sentence names — the real 2,474-item corpus, 45 topics, 22,933 chunks,
+    `items.json` sha256 `4fed54a0…` — against the IDENTICAL query with this function replaced by
+    a passthrough, so the ratio isolates the stage rather than the whole response. Best of five
+    after a warm-up:
+
+        de 5.06x · la 3.89x · openai 4.02x · anthropic 4.14x
+        video 3.31x · modelo 2.98x · agente 2.88x · retrieval 2.12x
+
+    **2.1x-5.1x, median 3.6x.** The round-10 gate measured the same stage independently and got
+    2.08x-7.48x, median 4.11x: different cells, same band and the same direction.
+
+    And 0.7 was never reachable. This stage only ADDS queries to the work the passthrough already
+    did, so a ratio below 1.0 could not come out however the corpus fell — a number that cannot
+    come out another way is not a measurement (rule 2), which is what carried a wrong figure
+    through three rounds of green.
+
+    It is still the cheaper of the two designs by a wide margin: deepening the GLOBAL window to
+    the same end was measured at 5-56x on this corpus (`de` 67 ms -> 3,723 ms). The comparison
+    survives the correction; the band that made it look free did not.
 
     THE TWO PHASES NARROW BY OWNER KEY, not by id. A topic slug may be all digits and so is every
     tweet id, so `(item, X)` and `(topic, X)` are both representable and were both answered by an
@@ -470,7 +491,7 @@ def _settle_evidence(
         own = _verified_top(index, query, filters, (("item", item_id),), cap, excluded)
         if len(own) < cap:
             slugs = tuple(item_topics(context.store[item_id])) if item_id in context.store else ()
-            topics = tuple(("topic", slug) for slug in slugs)
+            topics: tuple[OwnerKey, ...] = tuple(("topic", slug) for slug in slugs)
             own += _verified_top(index, query, filters, topics, cap - len(own), excluded)
         settled.append((item_id, own))
     return settled, excluded
