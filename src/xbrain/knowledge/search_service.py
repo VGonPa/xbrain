@@ -277,25 +277,88 @@ def _materialise(
     re-mixed per page: the round trip is asserted by walking a cursor to exhaustion and
     requiring the concatenation to EQUAL a single unpaged call.
     """
+    grouped, excluded, exhausted = _chunk_owners(index, query, filters, context, needed=needed)
+    _fill_from_profiles(index, query, filters, context, grouped, needed=needed)
+    return list(grouped.items()), excluded, exhausted
+
+
+def _chunk_owners(
+    index: OpenIndex,
+    query: str,
+    filters: SearchFilters,
+    context: QueryContext,
+    *,
+    needed: int,
+) -> tuple[dict[str, list[LexicalHit]], int, bool]:
+    """Deepen the CHUNK window until it yields `needed` owners the response can serve.
+
+    THIS RUNS TO COMPLETION BEFORE A SINGLE PROFILE CANDIDATE IS CONSIDERED, and that ordering
+    IS the fix. The previous loop appended profile candidates and then tested `len(grouped) >=
+    needed`, so a matching profile could satisfy the quota while deeper VALID chunk owners were
+    still unreached — the weaker plane answering while the stronger one had an unexamined
+    result.
+
+    Measured on thirty items whose text is one marker, so both planes rank the same owners,
+    with the eight raw hits a `limit=1` page materialises corrupted: the first page served
+    `p000`, a profile-only candidate, when the ranking's head was `p008`, a real chunk match.
+
+    AND IT IS WHAT MAKES THE CURSOR A POSITION IN ONE RANKING. A larger offset materialises a
+    deeper window, so while the chunk section could be cut short by profile fill its SIZE was a
+    function of the page — every page sliced a different ranking, `p008` was unreachable and
+    `p000` came back twice. Deciding the section by `needed` alone makes it grow monotonically
+    and freeze once the plane is exhausted, which is the prefix-stability paging needs.
+
+    A hit without a resolvable surface locator is excluded and counted FIRST (B-k): the
+    alternative was a locator invented from the chunk's own columns, and since U-5 the
+    fingerprint is recomputed over the narrowed locator, so a hit that has none cannot be
+    verified at all. Then every survivor's evidence must recompute.
+
+    The count is the FINAL window's, never accumulated: every window is a prefix of the same
+    ranking, so the deepest already holds every exclusion the shallower ones saw.
+    """
     depth = needed
-    seen = (-1, -1)
+    seen = -1
     while True:
         candidates, exhausted = index.lexical.search_owners(query, depth, filters=filters)
-        # A hit without a resolvable surface locator is excluded and counted FIRST (B-k): the
-        # alternative was a locator invented from the chunk's own columns — and since U-5 the
-        # fingerprint is recomputed over the narrowed locator, so a hit that has none cannot be
-        # verified at all. Then every survivor's evidence must recompute.
         hits, unresolvable = resolvable_hits(candidates)
         hits, corrupt = verify_fingerprints(hits)
-        profiles = index.lexical.search_profiles(query, depth, filters=filters)
         grouped = _group_by_item(hits, context, limit=needed)
+        if len(grouped) >= needed or exhausted or len(candidates) == seen:
+            return grouped, corrupt + unresolvable, exhausted
+        seen = len(candidates)
+        depth *= 2
+
+
+def _fill_from_profiles(
+    index: OpenIndex,
+    query: str,
+    filters: SearchFilters,
+    context: QueryContext,
+    grouped: dict[str, list[LexicalHit]],
+    *,
+    needed: int,
+) -> None:
+    """Top the ranking up from the PROFILE plane, deepening it the way the chunk plane deepens.
+
+    Only what the chunk plane could not supply, and only after it has been asked to exhaustion
+    — so a profile candidate can never displace a chunk owner that was simply not looked at
+    yet. Deepening matters here for its own reason: `_append_profile_candidates` skips an id
+    the store no longer holds, so a fixed depth let deleted owners consume the quota and end
+    the search with a short page (the round-2 finding, on the plane round 1 did not touch).
+
+    The termination is the profile ranking refusing to grow, which is what keeps a corpus
+    smaller than the window from doubling forever asking for owners that do not exist.
+    """
+    depth = needed
+    seen = -1
+    while len(grouped) < needed:
+        profiles = index.lexical.search_profiles(query, depth, filters=filters)
         _append_profile_candidates(
             grouped, [hit.item_id for hit in profiles], context, limit=needed
         )
-        reached = (len(candidates), len(profiles))
-        if len(grouped) >= needed or exhausted or reached == seen:
-            return list(grouped.items()), corrupt + unresolvable, exhausted
-        seen = reached
+        if len(profiles) == seen:
+            return
+        seen = len(profiles)
         depth *= 2
 
 

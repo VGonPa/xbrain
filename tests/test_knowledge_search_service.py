@@ -1726,3 +1726,95 @@ def test_a_walk_across_both_candidate_planes_equals_the_unpaged_ranking(
     assert len(whole) > 3 * limit, "the ranking must outlast several pages, or nothing is tested"
 
     assert _walk(query, context, limit=limit) == whole
+
+
+# ---------------------------------------------------------------------------
+# Review round 4 — profile candidates must not end the chunk refill
+# ---------------------------------------------------------------------------
+
+
+def _one_marker_corpus(seed: Item, size: int, marker: str) -> dict[str, Item]:
+    """`size` copies of one item whose TEXT is the marker and which has nothing else.
+
+    The text reaches the `post` surface (the chunk plane) AND `profile_text` (the profile
+    plane), so a single query lights both planes over the SAME owners — the population the
+    review named, and the one every earlier fixture in this file missed by lighting the two
+    planes over DISJOINT owners.
+    """
+    return {
+        f"p{index:03d}": seed.model_copy(
+            update={"id": f"p{index:03d}", "text": marker, "content": None, "enriched": None}
+        )
+        for index in range(size)
+    }
+
+
+def _leading_chunk_hits(context: QueryContext, query: str, owners: int):
+    """The raw window `search_owners` materialises for a page of `owners` — before grouping."""
+    opened = index_store.open_for_query(
+        context.index_dir, context.items_path, context.vocab_path, context.topics_path
+    )
+    try:
+        return opened.lexical.search_owners(query, owners, filters=None)[0]
+    finally:
+        opened.close()
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_profile_candidates_do_not_end_the_chunk_refill_before_deeper_owners(
+    tmp_path: Path, corpus, limit: int
+) -> None:
+    """The population the previous three rounds all missed (review round 4, HIGH).
+
+    `_append_profile_candidates` filled `grouped` BEFORE `len(grouped) >= needed` ended the
+    refill. So when the leading chunk candidates fail verification, matching profiles can
+    satisfy the quota while deeper VALID chunk owners are still unreached — and because a
+    larger offset materialises a deeper chunk window, each page slices a DIFFERENT ranking.
+    The append-only claim the loop rested on is false for exactly this population.
+
+    Staged as the review staged it: thirty items whose text is one marker, so the chunk plane
+    and the profile plane rank the SAME owners; then the eight raw hits that `search_owners`
+    returns for a `limit=1` page are corrupted, so the whole leading window is excluded.
+
+    Measured before the fix, and this is the shape no earlier fixture here could produce:
+
+        whole : p008 p009 … p029 p000 … p007
+        paged : p000 p009 … p029 p000 … p007
+        p008 unreachable, p000 served twice
+
+    Note what the first page got WRONG: it served `p000`, a profile-only candidate, when the
+    ranking's first result is `p008`, a real chunk match. A page that answers with the weaker
+    plane while the stronger one had an unexamined answer is not a pagination detail.
+
+    Asserted as equality against one unpaged call, plus the first page against the ranking's
+    head — the second is what names WHICH defect this is when it fails.
+    """
+    store, _vocab, _pages = corpus
+    marker = "Unicornmarker"
+    live = _one_marker_corpus(store["k01"], 30, marker)
+    data = tmp_path / "data"
+    _persist(data, live, [], {})
+    _build(data)
+    context = _context(data, live, [], {})
+
+    leading = _leading_chunk_hits(context, marker, 2)
+    assert leading, "the chunk plane must answer, or nothing is tested"
+    connection = open_index(db_path(context.index_dir))
+    with connection:
+        for hit in leading:
+            connection.execute(
+                "UPDATE chunks SET fingerprint = ? WHERE chunk_id = ?", ("bad", hit.chunk_id)
+            )
+    connection.close()
+
+    whole = [result.item_id for result in search(marker, context, limit=200).results]
+    assert len(whole) == 30, whole
+    assert whole[0] not in {hit.owner_id for hit in leading}, "the head must be a SURVIVING owner"
+
+    first = search(marker, context, limit=limit)
+    assert [r.item_id for r in first.results] == whole[:limit], (
+        "the first page served the profile plane while a verified chunk owner was unexamined"
+    )
+    assert first.results[0].matches, "and the ranking's head is a real chunk match"
+
+    assert _walk(marker, context, limit=limit) == whole
