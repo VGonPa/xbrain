@@ -304,6 +304,101 @@ def test_a_manifest_declaring_less_than_the_schema_is_refused_entirely(omitted: 
     assert index_schema.REBUILD_ADVICE in str(caught.value)
 
 
+def test_a_manifest_declaring_MORE_than_the_schema_is_refused_through_every_door() -> None:
+    """THE TOP-LEVEL DOCUMENT WAS TOTAL BUT NOT CLOSED, AND THE NESTED MAPPINGS HID IT.
+
+    `_closed_keys` refuses an undeclared key in `counts`, `skipped`, `chunker_params` and
+    `store_signal`, and four tests pinned exactly that — so «total and closed» read as
+    covered while the DOCUMENT ITSELF only ever checked what was MISSING. Measured on the
+    untouched tree: a valid manifest plus `"future_plane": {...}` loaded through
+    `Manifest.from_dict` AND through `load_compatible_manifest`, which returned it as
+    compatible, with the extra key silently dropped.
+
+    That is the fail-open this child's own contract rules out. A document carrying a key
+    this code does not know was written by something that watches a plane this code cannot
+    see; accepting it certifies the index current over exactly that plane, which is the
+    round-05 defect one level up — and `search` would then answer over it saying nothing.
+
+    THE PUBLIC FILE LOADER IS ASSERTED, NOT ONLY `from_dict`. The reader is reachable from
+    disk through two doors and a caller only ever meets those; a guard proven on the
+    in-memory classmethod alone leaves the ones operators actually use unproven.
+
+    Seen red at `fdad115` on all three assertions below: `DID NOT RAISE`.
+    """
+    extra = {**_document(), "future_plane": {"fingerprint": "unknown"}}
+
+    with pytest.raises(index_schema.IndexIncompatibleError) as caught:
+        index_build.Manifest.from_dict(extra)
+    assert "future_plane" in str(caught.value)
+    assert index_schema.REBUILD_ADVICE in str(caught.value)
+
+
+def test_an_unknown_top_level_key_is_refused_through_the_public_file_loader(
+    tmp_path: Path,
+) -> None:
+    """The same gap as read from DISK — `load_manifest` and the compatibility door.
+
+    `load_compatible_manifest` is the one a query would call, and it RETURNED a manifest
+    from a newer writer as compatible. Refusing it is what spec §9.3 means by never
+    querying an incompatible manifest partially.
+    """
+    index_build.write_manifest(tmp_path, _manifest())
+    path = index_schema.manifest_path(tmp_path)
+    path.write_text(
+        json.dumps({**json.loads(path.read_text(encoding="utf-8")), "future_plane": {}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(index_schema.IndexIncompatibleError, match="future_plane"):
+        index_build.load_manifest(tmp_path)
+    with pytest.raises(index_schema.IndexIncompatibleError, match="future_plane"):
+        index_build.load_compatible_manifest(tmp_path)
+
+
+def test_a_writer_whose_to_dict_grows_a_key_cannot_seal_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE OTHER DIRECTION OF THE SAME GAP: the round-trip could not SEE schema drift.
+
+    `write_manifest` validates through `Manifest.from_dict` before a byte lands, and that
+    guard is what stops a writer whose shape drifted from the reader's. With the document
+    open at the top level the round-trip accepted an ADDED key, so a drifted `to_dict`
+    wrote it to disk and every later door dropped it in silence — the guard passing on the
+    exact defect it exists to catch.
+
+    Both halves of the writer's promise are asserted, because they fail differently: over a
+    FRESH directory nothing may be created, and over an EXISTING manifest the previous
+    bytes must survive intact. A writer that truncated first and validated second satisfies
+    neither, and satisfies a bare `pytest.raises` perfectly.
+
+    Seen red at `fdad115`: `DID NOT RAISE`, with the drifted key on disk.
+    """
+    index_build.write_manifest(tmp_path, _manifest())
+    before = index_schema.manifest_path(tmp_path).read_bytes()
+
+    drifted = {**_document(), "future_plane": {}}
+    monkeypatch.setattr(index_build.Manifest, "to_dict", lambda self: drifted)
+
+    with pytest.raises(index_schema.IndexIncompatibleError, match="future_plane"):
+        index_build.write_manifest(tmp_path, _manifest())
+    assert index_schema.manifest_path(tmp_path).read_bytes() == before, "previous bytes intact"
+
+    with pytest.raises(index_schema.IndexIncompatibleError, match="future_plane"):
+        index_build.write_manifest(tmp_path / "fresh", _manifest())
+    assert not index_schema.manifest_path(tmp_path / "fresh").exists()
+
+
+def test_the_closure_rule_has_one_definition_shared_by_the_document_and_its_mappings() -> None:
+    """Rule 5: «exactly the declared keys» is ONE function, not two that drift.
+
+    The top-level document and the four nested mappings refuse for the same reason and
+    must not be able to disagree about what refusing means — which is how the document
+    came to be total while every mapping under it was closed.
+    """
+    assert index_build._closure_gap({"a", "b"}, frozenset({"a", "c"})) == (["c"], ["b"])
+    assert index_build._closure_gap({"a"}, frozenset({"a"})) == ([], [])
+
+
 @pytest.mark.parametrize("planted", [["schema_version", "built_at"], 3, None, True, "manifest"])
 def test_a_document_that_is_not_a_json_object_leaves_by_the_same_door(planted: object) -> None:
     """THE TOTALITY CHECK IS NOT A TYPE CHECK, and reading it as one is how a list got through.

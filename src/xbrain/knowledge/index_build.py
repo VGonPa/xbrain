@@ -919,10 +919,16 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, raw: object) -> Manifest:
-        """The document, TOTALLY validated — every nested key, every value's type.
+        """The document, validated TOTAL and CLOSED — and the second half was the bug.
+
+        BOTH DIRECTIONS, AND ONLY ONE OF THEM USED TO BE CHECKED HERE. Missing fields were
+        refused; an UNDECLARED one was silently dropped, so a manifest from a writer watching
+        a plane this code cannot see loaded as compatible through every door. `_closure_gap`
+        now answers both, and it is the same function the nested mappings ask — which is what
+        makes «total and closed» one rule rather than two that already disagreed.
 
         THE DOCUMENT IS A JSON OBJECT BEFORE IT IS ANYTHING ELSE, and that ordering is not
-        style. The totality check is `MANIFEST_FIELDS - set(raw)`, and `set()` of a non-mapping
+        style. The totality check is a set difference, and `set()` of a non-mapping
         does not raise — it takes the ELEMENTS. A hand-edited `manifest.json` holding the JSON
         LIST of the field NAMES therefore passed the guard with `missing` empty, and the first
         subscript raised `TypeError: list indices must be integers` out of every door, as a
@@ -934,8 +940,13 @@ class Manifest:
             raise IndexIncompatibleError(
                 f"El manifest no es un objeto JSON, es {type(raw).__name__}. {REBUILD_ADVICE}"
             )
-        if missing := sorted(MANIFEST_FIELDS - set(raw)):
+        missing, unknown = _closure_gap(set(raw), MANIFEST_FIELDS)
+        if missing:
             raise IndexIncompatibleError(f"El manifest no declara {missing}. {REBUILD_ADVICE}")
+        if unknown:
+            raise IndexIncompatibleError(
+                f"El manifest declara {unknown}, que este código no conoce. {REBUILD_ADVICE}"
+            )
         return cls(
             schema_version=str(raw["schema_version"]),
             built_at=_instant(raw["built_at"]),
@@ -979,12 +990,33 @@ def _closed_keys(value: object, field_name: str, declared: frozenset[str]) -> di
     """
     if not isinstance(value, Mapping):
         raise _malformed(field_name, f"no es un objeto, es {type(value).__name__}")
-    keys = set(value)
-    if absent := sorted(declared - keys):
+    absent, unknown = _closure_gap(set(value), declared)
+    if absent:
         raise _malformed(field_name, f"faltan {absent}")
-    if unknown := sorted(keys - declared):
+    if unknown:
         raise _malformed(field_name, f"claves no declaradas {unknown}")
     return dict(value)
+
+
+def _closure_gap(keys: set[str], declared: frozenset[str]) -> tuple[list[str], list[str]]:
+    """`(absent, unknown)` — the ONE definition of «exactly the declared keys» (rule 5).
+
+    THE DOCUMENT AND ITS MAPPINGS USED TO ANSWER THIS DIFFERENTLY, AND THAT IS THE BUG THIS
+    EXISTS TO MAKE IMPOSSIBLE. `_closed_keys` refused an undeclared key in `counts`,
+    `skipped`, `chunker_params` and `store_signal`, four tests pinned exactly that, and the
+    phrase «total and closed» therefore read as covered — while the TOP-LEVEL document only
+    ever checked what was MISSING. Measured: a valid manifest plus `"future_plane": {...}`
+    loaded through `Manifest.from_dict` and through `load_compatible_manifest`, which
+    returned it as COMPATIBLE with the key silently dropped, and a drifted `to_dict` carrying
+    it passed `write_manifest`'s round-trip and reached disk.
+
+    A key this code does not know was written by something watching a plane this code cannot
+    see, so accepting it certifies the index current over exactly that plane. Both callers now
+    compute the gap here and only the WORDING is theirs: the document says «no declara» /
+    «declara … que este código no conoce», a mapping says «faltan» / «claves no declaradas»,
+    because a caller reading `manifest.json` needs to be told which of the two it is.
+    """
+    return sorted(declared - keys), sorted(keys - declared)
 
 
 def _counter_mapping(value: object, field_name: str, declared: frozenset[str]) -> dict[str, int]:
