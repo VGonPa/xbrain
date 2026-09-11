@@ -1846,3 +1846,114 @@ def test_profile_candidates_do_not_end_the_chunk_refill_before_deeper_owners(
     assert first.results[0].matches, "and the ranking's head is a real chunk match"
 
     assert _walk(marker, context, limit=limit) == whole
+
+
+# ---------------------------------------------------------------------------
+# Review round 5 — the refill terminated on a ranking it never materialised
+# ---------------------------------------------------------------------------
+
+
+def _windowing_corpus(seed: Item, marker: str) -> dict[str, Item]:
+    """One DENSE article and fourteen THIN ones, so `search_owners` doubles unevenly.
+
+    The dense item holds the marker ten times over ten paragraphs and therefore owns many
+    chunk rows; each thin item holds it once, buried in filler. A window sized for a few
+    owners is then mostly the dense item's rows, which is what makes the retriever's row
+    count rise and FALL as the requested owner count grows.
+    """
+    dense = "\n\n".join(
+        f"{marker} " * 4 + f"parrafo {n} " + " ".join(f"w{i}" for i in range(90)) for n in range(10)
+    )
+    thin = (
+        " ".join(f"relleno{i}" for i in range(150))
+        + f" {marker} "
+        + " ".join(f"cola{i}" for i in range(40))
+    )
+
+    def article(ident: str, body: str) -> Item:
+        return seed.model_copy(
+            update={
+                "id": ident,
+                "text": f"Post {ident}.",
+                "enriched": None,
+                "content": Content(
+                    fetched_at=datetime(2026, 1, 2, tzinfo=UTC),
+                    sources=[
+                        ContentSourceSuccess(
+                            kind="external_article",
+                            url=f"https://example.test/{ident}",
+                            title=f"Articulo {ident}",
+                            text=body,
+                        )
+                    ],
+                ),
+            }
+        )
+
+    store = {"L000": article("L000", dense)}
+    store.update({f"T{i:03d}": article(f"T{i:03d}", f"{thin} T{i:03d}") for i in range(14)})
+    return store
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3])
+def test_the_refill_does_not_stop_on_a_ranking_it_never_materialised(
+    tmp_path: Path, corpus, limit: int
+) -> None:
+    """The refill's termination rested on a premise that is FALSE (review round 5, BLOCKING).
+
+    `_chunk_owners` ended on `len(candidates) == seen`, justified as «a window that did not
+    GROW means the ranking is fully materialised». But `search_owners(q, d)` doubles its OWN
+    query window internally and returns the first slice holding `d` distinct owners, so its
+    ROW COUNT IS NOT MONOTONE IN `d`. Two depths tie without the ranking being exhausted, the
+    equality fires, and the plane is declared finished with rows never examined.
+
+    Measured on this fixture, and asserted below as a PRECONDITION so a change in the
+    retriever's windowing fails loudly here instead of quietly disarming the test:
+
+        C(n) = {1: 4, 2: 16, 3: 12, 4: 16, 8: 24}      rows  — rises, falls, ties
+        distinct owners = {1: 1, 2: 7, 3: 3, 4: 7, 8: 15}
+
+    `C(2) == C(4) == 16` while the whole ranking is 24 rows over 15 owners. With the leading
+    owners deleted from the live store and nobody reindexed — the ordinary «you ran `enrich`
+    and did not reindex» state — `limit=1` answered `results: []`, `truncated: false`,
+    `cursor: null` over eight items the same service returns at `limit=200`. Spec §9.3 forbids
+    that silent cut, and this is its worst form: not a short page, a false claim about the
+    corpus.
+
+    NO CORRUPTION IS STAGED. The earlier pagination regressions reach their states by
+    excluding rows; this one needs only a store that moved, which is why it survived them.
+
+    Seen red at `86beadc`: `[] != ['T006']`.
+    """
+    store, _vocab, _pages = corpus
+    marker = "Unicornmarker"
+    indexed = _windowing_corpus(store["k01"], marker)
+    data = tmp_path / "data"
+    _persist(data, indexed, [], {})
+    _build(data)
+
+    opened = index_store.open_for_query(
+        data / "index", data / "items.json", data / "vocab.yaml", data / "topics.json"
+    )
+    try:
+        rows = {n: len(opened.lexical.search_owners(marker, n)[0]) for n in (1, 2, 3, 4, 8)}
+        frozen = {hit.owner_id for hit in opened.lexical.search_owners(marker, 4)[0]}
+    finally:
+        opened.close()
+    assert rows[2] == rows[4] < rows[8], (
+        f"the retriever's row count must tie WITHOUT exhaustion, or the defect is not staged: {rows}"
+    )
+
+    live = {k: v for k, v in indexed.items() if k not in frozen}
+    context = _context(data, live, [], {})
+
+    whole = [result.item_id for result in search(marker, context, limit=200).results]
+    assert len(whole) > limit, f"the ranking must outlast a page, or nothing is tested: {whole}"
+
+    page = search(marker, context, limit=limit)
+    assert [r.item_id for r in page.results] == whole[:limit], (
+        "the refill stopped on a window that tied by coincidence, not on an exhausted ranking"
+    )
+    assert page.truncated is True and page.cursor is not None
+
+    assert _walk(marker, context, limit=limit) == whole

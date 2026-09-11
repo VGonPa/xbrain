@@ -69,7 +69,7 @@ from xbrain.knowledge.index_store import (
     resolvable_hits,
     verify_fingerprints,
 )
-from xbrain.knowledge.lexical import LexicalHit
+from xbrain.knowledge.lexical import LexicalHit, distinct_owners
 from xbrain.knowledge.models import DerivedText, SurfaceType
 from xbrain.knowledge.provenance import DEFAULT_EVIDENCE_CLASSES, ORIGIN_TRUST
 from xbrain.knowledge.surfaces import (
@@ -244,7 +244,7 @@ def _materialise(
     as answering an unknown topic with zero results. Both say *nothing is there* when the
     truth is *I did not look*.
 
-    BOTH PLANES DEEPEN, AND THE TERMINATION READS BOTH. The first version of this loop
+    BOTH PLANES DEEPEN, EACH ON ITS OWN TERMINATION. The first version of this loop
     doubled the CHUNK window and asked `search_profiles` for a fixed `needed`, then stopped
     when the chunk window stopped growing — so the profile plane could never be looked at
     harder, and for a query answered by that plane ALONE (a handle lives in every profile and
@@ -313,19 +313,43 @@ def _chunk_owners(
     fingerprint is recomputed over the narrowed locator, so a hit that has none cannot be
     verified at all. Then every survivor's evidence must recompute.
 
+    THE TERMINATION ASKS FOR OWNERS, NOT FOR ROWS, AND THE ROW VERSION WAS WRONG. This loop
+    used to stop on `len(candidates) == seen` — «a window that did not GROW means the ranking
+    is fully materialised». That premise is FALSE: `search_owners(q, d)` doubles its own query
+    window internally and returns the first slice holding `d` distinct owners, so its ROW COUNT
+    IS NOT MONOTONE IN `d`. Measured on a corpus of one dense article and fourteen thin ones:
+
+        C(n) = {1: 4, 2: 16, 3: 12, 4: 16, 8: 24}   rows — rises, falls, and ties at 2 and 4
+        owners(n) = {1: 1, 2: 7, 3: 3, 4: 7, 8: 15}
+
+    `C(2) == C(4)` while the ranking holds 24 rows over 15 owners, so the equality fired on a
+    coincidence and the plane was declared finished with rows never examined. With the leading
+    owners deleted from the live store, `limit=1` then answered `results: []`,
+    `truncated: false`, `cursor: null` over eight items the same service returns at
+    `limit=200` — spec §9.3's silent cut in its worst form, a false claim about the corpus.
+
+    `distinct_owners(candidates) < depth` is the honest question, and it is monotone because it
+    counts the thing the depth is expressed in: `search_owners` guarantees `depth` distinct
+    owners unless the ranking cannot supply them, so falling short IS «fully materialised».
+    The rows were never the quantity being asked about.
+
+    THE SIBLING LOOP DOES NOT SHARE THIS, and that was measured rather than assumed.
+    `_fill_from_profiles` terminates on its own row count, but `search_profiles` issues a plain
+    `LIMIT ?`, so its count is `min(n, total)` — monotone, measured
+    `P(n) = {1: 1, 2: 2, 3: 3, 4: 4, 8: 8, 12: 12, 16: 12, 32: 12}` — and a tie there can only
+    mean saturation. One loop needed the change, not two.
+
     The count is the FINAL window's, never accumulated: every window is a prefix of the same
     ranking, so the deepest already holds every exclusion the shallower ones saw.
     """
     depth = needed
-    seen = -1
     while True:
         candidates, exhausted = index.lexical.search_owners(query, depth, filters=filters)
         hits, unresolvable = resolvable_hits(candidates)
         hits, corrupt = verify_fingerprints(hits)
         grouped = _group_by_item(hits, context, limit=needed)
-        if len(grouped) >= needed or exhausted or len(candidates) == seen:
+        if len(grouped) >= needed or exhausted or distinct_owners(candidates) < depth:
             return grouped, corrupt + unresolvable, exhausted
-        seen = len(candidates)
         depth *= 2
 
 
