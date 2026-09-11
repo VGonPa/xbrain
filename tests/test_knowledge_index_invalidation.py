@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge import index_build, index_schema
+from xbrain.knowledge import index_build, index_schema, index_store
 from xbrain.knowledge.chunking import ChunkerParams
 from xbrain.knowledge.index_schema import (
     FTS_TABLES,
@@ -627,7 +627,9 @@ def test_update_refuses_a_database_that_disagrees_with_its_manifest(built: Path,
     assert "topics" in report.advice
 
 
-def test_update_over_a_missing_database_creates_nothing(built: Path, corpus) -> None:
+def test_update_over_a_missing_database_creates_nothing_and_leaves_search_closed(
+    built: Path, corpus
+) -> None:
     """G-2: `index update` — even `--dry-run` — CREATED an empty database under a manifest
     that was still standing, and the query door went from failing closed to answering open.
 
@@ -641,13 +643,14 @@ def test_update_over_a_missing_database_creates_nothing(built: Path, corpus) -> 
     knowledge.db` (52 MB, a natural clean-up target) → `update --dry-run` exit 1 with the
     right message AND a 167,936-byte `knowledge.db` → `search` exit 0, «Sin resultados».
 
-    THE QUERY HALF IS 02.9'S AND IS NOT ASSERTED HERE: `search` does not exist in this tree,
-    so the third door is added when it does. What IS asserted is the half that belongs to this
-    child and is the cause of the other: `update` refuses BEFORE touching the disk, names
-    `--force` (plain `build` refuses while the manifest exists — the dead end), and leaves no
-    file behind on either path.
+    THREE CLOSURES, and the third arrived with 02.9: `update` refuses BEFORE touching the disk
+    and names `--force` (plain `build` refuses while the manifest exists — the dead end); no
+    file appears on either path; and the query door keeps refusing rather than answering an
+    empty corpus. The query half is what the defect was ABOUT, so it is asserted here now that
+    there is a door to assert it through.
 
-    Seen red before the fix: `db_path(...).exists()` was True after the dry run.
+    Seen red before the fix: `db_path(...).exists()` was True after the dry run, and the query
+    door returned a response over a base of zero rows.
     """
     db_path(built / "index").unlink()
     assert manifest_path(built / "index").exists(), "the manifest is what makes this state"
@@ -660,8 +663,12 @@ def test_update_over_a_missing_database_creates_nothing(built: Path, corpus) -> 
         _update(built)
     assert not db_path(built / "index").exists()
 
+    with pytest.raises(IndexMissingError, match="xbrain index build --force"):
+        index_store.open_for_query(built / "index", *_paths(built))
+    assert not db_path(built / "index").exists(), "the query door may not create it either"
 
-def test_status_declares_a_standing_manifest_over_a_missing_database_as_update_does(
+
+def test_status_declares_a_standing_manifest_over_a_missing_database_as_every_door_does(
     built: Path, corpus
 ) -> None:
     """U-2: the ONE state the seam's docstring lists first — a manifest standing over a base
@@ -672,10 +679,13 @@ def test_status_declares_a_standing_manifest_over_a_missing_database_as_update_d
     con `xbrain index update`» — the advice `update` then refused. Two instruments, one state,
     opposite answers (rule 9), on the diagnostic instrument.
 
-    Asserted BY VALUE across the doors that exist in this tree: `status` reports incomplete and
-    publishes, verbatim, the sentence `update` raises. 02.9 adds the query door to the same
-    assertion; it cannot be the one that introduces the property, because the defect was in
-    `status`.
+    Asserted BY VALUE across all three doors: `status` reports incomplete and publishes,
+    VERBATIM, the sentence `update` and the query door raise. `search` could not be the door
+    that introduced the property — the defect was in `status` — but it is the door whose
+    silence the defect was measured against, so it belongs in the comparison.
+
+    `get` reads the live store and keeps answering with no index at all (spec §3.7 invariant
+    7); it is `get_service`'s, and 02.10 adds it to this list.
 
     Seen red before the fix: `incomplete is False` and the advice named `index update`.
     """
@@ -685,6 +695,10 @@ def test_status_declares_a_standing_manifest_over_a_missing_database_as_update_d
     with pytest.raises(IndexMissingError, match="xbrain index build --force") as refused:
         _update(built, dry_run=True)
     sentence = str(refused.value)
+
+    with pytest.raises(IndexMissingError) as refused_query:
+        index_store.open_for_query(built / "index", *_paths(built))
+    assert str(refused_query.value) == sentence, "one sentence, every door"
 
     report = _status(built)
     assert report.incomplete is True
@@ -865,9 +879,11 @@ def test_a_manifest_with_empty_counts_is_refused_by_every_door_not_sealed_as_hea
     `profiles=0`, sealing the amputation as sound. Three instruments converging on an
     incomplete index presented as healthy: the FAIL-OPEN family, sixth route.
 
-    THE QUERY DOOR IS 02.9'S. The two that exist here are asserted, and so is the last line,
-    which is the one that matters most: nothing RE-SEALS the amputated base. A door that
-    refuses but re-seals on the way out has only moved the failure one run later.
+    ALL THREE DOORS NOW, and the last line still matters most: nothing RE-SEALS the amputated
+    base. A door that refuses but re-seals on the way out has only moved the failure one run
+    later. The query door was the instrument that made this dangerous — zero results with
+    `degraded: ["no_embeddings"]` is indistinguishable from a corpus with no matches — so its
+    refusal is the one the criterion is really about.
     """
     path = manifest_path(built / "index")
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -883,6 +899,8 @@ def test_a_manifest_with_empty_counts_is_refused_by_every_door_not_sealed_as_hea
 
     with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
         _update(built)
+    with pytest.raises(IndexIncompatibleError, match="xbrain index build --force"):
+        index_store.open_for_query(built / "index", *_paths(built))
     report = _status(built)
     assert report.incomplete is True
     assert "xbrain index build --force" in report.advice, report.advice
@@ -891,10 +909,10 @@ def test_a_manifest_with_empty_counts_is_refused_by_every_door_not_sealed_as_hea
     )
 
 
-def test_status_and_update_ask_one_function_whether_the_manifest_describes_the_base(
+def test_status_search_and_update_ask_one_function_whether_the_manifest_describes_the_base(
     built: Path, corpus, monkeypatch
 ) -> None:
-    """The seam, asserted by IDENTITY across the consumers that exist (CLAUDE.md rule 5).
+    """The seam, asserted by IDENTITY across ALL THREE of its consumers (CLAUDE.md rule 5).
 
     Six rounds of the monolith closed the fail-open family one route at a time — an interrupted
     forced rebuild, a missing table, a dry run creating an empty base, a signal covering one
@@ -904,9 +922,9 @@ def test_status_and_update_ask_one_function_whether_the_manifest_describes_the_b
     door that re-derives the question stays silent under the sentinel and goes red here; a door
     that stops asking goes red here.
 
-    02.9's query door joins this assertion when it exists. The binding is not weaker for having
-    two consumers instead of three: what it forbids is a door with its OWN answer, and that is
-    forbidden for each door independently.
+    The query door is the third consumer and it runs the same function with `whole_file=False`
+    — a different ARGUMENT, the same question — which is precisely what a per-door
+    re-derivation would have looked like from the outside until the sentinel was applied.
 
     Seen red by having `update` compare `manifest.counts` against `count_rows` itself instead of
     asking: the sentinel never appears and `update` returns a normal report.
@@ -924,10 +942,13 @@ def test_status_and_update_ask_one_function_whether_the_manifest_describes_the_b
     with pytest.raises(IndexIncompatibleError) as caught:
         _update(built)
     assert str(caught.value) == sentinel
+    with pytest.raises(IndexIncompatibleError) as caught:
+        index_store.open_for_query(built / "index", *_paths(built))
+    assert str(caught.value) == sentinel
     assert _status(built).advice == sentinel
 
 
-def test_status_and_update_ask_one_function_whether_the_base_exists(
+def test_status_search_and_update_ask_one_function_whether_the_base_exists(
     built: Path, corpus, monkeypatch
 ) -> None:
     """The OTHER half of the seam's question — «is there a base at all?» — by identity (U-2).
@@ -935,10 +956,12 @@ def test_status_and_update_ask_one_function_whether_the_base_exists(
     `describe_base` answers «does this manifest describe this base?» and presupposes a base;
     `require_database` answers whether there is one, and its docstring promised «one function,
     called by every door» while `status` was not among them, which is exactly how F7-1/F2 stayed
-    open with the seam in place. The sentinel is raised from `require_database` in every module
-    that binds the name; `update` must raise it verbatim and `status` must publish it as its
-    advice. A door that tests `exists()` by itself stays silent under the sentinel and goes red
-    here.
+    open with the seam in place. The sentinel is raised from `require_database` in EVERY MODULE
+    THAT BINDS THE NAME — `index_schema`, `index_build` and now `index_store` — because each
+    imported it into its own namespace, so patching one module would leave the others calling
+    the real function and the test would pass while proving nothing about them. `update` and the
+    query door must raise it verbatim and `status` must publish it as its advice. A door that
+    tests `exists()` by itself stays silent under the sentinel and goes red here.
 
     Seen red before the fix: `status` answered `advice == ''` under the sentinel, because it
     never asked.
@@ -948,11 +971,14 @@ def test_status_and_update_ask_one_function_whether_the_base_exists(
     def refuse(index_dir):
         raise IndexMissingError(sentinel)
 
-    for module in (index_schema, index_build):
+    for module in (index_schema, index_build, index_store):
         monkeypatch.setattr(module, "require_database", refuse)
 
     with pytest.raises(IndexMissingError) as caught:
         _update(built)
+    assert str(caught.value) == sentinel
+    with pytest.raises(IndexMissingError) as caught:
+        index_store.open_for_query(built / "index", *_paths(built))
     assert str(caught.value) == sentinel
     report = _status(built)
     assert report.incomplete is True and report.advice == sentinel

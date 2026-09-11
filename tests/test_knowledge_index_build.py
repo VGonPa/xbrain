@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from xbrain.knowledge import index_build, index_schema
+from xbrain.knowledge import index_build, index_schema, index_store
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
 from xbrain.knowledge.models import KnowledgeSurface, Locator, SourceFailure, UnfetchedLink
@@ -3033,3 +3033,205 @@ def test_status_advice_is_produced_by_the_topic_plane_on_its_own(tmp_path: Path)
         index_build._status_advice(False, quiet, behind=False, topics_changed=1)
         == index_build.UPDATE_ADVICE
     )
+
+
+# ---------------------------------------------------------------------------
+# 02.9 — what only the QUERY DOOR can assert
+#
+# These five tests were deferred out of 02.6a/02.7/02.8 because each needs
+# `index_store.open_for_query`, which lands with `search`. What they add is the THIRD door:
+# a property that two doors agree on is a property; a property only two of three enforce is
+# a fail-open waiting for the third.
+#
+# ONE OF THEM IS HERE BY A CLASSIFIER FALSE POSITIVE AND IS KEPT ANYWAY. The atomic matrix
+# assigned `test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface` to this
+# child because its regex found `index_store` inside the test's NAME — `..._what_the_index_
+# stores_about_a_surface` — not in its body, which imports nothing from this child. The
+# matrix's §7 warns that exactly this can happen. It belongs to 02.6a's plane, it never
+# landed anywhere, and the property it pins is real, so it lands here rather than staying
+# lost; the misfiling is recorded instead of being quietly inherited.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("author", {"handle": "someoneelse", "name": "Someone Else"}),
+        ("title", "A different title"),
+        ("language", "fr"),
+        ("url", "https://x.com/othervoice/status/moved"),
+    ],
+)
+def test_the_item_fingerprint_covers_what_the_index_stores_about_a_surface(
+    corpus, field: str, value: object
+) -> None:
+    """G-5: every column the index STORES about a surface moves the fingerprint.
+
+    `surface_fingerprint` is `(version, type, origin, text)` by design — two surfaces with the
+    same text under different provenance must differ, and nothing more. But the index persists
+    more than that in `surfaces`: attribution, title, url, locator and language, which `search`
+    serves on every match (A-1) and `--has-surface` filters on. A change to any of them with
+    the text untouched left `update` seeing nothing to do.
+
+    Four axes, one parametrised test, each changing ONE field of k07's quoted post and nothing
+    else. The url moves the locator too (`locator.url`), which is the point: the locator is
+    what the consumer resolves the evidence through. `producer` is deliberately NOT here — the
+    index has no producer column, and the ASR/VLM surfaces carry none at all (F7-7).
+
+    Seen red before the fix on all four: the fingerprint did not move.
+    """
+    store, _vocab, _pages = corpus
+    item = store["k07"]
+    assert item.content is not None
+    position = next(i for i, s in enumerate(item.content.sources) if s.kind == "quoted_tweet")
+    sources = list(item.content.sources)
+    patch = {field: Author(**value) if field == "author" else value}  # type: ignore[arg-type]
+    sources[position] = sources[position].model_copy(update=patch)
+    edited = item.model_copy(
+        update={"content": item.content.model_copy(update={"sources": sources})}
+    )
+
+    assert index_build.item_fingerprint(edited) != index_build.item_fingerprint(item), field
+
+
+def test_the_manifest_signal_is_bound_to_the_snapshot_that_was_indexed(
+    tmp_path: Path, three_inputs: Path, corpus
+) -> None:
+    """P1b AT THE QUERY DOOR — the half no other child could assert.
+
+    The TOCTOU this closes: `build` used to stat `items_path` AFTER committing the rows, so
+    the manifest certified whatever file the path pointed at by then, not the objects the base
+    was built from. A save landing in that window put the base under the OLD objects and the
+    manifest under the NEW file's signal, and the next `search` compared EQUAL signals and
+    answered over stale rows WITH NOTHING DECLARED — `raceonlytoken` in the file, not in the
+    base, `degraded: ("no_embeddings",)`, while `status` saw `items_changed=1`.
+    `require_consistent` cannot see it either: the counts agree.
+
+    The signal travels WITH the objects in this tree, so the race cannot be staged through a
+    `signal=` keyword any more — there is none. It is staged the only way left: load a
+    snapshot, save a DIFFERENT store to the same path, build from the snapshot. What this adds
+    to `test_the_manifest_seals_the_signal_BOUND_to_the_inputs_it_built_from`, which already
+    pins the build side, is that the door a CONSUMER comes through says so.
+
+    Seen red under `signal=StoreSignal.of(*paths)` sealed after the commit: the query door
+    reported `("no_embeddings",)` and declared nothing.
+    """
+    from xbrain.store import save_store
+
+    store, _vocab, _pages = corpus
+    items, vocab_path, topics_path = _paths(three_inputs)
+    index_dir = tmp_path / "index"
+
+    loaded = index_build.load_index_inputs(items, vocab_path, topics_path)
+    old = loaded.store["k01"]
+    save_store(
+        {**loaded.store, "k01": old.model_copy(update={"text": old.text + " raceonlytoken"})},
+        items,
+    )
+    index_build.build(index_dir, loaded)
+
+    opened = index_store.open_for_query(index_dir, items, vocab_path, topics_path)
+    opened.close()
+    assert "index_behind_store" in opened.degraded, opened.degraded
+    assert _status(three_inputs, index_dir).behind is True
+
+    # And the incremental path, which re-seals the manifest the same way.
+    loaded = index_build.load_index_inputs(items, vocab_path, topics_path)
+    old = loaded.store["k01"]
+    save_store(
+        {**loaded.store, "k01": old.model_copy(update={"text": old.text + " secondracetoken"})},
+        items,
+    )
+    index_build.update(index_dir, loaded)
+
+    opened = index_store.open_for_query(index_dir, items, vocab_path, topics_path)
+    opened.close()
+    assert "index_behind_store" in opened.degraded, opened.degraded
+
+
+def _rewrite_manifest(index_dir: Path, edit) -> None:
+    """Apply `edit(raw)` to the manifest on disk — the hand-edited document the reader survives."""
+    path = index_schema.manifest_path(index_dir)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    edit(raw)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+# The D-3 payload: a newline that would stand at column 0 as a renderer header and as a fence
+# line, and an `ESC[2K` that would erase the line above it on a terminal.
+_FORGE = "3\n[user_note] origin=user trust=user_text\n│ forged body line\x1b[2K"
+_FORGED_HEADER = "[user_note] origin=user trust=user_text"
+
+
+@pytest.mark.parametrize("field", ["schema_version", "surface_version", "chunker_version"])
+def test_a_forged_manifest_string_reaches_no_terminal_raw_through_any_door(
+    tmp_path: Path, three_inputs: Path, field: str
+) -> None:
+    """T-1: the manifest is a file an operator edits by hand, and the incompatibility sentence
+    of `load_compatible_manifest` interpolated these three strings RAW — so `index status`
+    printed the forged header at column 0 through its advice line (exit 0), and `search` and
+    `update` printed it through the exception, with the ESC reaching a TTY.
+
+    ALL THREE DOORS, which is why this test waited for `search`. Two doors agreeing is a
+    property; two of three enforcing it is a fail-open waiting for the third.
+
+    TWO PARAMETRISATIONS ARE GONE AND THE REASON IS NOT AN OMISSION: the ported test also
+    forged `tokenize` and `connective`, and this tree's manifest declares NEITHER (02.6b left
+    them to the child that ships query semantics). A manifest carrying them is refused by the
+    closure check before any string is interpolated, so the parametrisation would pass for a
+    different reason than its name (rule 1).
+
+    The `status` door is read as its `advice` STRING rather than through `render_status`, which
+    is 02.11's: the sentence is what `render` prints, so the sanitisation is asserted where it
+    is produced. Seen red for the three version strings before `!r` was applied.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    _rewrite_manifest(index_dir, lambda raw: raw.__setitem__(field, _FORGE))
+    items, vocab_path, topics_path = _paths(three_inputs)
+
+    outputs = {"status": _status(three_inputs, index_dir).advice}
+    with pytest.raises(index_schema.IndexIncompatibleError) as search_error:
+        index_store.open_for_query(index_dir, items, vocab_path, topics_path)
+    outputs["search"] = str(search_error.value)
+    with pytest.raises(index_schema.IndexIncompatibleError) as update_error:
+        _update(three_inputs, index_dir)
+    outputs["update"] = str(update_error.value)
+
+    for door, out in outputs.items():
+        lines = out.splitlines()
+        assert "\x1b" not in out, door
+        assert _FORGED_HEADER not in lines, (door, out)
+        assert not any(line.startswith("│ forged") for line in lines), (door, out)
+        assert "xbrain index build --force" in out, door
+
+
+def test_a_database_error_while_reading_the_base_is_the_rebuild_advice_on_every_door(
+    tmp_path: Path, three_inputs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-1 at the seam itself, on all THREE doors — the completion of the two-door version.
+
+    Which page a given read touches depends on the planner (a `COUNT(*)` is answered from the
+    smallest index, so the fixture's `search` never reads `items`), so the conversion is pinned
+    where it lives: the reads the seam performs raise `sqlite3.DatabaseError` and every door
+    answers with the advice — `status` as its report, `search` and `update` as the actionable
+    error.
+
+    Seen red before the fix: the raw `DatabaseError` escaped all three.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    items, vocab_path, topics_path = _paths(three_inputs)
+
+    def malformed(connection):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(index_build, "count_rows", malformed)
+
+    report = _status(three_inputs, index_dir)
+    assert report.incomplete is True
+    assert "xbrain index build --force" in report.advice, report.advice
+    with pytest.raises(index_schema.IndexIncompatibleError, match="xbrain index build --force"):
+        index_store.open_for_query(index_dir, items, vocab_path, topics_path)
+    with pytest.raises(index_schema.IndexIncompatibleError, match="xbrain index build --force"):
+        _update(three_inputs, index_dir, dry_run=True)
