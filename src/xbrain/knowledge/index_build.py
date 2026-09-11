@@ -42,32 +42,42 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
 
 from xbrain.executors.api import iter_content_sources
-from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams
+from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
 from xbrain.knowledge.index_schema import (
     REBUILD_ADVICE,
     SCHEMA_VERSION,
     IndexIncompatibleError,
     IndexMissingError,
+    db_path,
     manifest_path,
+    open_index,
+    open_memory_index,
 )
-from xbrain.knowledge.models import KnowledgeSurface
+from xbrain.knowledge.lexical import LexicalIndex
+from xbrain.knowledge.models import KnowledgeSurface, TopicRecord
+from xbrain.knowledge.profile import profile_text
 from xbrain.knowledge.surfaces import (
     article_block_texts,
     failed_sources,
     item_content_kinds,
     item_surfaces,
     item_topics,
+    knowledge_item,
+    topic_record,
+    topic_surfaces,
     unfetched_links,
 )
 from xbrain.models import Item, MediaPhotoDescribed, Topic, TopicPage
@@ -1149,3 +1159,553 @@ def load_compatible_manifest(index_dir: Path, *, params: ChunkerParams | None = 
             + f". {REBUILD_ADVICE}"
         )
     return manifest
+
+
+# ---------------------------------------------------------------------------
+# 02.7 — the WRITER and `build`: put the index on disk and seal it
+#
+# ONE WRITER, and that is the whole reason `write_item` / `write_topic` are public. `build`,
+# 02.8's `update` and the evaluation harness all come through here, so there is no second walk
+# that could emit a slightly different corpus and make a measured baseline describe something
+# other than what a query answers over (rule 5).
+#
+# THE MANIFEST IS WRITTEN LAST, OUTSIDE THE TRANSACTION, AND THAT ORDERING IS THE WHOLE SAFETY
+# PROPERTY. Rows go in one transaction; the manifest is sealed only after it commits. An
+# interruption therefore leaves rows rolled back AND no manifest — and an index with no
+# manifest is REFUSED by every door rather than answered partially (spec §9.3), so a `Ctrl-C`
+# cannot produce a small index that looks valid.
+#
+# WHAT IS NOT HERE. No `update`, no `status`, no invalidation, no query door, no CLI: 02.8 and
+# later. `count_rows` lands here because the manifest's `counts` are read back from the base.
+# ---------------------------------------------------------------------------
+
+
+UPDATE_ADVICE = "Actualiza el índice con `xbrain index update`."
+
+
+# The column order of `topics`, as ONE tuple type — the writer binds it and 02.8's comparator
+# will read it back. The same pattern as `SurfaceRow`, for the same reason: a membership-derived
+# column cannot be stored without there being one place that says what it is.
+TopicRow = tuple[
+    str,
+    str,
+    str | None,
+    str,
+    str | None,
+    int | None,
+    int,
+    str,
+    str,
+    str,
+    str | None,
+]
+
+# One literal per table. The f-string version was safe — the names come from a tuple in this
+# module — but it made `bandit` report B608 and needed a suppression, and a suppression is a
+# request to stop looking.
+_COUNT_STATEMENTS: dict[str, str] = {
+    "items": "SELECT COUNT(*) FROM items",
+    "topics": "SELECT COUNT(*) FROM topics",
+    "surfaces": "SELECT COUNT(*) FROM surfaces",
+    "chunks": "SELECT COUNT(*) FROM chunks",
+    "profiles": "SELECT COUNT(*) FROM profiles",
+}
+
+
+def count_rows(connection: sqlite3.Connection) -> dict[str, int]:
+    """How many rows each plane holds, read from the base itself.
+
+    Keyed by `COUNT_PLANES`, which is what the manifest declares — a test binds the two, so a
+    plane added to one and forgotten in the other goes red instead of producing a manifest
+    that counts four planes and claims five.
+    """
+    return {
+        table: int(connection.execute(statement).fetchone()[0])
+        for table, statement in _COUNT_STATEMENTS.items()
+    }
+
+
+@dataclass(frozen=True)
+class BuildReport:
+    """What a build did — or, under `dry_run`, what it WOULD have done."""
+
+    items_written: int
+    topics_written: int
+    surfaces_written: int
+    chunks_written: int
+    profiles_written: int
+    skipped: dict[str, int]
+    failed: list[dict[str, str]]
+    duration_seconds: float
+    dry_run: bool
+
+
+@dataclass
+class WriteCounters:
+    """Mutable tally shared by the writers. Not frozen: it is a running total, not a result."""
+
+    surfaces: int = 0
+    chunks: int = 0
+    profiles: int = 0
+    empty_text: int = 0
+    decorative: int = 0
+    no_speech: int = 0
+    failed_sources: int = 0
+
+
+def topic_row(record: TopicRecord) -> TopicRow:
+    """What the index STORES about a topic — the row `_write_topic_row` inserts, verbatim.
+
+    The same pattern as `surface_row` (G-5), for the same reason: one projection, and 02.8's
+    comparator reads it back. A membership-derived column — `primary_item_ids_json`,
+    `secondary_item_ids_json`, `stale` — therefore cannot be stored without there being a
+    single place that says what it is.
+    """
+    return (
+        record.slug,
+        record.description.text,
+        record.overview.text if record.overview else None,
+        json.dumps([note.text for note in record.notes], ensure_ascii=False),
+        record.synthesized_at.isoformat() if record.synthesized_at else None,
+        record.post_count_at_synth,
+        int(record.stale),
+        json.dumps(list(record.primary_item_ids)),
+        json.dumps(list(record.secondary_item_ids)),
+        record.vocab_fingerprint,
+        record.synthesis_fingerprint,
+    )
+
+
+def write_item(
+    index: LexicalIndex,
+    item: Item,
+    vocab: Sequence[Topic],
+    counters: WriteCounters,
+    *,
+    options: IndexOptions,
+) -> None:
+    """Everything one item contributes to the index: metadata, surfaces, chunks and profile."""
+    surfaces = item_surfaces(item)
+    fingerprint = item_fingerprint(item, options=options)
+    _write_item_metadata(index, item, fingerprint, options=options, counters=counters)
+    _write_surfaces(index, surfaces, counters)
+
+    chunks = chunk_surfaces(
+        surfaces,
+        params=options.params,
+        topics=item_topics(item),
+        url=item.url,
+        blocks_by_surface_id=article_block_texts(item),
+    )
+    stored = index.add(chunks, created_at=item.created_at, source=item.source)
+    counters.chunks += stored
+    empty_text = len(chunks) - stored
+    decorative, no_speech = declined_media(item)
+    counters.empty_text += empty_text
+    counters.decorative += decorative
+    counters.no_speech += no_speech
+    # Recorded ON THE ITEM'S ROW, so the manifest's `skipped` can be SUMMED from the base
+    # rather than carried over from a previous manifest (A-3). 02.8's incremental path
+    # deletes and rewrites the row, and the total stays exact without re-walking the corpus.
+    index.connection.execute(
+        "UPDATE items SET skipped_empty_text = ?, skipped_decorative = ?, "
+        "skipped_no_speech = ? WHERE item_id = ?",
+        (empty_text, decorative, no_speech, item.id),
+    )
+    if index.add_profile(item.id, profile_text(item, list(vocab)), fingerprint):
+        counters.profiles += 1
+
+
+def _write_item_metadata(
+    index: LexicalIndex,
+    item: Item,
+    fingerprint: str,
+    *,
+    options: IndexOptions,
+    counters: WriteCounters,
+) -> None:
+    """The five filterable tables, from the SAME projection a consumer would receive.
+
+    Built from `knowledge_item` rather than re-derived from the store, so a later `--author`,
+    `--topic` or `--kind` answers with exactly what `get` would show. A second derivation here
+    is the divergence rule 5 is about, and the field that would go wrong first is
+    `content_kinds`: a FAILED fetch has a kind, and listing it would tell a consumer to ask for
+    a body that does not exist.
+
+    `source_failures` takes SIX columns and not seven: `attempts` was dropped at
+    `SCHEMA_VERSION` "4" because it is fetch bookkeeping with no field on the knowledge
+    projection, and the only writer that ever existed bound it to a literal `None`.
+    """
+    projection = knowledge_item(item, vault_dir=options.vault_dir)
+    index.connection.execute(
+        "INSERT OR REPLACE INTO items (item_id, source, url, author_handle, author_name, "
+        "created_at, captured_at, primary_topic, note_path, bookmark_folder, store_fingerprint) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            item.id,
+            item.source,
+            item.url,
+            item.author.handle,
+            item.author.name,
+            item.created_at.isoformat(),
+            item.captured_at.isoformat(),
+            projection.primary_topic,
+            projection.note_path,
+            item.bookmark_folder,
+            fingerprint,
+        ),
+    )
+    for slug in projection.topics:
+        index.connection.execute(
+            "INSERT OR REPLACE INTO item_topics (item_id, slug, is_primary) VALUES (?,?,?)",
+            (item.id, slug, int(slug == projection.primary_topic)),
+        )
+    for kind in projection.content_kinds:
+        index.connection.execute(
+            "INSERT OR REPLACE INTO item_content_kinds (item_id, kind) VALUES (?,?)",
+            (item.id, kind),
+        )
+    for failure in projection.failed_sources:
+        counters.failed_sources += 1
+        index.connection.execute(
+            "INSERT INTO source_failures (item_id, kind, url, failure_reason, error, "
+            "http_status) VALUES (?,?,?,?,?,?)",
+            (
+                item.id,
+                failure.kind,
+                failure.url,
+                failure.failure_reason,
+                failure.error,
+                failure.http_status,
+            ),
+        )
+    for link in projection.unfetched_links:
+        index.connection.execute(
+            "INSERT INTO unfetched_links (item_id, url, reason, detail) VALUES (?,?,?,?)",
+            (item.id, link.url, link.reason, link.detail),
+        )
+
+
+def write_topic(
+    index: LexicalIndex,
+    topic: Topic,
+    page: TopicPage | None,
+    primary_ids: tuple[str, ...],
+    secondary_ids: tuple[str, ...],
+    counters: WriteCounters,
+    *,
+    options: IndexOptions,
+) -> None:
+    """One topic's record and its three surfaces (spec §3.6)."""
+    _write_topic_row(index, topic_record(topic, page, primary_ids, secondary_ids))
+    surfaces = topic_surfaces(topic, page)
+    _write_surfaces(index, surfaces, counters)
+    chunks = chunk_surfaces(surfaces, params=options.params)
+    stored = index.add(chunks)
+    counters.chunks += stored
+    counters.empty_text += len(chunks) - stored
+
+
+def _write_topic_row(index: LexicalIndex, record: TopicRecord) -> None:
+    """The one `INSERT` into `topics`, binding `topic_row` in its declared column order."""
+    index.connection.execute(
+        "INSERT OR REPLACE INTO topics (slug, description, overview, notes_json, "
+        "synthesized_at, post_count_at_synth, stale, primary_item_ids_json, "
+        "secondary_item_ids_json, vocab_fingerprint, synthesis_fingerprint) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        topic_row(record),
+    )
+
+
+def _write_surfaces(
+    index: LexicalIndex, surfaces: Sequence[KnowledgeSurface], counters: WriteCounters
+) -> None:
+    """Every surface row, from the SAME projection `item_fingerprint` hashes (G-5).
+
+    What is stored is what is fingerprinted, by construction. LENGTH, never the body, in the
+    last column: spec §10.8 keeps article text out of derived stores, and `chunks.text` is
+    where text lives.
+    """
+    for surface in surfaces:
+        counters.surfaces += 1
+        index.connection.execute(
+            "INSERT OR REPLACE INTO surfaces (surface_id, owner_type, owner_id, surface_type, "
+            "origin, trust_class, derived, attribution_handle, attribution_name, title, url, "
+            "locator_json, language, fingerprint, char_length) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            surface_row(surface),
+        )
+
+
+def topic_membership(
+    store: Mapping[str, Item], slug: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(primary_item_ids, secondary_item_ids)` for a topic, both sorted.
+
+    Sorted because `TopicRecord` is fingerprinted downstream and an order following dict
+    iteration would make two builds of the same store differ. A PRIMARY item is EXCLUDED from
+    the secondary list rather than appearing in both: the two answer different questions, and
+    double counting would inflate any membership figure taken from them.
+    """
+    primary = tuple(
+        sorted(i.id for i in store.values() if i.enriched and i.enriched.primary_topic == slug)
+    )
+    secondary = tuple(
+        sorted(
+            i.id
+            for i in store.values()
+            if i.enriched and slug in i.enriched.topics and i.id not in primary
+        )
+    )
+    return primary, secondary
+
+
+@dataclass(frozen=True)
+class ManifestTallies:
+    """`counts` and `skipped` as the DATABASE holds them — the one source for both writers.
+
+    Reading them back from the rows means the manifest describes the base BY CONSTRUCTION, so
+    a base that disagrees with its manifest can be DETECTED (C-3). Computing them from the run
+    counters instead is what drifted before: an incremental update adjusted four of the five
+    counts by hand and topic chunks were added on every rebuild and never subtracted.
+    """
+
+    counts: dict[str, int]
+    skipped: dict[str, int]
+
+
+def manifest_tallies(connection: sqlite3.Connection) -> ManifestTallies:
+    """What the manifest reports about the base, read from the base itself."""
+    summed = connection.execute(
+        "SELECT COALESCE(SUM(skipped_empty_text), 0), COALESCE(SUM(skipped_decorative), 0), "
+        "COALESCE(SUM(skipped_no_speech), 0) FROM items"
+    ).fetchone()
+    failed_source_rows = connection.execute("SELECT COUNT(*) FROM source_failures").fetchone()[0]
+    return ManifestTallies(
+        counts=count_rows(connection),
+        skipped={
+            "empty_text": int(summed[0]),
+            "decorative": int(summed[1]),
+            "no_speech": int(summed[2]),
+            "failed_sources": int(failed_source_rows),
+        },
+    )
+
+
+class _DryRun(Exception):
+    """Internal: unwinds the transaction after a dry run has counted the work."""
+
+
+def connection_closed(connection: sqlite3.Connection) -> bool:
+    """Whether the connection is already closed, without raising on the happy path."""
+    try:
+        connection.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        return True
+    return False
+
+
+def build(
+    index_dir: Path,
+    inputs: IndexInputs,
+    *,
+    options: IndexOptions | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> BuildReport:
+    """Build `data/index/` from scratch and SEAL it. Read-only with respect to the store.
+
+    IT TAKES AN `IndexInputs`, AND THAT IS P1b ENFORCED BY TYPE. The rows and the cheap signal
+    come from ONE snapshot, bound together by `load_index_inputs` at the moment the bytes were
+    parsed, so no caller can pair rows read at one instant with a `stat` taken at another. The
+    shape this closes is not hypothetical: sealing `StoreSignal.of(paths)` AFTER the commit
+    describes whatever file sits on that path by then, and a save landing in that window
+    produced a manifest certifying a store the base had never seen — the next query compared
+    EQUAL and answered over stale rows with nothing declared. A signal argument that could be
+    omitted is the same defect one keyword away, which is why there is no such argument.
+
+    ONE TRANSACTION, AND THE MANIFEST LAST — AND, ON A FORCED REBUILD, THE OLD MANIFEST REMOVED
+    FIRST. A `Ctrl-C` or a full disk mid-build rolls the rows back and leaves no manifest, and
+    an index with no manifest is REFUSED by every door rather than answered partially (spec
+    §9.3), so an interruption cannot produce a small index that looks valid. That sentence was
+    only true for a FRESH build until C-1: `--force` kept the previous manifest standing while
+    the new database was written, so an interrupted forced rebuild left a manifest whose
+    versions and cheap signal still matched — `status` reported nothing wrong and a query
+    answered «no results» over an EMPTY base, indistinguishable from a corpus with no matches.
+
+    A forced rebuild therefore does NOT preserve the previous index: manifest and database are
+    both gone before the first row is written, and recovering from an interruption is
+    `xbrain index build` again. Rebuilding over an existing index REQUIRES `force`, because a
+    rebuild throws away something that may have taken minutes and the incremental path usually
+    wants `index update` instead. The error names both commands.
+
+    TWO THINGS FOUND BY MEASURING, NOT BY READING:
+
+    * `dry_run` builds into `sqlite3(":memory:")` and touches NO FILE AT ALL. The first version
+      opened the real database (creating it when absent), rolled back, then removed the file it
+      believed it had created — so a dry run against a working index DESTROYED it, from the
+      flag whose whole promise is that it changes nothing;
+    * `force` UNLINKS the database instead of clearing the rows. Clearing in place left
+      SQLite's freelist behind: on the real corpus a fresh build was 51.2 MB and the same index
+      after five forced rebuilds was 66.5 MB, with `VACUUM` recovering it only to 60.6 MB. A
+      derived artefact whose size depends on how many times it has been rebuilt is one nobody
+      can reason about.
+    """
+    options = options or IndexOptions()
+    if manifest_path(index_dir).exists() and not force and not dry_run:
+        raise ValueError(
+            f"Ya existe un índice en {index_dir}. {UPDATE_ADVICE} "
+            "Si de verdad quieres reconstruirlo desde cero, usa `xbrain index build --force`."
+        )
+    started = time.perf_counter()
+    counters = WriteCounters()
+    failed: list[dict[str, str]] = []
+
+    if dry_run:
+        connection = open_memory_index()
+    else:
+        # THE MANIFEST GOES FIRST (C-1). It is what every query trusts, so it must not outlive
+        # the database it describes — see the docstring for what an interrupted `--force` left
+        # standing before this line existed.
+        manifest_path(index_dir).unlink(missing_ok=True)
+        db_path(index_dir).unlink(missing_ok=True)
+        # The ONE caller allowed to create the file (G-2): every other door finds the absence
+        # and names the command instead of leaving an empty base behind.
+        connection = open_index(db_path(index_dir), create=True)
+    try:
+        with connection:  # one transaction: commit on success, rollback on ANY exception
+            _write_everything(
+                LexicalIndex(connection),
+                inputs.store,
+                inputs.vocab,
+                inputs.topic_pages,
+                counters,
+                options=options,
+            )
+            tallies = manifest_tallies(connection)
+            if dry_run:
+                # A dry run does the whole walk and then throws it away, so the counts it
+                # reports are the counts a real build WOULD produce — not an estimate.
+                raise _DryRun
+    except _DryRun:
+        connection.close()
+        return _build_report(
+            counters,
+            failed,
+            started,
+            items=len(inputs.store),
+            topics=len(inputs.vocab),
+            dry_run=True,
+        )
+    finally:
+        if not connection_closed(connection):
+            connection.close()
+
+    write_manifest(
+        index_dir,
+        _fresh_manifest(inputs, tallies, failed, options=options),
+    )
+    return _build_report(
+        counters,
+        failed,
+        started,
+        items=len(inputs.store),
+        topics=len(inputs.vocab),
+        dry_run=False,
+    )
+
+
+def _write_everything(
+    index: LexicalIndex,
+    store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
+    counters: WriteCounters,
+    *,
+    options: IndexOptions,
+) -> None:
+    """Every item and every topic, in SORTED order, inside the caller's transaction.
+
+    Sorted so two builds of the same store write the same rows in the same sequence — spec
+    §3.7.8 needs that for the `chunk_id` tie-break to mean anything, since an order following
+    dict iteration would reorder results between rebuilds of identical data.
+    """
+    for item_id in sorted(store):
+        write_item(index, store[item_id], vocab, counters, options=options)
+    for topic in sorted(vocab, key=lambda t: t.slug):
+        primary, secondary = topic_membership(store, topic.slug)
+        write_topic(
+            index, topic, topic_pages.get(topic.slug), primary, secondary, counters, options=options
+        )
+
+
+def _fresh_manifest(
+    inputs: IndexInputs,
+    tallies: ManifestTallies,
+    failed: list[dict[str, str]],
+    *,
+    options: IndexOptions,
+) -> Manifest:
+    """The manifest a full build writes — every version taken from the CODE, not carried over.
+
+    A build is what DEFINES the versions the index was written under, so they come from the
+    constants; 02.8's update has already proved they match and must COPY them instead, rather
+    than silently "fixing" a mismatch that should have refused the run.
+
+    The four deep fingerprints are computed HERE, from the same `IndexInputs` the rows were
+    written from — never re-read from disk — so the manifest's answer to *what changed* is
+    about the corpus that is actually in the base.
+    """
+    return Manifest(
+        schema_version=SCHEMA_VERSION,
+        built_at=datetime.now(timezone.utc),
+        store_fingerprint=store_fingerprint(inputs.store, options=options),
+        store_signal=inputs.signal,
+        vocab_fingerprint=vocab_fingerprint(inputs.vocab),
+        topics_fingerprint=topics_fingerprint(inputs.topic_pages),
+        surface_version=SURFACE_VERSION,
+        chunker_version=CHUNKER_VERSION,
+        chunker_params=asdict(options.params),
+        counts=dict(tallies.counts),
+        skipped=dict(tallies.skipped),
+        failed=failed,
+    )
+
+
+def _skipped(counters: WriteCounters) -> dict[str, int]:
+    """The four causes spec §5.6 asks about, each counting what its name says.
+
+    `empty_text` is structurally 0 today: the emitters drop a blank surface before the index
+    ever sees it, so the counter can only move if a surface with a whitespace-only body ever
+    reaches here. It is kept because the manifest shape is specified and because the path is
+    real — and it is documented as 0-by-construction so nobody quotes it as a measurement of
+    the corpus (rule 2).
+    """
+    return {
+        "empty_text": counters.empty_text,
+        "decorative": counters.decorative,
+        "no_speech": counters.no_speech,
+        "failed_sources": counters.failed_sources,
+    }
+
+
+def _build_report(
+    counters: WriteCounters,
+    failed: list[dict[str, str]],
+    started: float,
+    *,
+    items: int,
+    topics: int,
+    dry_run: bool,
+) -> BuildReport:
+    return BuildReport(
+        items_written=items,
+        topics_written=topics,
+        surfaces_written=counters.surfaces,
+        chunks_written=counters.chunks,
+        profiles_written=counters.profiles,
+        skipped=_skipped(counters),
+        failed=failed,
+        duration_seconds=time.perf_counter() - started,
+        dry_run=dry_run,
+    )
