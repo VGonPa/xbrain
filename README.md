@@ -32,6 +32,7 @@ it through a worksheet hand-off (see [Execution modes](#execution-modes)).
 - [Configuration](#configuration)
 - [The pipeline](#the-pipeline)
 - [Commands](#commands)
+- [Search & retrieval](#search--retrieval)
 - [Execution modes](#execution-modes)
 - [Snapshots & safety](#snapshots--safety)
 - [How it works](#how-it-works)
@@ -455,6 +456,11 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 [vision]
 # command = "vlm-describe"                # external vision model for `digest-video --frames`
 # model = "qwen2-vl-7b"                   # optional; omit for the tool default
+
+[index]                                   # the whole section is optional
+# dir = "index"                           # under data/; must resolve INSIDE data/
+# max_matches_per_item = 3                # fragments one item may cite in a search
+# get_char_budget = 40000                 # per-response ceiling before truncate + cursor
 ```
 
 | Section | Key | Default | Purpose |
@@ -475,6 +481,9 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[transcribe]` | `model` | — | Optional model id passed to the transcriber (`--model`). Omit for the tool default. |
 | `[vision]` | `command` | — (unset) | External vision model `xbrain digest-video --frames` shells out to (describes key-frame slides; lives outside xbrain core). No bundled default — `--frames` errors until it is set. May be a multi-token wrapper. |
 | `[vision]` | `model` | — | Optional model id passed to the vision command (`--model`). Omit for the tool default. |
+| `[index]` | `dir` | `index` | Where `data/index/` lives, relative to `data_dir`. Validated on load: an absolute path, a `..` or an escaping symlink is refused, because `index build --force` deletes and recreates whatever it finds there. |
+| `[index]` | `max_matches_per_item` | `3` | How many fragments of one item `search` may cite. What stops a long transcript filling the top ten with ten adjacent windows of itself. |
+| `[index]` | `get_char_budget` | `40000` | Per-response character ceiling for `get`. Above it the bundle truncates **declaring it** and returns a cursor, never silently. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the
@@ -708,6 +717,11 @@ uv run xbrain <command> [options]
 | `refresh-media` | Re-capture X and backfill the **playable video URL + bitrate + duration** onto items whose video is still poster-era (incremental `extract` + non-overwriting merge never refresh existing videos). Video-only — photos and enrichment/description state are preserved, and a good video is never degraded back to its poster if X drifts. Scrolls the full history (slow); destructive → auto-snapshot; prints a download-size estimate. Does **not** download video (that is `download-videos`). Re-seeing 0 known items on a non-empty store (likely expired session / GraphQL drift) aborts without saving unless `--force`. `--source bookmarks\|tweets\|all`, `--force`. |
 | `download-videos` | Download the actual **mp4 bytes** for backfilled videos and embed them inline in the wiki — the video counterpart to `media`. mp4 only: HLS (`.m3u8`) needs ffmpeg and is a deferred follow-up (skipped + counted); poster-era entries (run `refresh-media` first) are skipped too. Prints a `~X.X GB` size estimate and asks for confirmation **unless `--yes`**. `--max-size 500MB\|2GB` skips videos whose estimated size exceeds the cap. Validates the response is really a video (rejects HTML/JSON interstitials served as 200). Destructive → auto-snapshot; idempotent (re-runs skip downloaded videos unless `--force`). `--source bookmarks\|tweets\|all`, `--limit N`, `--items <a,b,c>`, `--max-size <size>`, `--force`, `--yes`. See [Local media storage](#local-media-storage). |
 | `knowledge inspect` | **Read-only** view of the unified knowledge contract for one item (`xbrain knowledge inspect <id>`) or one topic (`--topic <slug>`). Shows the read projection, and with `--surfaces` / `--chunks` every emitted surface with its `origin`, `trust_class`, `attribution`, `locator` and `fingerprint`. `--json` emits a stable document. It is the cheapest verification layer there is: a quoted post's real author sits right beside the poster's, so a mis-attribution is visible in two seconds without any judge. Never truncates an article body (unlike the LLM prompts), returns **every** source of a kind (not just the first), and hydrates verification verdicts from the live store so a revoked FAIL is never shown as the old PASS. Writes nothing, takes no snapshot. |
+| `index build` | Build the persistent retrieval index into `data/index/` (SQLite + FTS5) and seal it with a manifest. **`data/index/` is derived and reconstructible** — never versioned, never backed up, deleting it costs one rebuild — which is why every incompatibility here is answered by a refusal plus `--force` rather than by a repair. Writes nothing but `data/index/`; takes no snapshot, because there is nothing of yours to lose. `--force` rebuilds over an existing index (manifest deleted first, database second, so an interrupted rebuild never leaves a manifest standing over an empty base). `--dry-run` counts what it would write. `--json`. |
+| `index update` | Put the index back in step with the store, touching **only** what changed — one transaction for the whole run, so an interrupted update leaves the previous state rather than half of a change nobody can name. This is the normal path after `enrich`, `topics`, `vocab`, `fetch` or `digest-video`. `--dry-run`, `--json`. |
+| `index status` | What the index holds and how far behind the store it is: versions, counts, what was skipped, items added/changed/removed, topics whose membership moved, and whether the cheap staleness signal has tripped. **It is the command that answers when the others refuse** — `search`, `get`, `build` and `update` reject an absent or incompatible index; this one reports it, and names the same command they name. It also pays for `PRAGMA quick_check`, which the query doors deliberately do not, so it sees corruption on pages no query reads. `--json`. |
+| `search` | Ranked items with the fragments that matched, each carrying its `origin`, `trust_class` and locator — and, when the match landed on generated text, the exact `xbrain get` that fetches the underlying source. Read-only (`mode=ro`), no network, no LLM. All eight filters are pushed into SQL **before** scoring: `--from`/`--to`, `--source`/`--mine`, `--author`, `--topic`, `--kind`, `--origin`, `--has-surface` (each repeatable where plural). Matches are grouped by item and capped at `[index].max_matches_per_item`, so a long transcript yields one result with three fragments, not ten of the top ten. Chunks whose fingerprint does not recompute, or whose surface no longer resolves, are **withheld and counted** in `corrupt_chunks_excluded`. The response declares its own degradations — `index_behind_store`, `no_embeddings`, `<strategy>_not_implemented` — rather than answering as if they did not apply. `--limit`, `--cursor`, `--strategy`, `--json`. |
+| `get` | One item's complete evidence — surfaces, chunks, topics, fetch failures, unfetched links, verification verdicts — **read from the live store, never from the index**, so it works with `data/index/` deleted. An index able to answer this would be a second copy of the corpus that nothing invalidates, and the day the two disagreed there would be no way to know which one the reader was shown. Never truncates silently: above `[index].get_char_budget` it truncates **declaring it** and returns a cursor. `--surface` (repeatable; an unknown one is refused listing what the item actually has), `--query` to prioritise the fragments that score for it, `--cursor`, `--json`. |
 | `eval` | Evaluate retrieval against `eval/golden-set.yaml` (tracked in Git) and publish `data/eval-report.{json,md}` (not tracked — it carries corpus excerpts). Metrics per **strategy × stratum × provenance**, never one global figure. A stratum with no cases is reported as *sin cobertura*, never as 0.0, and a case whose filters the strategy cannot apply is reported as **not measured** rather than as a failure — the lexical baseline has no date/source columns until the persisted index exists. **Report-only**: never writes `items.json`, never snapshots. Without `--min-recall` it reports without judging (the spec fixes merge thresholds *after* the baseline runs); with it, the command becomes a gate and exits non-zero naming the bucket that fell short — or, when the threshold could not be compared against a single bucket, naming that count, so a gate that measured nothing fails closed instead of reporting PASS. Cases that retrieved nothing at all are counted per bucket (`vacíos`), because a 0.0 from an empty result set is a different fault from a 0.0 from a bad ranking. `--strategy`, `--k`, `--golden-set`, `--report`, `--json`. |
 | `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
 | `fetch-video` | **Ephemeral** download of the real mp4 for selected videos to `--to <dir>/<id>.mp4`, for agent-side processing (transcription/analysis is external — see below). Select with `--ids a,b` and/or `--topic <t>` (+ `--max-size`, `--limit`, `--source`). Reuses `download-videos`' content-validation, failure classification, atomic write and mp4/HLS/poster discriminator; HLS and poster-era are skipped + counted. **Deliberately non-persisting:** never mutates `items.json`, never snapshots, never touches `data/media/` — it writes only under `--to`. `--json` for machine output. |
@@ -731,6 +745,78 @@ The window is inclusive at both ends: a date-only `--until 2025-12-31` covers th
 whole of Dec 31 (up to `23:59:59.999999` UTC). Pass an explicit time
 (`--until 2025-12-31T09:00:00`) to cut off mid-day instead.
 Run `uv run xbrain <command> --help` for the full option list.
+
+---
+
+## Search & retrieval
+
+Once `enrich` and `topics` have run, build the index and query it. Real output
+from a corpus of 2,474 items:
+
+```bash
+uv run xbrain index build
+# → 2474 items · 45 topics · 10570 superficies · 22933 chunks · 2474 perfiles
+# →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
+# →   3.1s
+
+uv run xbrain search "transformer attention" --limit 2
+# → "transformer attention" · estrategia lexical
+# → · Estrategia léxica (sin embeddings): recupera nombres propios, cifras y
+# →   frases exactas, no similitud conceptual.
+# →
+# → 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
+# →    https://x.com/xiathis/status/2051242195298968041
+# →    topics: llm-foundations, frontier-models
+# →    resumen (llm): Clase de Stanford que recorre las decisiones de …
+# →    · [video_transcript] origin=asr trust=machine_extracted · via lexical
+# →      ly talking about changing here is you know, where the norms go, …
+# →    → verifica con: xbrain get 2051242195298968041 --surface video_transcript
+```
+
+**`origin` and `trust` travel with every fragment**, so a consumer never has to
+infer them: `origin=asr` means a machine heard it, `origin=llm` means xbrain
+wrote it. When the match is generated text, the last line names the surface that
+can actually settle the claim — and `get` hands it over in full:
+
+```bash
+uv run xbrain get 2051242195298968041 --surface video_transcript
+```
+
+`--json` on either command returns the same content as a stable document
+(`SearchResponse` / `EvidenceBundle`): the human view and the JSON are two
+renderings of **one** response model, so there is no human-only fact and no
+JSON-only one.
+
+```bash
+uv run xbrain search "agents" --topic ai-agents --from 2026-01-01 --kind x_article
+uv run xbrain search "agents" --mine --has-surface video_transcript --json
+```
+
+**The index does not update itself.** Indexing is manual by decision, so every
+stage that writes the store leaves it behind — and rather than quietly serving
+stale evidence, `search` says so and names the fix:
+
+```
+⚠ El índice va por detrás del store: `items.json`, `vocab.yaml` o `topics.json`
+  cambió después de construirlo. La evidencia puede estar obsoleta — actualiza
+  con `xbrain index update`.
+```
+
+```bash
+uv run xbrain index status    # what it holds, how far behind, what changed
+uv run xbrain index update    # 0.8s when nothing moved
+```
+
+Two limits, declared rather than discovered later. There is **no stemming** —
+FTS5 has no multilingual stemmer and the English one would wreck a Spanish
+corpus, so `agente` and `agentes` are different words; on the corpus above their
+top tens shared **zero** items. And it is **lexical, not semantic**: proper
+nouns, figures and exact phrases, not conceptual similarity. Every response
+declares the second (`degraded: ["no_embeddings"]`). Diacritics, on the other
+hand, fold — `atencion` and `atención` rank identically.
+
+Costs, staleness, error messages and the rest of the limits:
+**[docs/knowledge-index.md](docs/knowledge-index.md)**.
 
 ---
 
@@ -1270,6 +1356,18 @@ xbrain/
 │   ├── llm_json.py       # shared helper: pull a JSON object out of an LLM reply
 │   ├── topic_synth.py    # topic-overview synthesis (api + worksheet)
 │   ├── topics.py         # topic-page computation + rendering
+│   ├── knowledge/        # the READ contract + the persistent index (`search` / `get`)
+│   │   ├── surfaces.py   #   the emitter: Item/Content/Topic → KnowledgeSurface
+│   │   ├── chunking.py   #   the structural chunker (atomic surfaces beat MAX_CHARS)
+│   │   ├── contracts.py  #   SearchResponse / EvidenceBundle — the frozen envelopes
+│   │   ├── lexical_fts.py#   ONE FTS5 tokenizer + bm25, shared by index and harness
+│   │   ├── index_schema.py #  data/index/ DDL, the open door, drift + corruption checks
+│   │   ├── index_build.py  #  build/update/status + the manifest that seals them
+│   │   ├── index_store.py  #  opening FOR A QUERY: read-only, degradation, fail-closed rows
+│   │   ├── search_service.py # `search`: filter → score → group → hydrate
+│   │   ├── get_service.py    # `get`: complete evidence from the STORE, budget + cursor
+│   │   ├── render.py     #   the human view of the SAME model `--json` serialises
+│   │   └── evaluation.py #   `eval`: per-stratum retrieval metrics, report-only
 │   ├── evidence.py       # ONE definition of what counts as evidence for a generated output
 │   ├── verification.py   # the `verify` stage: the LLM-as-judge ensemble
 │   ├── verification_audit.py  # `verify --audit`: the judge≠party second pass
@@ -1333,7 +1431,8 @@ client. Respect X's Terms of Service.
 |----------|-------------|
 | [docs/tutorial.md](docs/tutorial.md) | **Start here** — end-to-end walkthrough from install to a searchable wiki. |
 | [docs/digest-video.md](docs/digest-video.md) | Worked example: turn a bookmarked talk into transcript + slide notes. |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failures & fixes (auth, PATH, digest-video, iCloud). |
+| [docs/knowledge-index.md](docs/knowledge-index.md) | Operating the search index: when to rebuild, measured cost, and what the lexical baseline cannot do. |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failures & fixes (auth, PATH, digest-video, index, iCloud). |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How XBrain is shaped: pipeline stages, artifacts, rubrics, executors, invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute — including PRs written with AI agents. |
 | [LICENSE](LICENSE) | MIT. |
@@ -1343,4 +1442,4 @@ code. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-*Last updated: 2026-05-19*
+*Last updated: 2026-09-12*

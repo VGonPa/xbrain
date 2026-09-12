@@ -746,13 +746,14 @@ So the count is not a floor on the ensemble's false negatives, and an earlier dr
 
 `src/xbrain/knowledge/` is the READ contract: the logical view an external model queries, so
 a consumer never has to know the shape of `items.json`, hunt for a markdown heading, or guess
-which account wrote a quoted tweet. Nothing in it mutates the store — every module is
-read-only by construction, and the two commands it ships (`knowledge inspect`, `eval`) take
-no snapshot because they have nothing to snapshot.
+which account wrote a quoted tweet. **Nothing in it mutates the store.** `knowledge inspect`,
+`eval`, `search` and `get` write nothing at all; `index build` and `index update` write only
+`data/index/`, which is derived. None of the six takes a snapshot, because none of them can
+destroy anything a rebuild would not restore.
 
-It is built over four PRs. This one is the contract and the evaluation; the persisted index,
-embeddings, the minimal graph and the MCP adapter come later and consume these names without
-renegotiating them.
+It is built over four plans. The contract and the evaluation landed first; the persistent
+index, `search` and `get` are this one. Embeddings, the minimal graph and the MCP adapter come
+later and consume these names without renegotiating them.
 
 ### The four entities
 
@@ -871,6 +872,154 @@ instead of one strong one.
 The chunker's parameters are ARGUMENTS, not module constants, so a future sweep changes the
 default without being able to move the ranking fixture that pins today's behaviour.
 
+### The persistent index
+
+`data/index/` holds a SQLite database and a manifest. It is **derived and reconstructible**:
+never versioned, never backed up, never repaired — deleting it costs one `xbrain index build`.
+That is the property everything below leans on, because it means a refusal is always cheap.
+
+```
+data/index/
+├── knowledge.db     items · surfaces · chunks · profiles · topics
+│                    + chunks_fts and profiles_fts (external-content FTS5)
+└── manifest.json    the seal, written LAST
+```
+
+**Two planes, not one.** `chunks_fts` indexes fragment bodies — what a citation quotes.
+`profiles_fts` indexes one retrieval profile per item — author, topics, title-ish metadata —
+which is what answers a query whose words appear in no fragment. A profile is never served as
+a citation; it only puts an item on the candidate list.
+
+**`rowid` is an explicit `INTEGER PRIMARY KEY`.** With an implicit one, SQLite is free to
+reuse the rowid of a deleted row, and an external-content FTS5 table that still holds the old
+row's tokens would then return the *new* chunk for the *old* word. Deletes retract their
+tokens before the row goes.
+
+#### The manifest, and what invalidates the index
+
+The manifest is written last, so its presence means the build finished. It carries the schema,
+emitter and chunker versions, the chunker's parameters, the counts, what was skipped, what
+failed, an `embeddings` slot Plan 03 fills — and **two kinds of change signal**, which is the
+part worth reading twice.
+
+| Signal | Cost | What it detects | What it does |
+|---|---|---|---|
+| four **deep fingerprints** — item, store, vocabulary, topics | a full walk | exactly what changed | drives `build` / `update` / `status` |
+| one **cheap `StoreSignal`** — `mtime_ns` + size of the three inputs | three `os.stat` | *something* changed | lets a query declare `index_behind_store` on every call |
+
+Three inputs, not one. The index derives from `items.json`, `vocab.yaml` **and** `topics.json`:
+a topic description enters every assigned item's profile, and overviews and notes are chunks.
+An earlier version compared `items.json` alone, so `xbrain topics` — which writes
+`topics.json` and never `items.json` — left every later `search` answering over the old topic
+plane with nothing declared. All six fields are required: zeros are also what an *absent* file
+reads as, so a signal that omitted the vocabulary was byte-identical to one taken over a
+vocabulary that is not there, and two such signals compare equal forever.
+
+The cheap signal is **cheap and falible, in one declared direction**. A `touch` with no edit is
+a false positive, accepted on purpose: a false positive costs one warning, a false negative
+costs serving stale evidence as fresh. The mirror case — a replacement of identical size with
+the mtime preserved — is invisible to it, deterministically and permanently. Nothing in this
+repo promises freshness from `mtime` + size; the answer to *what actually changed* is the deep
+fingerprint. That limit is written down rather than disguised.
+
+#### A query refuses, a diagnosis reports
+
+`search`, `get`, `build` and `update` refuse an index they cannot read. `index status`
+**reports** it — it is the instrument you run precisely to find out — and it names the same
+command the refusing doors name. Two instruments answering the same question with opposite
+verdicts is the failure mode; the escape is not a silent diagnosis, it is a shared sentence.
+
+The open door proves four things before a query sees a row: the file exists, page 1 reads, the
+declared tables and columns are present, and **one trivial `MATCH` runs on each FTS plane**.
+That last probe exists because the first three do not touch an FTS5 shadow table: with
+`chunks_fts_data` dropped, `search` died with a raw traceback while `status` exited 0 and
+called the index healthy. The probe costs 0.01 ms per plane on the 52 MiB real index and
+raises exactly where a query would. `status` additionally runs `PRAGMA quick_check`
+(155–850 ms measured, depending on load), which sees corruption on pages no door reads — it is
+the explicit diagnostic and it can afford what a query cannot.
+
+Extra columns are tolerated; missing or redefined ones are not. A base that holds more than
+this code reads is readable. Every incompatibility — schema drift, a hand-edited manifest, a
+torn page, a manifest that is a JSON list — ends with the same sentence, because they are the
+same operator situation.
+
+#### `search`: filters first, then scoring, then hydration
+
+All eight filters of the retrieval spec are pushed into `WHERE` **before** anything is scored,
+including the two that needed their own plumbing (`content_kinds` via a per-item kind table,
+`has_surfaces` via an `EXISTS` over surfaces). Narrowing therefore makes a query cheaper, not
+more expensive.
+
+Three things then happen to the candidate rows, and each one drops something:
+
+1. **Unresolvable rows are excluded.** A chunk whose surface row holds no locator cannot be
+   served with a locator, and the earlier code *fabricated* one — the item's URL, no source
+   index — which points a reader at the wrong bytes with confidence.
+2. **Fingerprints are recomputed** over the row as served — text, provenance, owner, position,
+   attribution, title, locator — through the one projection the chunker uses. A row written by
+   a different chunker, or edited by hand, does not match and is not returned.
+3. Both are counted in **`corrupt_chunks_excluded`**, whose name was `stale_chunks_excluded`
+   until someone noticed it *sounded* like the staleness signal and *measured* the consistency
+   one. A counter that answers a different question from the one its name asks is how a wrong
+   number gets quoted with confidence.
+
+Surviving rows are **grouped by item**, capped at `[index].max_matches_per_item` (3 by
+default), so a long transcript contributes one result with three fragments rather than ten of
+the top ten. Grouping is what makes the cap meaningful; the cap is what makes grouping honest.
+
+Only then is anything hydrated from the store — and `verification_status` comes from the
+**live store**, never from the index, through the same freshness check `generate` applies. A
+verdict copied into the index at build time would keep asserting a PASS that a later
+`verify --audit` had revoked.
+
+#### `get`: the index is not allowed to answer
+
+`get` reads the **store**, and works with `data/index/` deleted. An index able to answer it
+would be a second copy of the corpus that nothing invalidates, and the day the two disagreed
+there would be no way to tell which one the reader was shown. Over `[index].get_char_budget`
+the bundle truncates **declaring it** and returns a cursor; a failed fetch comes back as a
+structured failure rather than as a hole.
+
+#### Degradation is declared, never simulated
+
+`IndexStatusRef.degraded` is a fixed-order tuple, so two responses over the same state are
+byte-identical.
+
+- **`no_embeddings`** — read off the manifest's `embeddings` block, not hard-coded, so the day
+  Plan 03 writes that block the flag stops appearing with no other change. A constant would
+  keep declaring a degradation that no longer applied, with the test beside it green.
+- **`index_behind_store`** — the cheap signal disagreed with the manifest. Declared, not
+  repaired and not raised: possibly-stale evidence is answerable as long as the answer says so.
+- **`<strategy>_not_implemented`** — a strategy declared in the contract but with no backend
+  runs `lexical` and says which one it was asked for, in the response *and* in a warning line.
+  A **misspelled** strategy raises instead: a typo is not a degradation, and answering it with
+  lexical results would turn it into a measurement.
+
+#### One model, two renderings
+
+`render.py` takes a `SearchResponse`, an `EvidenceBundle` or a report and produces text. It
+never reaches back into the store, the index or the services — a renderer that re-derived
+anything would be a third definition of what a result is, after the service and the JSON. So
+`--json` and the human view cannot disagree, and every field a human reads is a field a
+consumer can parse.
+
+Every non-body field — id, URL, topic slug, query, cursor, path — reaches the terminal through
+one sanitisation function, and bodies through a fence. Four separate patches for the same
+class of defect (a newline in a stored URL standing at column 0 as a header) is what collapsed
+into one seam; the test forges every string field the contract declares and expects no forged
+line at column 0 and no control byte in either rendering.
+
+#### The seam guards
+
+`tests/test_knowledge_seams.py` enumerates the finished package **by reference**, not by
+prose: every consumer of the query door and of the evidence projection is named, so a new
+module that opens the database directly, or a caller that bypasses the fingerprint check, goes
+red. Its positive control is the file itself — the bypass shapes it knows about are listed
+inside it, so a guard that has stopped guarding is visible rather than quietly green.
+`tests/test_knowledge_surface_coverage.py` does the same for totality across the contract's
+three maps. The point of both is rule 11: what can be *removed* already fails closed; what can
+be *hollowed out* needs a guard.
+
 ### The evaluation, and where its gate really reaches
 
 `eval/golden-set.yaml` is **tracked in Git** — the one exception to "nothing personal is
@@ -891,7 +1040,8 @@ strategy cannot apply is reported as UNMEASURED, not as 0.0 — the lexical base
 date or source columns, so scoring those cases would say retrieval failed where the
 instrument does not exist yet.
 
-The baseline is the SAME FTS5 the persisted index will use, on `sqlite3(":memory:")`: same
+The baseline is the SAME FTS5 the persisted index uses, on `sqlite3(":memory:")`
+(`index_schema.open_memory_index`, one DDL for both): same
 DDL, same tokenizer (`unicode61 remove_diacritics 2`, no stemming — FTS5 has no multilingual
 stemmer and an English one would wreck the Spanish half), same `bm25()`, same explicit
 tie-break on `chunk_id`. So what changes later is where the database lives, not how it
@@ -1139,6 +1289,7 @@ xbrain/
 ├── docs/                    ← user-facing guides
 │   ├── tutorial.md
 │   ├── troubleshooting.md
+│   ├── knowledge-index.md   ← operating the persistent index: cost, staleness, limits
 │   └── digest-video.md
 │
 ├── src/xbrain/              ← the package
@@ -1155,8 +1306,14 @@ xbrain/
 │   │   ├── profile.py       ← the item's retrieval profile (never a citation)
 │   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen per envelope (SearchResponse "2", EvidenceBundle "2", Graph "1")
 │   │   ├── goldenset.py     ← two-stage loader: structure, then resolution
-│   │   ├── lexical_fts.py   ← the FTS5 DDL + scorer Plan 02 reuses
-│   │   ├── lexical_memory.py← that same FTS5 on sqlite3(":memory:")
+│   │   ├── lexical_fts.py   ← the FTS5 DDL + scorer: ONE tokenizer, ONE bm25
+│   │   ├── lexical.py       ← the retriever over a persisted connection
+│   │   ├── index_schema.py  ← data/index/ DDL, the open door, drift + corruption checks
+│   │   ├── index_build.py   ← build/update/status, the manifest, the four fingerprint planes
+│   │   ├── index_store.py   ← opening FOR A QUERY: read-only, degradation, fail-closed chunks
+│   │   ├── search_service.py← search(): filters, candidates, grouping, hydration
+│   │   ├── get_service.py   ← get(): complete evidence from the STORE, budget + cursor
+│   │   ├── render.py        ← the human view of the SAME response model --json serialises
 │   │   └── evaluation.py    ← the harness: per-stratum metrics, report-only
 │   │
 │   ├── extract/             ← X traffic interception
@@ -1231,6 +1388,9 @@ xbrain/
 │   ├── state.json
 │   ├── vocab.yaml
 │   ├── topics.json
+│   ├── index/               ← the persistent index — DERIVED, rebuildable, never versioned
+│   │   ├── knowledge.db     ← SQLite + FTS5 (two planes: chunks, profiles)
+│   │   └── manifest.json    ← the seal: versions, fingerprints, counts, cheap signal
 │   ├── payloads/            ← raw GraphQL subtrees, sharded + gzipped
 │   ├── media/               ← downloaded photo / video / article-image / frame bytes
 │   └── snapshots/           ← pre-<command> recovery copies

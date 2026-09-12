@@ -187,7 +187,66 @@ one blind spot, and this one cannot share it but cannot read a claim.
 running only once enough of the corpus carries verdicts — otherwise, as above,
 you are measuring your own coverage.
 
-## 7. See the whole corpus at a glance
+## 7. Index it and search it
+
+Once `enrich` and `topics` have run, build the retrieval index. It is derived
+from the store, so it costs nothing you cannot rebuild:
+
+```bash
+uv run xbrain index build
+# → 2474 items · 45 topics · 10570 superficies · 22933 chunks · 2474 perfiles
+# →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
+# →   3.1s
+```
+
+Now query it. Results come back grouped by item, each with the fragments that
+matched and where they came from:
+
+```bash
+uv run xbrain search "transformer attention" --limit 5
+# → 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
+# →    · [video_transcript] origin=asr trust=machine_extracted · via lexical
+# →      ly talking about changing here is you know, where the norms go, …
+# →    → verifica con: xbrain get 2051242195298968041 --surface video_transcript
+```
+
+That last line is the habit worth forming. `origin=llm` on a match means **xbrain
+wrote it**, not the author — so when a summary is what matched, `verifica con`
+names the surface that can actually settle the claim, and `get` hands you the
+source in full:
+
+```bash
+uv run xbrain get 2051242195298968041 --surface video_transcript
+```
+
+`get` reads the **live store**, never the index, so it keeps working with
+`data/index/` deleted. Add `--json` to either command for the same content as a
+stable document — the human view and the JSON are two renderings of one model.
+
+Narrow with any of the eight filters (`--from`/`--to`, `--author`, `--mine`,
+`--topic`, `--kind`, `--origin`, `--has-surface`); they are applied before
+anything is scored:
+
+```bash
+uv run xbrain search "agents" --topic ai-agents --from 2026-01-01 --kind x_article
+```
+
+**The index does not update itself.** Any stage that writes the store leaves it
+behind, and `search` says so rather than quietly serving stale evidence:
+
+```bash
+uv run xbrain index status    # what it holds, how far behind it is
+uv run xbrain index update    # touch only what changed (0.8s when nothing did)
+```
+
+Two limits to know before you judge the results. There is **no stemming** —
+`agente` and `agentes` are different words, and on this corpus their top tens
+shared zero items — and it is **lexical, not semantic**: it finds proper nouns,
+figures and exact phrases, not conceptual similarity. Every response declares the
+second one (`degraded: ["no_embeddings"]`). Details, costs and the rest of the
+limits: [The knowledge index](knowledge-index.md).
+
+## 8. See the whole corpus at a glance
 
 `generate` also writes `dashboard.html` — a self-contained interactive dashboard
 (counts, topics, authors, growth over time, photo thumbnails), with drill-down and
@@ -204,11 +263,16 @@ open ~/Documents/Vault/vault/learnings/x-knowledge/dashboard.html
 Re-run periodically — everything is **incremental and idempotent**:
 
 ```bash
-uv run xbrain sync        # pull new bookmarks/tweets, re-render
-uv run xbrain enrich      # enrich only the new posts
-uv run xbrain topics      # refresh topic pages
+uv run xbrain sync          # pull new bookmarks/tweets, re-render
+uv run xbrain enrich        # enrich only the new posts
+uv run xbrain topics        # refresh topic pages
 uv run xbrain generate
+uv run xbrain index update  # put the search index back in step with the store
 ```
+
+`index update` is last because every command above it writes the store. Skip it
+and nothing breaks — `search` detects it and warns — but you will be searching
+yesterday's corpus.
 
 The markdown is **derived and disposable** — delete and regenerate any time. The
 source of truth is `data/items.json` (snapshotted before every destructive op;
