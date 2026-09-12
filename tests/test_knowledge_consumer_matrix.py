@@ -15,10 +15,12 @@ THREE POPULATIONS, THREE TOTALITY ASSERTIONS:
    mapping is what `get_service` uses to answer "what surfaces does this failed fetch
    explain?".
 
-3. The CONSUMERS — `search_service` and `get_service` read provenance from
-   `SURFACE_ORIGIN` and `ORIGIN_TRUST`, never from a hand-written list. The totality
-   assertions here guarantee that adding a new `SurfaceType` or `ContentKind` without
-   wiring it into those maps raises immediately, not at query time.
+3. The CONSUMERS read each map from ONE place, never from a hand-written list.
+   `search_service._verify_with` is the provenance consumer: it reads `SURFACE_ORIGIN`
+   and `ORIGIN_TRUST`. `get_service._failed_surface_types` reads only
+   `CONTENT_KIND_TO_SURFACE_TYPES` and touches neither provenance map. The totality
+   assertions here guarantee that a new `SurfaceType` without an origin, or a new
+   `ContentKind` without a surface mapping, goes red here and not at query time.
 
 WHAT IS NOT TESTED HERE: the generator/judge/checker contract (`test_evidence_contract.py`
 already covers that) and the per-model text-field classification
