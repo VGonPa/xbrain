@@ -307,6 +307,119 @@ def test_eval_sweep_honours_and_publishes_the_limit(workspace: Path) -> None:
     assert default["limit"] == 10
 
 
+def test_eval_sweep_ranks_at_the_k_the_command_was_given(workspace: Path) -> None:
+    """F2-1 of the final gate on #177: `--k` never reached the sweep. `_run_sweep` took no `k`
+    and called `sweep_chunker` without one, so the ranking always happened at the default 10:
+
+        eval --k 5 --sweep-chunker "target=800,1600" --json  ->  report k = 10
+        eval       --sweep-chunker "target=800,1600" --json  ->  report k = 10
+        payloads byte-identical: True
+
+    It is the same defect, in the same function, with the same byte-identical tell as the
+    `--limit` one the sweep commit says it fixed — and every `k=` in the sweep's own tests was
+    the default, so no test at any layer could have caught it. `sweep_chunker(k=…)` was always
+    correct; only the wiring was missing.
+
+    The DEFAULT is asserted as a control, so this cannot pass because 5 happened to be what
+    the command does anyway.
+    """
+    payload = _json_stdout(
+        runner.invoke(app, ["eval", "--k", "5", "--sweep-chunker", "target=800,1600", "--json"])
+    )
+    assert payload["k"] == 5, payload
+    assert all("recall@5" in row for row in payload["rows"]), payload["rows"]
+
+    default = _json_stdout(
+        runner.invoke(app, ["eval", "--sweep-chunker", "target=800,1600", "--json"])
+    )
+    assert default["k"] == 10, "the control moved: 5 was not distinguishable from the default"
+
+
+def test_eval_sweep_refuses_more_than_one_k_instead_of_picking_one(workspace: Path) -> None:
+    """`--k` is repeatable on the ordinary path — a report carries several columns — and the
+    sweep ranks by exactly ONE `recall@k`. Taking `max(k)` would discard the others in silence,
+    which is the defect this PR exists to close, one layer up. So the combination is REFUSED,
+    by name and with a non-zero exit.
+    """
+    result = runner.invoke(
+        app, ["eval", "--k", "1", "--k", "5", "--sweep-chunker", "target=800,1600"]
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "--k" in result.output and "--sweep-chunker" in result.output, result.output
+    # And ONE value is honoured rather than refused along with the rest.
+    assert (
+        _json_stdout(
+            runner.invoke(app, ["eval", "--k", "5", "--sweep-chunker", "target=800", "--json"])
+        )["k"]
+        == 5
+    )
+
+
+def test_eval_sweep_refuses_a_threshold_it_cannot_apply(workspace: Path) -> None:
+    """F2-2 of the final gate on #177: `--min-recall` was accepted on the sweep path and
+    silently ignored, because `if sweep_chunker: _run_sweep(...); return` happens before the
+    threshold is ever used. Measured there, with the ordinary path as the control:
+
+        | threshold        | ordinary `eval` | `eval --sweep-chunker` |
+        | --min-recall 1.1 | exit 1          | exit 0                 |
+        | --min-recall 2.0 | exit 1          | exit 0                 |
+
+    The flag's own help promises *«si algún bucket queda por debajo, el comando falla»*, and
+    on the sweep path it judged nothing and exited 0 — the fail-open CLAUDE.md already records
+    for this exact flag. The threshold judges the BUCKETS of one evaluation; a sweep publishes
+    a table of combinations and has no bucket to compare against, so inventing a meaning for
+    it here would be a gate whose green a reader would misread. It is refused instead, which
+    is the one reading that cannot mislead.
+
+    Both halves are asserted: the sweep refuses, and the ordinary path still fails — so the
+    flag's promise is kept somewhere and the refusal is a narrowing, not a deletion.
+    """
+    swept = runner.invoke(
+        app, ["eval", "--min-recall", "2.0", "--sweep-chunker", "target=800,1600"]
+    )
+
+    assert swept.exit_code != 0, "the sweep accepted a threshold it never applied:\n" + swept.output
+    assert "--min-recall" in swept.output and "--sweep-chunker" in swept.output, swept.output
+
+    plain = runner.invoke(app, ["eval", "--min-recall", "2.0"])
+    assert plain.exit_code != 0, plain.output
+
+
+def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(workspace: Path) -> None:
+    """F2-3 at the surface a caller reads. A sweep whose every combination was unscorable
+    printed «PLANO: todas las combinaciones puntúan igual» and exited 0 — a positive claim
+    about a ranking that never happened, reported as a success.
+
+    The golden set is trimmed to FX7, whose `source` filter the lexical baseline cannot push
+    into `WHERE`, so every case is UNMEASURED for every combination — the same construction
+    the threshold's own fail-closed test uses.
+
+    The empty grid is asserted beside it because it is the same predicate — no winner — and
+    it used to publish `rows: []` with exit 0 as well.
+    """
+    golden = yaml.safe_load((workspace / "eval" / "golden-set.yaml").read_text(encoding="utf-8"))
+    golden["cases"] = [c for c in golden["cases"] if c["id"] == "FX7"]
+    golden.pop("scenarios", None)
+    (workspace / "eval" / "golden-set.yaml").write_text(
+        yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
+    )
+
+    unmeasured = runner.invoke(app, ["eval", "--sweep-chunker", "target=800,1600"])
+
+    assert unmeasured.exit_code != 0, "a sweep that scored nothing exited 0:\n" + unmeasured.output
+    assert "SIN MEDICIÓN" in unmeasured.output, unmeasured.output
+    assert "PLANO" not in unmeasured.output, unmeasured.output
+    # The table is still published: the run failed, the evidence is not withheld.
+    payload = json.loads((workspace / "data" / "eval-sweep.json").read_text(encoding="utf-8"))
+    assert payload["winner"] is None and payload["measured"] is False
+    assert len(payload["rows"]) == 2
+
+    empty = runner.invoke(app, ["eval", "--sweep-chunker", "target="])
+    assert empty.exit_code != 0, empty.output
+    assert "SIN COMBINACIONES" in empty.output, empty.output
+
+
 def test_eval_sweep_refuses_an_unknown_axis_through_the_command(workspace: Path) -> None:
     """A typo that swept nothing would publish the DEFAULT's numbers under the name of a
     sweep. The refusal has to reach the CLI's exit code, not only `parse_sweep`.

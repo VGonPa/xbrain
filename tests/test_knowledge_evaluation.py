@@ -983,3 +983,74 @@ def test_a_one_cell_sweep_does_not_report_a_tie_it_could_not_have_measured(corpu
     # And a real tie still says PLANO, so the deviation narrowed the claim and did not delete it.
     flat = render_sweep_markdown(sweep_chunker(cases, corpus, {"min_chars": [40, 41]}))
     assert "PLANO" in flat, flat
+
+
+def test_a_sweep_that_measured_nothing_has_no_winner_and_does_not_report_a_tie(corpus) -> None:
+    """F2-3 of the final gate on #177. `_sweep_verdict` built `distinct` out of `_number(...)`
+    STRINGS, and `_number(None)` is the constant `"sin cobertura"` — so N rows that could not
+    be scored at all collapsed to ONE distinct value and took the flat branch. Executed there
+    with `cases=[]` over two combinations, the report read:
+
+        |  800 | 0 | 56 | sin cobertura | sin cobertura | sin cobertura |
+        | 1600 | 0 | 47 | sin cobertura | sin cobertura | sin cobertura |
+        PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks.
+
+    The table is honest and the verdict is not: it makes a positive claim about a ranking that
+    never happened, over rows where NOTHING was compared. It is declared deviation 3 (the
+    one-row fake tie) one input class over — same predicate, same false verdict — and the
+    verdict is the one line a reader takes away.
+
+    A sweep with nothing measured therefore has NO WINNER and says so, and the contrast is
+    asserted in the same test: a GENUINE tie — rows that all scored the same REAL number —
+    still reports PLANO and still has a winner, so the repair narrowed the claim instead of
+    deleting it.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+
+    nothing = sweep_chunker([], corpus, {"target": [800, 1600]})
+    text = render_sweep_markdown(nothing)
+    assert nothing.winner is None, "an unscored row was published as the winner"
+    assert nothing.measured is False
+    assert "PLANO" not in text, text
+    assert "SIN MEDICIÓN" in text, text
+    payload = nothing.to_dict()
+    assert payload["winner"] is None and payload["measured"] is False
+    assert "SIN MEDICIÓN" in payload["verdict"]
+
+    # A grid that resolves to no combination at all has no winner either, and says a DIFFERENT
+    # thing: nothing was swept, as against swept and unscorable.
+    empty = sweep_chunker(cases, corpus, {"target": []})
+    assert empty.winner is None and empty.rows == ()
+    assert "SIN COMBINACIONES" in render_sweep_markdown(empty)
+
+    # THE MEASURED FLAT TIE IS PRESERVED. `min_chars` at 40 and 41 cannot change the ranking
+    # on this corpus (no fragment sits near the floor), so both rows score the same REAL
+    # value — which is a result about the chunker, not an absence of one.
+    flat = sweep_chunker(cases, corpus, {"min_chars": [40, 41]})
+    assert flat.measured is True and flat.winner is not None
+    assert flat.winner.recall is not None
+    assert "PLANO" in render_sweep_markdown(flat)
+
+
+def test_the_top_row_is_the_winner_only_when_it_actually_scored() -> None:
+    """The guard read off the ROW's own state, so a future change to the sort order cannot
+    quietly publish an unscored combination as the winner.
+
+    Asserted on a report BUILT HERE rather than on one `sweep_chunker` produced: measurability
+    depends on the cases (a filter the strategy cannot push), never on the chunk size, so every
+    combination of a real sweep is scorable or none is, and the mixed table below is not
+    reachable through the public entry point. It is exactly the state a reordering would
+    create, which is why it is pinned here instead of being argued.
+    """
+    from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS
+    from xbrain.knowledge.evaluation import SweepReport, SweepRow
+
+    unscored = SweepRow(
+        params=DEFAULT_CHUNKER_PARAMS, chunks=10, recall=None, mrr=None, by_stratum={}
+    )
+    scored = SweepRow(params=DEFAULT_CHUNKER_PARAMS, chunks=99, recall=0.5, mrr=0.5, by_stratum={})
+
+    assert SweepReport(k=10, rows=(unscored, scored)).winner is None
+    assert SweepReport(k=10, rows=(scored, unscored)).winner is scored

@@ -758,6 +758,12 @@ def _cell(values: dict[str, Any], name: str) -> str:
 # count as an owner count would be a figure that cannot come out any other way.
 
 
+# The k the sweep ranks at when the caller names none. ONE definition, read by the function
+# signature below and by the CLI's `_run_sweep`: a second literal in the command would be a
+# default that could drift away from the one the report publishes (rule 5).
+DEFAULT_SWEEP_K: int = 10
+
+
 @dataclass(frozen=True)
 class SweepRow:
     """One `(target, overlap)` combination and what it scored.
@@ -783,20 +789,57 @@ class SweepRow:
 class SweepReport:
     """Every combination, best first, with the k the ranking was decided on and the retrieval
     depth every cell ran at — the two numbers a reader needs to compare a cell with the next
-    sweep's."""
+    sweep's.
+
+    A ranking is not guaranteed: a grid that resolved to no combination, and a table where no
+    combination could be scored, both report `winner is None`. The caller decides what to do
+    with that; what this class refuses to do is name a winner it does not have.
+    """
 
     k: int
     rows: tuple[SweepRow, ...]
     limit: int = 0
 
     @property
+    def measured(self) -> bool:
+        """Did ANY combination produce a score? A table of `sin cobertura` is not a ranking.
+
+        Read off the rows' own `recall`, never off the rendered strings: `_number(None)` is the
+        constant `"sin cobertura"`, so a predicate computed on the formatted table collapses
+        every unscored row onto one value and reads as a tie (F2-3).
+        """
+        return any(row.recall is not None for row in self.rows)
+
+    @property
     def winner(self) -> SweepRow | None:
-        return self.rows[0] if self.rows else None
+        """The top row — and only when that row actually scored.
+
+        The condition is the ROW's own state rather than `self.measured`, so a future change to
+        the sort order cannot publish an unscored combination as the winner while the report
+        still calls itself measured. Today the two coincide: measurability depends on the cases
+        (a filter the strategy cannot push into `WHERE`), never on the chunk size, so every
+        combination of one sweep is scorable or none is.
+        """
+        if not self.rows:
+            return None
+        top = self.rows[0]
+        return top if top.recall is not None else None
 
     def to_dict(self) -> dict[str, Any]:
+        winner = self.winner
         return {
             "k": self.k,
             "limit": self.limit,
+            # The three keys a machine consumer needs to tell a RANKING from a table that could
+            # not be ranked. `verdict` is the same sentence the markdown prints, taken from the
+            # same function, so the human artefact and the machine one cannot disagree (rule 5).
+            "measured": self.measured,
+            "winner": (
+                None
+                if winner is None
+                else {"target": winner.params.target, "overlap": winner.params.overlap}
+            ),
+            "verdict": _sweep_verdict(self),
             "rows": [
                 {
                     "target": row.params.target,
@@ -844,7 +887,7 @@ def sweep_chunker(
     grid: Mapping[str, Sequence[int]],
     *,
     strategy: str = "lexical",
-    k: int = 10,
+    k: int = DEFAULT_SWEEP_K,
     base: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
     limit: int | None = None,
 ) -> SweepReport:
@@ -866,7 +909,9 @@ def sweep_chunker(
     so the reader never infers it from the table.
 
     A combination that scores nothing measurable sorts last instead of sorting first, which is
-    what a `None` would do under a naive `max`.
+    what a `None` would do under a naive `max`. And when NO combination scored, the report has
+    no winner at all — `sin cobertura` on every row is the absence of a ranking, never a tie
+    between rows that were never compared.
 
     `limit` is the retrieval depth every cell runs at: the CLI's `--limit`, threaded through
     and published on the report. The first version of the sweep called `evaluate` with no
@@ -967,16 +1012,42 @@ def render_sweep_markdown(report: SweepReport) -> str:
             f"| {row.params.target} | {row.params.overlap} | {row.chunks} "
             f"| {_number(row.recall)} | {_number(row.recall_at_1)} | {_number(row.mrr)} |"
         )
-    if report.winner is not None:
-        lines += ["", _sweep_verdict(report)]
+    # Emitted unconditionally: every table has a sentence now, including the two that have no
+    # winner. The guard that used to stand here (`if report.winner is not None`) meant a sweep
+    # with no rows published a bare header and said nothing at all about it.
+    lines += ["", _sweep_verdict(report)]
     return "\n".join(lines)
 
 
 def _sweep_verdict(report: SweepReport) -> str:
-    """Which criterion DECIDED, said in the report (S-1): a tie on `recall@k` is named, with
-    the rows it spans, and the criterion that broke it is named with its two values."""
+    """The one sentence a reader takes away, for EVERY shape of table.
+
+    Three of the five cases are not rankings at all — no rows, nothing scored, a single cell —
+    and each of them used to be reported as something it was not. They are answered here; the
+    ranked table's own «which criterion decided» is `_decided_verdict`, kept apart so this
+    function reads as the list of shapes a sweep can have.
+    """
+    # NO ROWS AT ALL. A grid whose axis resolved to no value swept nothing, and a header with
+    # no table under it is not a result; saying so is cheaper than making a reader notice.
+    if not report.rows:
+        return (
+            "SIN COMBINACIONES: el barrido no produjo ninguna fila, así que no hay ganador "
+            "(¿un eje sin valores, `target=`?)."
+        )
     winner = report.winner
-    assert winner is not None
+    # ROWS, BUT NOTHING MEASURED (F2-3 of the final gate on #177). `distinct` below is built
+    # out of `_number(...)` STRINGS and `_number(None)` is the constant `"sin cobertura"`, so N
+    # unscored rows collapsed to ONE distinct value and took the flat branch: «PLANO: todas las
+    # combinaciones puntúan igual» over a table where nothing was compared to anything. That is
+    # declared deviation 3 — the one-row fake tie — one input class over, and the verdict is the
+    # line a reader takes away. A tie is a RESULT about the chunker; this is its absence, and
+    # the two now read differently.
+    if winner is None:
+        return (
+            f"SIN MEDICIÓN: ninguna de las {len(report.rows)} combinaciones pudo puntuarse "
+            f"(recall@{report.k} sin cobertura en todas), así que no hay ganador ni empate: "
+            "el barrido no midió nada."
+        )
     label = f"target={winner.params.target}, overlap={winner.params.overlap}"
     # A DEVIATION FROM THE SNAPSHOT, and the reason. `len(distinct) == 1` is true for a
     # ONE-ROW sweep as well, so a single-combination run always printed «PLANO: todas las
@@ -986,6 +1057,18 @@ def _sweep_verdict(report: SweepReport) -> str:
     # A single cell is a measurement of one combination and says so.
     if len(report.rows) == 1:
         return f"UNA COMBINACIÓN: {label}; no hay barrido que comparar."
+    return _decided_verdict(report, winner, label)
+
+
+def _decided_verdict(report: SweepReport, winner: SweepRow, label: str) -> str:
+    """Which criterion DECIDED, said in the report (S-1): a tie on `recall@k` is named, with
+    the rows it spans, and the criterion that broke it is named with its two values.
+
+    Reached only for a table with MORE THAN ONE row and a scored winner, so every branch below
+    is a statement about a comparison that actually happened.
+    """
+    # Reached only with a winner, i.e. with at least one row SCORED — so a `sin cobertura`
+    # that survives into this set is a partially-unmeasured table, never the empty one.
     distinct = {(_number(r.recall), _number(r.mrr)) for r in report.rows}
     if len(distinct) == 1:
         return "PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks."
