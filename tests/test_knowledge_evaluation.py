@@ -697,3 +697,47 @@ def test_the_aggregate_names_come_from_the_cases_not_from_a_second_list(report) 
     bucket = report.by_stratum["exacto"]
     case = next(c for c in report.cases if "exacto" in c.strata)
     assert set(bucket["measured"]) == set(case.metrics)
+
+
+# ---------------------------------------------------------------------------
+# 02.13 — lexical_memory retirement guard
+# ---------------------------------------------------------------------------
+
+
+def test_lexical_memory_is_retired_and_not_imported() -> None:
+    """The in-memory baseline wrapper is DELETED by Plan 02.13.
+
+    This guard ensures no active import of `lexical_memory` remains anywhere in the knowledge
+    package. The module was retired when the evaluation harness moved to the persisted index
+    writer (`LexicalIndex` via `open_memory_index`), which uses the SAME schema and scorer
+    as the persisted index — the difference is only where the database lives.
+
+    R2 of the delivery plan: `evaluation.py` was the sole remaining consumer.
+    """
+    import ast
+    from pathlib import Path
+
+    knowledge_dir = Path(__file__).parent.parent / "src" / "xbrain" / "knowledge"
+    violations: list[str] = []
+
+    for py_file in knowledge_dir.glob("*.py"):
+        if py_file.name == "lexical_memory.py":
+            violations.append(f"{py_file.name}: module file still exists")
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if "lexical_memory" in alias.name:
+                        violations.append(f"{py_file.name}:{node.lineno}: imports {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and "lexical_memory" in node.module:
+                    violations.append(f"{py_file.name}:{node.lineno}: imports from {node.module}")
+
+    assert not violations, (
+        "lexical_memory.py was retired in 02.13 but active imports remain:\n  "
+        + "\n  ".join(violations)
+    )

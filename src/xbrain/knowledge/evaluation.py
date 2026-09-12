@@ -46,7 +46,8 @@ from typing import Any, Iterable, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
-from xbrain.knowledge.lexical_memory import InMemoryLexicalIndex, LexicalHit
+from xbrain.knowledge.index_schema import open_memory_index
+from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
 from xbrain.knowledge.models import KnowledgeChunk
 from xbrain.knowledge.surfaces import (
     article_block_texts,
@@ -72,14 +73,15 @@ DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 
 # Which of spec §7.2's eight filters each strategy can actually push into the backend.
 #
-# THIS TABLE IS THE DIFFERENCE BETWEEN A ZERO AND A GAP. The lexical baseline indexes chunks
-# and their surface metadata; it has no date, author, source or content-kind columns — those
-# arrive with Plan 02's persisted index, and spec §7.2 says of `content_kinds` and
-# `has_surfaces` that they come from no existing column and need their own plumbing.
+# THIS TABLE IS THE DIFFERENCE BETWEEN A ZERO AND A GAP. The evaluation harness measures the
+# BASELINE retrieval, so it supports only the two filters that the original in-memory scorer
+# could apply: `has_surfaces` and `origins`. The remaining six (date, author, source,
+# content-kind) are available in the persisted index but are NOT supported HERE — a case that
+# declares any of them is UNMEASURED, preserving the evaluation contract.
 #
 # Scoring a case whose filter nobody applied produced `filtros: recall@10 = 0.0` in the first
-# real-corpus run of this harness. That number reads as "retrieval failed at filtering", when
-# the truth is that the instrument does not exist yet — a fabricated zero, and precisely what
+# real-corpus run of the harness. That number reads as "retrieval failed at filtering", when
+# the truth is that the instrument did not exist yet — a fabricated zero, and precisely what
 # spec §8.6.8 forbids. So an unsupported filter makes the case UNMEASURED instead.
 SUPPORTED_FILTERS: dict[str, frozenset[str]] = {
     "lexical": frozenset({"has_surfaces", "origins"}),
@@ -271,15 +273,20 @@ def corpus_chunks(
 
 def build_index(
     corpus: Corpus, *, params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
-) -> tuple[InMemoryLexicalIndex, IndexStats]:
+) -> tuple[LexicalIndex, IndexStats]:
     """The lexical baseline over a whole corpus, plus what it covered.
+
+    Uses the SAME persisted schema and scorer as `index_build` (spec §8.5), via
+    `open_memory_index()` from `index_schema` — the only difference is where the database
+    lives, so the baseline is measured by the instrument it will be replaced by.
 
     `chunks` is what the chunker EMITTED and `chunks_not_indexed` is the difference the index
     refused, so the two together say whether coverage is complete — one number that silently
     meant "indexed" could not.
     """
     chunks, surfaces = corpus_chunks(corpus, params=params)
-    index = InMemoryLexicalIndex()
+    connection = open_memory_index()
+    index = LexicalIndex(connection)
     indexed = index.add(chunks)
     return index, IndexStats(
         items=len(corpus.items),
@@ -368,7 +375,7 @@ def evaluate(
     )
 
 
-def _search(index: InMemoryLexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalHit, ...]:
+def _search(index: LexicalIndex, case: GoldenCase, limit: int) -> tuple[LexicalHit, ...]:
     """Run one case's query, applying its filters BEFORE scoring (spec §5.3).
 
     The filters a case declares are part of the case (spec §8.1) — v1 kept windows under a
@@ -376,13 +383,21 @@ def _search(index: InMemoryLexicalIndex, case: GoldenCase, limit: int) -> tuple[
     was reported as though the window had been applied. Only the filters this baseline can
     push into `WHERE` are applied here; the rest are declared in the report rather than
     silently ignored (see `_unsupported_filters`).
+
+    ONLY `has_surfaces` AND `origins` ARE PASSED (02.13). The evaluation contract supports
+    exactly these two — see `SUPPORTED_FILTERS` — so only they are forwarded to the index.
+    The remaining six filters from `SearchFilters` are deliberately NOT applied here; cases
+    that declare any of them are already classified as unmeasured upstream.
     """
-    return index.search(
-        case.query,
-        limit=limit,
-        surface_types=case.filters.has_surfaces,
+    from xbrain.knowledge.contracts import SearchFilters
+
+    # Pass ONLY the supported filters — has_surfaces and origins — leaving the rest at default.
+    # This preserves the evaluation contract: unsupported filters are NOT silently applied.
+    supported = SearchFilters(
+        has_surfaces=case.filters.has_surfaces,
         origins=case.filters.origins,
     )
+    return index.search(case.query, limit, filters=supported)
 
 
 def _owner_key(owner_type: str, owner_id: str) -> str:
