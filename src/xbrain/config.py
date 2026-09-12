@@ -83,6 +83,25 @@ class Config:
     index_dir: Path
     index_max_matches_per_item: int
     index_get_char_budget: int
+    # `[embeddings]` — the EXTERNAL embedding backend the knowledge index's vector
+    # plane shells out to (Plan 03 §1.4). Like `[vision].command` there is NO bundled
+    # default: `embeddings_command` starts at `""` and, unset, `search` keeps serving
+    # lexical results. Shipping a default would be choosing the embedding model
+    # without evaluating it, and the model is chosen by the golden set.
+    #
+    # The two prefixes are a property of the MODEL, not of the code: the E5 and BGE
+    # families degrade notably without `"query: "` / `"passage: "`, and other models
+    # want neither. Keeping them in config is what lets a model change without
+    # touching Python — and they go into the index manifest, because changing one
+    # invalidates the stored vectors exactly as changing the model does.
+    #
+    # FLAT NAMES, like every other section: `Config` is one dataclass, not a tree.
+    embeddings_command: str
+    embeddings_model: str | None
+    embeddings_batch_size: int
+    embeddings_timeout_seconds: int
+    embeddings_query_prefix: str
+    embeddings_passage_prefix: str
 
     @property
     def payload_dir(self) -> Path:
@@ -156,6 +175,42 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
     return index_dir, max_matches, char_budget
 
 
+def _embeddings_settings(settings: dict) -> tuple[str, str | None, int, int, str, str]:
+    """`[embeddings]` → the six flat fields, range-checked.
+
+    THE DEFAULTS ARE IMPORTED, NEVER RETYPED (rule 5). A `64` typed here would be a
+    second definition of a batch size `embeddings.py` owns, and the two copies drift
+    the day one of them moves with nothing going red, because each file stays
+    internally consistent on its own. The import is LOCAL to this function for the
+    same reason `_index_settings`' is: `config.py` is loaded on every single `xbrain`
+    invocation, and `xbrain login` should not pay to import `subprocess` and the
+    embedder contract to find out where the vault is.
+
+    `command` has NO default beyond `""` and no validation beyond that: an unset
+    command is the normal, supported state (the vector plane is opt-in end to end),
+    and `xbrain.embeddings` is what turns a request made against it into an
+    actionable error. The two prefixes are likewise unvalidated — `""` is right for
+    most models and any string is legitimate for the rest.
+    """
+    from xbrain.embeddings import DEFAULT_BATCH_SIZE, DEFAULT_TIMEOUT_SECONDS
+
+    embeddings = settings.get("embeddings", {})
+    batch_size = int(embeddings.get("batch_size", DEFAULT_BATCH_SIZE))
+    if batch_size < 1:
+        raise ValueError("config.toml: [embeddings].batch_size must be >= 1")
+    timeout_seconds = int(embeddings.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+    if timeout_seconds < 1:
+        raise ValueError("config.toml: [embeddings].timeout_seconds must be >= 1")
+    return (
+        embeddings.get("command", ""),
+        embeddings.get("model"),
+        batch_size,
+        timeout_seconds,
+        embeddings.get("query_prefix", ""),
+        embeddings.get("passage_prefix", ""),
+    )
+
+
 def load_config(repo_root: Path) -> Config:
     """Load config.toml from a repo root into a Config."""
     settings = tomllib.loads((repo_root / "config.toml").read_text(encoding="utf-8"))
@@ -210,6 +265,14 @@ def load_config(repo_root: Path) -> Config:
         )
     data_dir = repo_root / paths["data_dir"]
     index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
+    (
+        embeddings_command,
+        embeddings_model,
+        embeddings_batch_size,
+        embeddings_timeout_seconds,
+        embeddings_query_prefix,
+        embeddings_passage_prefix,
+    ) = _embeddings_settings(settings)
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -236,4 +299,10 @@ def load_config(repo_root: Path) -> Config:
         index_dir=index_dir,
         index_max_matches_per_item=index_max_matches,
         index_get_char_budget=index_char_budget,
+        embeddings_command=embeddings_command,
+        embeddings_model=embeddings_model,
+        embeddings_batch_size=embeddings_batch_size,
+        embeddings_timeout_seconds=embeddings_timeout_seconds,
+        embeddings_query_prefix=embeddings_query_prefix,
+        embeddings_passage_prefix=embeddings_passage_prefix,
     )

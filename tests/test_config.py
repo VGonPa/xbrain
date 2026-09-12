@@ -469,3 +469,132 @@ def test_load_config_index_dir_rejects_a_symlink_out_of_data_dir(tmp_path: Path)
     )
     with pytest.raises(ValueError, match="index"):
         load_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# [embeddings] — Plan 03 §1.4. The six settings the external embedding backend
+# reads. Flat names, like every other section (`index_dir`, `vision_command`).
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_defaults_embeddings_command_to_unset(tmp_path: Path):
+    """No [embeddings] section → the external embedder is unset (`""`) and the
+    model is None.
+
+    That is the NORMAL, supported state, not a half-configured one: the vector
+    plane is opt-in end to end, `search` keeps serving lexical results, and there
+    is deliberately NO bundled default — shipping one would be choosing the
+    embedding model without evaluating it (Plan 03 §1.2).
+    """
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.embeddings_command == ""
+    assert cfg.embeddings_model is None
+
+
+def test_load_config_defaults_both_prefixes_to_empty(tmp_path: Path):
+    """`""`, not `"query: "`.
+
+    The prefixes belong to the MODEL, and there is no default model — so a default
+    prefix would silently prepend `"query: "` to every text for a model that never
+    asked for it, changing every stored vector with nothing to point at.
+    """
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.embeddings_query_prefix == ""
+    assert cfg.embeddings_passage_prefix == ""
+
+
+def test_load_config_embeddings_defaults_are_the_owning_modules_constants(
+    tmp_path: Path, monkeypatch
+):
+    """The batch size and timeout are IMPORTED from `xbrain.embeddings`, not retyped.
+
+    And comparing against the imported constant would NOT catch a retyped literal
+    (rule 2 applied to a test): `assert cfg.embeddings_batch_size == DEFAULT_BATCH_SIZE`
+    passes just as happily on a hand-typed `64`, because both sides read 64 either
+    way — the assertion could not come out differently. So the owning constants are
+    MOVED here, and the configured defaults must move with them. A literal in
+    `config.py` fails this; an import passes it.
+    """
+    monkeypatch.setattr("xbrain.embeddings.DEFAULT_BATCH_SIZE", 7)
+    monkeypatch.setattr("xbrain.embeddings.DEFAULT_TIMEOUT_SECONDS", 11)
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.embeddings_batch_size == 7
+    assert cfg.embeddings_timeout_seconds == 11
+
+
+def test_load_config_embeddings_defaults_are_the_documented_values(tmp_path: Path):
+    """And the values themselves, once, so `config.toml.example` stays honest."""
+    _write_repo(tmp_path)
+    cfg = load_config(tmp_path)
+    assert cfg.embeddings_batch_size == 64
+    assert cfg.embeddings_timeout_seconds == 600
+
+
+def test_load_config_embeddings_round_trips_every_setting(tmp_path: Path):
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        "[embeddings]\n"
+        'command = "xbrain-embed --fast"\n'
+        'model = "intfloat/multilingual-e5-base"\n'
+        "batch_size = 128\n"
+        "timeout_seconds = 90\n"
+        'query_prefix = "query: "\n'
+        'passage_prefix = "passage: "\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.embeddings_command == "xbrain-embed --fast"
+    assert cfg.embeddings_model == "intfloat/multilingual-e5-base"
+    assert cfg.embeddings_batch_size == 128
+    assert cfg.embeddings_timeout_seconds == 90
+    assert cfg.embeddings_query_prefix == "query: "
+    assert cfg.embeddings_passage_prefix == "passage: "
+
+
+def test_load_config_keeps_the_two_prefixes_apart(tmp_path: Path):
+    """The two are distinct settings, asserted with DIFFERENT values.
+
+    Configured with the same string on both sides, a loader that read `query_prefix`
+    into both fields would pass every other test in this file. The E5 family
+    degrades notably when a passage carries the query prefix, and the vectors stay
+    well-formed and unit-length the whole time — nothing else would ever report it.
+    """
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        '[embeddings]\nquery_prefix = "Q>"\npassage_prefix = "P>"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.embeddings_query_prefix == "Q>"
+    assert cfg.embeddings_passage_prefix == "P>"
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("batch_size", "0"),
+        ("batch_size", "-1"),
+        ("timeout_seconds", "0"),
+        ("timeout_seconds", "-30"),
+    ],
+)
+def test_load_config_embeddings_rejects_out_of_range(tmp_path: Path, setting: str, value: str):
+    """An out-of-range value fails where it is READ, with an actionable message.
+
+    `batch_size = 0` would slice the corpus into empty batches and embed nothing
+    while reporting success; `timeout_seconds = 0` would kill every embedder call
+    before it started and read as a broken backend.
+    """
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n'
+        f"[embeddings]\n{setting} = {value}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=setting):
+        load_config(tmp_path)
