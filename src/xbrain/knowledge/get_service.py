@@ -275,12 +275,17 @@ def _paginate(
             page.take_surface(surface)
             continue
         pieces = _chunks_of(item, surface, params)
-        # B2: same rationale for the chunk index on the FINAL surface. Mid-pagination, a
-        # cursor past the current surface's chunks just advances to the next one; on the last
-        # surface it would report completion when chunks remain unvisited. The check is
-        # "at the starting surface" (position == start_surface) AND "beyond the last chunk"
-        # (resume >= len(pieces)) AND "there is no following surface to fall through to".
-        if position == start_surface and resume >= len(pieces) and position + 1 >= len(wanted):
+        # B2: same rationale for the chunk index on the STARTING surface. A cursor that
+        # points past the chunks of the surface it claims to resume from is invalid — it
+        # came from a different store state, a different budget, or a corrupted string.
+        # Mid-pagination, an out-of-range chunk cursor CANNOT "just advance to the next
+        # surface": the cursor names THIS surface, and what the caller asked to resume is
+        # chunks of THIS surface that do not exist. Silently advancing makes it look like
+        # the skipped surface was delivered when it was not — the same class of silent cut
+        # spec §9.3 forbids. Measured (R2): `cursor="0:99999"` with
+        # `surfaces=("external_article", "summary")` returned `cursor="1:0"` and the first
+        # surface was never served.
+        if position == start_surface and resume >= len(pieces):
             raise ValueError(
                 f"Cursor inválido: {cursor!r} apunta más allá de los fragmentos disponibles. "
                 "Usa el que devolvió la respuesta anterior."

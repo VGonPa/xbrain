@@ -33,7 +33,7 @@ from xbrain.knowledge.get_service import (
     get,
 )
 from xbrain.knowledge.index_schema import db_path, open_index
-from xbrain.knowledge.models import KnowledgeSurface
+from xbrain.knowledge.models import KnowledgeSurface, SurfaceType
 from xbrain.knowledge.search_service import QueryContext
 from xbrain.knowledge.surfaces import article_block_texts, item_surfaces, item_topics
 from xbrain.models import Item, Topic, TopicPage
@@ -162,18 +162,83 @@ def test_get_with_a_query_also_works_without_the_index(context: QueryContext) ->
 # 22 — the default is metadata, not a dump
 # ---------------------------------------------------------------------------
 
+# What an unqualified `get` may deliver, WRITTEN OUT BY HAND (F-1, round 01, found
+# independently by both gate reviewers).
+#
+# The first version of the test below read this from the implementation:
+#
+#     assert {s.surface_type for s in bundle.surfaces} <= set(DEFAULT_SURFACES)
+#
+# — importing its expected answer from the very constant it existed to pin, which is rule 1
+# in one line. And the `<=` was weak in BOTH directions: a superset satisfies it, so any
+# widening of `DEFAULT_SURFACES` passed, and the empty set is a subset of everything, so a
+# `get` that delivered nothing at all passed too.
+#
+# Measured, not argued: widening `DEFAULT_SURFACES` from `("summary",)` to
+# `("summary", "external_article")` left the whole focused suite green while an unqualified
+# `get` dumped the 20,147-character article — the one thing Plan 02 §5 says the default must
+# never do. The literal below is what makes that mutation red.
+_EXPECTED_DEFAULT_SURFACE_TYPES = ("summary",)
 
-def test_get_without_surfaces_does_not_dump_the_long_bodies(context: QueryContext) -> None:
+
+def test_the_default_surface_list_is_the_summary_alone() -> None:
+    """The exported constant, pinned against a hand-written literal (F-1).
+
+    Separate from the behavioural test below on purpose, and neither replaces the other: this
+    one goes red when the CONSTANT moves, that one goes red when the BEHAVIOUR moves, and a
+    `_select` that stopped consulting the constant would leave this green while the corpus
+    poured out of an unqualified `get`.
+    """
+    assert DEFAULT_SURFACES == _EXPECTED_DEFAULT_SURFACE_TYPES
+
+
+@pytest.mark.parametrize(
+    ("item_id", "withheld"),
+    [
+        ("k03", ("post", "external_article")),
+        ("k08", ("post", "video_transcript", "video_frame", "video_digest")),
+    ],
+)
+def test_get_without_surfaces_delivers_the_summary_and_withholds_every_long_body(
+    context: QueryContext, item_id: str, withheld: tuple[SurfaceType, ...]
+) -> None:
     """Step 22 / Plan 02 §5: metadata, topics, summary and the LIST of what is available.
 
-    Asserted by what is ABSENT — no article, no transcript — rather than by a length
-    threshold, which would pass or fail on how long the fixture happens to be.
+    Three assertions, and each one closes a hole the subset test left open (F-1):
+
+    * the delivered types are compared for EQUALITY against a hand-written literal, so a
+      widened default is red rather than "still a subset";
+    * the summary is asserted PRESENT and byte-identical to `item.enriched.summary` — read
+      from the store model, a source no constant in `knowledge/` can contaminate — so an
+      empty bundle is red rather than "vacuously a subset";
+    * every long body the item actually has is named and rejected ONE BY ONE, and asserted
+      present in `available_surfaces` in the same breath. Withholding a body the item does
+      not have is not a property worth testing; withholding one it does have is.
+
+    Both enriched fixtures, because between them they cover five of the six surface types the
+    corpus emits: a single-item test would say nothing about the transcript, the frames or the
+    digest, and `video_transcript` is the 5,372-character one a widened default would hurt
+    most.
     """
-    bundle = get("k03", context)
-    assert {s.surface_type for s in bundle.surfaces} <= set(DEFAULT_SURFACES)
-    assert "external_article" in bundle.item.available_surfaces, (
-        "the body is withheld, but its NAME must be there or the caller cannot ask for it"
+    item = context.store[item_id]
+    assert item.enriched is not None and item.enriched.summary, (
+        "this test measures what an ENRICHED item withholds; without a summary it would be "
+        "asserting that an empty default is empty"
     )
+
+    bundle = get(item_id, context)
+
+    delivered = [surface.surface_type for surface in bundle.surfaces]
+    assert delivered == list(_EXPECTED_DEFAULT_SURFACE_TYPES)
+    assert bundle.surfaces[0].text == item.enriched.summary, (
+        "the summary is the item's own index card, delivered verbatim — not merely a surface "
+        "whose type happens to be 'summary'"
+    )
+    for name in withheld:
+        assert name not in delivered, f"an unqualified get must not deliver {name}"
+        assert name in bundle.item.available_surfaces, (
+            f"{name} is withheld, but its NAME must be there or the caller cannot ask for it"
+        )
     assert bundle.chunks == ()
 
 
@@ -370,6 +435,34 @@ def test_an_out_of_range_query_cursor_is_refused(context: QueryContext) -> None:
             surfaces=("external_article",),
             query="Quillfeather",
             cursor="q:99999",
+        )
+
+
+def test_an_out_of_range_chunk_cursor_on_a_non_final_surface_is_refused(
+    context: QueryContext,
+) -> None:
+    """R2 (Codex review): an out-of-range chunk cursor on the STARTING surface was only
+    rejected when that surface was ALSO the final one. With multiple requested surfaces,
+    the check's `position + 1 >= len(wanted)` clause failed and the code fell through to
+    advance the cursor to the next surface — silently skipping every chunk of the first.
+
+    Reproduced on HEAD before the fix:
+        get("k03", ctx, surfaces=("external_article", "summary"),
+            limits=GetLimits(char_budget=100), cursor="0:99999")
+        → cursor="1:0", surfaces=(), chunks=()
+
+    The consumer asked to resume at chunk 99999 of the article, which does not exist; the
+    call returned a cursor pointing at the summary, and the article was never delivered.
+    Same class of silent cut as B2, but on a non-final surface. Now raises ValueError on
+    any starting surface, not only the final one.
+    """
+    with pytest.raises(ValueError, match="Cursor"):
+        get(
+            "k03",
+            context,
+            surfaces=("external_article", "summary"),
+            limits=GetLimits(char_budget=100),  # force chunking
+            cursor="0:99999",
         )
 
 
