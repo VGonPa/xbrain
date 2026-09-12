@@ -914,8 +914,11 @@ connectives apart, so the change would otherwise have passed the fixture in sile
 The remaining known limits, both declared rather than discovered later: there is **no
 stemming**, and **IDF is relative to this corpus**, so a word that reads as a function word
 can still be rare to the index and go undiscounted: `el` is 1 of 49 fixture chunks and **6,070 of
-22,286** real ones (27.2 %), re-derived 2026-09-01 on the SHIPPED chunker (v2, `800/0`, store
-sha256 `f76341a3…`). *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
+22,286** real ones (27.2 %), re-derived 2026-09-01 on the then-shipped chunker (v2, `800/0`, store
+sha256 `f76341a3…`). **`CHUNKER_VERSION` is `v3` since Plan 02.9**, and this count still stands:
+v3 changed the FINGERPRINT projection (the served title joined the hashed tuple) and not the cut,
+proven by the version-stripped ranking fixture being byte-identical across the bump — the chunk
+ids moved and the chunk COUNT did not. *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
 chunker v1 and the store md5 `5aaf62f4…` — correct for that population, and left undated after
 the chunker moved; F-4 corrected the other three sites and missed this one.)* Those are what the
 vector layer of Plan 03 has to beat.

@@ -525,8 +525,13 @@ generates an Obsidian wiki.
   runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
   as a function word can still be rare to the index and go undiscounted — `el` is 1 of 49
   fixture chunks (2.0 %) and **6,070 of 22,286** real ones (**27.2 %**), re-derived 2026-09-01
-  on the SHIPPED chunker (v2, `800/0`, store sha256 `f76341a3…`), which is why a fixture query
-  ranks it high and the real corpus does not. *(It read `5,748 of 18,319 (31.4 %)`, which was
+  on the then-shipped chunker (v2, `800/0`, store sha256 `f76341a3…`), which is why a fixture
+  query ranks it high and the real corpus does not. **`CHUNKER_VERSION` is `v3` since Plan
+  02.9**, and this count still stands: v3 changed the FINGERPRINT projection (the served title
+  joined the hashed tuple) and not the cut, proven by the version-stripped ranking fixture
+  being byte-identical across the bump — so the chunk ids moved and the chunk COUNT did not.
+  Do not re-stamp a measured figure to a new version without that proof: which of the two a
+  version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
   correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
   in this branch and the derived figure did not — rule 6. Read the old pair as history.)* That, and no stemming, is what Plan 03's vector
   layer has to beat. Picking between `OR`, minimum-should-match and per-term weighting is Plan

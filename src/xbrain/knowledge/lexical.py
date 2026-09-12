@@ -41,7 +41,7 @@ from pydantic import ValidationError
 from xbrain.knowledge.contracts import SearchFilters
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.lexical_fts import match_expression, rank_order
-from xbrain.knowledge.models import KnowledgeChunk, Locator, SurfaceType
+from xbrain.knowledge.models import KnowledgeChunk, Locator, OwnerType, SurfaceType
 from xbrain.models import Author
 
 # How much of a matching chunk is shown back. Long enough to recognise the hit, short enough
@@ -54,9 +54,24 @@ EXCERPT_CHARS = 300
 # starts at `OWNER_CHUNK_MULTIPLIER` chunks per owner asked for and DOUBLES while the result
 # set came back full and still holds fewer owners than asked — a set shorter than its limit
 # is the whole ranking, and there is nothing deeper to find — up to `MAX_CHUNK_DEPTH`.
-# Reaching the bound short of owners is DECLARED to the caller, never absorbed. ONE loop,
-# here, for the two consumers that need it (rule 5): the evaluation harness (`_search`) and
-# the search service (M-4, round 08), which decides `truncated` over this window.
+# Reaching the bound short of owners is DECLARED to the caller, never absorbed.
+#
+# ONE CONSUMER, NOT TWO, and the comment said two (round 10). It claimed a rule-5 binding to
+# the evaluation harness; `evaluation.py` contains neither `search_owners` nor `exhausted`,
+# its `_search` calls `InMemoryLexicalIndex.search(q, limit)`, and that class has exactly two
+# methods, `add` and `search`. So the only caller is `search_service._chunk_owners` (M-4,
+# round 08), which decides `truncated` over this window.
+#
+# The two therefore score DIFFERENT retrievals, which is the part worth knowing. Measured on
+# a 31-item corpus where one item monopolises the head of the chunk ranking:
+#
+#     k= 5   harness search(q,k):  5 chunks /  1 owner    service:  20 chunks / 15 owners
+#     k=10   harness search(q,k): 10 chunks /  5 owners   service:  36 chunks / 31 owners
+#
+# The published lexical baseline is a chunk-limited retrieval and the service pages by
+# owners, so a recall@k from the harness is not a statement about what `search` returns.
+# Whether to unify them is a Plan-02 §11 question and is NOT settled here; what is settled
+# is that the comment no longer asserts a binding that does not exist.
 OWNER_CHUNK_MULTIPLIER = 4
 MAX_CHUNK_DEPTH = 10_000
 
@@ -109,7 +124,7 @@ class LexicalHit:
 
     chunk_id: str
     surface_id: str
-    owner_type: str
+    owner_type: OwnerType
     owner_id: str
     surface_type: SurfaceType
     origin: str
@@ -129,15 +144,38 @@ class LexicalHit:
     surface_locator: Locator | None = None
 
 
+# An owner's IDENTITY. The PAIR, never the id alone: `surface_id` has carried
+# `<owner_type>:<owner_id>:…` since spec §3.3 because the two namespaces OVERLAP —
+# `Topic.slug` is `^[a-z0-9]+(?:-[a-z0-9]+)*$`, which admits an all-digit slug, and every
+# real tweet id is all digits. One alias, so the counting and the narrowing cannot drift.
+#
+# The type half is `OwnerType`, the SAME closed set `KnowledgeChunk` is written from, so a
+# caller cannot ask for `("items", id)` and get a silent empty answer, and so `_owner_clause`
+# can bound its expression tree by a set size it can name rather than by a caller's length.
+OwnerKey = tuple[OwnerType, str]
+
+
+def owner_key(hit: LexicalHit) -> OwnerKey:
+    """Which owner this hit belongs to — THE definition, for both readers (C1, round 10).
+
+    `distinct_owners` counted the pair; the owner narrowing matched the id alone. Two answers
+    to one question is the drift rule 5 exists to stop, and it survived nine rounds because
+    no corpus in the suite held two owner types sharing an id. When one does, half a
+    composite key is indistinguishable from all of it: a topic's synthesized prose is served
+    under an item's name, and another item's article is served with that item's locator.
+    """
+    return (hit.owner_type, hit.owner_id)
+
+
 def distinct_owners(hits: Sequence[LexicalHit]) -> int:
-    """How many distinct `(owner_type, owner_id)` a ranking prefix holds.
+    """How many distinct owners a ranking prefix holds.
 
     Public because `search_owners` STOPS on it and `search_service` has to read the same
     number to know whether a window shorter than it asked for is the whole ranking or just
     a shallow one (B1). Two readings of «how deep did we get» is how the window and its
     consumer drift apart, and the drift is invisible until the exclusions bite (rule 5).
     """
-    return len({(hit.owner_type, hit.owner_id) for hit in hits})
+    return len({owner_key(hit) for hit in hits})
 
 
 @dataclass(frozen=True)
@@ -331,14 +369,23 @@ class LexicalIndex:
         *,
         filters: SearchFilters | None = None,
         surface_types: tuple[SurfaceType, ...] = (),
-        owner_ids: tuple[str, ...] = (),
+        owners: tuple[OwnerKey, ...] = (),
     ) -> tuple[LexicalHit, ...]:
         """The top `limit` chunks for `query`, best first, deterministic under ties.
 
-        `surface_types` and `owner_ids` are NOT among spec §7.2's eight — they are internal
-        narrowing used by `get` (rank inside one item's long source) and by the evaluation
-        harness. They are kept off `SearchFilters` because that model is the FROZEN external
+        `surface_types` and `owners` are NOT among spec §7.2's eight — they are internal
+        narrowing, kept off `SearchFilters` because that model is the FROZEN external
         contract and adding to it would be the incompatible change the freeze prevents.
+        ONE consumer today, `search_service._verified_top`, which re-derives a served item's
+        citations from its own plane before its topics'.
+
+        `owners` takes `OwnerKey` PAIRS, and that is the whole of C1. It took bare ids, and
+        an id is not an identifier here: a topic slug may be all digits and so is every tweet
+        id, so `chunks.owner_id IN (…)` answered with whatever carried that id in EITHER
+        namespace. Measured at `804b341`, an item with no `content` at all was served citing
+        two chunks of another item's article, under its title and its locator; and a topic
+        whose slug equalled an item's own id took the first two of that item's three
+        citation slots, ahead of its own summary.
 
         An empty query is a validation error, not an empty result (spec §9.3): an empty
         result set claims something about the corpus, when the truth is that nothing was
@@ -347,7 +394,7 @@ class LexicalIndex:
         expression = self._expression(query, limit)
         if expression is None:
             return ()
-        clauses, params = self._where(expression, filters, surface_types, owner_ids)
+        clauses, params = self._where(expression, filters, surface_types, owners)
         sql = f"{_SELECT_CHUNKS} WHERE {' AND '.join(clauses)} {_CHUNK_RANK_ORDER} LIMIT ?"  # nosec B608
         rows = self._fetch(sql, (*params, limit))
         return tuple(_hit(row) for row in rows)
@@ -361,10 +408,33 @@ class LexicalIndex:
         same rows `search` returns for the chunk limit reached — so a caller that groups
         by owner sees a list that is prefix-consistent across depths: a deeper window only
         appends. `depth_exhausted` is True when `MAX_CHUNK_DEPTH` was reached with fewer
-        owners than asked; the harness declares it on the case and the service declares
-        a truncation it cannot page (both say so, neither guesses).
+        owners than asked, and the service declares it as a truncation it cannot page — it
+        says so rather than guessing. (The harness was named here too and never called this
+        method; see the note on `OWNER_CHUNK_MULTIPLIER`.)
+
+        THE FIRST WINDOW IS CAPPED TOO, AND IT WAS NOT. `MAX_CHUNK_DEPTH` bounded only the
+        DOUBLING path, so `owners * OWNER_CHUNK_MULTIPLIER` could open larger than the bound on
+        its very first query: the limit that exists to cap the work applied only to small
+        pages. Measured on 11,200 matching rows over 16 items — `--limit 500` read 2,008 rows
+        and stopped at the cap, while `--limit 2763` read 11,056, i.e. PAST a bound of 10,000,
+        and the two pages therefore answered from different amounts of the corpus. Capping
+        here makes the bound mean one thing for every page size.
+
+        WHAT IT COSTS DID CHANGE, and this docstring said it did not (round 10). Before the
+        cap, an owner past the bound was reachable at a page size large enough to open a
+        first window past it; after it, that owner is out of the chunk plane at EVERY page
+        size. Measured on the same corpus: `--limit 2763` returned 16 results before and 15
+        after, the sixteenth missing at 2763 and at 5000 alike. Consistency was the point and
+        it was bought with a capability, which is a trade worth naming rather than a cost
+        that stayed still.
+
+        Nor is such an owner simply gone: with no chunk of its own inside the window it is
+        usually re-admitted from the PROFILE plane, carrying zero citations and the derived
+        `verify_with` branch. That is pre-existing behaviour and not a consequence of the
+        cap, but "unreachable" was the wrong word for it. What the bound reaching its end
+        means is DECLARED through `depth_exhausted`, and is the price of bounding work.
         """
-        chunk_limit = max(owners * OWNER_CHUNK_MULTIPLIER, 1)
+        chunk_limit = min(max(owners * OWNER_CHUNK_MULTIPLIER, 1), MAX_CHUNK_DEPTH)
         while True:
             hits = self.search(query, chunk_limit, filters=filters)
             if distinct_owners(hits) >= owners or len(hits) < chunk_limit:
@@ -465,7 +535,7 @@ class LexicalIndex:
         expression: str,
         filters: SearchFilters | None,
         surface_types: tuple[SurfaceType, ...],
-        owner_ids: tuple[str, ...],
+        owners: tuple[OwnerKey, ...],
     ) -> tuple[list[str], list[object]]:
         """The WHERE clauses and their bound parameters — never an interpolated value."""
         clauses = ["chunks_fts MATCH ?"]
@@ -484,9 +554,10 @@ class LexicalIndex:
         if surface_types:
             clauses.append(f"chunks.surface_type IN ({_placeholders(len(surface_types))})")
             params += list(surface_types)
-        if owner_ids:
-            clauses.append(f"chunks.owner_id IN ({_placeholders(len(owner_ids))})")
-            params += list(owner_ids)
+        if owners:
+            owner_clause, owner_params = _owner_clause(owners)
+            clauses.append(owner_clause)
+            params += owner_params
         return clauses, params
 
     def _fetch(self, sql: str, params: tuple[object, ...]) -> list[sqlite3.Row]:
@@ -572,9 +643,31 @@ def _item_clauses(filters: SearchFilters, owner_column: str) -> tuple[list[str],
     a profile has no origin (G-1). The totality test over both planes
     (`test_every_declared_filter_is_pushed_on_the_profile_plane_too`) is what keeps the two
     planes agreeing on all eight, this docstring only says where each one lives.
+
+    AN ITEM-SCOPED FILTER REQUIRES AN ITEM-OWNED ROW, ONCE, HERE (M2, round 12). Every clause
+    below joins an item table to `{owner_column}`, and on the chunk plane that column holds
+    BOTH namespaces: a topic whose slug equals an item's id inherited that item's author, its
+    content kinds and its surfaces, so `--author vgonpa` returned an item written by someone
+    else and `--has-surfaces external_article` returned an item with no `content` at all.
+
+    This is the module's own documented intent, not a new rule — *ITEM-SCOPED FILTERS FAIL
+    CLOSED ON TOPIC-OWNED CHUNKS*. Date and source already did, and only by luck: their columns
+    are NULL on a topic row, so the comparison fails. The three that route through `EXISTS`
+    joins had no such accident behind them.
+
+    ONE guard for all three rather than a predicate bolted onto each: they combine with `AND`,
+    so one clause is equivalent, and the sentence «an item filter means the owner is an item»
+    then exists in one place instead of three that can drift (rule 5). It is added only when an
+    item-scoped filter is actually present — an unfiltered query still sees both planes — and
+    only on the chunk plane, because `profiles` holds nothing but items and has no such column.
     """
     clauses: list[str] = []
     params: list[object] = []
+    if owner_column == "chunks.owner_id" and (
+        filters.author is not None or filters.content_kinds or filters.has_surfaces
+    ):
+        clauses.append("chunks.owner_type = ?")
+        params.append("item")
     if filters.author is not None:
         clauses.append(
             f"EXISTS (SELECT 1 FROM items WHERE items.item_id = {owner_column} "  # nosec B608
@@ -633,13 +726,22 @@ def _topic_clause(filters: SearchFilters) -> tuple[str, list[object]]:
     slug: without that branch, filtering by a topic would exclude exactly the surfaces that
     ARE the topic — a `topic_note` about `ai-policy` would vanish from `--topic ai-policy`,
     which reads as "the topic has no notes" rather than as a shape of the filter.
+
+    EACH ARM NAMES ITS OWN OWNER TYPE (M2, round 12). Arm 2 always did. Arm 1 asked only
+    whether the owner id belonged to an item in the topic, and asked it of every row — so a
+    chunk owned by topic `7001` matched `--topic kestrel` whenever ITEM `7001` was in
+    `kestrel`, which is one topic answering for another through a name it merely shares.
+
+    The fix is arm 1, never the clause: closing the whole thing to topics would pass a
+    regression about the collision and silently delete the feature arm 2 exists for, which is
+    why both arms are asserted together.
     """
     if not filters.topics:
         return "", []
     placeholders = _placeholders(len(filters.topics))
     clause = (
-        "(EXISTS (SELECT 1 FROM item_topics WHERE item_topics.item_id = chunks.owner_id "  # nosec B608
-        f"AND item_topics.slug IN ({placeholders})) "
+        "((chunks.owner_type = 'item' AND EXISTS (SELECT 1 FROM item_topics "  # nosec B608
+        f"WHERE item_topics.item_id = chunks.owner_id AND item_topics.slug IN ({placeholders}))) "
         f"OR (chunks.owner_type = 'topic' AND chunks.owner_id IN ({placeholders})))"
     )
     return clause, [*filters.topics, *filters.topics]
@@ -654,6 +756,52 @@ def _placeholders(count: int) -> str:
     promise attached to an f-string.
     """
     return ",".join("?" * count)
+
+
+def _owner_clause(owners: tuple[OwnerKey, ...]) -> tuple[str, list[object]]:
+    """The owner narrowing: one `IN` PER TYPE, not one equality per owner (C1, then M1).
+
+    Both columns are constrained, because an owner is the pair — that is C1, and an id-only
+    clause served one owner's text under another owner's name.
+
+    ONE DISJUNCT PER TYPE, and the first version wrote one per OWNER. A left-deep `OR` tree of
+    equalities meets `SQLITE_MAX_EXPR_DEPTH` (1000) long before anything else: measured on
+    sqlite 3.50.4, 993 owners answered and 995 raised, where the `IN (…)` it replaced was a
+    single node and answered past 16,384. Grouping by type bounds the tree at the number of
+    distinct owner TYPES — two, and `OwnerType` makes that a closed set — so the width of the
+    request is carried by the `IN` list, whose ceiling is the variable budget that bounded the
+    old clause too. Correctness and the ceiling were never actually in tension; the first
+    shape just paid for one with the other.
+
+    Ids are deduplicated per type, preserving first-seen order: `IN` does not care, the
+    variable budget does, and a caller that asks for the same owner twice should not lose
+    headroom for it.
+
+    WHAT REMAINS, declared rather than discovered. Past roughly 32k owners the statement runs
+    out of bound parameters, and `_fetch` converts that into `IndexIncompatibleError` — telling
+    an operator to rebuild an index that is perfectly healthy when the truth is that the
+    REQUEST was too wide (rule 9, the instrument naming the wrong surface). That is unchanged
+    from the id-only clause this replaces and is not repaired here; it belongs with the filter
+    joins in `_item_clauses`, which have their own half-key defect and are umbrella code. It is
+    far outside anything the callers reach: measured on the live corpus, the top-up phase asks
+    for one item's topics, and that is at most 4 against a 45-topic vocabulary.
+
+    The fragment is still built from COUNTS alone (`_placeholders`), so no caller text reaches
+    the statement; the types and ids are bound values.
+    """
+    grouped: dict[OwnerType, list[str]] = {}
+    for owner_type, owner_id in owners:
+        grouped.setdefault(owner_type, []).append(owner_id)
+    parts: list[str] = []
+    params: list[object] = []
+    for owner_type, ids in grouped.items():
+        unique = list(dict.fromkeys(ids))
+        parts.append(
+            f"(chunks.owner_type = ? AND chunks.owner_id IN ({_placeholders(len(unique))}))"
+        )
+        params.append(owner_type)
+        params += unique
+    return f"({' OR '.join(parts)})", params
 
 
 def _iso(value: datetime | None) -> str | None:
