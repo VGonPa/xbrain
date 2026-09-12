@@ -149,7 +149,11 @@ EVIDENCE = "xbrain.knowledge.chunking.chunk_evidence"
 EVIDENCE_HASHERS = frozenset(
     {"xbrain.knowledge.chunking::_chunk", "xbrain.knowledge.index_store::verify_fingerprints"}
 )
-HASHLIB_MODULES = frozenset({"xbrain.knowledge.ids", "xbrain.knowledge.index_build"})
+# `vector_index` hashes `sha256(text)`, the vector plane's dedupe key (Plan 03 §2.2) — not
+# evidence: the `chunk_fingerprint` check above stays closed, verified by injecting that call.
+HASHLIB_MODULES = frozenset(
+    {"xbrain.knowledge.ids", "xbrain.knowledge.index_build", "xbrain.knowledge.vector_index"}
+)
 
 # Modules a `getattr(<module>, "…")` or an `import_module("…")` must never reach: the ones
 # that define a watched symbol, plus `sqlite3`.
