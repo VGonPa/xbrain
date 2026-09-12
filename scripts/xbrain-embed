@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""xbrain `[embeddings].command` — the reference embedding backend (Plan 03 §1.3).
+
+Fulfils the xbrain embedder contract (`xbrain.embeddings`): invoked as
+`xbrain-embed [--model NAME]`, reads ONE JSON request on stdin and writes ONE JSON
+response on stdout, exit 0.
+
+    in:  {"schema_version": "1", "model": "…|null", "texts": ["…", "…"]}
+    out: {"schema_version": "1", "model": "intfloat/multilingual-e5-base",
+          "dimension": 768, "normalized": true, "vectors": [[…], […]]}
+
+It lives in `scripts/`, NOT in the package, and its dependencies are NOT in
+`pyproject.toml` — same as `scripts/xbrain-vision` and the `xbrain-transcribe*`
+family. xbrain core carries no model library; this wrapper is what a user points
+`[embeddings].command` at, and any other program honouring the contract above
+works just as well.
+
+Install what it needs separately, into its own environment:
+
+    uv tool install sentence-transformers
+    # then, in config.toml:
+    #   [embeddings]
+    #   command = "/absolute/path/to/scripts/xbrain-embed"
+
+DEFAULT_MODEL is a STARTING POINT, not a decision. Plan 03 §3 chooses the model
+with the golden set — multilingual-e5-base is simply the strongest of the §3.1
+candidates to start from, and the bake-off may replace it. Pass `--model` (or set
+`[embeddings].model`) to run a different one.
+
+**The query / passage prefixes are NOT applied here.** They are a property of the
+model and live in `[embeddings].query_prefix` / `passage_prefix`, applied by xbrain
+before the texts reach this process — so this wrapper embeds exactly the strings it
+receives. Prefixing again here would double them, which no model expects and
+nothing downstream would report.
+
+**Nothing in the request is executed or interpreted.** The texts are corpus data,
+they may contain anything a tweet or an article can contain, and they are used as
+model input only (Plan 03 §10.3).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+# The wire format version of the contract. xbrain spells this string in
+# `xbrain.embeddings.SCHEMA_VERSION`; this script CANNOT import xbrain (it runs
+# under whichever python has the model installed), so the duplication is
+# deliberate — and a test pins the two equal, because a silent divergence here
+# would make every batch fail at the far end with a version message naming two
+# numbers that look fine on their own.
+SCHEMA_VERSION = "1"
+
+# A starting point from Plan 03 §3.1, not the chosen model — see the module
+# docstring. 768 dimensions, strong es<->en, reasonable on CPU.
+DEFAULT_MODEL = "intfloat/multilingual-e5-base"
+
+# Loaded models are cached per process by sentence-transformers itself; this
+# wrapper handles one request per invocation, so there is nothing to cache here.
+_ENCODE_BATCH_SIZE = 32
+
+
+def _read_request(stream) -> dict:
+    """Parse the single JSON request on stdin, or exit with a clear message."""
+    raw = stream.read()
+    if not raw.strip():
+        raise SystemExit("xbrain-embed: empty request on stdin")
+    try:
+        request = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"xbrain-embed: request was not valid JSON: {exc}")
+    if not isinstance(request, dict):
+        raise SystemExit("xbrain-embed: request was not a JSON object")
+    version = str(request.get("schema_version", ""))
+    if version != SCHEMA_VERSION:
+        raise SystemExit(
+            f"xbrain-embed: request speaks schema_version {version or '(absent)'!r}, "
+            f"this wrapper speaks {SCHEMA_VERSION!r}"
+        )
+    texts = request.get("texts")
+    if not isinstance(texts, list) or not texts:
+        raise SystemExit("xbrain-embed: request carries no 'texts' to embed")
+    if not all(isinstance(text, str) for text in texts):
+        raise SystemExit("xbrain-embed: every entry of 'texts' must be a string")
+    return request
+
+
+def _encode(model_name: str, texts: list[str]) -> list[list[float]]:
+    """Embed the texts with sentence-transformers, L2-normalized.
+
+    The import is INSIDE the function so the module can be loaded (and tested)
+    without sentence-transformers installed — the same reason xbrain core never
+    imports a model library at the top level.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise SystemExit(
+            "xbrain-embed: sentence-transformers is not installed in this python "
+            f"({sys.executable}). Install it (`uv tool install sentence-transformers`) "
+            f"and point [embeddings].command at that environment ({exc})"
+        )
+    model = SentenceTransformer(model_name)
+    vectors = model.encode(
+        texts,
+        batch_size=_ENCODE_BATCH_SIZE,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    return [[float(value) for value in vector] for vector in vectors]
+
+
+def _response(model_name: str, vectors: list[list[float]]) -> str:
+    """The contract's response document, or an exit if the model returned nothing."""
+    if not vectors or not vectors[0]:
+        raise SystemExit(f"xbrain-embed: model {model_name!r} returned no vectors")
+    return json.dumps(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "model": model_name,
+            "dimension": len(vectors[0]),
+            # `normalize_embeddings=True` above, so this is a fact about the data,
+            # not a hope. xbrain verifies it anyway.
+            "normalized": True,
+            "vectors": vectors,
+        }
+    )
+
+
+def main() -> int:
+    """Read the request on stdin, embed, write the response on stdout."""
+    parser = argparse.ArgumentParser(
+        description="Reference embedding backend for the xbrain knowledge index."
+    )
+    parser.add_argument("--model", default=None, help=f"model name (default: {DEFAULT_MODEL})")
+    args = parser.parse_args()
+
+    request = _read_request(sys.stdin)
+    # The CLI flag wins over the request body, which wins over the default: xbrain
+    # sends `model: null` when `[embeddings].model` is unset, meaning "your default".
+    model_name = args.model or request.get("model") or DEFAULT_MODEL
+    vectors = _encode(model_name, list(request["texts"]))
+    sys.stdout.write(_response(model_name, vectors))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -67,6 +67,7 @@ target-version = "py312"
 # `test_ruff_examines_every_python_file_in_the_repo` fails when a new one is
 # added and not listed here, which is how these three got caught.
 extend-include = [
+    "scripts/xbrain-embed",
     "scripts/xbrain-transcribe",
     "scripts/xbrain-transcribe-auto",
     "scripts/xbrain-transcribe-mlx",

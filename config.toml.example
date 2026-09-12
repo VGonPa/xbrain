@@ -149,3 +149,43 @@ command = "parakeet-mlx"
 #   Character ceiling per `xbrain get` response. Above it the response is truncated
 #   DECLARING SO and returns a cursor to continue — never silently. ~40k is a long
 #   article with its metadata: the common case does not paginate.
+
+[embeddings]
+# The EXTERNAL embedding backend the knowledge index's vector plane shells out to.
+# Like the transcriber and the vision model, the heavy ML lives OUTSIDE xbrain core:
+# the CLI carries no model dependency and only invokes this command as a subprocess.
+# xbrain invokes:
+#   <command> [--model M]
+# and hands it the texts as JSON on stdin (argv cannot carry thousands of chunks),
+# reading one vector per text back as JSON on stdout. May be a multi-token wrapper
+# (split with shlex, run without a shell).
+#
+# THE WHOLE SECTION IS OPTIONAL, and unset is a supported state rather than a
+# half-configured one: with no `command`, `xbrain search` keeps serving lexical
+# results and says so in its response. There is NO bundled default, on purpose —
+# shipping one would be choosing the embedding model without evaluating it, and the
+# model is chosen by the golden set.
+#
+# The bundled `scripts/xbrain-embed` is the reference backend (sentence-transformers,
+# local, nothing leaves the machine). Install its dependency separately — it is
+# deliberately not in pyproject.toml:
+#   uv tool install sentence-transformers
+# command = "/absolute/path/to/scripts/xbrain-embed"
+#
+# model = "intfloat/multilingual-e5-base"
+#   Omit → the backend's own default. Changing it INVALIDATES the vector plane (the
+#   lexical plane survives): vectors from two models are never mixed in one matrix.
+#
+# batch_size = 64
+#   How many texts travel per subprocess call.
+#
+# timeout_seconds = 600
+#   Wall-clock cap per batch, so a wedged model cannot hang an index build forever.
+#
+# query_prefix = "query: "
+# passage_prefix = "passage: "
+#   A property of the MODEL, not of xbrain. The E5 and BGE families degrade notably
+#   without them and expect DIFFERENT strings on the two sides; most other models
+#   want neither, which is why both default to empty. They live here so changing
+#   model never means editing Python — and they go into the index manifest, because
+#   changing one invalidates the stored vectors exactly as changing the model does.
