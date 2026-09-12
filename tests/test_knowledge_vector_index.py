@@ -889,3 +889,37 @@ def test_a_rebuild_landing_mid_load_cannot_serve_bytes_nobody_verified(
     hits = loaded.search(EAST, limit=1)
     assert [hit.chunk_id for hit in hits] == ["a:0:v3"]
     assert hits[0].score == pytest.approx(1.0)
+
+
+# ------------------------------------------------- `covers`: the text is part of the question
+
+
+def test_covers_answers_for_the_text_the_chunk_currently_holds(tmp_path: Path) -> None:
+    """`covers` is the plane's own answer to «do you hold the vector of THIS text for this id».
+
+    03.4 needs it and `row_of` cannot give it: a `chunk_id` is POSITIONAL
+    (`<surface_id>:<chunk_index>:<chunker_version>`), so it survives an edit of the prose
+    behind it. Asked only whether the id is known, the plane calls itself complete over a row
+    that answers with the geometry of the previous text — which is exactly the staleness an
+    `index update` produces and the reason this method takes two arguments.
+    """
+    loaded = plane(tmp_path, chunk("c1", "el mismo texto", EAST))
+    try:
+        assert loaded.covers("c1", "el mismo texto")
+        assert not loaded.covers("c1", "un texto reescrito")
+        assert not loaded.covers("c2", "el mismo texto")
+    finally:
+        loaded.close()
+
+
+def test_covers_holds_for_both_chunks_that_share_a_row(tmp_path: Path) -> None:
+    """Dedupe shares the vector, so it must share the ANSWER — for each id independently."""
+    loaded = plane(
+        tmp_path, chunk("c1", "texto repetido", EAST), chunk("c2", "texto repetido", EAST)
+    )
+    try:
+        assert loaded.row_of("c1") == loaded.row_of("c2")
+        assert loaded.covers("c1", "texto repetido")
+        assert loaded.covers("c2", "texto repetido")
+    finally:
+        loaded.close()

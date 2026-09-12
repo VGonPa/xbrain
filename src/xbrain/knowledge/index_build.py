@@ -44,7 +44,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
@@ -86,6 +86,21 @@ from xbrain.knowledge.surfaces import (
     topic_record,
     topic_surfaces,
     unfetched_links,
+)
+from xbrain.knowledge.vector_index import (
+    VECTOR_REBUILD_ADVICE,
+    VECTORS_FILENAME,
+    VECTORS_META_FILENAME,
+    ChunkVector,
+    VectorBackendUnavailable,
+    VectorPlane,
+    VectorPlaneIncompatible,
+    VectorSpec,
+    VectorWriteReport,
+    load_vector_plane,
+    text_fingerprint,
+    vector_plane_exists,
+    write_vector_plane,
 )
 from xbrain.models import Item, MediaPhotoDescribed, Topic, TopicPage
 from xbrain.rubrics import parse_vocab
@@ -914,6 +929,26 @@ SKIPPED_CAUSES: frozenset[str] = frozenset(
 )
 CHUNKER_PARAM_NAMES: frozenset[str] = frozenset(f.name for f in dataclass_fields(ChunkerParams))
 
+# The `embeddings` block's schema, READ OFF `VectorSpec` (rule 5) exactly as
+# `CHUNKER_PARAM_NAMES` is read off `ChunkerParams`. A sixth field added to the spec cannot
+# leave this reader declaring five, and a manifest cannot declare a property of the numbers
+# that nothing produced. The block IS the spec and carries nothing else: a row count here
+# would be a second copy of what `vectors.meta.json` already holds, and the two would drift
+# the day one of them moved.
+EMBEDDINGS_FIELDS: frozenset[str] = frozenset(f.name for f in dataclass_fields(VectorSpec))
+
+# The types each field must arrive as, so a hand-edited `"768"` is refused at the boundary
+# rather than reaching `numpy` as a shape. `bool` is checked BEFORE `int` on purpose: in
+# Python `True` IS an `int`, so an `int` check first would accept `normalized: 1` and a
+# `dimension: true` would pass as a width of one.
+_EMBEDDINGS_TYPES: dict[str, type] = {
+    "model": str,
+    "dimension": int,
+    "normalized": bool,
+    "query_prefix": str,
+    "passage_prefix": str,
+}
+
 
 @dataclass(frozen=True)
 class Manifest:
@@ -931,10 +966,12 @@ class Manifest:
     counts: dict[str, int]
     skipped: dict[str, int]
     failed: list[dict[str, str]] = field(default_factory=list)
-    # The hole Plan 03 fills with `{model, dimension, normalized, command_version}`. Declared
-    # NOW so its arrival is not a manifest migration in the next plan. Its INSIDE is not
-    # validated: this child ships no embeddings, and a schema for a payload it cannot produce
-    # would be prose in the column where a guard belongs. The SLOT's shape is checked.
+    # The `VectorSpec` the vector plane was written under, or `None` for an index with no
+    # plane — which is the normal, supported state, since embeddings are opt-in end to end.
+    # 02.6 declared the slot and checked only its SHAPE, because this tree could not produce
+    # one; 03.4 writes it, so `_embeddings_slot` now validates it TOTAL and CLOSED like every
+    # other nested schema here. Read it through `manifest_spec`, never as a loose mapping: the
+    # type is what `vector_verdict` and 03.5's query door compare a query against.
     embeddings: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -997,7 +1034,7 @@ class Manifest:
             chunker_params=_counter_mapping(
                 raw["chunker_params"], "chunker_params", CHUNKER_PARAM_NAMES
             ),
-            embeddings=_optional_mapping(raw["embeddings"], "embeddings"),
+            embeddings=_embeddings_slot(raw["embeddings"], "embeddings"),
             counts=_counter_mapping(raw["counts"], "counts", COUNT_PLANES),
             skipped=_counter_mapping(raw["skipped"], "skipped", SKIPPED_CAUSES),
             failed=_failures(raw["failed"]),
@@ -1074,13 +1111,53 @@ def _counter_mapping(value: object, field_name: str, declared: frozenset[str]) -
     return checked
 
 
-def _optional_mapping(value: object, field_name: str) -> dict[str, object] | None:
-    """`null` or an object — the `embeddings` slot Plan 03 fills — and nothing else."""
+def _embeddings_slot(value: object, field_name: str) -> dict[str, object] | None:
+    """`null`, or a TOTAL AND CLOSED `VectorSpec` block — and 03.4 is when that became true.
+
+    The slot shipped in 02.6 with its SHAPE checked and its INSIDE unvalidated, which was the
+    honest thing for a child that could not produce one: a schema for a payload nothing emits
+    is prose in the column where a guard belongs. There is a writer now, so the guard is owed.
+
+    THE FAIL-OPEN THIS CLOSES IS THE PREFIX. `query_prefix` and `passage_prefix` are properties
+    of the MODEL, not of this code — the E5 and BGE families embed `"query: …"` and
+    `"passage: …"` into different regions of one space — so a block that simply omitted one
+    would leave every query embedded bare against a corpus embedded prefixed: well-formed,
+    unit-length, and answering a question nobody asked. Nothing downstream can see that. The
+    same argument runs in the other direction for an UNDECLARED key: a block naming a
+    quantization this code cannot honour is a plane written by something else, and dropping
+    the key certifies it current over exactly the property nobody looked at.
+
+    It refuses; it does not repair. A malformed block is a manifest problem and leaves by
+    `IndexIncompatibleError` like every other field of this reader — the VECTOR-ONLY advice of
+    `vector_verdict` is for a block that is VALID and describes another model, which is a
+    different situation with a different cost (spec §5.5).
+    """
     if value is None:
         return None
-    if not isinstance(value, Mapping):
-        raise _malformed(field_name, f"no es null ni un objeto, es {type(value).__name__}")
-    return {str(key): item for key, item in value.items()}
+    raw = _closed_keys(value, field_name, EMBEDDINGS_FIELDS)
+    for key, expected in _EMBEDDINGS_TYPES.items():
+        if type(raw[key]) is not expected:
+            raise _malformed(field_name, f"{key!r} debe ser {expected.__name__}, es {raw[key]!r}")
+    if cast(int, raw["dimension"]) < 1:
+        raise _malformed(field_name, f"'dimension' debe ser positiva, es {raw['dimension']!r}")
+    return raw
+
+
+def embeddings_block(spec: VectorSpec) -> dict[str, object]:
+    """The spec as the manifest carries it. `asdict` so a new field travels without an edit."""
+    return asdict(spec)
+
+
+def manifest_spec(manifest: Manifest) -> VectorSpec | None:
+    """The `VectorSpec` a manifest declares, or `None` when it declares no plane.
+
+    ONE direction of the round trip `embeddings_block` opens, and the only place the block is
+    turned back into the type the rest of the system compares — so «what produced the numbers»
+    is answered by `VectorSpec` everywhere and by a loose mapping nowhere.
+    """
+    if manifest.embeddings is None:
+        return None
+    return VectorSpec(**cast(dict, manifest.embeddings))
 
 
 def _failures(value: object) -> list[dict[str, str]]:
@@ -1252,6 +1329,250 @@ def count_rows(connection: sqlite3.Connection) -> dict[str, int]:
     }
 
 
+# ---------------------------------------------------------------------------
+# 03.4 — the VECTOR PLANE, wired in: built beside the lexical one, declared in the manifest,
+# and invalidated on its OWN, without the other planes
+#
+# THE SEAM IS A CALLBACK. `xbrain.embeddings` owns the subprocess, `knowledge.vector_index`
+# owns the bytes and the arithmetic, and this module owns neither — it decides WHAT gets
+# embedded, WHEN, and what the manifest then says. An import of `embeddings` here would put a
+# `subprocess` contract inside the module every door of the index loads.
+#
+# WHAT GETS EMBEDDED IS READ BACK FROM THE BASE (rule 5). The `chunks` table is where chunk
+# text lives and what a query serves; a second walk of the emitters would embed a body the
+# table does not hold, and both descriptions would stay internally consistent while ranking
+# different prose.
+#
+# SPEC §5.5 IS THE REASON THIS IS A SEPARATE VERDICT AND NOT AN `IndexIncompatibleError`.
+# Changing the embedding model invalidates the VECTOR part of the index and not the store or
+# the lexical plane — so the refusal carries `VECTOR_REBUILD_ADVICE`, the base is not touched,
+# and `load_compatible_manifest` keeps returning the same manifest it returned before.
+# ---------------------------------------------------------------------------
+
+
+# What `index_build` needs of an embedder and nothing more: texts in, one unit vector out per
+# text, in order. `xbrain.embeddings.embed_passages` is the production implementation, adapted
+# by the caller — the prefix it applies is a property of the MODEL and travels in the spec.
+Embedder = Callable[[Sequence[str]], Sequence[Sequence[float]]]
+
+
+@dataclass(frozen=True)
+class VectorBuild:
+    """What a build needs to write a vector plane: the spec it DECLARES and the embedder.
+
+    The spec is declared by the caller — `config.toml` chose the model and both prefixes, and
+    a prefix is unobservable in the vectors that come back. It is then VERIFIED rather than
+    trusted: `write_vector_plane` refuses a row of the wrong width or of a norm that is not 1,
+    so a spec claiming 768 dimensions over a 384-wide response never reaches disk.
+    """
+
+    spec: VectorSpec
+    embed: Embedder
+
+
+def stored_chunk_texts(connection: sqlite3.Connection) -> dict[str, str]:
+    """`{chunk_id: text}` as the base holds it — the ONE corpus the vector plane embeds.
+
+    Ordered by `chunk_id` so two builds of the same store hand the embedder the same batch in
+    the same sequence: an embedder is an external process, and a batch whose order follows
+    SQLite's scan is a reproducibility hazard for no gain (spec §8.6).
+    """
+    return {
+        str(chunk_id): str(text)
+        for chunk_id, text in connection.execute(
+            "SELECT chunk_id, text FROM chunks ORDER BY chunk_id"
+        )
+    }
+
+
+def _distinct_texts(texts: Iterable[str]) -> list[str]:
+    """The bodies worth paying a model for: one per distinct text, in first-seen order.
+
+    DEDUPE BEFORE THE SUBPROCESS, NOT AFTER IT. `write_vector_plane` collapses identical text
+    onto one row either way, so embedding everything and letting the writer dedupe is CORRECT
+    and simply pays the model for every duplicate — invisible in the output, and measurable
+    only by counting what reached the embedder.
+    """
+    seen: dict[str, str] = {}
+    for text in texts:
+        seen.setdefault(text_fingerprint(text), text)
+    return list(seen.values())
+
+
+def _embedded_chunks(texts: Mapping[str, str], embed: Embedder) -> list[ChunkVector]:
+    """One `ChunkVector` per chunk, with identical bodies embedded ONCE and shared.
+
+    The vector is looked up by `text_fingerprint`, the same key the plane deduplicates by, so
+    two chunks quoting the same paragraph get the same numbers here and the same row there —
+    while each keeps its own `chunk_id`, which is what makes both of them retrievable.
+    """
+    bodies = _distinct_texts(texts.values())
+    vectors = list(embed(bodies))
+    if len(vectors) != len(bodies):
+        raise VectorPlaneIncompatible(
+            f"el embedder devolvió {len(vectors)} vectores para {len(bodies)} textos: "
+            f"emparejarlos por posición asignaría a cada fragmento el vector de otro. "
+            f"{VECTOR_REBUILD_ADVICE}"
+        )
+    by_fingerprint = {
+        text_fingerprint(body): tuple(float(value) for value in vector)
+        for body, vector in zip(bodies, vectors, strict=True)
+    }
+    return [
+        ChunkVector(chunk_id=chunk_id, text=text, vector=by_fingerprint[text_fingerprint(text)])
+        for chunk_id, text in texts.items()
+    ]
+
+
+def _write_plane(
+    index_dir: Path, connection: sqlite3.Connection, vectors: VectorBuild
+) -> VectorWriteReport:
+    """Embed the base's chunks and write the plane. Raises before a byte lands if it cannot."""
+    texts = stored_chunk_texts(connection)
+    return write_vector_plane(index_dir, vectors.spec, _embedded_chunks(texts, vectors.embed))
+
+
+def _planned_plane(connection: sqlite3.Connection) -> VectorWriteReport:
+    """What a build WOULD write, measured without invoking the embedder (dry run).
+
+    The dedupe key is `sha256(text)` — free — so the row count is a MEASUREMENT and not an
+    estimate, and the expensive half is precisely the half a dry run must not pay. It is the
+    number an operator wants before committing minutes of GPU to a build.
+    """
+    texts = stored_chunk_texts(connection)
+    rows = len(_distinct_texts(texts.values()))
+    return VectorWriteReport(chunks=len(texts), rows=rows, shared_rows=len(texts) - rows)
+
+
+def _discard_plane(index_dir: Path) -> None:
+    """Remove both files of the plane, so a rebuild cannot leave the previous one standing.
+
+    A matrix the new manifest does not declare is worse than no matrix: `vector_plane_exists`
+    answers True to anyone who asks the filesystem, the rows are keyed by chunk ids the new
+    base may not hold, and nothing records which model wrote them.
+    """
+    (index_dir / VECTORS_FILENAME).unlink(missing_ok=True)
+    (index_dir / VECTORS_META_FILENAME).unlink(missing_ok=True)
+
+
+VectorState = Literal[
+    "absent", "current", "spec_changed", "missing", "undeclared", "behind", "unreadable"
+]
+
+
+@dataclass(frozen=True)
+class VectorVerdict:
+    """Whether the vector plane can be queried, and — when it cannot — why, in ONE sentence.
+
+    SEPARATE FROM `BaseVerdict` BECAUSE THE COST IS SEPARATE (spec §5.5). Every refusal here
+    carries `VECTOR_REBUILD_ADVICE` and none carries `REBUILD_ADVICE`: a model, a dimension or
+    a prefix change costs the matrix, while the SQLite base stays cut by the same chunker,
+    sealed under the same versions and correct in every column. Routing these through
+    `IndexIncompatibleError` would be invisibly wrong — the operator would be told to throw
+    away minutes of lexical work that is not stale.
+
+    `absent` is not a failure: the plane is opt-in end to end, and an index built without an
+    embedder is complete. It is simply not `usable`, which is the one question a query asks.
+    """
+
+    state: VectorState
+    spec: VectorSpec | None
+    sentence: str
+    missing_chunks: int = 0
+    orphaned_rows: int = 0
+
+    @property
+    def usable(self) -> bool:
+        return self.state == "current"
+
+
+def _coverage(plane: VectorPlane, texts: Mapping[str, str]) -> tuple[int, int]:
+    """`(chunks with no vector of their CURRENT text, plane ids the base no longer holds)`.
+
+    BOTH DIRECTIONS, because each is silent on its own and they mean different things. A chunk
+    with no usable row is a fragment no vector query can reach; an orphaned row is a candidate
+    slot spent on a chunk nothing can resolve. One «out of date» boolean would hide which.
+
+    THE FIRST HALF ASKS ABOUT TEXT AND NOT ABOUT IDS, and that is the trap this check exists
+    for. A `chunk_id` is positional, so `enrich` rewriting a summary changes the chunk's prose
+    and leaves its id alone: every id still resolves, the plane looks complete, and the row
+    answers with the geometry of what used to be there. `VectorPlane.covers` is the plane's
+    own answer to «do you hold the vector of THIS text for this chunk».
+    """
+    stale = sum(1 for chunk_id, text in texts.items() if not plane.covers(chunk_id, text))
+    known = {cid for row in range(plane.row_count) for cid in plane.chunk_ids_for_row(row)}
+    return stale, len(known - set(texts))
+
+
+def vector_verdict(
+    index_dir: Path,
+    manifest: Manifest,
+    *,
+    expected: VectorSpec | None = None,
+    texts: Mapping[str, str] | None = None,
+) -> VectorVerdict:
+    """The ONE definition of «can this vector plane be queried?» (rule 5).
+
+    `expected` is the spec the caller intends to query with — the configured one. Omitted, the
+    plane is only checked against what the MANIFEST declares, which is what `status` needs in
+    order to describe an index whose config it has no opinion about.
+
+    `texts` is the base's `{chunk_id: text}`. Given, coverage is checked too: an `update`
+    rewrites the chunks of every item it touched and the plane is neither told nor repaired,
+    so it ends up holding vectors of prose that is no longer there. That is `behind`, and it
+    is the state this whole verdict exists to publish.
+    """
+    declared = manifest_spec(manifest)
+    present = vector_plane_exists(index_dir)
+    if declared is None:
+        if not present:
+            return VectorVerdict(state="absent", spec=None, sentence="")
+        return VectorVerdict(
+            state="undeclared",
+            spec=None,
+            sentence=(
+                f"Hay ficheros de plano vectorial en {index_dir} que el manifest no declara: "
+                f"nadie puede comprobar con qué modelo ni sobre qué corpus se escribieron. "
+                f"{VECTOR_REBUILD_ADVICE}"
+            ),
+        )
+    if not present:
+        return VectorVerdict(
+            state="missing",
+            spec=declared,
+            sentence=(
+                f"El manifest declara un plano vectorial que no está en {index_dir}. "
+                f"{VECTOR_REBUILD_ADVICE}"
+            ),
+        )
+    try:
+        plane = load_vector_plane(index_dir, expected=expected or declared)
+    except VectorPlaneIncompatible as error:
+        state: VectorState = "spec_changed" if expected and expected != declared else "unreadable"
+        return VectorVerdict(state=state, spec=declared, sentence=str(error))
+    except VectorBackendUnavailable as error:
+        return VectorVerdict(state="unreadable", spec=declared, sentence=str(error))
+    try:
+        if texts is None:
+            return VectorVerdict(state="current", spec=plane.spec, sentence="")
+        missing, orphaned = _coverage(plane, texts)
+    finally:
+        plane.close()
+    if not missing and not orphaned:
+        return VectorVerdict(state="current", spec=declared, sentence="")
+    return VectorVerdict(
+        state="behind",
+        spec=declared,
+        sentence=(
+            f"El plano vectorial no cubre el corpus indexado: {missing} fragmentos sin el "
+            f"vector de su texto actual y {orphaned} ids sin fragmento. "
+            f"{VECTOR_REBUILD_ADVICE}"
+        ),
+        missing_chunks=missing,
+        orphaned_rows=orphaned,
+    )
+
+
 @dataclass(frozen=True)
 class BuildReport:
     """What a build did — or, under `dry_run`, what it WOULD have done."""
@@ -1265,6 +1586,11 @@ class BuildReport:
     failed: list[dict[str, str]]
     duration_seconds: float
     dry_run: bool
+    # `None`, never `0`: a plane that was never asked for is not a plane of zero rows, and the
+    # two states take different actions. `chunks - rows` is how much of the corpus is
+    # duplicate prose.
+    vector_chunks: int | None = None
+    vector_rows: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1290,6 +1616,11 @@ class UpdateReport:
     topics_refreshed: int
     duration_seconds: float
     dry_run: bool
+    # 03.4: what the update left the vector plane owing — fragments with no vector, and rows
+    # whose chunk the base no longer holds. `None` when the index declares no plane. NOT
+    # repaired here: re-embedding is a subprocess, and `update` has no embedder.
+    vector_missing: int | None = None
+    vector_orphaned: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1313,6 +1644,9 @@ class StatusReport:
     behind: bool
     incomplete: bool
     advice: str
+    # 03.4: the vector plane's own verdict. `None` only when the manifest cannot be read at
+    # all — there is nothing to say a plane about. `absent` is the opt-out and not a defect.
+    vector: VectorVerdict | None = None
 
 
 @dataclass
@@ -1587,6 +1921,7 @@ def build(
     options: IndexOptions | None = None,
     dry_run: bool = False,
     force: bool = False,
+    vectors: VectorBuild | None = None,
 ) -> BuildReport:
     """Build `data/index/` from scratch and SEAL it. Read-only with respect to the store.
 
@@ -1625,6 +1960,14 @@ def build(
       after five forced rebuilds was 66.5 MB, with `VACUUM` recovering it only to 60.6 MB. A
       derived artefact whose size depends on how many times it has been rebuilt is one nobody
       can reason about.
+
+    `vectors` IS OPT-IN, AND THE PREVIOUS PLANE GOES REGARDLESS (03.4). Omitted, this build
+    writes no matrix and seals `embeddings: null` — and it still DELETES any plane that was
+    there, for the same reason the manifest goes first: files nothing declares are files whose
+    model, corpus and chunker nobody can check, and `vector_plane_exists` answers True to
+    whoever asks the filesystem. Given, the matrix and its meta land AFTER the rows commit and
+    BEFORE the manifest, so an embedder that dies leaves no manifest and the index is refused
+    whole rather than queried as a corpus with no vectors.
     """
     options = options or IndexOptions()
     if manifest_path(index_dir).exists() and not force and not dry_run:
@@ -1644,6 +1987,7 @@ def build(
         # standing before this line existed.
         manifest_path(index_dir).unlink(missing_ok=True)
         db_path(index_dir).unlink(missing_ok=True)
+        _discard_plane(index_dir)
         # The ONE caller allowed to create the file (G-2): every other door finds the absence
         # and names the command instead of leaving an empty base behind.
         connection = open_index(db_path(index_dir), create=True)
@@ -1660,8 +2004,17 @@ def build(
             tallies = manifest_tallies(connection)
             if dry_run:
                 # A dry run does the whole walk and then throws it away, so the counts it
-                # reports are the counts a real build WOULD produce — not an estimate.
+                # reports are the counts a real build WOULD produce — not an estimate. The
+                # vector numbers are measured the same way and WITHOUT the embedder: the
+                # dedupe key is a hash, the subprocess is the cost, and the flag exists to
+                # avoid exactly that cost.
+                planned = _planned_plane(connection) if vectors else None
                 raise _DryRun
+        # AFTER the rows commit and BEFORE the manifest. The plane is derived from what the
+        # base now holds, so it cannot be written from inside the transaction that is still
+        # deciding what that is; and the manifest, which is what says «this index is
+        # complete», stays the last thing to land.
+        written = _write_plane(index_dir, connection, vectors) if vectors else None
     except _DryRun:
         connection.close()
         return _build_report(
@@ -1671,6 +2024,7 @@ def build(
             items=len(inputs.store),
             topics=len(inputs.vocab),
             dry_run=True,
+            written=planned,
         )
     finally:
         if not connection_closed(connection):
@@ -1678,7 +2032,7 @@ def build(
 
     write_manifest(
         index_dir,
-        _fresh_manifest(inputs, tallies, failed, options=options),
+        _fresh_manifest(inputs, tallies, failed, options=options, vectors=vectors),
     )
     return _build_report(
         counters,
@@ -1687,6 +2041,7 @@ def build(
         items=len(inputs.store),
         topics=len(inputs.vocab),
         dry_run=False,
+        written=written,
     )
 
 
@@ -1720,6 +2075,7 @@ def _fresh_manifest(
     failed: list[dict[str, str]],
     *,
     options: IndexOptions,
+    vectors: VectorBuild | None = None,
 ) -> Manifest:
     """The manifest a full build writes — every version taken from the CODE, not carried over.
 
@@ -1741,6 +2097,7 @@ def _fresh_manifest(
         surface_version=SURFACE_VERSION,
         chunker_version=CHUNKER_VERSION,
         chunker_params=asdict(options.params),
+        embeddings=embeddings_block(vectors.spec) if vectors else None,
         counts=dict(tallies.counts),
         skipped=dict(tallies.skipped),
         failed=failed,
@@ -1772,6 +2129,7 @@ def _build_report(
     items: int,
     topics: int,
     dry_run: bool,
+    written: VectorWriteReport | None = None,
 ) -> BuildReport:
     return BuildReport(
         items_written=items,
@@ -1783,6 +2141,8 @@ def _build_report(
         failed=failed,
         duration_seconds=time.perf_counter() - started,
         dry_run=dry_run,
+        vector_chunks=written.chunks if written else None,
+        vector_rows=written.rows if written else None,
     )
 
 
@@ -2059,6 +2419,7 @@ def _update_report(
     started: float,
     *,
     dry_run: bool,
+    vector: VectorVerdict | None = None,
 ) -> UpdateReport:
     return UpdateReport(
         items_added=len(delta.added),
@@ -2072,6 +2433,8 @@ def _update_report(
         topics_refreshed=topics_refreshed,
         duration_seconds=time.perf_counter() - started,
         dry_run=dry_run,
+        vector_missing=None if vector is None else vector.missing_chunks,
+        vector_orphaned=None if vector is None else vector.orphaned_rows,
     )
 
 
@@ -2123,6 +2486,19 @@ def _next_manifest(
         skipped=dict(tallies.skipped),
         failed=[dict(entry) for entry in previous.failed],
     )
+
+
+def _vector_after_update(
+    index_dir: Path, manifest: Manifest, connection: sqlite3.Connection
+) -> VectorVerdict | None:
+    """The plane's coverage of the chunks this update has just left in the base.
+
+    `None` for an index that declares no plane — the opt-out — so the report distinguishes
+    «no plane» from «a plane that owes nothing», which take different actions.
+    """
+    if manifest.embeddings is None:
+        return None
+    return vector_verdict(index_dir, manifest, texts=stored_chunk_texts(connection))
 
 
 def update(
@@ -2192,6 +2568,9 @@ def update(
                     options=options,
                 )
                 tallies = manifest_tallies(connection)
+                # Measured INSIDE the transaction, so a dry run reports the gap a real update
+                # would leave rather than the gap that is there now (03.4).
+                vector = _vector_after_update(index_dir, manifest, connection)
                 if dry_run:
                     raise _DryRun
         except _DryRun:
@@ -2204,6 +2583,7 @@ def update(
                 topics_refreshed,
                 started,
                 dry_run=True,
+                vector=vector,
             )
     finally:
         if not connection_closed(connection):
@@ -2219,6 +2599,7 @@ def update(
         topics_refreshed,
         started,
         dry_run=False,
+        vector=vector,
     )
 
 
@@ -2343,8 +2724,14 @@ def _status_manifest(index_dir: Path, options: IndexOptions) -> tuple[Manifest |
 
 def _index_contents(
     index_dir: Path, manifest: Manifest | None, unusable: str
-) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow], str]:
-    """`(row counts per plane, {item_id: stored fingerprint}, {slug: stored topic row}, unusable)`.
+) -> tuple[dict[str, int], dict[str, str], dict[str, TopicRow], dict[str, str], str]:
+    """`(counts, {item_id: fingerprint}, {slug: topic row}, {chunk_id: text}, unusable)`.
+
+    THE CHUNK TEXTS COME BACK FROM HERE AND NOT FROM A SECOND OPEN (03.4). `status` needs them
+    to judge the vector plane's coverage, and this is one of the four functions declared as a
+    door onto `knowledge.db` (`tests/test_knowledge_seams.py`). A fifth opener would be a
+    fifth place to remember the existence check, the consistency check and the read-only mode,
+    which is exactly the seam that test exists to keep at four.
 
     THE BASE'S EXISTENCE IS ASKED OF `require_database`, LIKE EVERY OTHER DOOR (U-2). This
     function used to test `exists()` by itself and return three empties, "the truthful reading
@@ -2368,14 +2755,14 @@ def _index_contents(
     try:
         database = require_database(index_dir)
     except IndexMissingError as error:
-        return {}, {}, {}, unusable or str(error)
+        return {}, {}, {}, {}, unusable or str(error)
     connection = open_index(database, read_only=True)
     try:
         with reading_base(database):
             if manifest is not None and not unusable:
                 verdict = describe_base(connection, manifest, database, whole_file=True)
                 if verdict.sentence:
-                    return verdict.counts, {}, {}, verdict.sentence
+                    return verdict.counts, {}, {}, {}, verdict.sentence
                 counts = verdict.counts
             else:
                 counts = count_rows(connection)
@@ -2383,10 +2770,35 @@ def _index_contents(
                 counts,
                 _stored_fingerprints(connection),
                 stored_topic_rows(connection),
+                stored_chunk_texts(connection) if _declares_plane(manifest) else {},
                 unusable,
             )
     finally:
         connection.close()
+
+
+def _declares_plane(manifest: Manifest | None) -> bool:
+    """Whether reading the chunk texts is worth it: only an index that declares a plane."""
+    return manifest is not None and manifest.embeddings is not None
+
+
+def _status_vector(
+    index_dir: Path, manifest: Manifest | None, texts: Mapping[str, str], unusable: str
+) -> VectorVerdict | None:
+    """The vector plane as `status` sees it, over the texts the base door already read.
+
+    `status` REPORTS where a query REFUSES (rule 9): every failure here comes back as a state
+    rather than an exception, because this is the instrument an operator runs to find out what
+    is wrong and it must not be the door that dies. `vector_verdict` already converts an
+    absent `[embeddings]` extra into `unreadable` for that reason — `numpy` is what maps the
+    matrix, and a traceback out of `index status` would hide every other finding behind an
+    install problem.
+    """
+    if manifest is None or unusable:
+        return None
+    # Keyed on the DECLARATION, not on the dict being non-empty: a declared plane over a base
+    # with no chunks must still have its orphans counted, and `{}` is falsy.
+    return vector_verdict(index_dir, manifest, texts=texts if _declares_plane(manifest) else None)
 
 
 def _status_advice(
@@ -2396,6 +2808,7 @@ def _status_advice(
     behind: bool,
     unusable: str = "",
     topics_changed: int = 0,
+    vector: VectorVerdict | None = None,
 ) -> str:
     """The command that fixes what `status` just found — never a bare diagnosis.
 
@@ -2412,7 +2825,15 @@ def _status_advice(
             "Constrúyelo con `xbrain index build`."
         )
     if delta.added or delta.removed or delta.changed or behind or topics_changed:
-        return UPDATE_ADVICE
+        return (
+            f"{UPDATE_ADVICE} {vector.sentence}".strip()
+            if vector and vector.sentence
+            else (UPDATE_ADVICE)
+        )
+    # The lexical planes are current and the vector one is not: its own sentence, alone,
+    # because `index update` is not what repairs it (spec §5.5).
+    if vector and vector.sentence:
+        return vector.sentence
     return ""
 
 
@@ -2450,7 +2871,9 @@ def status(
     """
     options = options or IndexOptions()
     manifest, unusable = _status_manifest(index_dir, options)
-    counts, stored, stored_topics, unusable = _index_contents(index_dir, manifest, unusable)
+    counts, stored, stored_topics, chunk_texts, unusable = _index_contents(
+        index_dir, manifest, unusable
+    )
 
     current = {
         item_id: item_fingerprint(item, options=options) for item_id, item in inputs.store.items()
@@ -2463,6 +2886,7 @@ def status(
     )
     behind = manifest is not None and manifest.store_signal != inputs.signal
     incomplete = manifest is None or bool(unusable)
+    vector = _status_vector(index_dir, manifest, chunk_texts, unusable)
     return StatusReport(
         manifest=manifest,
         counts=counts,
@@ -2473,6 +2897,12 @@ def status(
         behind=behind,
         incomplete=incomplete,
         advice=_status_advice(
-            incomplete, delta, behind=behind, unusable=unusable, topics_changed=topics_changed
+            incomplete,
+            delta,
+            behind=behind,
+            unusable=unusable,
+            topics_changed=topics_changed,
+            vector=vector,
         ),
+        vector=vector,
     )

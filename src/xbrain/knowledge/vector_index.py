@@ -531,8 +531,8 @@ def _require_same_spec(stored: VectorSpec, expected: VectorSpec) -> None:
 
 def _checked_row_maps(
     raw: Mapping[str, object],
-) -> tuple[int, dict[str, int], tuple[tuple[str, ...], ...]]:
-    """`(rows, chunk_rows, row_chunks)`, with every index proved to exist.
+) -> tuple[int, dict[str, int], tuple[tuple[str, ...], ...], dict[str, int]]:
+    """`(rows, chunk_rows, row_chunks, text_rows)`, with every index proved to exist.
 
     An out-of-range row is the failure this catches: it either reads another chunk's geometry
     or dies inside a query, and both happen long after whatever wrote the document.
@@ -553,7 +553,7 @@ def _checked_row_maps(
                 f"existe en una matriz de {rows} filas. {VECTOR_REBUILD_ADVICE}"
             )
         grouped[row].append(chunk_id)
-    return rows, chunk_rows, tuple(tuple(ids) for ids in grouped)
+    return rows, chunk_rows, tuple(tuple(ids) for ids in grouped), fingerprints
 
 
 def _bounded_int(raw: object, field: str, minimum: int) -> int:
@@ -653,11 +653,17 @@ def load_vector_plane(index_dir: Path, *, expected: VectorSpec | None = None) ->
     spec = _meta_spec(raw)
     if expected is not None:
         _require_same_spec(spec, expected)
-    rows, chunk_rows, row_chunks = _checked_row_maps(raw)
+    rows, chunk_rows, row_chunks, text_rows = _checked_row_maps(raw)
     matrix = _mapped_matrix(
         index_dir / VECTORS_FILENAME, rows, spec.dimension, str(raw["matrix_sha256"])
     )
-    return VectorPlane(spec=spec, _matrix=matrix, _chunk_rows=chunk_rows, _row_chunks=row_chunks)
+    return VectorPlane(
+        spec=spec,
+        _matrix=matrix,
+        _chunk_rows=chunk_rows,
+        _row_chunks=row_chunks,
+        _text_rows=text_rows,
+    )
 
 
 @dataclass(frozen=True)
@@ -672,6 +678,7 @@ class VectorPlane:
     _matrix: Matrix | None
     _chunk_rows: Mapping[str, int]
     _row_chunks: tuple[tuple[str, ...], ...]
+    _text_rows: Mapping[str, int]
     _closed: bool = False
 
     @property
@@ -704,6 +711,20 @@ class VectorPlane:
                 f"la fila {row} no existe en una matriz de {len(self._row_chunks)} filas"
             )
         return self._row_chunks[row]
+
+    def covers(self, chunk_id: str, text: str) -> bool:
+        """Whether this plane holds the vector OF THIS TEXT for this chunk (Plan 03.4).
+
+        THE TEXT IS PART OF THE QUESTION, and that is the whole reason this is not
+        `row_of(chunk_id) is not None`. A `chunk_id` is POSITIONAL —
+        `<surface_id>:<chunk_index>:<chunker_version>` — so it survives an edit of the prose
+        behind it: after `enrich` rewrites a summary the id still resolves, still reads a row,
+        and that row still answers with the geometry of what used to be there. An id-only
+        check calls that plane complete. Measured on the fixture corpus: an edited summary
+        changed two chunks and left both ids untouched.
+        """
+        row = self._chunk_rows.get(chunk_id)
+        return row is not None and self._text_rows.get(text_fingerprint(text)) == row
 
     def close(self) -> None:
         """Release the mapping. A memmap holds a file handle until it is dropped.
