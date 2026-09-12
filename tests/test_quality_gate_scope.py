@@ -293,3 +293,67 @@ def test_check_sh_enforces_knowledge_package_coverage():
         "a failing per-package coverage must mark the run failed; otherwise check.sh still "
         "exits 0 and the summary still says PASSED"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. A file the gate opens but the SUITE cannot collect on a declared interpreter
+# ---------------------------------------------------------------------------
+
+
+def test_every_python_file_compiles_from_its_own_ast_like_pytest_recompiles_it():
+    """The fourth way the gate loses coverage: not a file it never opens, but one it
+    opens on the ONE interpreter where the file is fine.
+
+    `tests/test_knowledge_index_build.py` carried a lone-surrogate SOURCE literal —
+    `chr(0xD800)` — to prove the fingerprint planes refuse an unencodable string. pytest's
+    assertion rewriter re-`compile()`s every collected module from its AST, and CPython 3.13
+    encodes each string constant to UTF-8 while building the code object, which a lone
+    surrogate cannot survive. Measured: `compile(ast.parse(src), path, "exec")` is OK on
+    3.12.11 and raises `UnicodeEncodeError: … surrogates not allowed` on 3.13.7, and pytest
+    turns that into `Interrupted: 1 error during collection` — so ZERO tests ran, not merely
+    that file's.
+
+    NOTHING IN THE REPO COULD SEE IT. `quality.yml` and `gate-audit.yml` both pin
+    `uv python install 3.12`; `pyproject.toml` declares `requires-python = ">=3.12"` and
+    `CLAUDE.md` records that the venv runs 3.13. The gate was green on the interpreter where
+    the defect does not exist, which is rule 11's fail-open shape one level out: the gate
+    tests less and still says PASS.
+
+    THIS TEST RUNS ON WHATEVER INTERPRETER IS EXECUTING IT, so on 3.12 it does not reproduce
+    the original failure — and it is not written to. What it pins is the RULE: every Python
+    file git tracks must survive the `ast` -> `compile` round trip pytest itself performs. On
+    3.13 that is exactly the original defect, red. On 3.12 it still catches a file that fails
+    to parse at all. Adding the interpreter to the CI matrix is the other half and is NOT
+    done here: it is a change to `.github/`, which rule 13 says is read by a human.
+
+    AND THIS DOCSTRING NAMES THE CHARACTER AS `chr(0xD800)` RATHER THAN SPELLING THE ESCAPE,
+    because a docstring IS a string constant: the first version of this test quoted the literal
+    in its own prose and was refused by itself on 3.13, aborting collection of the file that
+    exists to prevent exactly that. Left recorded rather than tidied away — it is the cheapest
+    receipt that the guard bites.
+
+    Sourced from `git ls-files` like test 3, so ignored trees, build artefacts and sibling
+    worktrees can never make it noisy.
+    """
+    import ast
+
+    refused = []
+    for relpath in sorted(_repo_python_files()):
+        path = REPO_ROOT / relpath
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:  # tracked but absent from the working tree
+            continue
+        try:
+            compile(ast.parse(source, str(path)), str(path), "exec")
+        except SyntaxError as exc:
+            refused.append(f"{relpath}: does not parse — {exc}")
+        except (UnicodeEncodeError, ValueError) as exc:
+            refused.append(f"{relpath}: {type(exc).__name__}: {exc}")
+
+    assert not refused, (
+        "these files do not survive the `ast` -> `compile` round trip pytest's assertion "
+        f"rewriter performs on {sys.version.split()[0]}, so collecting them aborts the WHOLE "
+        "run (`Interrupted: N errors during collection`), not just the file:"
+        + "".join("\n  " + line for line in refused)
+    )

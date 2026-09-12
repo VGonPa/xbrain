@@ -118,14 +118,27 @@ def test_summary_producer_and_produced_at_come_from_the_enrichment() -> None:
     )
 
 
-def test_configured_commands_become_the_producer_of_asr_and_vlm_surfaces() -> None:
-    """The transcript's producer is the transcribe command, not a guess.
+def test_asr_and_vlm_surfaces_carry_no_producer_because_the_store_records_none() -> None:
+    """F7-7 / gate Codex F1 (round 08): spec §3.4 — *método o componente que la produjo* —
+    and *lo desconocido no se rellena por intuición: permanece desconocido hasta que el dato
+    conserve su productor*. The `x_video` source records no transcriber and no vision
+    command; the emitter used to stamp the command CONFIGURED at emission time, so changing
+    `[transcribe].command` changed the served provenance of a transcript nobody re-ran,
+    with text and fingerprints identical (measured on the real corpus). A configured command
+    is not evidence of what wrote the words. Plan 01 M4's own last row is the honest
+    reading: `None` where the format does not conserve it.
 
-    It is the one producer that does NOT live in the store, so it is passed in. CLAUDE.md
-    documents why it matters: parakeet does not fail on Spanish audio, it INVENTS — so
-    which backend produced a transcript is exactly the kind of thing a reader must be able
-    to recover after the fact.
+    The emitter therefore CANNOT be handed a producer for these two surfaces — there is no
+    parameter to pass one through, so no adapter can reintroduce the claim — and `produced_at`
+    still comes from `content.fetched_at`, which the store DOES record. The ASR/VLM origin
+    itself is still declared (`origin`, `trust_class`, the `machine_generated` warning).
+    Recording the producer at `digest-video`/frame time is the store change Plan 03 owns.
+
+    Seen red on `36f694b`: `item_surfaces` accepted `transcribe_command`/`vision_command`
+    and stamped them.
     """
+    import inspect
+
     item = _item(
         content=Content(
             fetched_at=datetime(2026, 3, 1, tzinfo=UTC),
@@ -144,14 +157,15 @@ def test_configured_commands_become_the_producer_of_asr_and_vlm_surfaces() -> No
             ],
         )
     )
-    surfaces = item_surfaces(
-        item,
-        transcribe_command="scripts/xbrain-transcribe-auto",
-        vision_command="scripts/xbrain-vision",
-    )
-    assert _by_type(surfaces, "video_transcript")[0].producer == "scripts/xbrain-transcribe-auto"
-    assert _by_type(surfaces, "video_frame")[0].producer == "scripts/xbrain-vision"
-    assert _by_type(surfaces, "video_transcript")[0].produced_at == datetime(2026, 3, 1, tzinfo=UTC)
+    parameters = set(inspect.signature(item_surfaces).parameters)
+    assert parameters.isdisjoint({"transcribe_command", "vision_command"}), parameters
+    surfaces = item_surfaces(item)
+    transcript = _by_type(surfaces, "video_transcript")[0]
+    frame = _by_type(surfaces, "video_frame")[0]
+    assert transcript.producer is None and frame.producer is None
+    assert transcript.produced_at == datetime(2026, 3, 1, tzinfo=UTC)
+    assert transcript.origin == "asr" and "machine_generated" in transcript.warnings
+    assert frame.origin == "vlm" and "machine_generated" in frame.warnings
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +468,11 @@ def test_surfaces_never_carry_a_verdict() -> None:
 
 
 def test_an_item_without_content_still_emits_post_and_summary() -> None:
-    """961 of 2 404 items (40 %) have no `content` at all — that is not an error.
+    """960 of 2 404 items (40 %) have no `content` at all — that is not an error.
+
+    Measured 2026-09-01 on `data/items.json`, sha256 `f76341a3…`. NOTE the population: this
+    is *no `content` block*, which is NOT *no primary surface* — the second is 0 of 2,404,
+    because every one of these still emits a `post` (F-5).
 
     Plan 01 §9: they emit `post` + `summary` + topics, with `content_kinds=()`.
     """
@@ -580,8 +598,10 @@ def test_the_video_digest_never_borrows_the_enrichment_executor_as_its_producer(
     the result would look populated and be manufactured. `producer` is the field that answers
     *what wrote these words*, and a wrong answer there is worse than no answer.
 
-    Measured 2026-08-31 over 2,404 items with the commands configured: `producer` is populated
-    on 6,923 item surfaces and absent only on `post` (2,404) and `video_digest` (216).
+    Re-derived 2026-09-02 over 2,404 items, after round 08 stopped stamping the configured
+    commands on ASR/VLM surfaces (F7-7): `producer` is populated on 4,575 item surfaces and
+    absent on `post` (2,404), `video_transcript` (152), `video_frame` (2,197) and
+    `video_digest` (216) — every one a surface whose producer the store does not record.
     """
     item = _item(
         enriched=Enrichment(
@@ -604,7 +624,7 @@ def test_the_video_digest_never_borrows_the_enrichment_executor_as_its_producer(
             ],
         ),
     )
-    surfaces = item_surfaces(item, transcribe_command="asr", vision_command="vlm")
+    surfaces = item_surfaces(item)
     digest = next(s for s in surfaces if s.surface_type == "video_digest")
     summary = next(s for s in surfaces if s.surface_type == "summary")
 

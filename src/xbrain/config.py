@@ -70,6 +70,19 @@ class Config:
     frames_interval_seconds: float
     frames_dedupe: bool
     frames_dedupe_distance: int
+    # `[index]` — the persistent knowledge index (Plan 02 §9). `index_dir` is where
+    # `xbrain index build` writes the SQLite base and its manifest; it is derived and
+    # reconstructible, lives under `data/` and is never versioned. The other two are read
+    # by the two query services: `index_max_matches_per_item` caps how many fragments of
+    # one item `search` may cite (spec §5.4 — it is what stops a long transcript filling
+    # the top ten with ten adjacent windows of itself), and `index_get_char_budget` is the
+    # per-response ceiling above which `get` truncates and hands back a cursor.
+    #
+    # FLAT NAMES, like every other section (`frames_max_frames`, `transcribe_command`):
+    # `Config` is one dataclass, not a tree of per-section objects.
+    index_dir: Path
+    index_max_matches_per_item: int
+    index_get_char_budget: int
 
     @property
     def payload_dir(self) -> Path:
@@ -105,6 +118,42 @@ class Config:
     @property
     def storage_state_path(self) -> Path:
         return self.repo_root / "auth" / "storage_state.json"
+
+
+def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
+    """`[index]` → `(index_dir, max_matches_per_item, get_char_budget)`, range-checked.
+
+    THE DEFAULTS ARE IMPORTED, NEVER RETYPED (rule 5). `40000` written here would be a
+    second definition of a budget `get_service` owns, and `"index"` a second definition of
+    the directory name `index_schema` owns; the two copies drift the day one of them moves,
+    and nothing goes red because each file is internally consistent. The imports are LOCAL
+    to this function on purpose: `config.py` is loaded on every single `xbrain` invocation,
+    and the knowledge stack behind those two constants pulls in `sqlite3`, the chunker and
+    the whole surface emitter — a module-level import would make `xbrain login` pay for it.
+
+    THE CONTAINMENT CHECK IS NOT THE `..` CHECK (Plan 02 §12.6). `index build --force`
+    unlinks and recreates everything under `index_dir`, so the question that has to be
+    answered is not *does this string contain `..`* but *does this path land inside
+    `data/`* — and a symlink passes the first and fails the second. `is_relative_to` is
+    asked of the RESOLVED path, which is what follows the link.
+    """
+    from xbrain.knowledge.get_service import DEFAULT_CHAR_BUDGET
+    from xbrain.knowledge.index_schema import DEFAULT_INDEX_DIR_NAME
+
+    index = settings.get("index", {})
+    index_dir = data_dir / index.get("dir", DEFAULT_INDEX_DIR_NAME)
+    if not index_dir.resolve().is_relative_to(data_dir.resolve()):
+        raise ValueError(
+            f"config.toml: [index].dir must stay inside {data_dir} "
+            f"(resolved to {index_dir.resolve()})"
+        )
+    max_matches = int(index.get("max_matches_per_item", 3))
+    if max_matches < 1:
+        raise ValueError("config.toml: [index].max_matches_per_item must be >= 1")
+    char_budget = int(index.get("get_char_budget", DEFAULT_CHAR_BUDGET))
+    if char_budget < 1:
+        raise ValueError("config.toml: [index].get_char_budget must be >= 1")
+    return index_dir, max_matches, char_budget
 
 
 def load_config(repo_root: Path) -> Config:
@@ -159,11 +208,13 @@ def load_config(repo_root: Path) -> Config:
         raise ValueError(
             "config.toml: [frames].interval_seconds must be > 0 (0 selects every frame)"
         )
+    data_dir = repo_root / paths["data_dir"]
+    index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
     return Config(
         repo_root=repo_root,
         vault=vault,
         output_dir=vault / paths["output_subdir"],
-        data_dir=repo_root / paths["data_dir"],
+        data_dir=data_dir,
         x_handle=x_settings["handle"],
         enrich_executor=executor,
         enrich_model=enrich.get("model", "claude-haiku-4-5-20251001"),
@@ -182,4 +233,7 @@ def load_config(repo_root: Path) -> Config:
         frames_interval_seconds=frames_interval_seconds,
         frames_dedupe=bool(frames.get("dedupe", True)),
         frames_dedupe_distance=frames_dedupe_distance,
+        index_dir=index_dir,
+        index_max_matches_per_item=index_max_matches,
+        index_get_char_budget=index_char_budget,
     )

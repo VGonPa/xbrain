@@ -69,6 +69,7 @@ def _chunk(**overrides) -> KnowledgeChunk:
         origin="source",
         trust_class="primary_source",
         derived=False,
+        locator=Locator(kind="item_text", char_start=0, char_end=13),
         fingerprint=HEX64,
     )
     return KnowledgeChunk(**{**defaults, **overrides})
@@ -96,7 +97,8 @@ def test_models_are_frozen(factory) -> None:
 def test_models_forbid_unknown_fields(factory) -> None:
     """`extra="forbid"` — a misspelled field must be an error, not a silent no-op.
 
-    Spec §7.1 freezes these shapes at `schema_version: "1"` so CLI and MCP cannot diverge.
+    Spec §7.1 freezes these shapes per envelope — they travel in the `EvidenceBundle`,
+    at `schema_version: "2"` since `locator` became required — so CLI and MCP cannot diverge.
     A model that swallows unknown keys lets a producer "add" a field that no consumer ever
     sees, which is the drift the freeze exists to prevent.
     """

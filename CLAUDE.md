@@ -505,9 +505,14 @@ generates an Obsidian wiki.
   group fails the anexo-A.3 leak rule; founding a case on the second would enshrine a possible
   hallucination as ground truth. Zero usable candidates — and the population measured is proper
   nouns, not all facts. **A case whose filters the strategy cannot apply is UNMEASURED, not
-  0.0**: the FTS5 baseline pushes only `has_surfaces`/`origins` into `WHERE`, and the first real
-  run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at filtering" when
-  the instrument does not exist yet (spec §8.6.8). The baseline is the SAME FTS5 the persisted
+  0.0**: under Plan 01 the FTS5 baseline pushed only `has_surfaces`/`origins` into `WHERE`, and
+  the first real run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at
+  filtering" when the instrument does not exist yet (spec §8.6.8). **That gap is now closed and
+  the RULE is what survives** (PR #179): the harness builds through `index_build`'s writer, the
+  same one `xbrain index build` drives, so all **eight** filters of spec §7.2 are pushed and the
+  two `filtros` cases are scored rather than reported unmeasured. `SUPPORTED_FILTERS` is derived
+  from `SearchFilters.model_fields`, so a ninth filter added to the frozen contract cannot
+  silently keep the set at eight. Read "only two" as history; do not quote it as a limit. The baseline is the SAME FTS5 the persisted
   index will use, on `sqlite3(":memory:")` — same DDL, same `unicode61 remove_diacritics 2`
   (no stemming: FTS5 has none multilingual, and the English one would wreck the Spanish half),
   same `bm25()`, same explicit `chunk_id` tie-break — so what dies later is where the database
@@ -523,13 +528,83 @@ generates an Obsidian wiki.
   in front of bm25 is two retrieval models stacked: bm25 wants a wide candidate set and
   discriminates by IDF, and requiring every term does that by brute force *before* the scorer
   runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
-  as a function word can still be rare to the index and go undiscounted — `el` is 1 of 43
-  fixture chunks (2.3 %) and 5,748 of 18,319 real ones (31.4 %), which is why a fixture query
-  ranks it high and the real corpus does not. That, and no stemming, is what Plan 03's vector
-  layer has to beat. Picking between `OR`, minimum-should-match and per-term weighting is Plan
-  02's sweep. **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
+  as a function word can still be rare to the index and go undiscounted — `el` is 1 of 49
+  fixture chunks (2.0 %) and **6,070 of 22,286** real ones (**27.2 %**), re-derived 2026-09-01
+  on the then-shipped chunker (v2, `800/0`, store sha256 `f76341a3…`), which is why a fixture
+  query ranks it high and the real corpus does not. **`CHUNKER_VERSION` is `v3` since Plan
+  02.9**, and this count still stands: v3 changed the FINGERPRINT projection (the served title
+  joined the hashed tuple) and not the cut, proven by the version-stripped ranking fixture
+  being byte-identical across the bump — so the chunk ids moved and the chunk COUNT did not.
+  Do not re-stamp a measured figure to a new version without that proof: which of the two a
+  version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
+  correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
+  in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
+  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7395 · MRR 0.7357** — NOT the
+  `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
+  it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
+  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
+  `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
+  tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
+  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat.
+  Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
+  **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
   counts the comparisons it made and fails closed at zero, because `passed = not failures` let
   `--min-recall 1.0` exit 0 having scored nothing.
+- **The persistent index (`data/index/`, `xbrain index build|update|status` · `search` · `get`)
+  is DERIVED, and that is what licenses every refusal in it.** SQLite + FTS5, two planes —
+  `chunks_fts` over fragment bodies (what a citation quotes) and `profiles_fts` over one
+  retrieval profile per item (what answers a query whose words appear in no fragment; never
+  served as a citation). Deleting the directory costs one `build`, so an incompatible manifest,
+  a drifted column or a torn page is **refused whole** rather than queried partially — a partial
+  answer over a schema this code no longer matches is a wrong answer wearing a right one's shape
+  — and every incompatibility ends with the same sentence, `xbrain index build --force`.
+  **`rowid` is an explicit `INTEGER PRIMARY KEY`**: with an implicit one SQLite may reuse a
+  deleted row's rowid and external-content FTS5 would return the NEW chunk for the OLD word.
+  **Two change signals, and confusing them is the trap.** Four DEEP fingerprints (item · store ·
+  vocabulary · topics) drive `build`/`update`/`status` and answer *what changed*; one CHEAP
+  `StoreSignal` — `mtime_ns` + size of the THREE inputs (`items.json`, `vocab.yaml`,
+  `topics.json`, six required fields) — is three `os.stat`, so a query can afford it on every
+  call and declare `index_behind_store`. Three inputs because comparing `items.json` alone left
+  `xbrain topics` writing a new topic plane that every later `search` answered over silently.
+  The cheap signal is **falible in one declared direction**: a `touch` with no edit is an
+  accepted false positive (a false positive costs a warning, a false negative serves stale
+  evidence as fresh), and a same-size replacement with the mtime preserved (`cp -p`, `rsync -a`,
+  `unzip`, a restored backup) is invisible to it FOREVER. Nothing promises freshness from
+  `mtime`+size. **The query door refuses and `index status` REPORTS** — same sentence, opposite
+  behaviour, on purpose (rule 9): `status` is the instrument you run to find out, and it pays
+  for `PRAGMA quick_check` (155–850 ms on the 52 MiB real index) which no query door can. The
+  open door instead runs one trivial `MATCH` per FTS plane (0.01 ms each), because page-1 and
+  `sqlite_master` reads touch no FTS5 shadow table: with `chunks_fts_data` dropped, `search`
+  died in a traceback while `status` exited 0 and called the index healthy. **`search` filters
+  BEFORE it scores** (all eight, incl. `content_kinds` and `has_surfaces`), excludes rows it
+  cannot serve honestly — no locator, or a fingerprint that does not recompute over the served
+  projection — into `corrupt_chunks_excluded` (named `stale_chunks_excluded` until someone
+  noticed it SOUNDED like the staleness signal and MEASURED the consistency one), groups by item
+  at `max_matches_per_item` (3), and hydrates `verification_status` from the **live store**, never
+  the index. **`get` never reads the index at all** and works with `data/index/` deleted: an
+  index able to answer it would be a second copy of the corpus that nothing invalidates.
+  Degradations are a fixed-order tuple, DECLARED not simulated: `no_embeddings` is read off the
+  manifest's `embeddings` block (not hard-coded — the day Plan 03 writes it the flag stops
+  appearing by itself), and `--strategy vector` degrades to lexical labelled
+  `vector_not_implemented` while a TYPO raises (a typo is not a degradation; answering it with
+  lexical results would turn it into a measurement). `render.py` is the human view of the SAME
+  response model `--json` serialises and reaches back into nothing. **Measured 2026-09-12 on the
+  live corpus (2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
+  `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
+  loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
+  store.** Re-derive it; it moves with the corpus. **Known limits, declared not discovered:** no
+  stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
+  tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
+  `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
+  (`unicode61 remove_diacritics 2`). And `xbrain eval` is **no longer a different filter surface** (PR #179):
+  the harness stopped walking the corpus its own way and now builds through `index_build`'s
+  writer, so it pushes the **same eight** filters `search` does and the two `filtros` cases of
+  the golden set are scored. **The rule outlives the gap**: a case whose filters a strategy
+  cannot apply is still **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as
+  "retrieval failed at filtering" when the instrument was not there — and that is what will
+  protect Plan 03's vector strategy, which starts with no filter columns of its own. The earlier
+  line here said the harness pushes only two; it was true until #179 and is now false.
+  Operation: `docs/knowledge-index.md`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·

@@ -2827,13 +2827,13 @@ def _inspect_item(corpus, item_id: str, *, want_surfaces: bool, want_chunks: boo
         )
     from xbrain.knowledge.surfaces import knowledge_item
 
-    surfaces = item_surfaces(
-        item,
-        transcribe_command=cfg.transcribe_command,
-        vision_command=cfg.vision_command,
-    )
+    surfaces = item_surfaces(item)
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
     payload: dict = {
-        "schema_version": "1",
+        # The version of the shapes this payload dumps, read off the contract (U-1): the
+        # surfaces and chunks here are the `EvidenceBundle`'s, so they carry its number.
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
         "item": knowledge_item(item, vault_dir=cfg.output_dir).model_dump(mode="json"),
         # Hydrated from the LIVE store, never persisted on a surface (M5): a stored copy
         # could not be invalidated when the verdict changed, so a revoked FAIL would keep
@@ -2892,8 +2892,10 @@ def _inspect_topic(corpus, slug: str, *, want_surfaces: bool) -> dict:
         raise ValueError(f"No existe el topic {slug!r} en data/vocab.yaml.")
     page = corpus.topic_pages.get(slug)
     primary, secondary = _topic_membership(corpus, slug)
+    from xbrain.knowledge.contracts import EVIDENCE_SCHEMA_VERSION
+
     payload: dict = {
-        "schema_version": "1",
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
         "topic": topic_record(topic, page, primary, secondary).model_dump(mode="json"),
     }
     if want_surfaces:
@@ -2966,6 +2968,451 @@ def _render_inspect(payload: dict) -> str:
     return "\n".join(lines)
 
 
+# ============================================================================
+# El índice persistente, `search` y `get` (Plan 02 §6)
+#
+# ESTA CAPA ES UN ADAPTADOR Y NADA MÁS. Cada comando carga las entradas una vez,
+# llama a su servicio una vez, y elige UNA de dos salidas sobre el MISMO objeto:
+# el documento JSON que el modelo serializa, o la vista humana que `render.py`
+# compone desde ese mismo modelo (spec §7.6). Aquí no se formatea una línea: un
+# formateador local sería una tercera definición de qué es un resultado, después
+# del servicio y del JSON, que es justo la divergencia de la regla 5.
+# ============================================================================
+
+index_app = typer.Typer(help="Construir y consultar el índice persistente (data/index/).")
+app.add_typer(index_app, name="index")
+
+
+def _handle_index_errors(func: Callable) -> Callable:
+    """Convertir los errores accionables del índice en un mensaje limpio + exit 1.
+
+    `IndexError_` hereda de `Exception`, NO de `ValueError`, así que `_handle_cli_errors`
+    —que enumera `ValueError`, `KeyError`, `RuntimeError`, `OSError`…— no lo ve: sin esta
+    capa, «no hay índice» se imprime como un traceback crudo y el spec §9.3 pide lo
+    contrario. Se apila DEBAJO de `_handle_cli_errors`, de modo que cada excepción la
+    atiende exactamente uno de los dos y ninguno reimplementa al otro.
+
+    El import es local porque `index_schema` arrastra `sqlite3` y los modelos del contrato,
+    y `cli.py` se importa en cada invocación de `xbrain`, incluida `login`.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        from xbrain.knowledge.index_schema import IndexError_
+
+        try:
+            return func(*args, **kwargs)
+        except IndexError_ as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    return wrapper
+
+
+def _index_inputs(cfg: Config):
+    """Las tres entradas del índice, con la señal barata del snapshot que se leyó.
+
+    UN SOLO CARGADOR PARA LOS CINCO COMANDOS. `load_index_inputs` ata las filas y la señal
+    al mismo instante y a los mismos descriptores (P1b): dos cargadores distintos dejarían
+    que las filas describan un momento y el `stat` otro, y esa diferencia es invisible.
+    """
+    from xbrain.knowledge.index_build import load_index_inputs
+
+    return load_index_inputs(cfg.items_path, cfg.data_dir / "vocab.yaml", cfg.topics_path)
+
+
+def _index_options(cfg: Config):
+    """Lo que un build necesita y no es el corpus. Idéntico en build, update y status.
+
+    Idéntico a propósito: `item_fingerprint` las consume, así que tres comandos con opciones
+    distintas producirían tres huellas distintas del mismo item y `status` declararía
+    cambios que no existen.
+    """
+    from xbrain.knowledge.index_build import IndexOptions
+
+    return IndexOptions(vault_dir=cfg.output_dir)
+
+
+def _query_context(cfg: Config, inputs):
+    """Todo lo que una consulta necesita y no es la consulta (spec §7.2).
+
+    El STORE viaja dentro: `get` lee el store vivo (spec §3.7.7) y `search` hidrata la
+    verificación desde él (M5), así que las rutas que van aquí son las mismas que el
+    cargador acaba de leer.
+    """
+    from xbrain.knowledge.search_service import QueryContext
+
+    return QueryContext(
+        store=inputs.store,
+        vocab=inputs.vocab,
+        topic_pages=inputs.topic_pages,
+        index_dir=cfg.index_dir,
+        items_path=cfg.items_path,
+        vocab_path=cfg.data_dir / "vocab.yaml",
+        topics_path=cfg.topics_path,
+        vault_dir=cfg.output_dir,
+        language=cfg.output_language,
+        max_matches_per_item=cfg.index_max_matches_per_item,
+    )
+
+
+def _echo_json(payload: object) -> None:
+    """El documento estable en stdout, y nada más (spec §3.7.9)."""
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@index_app.command("build")
+@_handle_cli_errors
+@_handle_index_errors
+def index_build_command(
+    force: bool = typer.Option(
+        False, "--force", help="Reconstruye desde cero un índice ya existente."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Cuenta lo que haría; no toca ningún fichero."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Construye `data/index/` desde cero y lo sella.
+
+    NO ES DESTRUCTIVO SOBRE EL STORE y por eso no toma snapshot: lo único que escribe es
+    `data/index/`, que es derivado y reconstruible (Plan 02 §6). `--force` sí tira el índice
+    anterior —manifest primero, base después— así que una reconstrucción interrumpida no
+    deja un manifest en pie sobre una base vacía.
+    """
+    from dataclasses import asdict
+
+    from xbrain.knowledge.index_build import build
+    from xbrain.knowledge.render import render_build
+
+    cfg = _config()
+    report = build(
+        cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run, force=force
+    )
+    if json_out:
+        _echo_json(asdict(report))
+    else:
+        typer.echo(render_build(report))
+
+
+@index_app.command("update")
+@_handle_cli_errors
+@_handle_index_errors
+def index_update_command(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Cuenta el delta; no escribe nada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Pone el índice al día tocando solo lo que cambió (spec §5.6).
+
+    Una sola transacción para toda la corrida: un update a medias dejaría una aplicación
+    parcial de un cambio que nadie puede nombrar, y el índice parecería sano porque todos
+    los ids que contiene siguen resolviendo.
+    """
+    from dataclasses import asdict
+
+    from xbrain.knowledge.index_build import update
+    from xbrain.knowledge.render import render_update
+
+    cfg = _config()
+    report = update(cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run)
+    if json_out:
+        _echo_json(asdict(report))
+    else:
+        typer.echo(render_update(report))
+
+
+@index_app.command("status")
+@_handle_cli_errors
+@_handle_index_errors
+def index_status_command(
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Qué contiene el índice y cuánto se ha quedado atrás respecto al store.
+
+    ES EL COMANDO QUE RESPONDE CUANDO LOS DEMÁS SE NIEGAN. `search`, `get`, `build` y
+    `update` rechazan un índice ausente o incompatible; este lo REPORTA, porque es el
+    instrumento que se corre precisamente para averiguarlo. Dos instrumentos con respuestas
+    opuestas sobre un mismo estado es la regla 9, y la salida no es que el diagnóstico se
+    niegue también: es que diga el mismo comando que dicen las puertas.
+
+    El manifest se publica con `to_dict()`, el MISMO documento que `data/index/manifest.json`
+    contiene, nunca un volcado paralelo del dataclass (que además no sería serializable: lleva
+    un `datetime` y una `StoreSignal` anidada).
+    """
+    from xbrain.knowledge.index_build import status
+    from xbrain.knowledge.render import render_status
+
+    cfg = _config()
+    report = status(cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg))
+    if json_out:
+        _echo_json(
+            {
+                "manifest": report.manifest.to_dict() if report.manifest else None,
+                "counts": report.counts,
+                "items_added": report.items_added,
+                "items_changed": report.items_changed,
+                "items_removed": report.items_removed,
+                "topics_changed": report.topics_changed,
+                "behind": report.behind,
+                "incomplete": report.incomplete,
+                "advice": report.advice,
+            }
+        )
+    else:
+        typer.echo(render_status(report))
+
+
+def _search_filters(
+    created_from: str | None,
+    created_to: str | None,
+    source: str | None,
+    mine: bool,
+    author: str | None,
+    topics: list[str],
+    kinds: list[str],
+    origins: list[str],
+    has_surfaces: list[str],
+):
+    """Los ocho filtros del spec §7.2, armados y validados por el contrato.
+
+    `--mine` es el atajo del spec §7.2 para `source=own_tweet`, y es INCOMPATIBLE con
+    `--source`: dos maneras de fijar un campo son una manera de fijarlo a dos valores
+    distintos, y la resolución silenciosa (gane cuál gane) devolvería un corpus que el
+    operador no pidió sin decírselo.
+
+    Los valores de `--kind`, `--origin` y `--has-surface` NO se re-enumeran aquí: los valida
+    `SearchFilters`, que es donde viven los `Literal` del contrato. Una lista escrita a mano
+    en el CLI sería una segunda copia que envejece el día que el contrato crece (regla 5).
+    """
+    from xbrain.knowledge.contracts import SearchFilters
+
+    if mine and source is not None:
+        raise ValueError("`--mine` ya fija `--source own_tweet`; no los combines.")
+    # `model_validate`, no el constructor, y la diferencia es de TIPADO, no de estilo.
+    # `--kind`, `--origin`, `--has-surface` y `--source` llegan como texto libre del
+    # usuario y los campos que los reciben son `Literal`s del contrato: pasarlos al
+    # constructor obliga a un `cast` en el borde, que es decirle al comprobador que el
+    # texto ya está validado justo donde todavía no lo está. `model_validate` valida de
+    # verdad, en el sitio donde viven los valores válidos, y su mensaje los enumera
+    # («Input should be 'external_article', 'x_article', …»). Una lista escrita a mano
+    # aquí sería una segunda copia del contrato que envejece sola (regla 5).
+    return SearchFilters.model_validate(
+        {
+            "created_from": _parse_date(created_from),
+            "created_to": _parse_date(created_to, end_of_day=True),
+            "source": "own_tweet" if mine else source,
+            "author": author,
+            "topics": tuple(topics),
+            "content_kinds": tuple(kinds),
+            "origins": tuple(origins),
+            "has_surfaces": tuple(has_surfaces),
+        }
+    )
+
+
+@app.command("search")
+@_handle_cli_errors
+@_handle_index_errors
+def search_command(
+    query: str = typer.Argument(..., help="Qué buscar. Texto libre."),
+    limit: int = typer.Option(10, "--limit", help="Resultados por página."),
+    created_from: str | None = typer.Option(None, "--from", help="Items creados desde (ISO)."),
+    created_to: str | None = typer.Option(None, "--to", help="Items creados hasta (ISO)."),
+    source: str | None = typer.Option(None, "--source", help="bookmark | own_tweet."),
+    mine: bool = typer.Option(False, "--mine", help="Atajo de `--source own_tweet`."),
+    author: str | None = typer.Option(None, "--author", help="Handle del autor."),
+    topic: list[str] = typer.Option([], "--topic", help="Slug del vocabulario (repetible)."),
+    kind: list[str] = typer.Option([], "--kind", help="Tipo de contenido (repetible)."),
+    origin: list[str] = typer.Option([], "--origin", help="Procedencia del texto (repetible)."),
+    has_surface: list[str] = typer.Option(
+        [], "--has-surface", help="Solo items con esta superficie (repetible)."
+    ),
+    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia de recuperación."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una página truncada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Busca en el índice y devuelve items con sus fragmentos citables.
+
+    SOLO LECTURA: la base se abre `mode=ro`, el store no se toca y no hay red ni modelo —
+    el spec §13.12 exige que `search` funcione sin una sola llamada a un LLM.
+
+    Sin `--json` imprime la vista humana del spec §7.6 (item, autor, fecha, URL, superficie,
+    procedencia, excerpt, canales del match, advertencias, y el `xbrain get` que trae la
+    fuente); con `--json`, el MISMO `SearchResponse` como documento.
+    """
+    from typing import cast
+
+    from xbrain.knowledge.contracts import Strategy
+    from xbrain.knowledge.render import render_search
+    from xbrain.knowledge.search_service import search
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    response = search(
+        query,
+        _query_context(cfg, inputs),
+        filters=_search_filters(
+            created_from, created_to, source, mine, author, topic, kind, origin, has_surface
+        ),
+        limit=limit,
+        # El `cast` es honesto porque `search` valida este texto en su primera línea:
+        # `resolve_strategy` levanta un `ValueError` que enumera las estrategias
+        # declaradas y las implementadas. La firma es `Strategy` pero el contrato acepta
+        # y comprueba texto libre a propósito — un typo no es una degradación, y
+        # contestarlo con resultados léxicos lo convertiría en una medición.
+        strategy=cast(Strategy, strategy),
+        cursor=cursor,
+    )
+    if json_out:
+        _echo_json(response.model_dump(mode="json"))
+    else:
+        typer.echo(render_search(response))
+
+
+@app.command("get")
+@_handle_cli_errors
+@_handle_index_errors
+def get_command(
+    item_id: str = typer.Argument(..., help="Id del item."),
+    surface: list[str] = typer.Option(
+        [], "--surface", help="Superficie a entregar entera (repetible)."
+    ),
+    query: str | None = typer.Option(
+        None, "--query", help="Prioriza los fragmentos que puntúan para esta consulta."
+    ),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una respuesta truncada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
+
+    Es el invariante 7 del spec §3.7: `get` funciona con `data/index/` borrado, porque un
+    índice capaz de contestar `get` sería una copia del corpus que nada invalida, y el día
+    que las dos discreparan no habría forma de saber cuál se le enseñó al lector.
+
+    El presupuesto por respuesta sale de `[index].get_char_budget`; por encima de él la
+    respuesta se trunca DECLARÁNDOLO y entrega un cursor (spec §9.3), nunca en silencio.
+    """
+    from typing import Sequence, cast
+
+    from xbrain.knowledge.get_service import GetLimits, get
+    from xbrain.knowledge.models import SurfaceType
+    from xbrain.knowledge.render import render_get
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    bundle = get(
+        item_id,
+        _query_context(cfg, inputs),
+        # Mismo trato que `--strategy`: `get` comprueba cada nombre pedido contra las
+        # superficies que el item emite y las de las fuentes que fallaron, y rechaza las
+        # que no son ninguna de las dos enumerando las disponibles (`UnknownSurfaceError`).
+        surfaces=cast("Sequence[SurfaceType] | None", surface or None),
+        query=query,
+        limits=GetLimits(char_budget=cfg.index_get_char_budget),
+        cursor=cursor,
+    )
+    if json_out:
+        _echo_json(bundle.model_dump(mode="json"))
+    else:
+        typer.echo(render_get(bundle, surfaces=surface, query=query))
+
+
+def _run_sweep(
+    cfg,
+    cases,
+    corpus,
+    axes,
+    strategy: str,
+    report,
+    *,
+    json_out: bool,
+    limit: int,
+    ks: list[int],
+    min_recall: float | None,
+) -> None:
+    """`eval --sweep-chunker`: score every `(target, overlap)` and publish the table.
+
+    A SEPARATE PATH, not a flag threaded through `evaluate`, because the two answer different
+    questions: `eval` measures the retriever at the parameters in force, the sweep measures
+    the parameters. Folding them would make the ordinary report's numbers depend on whether a
+    sweep flag happened to be present.
+
+    The sweep changes `ChunkerParams` as an ARGUMENT and never the module constant, so
+    `tests/fixtures/knowledge_ranking.json` — which passes its own pinned parameters — cannot
+    be moved by it (M7).
+
+    EVERY OPTION THE COMMAND ACCEPTS EITHER REACHES THIS PATH OR IS REFUSED BY NAME — the class
+    of defect the final gate on #177 found three of here, one per option. A separate path that
+    silently drops the flags of the command it shares is the worst of both: the user reads the
+    command's help, the sweep obeys its own defaults, and the two never meet. `--limit` was
+    fixed as an instance (`--limit 10` and `--limit 150` were byte-identical) without closing
+    the class, so `--k` had it too, and `--min-recall` exited 0 having judged nothing.
+    """
+    from xbrain.knowledge.evaluation import (
+        DEFAULT_SWEEP_K,
+        parse_sweep,
+        render_sweep_markdown,
+        sweep_chunker as run_sweep,
+    )
+
+    # REFUSED, NOT IGNORED, and before anything is computed. The threshold judges the BUCKETS
+    # of one evaluation — stratum by stratum, provenance by provenance — and a sweep publishes
+    # a TABLE of chunker combinations, which has no bucket to compare it against. Applying it
+    # to the winner's overall recall would answer a question nobody asked with a green a reader
+    # would read as "every stratum clears the bar", and that misreading is worse than the
+    # missing feature. Accepting it in silence was the fail-open CLAUDE.md already records for
+    # this exact flag: «a threshold that reached no bucket is a FAILURE, not a pass».
+    if min_recall is not None:
+        raise ValueError(
+            "`--min-recall` no se aplica a `--sweep-chunker`: el umbral juzga los buckets de "
+            "UNA evaluación y el barrido publica una TABLA de combinaciones, así que no hay "
+            "bucket contra el que compararlo. Corre `xbrain eval --min-recall …` sin el "
+            "barrido para la puerta, y el barrido aparte para la tabla."
+        )
+    # `--k` is repeatable because the ordinary report carries a column per k; the sweep RANKS,
+    # and a ranking happens at one k. Choosing `max(ks)` would discard the rest in silence,
+    # which is the very defect this path is being repaired for.
+    if len(ks) > 1:
+        raise ValueError(
+            "`--sweep-chunker` ordena por un solo `recall@k` y recibió "
+            f"{len(ks)} valores de `--k` ({', '.join(str(value) for value in ks)}). "
+            "Elegir uno descartaría los demás en silencio: repite el barrido con un `--k` "
+            "por corrida."
+        )
+
+    grid = parse_sweep(axes)
+    # The depth the command advertises is the depth the sweep runs at: the first version
+    # dropped it here, and `--limit 10` and `--limit 150` were byte-identical.
+    result = run_sweep(
+        cases,
+        corpus,
+        grid,
+        strategy=strategy,
+        k=ks[0] if ks else DEFAULT_SWEEP_K,
+        limit=limit,
+    )
+    json_path = report or (cfg.data_dir / "eval-sweep.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_sweep_markdown(result), encoding="utf-8")
+    if json_out:
+        _echo_json(payload)
+    else:
+        typer.echo(render_sweep_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    # PUBLISHED FIRST, THEN FAILED. A sweep with no winner — nothing scorable, or no
+    # combination at all — is not a success, and it used to exit 0 while announcing «PLANO:
+    # todas las combinaciones puntúan igual», a positive claim about a ranking that never
+    # happened. The exit code is the surface a caller reads (rule 9); the table is still
+    # written and echoed, because the run failing is not a reason to withhold its evidence.
+    # The message is the report's OWN verdict, so stderr and the artefact say one thing.
+    if result.winner is None:
+        raise ValueError(payload["verdict"])
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
@@ -2973,19 +3420,29 @@ def eval_command(
     limit: int = typer.Option(
         10,
         "--limit",
-        help="Profundidad de recuperación por caso (nunca por debajo del mayor k).",
+        help="Profundidad de recuperación por caso, en OWNERS (nunca por debajo del mayor k).",
     ),
-    k: list[int] = typer.Option([], "--k", help="Valores de k a reportar (repetible)."),
+    k: list[int] = typer.Option(
+        [], "--k", help="Valores de k a reportar (repetible; el barrido admite uno solo)."
+    ),
     min_recall: float | None = typer.Option(
         None,
         "--min-recall",
-        help="Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa.",
+        help=(
+            "Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa. "
+            "No se combina con `--sweep-chunker`."
+        ),
     ),
     golden_set: Path = typer.Option(
         Path("eval/golden-set.yaml"), "--golden-set", help="Ruta del golden set."
     ),
     report: Path | None = typer.Option(
         None, "--report", help="Dónde escribir el informe (por defecto data/eval-report.json)."
+    ),
+    sweep_chunker: list[str] = typer.Option(
+        [],
+        "--sweep-chunker",
+        help="Barrido del troceo: `target=800,1200 overlap=0,150` (repetible o entrecomillado).",
     ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
@@ -3004,6 +3461,20 @@ def eval_command(
     cfg, corpus = _knowledge_corpus()
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)
+    if sweep_chunker:
+        _run_sweep(
+            cfg,
+            cases,
+            corpus,
+            sweep_chunker,
+            strategy,
+            report,
+            json_out=json_out,
+            limit=limit,
+            ks=k,
+            min_recall=min_recall,
+        )
+        return
     result = evaluate(
         cases,
         corpus,

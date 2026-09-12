@@ -11,7 +11,8 @@ THREE CONSTRAINTS CARRY THE WEIGHT, and each is asserted by the suite:
 * `frozen=True` — a surface whose text can be mutated after emission has a fingerprint that
   no longer means anything, and "the retrieved text is verbatim with respect to that
   surface" (spec §3.8) stops being checkable;
-* `extra="forbid"` — spec §7.1 freezes these shapes at `schema_version: "1"` so the CLI and
+* `extra="forbid"` — spec §7.1 freezes these shapes per envelope (`SearchResponse` "2",
+  `EvidenceBundle` "2", the graph envelope "1") so the CLI and
   MCP adapters cannot drift; a model that swallows unknown keys lets a producer add a field
   no consumer ever sees;
 * fingerprints are pattern-constrained to lowercase sha256 hex, the same defence
@@ -36,6 +37,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from xbrain.knowledge.provenance import Origin, TrustClass
 from xbrain.models import Author, ContentKind, FailureReason, SourceName, Verdict
+
+# Who a surface or chunk belongs to. TWO values, and the CLOSURE is the point: an id alone
+# does not identify an owner, because the two namespaces overlap — `Topic.slug` admits an
+# all-digit slug and every tweet id is all digits (C1). Named once here so the chunker, the
+# writer and the retriever's `OwnerKey` cannot disagree about the set (rule 5), and so the
+# owner narrowing can bound its SQL by the number of TYPES rather than of owners (M1).
+OwnerType = Literal["item", "topic"]
 
 # Every kind of text this layer can surface. Spec §4, one row per physical surface.
 SurfaceType = Literal[
@@ -196,15 +204,25 @@ class KnowledgeSurface(BaseModel):
 
     `producer` and `produced_at` answer spec §3.4's *method or component that produced it*
     and *instant of capture/generation*. They are populated from data already in the store
-    (`enriched.executor`, `MediaPhotoDescribed.description_version`/`described_at`, the
-    configured transcribe/vision command, `TopicPage.synthesized_at`) and are `None` only
-    where the format genuinely does not record it.
+    (`enriched.executor`, `MediaPhotoDescribed.description_version`/`described_at`,
+    `TopicPage.synthesized_at`, `content.fetched_at`) and are `None` where the format
+    genuinely does not record it — which INCLUDES `video_transcript` and `video_frame`
+    (F7-7, round 08): the `x_video` source records neither the transcriber nor the vision
+    command that wrote the text. Until round 08 those two surfaces carried the command
+    CONFIGURED when the surface was emitted; measured on the real corpus, changing
+    `[transcribe].command` to `whisper-large-v3` made `get` serve `producer:
+    whisper-large-v3` for a transcript parakeet wrote, text and fingerprints identical — a
+    provenance claim the store cannot back, and spec §3.4 says the unknown is not filled in
+    by intuition. It is `None` now, the origin (`asr`/`vlm`, `machine_generated`) is still
+    declared, and the honest fix — stamping the producer on the source when `digest-video`
+    attaches the transcript, as `caption_contract` does for frames — is a store change
+    outside Plan 02, recorded as an open issue for Plan 03.
     """
 
     model_config = _FROZEN
 
     surface_id: str
-    owner_type: Literal["item", "topic"]
+    owner_type: OwnerType
     owner_id: str
     surface_type: SurfaceType
     text: str
@@ -232,13 +250,28 @@ class KnowledgeChunk(BaseModel):
     with the title only on the surface, a `SearchMatch` on chunk 7 of a long article would
     reach the consumer as an orphan paragraph. It is accompanying metadata, not a chunk of
     its own, so it adds nothing to the indexed corpus.
+
+    `locator` travels with the chunk too, and it is REQUIRED (B2, round 06). Spec §3.7
+    invariant 2 — *todo texto devuelto incluye origin, surface_type y localizador* — and
+    §3.8 make a fragment nobody can resolve back to its source a number rather than
+    evidence, and a chunk is exactly what `get` delivers when a surface does not fit the
+    budget or a `--query` prioritises inside it: the surface, which held the only locator,
+    was then not in the bundle at all. `url` keeps its one meaning (where a human opens the
+    OWNER); `locator` is the surface's, narrowed to `char_start`/`char_end` by
+    `chunking.fragment_locator`, the same function `search` applies to a match, so the two
+    services agree by construction. It is a field the spec required of the chunk from the
+    start — its absence was a defect of the contract, not a property of it — and adding it
+    BUMPED `EvidenceBundle.schema_version` to "2" (U-1, round 07): under `extra="forbid"`
+    a required key is not "additive" for the only consumer that exists, so the version is
+    what makes the two refusals (old consumer, new document; new consumer, old document)
+    honest. The policy is written once, in `contracts.py`.
     """
 
     model_config = _FROZEN
 
     chunk_id: str
     surface_id: str
-    owner_type: Literal["item", "topic"]
+    owner_type: OwnerType
     owner_id: str
     surface_type: SurfaceType
     text: str
@@ -252,6 +285,7 @@ class KnowledgeChunk(BaseModel):
     attribution: Author | None = None
     topics: tuple[str, ...] = ()
     url: str | None = None
+    locator: Locator
     language: str | None = None
     fingerprint: str = Field(pattern=_SHA256)
 

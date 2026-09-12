@@ -1,8 +1,9 @@
 # tests/test_knowledge_contracts.py
 """The frozen external schemas (Plan 01 §3.5, spec §7, steps 19-20).
 
-These shapes are frozen at `schema_version: "1"` NOW, while the services that fill them do
-not exist yet. That is the point: spec §7.1 says CLI JSON and MCP are adapters over the same
+These shapes are frozen per envelope NOW (`SearchResponse` "2" since `SearchMatch` gained
+its title, `EvidenceBundle` "2" since U-1, the graph envelope "1"), while the services
+that fill them do not exist yet. That is the point: spec §7.1 says CLI JSON and MCP are adapters over the same
 service and must not implement two formats, and the way two formats appear is that the
 second adapter is written months after the first, against whatever the first happened to
 emit. Freezing the model first makes the second adapter a consumer rather than an author.
@@ -24,10 +25,12 @@ really does travel with an origin.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
+from xbrain.knowledge import contracts as contracts_module
 from xbrain.knowledge.contracts import (
     CONTRACT_MODELS,
     TEXT_FIELDS_REQUIRING_ORIGIN,
@@ -40,7 +43,11 @@ from xbrain.knowledge.contracts import (
     SearchMatch,
     SearchResponse,
     SearchResult,
+    NOT_IMPLEMENTED_SUFFIX,
+    SEARCH_SCHEMA_VERSION,
+    Strategy,
     is_str_field,
+    resolve_strategy,
 )
 from xbrain.knowledge.models import KnowledgeItem, Locator
 from xbrain.models import Author
@@ -144,11 +151,206 @@ def test_a_search_match_serializes_its_excerpt_next_to_its_origin() -> None:
 # ---------------------------------------------------------------------------
 
 
+# The version each envelope carries TODAY, and why (U-1, round 07).
+# `GraphExpansionResponse` is still the Plan 01 freeze: nothing in its shape moved.
+# `EvidenceBundle` is at "2" because round 06
+# made `KnowledgeChunk.locator` REQUIRED, and under `extra="forbid"` that is the incompatible
+# change the freeze exists to name: the Pydantic consumer of version 1 refuses a bundle with
+# the key (`chunks.0.locator: Extra inputs are not permitted`, measured against the exact
+# `origin/develop` model) and the new consumer refuses a version-1 document (`Field
+# required`). Two producers announcing one version that do not interoperate is the silent
+# mutation spec §7.1 forbids; the number is what makes the refusal honest.
+# `SearchResponse` is at "2" for the same rule read forwards (B2): `SearchMatch` gained the
+# `title` spec §4 makes accompany a chunk, and a DEFAULTED key is additive only for the new
+# consumer — the version-1 one forbids it, so the number moves for its refusal to name the
+# version. A bump nobody needs makes two adapters disagree; a bump nobody made makes them
+# disagree silently, which is worse.
+ENVELOPE_VERSIONS: dict[type, str] = {
+    SearchResponse: "2",
+    EvidenceBundle: "2",
+    GraphExpansionResponse: "1",
+}
+
+
 @pytest.mark.parametrize("model", [SearchResponse, EvidenceBundle, GraphExpansionResponse])
-def test_every_response_declares_schema_version_one(model) -> None:
+def test_every_response_declares_its_schema_version(model) -> None:
     """Spec §7.1: every contract carries `schema_version`, and an incompatible change needs
-    a new version rather than a silent mutation."""
-    assert model.model_fields["schema_version"].default == "1"
+    a new version rather than a silent mutation. Seen red on `9dfa34e`: `EvidenceBundle`
+    still said "1" over a shape its own version-1 model refuses."""
+    assert model.model_fields["schema_version"].default == ENVELOPE_VERSIONS[model]
+    assert (
+        getattr(__import__("xbrain.knowledge.contracts", fromlist=["x"]), "EVIDENCE_SCHEMA_VERSION")
+        == ENVELOPE_VERSIONS[EvidenceBundle]
+    )
+
+
+def _bundle_document() -> dict:
+    """A bundle as `get --query` emits it: one chunk, locator included — serialised."""
+    from xbrain.knowledge.models import KnowledgeChunk
+
+    chunk = KnowledgeChunk(
+        chunk_id="item:1:post:0:0:v2",
+        surface_id="item:1:post:0",
+        owner_type="item",
+        owner_id="1",
+        surface_type="post",
+        text="cuerpo",
+        chunk_index=0,
+        char_start=0,
+        char_end=6,
+        origin="source",
+        trust_class="primary_source",
+        derived=False,
+        locator=Locator(kind="item_text", char_start=0, char_end=6),
+        fingerprint="a" * 64,
+    )
+    bundle = EvidenceBundle(
+        item=KnowledgeItem(
+            item_id="1",
+            source="bookmark",
+            url="https://x.com/a/status/1",
+            author=Author(handle="a", name="A"),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+        ),
+        chunks=(chunk,),
+    )
+    return bundle.model_dump(mode="json")
+
+
+def test_a_version_one_bundle_is_refused_by_its_version_not_by_a_field() -> None:
+    """The transition is EXPLICIT (U-1): a document that announces `schema_version: "1"`
+    — the shape whose chunks had no locator — is refused because it is version 1, and the
+    refusal names the version. A document at "2" whose chunk lacks the locator is refused
+    too, because the locator is what "2" means (spec §3.7 invariant 2). Neither is a
+    silent acceptance and neither is a silent mutation.
+
+    Seen red on `9dfa34e`: the version-1 document validated (same literal), and only the
+    missing key was refused — a version-1 consumer and a version-2 producer under one number.
+    """
+    document = _bundle_document()
+    assert document["schema_version"] == "2"
+    assert EvidenceBundle.model_validate(document).chunks[0].locator.kind == "item_text"
+
+    legacy = {**document, "schema_version": "1"}
+    with pytest.raises(ValidationError) as refused:
+        EvidenceBundle.model_validate(legacy)
+    assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
+
+    without_locator = {
+        **document,
+        "chunks": [{k: v for k, v in document["chunks"][0].items() if k != "locator"}],
+    }
+    with pytest.raises(ValidationError) as refused:
+        EvidenceBundle.model_validate(without_locator)
+    assert ("chunks", 0, "locator") in {error["loc"] for error in refused.value.errors()}
+
+
+def test_the_search_envelope_moved_when_a_key_was_added_to_the_shape_it_transports() -> None:
+    """The version policy applied to `SearchMatch.title` (B2, gate Codex on `b61e04b`).
+
+    Round 06's bundle bump did NOT move this envelope, and the reason was stated as a fact
+    about the shape: *`SearchMatch` carried `locator` from the Plan 01 freeze, so the search
+    envelope's shape did not change and its version must not.* Spec §4's title changes the
+    shape, so the same rule now points the other way — *a key added to a frozen shape BUMPS
+    the version of every envelope that transports it* — and `SearchResponse` is the one
+    envelope that transports a `SearchMatch`.
+
+    Optional-with-a-default does not exempt it. Every model here is `extra="forbid"`, so it
+    is the version-1 CONSUMER that breaks: it refuses a document carrying `title` outright,
+    and the refusal has to name the version rather than a field nobody told it about. That
+    is exactly the U-1 case, running in the other direction.
+    """
+    assert "locator" in SearchMatch.model_fields
+    assert SearchMatch.model_fields["locator"].is_required()
+    assert SearchResponse.model_fields["schema_version"].default == "2"
+    assert SEARCH_SCHEMA_VERSION == "2"
+
+    document = SearchResponse(
+        query="q",
+        strategy="lexical",
+        filters=SearchFilters(),
+        index=IndexStatusRef(manifest_version="1", built_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        results=(
+            SearchResult(
+                rank=1,
+                item_id="1",
+                url="https://x.com/a/status/1",
+                author=Author(handle="a", name="A"),
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                matches=(
+                    SearchMatch(
+                        chunk_id="c",
+                        surface_type="external_article",
+                        origin="source",
+                        trust_class="primary_source",
+                        derived=False,
+                        excerpt="x",
+                        title="On Controls and Thresholds",
+                        locator=Locator(kind="content_source", char_start=0, char_end=1),
+                    ),
+                ),
+            ),
+        ),
+    ).model_dump(mode="json")
+    assert document["schema_version"] == "2"
+    assert document["results"][0]["matches"][0]["title"] == "On Controls and Thresholds"
+
+    legacy = {**document, "schema_version": "1"}
+    with pytest.raises(ValidationError) as refused:
+        SearchResponse.model_validate(legacy)
+    assert {error["loc"] for error in refused.value.errors()} == {("schema_version",)}
+
+
+# FRONTIER ADDITION, declared (child PR 02.1). `resolve_strategy` ships here, but at the
+# snapshot every test that exercises it lives in `tests/test_knowledge_evaluation.py` and
+# `tests/test_knowledge_search_service.py` — both later children, and both coupled to
+# services 02.1 does not ship. Porting nothing would land the function untested in the PR
+# that introduces it. These three tests are the three outcomes of its own docstring.
+
+
+def test_an_implemented_strategy_runs_and_degrades_nothing() -> None:
+    """The first outcome. `lexical` is the one member with a backend in this build."""
+    assert resolve_strategy("lexical") == ("lexical", ())
+
+
+def test_a_declared_strategy_with_no_backend_degrades_and_says_so() -> None:
+    """The second outcome, and the one F-2 exists for (spec §9.3).
+
+    `search` echoed the strategy it was ASKED for, so `strategy="hybrid"` came back labelled
+    `hybrid` over results produced entirely by bm25. Degradation is not refusal — *lexical
+    sigue operativo* — but it has to be NAMED, and the name is the requested strategy, so a
+    reader can tell which one did not run.
+    """
+    for declared in set(get_args(Strategy)) - contracts_module.IMPLEMENTED_STRATEGIES:
+        strategy, degraded = resolve_strategy(declared)
+        assert strategy == contracts_module.FALLBACK_STRATEGY == "lexical"
+        assert degraded == (f"{declared}{NOT_IMPLEMENTED_SUFFIX}",)
+
+
+def test_an_undeclared_strategy_is_a_validation_error_never_a_degradation() -> None:
+    """The third outcome. A typo answered with lexical results becomes a measurement: the
+    report would be headed `lexicl` and scored by a retriever nobody asked for. The message
+    names both sets, because "unknown" is useless without "known"."""
+    with pytest.raises(ValueError) as refused:
+        resolve_strategy("lexicl")
+    assert "lexicl" in str(refused.value)
+    assert "hybrid_graph" in str(refused.value)
+
+
+def test_the_implemented_set_is_read_at_call_time_not_closed_over(monkeypatch) -> None:
+    """Plan 03 adds its member to `IMPLEMENTED_STRATEGIES` and both surfaces stop degrading
+    with no other change — so the lookup must reach the module global when it is CALLED.
+
+    Asserted by injecting a hypothetical backend rather than by reading the source: a
+    `frozenset` captured at import time would keep degrading `vector` here, and the test
+    then does not depend on `vector` staying unimplemented forever.
+    """
+    assert resolve_strategy("vector") == ("lexical", ("vector_not_implemented",))
+    monkeypatch.setattr(
+        contracts_module, "IMPLEMENTED_STRATEGIES", frozenset({"lexical", "vector"})
+    )
+    assert resolve_strategy("vector") == ("vector", ())
 
 
 def test_responses_reject_an_unknown_field() -> None:

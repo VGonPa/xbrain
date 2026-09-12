@@ -280,9 +280,9 @@ No, and the distinction is the point. Three different things are NOT a score of 
 - **a stratum with no cases** (`expansion` has no mechanism until the graph exists);
 - **a surface with no data** (`thread` and `user_note` have zero instances in the corpus, so
   no case can be written and none is invented);
-- **a case whose filters the strategy cannot apply** — the lexical baseline has no date,
-  author, source or content-kind columns, so the two `filtros` cases are listed under *casos
-  NO medidos* with the filters that blocked them.
+- **a case whose filters the strategy cannot apply** — it is reported under *casos NO
+  medidos*, naming the filters that blocked it, because a zero there would blame retrieval
+  for an instrument that is not there.
 
 Reporting any of these as 0.0 would say retrieval failed where nobody asked it anything. If
 you want a gate, pass `--min-recall`. A bucket without coverage can never be NAMED as the one
@@ -291,11 +291,150 @@ vacuous either: it counts the `(bucket, metric)` comparisons it actually made, a
 count is **zero** it fails with *«el umbral … no se comparó contra nada»* instead of passing.
 A threshold of 1.0 used to exit 0 over a golden set the baseline could not score at all.
 
+**The third of those — a filter the strategy cannot push — has no live instance today.** The
+harness builds its baseline through the same writer `xbrain index build` drives, so `lexical`
+pushes all eight filters and both `filtros` cases are scored. It *used to* push only
+`has_surfaces` and `origins`, and those two cases *were* the unmeasured ones — read that as
+history, not as a current limit. The rule stays for Plan 03's vector strategy, which arrives
+with no filter columns of its own, so a case reported unmeasured again is naming a real gap.
+See [the filter question below](#xbrain-eval-reports-a-case-as-unmeasured-for-a-filter-that-search-applies).
+
 You will also see a **`vacíos`** column. It counts the cases in that bucket whose query
 retrieved **no chunk at all**, which is a different fault from "the right item ranked below
 k" even though both leave `recall@k` at 0.0. When `vacíos == casos`, the retriever was never
 given anything to rank; `precision@k` is then reported as *sin cobertura* rather than 0.0,
 because its numerator is zero by construction and the figure would restate the empty set.
+
+---
+
+## The knowledge index
+
+Everything below is about `data/index/` — the SQLite database `xbrain search`
+reads. It is **derived and reconstructible**: nothing in it is yours, deleting it
+loses nothing, and `xbrain index build` puts it back. Operating it day to day is
+[docs/knowledge-index.md](knowledge-index.md).
+
+### `Error: No hay índice en …/data/index. Constrúyelo con xbrain index build.`
+
+The index has not been built, or you deleted it. Build it:
+
+```bash
+uv run xbrain index build
+```
+
+If the message instead says **`No hay base de datos en … pero su manifest sigue en
+pie: el índice quedó incompleto`**, the database was removed and the manifest was
+left behind — plain `build` would refuse (*Ya existe un índice*), so the command
+it names is the forced one:
+
+```bash
+uv run xbrain index build --force
+```
+
+`xbrain get` is unaffected by any of this: it reads the live store, so it keeps
+working with `data/index/` deleted.
+
+### `Reconstruye el índice con xbrain index build --force`
+
+Every incompatibility ends with that one sentence, and they are all the same
+operator situation — *what is on disk is not what this code can read*. The line
+before it says which:
+
+| What the message says | What happened |
+|---|---|
+| `El índice fue construido con otra versión: schema_version '3' != '4'` — or a `surface_version`, `chunker_version` **or `chunker_params`** mismatch | you upgraded xbrain, or the chunker's parameters moved; the stored rows were cut and hashed by different code. **All four are checked, by every door**: a parameter change re-cuts every chunk under *identical* ids, so an index that only compared the version strings would answer over a corpus fingerprinted differently from the one it claims |
+| `faltan las tablas …` / `faltan las columnas …` | the database is from an older schema, or was edited |
+| `El manifest no declara …` / `El manifest declara …, que este código no conoce` | `manifest.json` was hand-edited, or written by another version |
+| `El manifest no es un objeto JSON, es list` | `manifest.json` is corrupt |
+| `La base del índice en … no se puede consultar (…)` | SQLite itself refused a read — a torn page, or not a database at all |
+
+The fix is the same in every row, and it is cheap: a rebuild costs seconds to
+minutes, not a re-fetch. **Nothing is queried partially** — a partial answer over
+a schema this code no longer matches is a wrong answer wearing a right one's
+shape, so the query refuses instead.
+
+### `search` warns that the index is behind the store
+
+```
+⚠ El índice va por detrás del store: `items.json`, `vocab.yaml` o `topics.json`
+  cambió después de construirlo. La evidencia puede estar obsoleta — actualiza
+  con `xbrain index update`.
+```
+
+That is the expected warning after any stage that writes the store — `enrich`,
+`topics`, `vocab`, `fetch`, `digest-video`. Indexing is manual, so run:
+
+```bash
+uv run xbrain index update
+```
+
+Two things worth knowing about the signal behind it. It compares `mtime` and size
+of the three inputs, so **a `touch` with no edit trips it**: that is a false
+positive by design, because the alternative failure — serving stale evidence as
+fresh — is the one that matters. And it is blind in exactly one direction: a
+replacement of the same size with the mtime preserved (`cp -p`, `rsync -a`,
+`unzip`, a restored backup) is invisible to it, deterministically. After a
+restore, run `xbrain index status`, which compares fingerprints rather than
+timestamps.
+
+### `index status` says *señal barata DESFASADA* but `0 cambiados`
+
+Exactly the false positive above: a file was rewritten with identical content, or
+merely touched. `index update` then reports `+0 nuevos · 0 cambiados · -0
+borrados` and reseals the manifest, which is the cheapest way to silence it.
+
+### `search` reports `corrupt_chunks_excluded: N`
+
+`N` rows were **withheld, not served**. A chunk is dropped when its fingerprint
+does not recompute over the row served beside it, or when its surface no longer
+resolves to a locator. Both mean the same thing — this code cannot serve that row
+honestly — and both are repaired by `xbrain index build --force`. Results still
+come back; the count is how you know some did not.
+
+### Results come back, but not the ones I expected
+
+Three causes, in the order they actually bite.
+
+**There is no stemming.** Singular and plural are different words. On one corpus
+the top ten for `agente` and for `agentes` shared **zero** items. Search for the
+form you expect to be written, or search for both.
+
+**It is lexical, not semantic.** It matches proper nouns, figures and exact
+phrases — not meaning. The response says so on every call
+(`degraded: ["no_embeddings"]`). Conceptual similarity arrives with the vector
+layer; until then, query with the words the author would have used.
+
+**Accents are not the problem.** The tokenizer folds diacritics, so `atencion`
+and `atención` return the same ranking. If the results changed, something else in
+the query did.
+
+### `--strategy vector` returned results — are they vector results?
+
+No, and the response says so twice: `strategy` comes back as `lexical`, and
+`degraded` carries `vector_not_implemented` beside a warning line —
+*Estos resultados NO son de `vector`*. The vector backend is Plan 03. A
+**misspelled** strategy is refused instead of degraded, listing the valid names,
+because answering a typo with lexical results would turn it into a measurement.
+
+### `xbrain eval` reports a case as unmeasured for a filter that `search` applies
+
+**It no longer does, for the `lexical` strategy.** The harness used to walk the
+corpus its own way and write chunks with no metadata, so it could push only
+`has_surfaces` and `origins` and a case declaring a date, author, source or
+content-kind filter came back unmeasured. It now builds through the same writer
+`xbrain index build` drives, so it pushes the same eight filters `search` does.
+
+If you still see it, the case is declaring a filter that the strategy you asked
+for cannot push — which is the rule working, not a bug. **Unmeasured is never
+`0.0`**: a zero from a filter nobody applied reads as "retrieval failed at
+filtering" when the instrument was not there. See
+[the stratum question above](#eval-reports-a-stratum-as-sin-cobertura--is-that-a-failure).
+
+### An index error prints a second, empty `Error:` line
+
+Cosmetic, and known. Both CLI error handlers fire on an index error, so the clean
+message is followed by a blank one. The exit code is still `1` and the first line
+is the real one.
 
 ---
 

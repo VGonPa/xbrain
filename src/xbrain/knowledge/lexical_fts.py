@@ -18,8 +18,10 @@ the corpus instead of to the tokenizer.
 
 THE CONNECTIVE IS A DISJUNCTION, AND THAT IS A RETRIEVAL DECISION, NOT A DEFAULT (M3). Terms
 were ANDed — the FTS5 default — which turns a twelve-word question into a demand that all
-twelve words sit inside ONE chunk. Measured on the real corpus (2,404 items, 18,319 chunks,
-the 21 scorable cases of `eval/golden-set.yaml`): the conjunction returned NOT ONE ROW for 18
+twelve words sit inside ONE chunk. Measured on the real corpus (2,404 items, 18,319 chunks
+under the PROVISIONAL chunker v1 — the shipped v2 emits 22,286, and this counterfactual has
+not been re-run on it because the connective decision does not turn on the chunk count; the
+21 scorable cases of `eval/golden-set.yaml`): the conjunction returned NOT ONE ROW for 18
 of the 21, and the only three that retrieved anything were single-term `exacto` queries. The
 published baseline — `semantico` 0.0, `cruzado_idioma` 0.0, `topic` 0.0 — was therefore a
 measurement of the query builder, and it was being read as an absence of vocabulary overlap.
@@ -52,7 +54,6 @@ number published today measures the retriever.
 from __future__ import annotations
 
 import re
-import sqlite3
 
 # The ONE tokenizer string. Exported so the baseline, Plan 02's persisted index and the
 # ranking fixture all record the same value and a change to it is visible in a diff.
@@ -63,49 +64,53 @@ FTS_TOKENIZE = "unicode61 remove_diacritics 2"
 # fixture where a change to it shows up in a diff instead of in a rewritten baseline.
 FTS_CONNECTIVE = "OR"
 
-# `rowid INTEGER PRIMARY KEY` explicitly (m1): an implicit rowid is renumbered by `VACUUM`,
-# which would silently repoint every FTS row at a different chunk.
-_SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS chunk (
-    rowid        INTEGER PRIMARY KEY,
-    chunk_id     TEXT NOT NULL UNIQUE,
-    surface_id   TEXT NOT NULL,
-    owner_type   TEXT NOT NULL,
-    owner_id     TEXT NOT NULL,
-    surface_type TEXT NOT NULL,
-    origin       TEXT NOT NULL,
-    trust_class  TEXT NOT NULL,
-    derived      INTEGER NOT NULL,
-    title        TEXT,
-    url          TEXT,
-    text         TEXT NOT NULL,
-    fingerprint  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS chunk_owner ON chunk (owner_type, owner_id);
-CREATE INDEX IF NOT EXISTS chunk_surface_type ON chunk (surface_type);
+# The INDEXED COLUMNS, in order, and they are part of the SCORER — not a layout detail.
+# `bm25()` weights every column of the table it is given, so adding or removing one changes
+# every score in the corpus. Exported for the same reason as the tokenizer: the in-memory
+# baseline and the persisted index MUST declare the identical set, or the characterization
+# fixture would be pinning two different scorers and would have to be regenerated the day
+# they diverged — at which point it pins nothing (Plan 01 §5.3, m16).
+FTS_COLUMNS: tuple[str, ...] = ("text", "title")
 
-CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5 (
-    text,
-    title,
-    tokenize = '{FTS_TOKENIZE}'
-);
-"""
 
-# The tie-break is EXPLICIT (spec §3.7.8). Two chunks with identical text score identically,
-# and sqlite's row order for a tie is an implementation detail — so without the second key
-# the ranking would differ between two builds of the same data.
-RANK_ORDER = "ORDER BY bm25(chunk_fts) ASC, chunk.chunk_id ASC"
+def fts5_table_sql(
+    name: str, *, columns: tuple[str, ...] = FTS_COLUMNS, content: str | None = None
+) -> str:
+    """The `CREATE VIRTUAL TABLE … USING fts5(…)` for `name`, with the ONE tokenizer.
+
+    `content` names the EXTERNAL content table when there is one. An external-content table
+    stores no text of its own and reads it back from `content` by rowid, which halves the
+    on-disk footprint of a 12-million-character corpus — and is why the content table's
+    rowid must be an explicit `INTEGER PRIMARY KEY` (`VACUUM` renumbers an implicit one) and
+    why a delete must retract the OLD text before the row disappears.
+
+    `name` and `columns` are identifiers this module's own callers choose; they never carry a
+    user string, which is what keeps the f-string below a composition of constants rather
+    than SQL built from input.
+    """
+    parts = [*columns]
+    if content is not None:
+        parts += [f"content='{content}'", "content_rowid='rowid'"]
+    parts.append(f"tokenize = '{FTS_TOKENIZE}'")
+    body = ",\n    ".join(parts)
+    return f"CREATE VIRTUAL TABLE IF NOT EXISTS {name} USING fts5 (\n    {body}\n)"
+
+
+def rank_order(fts_table: str, meta_table: str) -> str:
+    """`ORDER BY bm25(<fts>) ASC, <meta>.chunk_id ASC` — the ONE ranking order.
+
+    The tie-break is EXPLICIT (spec §3.7.8). Two chunks with identical text score
+    identically, and sqlite's row order for a tie is an implementation detail — so without
+    the second key the ranking would differ between two builds of the same data.
+    """
+    return f"ORDER BY bm25({fts_table}) ASC, {meta_table}.chunk_id ASC"
+
 
 # FTS5 reads punctuation as syntax: `@`, `"`, `*`, `(`, `NEAR`, `-`. The golden set has
 # literal queries — `@simonw`, `11.37%` — whose characters would otherwise become operators
 # or a syntax error. Every term is therefore quoted as an FTS5 string literal, so the query
 # is DATA and never syntax.
 _TERM_SPLIT = re.compile(r"[^\w@#.%/-]+", re.UNICODE)
-
-
-def create_schema(connection: sqlite3.Connection) -> None:
-    """Create the chunk table and its FTS5 companion. Idempotent."""
-    connection.executescript(_SCHEMA)
 
 
 def match_expression(query: str) -> str | None:
