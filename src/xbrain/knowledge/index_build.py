@@ -1545,12 +1545,27 @@ def vector_verdict(
                 f"{VECTOR_REBUILD_ADVICE}"
             ),
         )
+    if expected is not None and expected != declared:
+        # DECIDED BEFORE THE MATRIX IS TOUCHED, and that is not only cheaper. Deciding it from
+        # a failed load would label a corrupt digest `spec_changed` whenever the config
+        # happened to differ, and would need `numpy` to answer a question about two dataclasses
+        # — so `index status` on a machine without the `[embeddings]` extra could not say the
+        # one thing spec §5.5 is about.
+        return VectorVerdict(
+            state="spec_changed",
+            spec=declared,
+            sentence=(
+                f"El plano vectorial se escribió con {declared} y se consulta con {expected}: "
+                f"sus filas responden con la geometría de otro modelo. {VECTOR_REBUILD_ADVICE}"
+            ),
+        )
     try:
-        plane = load_vector_plane(index_dir, expected=expected or declared)
-    except VectorPlaneIncompatible as error:
-        state: VectorState = "spec_changed" if expected and expected != declared else "unreadable"
-        return VectorVerdict(state=state, spec=declared, sentence=str(error))
-    except VectorBackendUnavailable as error:
+        plane = load_vector_plane(index_dir, expected=declared)
+    except (VectorPlaneIncompatible, VectorBackendUnavailable) as error:
+        # Two causes, one state, and the loader's own sentence tells them apart: a meta the
+        # manifest disagrees with, and an absent `[embeddings]` extra. Both leave the plane
+        # unqueryable, and neither is something a caller of this function can repair — so
+        # `status` REPORTS instead of raising (rule 9), and the query door refuses.
         return VectorVerdict(state="unreadable", spec=declared, sentence=str(error))
     try:
         if texts is None:

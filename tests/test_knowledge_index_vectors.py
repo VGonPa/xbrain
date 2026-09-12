@@ -458,6 +458,28 @@ def test_the_spec_change_sentence_never_orders_a_full_rebuild(data: Path) -> Non
     assert REBUILD_ADVICE not in sentence
 
 
+def test_a_spec_change_is_decided_without_reading_the_matrix(data: Path) -> None:
+    """Two dataclasses answer it, so a truncated matrix does not get to answer it instead.
+
+    Deciding this from a FAILED LOAD would label a corrupt digest `spec_changed` whenever the
+    config happened to differ, and it would need `numpy` to compare two specs — so `index
+    status` on a machine without the `[embeddings]` extra could not report the one thing spec
+    §5.5 is about. Staged by truncating the matrix: under the manifest's own spec that plane
+    is `unreadable`, and under a different one it is still `spec_changed`.
+    """
+    _built(data)
+    manifest = index_build.load_manifest(data / "index")
+    (data / "index" / VECTORS_FILENAME).write_bytes(b"\x00\x00\x00\x00")
+    other = VectorSpec(
+        **{**{f.name: getattr(SPEC, f.name) for f in dataclass_fields(SPEC)}, "model": "otro"}
+    )
+
+    assert index_build.vector_verdict(data / "index", manifest).state == "unreadable"
+    assert (
+        index_build.vector_verdict(data / "index", manifest, expected=other).state == "spec_changed"
+    )
+
+
 def test_a_plane_read_under_its_own_spec_is_current(data: Path) -> None:
     _built(data)
     manifest = index_build.load_manifest(data / "index")
