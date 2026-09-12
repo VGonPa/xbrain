@@ -92,6 +92,7 @@ _META_FIELDS = frozenset(
         "query_prefix",
         "passage_prefix",
         "rows",
+        "matrix_sha256",
         "chunk_rows",
         "text_fingerprint_to_row",
     }
@@ -241,31 +242,40 @@ def _numpy() -> ModuleType:
     return numpy
 
 
-def _validated_vector(entry: ChunkVector, dimension: int) -> tuple[float, ...]:
-    """One row, proved to be a finite unit vector of the plane's dimension.
+def _validated_unit_vector(
+    vector: Sequence[float], dimension: int, subject: str
+) -> tuple[float, ...]:
+    """A finite unit vector of the plane's dimension, or a refusal naming `subject`.
 
-    Three refusals, each naming the chunk, because a matrix is written once and read for
-    months: a wrong width would shift every later row by the difference, a non-finite value
-    poisons every dot product it touches (ranking unpredictably instead of failing), and a
-    non-unit row makes this module's arithmetic stop being the cosine it reports.
+    ONE function for BOTH sides of the arithmetic — the rows going in and the query coming
+    against them — because the property is one property: `matrix @ q` is the cosine only when
+    both operands are unit vectors, and checking the stored half alone leaves a query of norm
+    5 multiplying every similarity by five. The order survives, so nothing looks wrong; 03.5
+    then fuses those numbers with a lexical channel, where a score off its declared scale is a
+    silent re-weighting of the whole result set. Two checks in two places would be two
+    definitions of one invariant, which is the drift rule 5 exists to stop.
+
+    A non-finite value is refused rather than stored or scored: `NaN` makes every comparison
+    against it false, so it does not rank badly — it empties the top-k, which reads exactly
+    like a corpus with nothing in it.
     """
-    if len(entry.vector) != dimension:
+    if len(vector) != dimension:
         raise VectorPlaneIncompatible(
-            f"el chunk {entry.chunk_id} trae un vector de dimensión {len(entry.vector)} y "
-            f"este plano guarda vectores de dimensión {dimension}. {VECTOR_REBUILD_ADVICE}"
+            f"{subject} trae un vector de dimensión {len(vector)} y este plano guarda "
+            f"vectores de dimensión {dimension}: no se pueden comparar"
         )
-    if not all(math.isfinite(value) for value in entry.vector):
+    if not all(math.isfinite(value) for value in vector):
         raise VectorPlaneIncompatible(
-            f"el vector del chunk {entry.chunk_id} tiene algún valor no finito (NaN o inf): "
-            "envenenaría todos los productos escalares que tocase en vez de fallar"
+            f"el vector de {subject} tiene algún valor no finito (NaN o inf): envenenaría "
+            "todos los productos escalares que tocase en vez de fallar"
         )
-    norm = math.sqrt(math.fsum(value * value for value in entry.vector))
+    norm = math.sqrt(math.fsum(value * value for value in vector))
     if abs(norm - 1.0) > _UNIT_TOLERANCE:
         raise VectorPlaneIncompatible(
-            f"el vector del chunk {entry.chunk_id} tiene norma {norm:.6f} y no 1.0: el "
-            "coseno de este plano es el producto escalar, y sólo lo es para vectores unitarios"
+            f"el vector de {subject} tiene norma {norm:.6f} y no 1.0: el coseno de este "
+            "plano es el producto escalar, y sólo lo es para vectores unitarios"
         )
-    return entry.vector
+    return tuple(vector)
 
 
 def _assign_rows(
@@ -290,7 +300,7 @@ def _assign_rows(
                 f"el chunk {entry.chunk_id} aparece dos veces en el mismo lote: un id "
                 "repetido haría que el plano respondiese con la fila escrita en último lugar"
             )
-        vector = _validated_vector(entry, dimension)
+        vector = _validated_unit_vector(entry.vector, dimension, f"el chunk {entry.chunk_id}")
         fingerprint = text_fingerprint(entry.text)
         row = fingerprint_rows.get(fingerprint)
         if row is None:
@@ -301,23 +311,53 @@ def _assign_rows(
     return matrix, chunk_rows, fingerprint_rows
 
 
-def _write_matrix(path: Path, matrix: Sequence[tuple[float, ...]], dimension: int) -> None:
-    """The float32 bytes, C-order, and nothing else in the file.
+def _sha256_file(path: Path) -> str:
+    """The file's digest, streamed a megabyte at a time so a 70 MB matrix is not held twice."""
+    digest = sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _write_matrix(path: Path, matrix: Sequence[tuple[float, ...]], dimension: int) -> str:
+    """The float32 bytes, C-order, nothing else in the file — and never written IN PLACE.
+
+    `tofile` opens its target for truncation and writes forward, so a rebuild of a plane with
+    the SAME shape that dies halfway would leave a file of exactly the right length holding
+    the new head and the old tail. Every size check calls that healthy, and every chunk on the
+    surviving half now reads another text's geometry. It goes to a temporary name and is
+    renamed over the top, which is atomic within a filesystem.
 
     Written with `tofile` rather than through a `w+` memmap: mapping is what makes READING
     25k x 768 floats cheap, and on the write side it would only add a mapping to tear down.
     An empty corpus writes an empty file — a legal state (Plan 03 §9), and one `np.memmap`
     cannot represent, which is why the reader special-cases it too.
+
+    Returns the digest of what was written, which the meta records.
     """
-    if not matrix:
-        path.write_bytes(b"")
-        return
-    numpy = _numpy()
-    numpy.asarray(matrix, dtype=numpy.float32).reshape(len(matrix), dimension).tofile(path)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        if matrix:
+            numpy = _numpy()
+            array = numpy.asarray(matrix, dtype=numpy.float32).reshape(len(matrix), dimension)
+            array.tofile(temporary)
+        else:
+            temporary.write_bytes(b"")
+        digest = _sha256_file(temporary)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return digest
 
 
 def _meta_document(
-    spec: VectorSpec, rows: int, chunk_rows: Mapping[str, int], fingerprints: Mapping[str, int]
+    spec: VectorSpec,
+    rows: int,
+    matrix_sha256: str,
+    chunk_rows: Mapping[str, int],
+    fingerprints: Mapping[str, int],
 ) -> dict[str, object]:
     """The meta as it is written — one JSON object, sorted, so two equal writes are equal."""
     return {
@@ -328,6 +368,7 @@ def _meta_document(
         "query_prefix": spec.query_prefix,
         "passage_prefix": spec.passage_prefix,
         "rows": rows,
+        "matrix_sha256": matrix_sha256,
         "chunk_rows": dict(sorted(chunk_rows.items())),
         "text_fingerprint_to_row": dict(sorted(fingerprints.items())),
     }
@@ -359,6 +400,11 @@ def write_vector_plane(
     The matrix is written before the meta, for the same reason `index_build` writes the
     manifest last: the document that says «this plane is complete» is the last thing to land.
     """
+    if spec.dimension < 1:
+        raise VectorPlaneIncompatible(
+            f"un plano vectorial de dimensión {spec.dimension} no tiene geometría: el coseno "
+            "no está definido y su matriz ocuparía cero octetos con cualquier número de filas"
+        )
     if not spec.normalized:
         raise VectorPlaneIncompatible(
             "este plano declara `normalized: false`, y su top-k es un producto escalar: "
@@ -368,8 +414,8 @@ def write_vector_plane(
     entries = tuple(chunk_vectors)
     matrix, chunk_rows, fingerprints = _assign_rows(entries, spec.dimension)
     index_dir.mkdir(parents=True, exist_ok=True)
-    _write_matrix(index_dir / VECTORS_FILENAME, matrix, spec.dimension)
-    document = _meta_document(spec, len(matrix), chunk_rows, fingerprints)
+    digest = _write_matrix(index_dir / VECTORS_FILENAME, matrix, spec.dimension)
+    document = _meta_document(spec, len(matrix), digest, chunk_rows, fingerprints)
     _replace_atomically(
         index_dir / VECTORS_META_FILENAME,
         (json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8"),
@@ -393,6 +439,15 @@ def _meta_mapping(path: Path) -> Mapping[str, object]:
     """The meta file as a JSON object, refusing anything else before a field is read."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        # `UnicodeDecodeError` is a `ValueError`, so neither of the two clauses below ever
+        # saw it and it left this layer as a raw traceback (spec §9.3 asks for the opposite).
+        # Its own message quotes the offending input, and this file indexes a personal
+        # corpus, so what is relayed is the file and the codec — never the content.
+        raise VectorPlaneIncompatible(
+            f"{VECTORS_META_FILENAME} no está codificado en UTF-8 y no se puede leer "
+            f"(no se reproduce su contenido). {VECTOR_REBUILD_ADVICE}"
+        ) from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise VectorPlaneIncompatible(
             f"no se puede leer {VECTORS_META_FILENAME} ({exc}). {VECTOR_REBUILD_ADVICE}"
@@ -435,7 +490,7 @@ def _meta_spec(raw: Mapping[str, object]) -> VectorSpec:
         )
     return VectorSpec(
         model=str(raw["model"]),
-        dimension=_positive_int(raw["dimension"], "dimension"),
+        dimension=_bounded_int(raw["dimension"], "dimension", 1),
         normalized=True,
         query_prefix=str(raw["query_prefix"]),
         passage_prefix=str(raw["passage_prefix"]),
@@ -450,12 +505,12 @@ def _require_same_spec(stored: VectorSpec, expected: VectorSpec) -> None:
     them which line moved. Every one of these is a total invalidation of the vector plane and
     of nothing else — the lexical plane and the store are untouched (spec §5.5).
     """
-    for field in ("model", "dimension", "query_prefix", "passage_prefix"):
-        mine, theirs = getattr(stored, field), getattr(expected, field)
+    for name in ("model", "dimension", "query_prefix", "passage_prefix"):
+        mine, theirs = getattr(stored, name), getattr(expected, name)
         if mine != theirs:
             raise VectorPlaneIncompatible(
-                f"el plano vectorial se construyó con {field}={mine!r} y se ha pedido "
-                f"{field}={theirs!r}: un cambio de modelo, dimensión o prefijo invalida "
+                f"el plano vectorial se construyó con {name}={mine!r} y se ha pedido "
+                f"{name}={theirs!r}: un cambio de modelo, dimensión o prefijo invalida "
                 f"todos los vectores guardados. {VECTOR_REBUILD_ADVICE}"
             )
 
@@ -468,7 +523,7 @@ def _checked_row_maps(
     An out-of-range row is the failure this catches: it either reads another chunk's geometry
     or dies inside a query, and both happen long after whatever wrote the document.
     """
-    rows = _positive_int(raw["rows"], "rows")
+    rows = _bounded_int(raw["rows"], "rows", 0)
     fingerprints = _int_map(raw["text_fingerprint_to_row"], "text_fingerprint_to_row")
     chunk_rows = _int_map(raw["chunk_rows"], "chunk_rows")
     if sorted(fingerprints.values()) != list(range(rows)):
@@ -487,15 +542,20 @@ def _checked_row_maps(
     return rows, chunk_rows, tuple(tuple(ids) for ids in grouped)
 
 
-def _positive_int(raw: object, field: str) -> int:
-    """One non-negative integer field of the meta, or a refusal naming it.
+def _bounded_int(raw: object, field: str, minimum: int) -> int:
+    """One integer field of the meta, at or above `minimum`, or a refusal naming it.
 
     `int(raw)` on its own would take `"768"`, `True` and `7.9` — three documents this code
     cannot honour, arriving as a dimension that silently disagrees with the matrix.
+
+    `dimension` takes a minimum of 1 and `rows` of 0, and the difference is not pedantry: the
+    size check is `rows * dimension * 4`, which for dimension 0 is 0 bytes for ANY number of
+    rows. A zero dimension therefore does not merely describe an impossible plane, it disarms
+    the one guard standing between a truncated matrix and a corpus silently read short.
     """
-    if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw < minimum:
         raise VectorPlaneIncompatible(
-            f"{VECTORS_META_FILENAME} trae un {field} que no es un entero no negativo: "
+            f"{VECTORS_META_FILENAME} trae un {field} que no es un entero >= {minimum}: "
             f"{raw!r}. {VECTOR_REBUILD_ADVICE}"
         )
     return raw
@@ -514,7 +574,7 @@ def _int_map(raw: object, field: str) -> dict[str, int]:
     return {str(key): int(value) for key, value in raw.items()}
 
 
-def _mapped_matrix(path: Path, rows: int, dimension: int) -> Matrix | None:
+def _mapped_matrix(path: Path, rows: int, dimension: int, digest: str) -> Matrix | None:
     """The matrix as a read-only `np.memmap`, or `None` for an empty plane.
 
     THE SIZE IS CHECKED FIRST, and this is the check the whole atomic-write story rests on: a
@@ -534,6 +594,14 @@ def _mapped_matrix(path: Path, rows: int, dimension: int) -> Matrix | None:
             f"{VECTORS_FILENAME} ocupa {actual_bytes} bytes y su meta describe {rows} filas "
             f"de dimensión {dimension} ({expected_bytes} bytes): los vectores están "
             f"incompletos. {VECTOR_REBUILD_ADVICE}"
+        )
+    actual_digest = _sha256_file(path)
+    if actual_digest != digest:
+        raise VectorPlaneIncompatible(
+            f"{VECTORS_FILENAME} no es la matriz que describe su meta (sha256 "
+            f"{actual_digest[:12]}… frente a {digest[:12]}…): el tamaño coincide y el "
+            f"contenido no, así que cada chunk leería la geometría de otro texto. "
+            f"{VECTOR_REBUILD_ADVICE}"
         )
     if rows == 0:
         return None
@@ -559,7 +627,9 @@ def load_vector_plane(index_dir: Path, *, expected: VectorSpec | None = None) ->
     if expected is not None:
         _require_same_spec(spec, expected)
     rows, chunk_rows, row_chunks = _checked_row_maps(raw)
-    matrix = _mapped_matrix(index_dir / VECTORS_FILENAME, rows, spec.dimension)
+    matrix = _mapped_matrix(
+        index_dir / VECTORS_FILENAME, rows, spec.dimension, str(raw["matrix_sha256"])
+    )
     return VectorPlane(spec=spec, _matrix=matrix, _chunk_rows=chunk_rows, _row_chunks=row_chunks)
 
 
@@ -575,6 +645,7 @@ class VectorPlane:
     _matrix: Matrix | None
     _chunk_rows: Mapping[str, int]
     _row_chunks: tuple[tuple[str, ...], ...]
+    _closed: bool = False
 
     @property
     def row_count(self) -> int:
@@ -595,11 +666,27 @@ class VectorPlane:
 
         More than one means the corpus quotes the same text twice, which is a fact worth being
         able to see rather than a duplicate to hide.
+
+        A row outside the matrix is REFUSED rather than indexed: `-1` is a perfectly valid
+        Python index and answers with the LAST row, so a caller that computed a row wrong
+        would receive another text's chunk ids and attribute them to a fragment nobody
+        retrieved.
         """
+        if not 0 <= row < len(self._row_chunks):
+            raise VectorPlaneIncompatible(
+                f"la fila {row} no existe en una matriz de {len(self._row_chunks)} filas"
+            )
         return self._row_chunks[row]
 
     def close(self) -> None:
-        """Release the mapping. A memmap holds a file handle until it is dropped."""
+        """Release the mapping. A memmap holds a file handle until it is dropped.
+
+        The flag is kept SEPARATE from `_matrix` being `None`, which already means something
+        else — an empty corpus — and conflating the two is what let a query on a closed plane
+        answer `()` instead of raising. Both are set through `object.__setattr__` because the
+        dataclass is frozen and these two are the one piece of state that legitimately moves.
+        """
+        object.__setattr__(self, "_closed", True)
         object.__setattr__(self, "_matrix", None)
 
     def search(
@@ -624,13 +711,14 @@ class VectorPlane:
         partition happened to do — stable within a run, free to differ across runs, which
         would break spec §8.6's reproducibility gate without ever looking wrong.
         """
+        if self._closed:
+            raise ValueError(
+                "este plano vectorial está cerrado: devolver un top-k vacío haría que un "
+                "error del llamante se leyese como un corpus sin resultados"
+            )
         if limit <= 0:
             raise ValueError("search requiere un limit positivo")
-        if len(query) != self.spec.dimension:
-            raise VectorPlaneIncompatible(
-                f"la consulta trae un vector de dimensión {len(query)} y este plano guarda "
-                f"vectores de dimensión {self.spec.dimension}: no se pueden comparar"
-            )
+        _validated_unit_vector(query, self.spec.dimension, "la consulta")
         rows = self._candidate_row_indices(allowed_chunk_ids)
         matrix = self._matrix
         if matrix is None or not rows:
@@ -640,7 +728,12 @@ class VectorPlane:
     def _candidate_row_indices(self, allowed: Collection[str] | None) -> list[int]:
         """The rows worth scoring: all of them, or just those the allowed chunks read."""
         if allowed is None:
-            return list(range(self.row_count))
+            # ROWS WITH NO CHUNK ARE NOT CANDIDATES. Plan 03 §2.3 makes orphans a designed
+            # state — a deleted chunk leaves its row behind until the next `build --force`
+            # compacts it — and `_top_positions` takes the best `limit` ROWS. An orphan among
+            # them expands to nothing, so the slot is spent and a result that does have an
+            # owner never reaches the caller, with nothing saying it was dropped.
+            return [row for row in range(self.row_count) if self._row_chunks[row]]
         rows = {row for row in (self._chunk_rows.get(cid) for cid in allowed) if row is not None}
         return sorted(rows)
 

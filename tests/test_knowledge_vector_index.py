@@ -244,12 +244,32 @@ def test_a_tie_at_the_top_k_boundary_is_broken_by_chunk_id(tmp_path: Path) -> No
     assert [hit.chunk_id for hit in loaded.search(EAST, limit=2)] == ["exact:0:v3", "aaa:0:v3"]
 
 
-def test_two_consecutive_searches_return_the_identical_ranking(tmp_path: Path) -> None:
-    """Spec §8.6 gate 2 — reproducible under ties, run to run."""
-    loaded = plane(tmp_path, *(chunk(f"{n}:0:v3", f"t{n}", EAST) for n in range(12)))
-    first = loaded.search(DIAGONAL, limit=5)
-    second = loaded.search(DIAGONAL, limit=5)
-    assert first == second
+def test_the_ranking_is_the_one_written_down_here(tmp_path: Path) -> None:
+    """Spec §8.6 gate 2, pinned as a LITERAL instead of against a second call.
+
+    Comparing `search(q)` to `search(q)` in one process asserts that a deterministic sort is
+    deterministic: it cannot fail, and it would stay green through any re-ranking this module
+    ever grows. What the gate is about is the ranking being the same TOMORROW, so the expected
+    order and the expected scores are written out by hand — including the 0.6 tie, which is
+    the only part a partition could reorder.
+    """
+    loaded = plane(
+        tmp_path,
+        chunk("west:0:v3", "w", (-1.0, 0.0)),
+        chunk("east-b:0:v3", "eb", EAST),
+        chunk("north:0:v3", "n", NORTH),
+        chunk("east-a:0:v3", "ea", EAST),
+        chunk("diag:0:v3", "d", DIAGONAL),
+    )
+    hits = loaded.search(DIAGONAL, limit=5)
+    assert [hit.chunk_id for hit in hits] == [
+        "diag:0:v3",
+        "north:0:v3",
+        "east-a:0:v3",
+        "east-b:0:v3",
+        "west:0:v3",
+    ]
+    assert [round(hit.score, 4) for hit in hits] == [1.0, 0.8, 0.6, 0.6, -0.6]
 
 
 def test_the_limit_caps_the_chunks_returned_not_the_rows(tmp_path: Path) -> None:
@@ -613,7 +633,7 @@ def test_a_matrix_that_vanishes_after_the_meta_is_read_is_refused(tmp_path: Path
     from xbrain.knowledge import vector_index
 
     with pytest.raises(VectorPlaneIncompatible) as excinfo:
-        vector_index._mapped_matrix(tmp_path / VECTORS_FILENAME, 1, 2)
+        vector_index._mapped_matrix(tmp_path / VECTORS_FILENAME, 1, 2, "0" * 64)
     assert VECTORS_FILENAME in str(excinfo.value)
 
 
@@ -623,3 +643,187 @@ def test_a_matching_spec_loads(tmp_path: Path) -> None:
     loaded = load_vector_plane(tmp_path, expected=SPEC)
     assert loaded.spec == SPEC
     loaded.close()
+
+
+# ------------------------------------------------------- the four blockers of the review round
+
+
+class _TornNumpy:
+    """A `numpy` stand-in whose `tofile` writes some bytes and then dies.
+
+    An interrupted rebuild is otherwise unreachable from a test: the failure has to land in
+    the middle of the write, not before it (nothing is written) and not after it (it
+    succeeded).
+    """
+
+    float32 = np.float32
+
+    def __init__(self, prefix: bytes) -> None:
+        self._prefix = prefix
+
+    def asarray(self, values, dtype=None):  # noqa: ANN001 - a stand-in, not an API
+        return self
+
+    def reshape(self, *shape):  # noqa: ANN002
+        return self
+
+    def tofile(self, path) -> None:  # noqa: ANN001
+        Path(path).write_bytes(self._prefix)
+        raise OSError("no space left on device")
+
+
+def test_an_interrupted_rebuild_does_not_corrupt_the_previous_matrix(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Blocker 1a: the matrix must not be written in place.
+
+    `tofile` opens its target for truncation, so rebuilding a plane of the SAME shape over
+    itself and dying halfway leaves a file of exactly the right size holding a mix of the new
+    head and the old tail — which every size check in the world calls healthy, and which pairs
+    each chunk with somebody else's geometry.
+    """
+    from xbrain.knowledge import vector_index
+
+    write_vector_plane(tmp_path, SPEC, [chunk("a:0:v3", "a", EAST), chunk("b:0:v3", "b", NORTH)])
+    before = (tmp_path / VECTORS_FILENAME).read_bytes()
+
+    monkeypatch.setattr(vector_index, "_numpy", lambda: _TornNumpy(b"\x00" * 8))
+    with pytest.raises(OSError):
+        write_vector_plane(
+            tmp_path, SPEC, [chunk("a:0:v3", "x", NORTH), chunk("b:0:v3", "y", EAST)]
+        )
+
+    assert (tmp_path / VECTORS_FILENAME).read_bytes() == before
+
+
+def test_a_same_size_rewrite_of_the_matrix_is_refused(tmp_path: Path) -> None:
+    """Blocker 1b: the size check cannot see a replacement of the right length.
+
+    Same bytes-on-disk, different numbers: every chunk id still resolves, and each one now
+    reads another text's geometry. The meta records a digest of the matrix precisely because
+    «the file is the right size» is not «the file is the right file».
+    """
+    write_vector_plane(tmp_path, SPEC, [chunk("a:0:v3", "a", EAST), chunk("b:0:v3", "b", DIAGONAL)])
+    matrix = tmp_path / VECTORS_FILENAME
+    # Reversed, NOT mirrored: `[1, 0, 0, 1]` reversed is `[1, 0, 0, 1]`, so a plane built from
+    # EAST and NORTH would have the same digest after the swap and this test would pass
+    # against a module that checks nothing at all.
+    swapped = np.fromfile(matrix, dtype=np.float32)[::-1].copy()
+    assert swapped.tolist() != np.fromfile(matrix, dtype=np.float32).tolist()
+    swapped.tofile(matrix)
+    assert matrix.stat().st_size == 2 * SPEC.dimension * 4
+
+    with pytest.raises(VectorPlaneIncompatible) as excinfo:
+        load_vector_plane(tmp_path)
+    assert VECTORS_FILENAME in str(excinfo.value)
+
+
+def test_an_orphan_row_does_not_consume_a_top_k_slot(tmp_path: Path) -> None:
+    """Blocker 2: a row nobody points at must not hide a result that does have an owner.
+
+    Plan 03 §2.3 makes orphan rows a DESIGNED state — a deleted chunk leaves its row behind
+    until the next `build --force` compacts it. Taking the best `limit` ROWS then expanding
+    them onto chunks spends the slot on a row that expands to nothing, and the caller gets
+    fewer results than exist, with nothing saying so.
+    """
+    write_vector_plane(
+        tmp_path, SPEC, [chunk("orphan:0:v3", "huérfano", EAST), chunk("kept:0:v3", "vivo", NORTH)]
+    )
+    path = tmp_path / VECTORS_META_FILENAME
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    orphan_row = meta["chunk_rows"].pop("orphan:0:v3")
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+    loaded = load_vector_plane(tmp_path)
+    assert loaded.chunk_ids_for_row(orphan_row) == ()
+
+    hits = loaded.search(EAST, limit=1)
+    assert [hit.chunk_id for hit in hits] == ["kept:0:v3"]
+
+
+def test_a_query_vector_that_is_not_unit_length_is_refused(tmp_path: Path) -> None:
+    """Blocker 3: the scores this module returns are declared to be cosines.
+
+    A query of norm 5 scales every one of them by five. The ORDER survives, so nothing looks
+    wrong — and then 03.5 fuses those numbers with a lexical channel, where a score that is
+    not on the scale it claims is a silent re-weighting of the whole result set.
+    """
+    loaded = plane(tmp_path, chunk("a:0:v3", "a", EAST))
+    with pytest.raises(VectorPlaneIncompatible) as excinfo:
+        loaded.search((3.0, 4.0), limit=1)
+    assert "norma" in str(excinfo.value)
+
+
+def test_a_non_finite_query_vector_is_refused(tmp_path: Path) -> None:
+    """Blocker 3: a NaN makes every comparison false, so the top-k comes back EMPTY.
+
+    Which reads exactly like «the corpus has nothing for you», and is the most expensive way
+    for a retrieval layer to be wrong.
+    """
+    loaded = plane(tmp_path, chunk("a:0:v3", "a", EAST))
+    with pytest.raises(VectorPlaneIncompatible):
+        loaded.search((float("nan"), 0.0), limit=1)
+
+
+def test_a_meta_that_is_not_utf8_is_refused_without_leaking_the_decode_error(
+    tmp_path: Path,
+) -> None:
+    """Blocker 4: `UnicodeDecodeError` is a `ValueError`, so neither `except` caught it.
+
+    It came out of the CLI as a raw traceback — the one thing spec §9.3 asks this layer never
+    to do — and its message carries a slice of the offending bytes, which in a file that
+    indexes a personal corpus is not something to print by accident.
+    """
+    write_vector_plane(tmp_path, SPEC, [chunk("a:0:v3", "a", EAST)])
+    (tmp_path / VECTORS_META_FILENAME).write_bytes(b"\xff\xfe{not utf-8}")
+
+    with pytest.raises(VectorPlaneIncompatible) as excinfo:
+        load_vector_plane(tmp_path)
+    message = str(excinfo.value)
+    assert VECTORS_META_FILENAME in message and "UTF-8" in message
+    assert "0xff" not in message and "byte" not in message
+
+
+def test_a_row_outside_the_matrix_is_refused_by_chunk_ids_for_row(tmp_path: Path) -> None:
+    """Blocker 5: `-1` is a VALID index in Python, and it answers with the LAST row.
+
+    So a caller that computed a row wrong does not crash — it receives some other text's
+    chunk ids and attributes them to a fragment nobody retrieved.
+    """
+    loaded = plane(tmp_path, chunk("a:0:v3", "a", EAST), chunk("b:0:v3", "b", NORTH))
+    with pytest.raises(VectorPlaneIncompatible):
+        loaded.chunk_ids_for_row(-1)
+    with pytest.raises(VectorPlaneIncompatible):
+        loaded.chunk_ids_for_row(2)
+
+
+def test_searching_a_closed_plane_raises_instead_of_answering_nothing(tmp_path: Path) -> None:
+    """Blocker 6: `()` from a closed plane is indistinguishable from an empty corpus.
+
+    One is a bug in the caller and the other is a fact about the data, and a retrieval layer
+    that reports them the same way makes the first one invisible.
+    """
+    loaded = plane(tmp_path, chunk("a:0:v3", "a", EAST))
+    assert loaded.search(EAST, limit=1) != ()
+    loaded.close()
+    with pytest.raises(ValueError):
+        loaded.search(EAST, limit=1)
+
+
+def test_a_spec_of_dimension_zero_cannot_be_written(tmp_path: Path) -> None:
+    """Blocker 2: dimension 0 makes the matrix 0 bytes and every cosine undefined."""
+    with pytest.raises(VectorPlaneIncompatible):
+        write_vector_plane(tmp_path, VectorSpec("m", 0, True, "", ""), [chunk("a:0:v3", "a", ())])
+
+
+def test_a_meta_declaring_dimension_zero_is_refused(tmp_path: Path) -> None:
+    """Blocker 2, the read half: a 0-dimension meta makes the size check vacuously true.
+
+    `rows * 0 * 4 == 0` for ANY number of rows, so the one guard standing between a truncated
+    matrix and a short corpus stops being able to fail.
+    """
+    write_vector_plane(tmp_path, SPEC, [chunk("a:0:v3", "a", EAST)])
+    edited_meta(tmp_path, dimension=0)
+    with pytest.raises(VectorPlaneIncompatible) as excinfo:
+        load_vector_plane(tmp_path)
+    assert "dimension" in str(excinfo.value)
