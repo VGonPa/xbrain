@@ -791,9 +791,13 @@ uv run xbrain get 2051242195298968041 --surface video_transcript
 renderings of **one** response model, so the two cannot disagree and there is no
 human-only fact. The containment runs one way only — the human view *selects*,
 and turns some fields into prose, so the JSON carries fields it never prints
-(`schema_version`, the echoed `filters`, `manifest_version`, `built_at`, and per
-match the `chunk_id`, `title`, `score`, `lexical_rank`, `vector_rank` and
-`locator`). Judge a result in the human view; consume one from `--json`.
+(`schema_version`, `manifest_version`, `built_at`, and per match the `chunk_id`,
+`title`, `score`, `lexical_rank`, `vector_rank` and `locator`). The echoed
+`filters` are **not** among them: a truncated result spells every one back as a
+flag of the continuation command it prints, because a cursor is an offset into
+the ranking the query *and* the filters define, and a continuation that dropped
+one would resume inside a different ranking. Judge a result in the human view;
+consume one from `--json`.
 
 ```bash
 uv run xbrain search "agents" --topic ai-agents --from 2026-01-01 --kind x_article

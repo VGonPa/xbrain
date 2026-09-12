@@ -1029,9 +1029,12 @@ consumer can parse.
 The containment runs one way only. The human view is a **projection**: it selects, and it
 says some things in Spanish prose that the JSON says structurally (a `degraded` flag becomes a
 sentence; `verify_with: []` becomes the `no_underlying_source` warning). The JSON carries
-fields it never prints — `schema_version`, the echoed `filters`, `manifest_version` and
-`built_at`, and per match the `chunk_id`, `title`, `score`, `lexical_rank`, `vector_rank` and
-`locator`. Read the human view to judge a result; parse `--json` to consume one.
+fields it never prints — `schema_version`, `manifest_version` and `built_at`, and per match
+the `chunk_id`, `title`, `score`, `lexical_rank`, `vector_rank` and `locator`. The echoed
+`filters` are not among them: a truncated result spells every one back as a flag of the
+continuation command it prints, because a cursor is an offset into the ranking the query AND
+the filters define, and a continuation that dropped one would resume inside a different
+ranking. Read the human view to judge a result; parse `--json` to consume one.
 
 Every non-body field — id, URL, topic slug, query, cursor, path — reaches the terminal through
 one sanitisation function, and bodies through a fence. Four separate patches for the same

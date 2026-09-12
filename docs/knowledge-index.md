@@ -140,10 +140,14 @@ the store or the index, so the two cannot disagree and anything you read above
 is a field you can parse. The containment runs one way only: the human view
 **selects**, and it turns some fields into Spanish prose (a `degraded` flag
 becomes a sentence, an empty `verify_with` becomes the `no_underlying_source`
-warning). The JSON below carries fields it never prints — `schema_version`, the
-echoed `filters`, `manifest_version`, `built_at`, and per match the `chunk_id`,
-`title`, `score`, `lexical_rank`, `vector_rank` and `locator`. Read the human
-view to judge a result; parse `--json` to consume one:
+warning). The JSON below carries fields it never prints — `schema_version`,
+`manifest_version`, `built_at`, and per match the `chunk_id`, `title`, `score`,
+`lexical_rank`, `vector_rank` and `locator`. The echoed `filters` are **not**
+among them: a truncated result spells every one back as a flag of the
+continuation command it prints (`--topic`, `--kind`, `--origin`, …), because a
+cursor is an offset into the ranking the query *and* the filters define, and a
+continuation that dropped one would resume inside a different ranking. Read the
+human view to judge a result; parse `--json` to consume one:
 
 ```bash
 uv run xbrain search "transformer attention" --limit 1 --json
