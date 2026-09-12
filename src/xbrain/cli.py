@@ -2968,6 +2968,355 @@ def _render_inspect(payload: dict) -> str:
     return "\n".join(lines)
 
 
+# ============================================================================
+# El índice persistente, `search` y `get` (Plan 02 §6)
+#
+# ESTA CAPA ES UN ADAPTADOR Y NADA MÁS. Cada comando carga las entradas una vez,
+# llama a su servicio una vez, y elige UNA de dos salidas sobre el MISMO objeto:
+# el documento JSON que el modelo serializa, o la vista humana que `render.py`
+# compone desde ese mismo modelo (spec §7.6). Aquí no se formatea una línea: un
+# formateador local sería una tercera definición de qué es un resultado, después
+# del servicio y del JSON, que es justo la divergencia de la regla 5.
+# ============================================================================
+
+index_app = typer.Typer(help="Construir y consultar el índice persistente (data/index/).")
+app.add_typer(index_app, name="index")
+
+
+def _handle_index_errors(func: Callable) -> Callable:
+    """Convertir los errores accionables del índice en un mensaje limpio + exit 1.
+
+    `IndexError_` hereda de `Exception`, NO de `ValueError`, así que `_handle_cli_errors`
+    —que enumera `ValueError`, `KeyError`, `RuntimeError`, `OSError`…— no lo ve: sin esta
+    capa, «no hay índice» se imprime como un traceback crudo y el spec §9.3 pide lo
+    contrario. Se apila DEBAJO de `_handle_cli_errors`, de modo que cada excepción la
+    atiende exactamente uno de los dos y ninguno reimplementa al otro.
+
+    El import es local porque `index_schema` arrastra `sqlite3` y los modelos del contrato,
+    y `cli.py` se importa en cada invocación de `xbrain`, incluida `login`.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        from xbrain.knowledge.index_schema import IndexError_
+
+        try:
+            return func(*args, **kwargs)
+        except IndexError_ as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    return wrapper
+
+
+def _index_inputs(cfg: Config):
+    """Las tres entradas del índice, con la señal barata del snapshot que se leyó.
+
+    UN SOLO CARGADOR PARA LOS CINCO COMANDOS. `load_index_inputs` ata las filas y la señal
+    al mismo instante y a los mismos descriptores (P1b): dos cargadores distintos dejarían
+    que las filas describan un momento y el `stat` otro, y esa diferencia es invisible.
+    """
+    from xbrain.knowledge.index_build import load_index_inputs
+
+    return load_index_inputs(cfg.items_path, cfg.data_dir / "vocab.yaml", cfg.topics_path)
+
+
+def _index_options(cfg: Config):
+    """Lo que un build necesita y no es el corpus. Idéntico en build, update y status.
+
+    Idéntico a propósito: `item_fingerprint` las consume, así que tres comandos con opciones
+    distintas producirían tres huellas distintas del mismo item y `status` declararía
+    cambios que no existen.
+    """
+    from xbrain.knowledge.index_build import IndexOptions
+
+    return IndexOptions(vault_dir=cfg.output_dir)
+
+
+def _query_context(cfg: Config, inputs):
+    """Todo lo que una consulta necesita y no es la consulta (spec §7.2).
+
+    El STORE viaja dentro: `get` lee el store vivo (spec §3.7.7) y `search` hidrata la
+    verificación desde él (M5), así que las rutas que van aquí son las mismas que el
+    cargador acaba de leer.
+    """
+    from xbrain.knowledge.search_service import QueryContext
+
+    return QueryContext(
+        store=inputs.store,
+        vocab=inputs.vocab,
+        topic_pages=inputs.topic_pages,
+        index_dir=cfg.index_dir,
+        items_path=cfg.items_path,
+        vocab_path=cfg.data_dir / "vocab.yaml",
+        topics_path=cfg.topics_path,
+        vault_dir=cfg.output_dir,
+        language=cfg.output_language,
+        max_matches_per_item=cfg.index_max_matches_per_item,
+    )
+
+
+def _echo_json(payload: object) -> None:
+    """El documento estable en stdout, y nada más (spec §3.7.9)."""
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@index_app.command("build")
+@_handle_cli_errors
+@_handle_index_errors
+def index_build_command(
+    force: bool = typer.Option(
+        False, "--force", help="Reconstruye desde cero un índice ya existente."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Cuenta lo que haría; no toca ningún fichero."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Construye `data/index/` desde cero y lo sella.
+
+    NO ES DESTRUCTIVO SOBRE EL STORE y por eso no toma snapshot: lo único que escribe es
+    `data/index/`, que es derivado y reconstruible (Plan 02 §6). `--force` sí tira el índice
+    anterior —manifest primero, base después— así que una reconstrucción interrumpida no
+    deja un manifest en pie sobre una base vacía.
+    """
+    from dataclasses import asdict
+
+    from xbrain.knowledge.index_build import build
+    from xbrain.knowledge.render import render_build
+
+    cfg = _config()
+    report = build(
+        cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run, force=force
+    )
+    if json_out:
+        _echo_json(asdict(report))
+    else:
+        typer.echo(render_build(report))
+
+
+@index_app.command("update")
+@_handle_cli_errors
+@_handle_index_errors
+def index_update_command(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Cuenta el delta; no escribe nada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Pone el índice al día tocando solo lo que cambió (spec §5.6).
+
+    Una sola transacción para toda la corrida: un update a medias dejaría una aplicación
+    parcial de un cambio que nadie puede nombrar, y el índice parecería sano porque todos
+    los ids que contiene siguen resolviendo.
+    """
+    from dataclasses import asdict
+
+    from xbrain.knowledge.index_build import update
+    from xbrain.knowledge.render import render_update
+
+    cfg = _config()
+    report = update(cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run)
+    if json_out:
+        _echo_json(asdict(report))
+    else:
+        typer.echo(render_update(report))
+
+
+@index_app.command("status")
+@_handle_cli_errors
+@_handle_index_errors
+def index_status_command(
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Qué contiene el índice y cuánto se ha quedado atrás respecto al store.
+
+    ES EL COMANDO QUE RESPONDE CUANDO LOS DEMÁS SE NIEGAN. `search`, `get`, `build` y
+    `update` rechazan un índice ausente o incompatible; este lo REPORTA, porque es el
+    instrumento que se corre precisamente para averiguarlo. Dos instrumentos con respuestas
+    opuestas sobre un mismo estado es la regla 9, y la salida no es que el diagnóstico se
+    niegue también: es que diga el mismo comando que dicen las puertas.
+
+    El manifest se publica con `to_dict()`, el MISMO documento que `data/index/manifest.json`
+    contiene, nunca un volcado paralelo del dataclass (que además no sería serializable: lleva
+    un `datetime` y una `StoreSignal` anidada).
+    """
+    from xbrain.knowledge.index_build import status
+    from xbrain.knowledge.render import render_status
+
+    cfg = _config()
+    report = status(cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg))
+    if json_out:
+        _echo_json(
+            {
+                "manifest": report.manifest.to_dict() if report.manifest else None,
+                "counts": report.counts,
+                "items_added": report.items_added,
+                "items_changed": report.items_changed,
+                "items_removed": report.items_removed,
+                "topics_changed": report.topics_changed,
+                "behind": report.behind,
+                "incomplete": report.incomplete,
+                "advice": report.advice,
+            }
+        )
+    else:
+        typer.echo(render_status(report))
+
+
+def _search_filters(
+    created_from: str | None,
+    created_to: str | None,
+    source: str | None,
+    mine: bool,
+    author: str | None,
+    topics: list[str],
+    kinds: list[str],
+    origins: list[str],
+    has_surfaces: list[str],
+):
+    """Los ocho filtros del spec §7.2, armados y validados por el contrato.
+
+    `--mine` es el atajo del spec §7.2 para `source=own_tweet`, y es INCOMPATIBLE con
+    `--source`: dos maneras de fijar un campo son una manera de fijarlo a dos valores
+    distintos, y la resolución silenciosa (gane cuál gane) devolvería un corpus que el
+    operador no pidió sin decírselo.
+
+    Los valores de `--kind`, `--origin` y `--has-surface` NO se re-enumeran aquí: los valida
+    `SearchFilters`, que es donde viven los `Literal` del contrato. Una lista escrita a mano
+    en el CLI sería una segunda copia que envejece el día que el contrato crece (regla 5).
+    """
+    from xbrain.knowledge.contracts import SearchFilters
+
+    if mine and source is not None:
+        raise ValueError("`--mine` ya fija `--source own_tweet`; no los combines.")
+    # `model_validate`, no el constructor, y la diferencia es de TIPADO, no de estilo.
+    # `--kind`, `--origin`, `--has-surface` y `--source` llegan como texto libre del
+    # usuario y los campos que los reciben son `Literal`s del contrato: pasarlos al
+    # constructor obliga a un `cast` en el borde, que es decirle al comprobador que el
+    # texto ya está validado justo donde todavía no lo está. `model_validate` valida de
+    # verdad, en el sitio donde viven los valores válidos, y su mensaje los enumera
+    # («Input should be 'external_article', 'x_article', …»). Una lista escrita a mano
+    # aquí sería una segunda copia del contrato que envejece sola (regla 5).
+    return SearchFilters.model_validate(
+        {
+            "created_from": _parse_date(created_from),
+            "created_to": _parse_date(created_to, end_of_day=True),
+            "source": "own_tweet" if mine else source,
+            "author": author,
+            "topics": tuple(topics),
+            "content_kinds": tuple(kinds),
+            "origins": tuple(origins),
+            "has_surfaces": tuple(has_surfaces),
+        }
+    )
+
+
+@app.command("search")
+@_handle_cli_errors
+@_handle_index_errors
+def search_command(
+    query: str = typer.Argument(..., help="Qué buscar. Texto libre."),
+    limit: int = typer.Option(10, "--limit", help="Resultados por página."),
+    created_from: str | None = typer.Option(None, "--from", help="Items creados desde (ISO)."),
+    created_to: str | None = typer.Option(None, "--to", help="Items creados hasta (ISO)."),
+    source: str | None = typer.Option(None, "--source", help="bookmark | own_tweet."),
+    mine: bool = typer.Option(False, "--mine", help="Atajo de `--source own_tweet`."),
+    author: str | None = typer.Option(None, "--author", help="Handle del autor."),
+    topic: list[str] = typer.Option([], "--topic", help="Slug del vocabulario (repetible)."),
+    kind: list[str] = typer.Option([], "--kind", help="Tipo de contenido (repetible)."),
+    origin: list[str] = typer.Option([], "--origin", help="Procedencia del texto (repetible)."),
+    has_surface: list[str] = typer.Option(
+        [], "--has-surface", help="Solo items con esta superficie (repetible)."
+    ),
+    strategy: str = typer.Option("lexical", "--strategy", help="Estrategia de recuperación."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una página truncada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Busca en el índice y devuelve items con sus fragmentos citables.
+
+    SOLO LECTURA: la base se abre `mode=ro`, el store no se toca y no hay red ni modelo —
+    el spec §13.12 exige que `search` funcione sin una sola llamada a un LLM.
+
+    Sin `--json` imprime la vista humana del spec §7.6 (item, autor, fecha, URL, superficie,
+    procedencia, excerpt, canales del match, advertencias, y el `xbrain get` que trae la
+    fuente); con `--json`, el MISMO `SearchResponse` como documento.
+    """
+    from typing import cast
+
+    from xbrain.knowledge.contracts import Strategy
+    from xbrain.knowledge.render import render_search
+    from xbrain.knowledge.search_service import search
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    response = search(
+        query,
+        _query_context(cfg, inputs),
+        filters=_search_filters(
+            created_from, created_to, source, mine, author, topic, kind, origin, has_surface
+        ),
+        limit=limit,
+        # El `cast` es honesto porque `search` valida este texto en su primera línea:
+        # `resolve_strategy` levanta un `ValueError` que enumera las estrategias
+        # declaradas y las implementadas. La firma es `Strategy` pero el contrato acepta
+        # y comprueba texto libre a propósito — un typo no es una degradación, y
+        # contestarlo con resultados léxicos lo convertiría en una medición.
+        strategy=cast(Strategy, strategy),
+        cursor=cursor,
+    )
+    if json_out:
+        _echo_json(response.model_dump(mode="json"))
+    else:
+        typer.echo(render_search(response))
+
+
+@app.command("get")
+@_handle_cli_errors
+@_handle_index_errors
+def get_command(
+    item_id: str = typer.Argument(..., help="Id del item."),
+    surface: list[str] = typer.Option(
+        [], "--surface", help="Superficie a entregar entera (repetible)."
+    ),
+    query: str | None = typer.Option(
+        None, "--query", help="Prioriza los fragmentos que puntúan para esta consulta."
+    ),
+    cursor: str | None = typer.Option(None, "--cursor", help="Continúa una respuesta truncada."),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
+
+    Es el invariante 7 del spec §3.7: `get` funciona con `data/index/` borrado, porque un
+    índice capaz de contestar `get` sería una copia del corpus que nada invalida, y el día
+    que las dos discreparan no habría forma de saber cuál se le enseñó al lector.
+
+    El presupuesto por respuesta sale de `[index].get_char_budget`; por encima de él la
+    respuesta se trunca DECLARÁNDOLO y entrega un cursor (spec §9.3), nunca en silencio.
+    """
+    from typing import Sequence, cast
+
+    from xbrain.knowledge.get_service import GetLimits, get
+    from xbrain.knowledge.models import SurfaceType
+    from xbrain.knowledge.render import render_get
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    bundle = get(
+        item_id,
+        _query_context(cfg, inputs),
+        # Mismo trato que `--strategy`: `get` comprueba cada nombre pedido contra las
+        # superficies que el item emite y las de las fuentes que fallaron, y rechaza las
+        # que no son ninguna de las dos enumerando las disponibles (`UnknownSurfaceError`).
+        surfaces=cast("Sequence[SurfaceType] | None", surface or None),
+        query=query,
+        limits=GetLimits(char_budget=cfg.index_get_char_budget),
+        cursor=cursor,
+    )
+    if json_out:
+        _echo_json(bundle.model_dump(mode="json"))
+    else:
+        typer.echo(render_get(bundle, surfaces=surface, query=query))
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
