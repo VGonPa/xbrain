@@ -31,6 +31,17 @@ dev = [
     "deptry>=0.16",
     "pytest-cov>=5.0",
 ]
+# `numpy` is the vector plane's arithmetic, and it is OPTIONAL on purpose. 25k x 768
+# float32 dot products take milliseconds through `vectors @ query` and seconds through a
+# stdlib `array` loop, which settles numpy-vs-pure-Python — it does not settle
+# numpy-vs-nothing. The embeddings backend is opt-in end to end (`[embeddings].command`
+# starts empty, `search` serves lexical results without it, and that degradation is
+# designed and tested), so a user who only runs the CLI does not pay for a plane they
+# never query. Declaring it here and NOT in `[project.dependencies]` is what keeps that
+# answer consistent with every other opt-in backend in this repo.
+embeddings = [
+    "numpy>=2.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -98,6 +109,20 @@ known_first_party = ["xbrain"]
 [tool.deptry.per_rule_ignores]
 # DEP002: the dev/CLI quality tools are invoked as commands by scripts/check.sh
 # and the poe tasks — they are never `import`ed, so deptry cannot see their use.
+#
+# `numpy` is here for a different reason, and the reason is the delivery shape, not the
+# dependency. This child declares the `[embeddings]` extra, regenerates the lock and
+# teaches CI to install it — deliberately WITHOUT the module that consumes it, so the
+# only change under `.github/` in the whole plan arrives as a diff a human can read in
+# one sitting. Measured on this tree with the extra declared and no consumer:
+#
+#     pyproject.toml: DEP002 'numpy' defined as a dependency but not used in the codebase
+#
+# which is deptry reporting the situation correctly. Silencing DEP002 for `numpy` is
+# therefore an ignore of a TRUE finding whose cause is sequencing, and it stops being
+# needed the moment the vector plane imports it (deptry reads imports inside function
+# bodies, so the deferred `import numpy` that keeps `import xbrain` working without the
+# extra is still an import deptry can see). Drop this entry in that PR.
 DEP002 = [
     "poethepoet",
     "radon",
@@ -110,6 +135,7 @@ DEP002 = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "numpy",
 ]
 # DEP001 + DEP003: scripts/import_chrome_session.py + import_safari_session.py
 # import browser-cookie3 behind a guarded `try/except ImportError` — it is a

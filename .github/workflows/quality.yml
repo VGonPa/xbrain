@@ -78,8 +78,19 @@ jobs:
       # `--locked` fails the build if uv.lock is stale against pyproject.toml, so the lock
       # cannot silently rot either. Upgrading stays deliberate and is one command:
       # `uv lock --upgrade-package ruff`.
+      #
+      # `--extra embeddings` joins it for the vector plane. The extra carries `numpy`, an
+      # OPTIONAL runtime backend (a CLI-only user never pays for it) whose tests are not
+      # optional at all: they import it directly. The alternative — letting them
+      # `pytest.importorskip` — is the fail-open of rule 11 in one line, because a forgotten
+      # extra would then SKIP the vector plane's tests under a GREEN `quality` check. Forgetting
+      # it here instead fails collection: red, loud, and impossible to mistake for a pass.
+      #
+      # `tests/test_ci_workflow.py` now asserts both halves of this command off its parsed
+      # argv — until this PR nothing in the suite asserted anything at all about this step,
+      # which made deleting `--locked` a silent, green-reporting downgrade.
       - name: Install dependencies from the lockfile
-        run: uv sync --extra dev --locked
+        run: uv sync --extra dev --extra embeddings --locked
       - name: Quality gate
         run: bash scripts/check.sh
 

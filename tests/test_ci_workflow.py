@@ -196,6 +196,8 @@ a dead gate, so it never sits open.
 """
 
 import re
+import shlex
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -1014,4 +1016,287 @@ def test_gate_job_may_file_the_red_branch_issue() -> None:
         f"The `{_REQUIRED_CHECK}` job declares a `permissions:` block without "
         f"`contents: read`. A permissions block sets every unlisted scope to `none`, so "
         f"`actions/checkout` can no longer clone the repo and the gate cannot run AT ALL."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The install step — the gate's environment, and until now its only unguarded half
+#
+# Measured on this file before this section existed: 1017 lines, 16 tests, and **not one
+# assertion about the step that builds the environment the gate runs in**. `grep -n
+# 'sync\|lock\|Install'` returned docstring prose and nothing else. That is a live
+# fail-open of rule 11: delete `--locked` and the required `quality` check still reports
+# SUCCESS — it has simply verified a DIFFERENT dependency tree from the one this repo
+# pins. `scripts/check.sh` does not cover the hole either, because it never reads the
+# lockfile at all: it invokes each tool through `uv run`, so the protection lives ONLY in
+# the workflow.
+#
+# It is not hypothetical. PR #135 exists because `uv pip install -e ".[dev]"` — uv's
+# pip-COMPATIBILITY mode, which never reads `uv.lock` — silently installed whatever ruff
+# had shipped that morning. ruff 0.16 turned UP017 on by default and `develop` went red
+# with no commit landing on it.
+#
+# Two properties, and each is verified RED by deleting its own half from the YAML:
+#
+#   1. the command installs FROM THE LOCKFILE (`--locked`);
+#   2. the command installs the extras the suite needs, `dev` AND `embeddings`.
+#
+# Both read the PARSED step's `run:` argv, never the file text. That distinction is the
+# whole point: `quality.yml`'s own comment block contains the string `--locked`, so a
+# text search is satisfied by the PROSE explaining the flag long after the flag itself is
+# gone — rule 1's "satisfied for the wrong reason", in the file that documents it.
+# ---------------------------------------------------------------------------
+
+#: The uv sub-command that builds the gate's environment. `uv sync` reads `uv.lock`;
+#: `uv pip install` is the pip-compatibility path that does not, which is why the
+#: presence of the latter anywhere in this workflow is itself a failure below.
+_INSTALL_COMMAND = "uv sync"
+
+#: uv's pip-compatibility mode. It resolves fresh from `pyproject.toml` and IGNORES
+#: `uv.lock`, so every `>=` specifier floats with the release train.
+_UNLOCKED_INSTALL_COMMAND = "uv pip install"
+
+#: The flag that makes `uv sync` fail when `uv.lock` is stale against `pyproject.toml`.
+#: Without it the lock can rot unnoticed; with it, upgrading stays a deliberate act.
+_LOCKED_FLAG = "--locked"
+
+#: Every extra the gate must install. `dev` carries the quality tools; `embeddings`
+#: carries `numpy`, which the vector plane's tests import directly — and they are
+#: forbidden from using `pytest.importorskip`, because a skipped test is a green gate
+#: that verified nothing, while a collection error is a red one (fail-closed).
+_REQUIRED_EXTRAS = ("dev", "embeddings")
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_PYPROJECT = _REPO_ROOT / "pyproject.toml"
+_LOCKFILE = _REPO_ROOT / "uv.lock"
+
+#: The distribution whose extras the workflow names. Its entry in `uv.lock` is what
+#: proves the lock was regenerated after the extra was declared.
+_PROJECT_NAME = "xbrain"
+
+
+def _install_step() -> dict[str, Any]:
+    """The single step in the gate job that builds its Python environment.
+
+    Asserting there is exactly ONE is part of the property, not tidiness: two install
+    steps mean a second one can quietly re-resolve on top of the locked environment, and
+    the flags on the first stop describing what the gate actually ran against.
+    """
+    steps = [
+        step
+        for step in _gate_job().get("steps") or []
+        if _INSTALL_COMMAND in str(step.get("run", ""))
+    ]
+    assert len(steps) == 1, (
+        f"The `{_REQUIRED_CHECK}` job has {len(steps)} steps running `{_INSTALL_COMMAND}`, "
+        f"expected exactly 1.\n"
+        f"\n"
+        f"With none, the gate installs nothing from the lockfile and every assertion below "
+        f"is vacuous. With two, the later one re-resolves over the first and the flags on "
+        f"either stop describing the environment `{_GATE_SCRIPT}` actually ran in."
+    )
+    return steps[0]
+
+
+def _install_argv() -> list[str]:
+    """The install command as ARGV — the only surface that can tell the flag from its prose.
+
+    `quality.yml` documents `--locked` in a comment. Comments are not commands: read the
+    parsed step, tokenize it, and a deleted flag is a deleted flag.
+    """
+    return shlex.split(str(_install_step().get("run", "")).strip())
+
+
+def _synced_extras() -> list[str]:
+    """The values the install command passes to `--extra`, in order."""
+    argv = _install_argv()
+    return [argv[i + 1] for i, token in enumerate(argv) if token == "--extra" and i + 1 < len(argv)]
+
+
+def _declared_extras() -> dict[str, list[str]]:
+    """`[project.optional-dependencies]` as declared in `pyproject.toml`."""
+    assert _PYPROJECT.is_file(), f"{_PYPROJECT.name} does not exist."
+    parsed = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    extras = (parsed.get("project") or {}).get("optional-dependencies") or {}
+    return {str(name): [str(spec) for spec in specs] for name, specs in extras.items()}
+
+
+def _runtime_dependencies() -> list[str]:
+    """`[project.dependencies]` — what every user pays for, extra or no extra."""
+    parsed = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    return [str(spec) for spec in (parsed.get("project") or {}).get("dependencies") or []]
+
+
+def _locked_extras() -> dict[str, list[str]]:
+    """This project's extras as RESOLVED in `uv.lock`.
+
+    Read from the lock's own `[[package]]` entry for `xbrain`, so a `pyproject.toml` edit
+    that was never followed by `uv lock` shows up as a missing key here — which is the
+    exact failure `--locked` would otherwise only surface inside a CI run.
+    """
+    assert _LOCKFILE.is_file(), f"{_LOCKFILE.name} does not exist."
+    parsed = tomllib.loads(_LOCKFILE.read_text(encoding="utf-8"))
+    for package in parsed.get("package") or []:
+        if package.get("name") == _PROJECT_NAME:
+            extras = package.get("optional-dependencies") or {}
+            return {
+                str(name): [str(entry.get("name", "")) for entry in entries]
+                for name, entries in extras.items()
+            }
+    raise AssertionError(
+        f"{_LOCKFILE.name} carries no `[[package]]` entry named `{_PROJECT_NAME}`, so "
+        f"nothing in it describes this project's extras. Regenerate it with `uv lock`."
+    )
+
+
+def test_the_gate_installs_from_the_lockfile() -> None:
+    """`--locked` must be on the install command, or the gate tests a tree nobody pinned.
+
+    FAIL-OPEN, and that is what makes it worth a test of its own: removing this flag
+    changes no output, breaks no step and produces no warning. The required `quality`
+    check still reports SUCCESS. It has just verified whatever PyPI served that morning
+    instead of what `uv.lock` pins — which is how 618 lint errors reached `develop` with
+    no commit landing on it (PR #135).
+
+    Asserted on ARGV, not on the file text, because the comment directly above the step
+    explains `--locked` at length: a text search stays green on the explanation of a flag
+    that is no longer passed.
+    """
+    argv = _install_argv()
+    assert _LOCKED_FLAG in argv, (
+        f"The gate's install command does not pass `{_LOCKED_FLAG}`:\n"
+        f"\n"
+        f"  {' '.join(argv)}\n"
+        f"\n"
+        f"Without it `uv sync` will happily install a resolution that disagrees with "
+        f"`uv.lock`, and a stale lock never fails anything. The gate then reports GREEN "
+        f"for a dependency tree this repository does not pin and no commit records — the "
+        f"fail-open half of rule 11. `{_GATE_SCRIPT}` does not cover this: it never reads "
+        f"the lockfile, it invokes each tool through `uv run`."
+    )
+
+
+def test_the_gate_installs_every_extra_the_suite_needs() -> None:
+    """`dev` AND `embeddings` must be synced, each named explicitly on the command.
+
+    `embeddings` carries `numpy`, which the vector plane imports directly. Forget it and
+    the tests that need it fail at COLLECTION — red, loud, fail-closed, and therefore
+    tolerable. The dangerous repair is `pytest.importorskip`, which turns the same
+    omission into skipped tests under a GREEN required check: the gate would report
+    success having exercised none of the vector plane. That is why the extra is asserted
+    here rather than tolerated in the tests that need it.
+
+    Read off ARGV so that documenting an extra in a comment — or in this docstring —
+    cannot stand in for passing it.
+    """
+    extras = _synced_extras()
+    missing = [extra for extra in _REQUIRED_EXTRAS if extra not in extras]
+    assert not missing, (
+        f"The gate's install command syncs {extras or 'no extras at all'} and is missing "
+        f"{missing}:\n"
+        f"\n"
+        f"  {' '.join(_install_argv())}\n"
+        f"\n"
+        f"An extra that CI never installs is a dependency the gate cannot exercise. The "
+        f"failure is at least honest today (a missing import fails collection) — but only "
+        f"while nobody reaches for `pytest.importorskip`, which would convert it into a "
+        f"silent skip beneath a green `{_REQUIRED_CHECK}` check."
+    )
+
+
+def test_the_gate_never_installs_outside_the_lockfile() -> None:
+    """`uv pip install` must appear in NO step of this workflow.
+
+    It is uv's pip-compatibility mode: it resolves fresh from `pyproject.toml` and never
+    reads `uv.lock`, so `--locked` above can be defeated without ever being deleted —
+    just add a second step that installs the pip way. Measured on this tree the day the
+    drift appeared: the pip path gave ruff 0.16.5 where the lockfile pins 0.15.13.
+    """
+    offenders = [
+        f"{job_id}: {str(step.get('run', '')).strip()}"
+        for job_id, job in (_workflow().get("jobs") or {}).items()
+        for step in (job.get("steps") or [])
+        if _UNLOCKED_INSTALL_COMMAND in str(step.get("run", ""))
+    ]
+    assert not offenders, (
+        f"These steps install outside the lockfile: {offenders}.\n"
+        f"\n"
+        f"`{_UNLOCKED_INSTALL_COMMAND}` ignores `uv.lock` entirely, so it reintroduces the "
+        f"drift `{_LOCKED_FLAG}` exists to stop — and it does so without touching the "
+        f"`{_INSTALL_COMMAND}` line that this file's other assertions read."
+    )
+
+
+def test_every_extra_the_gate_syncs_is_declared_and_locked() -> None:
+    """The install command names extras; `pyproject.toml` declares them; `uv.lock` pins them.
+
+    Three files, one fact — bound in code rather than in three lists that "should" match
+    (rule 5). Each half fails for its own reason and neither is visible locally:
+
+    * an extra named on the command but absent from `pyproject.toml` makes `uv sync` abort
+      in CI, and the first person to find out is whoever opened the next PR;
+    * an extra declared in `pyproject.toml` but absent from `uv.lock` means the lock was
+      never regenerated, so `--locked` fails the build — the flag doing its job, at
+      the cost of a red gate nobody could reproduce from the diff.
+
+    Derived from the YAML rather than hard-coded, so the next extra added to the command
+    is checked the day it lands and not the day someone remembers this test. The emptiness
+    guard matters: with no `--extra` at all, both loops below iterate over nothing and the
+    assertions would pass having compared nothing — which is why the two required extras
+    are pinned by name in `test_the_gate_installs_every_extra_the_suite_needs`.
+    """
+    extras = _synced_extras()
+    assert extras, (
+        f"The gate's install command passes no `--extra` at all, so this test compares "
+        f"nothing and would pass vacuously. Expected at least {list(_REQUIRED_EXTRAS)}."
+    )
+
+    declared = _declared_extras()
+    undeclared = [extra for extra in extras if extra not in declared]
+    assert not undeclared, (
+        f"The gate syncs {undeclared}, which `{_PYPROJECT.name}` does not declare under "
+        f"`[project.optional-dependencies]` (declared: {sorted(declared)}). `uv sync` "
+        f"fails on an unknown extra, so the gate cannot even start."
+    )
+
+    locked = _locked_extras()
+    unlocked = [extra for extra in extras if extra not in locked]
+    assert not unlocked, (
+        f"The gate syncs {unlocked}, which `{_LOCKFILE.name}` does not carry for "
+        f"`{_PROJECT_NAME}` (locked: {sorted(locked)}). The lockfile was not regenerated "
+        f"after the extra was declared, and `{_LOCKED_FLAG}` will fail the build on a "
+        f"staleness nothing in the diff explains. Run `uv lock`."
+    )
+
+
+def test_numpy_is_an_optional_extra_and_never_a_runtime_dependency() -> None:
+    """`numpy` belongs to `[embeddings]`, not to `[project.dependencies]`.
+
+    The same question already has an answer in this repository and it must not get a
+    second one: the embeddings backend is opt-in end to end — `[embeddings].command`
+    starts empty, `search` serves lexical results without it, and that degradation is
+    designed and tested. A user who only runs the CLI does not pay ~20 MB of wheel for a
+    plane they never query. Promoting `numpy` to a runtime dependency would answer that
+    question one way for embeddings and the other way for every other optional backend —
+    the divergence rule 5 exists to stop.
+
+    The corresponding half — the import being DEFERRED so `import xbrain` still works
+    without the extra — is not this child's to assert: there is no `numpy` import in the
+    tree yet. It ships with the module that first imports it.
+    """
+    extras = _declared_extras()
+    assert "embeddings" in extras, (
+        f"`{_PYPROJECT.name}` declares no `embeddings` extra "
+        f"(found: {sorted(extras)}), so there is nothing for the gate to sync."
+    )
+    assert any(spec.startswith("numpy") for spec in extras["embeddings"]), (
+        f"The `embeddings` extra is {extras['embeddings']} and does not carry `numpy`. "
+        f"The extra exists to make the vector plane's dot products fast; without numpy it "
+        f"installs nothing and the plane falls back to seconds-per-query Python loops."
+    )
+    runtime = [spec for spec in _runtime_dependencies() if spec.startswith("numpy")]
+    assert not runtime, (
+        f"`numpy` is declared in `[project.dependencies]` as {runtime}. It is an OPTIONAL "
+        f"backend: it must stay in `[project.optional-dependencies].embeddings` so that a "
+        f"CLI-only user does not pay for it, exactly as every other opt-in backend here."
     )
