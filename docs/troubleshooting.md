@@ -410,10 +410,16 @@ because answering a typo with lexical results would turn it into a measurement.
 
 ### `xbrain eval` reports a case as unmeasured for a filter that `search` applies
 
-Both are true. `xbrain search` pushes all eight filters into SQL; the evaluation
-harness measures the baseline retriever, which can push only `has_surfaces` and
-`origins`. A golden-set case declaring a date, author, source or content-kind
-filter is therefore **unmeasured** rather than scored — see
+**It no longer does, for the `lexical` strategy.** The harness used to walk the
+corpus its own way and write chunks with no metadata, so it could push only
+`has_surfaces` and `origins` and a case declaring a date, author, source or
+content-kind filter came back unmeasured. It now builds through the same writer
+`xbrain index build` drives, so it pushes the same eight filters `search` does.
+
+If you still see it, the case is declaring a filter that the strategy you asked
+for cannot push — which is the rule working, not a bug. **Unmeasured is never
+`0.0`**: a zero from a filter nobody applied reads as "retrieval failed at
+filtering" when the instrument was not there. See
 [the stratum question above](#eval-reports-a-stratum-as-sin-cobertura--is-that-a-failure).
 
 ### An index error prints a second, empty `Error:` line

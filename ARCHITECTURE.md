@@ -1069,9 +1069,18 @@ test proving the evaluation runs in CI could not run.
 Only a case whose ground truth is ENUMERATED scores. With `relevant_items: []` the recall@k
 is 0/0, which comes out as 1.0 or 0.0 depending on the implementation and measures nothing
 either way; those are archived as `scenarios` with their reason. And a case whose filters the
-strategy cannot apply is reported as UNMEASURED, not as 0.0 — the lexical baseline has no
-date or source columns, so scoring those cases would say retrieval failed where the
-instrument does not exist yet.
+strategy cannot apply is reported as UNMEASURED, not as 0.0 — scoring those cases would say
+retrieval failed where the instrument does not exist yet.
+
+**The lexical baseline no longer lacks those columns, and the rule is what survives the
+repair** (PR #179). Under Plan 01 the harness walked the corpus its own way and wrote chunks
+with no metadata, so it had no date, source, author or content-kind column to filter on, and
+the two `filtros` cases were unmeasured. It now builds through `index_build`'s writer — the
+same one `xbrain index build` drives — so all eight filters of spec §7.2 are pushed and those
+two cases are scored. `SUPPORTED_FILTERS` is derived from `SearchFilters.model_fields` rather
+than written out again, so a ninth filter added to the frozen contract cannot leave the
+harness quietly declaring eight. The UNMEASURED rule stays because Plan 03's vector strategy
+arrives with no filter columns of its own.
 
 The baseline is the SAME FTS5 the persisted index uses, on `sqlite3(":memory:")`
 (`index_schema.open_memory_index`, one DDL for both): same

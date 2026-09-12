@@ -505,9 +505,14 @@ generates an Obsidian wiki.
   group fails the anexo-A.3 leak rule; founding a case on the second would enshrine a possible
   hallucination as ground truth. Zero usable candidates — and the population measured is proper
   nouns, not all facts. **A case whose filters the strategy cannot apply is UNMEASURED, not
-  0.0**: the FTS5 baseline pushes only `has_surfaces`/`origins` into `WHERE`, and the first real
-  run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at filtering" when
-  the instrument does not exist yet (spec §8.6.8). The baseline is the SAME FTS5 the persisted
+  0.0**: under Plan 01 the FTS5 baseline pushed only `has_surfaces`/`origins` into `WHERE`, and
+  the first real run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at
+  filtering" when the instrument does not exist yet (spec §8.6.8). **That gap is now closed and
+  the RULE is what survives** (PR #179): the harness builds through `index_build`'s writer, the
+  same one `xbrain index build` drives, so all **eight** filters of spec §7.2 are pushed and the
+  two `filtros` cases are scored rather than reported unmeasured. `SUPPORTED_FILTERS` is derived
+  from `SearchFilters.model_fields`, so a ninth filter added to the frozen contract cannot
+  silently keep the set at eight. Read "only two" as history; do not quote it as a limit. The baseline is the SAME FTS5 the persisted
   index will use, on `sqlite3(":memory:")` — same DDL, same `unicode61 remove_diacritics 2`
   (no stemming: FTS5 has none multilingual, and the English one would wreck the Spanish half),
   same `bm25()`, same explicit `chunk_id` tie-break — so what dies later is where the database
@@ -584,10 +589,15 @@ generates an Obsidian wiki.
   stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
   tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
   `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
-  (`unicode61 remove_diacritics 2`). And `xbrain eval` is a DIFFERENT filter surface: it pushes
-  only `has_surfaces`/`origins`, so a golden-set case declaring any of the other six is
-  **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as "retrieval failed at
-  filtering" when the instrument was not there. Operation: `docs/knowledge-index.md`.
+  (`unicode61 remove_diacritics 2`). And `xbrain eval` is **no longer a different filter surface** (PR #179):
+  the harness stopped walking the corpus its own way and now builds through `index_build`'s
+  writer, so it pushes the **same eight** filters `search` does and the two `filtros` cases of
+  the golden set are scored. **The rule outlives the gap**: a case whose filters a strategy
+  cannot apply is still **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as
+  "retrieval failed at filtering" when the instrument was not there — and that is what will
+  protect Plan 03's vector strategy, which starts with no filter columns of its own. The earlier
+  line here said the harness pushes only two; it was true until #179 and is now false.
+  Operation: `docs/knowledge-index.md`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·

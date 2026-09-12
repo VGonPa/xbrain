@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -383,7 +384,7 @@ def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(
     assert "vector" in markdown.splitlines()[0], "the request is not hidden either"
 
 
-def test_every_implemented_strategy_declares_which_filters_it_can_push(corpus) -> None:
+def test_every_implemented_strategy_declares_which_filters_it_can_push() -> None:
     """Rule 5: the two tables that must agree are asserted to agree, not hoped to.
 
     `IMPLEMENTED_STRATEGIES` says which retrievers run; `SUPPORTED_FILTERS` says what each
@@ -414,7 +415,24 @@ def test_the_lexical_strategy_now_scores_the_filter_stratum(corpus) -> None:
     assert payload["by_stratum"]["filtros"] != NO_COVERAGE
 
 
-def test_the_supported_filter_set_is_DERIVED_from_the_frozen_contract(corpus) -> None:
+# One DECLARED value per field of the frozen contract, each valid for its own type. Written
+# as a total map and not as a `dict.get(..., None)` with a `continue`: the loop below has to
+# exercise every field, and a default that means "skip" turns an eight-field assertion into a
+# three-field one silently. Extending `SearchFilters` without extending this map is caught by
+# the coverage assertion inside the test, not by a reader remembering.
+_DECLARED_FILTER_VALUES: dict[str, object] = {
+    "created_from": datetime(2025, 10, 1),
+    "created_to": datetime(2025, 10, 31),
+    "source": "own_tweet",
+    "author": "x",
+    "topics": ("agentes",),
+    "content_kinds": ("x_video",),
+    "origins": ("source",),
+    "has_surfaces": ("post",),
+}
+
+
+def test_the_supported_filter_set_is_DERIVED_from_the_frozen_contract() -> None:
     """All eight, and taken from `SearchFilters` rather than written out a second time.
 
     A hand-written list here would be a second copy of the contract, and the day a ninth
@@ -427,18 +445,37 @@ def test_the_supported_filter_set_is_DERIVED_from_the_frozen_contract(corpus) ->
     `source` was not. The loop below asserts the same property for EVERY field of the
     contract, so "unsupported" cannot become a way to quietly stop measuring anything
     awkward — and it says so over the derived set rather than over a copy of it.
+
+    «EVERY FIELD» IS NOW TRUE. It was not: the sample value came from a two-entry `dict.get`
+    that returned `None` for the other six, and `None` meant `continue`, so the loop asserted
+    on THREE of the eight while its own docstring said eight — and since the assertion above
+    already equates the two sets, the loop could not have failed independently of it anyway.
+    A test that cannot fail on its own is rule 1's first row. The map is total, the
+    `asserted` tally is checked against `model_fields`, and `unsupported_filters` is exercised
+    on the value each field would really carry.
     """
     from xbrain.knowledge.evaluation import SUPPORTED_FILTERS, unsupported_filters
 
     assert SUPPORTED_FILTERS["lexical"] == frozenset(SearchFilters.model_fields)
     assert len(SUPPORTED_FILTERS["lexical"]) == 8
+
+    asserted: set[str] = set()
     for name in SearchFilters.model_fields:
-        value = {"source": "own_tweet", "author": "x"}.get(
-            name, ("post",) if name in {"has_surfaces"} else None
+        value = _DECLARED_FILTER_VALUES[name]
+        filters = SearchFilters(**{name: value})
+        # The value must actually READ as declared, or the next assertion is vacuous: a filter
+        # left at its default is never "declared", so a bad sample would make
+        # `unsupported_filters` return `()` for the uninteresting reason.
+        assert unsupported_filters(filters, "nonexistent-strategy") == (name,), (
+            f"the sample for {name!r} does not read as a DECLARED filter"
         )
-        if value is None:
-            continue
-        assert unsupported_filters(SearchFilters(**{name: value}), "lexical") == ()
+        assert unsupported_filters(filters, "lexical") == ()
+        asserted.add(name)
+
+    assert asserted == set(SearchFilters.model_fields), (
+        "a field of the frozen contract was skipped instead of asserted: "
+        f"{sorted(set(SearchFilters.model_fields) - asserted)}"
+    )
 
 
 def test_the_case_count_reconciles_including_the_unmeasured(corpus) -> None:
@@ -1110,6 +1147,95 @@ def test_a_flat_sweep_says_it_is_flat(corpus) -> None:
 
     assert "PLANO" in text
     assert "menos chunks" in text
+
+
+def test_the_sweep_publishes_the_retriever_that_ranked_the_cells(corpus, monkeypatch) -> None:
+    """F-2's sixth site: the sweep branch of the command whose other branch was repaired.
+
+    `xbrain eval --strategy vector` published a report headed `vector` produced entirely by
+    bm25, and the fix named the retriever in five places. `--sweep-chunker` is the SAME
+    command, it calls the same `evaluate` once per cell, `resolve_strategy` runs and the
+    degradation is computed — and then it was discarded with the rest of the per-cell report.
+    `data/eval-sweep.{json,md}` is the artefact Plan 03 has to beat, and it named no retriever
+    at all: measured on the fixture corpus at `6b368e9`, `SweepReport.to_dict()` returned the
+    keys `['k', 'limit', 'measured', 'rows', 'verdict', 'winner']` and not one of them says
+    which instrument produced the ranking.
+
+    THE PREMISE IS PINNED, NOT INHERITED, exactly as in the non-sweep twin above: `vector` is
+    the example of a declared-but-unimplemented strategy, and reading that from production
+    would expire the day Plan 03 lands.
+
+    Seen red before the fix: `KeyError: 'strategy'` on the payload, and the rendered table
+    contained the word `vector` nowhere.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [800, 1600]}, strategy="vector")
+    payload = report.to_dict()
+
+    assert payload["strategy"] == "lexical", "what ran"
+    assert payload["requested_strategy"] == "vector", "what was asked for"
+    assert payload["degraded"] == ["vector_not_implemented"]
+    assert payload["rows"], "spec §9.3: lexical stays operational, the table is still produced"
+
+    first = render_sweep_markdown(report).splitlines()[0]
+    assert "`lexical`" in first, "the table names the retriever that ranked it"
+    assert "vector" in first, "the request is not hidden either"
+
+
+def test_the_sweep_and_the_report_name_the_retriever_with_the_SAME_sentence(
+    corpus, monkeypatch
+) -> None:
+    """Rule 5, through the two PUBLIC renderers rather than through one shared symbol.
+
+    The defect was never that the sweep lacked a field: it was that `xbrain eval` publishes a
+    number down two branches and only one of them named its instrument. Asserting that both
+    call `retriever_label` would be the tautology of rule 1 row 6 — once they delegate, the
+    attribute IS the same object and the assertion cannot fail. So this asserts on what the
+    two renderers OUTPUT over the same three values, which is what a reader actually gets.
+
+    IT IS RUN ON THE DEGRADED CASE, and that is the whole of the test. Written first on a
+    plain `lexical` run, it passed against a sweep line hardcoded back to
+    `f"Recuperador: `{report.strategy}`"` — with nothing degraded the two forms produce the
+    same bytes, so the assertion could not fail for the reason it exists. Only a request that
+    could not run separates «names the retriever» from «echoes the strategy field».
+
+    Seen red under exactly that mutation: the ordinary heading carries `solicitada `vector`,
+    sin backend (vector_not_implemented)` and the sweep's line carries nothing.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    plain = evaluate(cases, corpus, strategy="vector")
+    swept = sweep_chunker(cases, corpus, {"target": [800]}, strategy="vector")
+
+    heading = render_markdown(plain).splitlines()[0]
+    sweep_line = render_sweep_markdown(swept).splitlines()[0]
+
+    clause = heading.removeprefix("# Evaluación de recuperación — ")
+    assert clause != "`lexical`", "the degraded case is what makes the two forms separable"
+    assert "vector_not_implemented" in clause
+    # The SAME sentence, not two that happen to agree on the undegraded input.
+    assert sweep_line == f"Recuperador: {clause}"
+
+
+def test_an_unknown_sweep_strategy_raises_before_any_cell_is_scored(corpus) -> None:
+    """A typo is not a degradation, and the sweep must refuse it where the report does.
+
+    `resolve_strategy` raises for a strategy in no contract at all — answering a typo with
+    lexical results would turn it into a measurement. Resolving ONCE at the top of the sweep,
+    rather than inheriting the raise from the first `evaluate`, is what makes that refusal
+    independent of whether the grid produced any combination to walk: an empty grid used to
+    return a `SweepReport` for a strategy that does not exist.
+    """
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    with pytest.raises(ValueError):
+        sweep_chunker(cases, corpus, {"target": []}, strategy="lexcial")
 
 
 def test_the_sweep_cannot_move_the_characterization_fixture(corpus) -> None:

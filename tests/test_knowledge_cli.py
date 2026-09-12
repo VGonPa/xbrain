@@ -323,6 +323,44 @@ def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path)
     assert not (workspace / "data" / "eval-report.json").exists()
 
 
+def test_the_sweep_ARTEFACTS_on_disk_name_the_retriever_that_ranked_them(
+    workspace: Path, monkeypatch
+) -> None:
+    """End of the chain: the two FILES a reader opens, not the in-process report object.
+
+    `data/eval-sweep.{json,md}` is the artefact Plan 03 has to beat, and it named no retriever
+    anywhere — `xbrain eval --strategy vector --sweep-chunker …` wrote a ranked table produced
+    entirely by bm25, with `strategy` absent from the JSON and absent from the markdown, while
+    the SAME command without `--sweep-chunker` headed its report «`lexical` · solicitada
+    `vector`, sin backend». One command, two branches, one of them silent about its instrument
+    (F-2). The report object is asserted in `tests/test_knowledge_evaluation.py`; this asserts
+    the bytes, because a field that never reaches the file is a field nobody reads.
+
+    The premise is pinned, not inherited: `vector` is the example of a declared-but-
+    unimplemented strategy and reading that from production would expire when Plan 03 lands.
+
+    Seen red before the fix: `"strategy" not in payload`, and the written markdown contained
+    the word `vector` nowhere.
+    """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
+    result = runner.invoke(
+        app, ["eval", "--strategy", "vector", "--sweep-chunker", "target=800,1600", "--json"]
+    )
+    payload = _json_stdout(result)
+
+    assert payload["strategy"] == "lexical", "what ran"
+    assert payload["requested_strategy"] == "vector", "what was asked for"
+    assert payload["degraded"] == ["vector_not_implemented"]
+
+    on_disk = json.loads((workspace / "data" / "eval-sweep.json").read_text(encoding="utf-8"))
+    assert on_disk["strategy"] == "lexical"
+    assert on_disk["requested_strategy"] == "vector"
+
+    markdown = (workspace / "data" / "eval-sweep.md").read_text(encoding="utf-8")
+    assert markdown.splitlines()[0].startswith("Recuperador: `lexical`")
+    assert "vector_not_implemented" in markdown.splitlines()[0]
+
+
 def test_eval_sweep_honours_and_publishes_the_limit(workspace: Path) -> None:
     """`xbrain eval --limit 150 --sweep-chunker …` produced a report byte-identical to
     `--limit 10` on the snapshot's real corpus, because `_run_sweep` never passed the option

@@ -32,11 +32,24 @@ source_gate: zz-support-files/docs/code-reviews/2026-09-01-plan-02-indice-lexico
 source_tree: b61e04bc57ef03c56319e8180d42efebc45d179f  # tag plan02/pre-b1b2
 # Node ids listados (ficheros completos cuentan como uno). Es el listón fail-closed: bajarlo
 # exige editar esta línea, que es precisamente la edición que se quiere ver en un diff.
-listed_nodes: 63
+#
+# 63 -> 71 en la pasada de corrección del hijo de paridad: +7 por los criterios 4c y 4d, que
+# estaban en el §15 y en NINGUNA de las dos listas (ni seleccionados ni declarados), y +1 por
+# `test_eval_does_not_write_to_the_store`, el guardián de escritura del comando que este hijo
+# cambia. Los ocho tests ya existían en el árbol: era una laguna de SELECCIÓN, no de cobertura.
+listed_nodes: 71
 
 # Los criterios del §15 que NO son una selección de tests, declarados en vez de omitidos: la
 # diferencia entre «no está» y «no puede estar» es la que un lector no puede reconstruir solo.
 not_a_test_selection:
+  - id: 4e
+    title: Se declara lo que la señal barata no ve
+    why: >-
+      el propio §15 lo llama «criterio de documentación, verificable leyendo: si aparece la
+      promesa, el criterio falla». Lo que exige es la AUSENCIA de una frase —que ningún texto
+      del plan prometa frescura a partir de `mtime`+tamaño— y una ausencia en prosa no tiene
+      node id. Lo guarda la prosa declarada de `index_build.StoreSignal` y el §«Known limits»
+      de `docs/knowledge-index.md`, no este fichero.
   - id: "15"
     title: Gate general sobre la integración con develop
     why: >-
@@ -77,6 +90,29 @@ criteria:
     tests:
       - node: tests/test_knowledge_search_service.py::test_editing_the_store_without_reindexing_declares_the_index_behind
       - node: tests/test_knowledge_index_build.py::test_status_reports_how_many_items_changed
+
+  - id: 4c
+    title: La señal vigila las TRES entradas, una por una (no sólo `items.json`)
+    # El criterio dice «lo mismo por las otras dos entradas, una por una» y remata: «la señal
+    # no es sólo del store, y este criterio es el que impide que se vuelva a serlo». Las dos
+    # mitades: la puerta de consulta (qué declara `search` al tocar cada fichero) y la señal
+    # misma (qué mira, y que siga siendo barata).
+    tests:
+      - node: tests/test_knowledge_search_service.py::test_editing_topics_or_vocab_without_reindexing_declares_the_index_behind
+      - node: tests/test_knowledge_index_build.py::test_the_query_time_signal_watches_each_of_the_three_inputs
+      - node: tests/test_knowledge_index_build.py::test_the_store_signal_is_one_stat_per_input_and_nothing_else
+      - node: tests/test_knowledge_index_build.py::test_the_signal_has_six_fields_in_order_none_defaulted_and_is_frozen
+
+  - id: 4d
+    title: El manifest nunca sella el centinela — la consulta responde, la carga levanta
+    # La asimetría del criterio es literal: «con una entrada obstruida, `build` levanta en vez
+    # de sellar `(-1,-1)`; y en consulta esa misma obstrucción responde declarando el índice
+    # detrás». Un test por cada mitad, más el que cierra el único camino que esquiva al
+    # escritor: un `manifest.json` editado a mano.
+    tests:
+      - node: tests/test_knowledge_index_build.py::test_an_input_that_cannot_be_stat_ed_answers_for_a_query_and_raises_for_a_load
+      - node: tests/test_knowledge_index_build.py::test_an_unreadable_input_is_an_error_never_an_empty_one
+      - node: tests/test_knowledge_manifest.py::test_the_unstattable_sentinel_cannot_be_SEALED_by_a_hand_edited_manifest
 
   - id: "5"
     title: "`SearchResponse` congelado, y la página que se declara truncada (M-4)"
@@ -178,6 +214,12 @@ criteria:
           también `test_build_does_not_touch_items_json`, que el umbrella no conserva
       - node: tests/test_knowledge_search_service.py::test_search_does_not_touch_items_json
       - node: tests/test_knowledge_get_service.py::test_get_does_not_touch_items_json
+      # `eval` es el cuarto comando del plan que lee el store, y el hijo de paridad del
+      # evaluador es justo el que lo hizo construir a través del escritor del índice: un
+      # arnés que ahora recorre el mismo `write_item` que `index build` es exactamente donde
+      # una escritura al store entraría sin que nadie la buscara. El guardián ya existía;
+      # sólo no estaba seleccionado.
+      - node: tests/test_knowledge_cli.py::test_eval_does_not_write_to_the_store
 
   - id: "14"
     title: VACUUM e invalidación física FTS

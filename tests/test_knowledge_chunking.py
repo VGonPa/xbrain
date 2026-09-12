@@ -718,40 +718,53 @@ def test_a_surface_shorter_than_the_floor_still_yields_its_one_chunk() -> None:
     assert chunks[0].text == "tiny"
 
 
-def test_the_harness_chunks_an_article_on_its_block_boundaries() -> None:
+def test_the_index_writer_chunks_an_article_on_its_block_boundaries() -> None:
     """m8: the guard on the PRODUCTION path, not on the entry point the tests call.
 
     M1 was never really about the `if blocks:` branch in `_spans`. It was that no production
     caller could feed it: `chunk_surfaces` had no `blocks` parameter, so the branch was
     unreachable from the CLI and from the harness, and deleting it left the whole suite
-    green. The fix wired both callers — and nothing pinned the wiring. Measured: deleting
-    `blocks_by_surface_id=article_block_texts(item)` from `evaluation.corpus_chunks` left
-    2,143 tests passing.
+    green. The fix wired both callers — and nothing pinned the wiring.
 
-    So this asserts through `corpus_chunks`, the function the harness actually calls, over a
-    corpus holding the article whose blocks the paragraph fallback provably cannot reproduce
-    (`_discriminating_blocks`, guarded by its own discrimination test above).
+    WHICH CALLER THIS ASSERTS THROUGH, and why it moved. It used to assert through
+    `evaluation.corpus_chunks`, on the strength of that function being «the one the harness
+    actually calls». The evaluator-parity child made that false: `evaluation.build_index` now
+    drives `index_build.write_item`, the SAME writer `xbrain index build` uses, and
+    `corpus_chunks` has no production caller left. Measured at `6b368e9`, before this test
+    moved: deleting `blocks_by_surface_id=article_block_texts(item)` from
+    `index_build.write_item` — the real walk, both commands — left the WHOLE suite green
+    (`2765 passed`), while deleting it from the orphan reddened this one test. The guard was
+    standing on the copy nobody runs, which is the same defect it was written to close, one
+    caller over.
+
+    So it asserts on the ROWS the writer persisted, read back out of `chunks`: `char_start`
+    and `char_end` are columns, so this is the partition `search` and `get` actually serve,
+    not a list of objects a second walk built. The corpus holds the article whose blocks the
+    paragraph fallback provably cannot reproduce (`_discriminating_blocks`, guarded by its own
+    discrimination test above).
     """
-    from xbrain.knowledge.evaluation import Corpus, corpus_chunks
+    from xbrain.knowledge.evaluation import Corpus, build_index
 
     blocks = _discriminating_blocks()
     item = _article_item(blocks)
     corpus = Corpus(items={item.id: item}, vocab=[], topic_pages={}, source="m8")
 
-    chunks, _surfaces = corpus_chunks(corpus)
-    article = [c for c in chunks if c.surface_type == "x_article"]
+    index, _stats = build_index(corpus)
+    rows = index.connection.execute(
+        "SELECT char_start, char_end FROM chunks WHERE surface_type = 'x_article' "
+        "ORDER BY char_start"
+    ).fetchall()
 
-    assert article, "the corpus walk emitted no article chunk at all"
+    assert rows, "the writer persisted no article chunk at all"
     edges, cursor = {0}, 0
     for block in blocks:
         cursor += len(block.text)
         edges.add(cursor)
-    for chunk in article:
-        assert chunk.char_start in edges, (
-            f"the harness cut inside a block at {chunk.char_start}: it is not being handed "
-            "the block boundaries"
+    for start, end in rows:
+        assert start in edges, (
+            f"the writer cut inside a block at {start}: it is not being handed the block boundaries"
         )
-        assert chunk.char_end in edges, f"the harness cut inside a block at {chunk.char_end}"
+        assert end in edges, f"the writer cut inside a block at {end}"
 
 
 # ---------------------------------------------------------------------------
