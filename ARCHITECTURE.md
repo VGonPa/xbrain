@@ -925,11 +925,18 @@ fingerprint. That limit is written down rather than disguised.
 
 #### A query refuses, a diagnosis reports
 
-`search`, `build` and `update` refuse an index they cannot read. `get` is not on that list
-and never will be: it opens no database, so there is nothing for it to refuse. `index status`
-**reports** the fault instead of refusing — it is the instrument you run precisely to find
-out — and it names the same command the refusing doors name. Two instruments answering the same question with opposite
-verdicts is the failure mode; the escape is not a silent diagnosis, it is a shared sentence.
+`search` and `update` refuse an index they cannot read. `build` is not on that list, and the
+direction matters: it is the one door allowed to CREATE the database (`open_index(...,
+create=True)`, the single caller that bypasses `require_database`), so an absent index is the
+input it exists for — what plain `build` refuses is an index that already EXISTS, and the
+command it names there is `--force`. `get` is not on the list either, and never will be: it
+never opens `data/index/`. A bare `get` opens no database at all; `get --query` opens one that
+exists nowhere on disk — a scratch `sqlite3(":memory:")` holding only that item's own chunks,
+ranked by the same scorer `search` uses and closed before the call returns — so an absent index
+is still nothing for it to refuse. `index status` **reports** the fault instead of refusing —
+it is the instrument you run precisely to find out — and it names the same command the refusing
+doors name. Two instruments answering the same question with opposite verdicts is the failure
+mode; the escape is not a silent diagnosis, it is a shared sentence.
 
 The open door proves four things before a query sees a row: the file exists, page 1 reads, the
 declared tables and columns are present, and **one trivial `MATCH` runs on each FTS plane**.
