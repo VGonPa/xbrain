@@ -538,6 +538,56 @@ generates an Obsidian wiki.
   02's sweep. **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
   counts the comparisons it made and fails closed at zero, because `passed = not failures` let
   `--min-recall 1.0` exit 0 having scored nothing.
+- **The persistent index (`data/index/`, `xbrain index build|update|status` · `search` · `get`)
+  is DERIVED, and that is what licenses every refusal in it.** SQLite + FTS5, two planes —
+  `chunks_fts` over fragment bodies (what a citation quotes) and `profiles_fts` over one
+  retrieval profile per item (what answers a query whose words appear in no fragment; never
+  served as a citation). Deleting the directory costs one `build`, so an incompatible manifest,
+  a drifted column or a torn page is **refused whole** rather than queried partially — a partial
+  answer over a schema this code no longer matches is a wrong answer wearing a right one's shape
+  — and every incompatibility ends with the same sentence, `xbrain index build --force`.
+  **`rowid` is an explicit `INTEGER PRIMARY KEY`**: with an implicit one SQLite may reuse a
+  deleted row's rowid and external-content FTS5 would return the NEW chunk for the OLD word.
+  **Two change signals, and confusing them is the trap.** Four DEEP fingerprints (item · store ·
+  vocabulary · topics) drive `build`/`update`/`status` and answer *what changed*; one CHEAP
+  `StoreSignal` — `mtime_ns` + size of the THREE inputs (`items.json`, `vocab.yaml`,
+  `topics.json`, six required fields) — is three `os.stat`, so a query can afford it on every
+  call and declare `index_behind_store`. Three inputs because comparing `items.json` alone left
+  `xbrain topics` writing a new topic plane that every later `search` answered over silently.
+  The cheap signal is **falible in one declared direction**: a `touch` with no edit is an
+  accepted false positive (a false positive costs a warning, a false negative serves stale
+  evidence as fresh), and a same-size replacement with the mtime preserved (`cp -p`, `rsync -a`,
+  `unzip`, a restored backup) is invisible to it FOREVER. Nothing promises freshness from
+  `mtime`+size. **The query door refuses and `index status` REPORTS** — same sentence, opposite
+  behaviour, on purpose (rule 9): `status` is the instrument you run to find out, and it pays
+  for `PRAGMA quick_check` (155–850 ms on the 52 MiB real index) which no query door can. The
+  open door instead runs one trivial `MATCH` per FTS plane (0.01 ms each), because page-1 and
+  `sqlite_master` reads touch no FTS5 shadow table: with `chunks_fts_data` dropped, `search`
+  died in a traceback while `status` exited 0 and called the index healthy. **`search` filters
+  BEFORE it scores** (all eight, incl. `content_kinds` and `has_surfaces`), excludes rows it
+  cannot serve honestly — no locator, or a fingerprint that does not recompute over the served
+  projection — into `corrupt_chunks_excluded` (named `stale_chunks_excluded` until someone
+  noticed it SOUNDED like the staleness signal and MEASURED the consistency one), groups by item
+  at `max_matches_per_item` (3), and hydrates `verification_status` from the **live store**, never
+  the index. **`get` never reads the index at all** and works with `data/index/` deleted: an
+  index able to answer it would be a second copy of the corpus that nothing invalidates.
+  Degradations are a fixed-order tuple, DECLARED not simulated: `no_embeddings` is read off the
+  manifest's `embeddings` block (not hard-coded — the day Plan 03 writes it the flag stops
+  appearing by itself), and `--strategy vector` degrades to lexical labelled
+  `vector_not_implemented` while a TYPO raises (a typo is not a degradation; answering it with
+  lexical results would turn it into a measurement). `render.py` is the human view of the SAME
+  response model `--json` serialises and reaches back into nothing. **Measured 2026-09-12 on the
+  live corpus (2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
+  `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
+  loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
+  store.** Re-derive it; it moves with the corpus. **Known limits, declared not discovered:** no
+  stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
+  tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
+  `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
+  (`unicode61 remove_diacritics 2`). And `xbrain eval` is a DIFFERENT filter surface: it pushes
+  only `has_surfaces`/`origins`, so a golden-set case declaring any of the other six is
+  **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as "retrieval failed at
+  filtering" when the instrument was not there. Operation: `docs/knowledge-index.md`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·
