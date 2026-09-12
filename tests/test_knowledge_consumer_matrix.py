@@ -15,12 +15,11 @@ THREE POPULATIONS, THREE TOTALITY ASSERTIONS:
    mapping is what `get_service` uses to answer "what surfaces does this failed fetch
    explain?".
 
-3. The CONSUMERS read each map from ONE place, never from a hand-written list.
-   `search_service._verify_with` is the provenance consumer: it reads `SURFACE_ORIGIN`
-   and `ORIGIN_TRUST`. `get_service._failed_surface_types` reads only
-   `CONTENT_KIND_TO_SURFACE_TYPES` and touches neither provenance map. The totality
-   assertions here guarantee that a new `SurfaceType` without an origin, or a new
-   `ContentKind` without a surface mapping, goes red here and not at query time.
+3. The CONSUMERS read each map from ONE place. Sections 1-2 never open a consumer, so
+   section 5 asserts this separately by AST. Measured before it existed: pointing
+   `_verify_with` at a private byte-exact copy of `SURFACE_ORIGIN` left ruff and all 2694
+   tests green. It asserts INCLUSION only — that a consumer reads nothing ELSE is not
+   tested, so "touches neither provenance map" is a description, not a guarantee.
 
 WHAT IS NOT TESTED HERE: the generator/judge/checker contract (`test_evidence_contract.py`
 already covers that) and the per-model text-field classification
@@ -29,8 +28,13 @@ already covers that) and the per-model text-field classification
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
+from types import ModuleType
 from typing import get_args
 
+from xbrain.knowledge import get_service, search_service
 from xbrain.knowledge.chunking import ATOMIC_SURFACES, WINDOWED_SURFACES
 from xbrain.knowledge.models import SurfaceType
 from xbrain.knowledge.provenance import ORIGIN_TRUST
@@ -197,3 +201,72 @@ def test_every_surface_is_produced_by_a_content_kind_or_declared_non_content() -
     assert produced & non_content == set(), (
         f"surfaces claimed by both CONTENT_KIND and NON_CONTENT: {produced & non_content}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. The consumer FUNCTIONS read the shared maps (structural, by AST)
+# ---------------------------------------------------------------------------
+#
+# Sections 1-4 never open a consumer, so all six stay green when one reads a private copy.
+# Function-scoped because ruff F401 already covers a copy that leaves an import unused, and
+# goes quiet when a second reader keeps it live (F811 likewise covers a module-scope shadow,
+# so that case is left to ruff). AST and not grep because `_select`'s docstring names
+# `CONTENT_KIND_TO_SURFACE_TYPES` while `_failed_surface_types` is the reader — a text
+# search is satisfied by prose (rule 1).
+
+# (module, function, names that function must READ) and the module that DEFINES each name.
+CONSUMER_MAP_READS: tuple[tuple[ModuleType, str, tuple[str, ...]], ...] = (
+    (
+        search_service,
+        "_verify_with",
+        ("SURFACE_ORIGIN", "ORIGIN_TRUST", "DEFAULT_EVIDENCE_CLASSES"),
+    ),
+    (search_service, "_hydrate", ("SURFACE_ORIGIN",)),
+    (get_service, "_failed_surface_types", ("CONTENT_KIND_TO_SURFACE_TYPES",)),
+)
+CANONICAL_DEFINITION = {
+    "CONTENT_KIND_TO_SURFACE_TYPES": "xbrain.knowledge.surfaces",
+    "SURFACE_ORIGIN": "xbrain.knowledge.surfaces",
+    "ORIGIN_TRUST": "xbrain.knowledge.provenance",
+    "DEFAULT_EVIDENCE_CLASSES": "xbrain.knowledge.provenance",
+}
+
+
+def test_the_consumer_table_is_not_empty() -> None:
+    """An empty table would pass by iterating nothing (rule 1)."""
+    assert CONSUMER_MAP_READS and all(names for _, _, names in CONSUMER_MAP_READS)
+
+
+def test_each_consumer_function_reads_the_shared_maps() -> None:
+    """Each named function loads each required map, imported from the module defining it.
+
+    Seen red by a private copy of `SURFACE_ORIGIN` in `_verify_with`, an inline dict in
+    `_failed_surface_types`, `_hydrate` dropping its lookup, and a consumer renamed so its
+    row points at nothing. Ruff misses the first, third and fourth.
+    """
+    for module, function, required in CONSUMER_MAP_READS:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(module)))
+        fn = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function),
+            None,
+        )
+        assert fn is not None, f"{module.__name__} has no {function!r}; update the row"
+        loaded = {
+            n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+        }
+        assert not set(required) - loaded, (
+            f"{module.__name__}.{function} no longer reads "
+            f"{', '.join(sorted(set(required) - loaded))} — it has grown a second "
+            "definition that will drift from the shared map (rule 5)"
+        )
+        imported = {
+            alias.asname or alias.name: imp.module or ""
+            for imp in ast.walk(tree)
+            if isinstance(imp, ast.ImportFrom)
+            for alias in imp.names
+        }
+        for name in required:
+            assert imported.get(name) == CANONICAL_DEFINITION[name], (
+                f"{module.__name__} binds {name!r} from {imported.get(name)!r}, "
+                f"expected {CANONICAL_DEFINITION[name]!r}"
+            )
