@@ -1348,6 +1348,46 @@ def test_a_malformed_search_cursor_is_refused_rather_than_restarted_from_zero(
         search("Quillfeather", context, cursor="s:-1")
 
 
+def test_a_search_cursor_past_the_end_of_the_ranking_is_refused_not_called_complete(
+    context: QueryContext,
+) -> None:
+    """A1 (gate review, round 04): the silent completion `get` refuses at three points and
+    `search` did not refuse at all.
+
+    With `offset >= len(ordered)` the page slice is empty, `len(ordered) > offset + limit` is
+    False, and the response came back `results=(), truncated=False, cursor=None` — *complete,
+    you have seen everything* — to a consumer that had seen NOTHING. Reproduced on the
+    fixture corpus before the fix against a `Quillfeather` ranking of 2 owners: `s:2`, `s:3`,
+    `s:50`, `s:99999` and `s:99999999` all answered identically, so `exhausted` rescues none
+    of them either.
+
+    THE BOUNDARY IS ASSERTED FROM BOTH SIDES, which is what keeps this from passing for the
+    wrong reason (rule 1): a guard that refused every cursor would satisfy the raise and go
+    red on the acceptance below, and an off-by-one (`>` for `>=`) goes red on the raise. The
+    last VALID offset is the one the walk actually reaches, taken from the response rather
+    than computed here, so the test cannot drift from the service's own idea of a page.
+
+    And an honest empty answer stays honest: a query matching nothing, asked with NO cursor,
+    is still an empty page and not an error — only a caller who CLAIMED a position can be
+    wrong about it.
+    """
+    whole = search("Quillfeather vgonpa", context, limit=50)
+    available = len(whole.results)
+    assert available > 1, "the ranking must hold more than one owner or the boundary is moot"
+    assert whole.cursor is None, "an unpaged call that fits names no continuation"
+
+    last_page = search("Quillfeather vgonpa", context, limit=1, cursor=f"s:{available - 1}")
+    assert len(last_page.results) == 1, "the last in-range offset must still be served"
+    assert last_page.truncated is False and last_page.cursor is None
+
+    for beyond in (available, available + 1, 99_999, 99_999_999):
+        with pytest.raises(ValueError, match="más allá de los resultados disponibles"):
+            search("Quillfeather vgonpa", context, limit=1, cursor=f"s:{beyond}")
+
+    empty = search("zzzznotawordinthiscorpus", context, limit=10)
+    assert empty.results == () and empty.truncated is False and empty.cursor is None
+
+
 def test_a_page_shorter_than_the_ranking_is_declared_and_its_cursor_continues(
     context: QueryContext,
 ) -> None:
