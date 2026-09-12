@@ -89,7 +89,12 @@ from xbrain.knowledge.surfaces import (
     item_topics,
     knowledge_item,
 )
-from xbrain.knowledge.vector_index import VectorPlane, load_vector_plane
+from xbrain.knowledge.vector_index import (
+    VECTOR_REBUILD_ADVICE,
+    VectorPlane,
+    VectorPlaneIncompatible,
+    load_vector_plane,
+)
 from xbrain.models import Item, Topic, TopicPage
 
 # The strategies that need the vector channel. `hybrid_graph` is Plan 04's and keeps degrading.
@@ -227,6 +232,11 @@ def bind_query_embedder(
     there is an `EmbedderFailed`, the same class as a timeout, and `hybrid` would degrade over
     it. A backend serving ANOTHER model is not a backend that is down: the plane refuses the
     query vector instead (`VectorPlaneIncompatible`, row 4), so two models are never mixed.
+
+    A MATCHING DIMENSION DOES NOT PROVE THE SAME MODEL (Plan 03 §13.4). The backend declares its
+    model on every batch, and a declaration other than the manifest's is refused HERE, as the
+    same `VectorPlaneIncompatible` — not an `EmbeddingError`, so `hybrid` cannot degrade over it:
+    two models of one width produce cosines that look exactly as healthy as real ones.
     """
     if not command.strip():
         return None
@@ -241,6 +251,13 @@ def bind_query_embedder(
             timeout_seconds=timeout_seconds,
             runner=runner,
         )
+        if spec is not None and batch.model != spec.model:
+            raise VectorPlaneIncompatible(
+                f"el embedder de `[embeddings].command` sirve el modelo {batch.model!r} y este "
+                f"plano vectorial se escribió con {spec.model!r}: jamás se comparan vectores de "
+                "dos modelos, aunque tengan la misma dimensión. Configura el embedder con ese "
+                f"modelo o, si el que vale es el nuevo: {VECTOR_REBUILD_ADVICE}"
+            )
         return batch.vectors[0]
 
     return embed

@@ -652,6 +652,81 @@ def test_search_hybrid_with_the_embedder_binary_missing_is_lexical_and_declares_
     assert not _vector_matches(payload)
 
 
+def _index_lines(output: str) -> list[str]:
+    """The human view's warnings: the lines between the header and the first result (spec §7.6)."""
+    header, _, rest = output.partition("\n")
+    assert "estrategia" in header, f"premise: the first line is the search header — {header!r}"
+    return rest.split("\n\n", 1)[0].splitlines()
+
+
+@pytest.mark.parametrize(
+    "binary, flag",
+    [(None, "embeddings_not_configured"), ("xbrain-embed-gone", "embedder_unavailable")],
+)
+def test_search_hybrid_human_view_names_what_to_fix_not_a_bare_code(
+    workspace: Path, binary: str | None, flag: str
+) -> None:
+    """A degraded `hybrid` read WITHOUT `--json` says what failed and which setting fixes it.
+
+    The JSON carries the code; the human view is the surface a reader actually reads, and a bare
+    `⚠ embedder_unavailable` is a flag they have to look up — i.e. one they will ignore. So the
+    warning line, above the first result, must name `[embeddings].command`, and must say these
+    results are lexical, not hybrid.
+    """
+    if binary is not None:
+        _configure_embeddings(workspace, str(workspace / "bin" / binary))
+    _build_index_with_a_plane(workspace)
+
+    result = runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "hybrid"])
+
+    assert result.exit_code == 0, result.output
+    warnings = _index_lines(result.stdout)
+    assert f"⚠ {flag}" not in warnings
+    naming = [line for line in warnings if "`[embeddings].command`" in line]
+    assert len(naming) == 1, warnings
+    assert "`lexical`" in naming[0] and "`hybrid`" in naming[0], naming[0]
+
+
+def test_index_build_embeddings_refuses_a_batch_from_another_model_than_the_probe(
+    workspace: Path, monkeypatch
+) -> None:
+    """Plan 03 §13.4 at build time: the probe fixes the model; a later batch from ANOTHER model
+    of the same dimension is refused, not appended into a matrix sealed under the first name.
+
+    `subprocess.run` is replaced (resolved at call time by `xbrain.embeddings`), so nothing runs:
+    the probe answers `model-a`, every later batch `model-b`, all 2-dimensional.
+    """
+    import subprocess
+
+    from xbrain.embeddings import SCHEMA_VERSION
+
+    answered: list[str] = []
+
+    def run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - a subprocess.run stand-in
+        texts = json.loads(kwargs["input"])["texts"]
+        model = "model-a" if not answered else "model-b"
+        answered.append(model)
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "model": model,
+            "dimension": 2,
+            "normalized": True,
+            "vectors": [[1.0, 0.0] if model == "model-a" else [0.0, 1.0] for _ in texts],
+        }
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+
+    _configure_embeddings(workspace, "xbrain-embed")
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = runner.invoke(app, ["index", "build", "--embeddings"])
+
+    assert answered[:2] == ["model-a", "model-b"], "premise: a second model did answer"
+    assert result.exit_code == 1, result.output
+    assert "model-b" in result.output and "model-a" in result.output
+    assert "Traceback" not in result.output
+    assert not _manifest_exists(workspace)
+
+
 @pytest.mark.parametrize("strategy", ["vector", "hybrid"])
 def test_search_needing_vectors_without_the_extra_names_the_install_command(
     workspace: Path, monkeypatch, strategy: str

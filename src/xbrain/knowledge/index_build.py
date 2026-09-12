@@ -1993,6 +1993,14 @@ def build(
     whoever asks the filesystem. Given, the matrix and its meta land AFTER the rows commit and
     BEFORE the manifest, so an embedder that dies leaves no manifest and the index is refused
     whole rather than queried as a corpus with no vectors.
+
+    THAT IS NOT A ROLLBACK, AND IT DIVERGES FROM Plan 03 §5 row 5 AND §9 (declared, PR #185).
+    The lexical rows are already COMMITTED when the embedder fails — a fresh connection counts
+    them — and only the missing manifest keeps the door shut. Under `force` the previous index
+    was discarded before the first row, so a failed `--embeddings --force` leaves lexical search
+    DOWN until `xbrain index build`, against spec §9.3 («lexical sigue operativo»). Keeping the
+    previous index standing across a failed rebuild is a declared follow-up.
+    `tests/test_knowledge_degradation.py::test_row5_*` pins both states as they are.
     """
     options = options or IndexOptions()
     if manifest_path(index_dir).exists() and not force and not dry_run:

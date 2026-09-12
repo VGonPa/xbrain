@@ -22,18 +22,22 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
+import sqlite3
 import subprocess  # nosec B404 - only to raise TimeoutExpired from a fake runner, nothing runs
 import sys
 from pathlib import Path
 
 import pytest
 
+from xbrain.embeddings import SCHEMA_VERSION as EMBEDDINGS_SCHEMA_VERSION
 from xbrain.embeddings import EmbedderFailed, EmbedderNotFound, embed_passages
 from xbrain.knowledge import index_build
 from xbrain.knowledge.contracts import SearchMatch, SearchResponse
 from xbrain.knowledge.index_schema import IndexError_
 from xbrain.knowledge.search_service import QueryContext, bind_query_embedder, search
 from xbrain.knowledge.vector_index import (
+    VECTOR_REBUILD_ADVICE,
     VECTORS_FILENAME,
     VectorPlaneIncompatible,
     VectorSpec,
@@ -75,6 +79,29 @@ class CountingEmbedder:
 
 def _timeout_runner(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - a subprocess.run stand-in
     raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 1))
+
+
+def _answering_runner(vector: tuple[float, ...], *, model: str):  # noqa: ANN202
+    """A `subprocess.run` stand-in that speaks the embedder protocol: `model`, one `vector`.
+
+    Nothing runs. It records each call so a test can prove the query WAS embedded — i.e. that
+    what failed afterwards was the geometry, not a backend that never answered.
+    """
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        calls.append(list(argv))
+        body = {
+            "schema_version": EMBEDDINGS_SCHEMA_VERSION,
+            "model": model,
+            "dimension": len(vector),
+            "normalized": True,
+            "vectors": [list(vector)],
+        }
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+
+    run.calls = calls  # type: ignore[attr-defined]
+    return run
 
 
 @pytest.fixture()
@@ -247,22 +274,61 @@ def test_row3_a_declared_plane_that_is_gone_is_refused_not_half_queried(
 # --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("through", ["counting_embedder", "real_adapter"])
 @pytest.mark.parametrize("strategy", ["hybrid", "vector"])
 def test_row4_a_query_vector_of_another_dimension_is_a_hard_error_never_a_degradation(
-    tmp_path: Path, corpus, strategy: str
+    tmp_path: Path, corpus, strategy: str, through: str
 ) -> None:
     """Two models' vectors are never mixed — and a `hybrid` request does NOT fall back to lexical.
 
     A dimension mismatch is not a backend that is down: it is a backend serving ANOTHER model.
     Degrading would hide exactly the misconfiguration that makes every later vector answer wrong.
+
+    `real_adapter` is the case that guards `bind_query_embedder`'s one deliberate omission: it
+    does NOT pass `expected_dimension`. Passed, the mismatch is raised inside `embeddings` as an
+    `EmbedderFailed` — the class of a timeout — and `hybrid` degrades over it. A fake embedder
+    that bypasses the adapter cannot see that; the adapter over a 3-dimensional backend can.
     """
     data = _data(tmp_path, corpus, with_plane=True)
     third = 1 / math.sqrt(3)
-    embedder = CountingEmbedder((third, third, third))
+    if through == "counting_embedder":
+        embedder = CountingEmbedder((third, third, third))
+        embed_query, calls = embedder, lambda: len(embedder.calls)
+    else:
+        run = _answering_runner((third, third, third), model=SPEC.model)
+        embed_query = bind_query_embedder(
+            "xbrain-embed", index_dir=data / "index", timeout_seconds=5, runner=run
+        )
+        calls = lambda: len(run.calls)  # noqa: E731
 
     with pytest.raises(VectorPlaneIncompatible, match=r"dimensión 3.*dimensión 2"):
-        search(QUERY, _context(data, corpus, embedder), strategy=strategy)
-    assert embedder.calls == [QUERY], "premise: the mismatch came from the query vector"
+        search(QUERY, _context(data, corpus, embed_query), strategy=strategy)
+    assert calls() == 1, "premise: the mismatch came from the query vector"
+
+
+@pytest.mark.parametrize("strategy", ["hybrid", "vector"])
+def test_row4_a_backend_serving_another_model_of_the_same_dimension_is_a_hard_error(
+    tmp_path: Path, corpus, strategy: str
+) -> None:
+    """A matching dimension does not prove the model is the same one (Plan 03 §13.4).
+
+    The backend DECLARES its model on every batch; the manifest says which model wrote the
+    plane. Same width, other model: the cosine is computed between two unrelated geometries and
+    looks exactly as healthy as a real one. So it is refused — under `hybrid` too, never
+    degraded, because a backend serving another model is not a backend that is down.
+    """
+    data = _data(tmp_path, corpus, with_plane=True)
+    run = _answering_runner((1.0, 0.0), model="another/model-of-dimension-2")
+    embed_query = bind_query_embedder(
+        "xbrain-embed", index_dir=data / "index", timeout_seconds=5, runner=run
+    )
+
+    with pytest.raises(
+        VectorPlaneIncompatible,
+        match=r"another/model-of-dimension-2.*intfloat/multilingual-e5-base",
+    ):
+        search(QUERY, _context(data, corpus, embed_query), strategy=strategy)
+    assert len(run.calls) == 1, "premise: the query WAS embedded — the model is what differed"
 
 
 # --------------------------------------------------------------------------------------------
@@ -270,29 +336,117 @@ def test_row4_a_query_vector_of_another_dimension_is_a_hard_error_never_a_degrad
 # --------------------------------------------------------------------------------------------
 
 
-def test_row5_a_build_whose_embedder_times_out_raises_and_rolls_back(
+_LEXICAL_TABLES = ("items", "topics", "surfaces", "chunks", "profiles")
+
+
+def _timing_out_build(texts):  # noqa: ANN001, ANN202 - the `Embedder` shape
+    return embed_passages(
+        texts, command="xbrain-embed", model=SPEC.model, runner=_timeout_runner
+    ).vectors
+
+
+def _persisted_rows(index_dir: Path) -> dict[str, int]:
+    """What a SEPARATE, read-only connection finds committed — not what the builder believes."""
+    uri = f"file:{index_build.db_path(index_dir)}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        return {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # nosec B608
+            for table in _LEXICAL_TABLES
+        }
+
+
+def test_row5_a_build_whose_embedder_times_out_raises_and_seals_no_manifest(
     tmp_path: Path, corpus
 ) -> None:
-    """`EmbedderFailed`, and the index is left as if the build had never started.
+    """`EmbedderFailed`, no manifest, no plane — and the lexical rows ARE left committed.
 
-    No manifest is sealed and no plane is written, so the query door REFUSES the directory and
-    names the build — it does not answer from a base whose vector half was never finished.
+    DECLARED DIVERGENCE from Plan 03 §5 row 5 («transacción revertida»): nothing is rolled
+    back. The lexical rows commit when `with connection:` exits, and the plane is written
+    AFTER that transaction, so a timeout lands on a base that is already durable. What keeps
+    the directory from being served is only the ORDER — the manifest is the last thing written
+    — and the door refuses a base with no manifest. This test pins that state as it is, read
+    from an independent connection, instead of claiming a rollback that does not happen.
     """
     data, inputs = _inputs(tmp_path, corpus)
-
-    def embed(texts):  # noqa: ANN001, ANN202 - the `Embedder` shape
-        return embed_passages(
-            texts, command="xbrain-embed", model=SPEC.model, runner=_timeout_runner
-        ).vectors
+    lexical_only = tmp_path / "lexical-only"
+    index_build.build(lexical_only, inputs)
 
     with pytest.raises(EmbedderFailed, match="timed out"):
         index_build.build(
-            data / "index", inputs, vectors=index_build.VectorBuild(spec=SPEC, embed=embed)
+            data / "index",
+            inputs,
+            vectors=index_build.VectorBuild(spec=SPEC, embed=_timing_out_build),
         )
+
+    assert not index_build.manifest_path(data / "index").exists()
+    assert not vector_plane_exists(data / "index")
+    committed = _persisted_rows(data / "index")
+    assert committed == _persisted_rows(lexical_only), "the WHOLE lexical base is durable"
+    assert all(committed.values()), f"premise: a non-empty corpus — {committed}"
+    with pytest.raises(IndexError_, match="xbrain index build"):
+        search(QUERY, _context(data, corpus, CountingEmbedder()))
+
+
+def test_row5_a_forced_rebuild_whose_embedder_times_out_leaves_lexical_search_down(
+    tmp_path: Path, corpus
+) -> None:
+    """`index build --embeddings --force` over a GOOD index, and the embedder times out.
+
+    DECLARED DIVERGENCE from spec §9.3 («lexical sigue operativo») and Plan 03 §9: `--force`
+    discards the previous manifest, base and plane BEFORE the first row is written (C-1), so
+    once the embedder fails there is no index left to answer from. A plain lexical search is
+    REFUSED until `xbrain index build` runs again. Preserving the previous index across a failed
+    forced rebuild is a declared follow-up, not something this test pretends already happens.
+    """
+    data = _data(tmp_path, corpus, with_plane=True)
+    inputs = index_build.load_index_inputs(
+        data / "items.json", data / "vocab.yaml", data / "topics.json"
+    )
+    assert search(QUERY, _context(data, corpus)).results, "premise: the index was good"
+
+    with pytest.raises(EmbedderFailed, match="timed out"):
+        index_build.build(
+            data / "index",
+            inputs,
+            force=True,
+            vectors=index_build.VectorBuild(spec=SPEC, embed=_timing_out_build),
+        )
+
     assert not index_build.manifest_path(data / "index").exists()
     assert not vector_plane_exists(data / "index")
     with pytest.raises(IndexError_, match="xbrain index build"):
-        search(QUERY, _context(data, corpus, CountingEmbedder()))
+        search(QUERY, _context(data, corpus))
+
+
+def test_the_vector_rebuild_advice_does_not_promise_a_lexical_plane_its_command_rebuilds(
+    tmp_path: Path, corpus
+) -> None:
+    """The command every plane refusal recommends REBUILDS the lexical plane, so it must say so.
+
+    `--embeddings --force` is wired to the full build: the base is unlinked and re-derived from
+    the store (a new file, carrying the store's CURRENT text). An advice promising «el plano
+    léxico no se toca» sends an operator into exactly the window the forced-rebuild test above
+    pins — no index at all if the embedder then fails.
+    """
+    data = _data(tmp_path, corpus, with_plane=True)
+    before = index_build.db_path(data / "index").stat().st_ino
+    inputs = index_build.load_index_inputs(
+        data / "items.json", data / "vocab.yaml", data / "topics.json"
+    )
+
+    index_build.build(
+        data / "index",
+        inputs,
+        force=True,
+        vectors=index_build.VectorBuild(spec=SPEC, embed=lambda texts: [_vector(t) for t in texts]),
+    )
+
+    assert index_build.db_path(data / "index").stat().st_ino != before, (
+        "premise: the recommended command replaced the lexical base"
+    )
+    assert "xbrain index build --embeddings --force" in VECTOR_REBUILD_ADVICE
+    assert "no se toca" not in VECTOR_REBUILD_ADVICE
+    assert re.search(r"también el plano léxico", VECTOR_REBUILD_ADVICE)
 
 
 def test_row5_a_query_whose_embedder_times_out_degrades_hybrid(tmp_path: Path, corpus) -> None:

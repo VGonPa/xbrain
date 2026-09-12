@@ -3074,7 +3074,7 @@ def _vector_build(cfg: Config):
     """
     from collections.abc import Sequence
 
-    from xbrain.embeddings import EmbedderNotFound, EmbeddingBatch, embed_passages
+    from xbrain.embeddings import EmbedderFailed, EmbedderNotFound, EmbeddingBatch, embed_passages
     from xbrain.knowledge.index_build import VectorBuild
     from xbrain.knowledge.vector_index import VectorSpec
 
@@ -3108,6 +3108,14 @@ def _vector_build(cfg: Config):
         vectors: list[tuple[float, ...]] = []
         for start in range(0, len(texts), size):
             batch = passages(texts[start : start + size], expected_dimension=spec.dimension)
+            # La dimensión no prueba el modelo (Plan 03 §13.4): una tanda de OTRO modelo del
+            # mismo ancho acabaría en la matriz sellada con el nombre del sondeo.
+            if batch.model != spec.model:
+                raise EmbedderFailed(
+                    f"el embedder sirvió el modelo {batch.model!r} a mitad del build, y el "
+                    f"sondeo declaró {spec.model!r}: jamás se mezclan vectores de dos modelos "
+                    "en una matriz, aunque tengan la misma dimensión"
+                )
             vectors.extend(batch.vectors)
         return vectors
 
