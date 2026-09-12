@@ -125,3 +125,28 @@ command = "parakeet-mlx"
 # interval_seconds = 15      # also keep a frame every N s (covers static tails)
 # dedupe           = true    # perceptual-hash near-duplicate removal
 # dedupe_distance  = 6        # max dHash Hamming distance to call two frames "same" (0-64)
+
+[index]
+# El índice persistente de conocimiento (`xbrain index build|update|status`,
+# `xbrain search`, `xbrain get`). Todo tiene default: la sección entera es
+# opcional y rara vez se toca.
+#
+# `data/index/` es DERIVADO y reconstruible — nunca se versiona, y borrarlo solo
+# cuesta un `xbrain index build`. `xbrain get` no lo lee siquiera: sirve la
+# evidencia desde el store vivo, así que sigue funcionando con el índice borrado.
+#
+# dir = "index"
+#   Subdirectorio bajo `data/` donde viven la base SQLite y su manifest. Tiene que
+#   quedar DENTRO de `data/`: una ruta que se resuelva fuera (un `..`, una
+#   absoluta o un symlink) se rechaza al cargar la config, porque `index build
+#   --force` borra y recrea lo que encuentre ahí.
+#
+# max_matches_per_item = 3
+#   Cuántos fragmentos de un mismo item puede citar `search` (spec §5.4). Es lo
+#   que impide que una transcripción larga llene el top diez con diez ventanas
+#   adyacentes de sí misma.
+#
+# get_char_budget = 40000
+#   Techo de caracteres por respuesta de `xbrain get`. Por encima, la respuesta se
+#   trunca DECLARÁNDOLO y devuelve un cursor para continuar — nunca en silencio.
+#   ~40k es un artículo largo con sus metadatos: el caso común no pagina.
