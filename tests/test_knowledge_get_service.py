@@ -980,6 +980,28 @@ def _indexed_chunk_ids(data: Path, item_id: str, surface_type: str) -> list[str]
         connection.close()
 
 
+def _indexed_chunks_with_text(data: Path, item_id: str, surface_type: str) -> dict[str, str]:
+    """The chunk texts the persisted index holds for ONE item's surface, keyed by chunk_id.
+
+    This is the GROUND TRUTH for B1 query-route verification: the exact bytes the index stored
+    under each chunk_id. If `get --query` cuts with different parameters than the index was
+    built with, the served bytes would differ from these — even when the chunk_ids happen to
+    overlap (same surface_id, same positional index, different cut).
+    """
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        return {
+            row["chunk_id"]: row["text"]
+            for row in connection.execute(
+                "SELECT chunk_id, text FROM chunks WHERE owner_type = 'item' AND owner_id = ? "
+                "AND surface_type = ?",
+                (item_id, surface_type),
+            )
+        }
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("route", ["paged", "query"])
 def test_get_cuts_with_the_chunker_parameters_its_context_carries(
     tmp_path: Path, corpus, route: str
@@ -1064,16 +1086,30 @@ def test_get_cuts_with_the_chunker_parameters_its_context_carries(
         assert dict(served)[indexed[0]] != default_cut[0].text
     else:
         # Query route: verify that returned chunks use the tight parameters' cut, not the
-        # default. The key observable is chunk id membership: every returned chunk id must
-        # exist in the index built with `tight` params, and each such chunk's text must match
-        # the indexed text exactly — proving the query route used the same params.
+        # default. The GROUND TRUTH is the persisted index — read each chunk's exact bytes
+        # from the database and assert byte-equality with what `get --query` served.
+        #
+        # B1 (Codex R3): the original test checked only id membership and length heuristics.
+        # A mutation that changed `_ranked_chunks` to use `target=250` (or any non-default
+        # that wasn't the index's `target=200`) would produce chunks with the SAME ids but
+        # DIFFERENT text, and the membership check would pass while the bytes diverged. The
+        # byte-equality assertion closes that gap: if `_ranked_chunks` ignores `context.params`
+        # or uses the wrong parameters, the served text differs from the indexed text and
+        # this test fails.
+        indexed_texts = _indexed_chunks_with_text(data, "k03", "external_article")
         assert served, "the query route must return at least one chunk"
         for chunk_id, text in served:
-            assert chunk_id in indexed, (
+            assert chunk_id in indexed_texts, (
                 f"query route returned chunk {chunk_id!r} not in indexed set — wrong params?"
             )
-        # Additional: no chunk should be as long as the default cut's first chunk, which is
-        # ~423 chars at default params vs ~200 chars at tight params.
+            assert text == indexed_texts[chunk_id], (
+                f"query route returned chunk {chunk_id!r} with text that differs from the "
+                f"persisted index — served {len(text)} chars vs indexed "
+                f"{len(indexed_texts[chunk_id])} chars; `_ranked_chunks` may be cutting with "
+                f"the wrong parameters"
+            )
+        # Retain the length heuristic as a secondary sanity check: no chunk should be as
+        # long as the default cut's first chunk (~423 chars at default vs ~200 at tight).
         default_first_len = len(default_cut[0].text)
         for chunk_id, text in served:
             assert len(text) < default_first_len, (
