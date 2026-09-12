@@ -33,8 +33,11 @@ it read — a fingerprint per item, plus the topic records the three inputs impl
 merely *something moved*.
 
 `search` opens the database `mode=ro`, so a stray write is an error rather than
-a silent repair; `get` opens no database at all. Neither calls an LLM and
-neither touches the network.
+a silent repair. `get` never opens `data/index/`: a bare `get` reads the live
+store and opens no database at all, and `get --query` opens one that exists
+nowhere on disk — a scratch `sqlite3(":memory:")` holding only that item's own
+chunks, built to rank them with the same scorer `search` uses, and closed before
+the call returns. Neither command calls an LLM and neither touches the network.
 
 ## When to rebuild, and when to update
 
