@@ -232,10 +232,13 @@ def _merge_short(
     """PACK consecutive structural units up to `target`, then split anything over `max_chars`.
 
     `target` is a SOFT ceiling per chunk, not "one chunk per paragraph", and the difference
-    is load-bearing. Measured on the real corpus (2026-08-31, 2,404 items): emitting one
-    chunk per paragraph produced **30,449** chunks where the plan's own volume estimate,
-    derived from the measured character counts, predicted 18–25k — and the plan says landing
-    outside that range means the chunker is not doing what it describes. The whole gap was
+    is load-bearing. HISTORY, NOT RE-DERIVABLE HERE (rule 6) — it measured the PRE-packing
+    implementation, which no longer exists: on the 2,404-item corpus of 2026-08-31, one chunk
+    per paragraph produced **30,449** chunks where the plan's own volume estimate, derived
+    from the measured character counts, predicted 18–25k — and the plan says landing outside
+    that range means the chunker is not doing what it describes. What the harness measures
+    now: the shipped `800/0` emits **22,933** chunks over 2,474 items, `recall@10` 0.7395 /
+    MRR 0.7357, population and instrument in `evaluation.sweep_chunker`. The whole gap was
     small paragraphs: `x_article` averaged **194 chars** across 11,016 chunks from 210
     articles.
 

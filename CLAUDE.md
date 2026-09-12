@@ -538,9 +538,16 @@ generates an Obsidian wiki.
   Do not re-stamp a measured figure to a new version without that proof: which of the two a
   version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
   correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
-  in this branch and the derived figure did not — rule 6. Read the old pair as history.)* That, and no stemming, is what Plan 03's vector
-  layer has to beat. Picking between `OR`, minimum-should-match and per-term weighting is Plan
-  02's sweep. **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
+  in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
+  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7395 · MRR 0.7357** — NOT the
+  `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
+  it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
+  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
+  `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
+  tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
+  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat.
+  Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
+  **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
   counts the comparisons it made and fails closed at zero, because `passed = not failures` let
   `--min-recall 1.0` exit 0 having scored nothing.
 - **The persistent index (`data/index/`, `xbrain index build|update|status` · `search` · `get`)
