@@ -827,3 +827,65 @@ def test_a_meta_declaring_dimension_zero_is_refused(tmp_path: Path) -> None:
     with pytest.raises(VectorPlaneIncompatible) as excinfo:
         load_vector_plane(tmp_path)
     assert "dimension" in str(excinfo.value)
+
+
+# ------------------------------- verification and mapping must see the SAME file (race)
+
+
+class _SwapOnMemmap:
+    """Real `numpy`, except that the first `memmap` is preceded by a rebuild landing.
+
+    The race needs the swap to happen in ONE exact window — after the digest has been
+    checked and before the bytes are mapped — and a thread cannot be aimed at a window that
+    narrow without being flaky. Driving it from inside `memmap` puts it there every time.
+    """
+
+    def __init__(self, matrix: Path, replacement: Path) -> None:
+        self._matrix = matrix
+        self._replacement = replacement
+        self.swapped = False
+
+    def __getattr__(self, name: str):  # noqa: ANN204 - everything else is real numpy
+        return getattr(np, name)
+
+    def memmap(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+        if not self.swapped:
+            self.swapped = True
+            os.replace(self._replacement, self._matrix)
+        return np.memmap(*args, **kwargs)
+
+
+def test_a_rebuild_landing_mid_load_cannot_serve_bytes_nobody_verified(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The matrix is hashed and then mapped, and `os.replace` swaps the NAME, not the file.
+
+    `write_vector_plane` finishes with exactly that call, so a build running while a query
+    opens the index is not hypothetical — it is this module's own writer. Resolving the path
+    once to hash it and again to map it makes those two lookups answer with two different
+    inodes: the digest passes over the old matrix and the query is served the new one, at the
+    old meta's `chunk_rows`. Every id still resolves, and every one of them reads a vector
+    belonging to another text.
+
+    Same size and same digest length on both sides, so nothing but the identity of the file
+    distinguishes them.
+    """
+    from xbrain.knowledge import vector_index
+
+    write_vector_plane(tmp_path, SPEC, [chunk("a:0:v3", "a", EAST)])
+    matrix = tmp_path / VECTORS_FILENAME
+    landing = tmp_path / "rebuilt.f32"
+    np.asarray([NORTH], dtype=np.float32).tofile(landing)
+    assert landing.stat().st_size == matrix.stat().st_size
+
+    swapper = _SwapOnMemmap(matrix, landing)
+    monkeypatch.setattr(vector_index, "_numpy", lambda: swapper)
+
+    loaded = load_vector_plane(tmp_path)
+    assert swapper.swapped, "the probe never reached the window it exists to test"
+
+    # EAST is what was verified; NORTH is what landed. A cosine of 1.0 says the plane served
+    # the bytes it checked, and 0.0 says it served the ones it never looked at.
+    hits = loaded.search(EAST, limit=1)
+    assert [hit.chunk_id for hit in hits] == ["a:0:v3"]
+    assert hits[0].score == pytest.approx(1.0)

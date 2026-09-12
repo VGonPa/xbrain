@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from xbrain.knowledge.index_schema import IndexError_
 
@@ -311,13 +311,27 @@ def _assign_rows(
     return matrix, chunk_rows, fingerprint_rows
 
 
-def _sha256_file(path: Path) -> str:
-    """The file's digest, streamed a megabyte at a time so a 70 MB matrix is not held twice."""
+def _sha256_stream(handle: BinaryIO) -> str:
+    """The digest of what is left in `handle`, a megabyte at a time.
+
+    It takes the OPEN FILE and not a path, which is the whole of the race fix below: a digest
+    computed by reopening the name proves something about whatever answered that name at that
+    moment, and nothing about the bytes anybody later maps.
+    """
     digest = sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
+    for block in iter(lambda: handle.read(1 << 20), b""):
+        digest.update(block)
     return digest.hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    """The digest of the file at `path`, for the write side, where nothing is racing yet.
+
+    The matrix is hashed while it still lives under its temporary name, before the rename
+    that publishes it, so no other process can be holding or replacing it.
+    """
+    with path.open("rb") as handle:
+        return _sha256_stream(handle)
 
 
 def _write_matrix(path: Path, matrix: Sequence[tuple[float, ...]], dimension: int) -> str:
@@ -581,32 +595,45 @@ def _mapped_matrix(path: Path, rows: int, dimension: int, digest: str) -> Matrix
     matrix truncated by a full disk or a killed build is still a valid float32 file, just
     shorter, and `np.memmap` would map whatever fits and answer queries over a corpus missing
     its tail with no sign that anything was lost.
+
+    AND ALL THREE STEPS GO THROUGH ONE OPEN FILE, which is not tidiness — it is the only
+    thing that makes the digest mean anything. `os.replace` swaps a directory ENTRY, not an
+    inode, so measuring the name, hashing the name and mapping the name are three independent
+    lookups that a rebuild landing between any two of them answers differently.
+    `write_vector_plane` ends with exactly that call, so the racing writer is this module's
+    own: the verification would pass over the old matrix and the query be served the new one,
+    under the old meta's `chunk_rows`, with every id still resolving and every one of them
+    reading another text's vector. An open descriptor pins the inode, and a POSIX mapping
+    outlives the descriptor that made it, so what is mapped is exactly what was hashed.
     """
     expected_bytes = rows * dimension * _FLOAT32_BYTES
     try:
-        actual_bytes = path.stat().st_size
+        handle = path.open("rb")
     except OSError as exc:
         raise VectorPlaneIncompatible(
             f"falta {VECTORS_FILENAME} en {path.parent} ({exc}). {VECTOR_REBUILD_ADVICE}"
         ) from exc
-    if actual_bytes != expected_bytes:
-        raise VectorPlaneIncompatible(
-            f"{VECTORS_FILENAME} ocupa {actual_bytes} bytes y su meta describe {rows} filas "
-            f"de dimensión {dimension} ({expected_bytes} bytes): los vectores están "
-            f"incompletos. {VECTOR_REBUILD_ADVICE}"
-        )
-    actual_digest = _sha256_file(path)
-    if actual_digest != digest:
-        raise VectorPlaneIncompatible(
-            f"{VECTORS_FILENAME} no es la matriz que describe su meta (sha256 "
-            f"{actual_digest[:12]}… frente a {digest[:12]}…): el tamaño coincide y el "
-            f"contenido no, así que cada chunk leería la geometría de otro texto. "
-            f"{VECTOR_REBUILD_ADVICE}"
-        )
-    if rows == 0:
-        return None
-    numpy = _numpy()
-    return numpy.memmap(path, dtype=numpy.float32, mode="r", shape=(rows, dimension))
+    with handle:
+        actual_bytes = os.fstat(handle.fileno()).st_size
+        if actual_bytes != expected_bytes:
+            raise VectorPlaneIncompatible(
+                f"{VECTORS_FILENAME} ocupa {actual_bytes} bytes y su meta describe {rows} "
+                f"filas de dimensión {dimension} ({expected_bytes} bytes): los vectores "
+                f"están incompletos. {VECTOR_REBUILD_ADVICE}"
+            )
+        actual_digest = _sha256_stream(handle)
+        if actual_digest != digest:
+            raise VectorPlaneIncompatible(
+                f"{VECTORS_FILENAME} no es la matriz que describe su meta (sha256 "
+                f"{actual_digest[:12]}… frente a {digest[:12]}…): el tamaño coincide y el "
+                f"contenido no, así que cada chunk leería la geometría de otro texto. "
+                f"{VECTOR_REBUILD_ADVICE}"
+            )
+        if rows == 0:
+            return None
+        handle.seek(0)
+        numpy = _numpy()
+        return numpy.memmap(handle, dtype=numpy.float32, mode="r", shape=(rows, dimension))
 
 
 def load_vector_plane(index_dir: Path, *, expected: VectorSpec | None = None) -> VectorPlane:
