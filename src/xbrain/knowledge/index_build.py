@@ -1407,6 +1407,13 @@ def _embedded_chunks(texts: Mapping[str, str], embed: Embedder) -> list[ChunkVec
     while each keeps its own `chunk_id`, which is what makes both of them retrievable.
     """
     bodies = _distinct_texts(texts.values())
+    if not bodies:
+        # THE EMBEDDER IS NEVER CALLED WITH AN EMPTY BATCH, and that obligation is named in
+        # `embeddings.embed_texts`: it raises on one, because there is nothing to embed and no
+        # dimension a response could be validated against. An empty corpus is not an error
+        # here — it is an index of zero chunks, and the plane it writes is an honest plane of
+        # zero rows that `load_vector_plane` already reads.
+        return []
     vectors = list(embed(bodies))
     if len(vectors) != len(bodies):
         raise VectorPlaneIncompatible(

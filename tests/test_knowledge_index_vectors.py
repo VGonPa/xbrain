@@ -53,6 +53,7 @@ from xbrain.knowledge.index_schema import (
 from xbrain.knowledge.vector_index import (
     VECTORS_FILENAME,
     VECTOR_REBUILD_ADVICE,
+    VectorPlaneIncompatible,
     VectorSpec,
     load_vector_plane,
     text_fingerprint,
@@ -111,6 +112,13 @@ class Embedder:
         angle = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
         angle *= 2 * math.pi
         return (math.cos(angle), math.sin(angle))
+
+
+class ShortChanging:
+    """An embedder that answers one vector fewer than it was asked for."""
+
+    def __call__(self, texts):  # noqa: ANN001, ANN204
+        return [Embedder._vector(text) for text in list(texts)[:-1]]
 
 
 class Exploding:
@@ -357,6 +365,31 @@ def test_a_build_without_an_embedder_reports_no_vector_numbers(data: Path) -> No
     assert report.vector_rows is None
 
 
+def test_an_empty_corpus_writes_an_empty_plane_and_never_calls_the_embedder(
+    tmp_path: Path,
+) -> None:
+    """`embeddings.embed_texts` RAISES on an empty batch and names this caller as the guard.
+
+    Its docstring: «`xbrain index build` checks for an empty corpus before it gets here» —
+    there is nothing to embed and no dimension a response could be validated against. An empty
+    corpus is not an error, it is an index of zero chunks, so the honest result is a plane of
+    zero rows rather than a crash out of the subprocess contract.
+    """
+    empty = tmp_path / "data"
+    _persist(empty, store={}, vocab=[], pages={})
+    embedder = Embedder()
+
+    report = _build(empty, vectors=index_build.VectorBuild(spec=SPEC, embed=embedder))
+
+    assert embedder.batches == []
+    assert (report.vector_chunks, report.vector_rows) == (0, 0)
+    plane = load_vector_plane(empty / "index")
+    try:
+        assert plane.row_count == 0
+    finally:
+        plane.close()
+
+
 def test_a_dry_run_never_embeds_and_writes_no_plane(data: Path) -> None:
     """The flag's whole promise is that it changes nothing — and costs nothing.
 
@@ -395,6 +428,21 @@ def test_a_forced_rebuild_without_an_embedder_removes_the_previous_plane(data: P
     _build(data, force=True)
     assert not vector_plane_exists(data / "index")
     assert index_build.load_manifest(data / "index").embeddings is None
+
+
+def test_an_embedder_that_answers_fewer_vectors_is_refused_before_a_byte_lands(
+    data: Path,
+) -> None:
+    """Vectors are paired with texts BY POSITION, so a short answer shifts every later one.
+
+    `zip` would truncate silently and hand each fragment after the gap the vector of its
+    neighbour: well-formed, unit-length, and attributed to the wrong text. The count is checked
+    before anything is paired, and the refusal leaves no plane and no manifest behind.
+    """
+    with pytest.raises(VectorPlaneIncompatible, match="vectores para"):
+        _build(data, vectors=index_build.VectorBuild(spec=SPEC, embed=ShortChanging()))
+    assert not vector_plane_exists(data / "index")
+    assert not manifest_path(data / "index").exists()
 
 
 def test_an_embedder_that_dies_leaves_no_manifest(data: Path) -> None:
