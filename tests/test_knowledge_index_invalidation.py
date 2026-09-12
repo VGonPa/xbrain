@@ -37,6 +37,7 @@ import pytest
 
 from xbrain.knowledge import index_build, index_schema, index_store
 from xbrain.knowledge.chunking import ChunkerParams
+from xbrain.knowledge.get_service import get
 from xbrain.knowledge.index_schema import (
     FTS_TABLES,
     REBUILD_ADVICE,
@@ -49,6 +50,7 @@ from xbrain.knowledge.index_schema import (
 )
 from xbrain.knowledge.lexical import LexicalIndex
 from xbrain.knowledge.profile import profile_text
+from xbrain.knowledge.search_service import QueryContext
 from xbrain.knowledge.surfaces import item_surfaces, knowledge_item
 from xbrain.models import Author, Content, ContentSourceSuccess, Item, Topic, TopicPage
 from xbrain.rubrics import save_vocab
@@ -685,7 +687,12 @@ def test_status_declares_a_standing_manifest_over_a_missing_database_as_every_do
     silence the defect was measured against, so it belongs in the comparison.
 
     `get` reads the live store and keeps answering with no index at all (spec §3.7 invariant
-    7); it is `get_service`'s, and 02.10 adds it to this list.
+    7); it is `get_service`'s, and child 02.10 adds it to this list — the FOURTH door, and
+    the only one of the four whose correct answer is a bundle. It is asserted in the same
+    breath as the other three because the interesting property is the CONTRAST: in one state
+    of the index, three doors refuse with one sentence and the fourth is untouched by it. A
+    `get` that reached for the base — for a title, a topic, anything — would raise the same
+    `IndexMissingError` here and the contrast would collapse into a fourth refusal.
 
     Seen red before the fix: `incomplete is False` and the advice named `index update`.
     """
@@ -704,6 +711,23 @@ def test_status_declares_a_standing_manifest_over_a_missing_database_as_every_do
     assert report.incomplete is True
     assert report.advice == sentence
     assert "xbrain index build --force" in report.advice
+
+    store, vocab, pages = corpus
+    bundle = get(
+        "k03",
+        QueryContext(
+            store=store,
+            vocab=vocab,
+            topic_pages=pages,
+            index_dir=built / "index",
+            items_path=built / "items.json",
+            vocab_path=built / "vocab.yaml",
+            topics_path=built / "topics.json",
+        ),
+        surfaces=("external_article",),
+    )
+    assert bundle.surfaces and bundle.surfaces[0].surface_type == "external_article"
+
     assert not db_path(built / "index").exists(), "no door may create the base but `build`"
 
 
