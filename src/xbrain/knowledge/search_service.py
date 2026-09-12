@@ -203,6 +203,7 @@ def search(
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
         ordered, excluded, exhausted = _materialise(index, query, filters, context, needed=beyond)
+        _refuse_cursor_past_the_ranking(cursor, offset, len(ordered))
         page, evidence_excluded = _settle_evidence(
             index, query, filters, context, ordered[offset : offset + limit]
         )
@@ -227,6 +228,45 @@ def search(
         )
     finally:
         index.close()
+
+
+def _refuse_cursor_past_the_ranking(cursor: str | None, offset: int, available: int) -> None:
+    """Refuse a cursor whose offset sits at or past the end of the ranking (A1).
+
+    THE SILENT COMPLETION THIS CLOSES, MEASURED ON A REAL INDEX BEFORE THE FIX. With
+    `offset >= len(ordered)` the slice `ordered[offset : offset + limit]` is empty,
+    `len(ordered) > offset + limit` is False, and the response came back
+    `results=(), truncated=False, cursor=None` — *the query is complete and you have seen
+    everything* — to a consumer that had seen NOTHING. Reproduced on the fixture corpus
+    against a `Quillfeather` ranking of 2 owners, at `s:2`, `s:3`, `s:50`, `s:99999` and
+    `s:99999999`: all five, identically. `exhausted` does not rescue any of them, which is
+    worth saying because it looks as though a large enough offset would trip
+    `MAX_CHUNK_DEPTH` and at least declare a truncation — it does not.
+
+    That is the shape spec §9.3 forbids and the one `_materialise`'s own docstring calls *a
+    false claim about the corpus*: **both say nothing is there when the truth is that I did
+    not look.** `get_service` refuses it at three points (surface index, chunk index, query
+    offset); this is the fourth population and the same refusal.
+
+    NO SUCH CURSOR IS EVER EMITTED BY THIS SERVICE — `search` attaches one only when
+    `len(ordered) > offset + limit`, so it can never name a position at or past the end. An
+    offset that lands there is a corrupted string, a replay against a corpus that has since
+    shrunk, or a hand-typed value, and none of the three can be answered honestly.
+
+    IT COSTS ONE MATERIALISATION, and that is not an oversight: `available` does not exist
+    until the window has been built, so the check cannot move into `_decode_search_cursor`,
+    which holds only the raw string. `_paginate`'s B2 guard sits away from `_decode` for
+    exactly the same reason. What it does buy is refusing BEFORE `_settle_evidence`, so a
+    doomed page never pays for its evidence pass.
+
+    A `None` cursor is untouched: a query that genuinely matches nothing must still answer
+    with an honest empty page, and only a caller who CLAIMED a position can be wrong about it.
+    """
+    if cursor and offset >= available:
+        raise ValueError(
+            f"Cursor inválido: {cursor!r} apunta más allá de los resultados disponibles. "
+            "Usa el que devolvió la respuesta anterior."
+        )
 
 
 def _materialise(

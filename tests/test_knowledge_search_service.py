@@ -1029,6 +1029,57 @@ def test_a_match_locator_is_the_surface_locator_plus_the_character_range(
 
 
 # ---------------------------------------------------------------------------
+# Round 06 — ONE locator and ONE attribution for any served fragment (seam b)
+#
+# Restored by child 02.10 — THREE functions, and they are not contiguous. This one, and the
+# pair that follows the four-guards block below (`..._is_the_one_the_emitter_computed` and
+# `..._through_one_function`), are the only tests in this file that import `get_service.get`,
+# so none of them could travel with the rest of it until `get` existed (matrix F5). Each sits
+# beside the search-side test it pairs with rather than in one restored heap. They are the
+# CROSS-SERVICE half of seam (b) — the half no single-service test can hold — and the
+# neighbouring block's four guards deliberately do not cover them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "item_id, surface_type, term",
+    [("k07", "quoted_post", "audit"), ("k03", "external_article", "Quillfeather")],
+)
+def test_a_search_match_and_the_chunk_get_serves_share_one_locator_and_one_attribution(
+    context: QueryContext, item_id: str, surface_type: str, term: str
+) -> None:
+    """The attribution/locator family reappeared by four routes in five rounds — a search
+    without the surfaces join, a fingerprint blind to the author, the human chunk header,
+    and now the chunks of `get` (B2) — because each consumer built its own locator. Rule 5.
+
+    The SAME fragment reached through the two services: a `SearchMatch` from `search` and
+    the `KnowledgeChunk` `get --query` returns for the same `chunk_id` must carry an
+    identical `locator` (the surface's, narrowed by `fragment_locator`) and an identical
+    `attribution` (the surface's author — the quoted author on k07, not the poster). A
+    consumer that re-derives either goes red here. Seen red before the fix: the chunk
+    had no `locator`.
+    """
+    from xbrain.knowledge.get_service import get
+
+    response = search(term, context, limit=20)
+    match = next(
+        m
+        for r in response.results
+        if r.item_id == item_id
+        for m in r.matches
+        if m.surface_type == surface_type
+    )
+    bundle = get(item_id, context, surfaces=(surface_type,), query=term)
+    chunk = next(c for c in bundle.chunks if c.chunk_id == match.chunk_id)
+
+    assert match.locator == chunk.locator
+    assert match.attribution == chunk.attribution
+    assert (match.locator.char_start, match.locator.char_end) == (chunk.char_start, chunk.char_end)
+    if surface_type == "quoted_post":
+        assert chunk.attribution is not None and chunk.attribution.handle == "othervoice"
+
+
+# ---------------------------------------------------------------------------
 # The four guards this child SHIPS that the atomic split left without a test
 #
 # The matrix moves `test_knowledge_search_service.py`'s L999-1397 block to 02.14 wholesale,
@@ -1107,6 +1158,106 @@ def test_a_chunk_whose_surface_holds_no_locator_is_excluded_and_counted(
     assert response.index.corrupt_chunks_excluded >= len(surfaces)
     served = {m.chunk_id for r in response.results for m in r.matches}
     assert served.isdisjoint(surfaces)
+
+
+# The other two restored by 02.10 (see the seam-b header above), placed here because each
+# checks the fingerprint/locator machinery the four guards immediately above exercise from
+# the search side only.
+
+
+def _quoted_victim(context: QueryContext) -> tuple[str, str]:
+    """`(chunk_id, surface_id)` of k07's quoted post — @othervoice's words, one chunk."""
+    connection = sqlite3.connect(db_path(context.index_dir))
+    try:
+        return connection.execute(
+            "SELECT chunk_id, surface_id FROM chunks WHERE text LIKE '%audit%' LIMIT 1"
+        ).fetchone()
+    finally:
+        connection.close()
+
+
+def test_the_fingerprint_search_verifies_is_the_one_the_emitter_computed(
+    context: QueryContext,
+) -> None:
+    """The evidence projection by VALUE across the two sides (the G-5 pattern, rule 5): the
+    row the index holds for k07's quoted chunk carries the fingerprint the emitter computed
+    for the same chunk when `get` serves it, and recomputing it from what the ROW serves —
+    through `chunk_evidence` and `fragment_locator`, as `verify_fingerprints` does — gives
+    the same value. A verifier that assembled the parts itself, or an emitter that hashed
+    a different projection, disagrees here by value.
+
+    `title` is one of the arms (U-5's round-08 extension), so it is passed here too: the
+    projection is rebuilt WHOLE or the comparison proves nothing about the arms it omitted.
+    """
+    from xbrain.knowledge.chunking import chunk_evidence, fragment_locator
+    from xbrain.knowledge.get_service import get
+    from xbrain.knowledge.ids import chunk_fingerprint
+    from xbrain.knowledge.lexical import LexicalIndex
+
+    victim, _surface = _quoted_victim(context)
+    served = get("k07", context, surfaces=("quoted_post",), query="audit").chunks
+    assert [c.chunk_id for c in served] == [victim]
+
+    index = LexicalIndex(open_index(db_path(context.index_dir), read_only=True))
+    try:
+        hit = index.fetch_chunk(victim)
+    finally:
+        index.connection.close()
+    assert hit is not None and hit.surface_locator is not None
+    assert hit.fingerprint == served[0].fingerprint
+    recomputed = chunk_fingerprint(
+        chunk_evidence(
+            surface_id=hit.surface_id,
+            chunk_index=hit.chunk_index,
+            text=hit.text,
+            owner_type=hit.owner_type,
+            owner_id=hit.owner_id,
+            surface_type=hit.surface_type,
+            origin=hit.origin,
+            trust_class=hit.trust_class,
+            derived=hit.derived,
+            char_start=hit.char_start,
+            char_end=hit.char_end,
+            attribution=hit.attribution,
+            title=hit.title,
+            locator=fragment_locator(hit.surface_locator, hit.char_start, hit.char_end),
+        )
+    )
+    assert recomputed == hit.fingerprint
+
+
+def test_search_and_get_build_every_fragment_locator_through_one_function(
+    context: QueryContext, monkeypatch
+) -> None:
+    """The seam asserted STRUCTURALLY, not by value (rule 5, the G-5 pattern): the test
+    above proves the two services agree today; this one proves they agree because they
+    ask the same function. `fragment_locator` is swapped for a sentinel in the two modules
+    that build a SERVED locator, and every match `search` returns and every chunk
+    `get --query` returns must carry the sentinel. A consumer that narrows the surface
+    locator itself — a `model_copy` of its own, the shape `_match` had before — stays honest
+    by value and goes red here.
+
+    `index_store` binds the name too and is deliberately NOT patched: there it rebuilds the
+    evidence of a row the real emitter wrote, so a sentinel would make every fingerprint
+    fail to recompute and the whole ranking would be excluded — the test would go red for
+    the wrong reason, and would keep passing once the seam broke. Verification is not
+    service, and only the serving half is under test here.
+
+    Seen red under exactly that mutation of `_match`: the match carried a real locator.
+    """
+    from xbrain.knowledge import chunking
+    from xbrain.knowledge.get_service import get
+    from xbrain.knowledge.models import Locator
+
+    sentinel = Locator(kind="vocab", note_index=999_999)
+    monkeypatch.setattr(chunking, "fragment_locator", lambda *args: sentinel)
+    monkeypatch.setattr(search_service, "fragment_locator", lambda *args: sentinel)
+
+    response = search("Quillfeather", context)
+    matches = [m for r in response.results for m in r.matches]
+    assert matches and all(m.locator == sentinel for m in matches)
+    bundle = get("k03", context, surfaces=("external_article",), query="Quillfeather")
+    assert bundle.chunks and all(c.locator == sentinel for c in bundle.chunks)
 
 
 def _locatorless_hit() -> LexicalHit:
@@ -1195,6 +1346,46 @@ def test_a_malformed_search_cursor_is_refused_rather_than_restarted_from_zero(
         search("Quillfeather", context, cursor="s:abc")
     with pytest.raises(ValueError, match="Cursor inválido"):
         search("Quillfeather", context, cursor="s:-1")
+
+
+def test_a_search_cursor_past_the_end_of_the_ranking_is_refused_not_called_complete(
+    context: QueryContext,
+) -> None:
+    """A1 (gate review, round 04): the silent completion `get` refuses at three points and
+    `search` did not refuse at all.
+
+    With `offset >= len(ordered)` the page slice is empty, `len(ordered) > offset + limit` is
+    False, and the response came back `results=(), truncated=False, cursor=None` — *complete,
+    you have seen everything* — to a consumer that had seen NOTHING. Reproduced on the
+    fixture corpus before the fix against a `Quillfeather` ranking of 2 owners: `s:2`, `s:3`,
+    `s:50`, `s:99999` and `s:99999999` all answered identically, so `exhausted` rescues none
+    of them either.
+
+    THE BOUNDARY IS ASSERTED FROM BOTH SIDES, which is what keeps this from passing for the
+    wrong reason (rule 1): a guard that refused every cursor would satisfy the raise and go
+    red on the acceptance below, and an off-by-one (`>` for `>=`) goes red on the raise. The
+    last VALID offset is the one the walk actually reaches, taken from the response rather
+    than computed here, so the test cannot drift from the service's own idea of a page.
+
+    And an honest empty answer stays honest: a query matching nothing, asked with NO cursor,
+    is still an empty page and not an error — only a caller who CLAIMED a position can be
+    wrong about it.
+    """
+    whole = search("Quillfeather vgonpa", context, limit=50)
+    available = len(whole.results)
+    assert available > 1, "the ranking must hold more than one owner or the boundary is moot"
+    assert whole.cursor is None, "an unpaged call that fits names no continuation"
+
+    last_page = search("Quillfeather vgonpa", context, limit=1, cursor=f"s:{available - 1}")
+    assert len(last_page.results) == 1, "the last in-range offset must still be served"
+    assert last_page.truncated is False and last_page.cursor is None
+
+    for beyond in (available, available + 1, 99_999, 99_999_999):
+        with pytest.raises(ValueError, match="más allá de los resultados disponibles"):
+            search("Quillfeather vgonpa", context, limit=1, cursor=f"s:{beyond}")
+
+    empty = search("zzzznotawordinthiscorpus", context, limit=10)
+    assert empty.results == () and empty.truncated is False and empty.cursor is None
 
 
 def test_a_page_shorter_than_the_ranking_is_declared_and_its_cursor_continues(
