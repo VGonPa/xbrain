@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge import index_build
+from xbrain.knowledge import get_service, index_build
 from xbrain.knowledge.chunking import ChunkerParams, chunk_surfaces
 from xbrain.knowledge.contracts import EvidenceBundle
 from xbrain.knowledge.get_service import (
@@ -120,6 +121,31 @@ def long_article_context(tmp_path: Path, corpus) -> QueryContext:
     data = tmp_path / "data"
     _persist(data, store, vocab, pages)
     assert not (data / "index").exists()
+    return _context(data, store, vocab, pages)
+
+
+def _article_context_of_exactly(tmp_path: Path, corpus, length: int) -> QueryContext:
+    """The committed article fixture with its BODY resized to exactly `length` characters.
+
+    The 20,147-character fixture is the right size for "the whole body comes back
+    untruncated" and the WRONG size for anything that measures the DEFAULT BUDGET, because
+    20,147 sits far below it: every default from 20,148 upwards delivers that body whole, so
+    the fixture cannot tell 40,000 from 30,000 from a billion (F-2, round 01). A boundary has
+    to be probed with a body AT it.
+
+    Grown by repeating the real article rather than by emitting one character over and over,
+    so the paragraph structure the chunker cuts on is the structure a real article has; then
+    sliced to the exact length, which is the number the caller asserts on.
+    """
+    raw = json.loads((FIXTURES / "knowledge_long_article.json").read_text(encoding="utf-8"))
+    body = raw["content"]["sources"][0]["text"]
+    grown = (body + "\n\n") * (length // len(body) + 2)
+    raw["content"]["sources"][0]["text"] = grown[:length]
+    item = Item.model_validate(raw)
+    _store, vocab, pages = corpus
+    store = {item.id: item}
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
     return _context(data, store, vocab, pages)
 
 
@@ -763,30 +789,65 @@ def test_get_declares_no_producer_for_a_transcript_the_store_does_not_attribute(
 # ---------------------------------------------------------------------------
 
 
-def test_get_with_a_query_closes_its_scratch_database(context: QueryContext) -> None:
-    """M-1 (round 02, Codex F-08): `_ranked_chunks` opened `sqlite3(":memory:")` and never
-    closed it; Python 3.13 reports the leak as a `ResourceWarning: unclosed database`, which
-    the gate printed repeatedly during pytest. One call is harmless; a long-lived adapter
-    (Plan 04's MCP server) accumulates handles for every `get --query`.
+def _is_closed(connection: sqlite3.Connection) -> bool:
+    """Whether this connection is closed, asked of the connection itself.
 
-    Seen red before the fix: one `unclosed database` warning per call.
+    `sqlite3` exposes no `closed` attribute, so the question is put the only way it can be:
+    a trivial statement on a closed connection raises `ProgrammingError`.
     """
-    import gc
-    import warnings
+    try:
+        connection.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        return True
+    return False
 
-    # Reap what EARLIER tests left behind first, so the measured window holds only this
-    # call's connections — in the full suite the first version caught a neighbour's leak.
-    gc.collect()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ResourceWarning)
-        get("k03", context, surfaces=("external_article",), query="Alpha")
-        gc.collect()
-    leaks = [
-        w
-        for w in caught
-        if issubclass(w.category, ResourceWarning) and "unclosed database" in str(w.message)
-    ]
-    assert not leaks, [str(w.message) for w in leaks]
+
+def test_get_with_a_query_closes_its_scratch_database(
+    context: QueryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-1 (round 02, Codex F-08): `_ranked_chunks` opened `sqlite3(":memory:")` and never
+    closed it. One call is harmless; a long-lived adapter (Plan 04's MCP server) accumulates
+    one handle for every `get --query` it ever answers.
+
+    THIS TEST USED TO ASSERT ON A `ResourceWarning: unclosed database`, AND ON THE INTERPRETER
+    CI PINS IT COULD NOT FAIL (F-3, round 01). That warning comes from `sqlite3.Connection`'s
+    finalizer and only exists from Python 3.13; `.github/workflows/quality.yml` pins 3.12.
+    Measured 2×2 on the real module, with and without `index.connection.close()`:
+
+        | interpreter | close() kept | close() removed |
+        |-------------|--------------|-----------------|
+        | 3.12.11     | 0 warnings   | 0 warnings      |
+        | 3.13        | 0 warnings   | 1 warning       |
+
+    Three of those four cells are green, so on the pinned interpreter the assertion was
+    satisfied by the absence of a warning the interpreter never emits — rule 1, and rule 2
+    besides: a result that cannot come out any other way.
+
+    So the question is now put to the CONNECTION rather than to the warnings filter. The
+    module's own seam is spied, every scratch database `get` opens is captured, and each one
+    must be CLOSED by the time `get` returns. That is the resource state the review cared
+    about, it is version-independent, and it names WHICH connection leaked instead of
+    counting warnings a neighbouring test could also have produced.
+
+    Seen red on Python 3.12.11 with `index.connection.close()` removed: `[False] != [True]`.
+    """
+    opened: list[sqlite3.Connection] = []
+    real_open = get_service.open_memory_index
+
+    def spy() -> sqlite3.Connection:
+        connection = real_open()
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(get_service, "open_memory_index", spy)
+
+    get("k03", context, surfaces=("external_article",), query="Alpha")
+
+    assert opened, (
+        "the query path must open a scratch database, or this test passes by measuring "
+        "nothing at all"
+    )
+    assert [_is_closed(connection) for connection in opened] == [True] * len(opened)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,32 +1081,41 @@ def test_get_cuts_with_the_chunker_parameters_its_context_carries(
             )
 
 
-def test_the_default_budget_is_the_one_get_applies_when_the_caller_names_none(
-    long_article_context: QueryContext,
-) -> None:
-    """`DEFAULT_CHAR_BUDGET` is the configurable ceiling, and R12 makes it a public name.
+# The default ceiling, WRITTEN OUT BY HAND, for the same reason as
+# `_EXPECTED_DEFAULT_SURFACE_TYPES` above. The boundary cases below are sized from THIS
+# literal and never from `DEFAULT_CHAR_BUDGET`, so they measure the number the module
+# actually applies instead of agreeing with it by construction.
+_EXPECTED_DEFAULT_CHAR_BUDGET = 40_000
 
-    `config._index_settings` imports it in child 02.12 so `[index].char_budget` has a default
-    to fall back on, and `load_config` runs on EVERY CLI invocation — so the export is load
-    bearing for the whole CLI, not decoration.
 
-    Asserted through behaviour rather than by reading the constant back, which would restate
-    it (rule 1): a `get` that names no `limits` must equal one that names exactly this budget,
-    the fixture's whole 20,147-character body must fit under it, and one character less must
-    be enough to force the pagination — so the number is the ceiling that actually binds and
-    not a field nothing consults.
+def test_the_default_budget_is_the_value_get_exports(long_article_context: QueryContext) -> None:
+    """The exported constant AND the dataclass default — pinned, and pinned to EACH OTHER.
+
+    `config._index_settings` imports `DEFAULT_CHAR_BUDGET` in child 02.12 so
+    `[index].char_budget` has a default to fall back on, and `load_config` runs on EVERY CLI
+    invocation. From that point on the export and the ceiling `get` actually applies are two
+    definitions of one number, which is rule 5: bind them in code or watch them diverge.
+
+    That binding is what the first version of this test did not have. It compared an implicit
+    `get` against an explicit `GetLimits(char_budget=DEFAULT_CHAR_BUDGET)` on the
+    20,147-character fixture — a body that fits under BOTH — so the two calls returned
+    identical bundles whatever the dataclass default held. Measured: rewriting
+    `char_budget: int = DEFAULT_CHAR_BUDGET` as `char_budget: int = 30_000` left the whole
+    focused suite green. The second assert below is the line that goes red for that, before
+    02.12 starts trusting the export to describe the ceiling.
     """
+    assert DEFAULT_CHAR_BUDGET == _EXPECTED_DEFAULT_CHAR_BUDGET
+    assert GetLimits().char_budget == DEFAULT_CHAR_BUDGET, (
+        "the dataclass default and the exported name must be ONE number, or "
+        "`[index].char_budget` documents a ceiling `get` does not apply"
+    )
+
+    # And the export is a ceiling that BINDS, not a field nothing consults: the fixture's
+    # whole body fits under it, and one character less than that body forces the pagination.
     item = next(iter(long_article_context.store.values()))
     kwargs = {"surfaces": ("external_article",)}
-
-    implicit = get(item.id, long_article_context, **kwargs)
-    explicit = get(
-        item.id, long_article_context, limits=GetLimits(char_budget=DEFAULT_CHAR_BUDGET), **kwargs
-    )
-    assert implicit == explicit
-    (surface,) = implicit.surfaces
+    (surface,) = get(item.id, long_article_context, **kwargs).surfaces
     assert len(surface.text) <= DEFAULT_CHAR_BUDGET
-
     tighter = get(
         item.id,
         long_article_context,
@@ -1053,6 +1123,43 @@ def test_the_default_budget_is_the_one_get_applies_when_the_caller_names_none(
         **kwargs,
     )
     assert tighter.surfaces == () and tighter.truncated is True
+
+
+@pytest.mark.parametrize(
+    ("length", "fits"),
+    [(_EXPECTED_DEFAULT_CHAR_BUDGET, True), (_EXPECTED_DEFAULT_CHAR_BUDGET + 1, False)],
+)
+def test_the_implicit_budget_binds_at_exactly_forty_thousand_characters(
+    tmp_path: Path, corpus, length: int, fits: bool
+) -> None:
+    """The default budget, measured AT its boundary, from behaviour alone (F-2).
+
+    A body of exactly 40,000 characters comes back whole from an implicit `get`; a body of
+    40,001 does not. Nothing here reads `DEFAULT_CHAR_BUDGET` — both lengths are literals — so
+    the pair brackets the APPLIED ceiling to a single value, and any other default, in either
+    direction, makes one of the two cases red. That is the property the 20,147-character
+    fixture could not have: every default from 20,148 upwards delivered it whole, which is how
+    a 30,000 default survived the whole focused suite.
+
+    The 40,001 case truncates by arithmetic, not by luck: the budget left before the final
+    chunk is `40,000 − (40,001 − L) = L − 1`, one character short of that chunk whatever the
+    chunker made `L`, so it is always refused and always yields a cursor.
+    """
+    context = _article_context_of_exactly(tmp_path, corpus, length)
+    item = next(iter(context.store.values()))
+    (emitted,) = [s for s in item_surfaces(item) if s.surface_type == "external_article"]
+    assert len(emitted.text) == length, "the resized fixture IS the measurement; check it first"
+
+    bundle = get(item.id, context, surfaces=("external_article",))
+
+    if fits:
+        assert bundle.truncated is False and bundle.cursor is None
+        assert [s.text for s in bundle.surfaces] == [emitted.text]
+        assert bundle.chunks == ()
+    else:
+        assert bundle.truncated is True and bundle.cursor
+        assert bundle.surfaces == (), "a partial surface would carry a fingerprint that lies"
+        assert bundle.chunks
 
 
 def test_pagination_crosses_from_one_surface_to_the_next_without_mixing_them(
