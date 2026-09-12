@@ -117,6 +117,9 @@ $ uv run xbrain search "transformer attention" --limit 2
    · [video_transcript] origin=asr trust=machine_extracted · via lexical
      hyperparameter. Um I always found this to be very strange when sort of teac…
    → verifica con: xbrain get 2051242195298968041 --surface video_transcript
+
+[extracto: se omite el resultado 2; una línea de truncado, cuando la hay, se
+ imprime bajo la cabecera, encima del resultado 1, no aquí]
 ```
 
 Three things in that block are the whole point of the layer.
