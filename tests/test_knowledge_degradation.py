@@ -418,6 +418,15 @@ def test_row5_a_forced_rebuild_whose_embedder_times_out_leaves_lexical_search_do
         search(QUERY, _context(data, corpus))
 
 
+def _chunks_containing(index_dir: Path, needle: str) -> int:
+    """How many committed chunks carry `needle`, read by a SEPARATE read-only connection."""
+    uri = f"file:{index_build.db_path(index_dir)}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM chunks WHERE instr(text, ?) > 0", (needle,)
+        ).fetchone()[0]
+
+
 def test_the_vector_rebuild_advice_does_not_promise_a_lexical_plane_its_command_rebuilds(
     tmp_path: Path, corpus
 ) -> None:
@@ -427,9 +436,23 @@ def test_the_vector_rebuild_advice_does_not_promise_a_lexical_plane_its_command_
     the store (a new file, carrying the store's CURRENT text). An advice promising «el plano
     léxico no se toca» sends an operator into exactly the window the forced-rebuild test above
     pins — no index at all if the embedder then fails.
+
+    THE PREMISE IS PROVEN BY CONTENT, NOT BY THE FILESYSTEM. It used to compare `st_ino` before
+    and after, and CI went red on a correct build: a freed inode may be handed to the very next
+    file, so unlink + recreate can keep the number. That assertion measured the allocator, not
+    the contract — it could fail, and pass, for a reason unrelated to what it claimed (rule 1);
+    `mtime` has the same flaw at its granularity. What the advice must be honest about is that
+    the lexical base is RE-DERIVED FROM THE STORE, so the store is edited between the two builds
+    and the new base's chunks must carry the new text AND none of the old. A rebuild that kept
+    the previous base — the vector-only rebuild the old advice promised — fails both.
     """
     data = _data(tmp_path, corpus, with_plane=True)
-    before = index_build.db_path(data / "index").stat().st_ino
+    old, new = "Zephyrine", "Marrowglade"
+    assert _chunks_containing(data / "index", old) == 1, "premise: the old base holds the old text"
+    assert _chunks_containing(data / "index", new) == 0, "premise: and not the new one"
+    store, _, _ = corpus
+    edited = store["k01"].model_copy(update={"text": store["k01"].text.replace(old, new)})
+    save_store({**store, "k01": edited}, data / "items.json")
     inputs = index_build.load_index_inputs(
         data / "items.json", data / "vocab.yaml", data / "topics.json"
     )
@@ -441,9 +464,10 @@ def test_the_vector_rebuild_advice_does_not_promise_a_lexical_plane_its_command_
         vectors=index_build.VectorBuild(spec=SPEC, embed=lambda texts: [_vector(t) for t in texts]),
     )
 
-    assert index_build.db_path(data / "index").stat().st_ino != before, (
-        "premise: the recommended command replaced the lexical base"
+    assert _chunks_containing(data / "index", new) == 1, (
+        "the recommended command re-derived the lexical base from the store's CURRENT text"
     )
+    assert _chunks_containing(data / "index", old) == 0, "and kept nothing of the previous base"
     assert "xbrain index build --embeddings --force" in VECTOR_REBUILD_ADVICE
     assert "no se toca" not in VECTOR_REBUILD_ADVICE
     assert re.search(r"también el plano léxico", VECTOR_REBUILD_ADVICE)
