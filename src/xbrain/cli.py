@@ -3040,7 +3040,7 @@ def _query_context(cfg: Config, inputs):
     verificación desde él (M5), así que las rutas que van aquí son las mismas que el
     cargador acaba de leer.
     """
-    from xbrain.knowledge.search_service import QueryContext
+    from xbrain.knowledge.search_service import QueryContext, bind_query_embedder
 
     return QueryContext(
         store=inputs.store,
@@ -3053,7 +3053,65 @@ def _query_context(cfg: Config, inputs):
         vault_dir=cfg.output_dir,
         language=cfg.output_language,
         max_matches_per_item=cfg.index_max_matches_per_item,
+        # Vacío → `None`: `hybrid` declara `embeddings_not_configured` y `vector` es un error.
+        embed_query=bind_query_embedder(
+            cfg.embeddings_command,
+            index_dir=cfg.index_dir,
+            timeout_seconds=cfg.embeddings_timeout_seconds,
+        ),
     )
+
+
+def _vector_build(cfg: Config):
+    """`[embeddings]` → el `VectorBuild` que `index build --embeddings` entrega al builder.
+
+    Un `command` vacío se rechaza AQUÍ, antes de construir nada: una bandera que pidió vectores
+    no sella un índice sin ellos. La spec no se teclea: modelo, dimensión y normalización son
+    los que declara UNA tanda de sondeo, así que el manifest registra lo que el backend produjo;
+    cada tanda posterior se exige a esa dimensión (`expected_dimension`) y dos modelos nunca
+    comparten matriz. El sondeo es también donde un binario ausente o no ejecutable aflora como
+    `EmbedderNotFound` (Plan 03 §5, fila 2), antes de escribir un byte.
+    """
+    from collections.abc import Sequence
+
+    from xbrain.embeddings import EmbedderNotFound, EmbeddingBatch, embed_passages
+    from xbrain.knowledge.index_build import VectorBuild
+    from xbrain.knowledge.vector_index import VectorSpec
+
+    if not cfg.embeddings_command.strip():
+        raise EmbedderNotFound(
+            "`--embeddings` necesita un embedder: configura `[embeddings].command` en "
+            "config.toml (ver config.toml.example)"
+        )
+
+    def passages(texts: Sequence[str], expected_dimension: int | None = None) -> EmbeddingBatch:
+        return embed_passages(
+            texts,
+            command=cfg.embeddings_command,
+            model=cfg.embeddings_model,
+            prefix=cfg.embeddings_passage_prefix,
+            expected_dimension=expected_dimension,
+            timeout_seconds=cfg.embeddings_timeout_seconds,
+        )
+
+    probe = passages(["xbrain"])
+    spec = VectorSpec(
+        model=probe.model,
+        dimension=probe.dimension,
+        normalized=probe.normalized,
+        query_prefix=cfg.embeddings_query_prefix,
+        passage_prefix=cfg.embeddings_passage_prefix,
+    )
+
+    def embed(texts: Sequence[str]) -> list[tuple[float, ...]]:
+        size = cfg.embeddings_batch_size
+        vectors: list[tuple[float, ...]] = []
+        for start in range(0, len(texts), size):
+            batch = passages(texts[start : start + size], expected_dimension=spec.dimension)
+            vectors.extend(batch.vectors)
+        return vectors
+
+    return VectorBuild(spec=spec, embed=embed)
 
 
 def _echo_json(payload: object) -> None:
@@ -3072,6 +3130,11 @@ def index_build_command(
         False, "--dry-run", help="Cuenta lo que haría; no toca ningún fichero."
     ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+    embeddings: bool = typer.Option(
+        False,
+        "--embeddings",
+        help="Escribe también el plano vectorial con `[embeddings].command`.",
+    ),
 ) -> None:
     """Construye `data/index/` desde cero y lo sella.
 
@@ -3079,6 +3142,11 @@ def index_build_command(
     `data/index/`, que es derivado y reconstruible (Plan 02 §6). `--force` sí tira el índice
     anterior —manifest primero, base después— así que una reconstrucción interrumpida no
     deja un manifest en pie sobre una base vacía.
+
+    `--embeddings` escribe además el plano vectorial (Plan 03 §5), y es el comando que nombran
+    los errores accionables del plano. Un `command` vacío o un binario ausente lo rechazan
+    antes de escribir nada. Con `--dry-run` no se llama al embedder: no hay nada que embeber
+    en una corrida que no escribe.
     """
     from dataclasses import asdict
 
@@ -3086,8 +3154,14 @@ def index_build_command(
     from xbrain.knowledge.render import render_build
 
     cfg = _config()
+    vectors = _vector_build(cfg) if embeddings and not dry_run else None
     report = build(
-        cfg.index_dir, _index_inputs(cfg), options=_index_options(cfg), dry_run=dry_run, force=force
+        cfg.index_dir,
+        _index_inputs(cfg),
+        options=_index_options(cfg),
+        dry_run=dry_run,
+        force=force,
+        vectors=vectors,
     )
     if json_out:
         _echo_json(asdict(report))

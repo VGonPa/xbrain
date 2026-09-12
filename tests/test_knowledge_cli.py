@@ -539,3 +539,180 @@ def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> N
             "not handing the chunker the block boundaries"
         )
         assert chunk["char_end"] in edges
+
+
+# ---------------------------------------------------------------------------
+# Plan 03.6 — `search --strategy` when the vector channel cannot run (§5, §13)
+# ---------------------------------------------------------------------------
+
+SEARCH_QUERY = "Quillfeather"
+
+
+def _configure_embeddings(workspace: Path, command: str) -> None:
+    config = workspace / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + f"[embeddings]\ncommand = {json.dumps(command)}\n",
+        encoding="utf-8",
+    )
+
+
+def _build_index_with_a_plane(workspace: Path) -> None:
+    """The index `xbrain index build --embeddings` would leave, embedded by a hash fake.
+
+    Built through the CLI's OWN loaders (`_index_inputs`, `_index_options`), so the manifest it
+    seals is the one the query door compares against — not a second description of it.
+    """
+    import math
+
+    from xbrain import cli
+    from xbrain.config import load_config
+    from xbrain.knowledge import index_build
+    from xbrain.knowledge.vector_index import VectorSpec
+
+    def embed(texts):  # noqa: ANN001, ANN202 - the `Embedder` shape
+        vectors = []
+        for text in texts:
+            angle = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+            vectors.append((math.cos(angle * 2 * math.pi), math.sin(angle * 2 * math.pi)))
+        return vectors
+
+    cfg = load_config(workspace)
+    spec = VectorSpec(
+        model="fake-model", dimension=2, normalized=True, query_prefix="", passage_prefix=""
+    )
+    index_build.build(
+        cfg.index_dir,
+        cli._index_inputs(cfg),
+        options=cli._index_options(cfg),
+        vectors=index_build.VectorBuild(spec=spec, embed=embed),
+    )
+
+
+def _vector_matches(payload: dict) -> list[dict]:
+    return [
+        match
+        for result in payload["results"]
+        for match in result["matches"]
+        if "vector" in match["matched_by"] or match["vector_rank"] is not None
+    ]
+
+
+def test_search_hybrid_without_an_embeddings_section_is_lexical_and_says_so(
+    workspace: Path,
+) -> None:
+    """Criterion §13.2 through the command: no `[embeddings]` at all, and everything still works.
+
+    Before 03.6 the command never bound an embedder, so the answer said `hybrid_not_implemented`
+    — a false statement about the build that no setting could ever make true.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+
+    payload = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "hybrid", "--json"])
+    )
+
+    assert payload["strategy"] == "lexical"
+    assert "embeddings_not_configured" in payload["index"]["degraded"]
+    assert "hybrid_not_implemented" not in payload["index"]["degraded"]
+    assert payload["results"], "lexical stays operational"
+    assert not _vector_matches(payload)
+
+
+def test_search_vector_without_vectors_is_an_error_and_prints_no_response(
+    workspace: Path,
+) -> None:
+    """Criterion §13.3: `--strategy vector` was ASKED for; answering lexically would hide it."""
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+
+    result = runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "vector", "--json"])
+
+    assert result.exit_code == 1, result.output
+    assert result.stdout == "", "an error must not also print a response a consumer could parse"
+    assert "xbrain index build --embeddings" in result.output
+
+
+def test_search_hybrid_with_the_embedder_binary_missing_is_lexical_and_declares_it(
+    workspace: Path,
+) -> None:
+    """Criterion §13.4 end to end: a configured command whose binary is gone, a plane on disk.
+
+    The command binds the REAL adapter, the REAL subprocess boundary refuses to start, and the
+    response is `lexical` with `embedder_unavailable` and not one `vector` in any `matched_by`.
+    """
+    _configure_embeddings(workspace, str(workspace / "bin" / "xbrain-embed-gone"))
+    _build_index_with_a_plane(workspace)
+
+    payload = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "hybrid", "--json"])
+    )
+
+    assert payload["strategy"] == "lexical"
+    assert payload["index"]["degraded"] == ["embedder_unavailable"]
+    assert payload["results"]
+    assert not _vector_matches(payload)
+
+
+@pytest.mark.parametrize("strategy", ["vector", "hybrid"])
+def test_search_needing_vectors_without_the_extra_names_the_install_command(
+    workspace: Path, monkeypatch, strategy: str
+) -> None:
+    """Criterion §13.12, second half: never a raw `ImportError`, always the one install command.
+
+    The plane is on disk and the command is configured, so the ONLY thing missing is `numpy` —
+    blocked in `sys.modules`, which makes its import raise exactly as an absent package does.
+    """
+    import sys
+
+    _configure_embeddings(workspace, str(workspace / "bin" / "xbrain-embed"))
+    _build_index_with_a_plane(workspace)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+    result = runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", strategy, "--json"])
+
+    assert result.exit_code == 1, result.output
+    assert "uv pip install 'xbrain[embeddings]'" in result.output
+    assert not isinstance(result.exception, ImportError)
+    assert "Traceback" not in result.output
+
+
+def _manifest_exists(workspace: Path) -> bool:
+    from xbrain.config import load_config
+    from xbrain.knowledge.index_build import manifest_path
+
+    return manifest_path(load_config(workspace).index_dir).exists()
+
+
+def test_index_build_embeddings_without_a_command_names_the_setting_and_builds_nothing(
+    workspace: Path,
+) -> None:
+    """`--embeddings` with no `[embeddings].command`: a refusal naming the setting, not a lexical
+    index quietly sealed under a flag that asked for vectors."""
+    result = runner.invoke(app, ["index", "build", "--embeddings"])
+
+    assert result.exit_code == 1, result.output
+    assert "[embeddings].command" in result.output
+    assert not _manifest_exists(workspace)
+
+
+@pytest.mark.parametrize("executable", [False, None])
+def test_index_build_embeddings_with_the_binary_absent_is_embedder_not_found(
+    workspace: Path, executable: bool | None
+) -> None:
+    """Plan 03 §5, row 2, through the command: missing (`None`) or not executable (`False`).
+
+    The REAL subprocess boundary refuses to start the process; the command exits 1 naming the
+    setting to fix, and no manifest is sealed that a query door could trust.
+    """
+    binary = workspace / "bin" / "xbrain-embed"
+    if executable is not None:
+        binary.parent.mkdir()
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o644)
+    _configure_embeddings(workspace, str(binary))
+
+    result = runner.invoke(app, ["index", "build", "--embeddings"])
+
+    assert result.exit_code == 1, result.output
+    assert "[embeddings].command" in result.output
+    assert "Traceback" not in result.output
+    assert not _manifest_exists(workspace)

@@ -166,6 +166,17 @@ command = "parakeet-mlx"
 # shipping one would be choosing the embedding model without evaluating it, and the
 # model is chosen by the golden set.
 #
+# With it set, `xbrain index build --embeddings` writes the vector plane (add `--force`
+# over an existing index) and `xbrain search --strategy hybrid|vector` uses it. When a
+# piece is missing, no answer pretends the vector channel ran (Plan 03 §5):
+#   no `command`                  → `hybrid` answers lexical, degraded `embeddings_not_configured`
+#   binary missing / failing      → `hybrid` answers lexical, degraded `embedder_unavailable`
+#   `--strategy vector` without a plane, a command or a working backend → an ERROR, never
+#                                   a lexical answer: you asked for vectors by name
+#   a query vector of another dimension than the manifest's → an ERROR (models never mix)
+#   the `[embeddings]` extra not installed → an ERROR naming
+#                                   `uv pip install 'xbrain[embeddings]'`
+#
 # The bundled `scripts/xbrain-embed` is the reference backend (sentence-transformers,
 # local, nothing leaves the machine). Install its dependency separately — it is
 # deliberately not in pyproject.toml:

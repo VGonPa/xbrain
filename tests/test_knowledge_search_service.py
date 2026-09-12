@@ -316,13 +316,24 @@ def test_a_strategy_with_no_backend_is_answered_lexically_and_says_so(
 
     Seen red before the fix: `strategy` came back `'vector'` and `'hybrid'`, and no
     `*_not_implemented` flag existed at all.
+
+    PLAN 03.6 NARROWED THE POPULATION, it did not relax the rule. `vector` and `hybrid` have a
+    backend since 03.5, so calling them `_not_implemented` became the false statement: `hybrid`
+    now names the CAUSE (`embeddings_not_configured` here — no embedder in this context) and
+    `vector`, asked for by name, is an error (`tests/test_knowledge_degradation.py`, row 6).
+    `hybrid_graph` is the declared strategy that still has no backend.
     """
     monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
-    for requested in ("vector", "hybrid", "hybrid_graph"):
-        response = search("Quillfeather", context, strategy=requested)
-        assert response.strategy == "lexical", requested
-        assert f"{requested}_not_implemented" in response.index.degraded, requested
-        assert response.results, "lexical stays operational — the spec's first clause"
+    response = search("Quillfeather", context, strategy="hybrid_graph")
+    assert response.strategy == "lexical"
+    assert "hybrid_graph_not_implemented" in response.index.degraded
+    assert response.results, "lexical stays operational — the spec's first clause"
+
+    hybrid = search("Quillfeather", context, strategy="hybrid")
+    assert hybrid.strategy == "lexical"
+    assert "embeddings_not_configured" in hybrid.index.degraded
+    assert "hybrid_not_implemented" not in hybrid.index.degraded
+    assert hybrid.results
 
 
 def test_the_implemented_strategy_is_declared_without_a_degradation(
@@ -1521,11 +1532,15 @@ def test_the_requested_strategy_that_did_not_run_leads_the_degradation_tuple(
     and putting it first keeps the envelope deterministic without a set operation.
 
     Seen red with `self.degraded + strategy_degradation`: the index's own flag leads.
+
+    Since Plan 03.6 the flag that leads is the CAUSE the request did not run —
+    `embeddings_not_configured`, this context has no embedder — no longer
+    `hybrid_not_implemented`, which stopped being true when 03.5 gave `hybrid` a backend.
     """
     degraded = search("Quillfeather", context, strategy="hybrid").index.degraded
 
-    assert degraded[0] == "hybrid_not_implemented", degraded
-    assert degraded == ("hybrid_not_implemented", "no_embeddings")
+    assert degraded[0] == "embeddings_not_configured", degraded
+    assert degraded == ("embeddings_not_configured", "no_embeddings")
 
 
 def test_a_primary_match_names_ITSELF_not_every_primary_surface_the_item_has(
