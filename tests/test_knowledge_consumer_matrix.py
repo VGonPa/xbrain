@@ -15,10 +15,10 @@ THREE POPULATIONS, THREE TOTALITY ASSERTIONS:
    mapping is what `get_service` uses to answer "what surfaces does this failed fetch
    explain?".
 
-3. The CONSUMERS — `search_service`, `get_service`, and `evaluation` all read provenance
-   from `SURFACE_ORIGIN` and `ORIGIN_TRUST`, never from a hand-written list. The
-   verification here is not that they use the right values (the existing tests cover that)
-   but that they USE THE SHARED CONSTANTS AT ALL, by identity.
+3. The CONSUMERS — `search_service` and `get_service` read provenance from
+   `SURFACE_ORIGIN` and `ORIGIN_TRUST`, never from a hand-written list. The totality
+   assertions here guarantee that adding a new `SurfaceType` or `ContentKind` without
+   wiring it into those maps raises immediately, not at query time.
 
 WHAT IS NOT TESTED HERE: the generator/judge/checker contract (`test_evidence_contract.py`
 already covers that) and the per-model text-field classification
@@ -96,19 +96,29 @@ def test_every_surface_type_is_classified_by_the_chunker() -> None:
 
 
 def test_content_kind_to_surface_mapping_covers_all_kinds() -> None:
-    """Every ContentKind is in CONTENT_KIND_TO_SURFACE_TYPES.
+    """Every ContentKind is in CONTENT_KIND_TO_SURFACE_TYPES with a non-empty value.
 
     `get_service._failed_surface_types` uses this mapping to answer "which surface types
     does this failed fetch explain?" — a kind missing from the map would make `get` unable
     to tell the caller that a requested surface failed to fetch rather than not existing.
+    A kind mapped to an empty tuple would explain zero surfaces, which is semantically
+    wrong: the content exists but produces nothing.
 
-    Seen red by adding a ContentKind without mapping it to its surface(s).
+    Seen red by adding a ContentKind without mapping it to its surface(s), or by mapping
+    it to an empty tuple.
     """
     assert set(get_args(ContentKind)) == set(CONTENT_KIND_TO_SURFACE_TYPES), (
         f"ContentKind / CONTENT_KIND_TO_SURFACE_TYPES mismatch: "
         f"missing from map: {set(get_args(ContentKind)) - set(CONTENT_KIND_TO_SURFACE_TYPES)}, "
         f"extra in map: {set(CONTENT_KIND_TO_SURFACE_TYPES) - set(get_args(ContentKind))}"
     )
+
+    # Every kind must produce at least one surface — an empty tuple is semantically wrong
+    for kind, surface_types in CONTENT_KIND_TO_SURFACE_TYPES.items():
+        assert surface_types, (
+            f"CONTENT_KIND_TO_SURFACE_TYPES[{kind!r}] is empty — every kind must produce "
+            "at least one surface type"
+        )
 
 
 def test_every_mapped_surface_type_is_real() -> None:
