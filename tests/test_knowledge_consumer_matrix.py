@@ -18,8 +18,10 @@ THREE POPULATIONS, THREE TOTALITY ASSERTIONS:
 3. The CONSUMERS read each map from ONE place. Sections 1-2 never open a consumer, so
    section 5 asserts this separately by AST. Measured before it existed: pointing
    `_verify_with` at a private byte-exact copy of `SURFACE_ORIGIN` left ruff and all 2694
-   tests green. It asserts INCLUSION only — that a consumer reads nothing ELSE is not
-   tested, so "touches neither provenance map" is a description, not a guarantee.
+   tests green. Two assertions: the map name is loaded, and it is not REBOUND locally (a
+   rebind keeps the load, so one without the other passes a private copy). Both are about
+   the required names only — that a consumer reads nothing ELSE is not tested, so "touches
+   neither provenance map" is a description, not a guarantee.
 
 WHAT IS NOT TESTED HERE: the generator/judge/checker contract (`test_evidence_contract.py`
 already covers that) and the per-model text-field classification
@@ -209,8 +211,9 @@ def test_every_surface_is_produced_by_a_content_kind_or_declared_non_content() -
 #
 # Sections 1-4 never open a consumer, so all six stay green when one reads a private copy.
 # Function-scoped because ruff F401 already covers a copy that leaves an import unused, and
-# goes quiet when a second reader keeps it live (F811 likewise covers a module-scope shadow,
-# so that case is left to ruff). AST and not grep because `_select`'s docstring names
+# goes quiet when a second reader keeps it live. A MODULE-scope shadow is left to ruff's F811;
+# a FUNCTION-local one is not, because it is in a different scope and F811 never sees it — that
+# is the second assertion. AST and not grep because `_select`'s docstring names
 # `CONTENT_KIND_TO_SURFACE_TYPES` while `_failed_surface_types` is the reader — a text
 # search is satisfied by prose (rule 1).
 
@@ -232,6 +235,32 @@ CANONICAL_DEFINITION = {
 }
 
 
+def _locally_bound(fn: ast.FunctionDef) -> set[str]:
+    """The names the function BINDS by store (assignment, walrus, loop/with target), by
+    parameter, or by a function-local import.
+
+    A local rebind KEEPS the Load the check above looks for, and the two ruff rules that
+    comment defers to are blind to it BY CONSTRUCTION, not by oversight: F811 compares
+    bindings within ONE scope, and a function local is a different scope from the module
+    import; F401 stays quiet because a second consumer keeps that import live. Measured on
+    this tree with `_verify_with` reading a private `dict(...)` copy of `SURFACE_ORIGIN`:
+    ruff `All checks passed`, suite `2696 passed, 1 xfailed`.
+
+    Only these three forms are collected, and each was seen red before this was written. The
+    remaining binders — `except ... as NAME`, a nested `def`/`class` NAME — are not collected,
+    so a shadow spelled that way is a known gap, not a covered case.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.alias):  # reachable only from a function-local import
+            bound.add(node.asname or node.name.split(".")[0])
+    return bound
+
+
 def test_the_consumer_table_is_not_empty() -> None:
     """An empty table would pass by iterating nothing (rule 1)."""
     assert CONSUMER_MAP_READS and all(names for _, _, names in CONSUMER_MAP_READS)
@@ -239,6 +268,9 @@ def test_the_consumer_table_is_not_empty() -> None:
 
 def test_each_consumer_function_reads_the_shared_maps() -> None:
     """Each named function loads each required map, imported from the module defining it.
+
+    A name that is loaded but locally REBOUND is a copy wearing the shared map's name, so
+    the second assertion refuses any local binding of a required name.
 
     Seen red by a private copy of `SURFACE_ORIGIN` in `_verify_with`, an inline dict in
     `_failed_surface_types`, `_hydrate` dropping its lookup, and a consumer renamed so its
@@ -258,6 +290,11 @@ def test_each_consumer_function_reads_the_shared_maps() -> None:
             f"{module.__name__}.{function} no longer reads "
             f"{', '.join(sorted(set(required) - loaded))} — it has grown a second "
             "definition that will drift from the shared map (rule 5)"
+        )
+        shadowed = set(required) & _locally_bound(fn)
+        assert not shadowed, (
+            f"{module.__name__}.{function} REBINDS {', '.join(sorted(shadowed))} locally — "
+            "the load above then reads a private copy, not the shared map (rule 5)"
         )
         imported = {
             alias.asname or alias.name: imp.module or ""
