@@ -50,12 +50,14 @@ froze on purpose.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, fragment_locator
 from xbrain.knowledge.contracts import (
+    FALLBACK_STRATEGY,
+    Channel,
     SearchFilters,
     SearchMatch,
     SearchResponse,
@@ -63,6 +65,8 @@ from xbrain.knowledge.contracts import (
     Strategy,
     resolve_strategy,
 )
+from xbrain.knowledge.fusion import FusedChunk, fuse
+from xbrain.knowledge.index_build import manifest_spec
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.index_store import (
     OpenIndex,
@@ -70,7 +74,12 @@ from xbrain.knowledge.index_store import (
     resolvable_hits,
     verify_fingerprints,
 )
-from xbrain.knowledge.lexical import LexicalHit, OwnerKey, distinct_owners
+from xbrain.knowledge.lexical import (
+    OWNER_CHUNK_MULTIPLIER,
+    LexicalHit,
+    OwnerKey,
+    distinct_owners,
+)
 from xbrain.knowledge.models import DerivedText, SurfaceType
 from xbrain.knowledge.provenance import DEFAULT_EVIDENCE_CLASSES, ORIGIN_TRUST
 from xbrain.knowledge.surfaces import (
@@ -79,7 +88,20 @@ from xbrain.knowledge.surfaces import (
     item_topics,
     knowledge_item,
 )
+from xbrain.knowledge.vector_index import VectorPlane, load_vector_plane
 from xbrain.models import Item, Topic, TopicPage
+
+# The strategies that need the vector channel. `hybrid_graph` is Plan 04's and keeps degrading.
+_VECTOR_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid"})
+
+# Declared when a vector strategy is asked for WITH filters. The plane has no filter columns,
+# and a filter applied after scoring is not a filter (`VectorPlane.search`), so the vector
+# channel does not run rather than serve unfiltered geometry under a filtered request.
+VECTOR_FILTERS_UNSUPPORTED = "vector_filters_unsupported"
+
+# A search bucket: an item id, its chunk hits in rank order, and — on a fused strategy — the
+# explanation of each hit keyed by `chunk_id` (empty on `lexical`, where the channel is implied).
+_Settled = tuple[str, list[LexicalHit], Mapping[str, FusedChunk]]
 
 # The search cursor is an OFFSET into the ranking (M-4, round 08): `s:<offset>`. The other
 # two cursor shapes in this package (`get`'s positional `<surface>:<chunk>` and `q:<offset>`)
@@ -149,6 +171,23 @@ class QueryContext:
     language: str = "English"
     max_matches_per_item: int = 3
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
+    # How a query becomes a vector (Plan 03 §4). The adapter binds `embeddings.embed_query` with
+    # the configured command and the MANIFEST's prefix; `None` means no embedder is configured,
+    # and a vector strategy then degrades to `lexical` instead of pretending (spec §9.3).
+    embed_query: Callable[[str], Sequence[float]] | None = None
+
+
+@dataclass(frozen=True)
+class _VectorChannel:
+    """The vector channel of ONE query, proved runnable: a loaded plane and the query's vector.
+
+    `lexical` says whether the lexical channel is fused in beside it — `hybrid` — or not —
+    `vector`, which serves only what the geometry found (spec §5.7: separable strategies).
+    """
+
+    plane: VectorPlane
+    vector: tuple[float, ...]
+    lexical: bool
 
 
 def search(
@@ -199,19 +238,36 @@ def search(
         context.topics_path,
         params=context.params,
     )
+    channel: _VectorChannel | None = None
     try:
+        executed, strategy_degradation, channel = _resolve_channel(
+            query, strategy, filters, index, context, (executed, strategy_degradation)
+        )
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
-        ordered, excluded, exhausted = _materialise(index, query, filters, context, needed=beyond)
+        if channel is None:
+            ordered, excluded, exhausted = _materialise(
+                index, query, filters, context, needed=beyond
+            )
+        else:
+            ordered, excluded, exhausted = _materialise_fused(
+                index, channel, query, context, needed=beyond
+            )
         _refuse_cursor_past_the_ranking(cursor, offset, len(ordered))
-        page, evidence_excluded = _settle_evidence(
-            index, query, filters, context, ordered[offset : offset + limit]
-        )
+        window = ordered[offset : offset + limit]
+        page: list[_Settled]
+        if channel is None:
+            lexical_page, evidence_excluded = _settle_evidence(
+                index, query, filters, context, window
+            )
+            page = [(item_id, hits, {}) for item_id, hits in lexical_page]
+        else:
+            page, evidence_excluded = _settle_fused(index, channel, query, context, window)
         excluded |= evidence_excluded
         corrupt_chunks_excluded = len(excluded)
         results = tuple(
-            _hydrate(rank, item_id, matches, context)
-            for rank, (item_id, matches) in enumerate(page, start=offset + 1)
+            _hydrate(rank, item_id, matches, context, explanations)
+            for rank, (item_id, matches, explanations) in enumerate(page, start=offset + 1)
         )
         truncated = len(ordered) > offset + limit or exhausted
         return SearchResponse(
@@ -227,7 +283,47 @@ def search(
             cursor=_encode_search_cursor(offset + limit) if len(ordered) > offset + limit else None,
         )
     finally:
+        if channel is not None:
+            channel.plane.close()
         index.close()
+
+
+def _resolve_channel(
+    query: str,
+    requested: Strategy,
+    filters: SearchFilters,
+    index: OpenIndex,
+    context: QueryContext,
+    lexical_resolution: tuple[Strategy, tuple[str, ...]],
+) -> tuple[Strategy, tuple[str, ...], _VectorChannel | None]:
+    """The strategy that RUNS, its degradation, and the vector channel when it can run.
+
+    THE LINE THAT IS NOT CROSSED (Plan 03 §5, spec §9.3): the response names `vector` or
+    `hybrid` only when this returns a channel — a plane the manifest declares, loaded under the
+    manifest's own spec, and a query vector already in hand. Anything short of that keeps
+    `resolve_strategy`'s answer: `lexical`, with the degradation declared.
+
+    The embedder is called LAST, after every reason not to run has been ruled out: a subprocess
+    spent on a query that cannot be scored is a cost with nothing to show for it.
+
+    A plane the manifest declares and the disk cannot serve is REFUSED by `load_vector_plane`
+    rather than degraded: that is an index problem with an actionable rebuild, not a missing
+    backend, and answering it lexically would hide it (Plan 03 §5, «no se consulta a medias»).
+    """
+    if requested not in _VECTOR_STRATEGIES:
+        return (*lexical_resolution, None)
+    spec = manifest_spec(index.manifest)
+    if spec is None or context.embed_query is None:
+        return (*lexical_resolution, None)
+    if filters != SearchFilters():
+        return FALLBACK_STRATEGY, (VECTOR_FILTERS_UNSUPPORTED,), None
+    plane = load_vector_plane(context.index_dir, expected=spec)
+    try:
+        vector = tuple(float(value) for value in context.embed_query(query))
+    except BaseException:
+        plane.close()
+        raise
+    return requested, (), _VectorChannel(plane=plane, vector=vector, lexical=requested == "hybrid")
 
 
 def _refuse_cursor_past_the_ranking(cursor: str | None, offset: int, available: int) -> None:
@@ -570,6 +666,209 @@ def _fill_from_profiles(
         depth *= 2
 
 
+# ---------------------------------------------------------------------------
+# 2b — the fused strategies (Plan 03 §4): `vector` and `hybrid`
+# ---------------------------------------------------------------------------
+
+
+def _materialise_fused(
+    index: OpenIndex,
+    channel: _VectorChannel,
+    query: str,
+    context: QueryContext,
+    *,
+    needed: int,
+) -> tuple[list[tuple[str, list[LexicalHit]]], set[str], bool]:
+    """The owner ranking of a fused strategy — `(ordered, excluded, exhausted)`, like `_materialise`.
+
+    Each channel ranks chunks it has VERIFIED (a vector hit is hydrated through the lexical
+    plane's `chunks` row and must pass the same `resolvable_hits` + `verify_fingerprints` gate
+    as a lexical one — the vector plane stores no owner, locator or text of its own), the
+    rankings are fused by RRF, and the fused chunk order is grouped by item exactly as the
+    lexical path groups bm25's.
+
+    Both windows deepen until the ranking can serve `needed` owners or neither channel can grow.
+    `hybrid` then tops up from the profile plane, after the fused chunk owners — the same
+    declared ordering `_fill_from_profiles` keeps for `lexical` (Plan 03 §4.3); `vector` does
+    not, because a bm25 profile candidate is not something the vector channel found.
+
+    DECLARED LIMIT: RRF over a deeper window can re-order the head (a chunk a deeper window
+    adds to the second channel gains score), so for a fused strategy a cursor is an offset into
+    the ranking materialised for THAT page, not a position proven stable across pages as it is
+    for `lexical`.
+    """
+    depth = needed
+    while True:
+        if channel.lexical:
+            lexical, lexical_excluded, exhausted, lexical_done = _lexical_window(
+                index, query, depth
+            )
+        else:
+            lexical, lexical_excluded, exhausted, lexical_done = (), set(), False, True
+        vector, vector_excluded, vector_done = _vector_window(
+            index, channel, depth * OWNER_CHUNK_MULTIPLIER
+        )
+        fused = _fuse_hits(channel, lexical, vector)
+        grouped = _group_by_item([hit for hit, _ in fused], context, limit=needed)
+        if len(grouped) >= needed or (lexical_done and vector_done):
+            break
+        depth *= 2
+    if channel.lexical:
+        _fill_from_profiles(index, query, SearchFilters(), context, grouped, needed=needed)
+    return list(grouped.items()), lexical_excluded | vector_excluded, exhausted
+
+
+def _lexical_window(
+    index: OpenIndex, query: str, depth: int
+) -> tuple[tuple[LexicalHit, ...], set[str], bool, bool]:
+    """`(verified hits, excluded ids, exhausted, saturated)` of the lexical channel at `depth`."""
+    candidates, exhausted = index.lexical.search_owners(query, depth)
+    hits, _ = resolvable_hits(candidates)
+    hits, _ = verify_fingerprints(hits)
+    excluded = {hit.chunk_id for hit in candidates} - {hit.chunk_id for hit in hits}
+    return hits, excluded, exhausted, exhausted or distinct_owners(candidates) < depth
+
+
+def _vector_window(
+    index: OpenIndex,
+    channel: _VectorChannel,
+    limit: int,
+    allowed: Collection[str] | None = None,
+) -> tuple[tuple[LexicalHit, ...], set[str], bool]:
+    """`(verified hits, excluded ids, saturated)` of the vector channel's top `limit`.
+
+    A vector hit whose `chunk_id` the lexical plane does not hold is skipped, not counted: the
+    two planes may legitimately disagree about a chunk (`index update` leaves the vector plane
+    behind, and `index status` declares it), and a query is not where that gets adjudicated.
+    A hit the lexical plane holds and cannot serve honestly is excluded AND counted, like any
+    other `corrupt_chunks_excluded` row.
+    """
+    scored = channel.plane.search(channel.vector, limit, allowed_chunk_ids=allowed)
+    fetched = [
+        hit
+        for hit in (index.lexical.fetch_chunk(scored_hit.chunk_id) for scored_hit in scored)
+        if hit is not None
+    ]
+    kept, _ = resolvable_hits(fetched)
+    kept, _ = verify_fingerprints(kept)
+    excluded = {hit.chunk_id for hit in fetched} - {hit.chunk_id for hit in kept}
+    return kept, excluded, len(scored) < limit
+
+
+def _fuse_hits(
+    channel: _VectorChannel,
+    lexical: Sequence[LexicalHit],
+    vector: Sequence[LexicalHit],
+) -> list[tuple[LexicalHit, FusedChunk]]:
+    """RRF over the two verified rankings, each hit paired with its explanation, best first."""
+    rankings: dict[Channel, list[str]] = {"vector": [hit.chunk_id for hit in vector]}
+    if channel.lexical:
+        rankings["lexical"] = [hit.chunk_id for hit in lexical]
+    by_id = {hit.chunk_id: hit for hit in (*lexical, *vector)}
+    return [(by_id[fused.chunk_id], fused) for fused in fuse(rankings)]
+
+
+def _settle_fused(
+    index: OpenIndex,
+    channel: _VectorChannel,
+    query: str,
+    context: QueryContext,
+    page: list[tuple[str, list[LexicalHit]]],
+) -> tuple[list[_Settled], set[str]]:
+    """`_settle_evidence` for a fused strategy: each SERVED item's matches, re-derived per item.
+
+    Same two rules, so the evidence does not depend on the page size: the owner universe comes
+    from the STORE (`item_topics`), and the item's OWN chunks fill the slots before its topics'.
+    Each channel is asked for the item's best `cap` chunks — lexically through `_verified_top`,
+    geometrically with the plane narrowed to the item's own chunk ids BEFORE scoring — and the
+    two are fused. A rank in the explanation is therefore the chunk's position in its channel's
+    ranking OF THIS ITEM, the same scope `lexical_rank` has always had on the lexical path.
+
+    A profile-only candidate keeps its empty bucket: no channel selected a chunk of it, and
+    giving it one here would invent a citation (Plan 03 §4.3, `matches: []`).
+    """
+    cap = context.max_matches_per_item
+    settled: list[_Settled] = []
+    excluded: set[str] = set()
+    for item_id, hits in page:
+        if not hits:
+            settled.append((item_id, hits, {}))
+            continue
+        slugs = tuple(item_topics(context.store[item_id])) if item_id in context.store else ()
+        topics: tuple[OwnerKey, ...] = tuple(("topic", slug) for slug in slugs)
+        chosen = _fused_evidence(index, channel, query, (("item", item_id),), topics, cap, excluded)
+        settled.append(
+            (item_id, [hit for hit, _ in chosen], {hit.chunk_id: fused for hit, fused in chosen})
+        )
+    return settled, excluded
+
+
+def _fused_evidence(
+    index: OpenIndex,
+    channel: _VectorChannel,
+    query: str,
+    own: tuple[OwnerKey, ...],
+    topics: tuple[OwnerKey, ...],
+    cap: int,
+    excluded: set[str],
+) -> list[tuple[LexicalHit, FusedChunk]]:
+    """The best `cap` fused chunks of one item: its own first, its topics' only to fill.
+
+    Each channel's ranking is the item's own chunks followed by its topics' — one ranking per
+    channel, so a topic chunk's rank continues after the item's rather than restarting at 1 —
+    and after fusion the item's own chunks are placed first, because a topic note is
+    synthesized prose about a GROUP and the item's own evidence is what a reader can check.
+    """
+    none = SearchFilters()
+    lexical = _verified_top(index, query, none, own, cap, excluded) if channel.lexical else []
+    vector = _vector_top(index, channel, own, cap, excluded)
+    own_ids = {hit.chunk_id for hit in (*lexical, *vector)}
+    if len(own_ids) < cap and topics:
+        remaining = cap - len(own_ids)
+        if channel.lexical:
+            lexical += _verified_top(index, query, none, topics, remaining, excluded)
+        vector += _vector_top(index, channel, topics, remaining, excluded)
+    fused = _fuse_hits(channel, lexical, vector)
+    fused.sort(key=lambda pair: pair[0].chunk_id not in own_ids)
+    return fused[:cap]
+
+
+def _vector_top(
+    index: OpenIndex,
+    channel: _VectorChannel,
+    owners: tuple[OwnerKey, ...],
+    wanted: int,
+    excluded: set[str],
+) -> list[LexicalHit]:
+    """The best `wanted` VERIFIED vector chunks of `owners` — `_verified_top`'s vector twin.
+
+    Exclusion costs the row, never the slot: the window doubles until `wanted` survive or the
+    owners' chunks run out, for the reason `_verified_top` documents.
+    """
+    allowed = _owner_chunk_ids(index, owners)
+    if not allowed or wanted <= 0:
+        return []
+    depth = wanted
+    while True:
+        kept, rejected, saturated = _vector_window(index, channel, depth, allowed)
+        excluded |= rejected
+        if len(kept) >= wanted or saturated:
+            return list(kept[:wanted])
+        depth *= 2
+
+
+def _owner_chunk_ids(index: OpenIndex, owners: tuple[OwnerKey, ...]) -> frozenset[str]:
+    """Every chunk id the lexical plane holds for these owners — by the PAIR, never the id alone."""
+    ids: set[str] = set()
+    for owner_type, owner_id in owners:
+        rows = index.lexical.connection.execute(
+            "SELECT chunk_id FROM chunks WHERE owner_type = ? AND owner_id = ?",
+            (owner_type, owner_id),
+        )
+        ids.update(str(row[0]) for row in rows)
+    return frozenset(ids)
+
+
 def _encode_search_cursor(offset: int) -> str:
     """The cursor of the page starting at `offset` in the ranking. Opaque to the caller."""
     return f"{_SEARCH_CURSOR_PREFIX}:{offset}"
@@ -729,7 +1028,11 @@ def _append_profile_candidates(
 
 
 def _hydrate(
-    rank: int, item_id: str, hits: Sequence[LexicalHit], context: QueryContext
+    rank: int,
+    item_id: str,
+    hits: Sequence[LexicalHit],
+    context: QueryContext,
+    explanations: Mapping[str, FusedChunk] | None = None,
 ) -> SearchResult:
     """One item's result: metadata, labelled context, matches, and what to ask `get` for.
 
@@ -747,7 +1050,11 @@ def _hydrate(
             origin=SURFACE_ORIGIN["summary"],
             verification_status=(verdicts["summary"].verdict if "summary" in verdicts else None),
         )
-    matches = tuple(_match(position, hit) for position, hit in enumerate(hits, start=1))
+    explained = explanations or {}
+    matches = tuple(
+        _match(position, hit, explained.get(hit.chunk_id))
+        for position, hit in enumerate(hits, start=1)
+    )
     return SearchResult(
         rank=rank,
         item_id=item.id,
@@ -762,8 +1069,14 @@ def _hydrate(
     )
 
 
-def _match(position: int, hit: LexicalHit) -> SearchMatch:
+def _match(position: int, hit: LexicalHit, explanation: FusedChunk | None = None) -> SearchMatch:
     """One chunk, with WHY it matched and where it came from (spec §5.3).
+
+    ON A FUSED STRATEGY THE EXPLANATION IS THE FUSION'S (Plan 03 §4.2, criterion §13.7):
+    `matched_by`, `lexical_rank`, `vector_rank` and `score` come from `FusedChunk`, so a chunk
+    only the vector channel found carries `lexical_rank: null`, never a position invented for
+    it, and `score` is the RRF signal rather than bm25's. Without one, the lexical channel is
+    the only channel there is and `position` is its rank.
 
     `score` is bm25's, and bm25 is negative-is-better; it is carried unchanged and documented
     as a RANKING SIGNAL rather than a probability, which spec §5.3 requires — a fused rank
@@ -804,9 +1117,10 @@ def _match(position: int, hit: LexicalHit) -> SearchMatch:
         excerpt=hit.excerpt,
         title=hit.title,
         attribution=hit.attribution,
-        matched_by=("lexical",),
-        lexical_rank=position,
-        score=hit.score,
+        matched_by=("lexical",) if explanation is None else explanation.matched_by,
+        lexical_rank=position if explanation is None else explanation.lexical_rank,
+        vector_rank=None if explanation is None else explanation.vector_rank,
+        score=hit.score if explanation is None else explanation.score,
         locator=fragment_locator(hit.surface_locator, hit.char_start, hit.char_end),
     )
 
