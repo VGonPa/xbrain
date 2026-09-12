@@ -3317,6 +3317,102 @@ def get_command(
         typer.echo(render_get(bundle, surfaces=surface, query=query))
 
 
+def _run_sweep(
+    cfg,
+    cases,
+    corpus,
+    axes,
+    strategy: str,
+    report,
+    *,
+    json_out: bool,
+    limit: int,
+    ks: list[int],
+    min_recall: float | None,
+) -> None:
+    """`eval --sweep-chunker`: score every `(target, overlap)` and publish the table.
+
+    A SEPARATE PATH, not a flag threaded through `evaluate`, because the two answer different
+    questions: `eval` measures the retriever at the parameters in force, the sweep measures
+    the parameters. Folding them would make the ordinary report's numbers depend on whether a
+    sweep flag happened to be present.
+
+    The sweep changes `ChunkerParams` as an ARGUMENT and never the module constant, so
+    `tests/fixtures/knowledge_ranking.json` — which passes its own pinned parameters — cannot
+    be moved by it (M7).
+
+    EVERY OPTION THE COMMAND ACCEPTS EITHER REACHES THIS PATH OR IS REFUSED BY NAME — the class
+    of defect the final gate on #177 found three of here, one per option. A separate path that
+    silently drops the flags of the command it shares is the worst of both: the user reads the
+    command's help, the sweep obeys its own defaults, and the two never meet. `--limit` was
+    fixed as an instance (`--limit 10` and `--limit 150` were byte-identical) without closing
+    the class, so `--k` had it too, and `--min-recall` exited 0 having judged nothing.
+    """
+    from xbrain.knowledge.evaluation import (
+        DEFAULT_SWEEP_K,
+        parse_sweep,
+        render_sweep_markdown,
+        sweep_chunker as run_sweep,
+    )
+
+    # REFUSED, NOT IGNORED, and before anything is computed. The threshold judges the BUCKETS
+    # of one evaluation — stratum by stratum, provenance by provenance — and a sweep publishes
+    # a TABLE of chunker combinations, which has no bucket to compare it against. Applying it
+    # to the winner's overall recall would answer a question nobody asked with a green a reader
+    # would read as "every stratum clears the bar", and that misreading is worse than the
+    # missing feature. Accepting it in silence was the fail-open CLAUDE.md already records for
+    # this exact flag: «a threshold that reached no bucket is a FAILURE, not a pass».
+    if min_recall is not None:
+        raise ValueError(
+            "`--min-recall` no se aplica a `--sweep-chunker`: el umbral juzga los buckets de "
+            "UNA evaluación y el barrido publica una TABLA de combinaciones, así que no hay "
+            "bucket contra el que compararlo. Corre `xbrain eval --min-recall …` sin el "
+            "barrido para la puerta, y el barrido aparte para la tabla."
+        )
+    # `--k` is repeatable because the ordinary report carries a column per k; the sweep RANKS,
+    # and a ranking happens at one k. Choosing `max(ks)` would discard the rest in silence,
+    # which is the very defect this path is being repaired for.
+    if len(ks) > 1:
+        raise ValueError(
+            "`--sweep-chunker` ordena por un solo `recall@k` y recibió "
+            f"{len(ks)} valores de `--k` ({', '.join(str(value) for value in ks)}). "
+            "Elegir uno descartaría los demás en silencio: repite el barrido con un `--k` "
+            "por corrida."
+        )
+
+    grid = parse_sweep(axes)
+    # The depth the command advertises is the depth the sweep runs at: the first version
+    # dropped it here, and `--limit 10` and `--limit 150` were byte-identical.
+    result = run_sweep(
+        cases,
+        corpus,
+        grid,
+        strategy=strategy,
+        k=ks[0] if ks else DEFAULT_SWEEP_K,
+        limit=limit,
+    )
+    json_path = report or (cfg.data_dir / "eval-sweep.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_sweep_markdown(result), encoding="utf-8")
+    if json_out:
+        _echo_json(payload)
+    else:
+        typer.echo(render_sweep_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    # PUBLISHED FIRST, THEN FAILED. A sweep with no winner — nothing scorable, or no
+    # combination at all — is not a success, and it used to exit 0 while announcing «PLANO:
+    # todas las combinaciones puntúan igual», a positive claim about a ranking that never
+    # happened. The exit code is the surface a caller reads (rule 9); the table is still
+    # written and echoed, because the run failing is not a reason to withhold its evidence.
+    # The message is the report's OWN verdict, so stderr and the artefact say one thing.
+    if result.winner is None:
+        raise ValueError(payload["verdict"])
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
@@ -3324,19 +3420,29 @@ def eval_command(
     limit: int = typer.Option(
         10,
         "--limit",
-        help="Profundidad de recuperación por caso (nunca por debajo del mayor k).",
+        help="Profundidad de recuperación por caso, en OWNERS (nunca por debajo del mayor k).",
     ),
-    k: list[int] = typer.Option([], "--k", help="Valores de k a reportar (repetible)."),
+    k: list[int] = typer.Option(
+        [], "--k", help="Valores de k a reportar (repetible; el barrido admite uno solo)."
+    ),
     min_recall: float | None = typer.Option(
         None,
         "--min-recall",
-        help="Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa.",
+        help=(
+            "Umbral: si algún bucket queda por debajo, el comando falla. Sin él, solo informa. "
+            "No se combina con `--sweep-chunker`."
+        ),
     ),
     golden_set: Path = typer.Option(
         Path("eval/golden-set.yaml"), "--golden-set", help="Ruta del golden set."
     ),
     report: Path | None = typer.Option(
         None, "--report", help="Dónde escribir el informe (por defecto data/eval-report.json)."
+    ),
+    sweep_chunker: list[str] = typer.Option(
+        [],
+        "--sweep-chunker",
+        help="Barrido del troceo: `target=800,1200 overlap=0,150` (repetible o entrecomillado).",
     ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
@@ -3355,6 +3461,20 @@ def eval_command(
     cfg, corpus = _knowledge_corpus()
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)
+    if sweep_chunker:
+        _run_sweep(
+            cfg,
+            cases,
+            corpus,
+            sweep_chunker,
+            strategy,
+            report,
+            json_out=json_out,
+            limit=limit,
+            ks=k,
+            min_recall=min_recall,
+        )
+        return
     result = evaluate(
         cases,
         corpus,

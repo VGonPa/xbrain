@@ -280,9 +280,9 @@ No, and the distinction is the point. Three different things are NOT a score of 
 - **a stratum with no cases** (`expansion` has no mechanism until the graph exists);
 - **a surface with no data** (`thread` and `user_note` have zero instances in the corpus, so
   no case can be written and none is invented);
-- **a case whose filters the strategy cannot apply** — the lexical baseline has no date,
-  author, source or content-kind columns, so the two `filtros` cases are listed under *casos
-  NO medidos* with the filters that blocked them.
+- **a case whose filters the strategy cannot apply** — it is reported under *casos NO
+  medidos*, naming the filters that blocked it, because a zero there would blame retrieval
+  for an instrument that is not there.
 
 Reporting any of these as 0.0 would say retrieval failed where nobody asked it anything. If
 you want a gate, pass `--min-recall`. A bucket without coverage can never be NAMED as the one
@@ -290,6 +290,14 @@ that failed — that would be a verdict on a population nobody measured — but 
 vacuous either: it counts the `(bucket, metric)` comparisons it actually made, and if that
 count is **zero** it fails with *«el umbral … no se comparó contra nada»* instead of passing.
 A threshold of 1.0 used to exit 0 over a golden set the baseline could not score at all.
+
+**The third of those — a filter the strategy cannot push — has no live instance today.** The
+harness builds its baseline through the same writer `xbrain index build` drives, so `lexical`
+pushes all eight filters and both `filtros` cases are scored. It *used to* push only
+`has_surfaces` and `origins`, and those two cases *were* the unmeasured ones — read that as
+history, not as a current limit. The rule stays for Plan 03's vector strategy, which arrives
+with no filter columns of its own, so a case reported unmeasured again is naming a real gap.
+See [the filter question below](#xbrain-eval-reports-a-case-as-unmeasured-for-a-filter-that-search-applies).
 
 You will also see a **`vacíos`** column. It counts the cases in that bucket whose query
 retrieved **no chunk at all**, which is a different fault from "the right item ranked below
@@ -410,10 +418,16 @@ because answering a typo with lexical results would turn it into a measurement.
 
 ### `xbrain eval` reports a case as unmeasured for a filter that `search` applies
 
-Both are true. `xbrain search` pushes all eight filters into SQL; the evaluation
-harness measures the baseline retriever, which can push only `has_surfaces` and
-`origins`. A golden-set case declaring a date, author, source or content-kind
-filter is therefore **unmeasured** rather than scored — see
+**It no longer does, for the `lexical` strategy.** The harness used to walk the
+corpus its own way and write chunks with no metadata, so it could push only
+`has_surfaces` and `origins` and a case declaring a date, author, source or
+content-kind filter came back unmeasured. It now builds through the same writer
+`xbrain index build` drives, so it pushes the same eight filters `search` does.
+
+If you still see it, the case is declaring a filter that the strategy you asked
+for cannot push — which is the rule working, not a bug. **Unmeasured is never
+`0.0`**: a zero from a filter nobody applied reads as "retrieval failed at
+filtering" when the instrument was not there. See
 [the stratum question above](#eval-reports-a-stratum-as-sin-cobertura--is-that-a-failure).
 
 ### An index error prints a second, empty `Error:` line

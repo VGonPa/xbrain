@@ -56,22 +56,24 @@ EXCERPT_CHARS = 300
 # is the whole ranking, and there is nothing deeper to find — up to `MAX_CHUNK_DEPTH`.
 # Reaching the bound short of owners is DECLARED to the caller, never absorbed.
 #
-# ONE CONSUMER, NOT TWO, and the comment said two (round 10). It claimed a rule-5 binding to
-# the evaluation harness; `evaluation.py` contains neither `search_owners` nor `exhausted`,
-# its `_search` calls `InMemoryLexicalIndex.search(q, limit)`, and that class has exactly two
-# methods, `add` and `search`. So the only caller is `search_service._chunk_owners` (M-4,
-# round 08), which decides `truncated` over this window.
+# TWO CONSUMERS, AND THAT IS THE RULE-5 BINDING: `search_service._chunk_owners` (M-4, round
+# 08), which decides `truncated` over this window, and `evaluation._search`, which scores the
+# published baseline over the SAME window. One function, so what the harness measures at
+# depth N is what the service pages at depth N.
 #
-# The two therefore score DIFFERENT retrievals, which is the part worth knowing. Measured on
-# a 31-item corpus where one item monopolises the head of the chunk ranking:
+# THE BINDING WAS ABSENT FROM THIS TREE, and a round-10 comment here recorded the absence as
+# though it were the design: `evaluation.py` contained neither `search_owners` nor
+# `exhausted`, its `_search` called `LexicalIndex.search(q, limit)`, and the only caller was
+# the service. What that cost is measurable, on a 31-item corpus where one item monopolises
+# the head of the chunk ranking:
 #
-#     k= 5   harness search(q,k):  5 chunks /  1 owner    service:  20 chunks / 15 owners
-#     k=10   harness search(q,k): 10 chunks /  5 owners   service:  36 chunks / 31 owners
+#     k= 5   chunk-limited search(q,k):  5 chunks /  1 owner    owner window:  20 chunks / 15 owners
+#     k=10   chunk-limited search(q,k): 10 chunks /  5 owners   owner window:  36 chunks / 31 owners
 #
-# The published lexical baseline is a chunk-limited retrieval and the service pages by
-# owners, so a recall@k from the harness is not a statement about what `search` returns.
-# Whether to unify them is a Plan-02 §11 question and is NOT settled here; what is settled
-# is that the comment no longer asserts a binding that does not exist.
+# A `recall@5` of 1/1 owners and one of 15/15 are not the same measurement, so while the two
+# diverged a baseline figure was not a statement about what `search` returns. Unifying them
+# is what the evaluator-parity child restored; the numbers above are the size of the gap it
+# closed, kept here because they are the reason the binding is not optional.
 OWNER_CHUNK_MULTIPLIER = 4
 MAX_CHUNK_DEPTH = 10_000
 
@@ -409,8 +411,8 @@ class LexicalIndex:
         by owner sees a list that is prefix-consistent across depths: a deeper window only
         appends. `depth_exhausted` is True when `MAX_CHUNK_DEPTH` was reached with fewer
         owners than asked, and the service declares it as a truncation it cannot page — it
-        says so rather than guessing. (The harness was named here too and never called this
-        method; see the note on `OWNER_CHUNK_MULTIPLIER`.)
+        says so rather than guessing. The evaluation harness calls it too, for the same
+        window; see the note on `OWNER_CHUNK_MULTIPLIER`.
 
         THE FIRST WINDOW IS CAPPED TOO, AND IT WAS NOT. `MAX_CHUNK_DEPTH` bounded only the
         DOUBLING path, so `owners * OWNER_CHUNK_MULTIPLIER` could open larger than the bound on

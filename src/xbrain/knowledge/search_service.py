@@ -177,10 +177,10 @@ def search(
     cut a fifty-item ranking to two with `truncated: false` — the silent cut spec §9.3
     forbids, on a field that could not come out any other way (rule 2). Now the candidate
     window is materialised until it holds ONE OWNER MORE than the page needs
-    (`LexicalIndex.search_owners`, whose ONLY caller this is — the evaluation harness was
-    named here as a second consumer and never called it, and the two therefore score
-    different retrievals; see `lexical.OWNER_CHUNK_MULTIPLIER`), so `truncated` is a
-    measurement of the ranking against the
+    (`LexicalIndex.search_owners`, whose TWO consumers are this service and
+    `evaluation._search` — one function, so what the harness scores at depth N is what this
+    page serves at depth N; see `lexical.OWNER_CHUNK_MULTIPLIER`, where the loop and the
+    binding are documented), so `truncated` is a measurement of the ranking against the
     page; the cursor is the offset of the next page (`s:<offset>`), and the pages are
     disjoint and reassemble the ranking in order, because every window is a prefix of the
     same ranking and a topic hit expands to the same sorted members under any page. The

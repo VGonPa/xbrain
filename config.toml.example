@@ -127,26 +127,25 @@ command = "parakeet-mlx"
 # dedupe_distance  = 6        # max dHash Hamming distance to call two frames "same" (0-64)
 
 [index]
-# El índice persistente de conocimiento (`xbrain index build|update|status`,
-# `xbrain search`, `xbrain get`). Todo tiene default: la sección entera es
-# opcional y rara vez se toca.
+# The persisted knowledge index (`xbrain index build|update|status`, `xbrain search`,
+# `xbrain get`). Everything has a default: the whole section is optional and rarely
+# touched.
 #
-# `data/index/` es DERIVADO y reconstruible — nunca se versiona, y borrarlo solo
-# cuesta un `xbrain index build`. `xbrain get` no lo lee siquiera: sirve la
-# evidencia desde el store vivo, así que sigue funcionando con el índice borrado.
+# `data/index/` is DERIVED and rebuildable — never versioned, and deleting it costs
+# only an `xbrain index build`. `xbrain get` does not even read it: it serves evidence
+# from the live store, so it keeps working with the index deleted.
 #
 # dir = "index"
-#   Subdirectorio bajo `data/` donde viven la base SQLite y su manifest. Tiene que
-#   quedar DENTRO de `data/`: una ruta que se resuelva fuera (un `..`, una
-#   absoluta o un symlink) se rechaza al cargar la config, porque `index build
-#   --force` borra y recrea lo que encuentre ahí.
+#   Subdirectory under `data/` holding the SQLite base and its manifest. It has to
+#   stay INSIDE `data/`: a path that resolves outside it (a `..`, an absolute path or
+#   a symlink) is refused when the config loads, because `index build --force` deletes
+#   and recreates whatever it finds there.
 #
 # max_matches_per_item = 3
-#   Cuántos fragmentos de un mismo item puede citar `search` (spec §5.4). Es lo
-#   que impide que una transcripción larga llene el top diez con diez ventanas
-#   adyacentes de sí misma.
+#   How many fragments of one item `search` may cite (spec §5.4). This is what keeps a
+#   long transcript from filling the top ten with ten adjacent windows of itself.
 #
 # get_char_budget = 40000
-#   Techo de caracteres por respuesta de `xbrain get`. Por encima, la respuesta se
-#   trunca DECLARÁNDOLO y devuelve un cursor para continuar — nunca en silencio.
-#   ~40k es un artículo largo con sus metadatos: el caso común no pagina.
+#   Character ceiling per `xbrain get` response. Above it the response is truncated
+#   DECLARING SO and returns a cursor to continue — never silently. ~40k is a long
+#   article with its metadata: the common case does not paginate.
