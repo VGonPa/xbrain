@@ -111,19 +111,13 @@ known_first_party = ["xbrain"]
 # DEP002: the dev/CLI quality tools are invoked as commands by scripts/check.sh
 # and the poe tasks — they are never `import`ed, so deptry cannot see their use.
 #
-# `numpy` is here for a different reason, and the reason is the delivery shape, not the
-# dependency. This child declares the `[embeddings]` extra, regenerates the lock and
-# teaches CI to install it — deliberately WITHOUT the module that consumes it, so the
-# only change under `.github/` in the whole plan arrives as a diff a human can read in
-# one sitting. Measured on this tree with the extra declared and no consumer:
-#
-#     pyproject.toml: DEP002 'numpy' defined as a dependency but not used in the codebase
-#
-# which is deptry reporting the situation correctly. Silencing DEP002 for `numpy` is
-# therefore an ignore of a TRUE finding whose cause is sequencing, and it stops being
-# needed the moment the vector plane imports it (deptry reads imports inside function
-# bodies, so the deferred `import numpy` that keeps `import xbrain` working without the
-# extra is still an import deptry can see). Drop this entry in that PR.
+# `numpy` WAS here, and is not any more. 03.1 declared the `[embeddings]` extra with no
+# consumer yet, so deptry reported it correctly as declared-but-unused and the entry
+# silenced a TRUE finding whose cause was sequencing. `knowledge/vector_index.py` now
+# imports it, deferred inside `_numpy()` so `import xbrain` keeps working without the
+# extra — and deptry reads imports inside function bodies, so the finding is gone at its
+# source rather than suppressed. Verified on this tree: deptry is clean with the entry
+# removed, and reports DEP002 for `numpy` if the import is taken back out.
 DEP002 = [
     "poethepoet",
     "radon",
@@ -136,7 +130,6 @@ DEP002 = [
     "pytest",
     "pytest-cov",
     "ruff",
-    "numpy",
 ]
 # DEP001 + DEP003: scripts/import_chrome_session.py + import_safari_session.py
 # import browser-cookie3 behind a guarded `try/except ImportError` — it is a
