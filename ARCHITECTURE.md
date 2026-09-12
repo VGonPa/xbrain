@@ -747,9 +747,10 @@ So the count is not a floor on the ensemble's false negatives, and an earlier dr
 `src/xbrain/knowledge/` is the READ contract: the logical view an external model queries, so
 a consumer never has to know the shape of `items.json`, hunt for a markdown heading, or guess
 which account wrote a quoted tweet. **Nothing in it mutates the store.** `knowledge inspect`,
-`eval`, `search` and `get` write nothing at all; `index build` and `index update` write only
-`data/index/`, which is derived. None of the six takes a snapshot, because none of them can
-destroy anything a rebuild would not restore.
+`search` and `get` write nothing at all; `eval` writes only its own report
+(`data/eval-report.json` and `data/eval-report.md`, or wherever `--report` points), and
+`index build` and `index update` write only `data/index/`, which is derived. None of the six
+takes a snapshot, because none of them can destroy anything a rebuild would not restore.
 
 It is built over four plans. The contract and the evaluation landed first; the persistent
 index, `search` and `get` are this one. Embeddings, the minimal graph and the MCP adapter come
@@ -924,9 +925,10 @@ fingerprint. That limit is written down rather than disguised.
 
 #### A query refuses, a diagnosis reports
 
-`search`, `get`, `build` and `update` refuse an index they cannot read. `index status`
-**reports** it — it is the instrument you run precisely to find out — and it names the same
-command the refusing doors name. Two instruments answering the same question with opposite
+`search`, `build` and `update` refuse an index they cannot read. `get` is not on that list
+and never will be: it opens no database, so there is nothing for it to refuse. `index status`
+**reports** the fault instead of refusing — it is the instrument you run precisely to find
+out — and it names the same command the refusing doors name. Two instruments answering the same question with opposite
 verdicts is the failure mode; the escape is not a silent diagnosis, it is a shared sentence.
 
 The open door proves four things before a query sees a row: the file exists, page 1 reads, the
@@ -976,9 +978,23 @@ verdict copied into the index at build time would keep asserting a PASS that a l
 
 `get` reads the **store**, and works with `data/index/` deleted. An index able to answer it
 would be a second copy of the corpus that nothing invalidates, and the day the two disagreed
-there would be no way to tell which one the reader was shown. Over `[index].get_char_budget`
-the bundle truncates **declaring it** and returns a cursor; a failed fetch comes back as a
+there would be no way to tell which one the reader was shown. A failed fetch comes back as a
 structured failure rather than as a hole.
+
+**Named, not dumped.** With no `--surface`, `get` delivers the item's metadata, its topics,
+its `summary` body and the *list* of surfaces it has (`DEFAULT_SURFACES = ("summary",)`) — the
+index card, not the corpus. Every other body is asked for by name, and an unknown name is
+refused listing what the item actually has. "Complete evidence" means every surface is
+reachable by selection and pagination, not three million characters in one call.
+
+**A cursor indexes a sequence the bundle does not carry.** Over `[index].get_char_budget` the
+bundle truncates **declaring it** and returns a cursor — an offset into the chunks of the
+*selected* surfaces in emitter order, or into their ranking when `--query` was given. The
+frozen bundle does not record what defined that sequence, so a continuation must repeat the
+original `--surface` flags, in the same order, and the same `--query`; dropping them resumes
+inside the default selection and either returns an empty page or is refused by the cursor
+decoder. That is why the truncation line prints the whole command rather than the cursor
+alone, and why the two cursor shapes refuse each other by name instead of restarting at zero.
 
 #### Degradation is declared, never simulated
 
@@ -1002,6 +1018,13 @@ never reaches back into the store, the index or the services — a renderer that
 anything would be a third definition of what a result is, after the service and the JSON. So
 `--json` and the human view cannot disagree, and every field a human reads is a field a
 consumer can parse.
+
+The containment runs one way only. The human view is a **projection**: it selects, and it
+says some things in Spanish prose that the JSON says structurally (a `degraded` flag becomes a
+sentence; `verify_with: []` becomes the `no_underlying_source` warning). The JSON carries
+fields it never prints — `schema_version`, the echoed `filters`, `manifest_version` and
+`built_at`, and per match the `chunk_id`, `title`, `score`, `lexical_rank`, `vector_rank` and
+`locator`. Read the human view to judge a result; parse `--json` to consume one.
 
 Every non-body field — id, URL, topic slug, query, cursor, path — reaches the terminal through
 one sanitisation function, and bodies through a fence. Four separate patches for the same
@@ -1312,7 +1335,7 @@ xbrain/
 │   │   ├── index_build.py   ← build/update/status, the manifest, the four fingerprint planes
 │   │   ├── index_store.py   ← opening FOR A QUERY: read-only, degradation, fail-closed chunks
 │   │   ├── search_service.py← search(): filters, candidates, grouping, hydration
-│   │   ├── get_service.py   ← get(): complete evidence from the STORE, budget + cursor
+│   │   ├── get_service.py   ← get(): evidence from the STORE — named surfaces, budget, cursor
 │   │   ├── render.py        ← the human view of the SAME response model --json serialises
 │   │   └── evaluation.py    ← the harness: per-stratum metrics, report-only
 │   │

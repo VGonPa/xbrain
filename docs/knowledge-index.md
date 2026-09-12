@@ -1,9 +1,10 @@
 # The knowledge index — operating it
 
 `xbrain index build` turns the store into a persistent SQLite/FTS5 index under
-`data/index/`, and `xbrain search` / `xbrain get` read it. This page is the
-operational half: when to rebuild, what it costs, and what the lexical baseline
-cannot do. The shape of it — planes, manifest, invalidation — is in
+`data/index/`, and `xbrain search` reads it. `xbrain get` does not — it serves
+evidence from the live store, and keeps working with `data/index/` deleted.
+This page is the operational half: when to rebuild, what it costs, and what the
+lexical baseline cannot do. The shape of it — planes, manifest, invalidation — is in
 [ARCHITECTURE.md](../ARCHITECTURE.md#the-persistent-index).
 
 Everything here was measured on one corpus and re-derived on 2026-09-12: **2,474
@@ -18,7 +19,7 @@ uv run xbrain index build     # build data/index/ from scratch and seal it
 uv run xbrain index update    # touch only what changed since the last build
 uv run xbrain index status    # what the index holds, and how far behind it is
 uv run xbrain search "…"      # ranked items with citable fragments
-uv run xbrain get <item-id>   # one item's complete evidence, from the STORE
+uv run xbrain get <item-id>   # one item's evidence, from the STORE (never the index)
 ```
 
 `build`, `update` and `status` write or read only `data/index/`. None of them
@@ -27,9 +28,9 @@ snapshot, because there is nothing of yours to lose: **`data/index/` is derived
 and reconstructible**, it is never versioned, and deleting it costs one
 `build`.
 
-`search` and `get` open the database `mode=ro`, so a stray write is an error
-rather than a silent repair. Neither calls an LLM and neither touches the
-network.
+`search` opens the database `mode=ro`, so a stray write is an error rather than
+a silent repair; `get` opens no database at all. Neither calls an LLM and
+neither touches the network.
 
 ## When to rebuild, and when to update
 
@@ -122,10 +123,16 @@ the source, not the paraphrase. When no such source exists the line says so —
 conserva ninguna fuente primaria que la sustente` — instead of pointing you
 back at the summary.
 
-**`--json` is the same model.** The human view and `--json` are two renderings of
-one `SearchResponse`; the renderer never reaches back into the store or the
-index. So anything you read above is a field you can parse, and there is no
-human-only fact:
+**`--json` is the same model, and the richer view.** The human view and `--json`
+are two renderings of one `SearchResponse`; the renderer never reaches back into
+the store or the index, so the two cannot disagree and anything you read above
+is a field you can parse. The containment runs one way only: the human view
+**selects**, and it turns some fields into Spanish prose (a `degraded` flag
+becomes a sentence, an empty `verify_with` becomes the `no_underlying_source`
+warning). The JSON below carries fields it never prints — `schema_version`, the
+echoed `filters`, `manifest_version`, `built_at`, and per match the `chunk_id`,
+`title`, `score`, `lexical_rank`, `vector_rank` and `locator`. Read the human
+view to judge a result; parse `--json` to consume one:
 
 ```bash
 uv run xbrain search "transformer attention" --limit 1 --json
@@ -152,12 +159,51 @@ index that could answer it would be a second copy of the corpus that nothing
 invalidates — and the day the two disagreed there would be no way to know which
 one the reader was shown.
 
-Over the character budget (`[index].get_char_budget`, 40,000 by default) the
-bundle is truncated **and says so**, handing back a cursor:
+### Ask for the surface you want
+
+A bare `get` is an **index card, not a dump**: item metadata, topics, the
+`summary` body, and the list of surfaces this item has. Every other body — the
+article, the transcript, the thread, the frame descriptions — is asked for by
+name:
 
 ```bash
-uv run xbrain get <id> --cursor <the cursor the previous response returned>
+uv run xbrain get <id>                              # metadata + topics + summary
+uv run xbrain get <id> --surface external_article   # that body, whole
+uv run xbrain get <id> --surface external_article --surface video_transcript
 ```
+
+An unknown `--surface` is refused listing the ones the item actually has, so the
+first command is also how you find out what the second can ask for. That is what
+"complete evidence" means here: every surface is *reachable*, by selection and
+by pagination — not everything at once.
+
+### Paginating: the cursor is not the whole request
+
+Over the character budget (`[index].get_char_budget`, 40,000 by default) the
+bundle is truncated **and says so**, handing back a cursor. The cursor is an
+offset into a sequence that **the request defined** — the chunks of the surfaces
+you selected, in emitter order, or their ranking when you passed `--query` — and
+the response does not carry that request back to you. So a continuation repeats
+the original `--surface` flags, in the same order, and the same `--query`:
+
+```bash
+uv run xbrain get <id> --surface external_article --query "attention" --cursor q:12
+```
+
+Drop them and you resume inside a different sequence: the cursor either lands in
+the default selection and returns an empty page, or is refused outright, because
+the positional cursor (`<surface>:<chunk>`) and the ranked one (`q:<offset>`)
+each refuse the other's shape by name rather than restarting at zero. You never
+have to assemble that line yourself — the truncation warning prints the exact
+command to run, flags and all:
+
+```
+⚠ Truncado. Continúa con: xbrain get <id> --surface external_article --cursor 0:7
+```
+
+`search` paginates the same way, for the same reason: its cursor (`s:<offset>`)
+is a position in the ranking that the query **and its filters** define, so the
+printed continuation repeats every filter and the page size beside `--cursor`.
 
 ## The eight filters
 
