@@ -22,11 +22,15 @@ uv run xbrain search "…"      # ranked items with citable fragments
 uv run xbrain get <item-id>   # one item's evidence, from the STORE (never the index)
 ```
 
-`build`, `update` and `status` write or read only `data/index/`. None of them
-touches `items.json`, `vocab.yaml` or `topics.json`, and none of them takes a
+`build`, `update` and `status` WRITE only `data/index/`, and none of them takes a
 snapshot, because there is nothing of yours to lose: **`data/index/` is derived
 and reconstructible**, it is never versioned, and deleting it costs one
-`build`.
+`build`. They do READ your store: all five commands load `items.json`,
+`vocab.yaml` and `topics.json` through the same loader, which is why the `build`
+below costs 9.5 s wall for 3.1 s of work. `status` goes further and WALKS what
+it read — a fingerprint per item, plus the topic records the three inputs imply
+— and that walk is what lets it answer *how many* items changed rather than
+merely *something moved*.
 
 `search` opens the database `mode=ro`, so a stray write is an error rather than
 a silent repair; `get` opens no database at all. Neither calls an LLM and
