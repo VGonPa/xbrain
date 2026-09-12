@@ -468,23 +468,64 @@ def test_a_counter_that_is_not_a_non_negative_integer_is_refused(
         )
 
 
-def test_the_embeddings_slot_is_null_or_an_object_and_declared_now_on_purpose() -> None:
-    """The hole Plan 03 fills with `{model, dimension, normalized, command_version}`.
+# The `VectorSpec` a manifest declares, in the shape spec §5.6 asks for. Written out here
+# rather than built from the dataclass, so the two sides of the comparison are not one.
+SPEC_BLOCK = {
+    "model": "intfloat/multilingual-e5-base",
+    "dimension": 768,
+    "normalized": True,
+    "query_prefix": "query: ",
+    "passage_prefix": "passage: ",
+}
 
-    Declared in this child so its arrival is not a manifest migration in the next plan, and
-    left UNVALIDATED inside: this child ships no embeddings, and a schema for a payload it
-    cannot produce would be prose in the column where a guard belongs. What IS checked is the
-    slot's shape — `null` or an object — so a scalar cannot sit where a mapping will.
+
+def test_the_embeddings_slot_is_null_or_a_whole_vector_spec() -> None:
+    """`null` or the FIVE fields, total and closed — and 03.4 is when that became true.
+
+    02.6 declared the slot and checked only its SHAPE, which was the honest thing for a child
+    that could not produce one: a schema for a payload nothing emits is prose in the column
+    where a guard belongs. This tree writes it (`index_build.VectorBuild`), so the guard is
+    owed, and the previous version of this test — which asserted that `{"model", "dimension"}`
+    LOADS — pinned the permissiveness rather than the contract.
+
+    THE FIELD THAT MAKES IT MATTER IS THE PREFIX. `query_prefix` / `passage_prefix` are
+    properties of the MODEL, so a block that omitted one would leave every query embedded bare
+    against a corpus embedded prefixed: still well-formed, still unit-length, and answering a
+    question nobody asked. Nothing downstream can see that; this reader is the only thing that
+    ever could.
     """
     assert _manifest().embeddings is None
     assert index_build.Manifest.from_dict(_document()).embeddings is None
-    assert index_build.Manifest.from_dict(
-        _document(embeddings={"model": "e5", "dimension": 1024})
-    ).embeddings == {"model": "e5", "dimension": 1024}
+    assert index_build.Manifest.from_dict(_document(embeddings=SPEC_BLOCK)).embeddings == (
+        SPEC_BLOCK
+    )
 
     for planted in (3, "e5", [1, 2]):
         with pytest.raises(index_schema.IndexIncompatibleError, match="embeddings"):
             index_build.Manifest.from_dict(_document(embeddings=planted))
+
+    # TOTAL: each field removed in turn is refused BY NAME, so no single omission survives.
+    for field_name in SPEC_BLOCK:
+        with pytest.raises(index_schema.IndexIncompatibleError, match=field_name):
+            index_build.Manifest.from_dict(
+                _document(embeddings={k: v for k, v in SPEC_BLOCK.items() if k != field_name})
+            )
+
+    # CLOSED: a property this code cannot honour is a plane written by something else.
+    with pytest.raises(index_schema.IndexIncompatibleError, match="quantization"):
+        index_build.Manifest.from_dict(_document(embeddings={**SPEC_BLOCK, "quantization": "int8"}))
+
+    # TYPED: `"768"` and `normalized: 1` are hand edits, not specs. `True` IS an `int` in
+    # Python, so a bare `int` check would take `dimension: true` as a width of one.
+    for broken in (
+        {**SPEC_BLOCK, "dimension": "768"},
+        {**SPEC_BLOCK, "dimension": True},
+        {**SPEC_BLOCK, "dimension": 0},
+        {**SPEC_BLOCK, "normalized": 1},
+        {**SPEC_BLOCK, "model": 5},
+    ):
+        with pytest.raises(index_schema.IndexIncompatibleError, match="embeddings"):
+            index_build.Manifest.from_dict(_document(embeddings=broken))
 
 
 def test_the_failed_list_is_a_list_of_text_objects_or_the_document_is_refused() -> None:

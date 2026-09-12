@@ -247,14 +247,19 @@ def test_no_embeddings_is_read_off_the_manifest_not_hard_coded(context: QueryCon
     """B-i (gate round 04, M-2 of gate 03): `no_embeddings` was a CONSTANT in `_degraded`.
 
     Spec §9.3: the response declares a degraded strategy when there is no vector backend —
-    and the manifest is where the backend is recorded (`embeddings: null` until Plan 03
-    fills `{model, dimension, normalized, command_version}`). A flag that is always on says
-    nothing about this index; the day Plan 03 writes the embeddings block, the test beside
-    this one would stay green while the response lied — the exact shape of F-2, fixed one
-    round ago on the `strategy` field.
+    and the manifest is where the backend is recorded. A flag that is always on says nothing
+    about this index; the day Plan 03 writes the embeddings block, the test beside this one
+    would stay green while the response lied — the exact shape of F-2, fixed one round ago on
+    the `strategy` field.
 
     Staged through the manifest on disk, not through a fake index: write an embeddings block,
     query, and the flag must be gone; write `null` back and it must return.
+
+    THE BLOCK IS A REAL `VectorSpec` SINCE 03.4. It used to be the shape 02.6 GUESSED at
+    (`{model, dimension, normalized, command_version}`), written before `VectorSpec` existed —
+    and the reader now validates the slot total and closed, so that guess is refused at
+    `load_manifest` and this test failed on the plant rather than on the flag. What is under
+    test did not move: it is still that `no_embeddings` is read off the manifest.
 
     Seen red before the fix: `"no_embeddings"` was declared with the block present.
     """
@@ -264,7 +269,8 @@ def test_no_embeddings_is_read_off_the_manifest_not_hard_coded(context: QueryCon
         "model": "test-embedder",
         "dimension": 8,
         "normalized": True,
-        "command_version": "0",
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
     }
     path.write_text(json.dumps(raw), encoding="utf-8")
     assert "no_embeddings" not in search("Quillfeather", context).index.degraded
