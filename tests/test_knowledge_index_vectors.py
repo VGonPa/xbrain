@@ -650,6 +650,35 @@ def test_an_update_over_an_index_with_no_plane_reports_no_vector_numbers(data: P
     report = _update(data)
     assert report.vector_missing is None
     assert report.vector_orphaned is None
+    assert report.vector_state is None
+
+
+@pytest.mark.parametrize(
+    ("break_matrix", "state"),
+    [
+        (lambda path: path.unlink(), "missing"),
+        (lambda path: path.write_bytes(b"not a matrix"), "unreadable"),
+    ],
+    ids=["matrix-deleted", "matrix-unreadable"],
+)
+def test_an_update_over_a_plane_it_cannot_read_reports_no_debt_it_never_measured(
+    data: Path, break_matrix, state: str
+) -> None:
+    """A plane nobody could open owes an UNKNOWN amount, and `0` is a claim that it owes none.
+
+    `VectorVerdict` defaults both counts to `0` on every state that never reached `_coverage`,
+    so copying them into the report published `0 / 0` — the exact numbers of a complete plane —
+    for a matrix that is not on disk. The counts come out `None` and the state says why, so an
+    unreadable plane cannot be confused with the opt-out either.
+    """
+    _built(data)
+    break_matrix(data / "index" / VECTORS_FILENAME)
+
+    report = _update(data)
+
+    assert report.vector_missing is None
+    assert report.vector_orphaned is None
+    assert report.vector_state == state
 
 
 # --------------------------------------------------------------------- 3c. `status` agrees

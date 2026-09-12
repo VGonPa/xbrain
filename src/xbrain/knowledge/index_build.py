@@ -1639,10 +1639,13 @@ class UpdateReport:
     duration_seconds: float
     dry_run: bool
     # 03.4: what the update left the vector plane owing — fragments with no vector, and rows
-    # whose chunk the base no longer holds. `None` when the index declares no plane. NOT
-    # repaired here: re-embedding is a subprocess, and `update` has no embedder.
+    # whose chunk the base no longer holds. NOT repaired here: re-embedding is a subprocess,
+    # and `update` has no embedder. `None` whenever nothing was MEASURED, never `0`: the index
+    # declares no plane (`vector_state` is `None`), or the plane could not be read and its
+    # debt is unknown (`vector_state` says why — `missing`, `unreadable`).
     vector_missing: int | None = None
     vector_orphaned: int | None = None
+    vector_state: VectorState | None = None
 
 
 @dataclass(frozen=True)
@@ -2443,6 +2446,9 @@ def _update_report(
     dry_run: bool,
     vector: VectorVerdict | None = None,
 ) -> UpdateReport:
+    # Only `current` and `behind` reached `_coverage`; every other state carries the verdict's
+    # DEFAULT zeros, and copying those would publish a plane nobody could open as owing nothing.
+    measured = vector is not None and vector.state in ("current", "behind")
     return UpdateReport(
         items_added=len(delta.added),
         items_changed=len(delta.changed),
@@ -2455,8 +2461,9 @@ def _update_report(
         topics_refreshed=topics_refreshed,
         duration_seconds=time.perf_counter() - started,
         dry_run=dry_run,
-        vector_missing=None if vector is None else vector.missing_chunks,
-        vector_orphaned=None if vector is None else vector.orphaned_rows,
+        vector_missing=vector.missing_chunks if vector and measured else None,
+        vector_orphaned=vector.orphaned_rows if vector and measured else None,
+        vector_state=None if vector is None else vector.state,
     )
 
 
