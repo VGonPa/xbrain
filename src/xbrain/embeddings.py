@@ -55,7 +55,12 @@ does (CLAUDE.md rule 9: assert on the source, never on the reported conclusion).
 
 **No failure message ever quotes an embedded text** (Plan 03 §10.5, §10.8). The
 corpus is personal and an operator error ends up in a terminal, a log or a pasted
-issue, so the messages carry counts, indices and dimensions only.
+issue, so the messages carry counts, indices and dimensions only. **That includes
+the backend's own stderr on a non-zero exit, which is therefore not relayed**: it
+is text the model process chose to print, and the usual thing a crashing embedder
+prints is a traceback whose frame quotes the `repr` of the text it failed on. A
+missing stderr costs the operator one re-run by hand; a leaked one cannot be
+un-pasted, and the batch that reaches this backend is the whole corpus.
 
 Failures surface as clear operator errors (subclasses of `RuntimeError`, which the
 CLI's `_handle_cli_errors` turns into a clean exit-1): a **missing / non-executable
@@ -175,9 +180,15 @@ def _run_embedder(argv: list[str], payload: str, runner: Runner, timeout_seconds
     except UnicodeDecodeError as exc:  # subprocess.run(text=True) on non-UTF-8 stdout
         raise EmbedderFailed(f"embedder {argv[0]!r} produced non-UTF-8 stdout: {exc}") from exc
     if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
+        # The backend's stderr is deliberately NOT relayed. It is whatever the model
+        # process chose to print, and a Python traceback prints the `repr` of the
+        # argument it choked on — here, the embedded text, i.e. the corpus (Plan 03
+        # §10.5). The message carries what identifies the RUN and nothing that
+        # identifies the DATA; the operator re-runs the command to read the rest.
         raise EmbedderFailed(
-            f"embedder {argv[0]!r} exited {completed.returncode}: {stderr or '(no stderr)'}"
+            f"embedder {argv[0]!r} exited {completed.returncode} — its stderr is not "
+            "repeated here, because a backend traceback quotes the text it failed on; "
+            "run the command by hand on a batch you own to see it"
         )
     return completed.stdout or ""
 

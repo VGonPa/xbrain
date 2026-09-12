@@ -184,12 +184,29 @@ def test_non_executable_binary_raises_embedder_not_found():
         embed_texts(["hola"], command="xbrain-embed", model=None, runner=_run)
 
 
-def test_non_zero_exit_reports_the_code_and_the_stderr():
-    runner = _runner("", returncode=3, stderr="CUDA out of memory")
+def test_non_zero_exit_reports_the_command_and_code_but_never_the_stderr():
+    """The operator gets what identifies the RUN — the command and the exit code —
+    and nothing the backend chose to print (Plan 03 §10.5).
+
+    A crashing embedder prints a traceback, and a traceback quotes the `repr` of
+    the argument that crashed it: here, an embedded text. Relaying stderr therefore
+    leaks corpus content into a terminal, a log or a pasted issue on exactly the
+    path an operator is most likely to copy somewhere. Seen red against the version
+    that f-stringed `completed.stderr` into the message.
+
+    The exit code is asserted UNDER ITS LABEL rather than as a bare substring: a
+    loose `"3" in message` would be satisfied by any digit anywhere (CLAUDE.md
+    rule 1).
+    """
+    stderr = f"Traceback (most recent call last):\n  encode(text={CORPUS_SENTINEL!r})"
+    runner = _runner("", returncode=137, stderr=stderr)
     with pytest.raises(EmbedderFailed) as excinfo:
-        embed_texts(["hola"], command="xbrain-embed", model=None, runner=runner)
+        embed_texts([CORPUS_SENTINEL], command="xbrain-embed", model=None, runner=runner)
     message = str(excinfo.value)
-    assert "3" in message and "CUDA out of memory" in message
+    assert "exited 137" in message
+    assert "xbrain-embed" in message
+    assert CORPUS_SENTINEL not in message
+    assert "Traceback" not in message
 
 
 def test_timeout_raises_embedder_failed_naming_the_budget():
@@ -531,47 +548,83 @@ def test_the_batch_is_immutable():
 
 
 @pytest.mark.parametrize(
-    "stdout",
+    "runner_kwargs",
     [
-        "not json",
-        json.dumps(
+        pytest.param({"stdout": "not json"}, id="unparseable-stdout"),
+        pytest.param(
             {
-                "schema_version": "99",
-                "model": "m",
-                "dimension": 2,
-                "normalized": True,
-                "vectors": [[1.0, 0.0]],
-            }
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "99",
+                        "model": "m",
+                        "dimension": 2,
+                        "normalized": True,
+                        "vectors": [[1.0, 0.0]],
+                    }
+                )
+            },
+            id="wrong-schema-version",
         ),
-        json.dumps(
+        pytest.param(
             {
-                "schema_version": SCHEMA_VERSION,
-                "model": "m",
-                "dimension": 2,
-                "normalized": True,
-                "vectors": [],
-            }
+                "stdout": json.dumps(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "model": "m",
+                        "dimension": 2,
+                        "normalized": True,
+                        "vectors": [],
+                    }
+                )
+            },
+            id="vector-count-mismatch",
         ),
-        json.dumps(
+        pytest.param(
             {
-                "schema_version": SCHEMA_VERSION,
-                "model": "m",
-                "dimension": 2,
-                "normalized": False,
-                "vectors": [[0.0, 0.0]],
-            }
+                "stdout": json.dumps(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "model": "m",
+                        "dimension": 2,
+                        "normalized": False,
+                        "vectors": [[0.0, 0.0]],
+                    }
+                )
+            },
+            id="zero-vector",
+        ),
+        # The non-zero exit is the branch where the leaked text is not ours to
+        # withhold by accident: it arrives from OUTSIDE, in whatever the backend
+        # printed, and a crashing embedder prints a traceback quoting the text it
+        # choked on. Until this case was added, the invariant below was parametrized
+        # over stdout-shaped failures only, so the one branch that DID relay corpus
+        # content sat outside its reach and the whole test stayed green (rule 1).
+        pytest.param(
+            {
+                "stdout": "",
+                "returncode": 137,
+                "stderr": f"Traceback (most recent call last):\n  encode({CORPUS_SENTINEL!r})",
+            },
+            id="non-zero-exit-with-stderr",
         ),
     ],
 )
-def test_no_failure_message_ever_quotes_the_embedded_text(stdout: str):
+def test_no_failure_message_ever_quotes_the_embedded_text(runner_kwargs: dict):
     """Plan 03 §10.5/§10.8: the corpus is personal, and an operator error ends up
     in a terminal, a log or a pasted issue. Messages name COUNTS, INDICES and
-    DIMENSIONS — never content.
+    DIMENSIONS — never content, whether that content came from the request xbrain
+    sent or from the stderr the backend sent back.
 
-    Seen red by f-stringing `texts` into any of these four messages.
+    Seen red by f-stringing `texts` into any of the first four messages, and by the
+    `completed.stderr` this module used to relay on the fifth.
     """
     with pytest.raises(EmbedderFailed) as excinfo:
-        embed_texts([CORPUS_SENTINEL], command="xbrain-embed", model=None, runner=_runner(stdout))
+        embed_texts(
+            [CORPUS_SENTINEL],
+            command="xbrain-embed",
+            model=None,
+            runner=_runner(**runner_kwargs),
+        )
     assert CORPUS_SENTINEL not in str(excinfo.value)
 
 
