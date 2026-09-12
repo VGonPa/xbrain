@@ -741,3 +741,245 @@ def test_lexical_memory_is_retired_and_not_imported() -> None:
         "lexical_memory.py was retired in 02.13 but active imports remain:\n  "
         + "\n  ".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# The chunker sweep (Plan 02 §7 · §15.12 signed-measurement half; delivery row 02.13)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_sweep_accepts_both_syntaxes_and_refuses_a_typo() -> None:
+    """A typo that silently swept nothing would publish the DEFAULT's numbers as a sweep.
+
+    So an unknown axis is refused rather than ignored. Both spellings work: one flag per axis,
+    and the plan's own quoted `target=... overlap=...`.
+    """
+    from xbrain.knowledge.evaluation import parse_sweep
+
+    assert parse_sweep(["target=800,1200", "overlap=0,150"]) == {
+        "target": [800, 1200],
+        "overlap": [0, 150],
+    }
+    assert parse_sweep(["target=800,1200 overlap=0,150"]) == {
+        "target": [800, 1200],
+        "overlap": [0, 150],
+    }
+    with pytest.raises(ValueError, match="desconocido"):
+        parse_sweep(["targt=800"])
+    with pytest.raises(ValueError, match="inválido"):
+        parse_sweep(["target"])
+
+
+def test_the_sweep_scores_every_combination_and_ranks_them(corpus) -> None:
+    """§7: the cartesian product, best `recall@k` first.
+
+    The row count is the product of the axes, asserted so a sweep that silently dropped a
+    combination — the failure that would make a "winner" the winner of a smaller contest —
+    goes red.
+    """
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [800, 1600], "overlap": [0, 150]})
+
+    assert len(report.rows) == 4
+    assert report.winner is report.rows[0]
+    recalls = [row.recall for row in report.rows if row.recall is not None]
+    assert recalls == sorted(recalls, reverse=True)
+
+
+def test_the_sweep_reports_the_chunk_count_so_a_tie_can_be_broken(corpus) -> None:
+    """Spec §13.15: a flat result is DOCUMENTED, and the tie-break is fewer chunks.
+
+    That only works if the count is in the table, so it is asserted to be there and to differ
+    between combinations — a column that were constant could not break anything.
+    """
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [400, 2400]})
+
+    counts = {row.params.target: row.chunks for row in report.rows}
+    assert all(count > 0 for count in counts.values())
+    assert counts[400] > counts[2400], "a smaller target must produce more chunks"
+
+
+def test_the_sweep_publishes_recall_at_1_and_names_the_criterion_that_decided(corpus) -> None:
+    """S-1 (gate Fable round 08): the published winner of the real sweep — 800/0 over
+    1200/0 — was decided by MRR after a tie on `recall@10`, while Plan 02 §7 and the README
+    said the tie-break is FEWER CHUNKS (which would have chosen 1200/0). The rule the code
+    applies is `recall@k`, then MRR, then fewer chunks; it is now written where the plan and
+    the README can be checked against it, and the report says WHICH criterion decided, so a
+    reader never has to infer it from the table. `recall@1` is published on every row: it is
+    the depth-independent figure the decision rests on and was not re-derivable from the
+    sweep's own output.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [400, 2400]}, k=10)
+    rows = report.to_dict()["rows"]
+    assert all("recall@1" in row and "recall@10" in row for row in rows), rows
+    assert all(row["recall@1"] is None or 0.0 <= row["recall@1"] <= 1.0 for row in rows)
+    text = render_sweep_markdown(report)
+    assert "recall@1" in text.splitlines()[2]
+    assert "decidió" in text or "PLANO" in text, text
+    assert "recall@10" in text and "MRR" in text and "menos chunks" in text
+
+
+def test_a_flat_sweep_says_it_is_flat(corpus) -> None:
+    """The negative result, published as one (spec §13.15).
+
+    Two combinations that score identically must not be presented as a winner and a loser:
+    the rendering says PLANO and states that the tie-break was the chunk count.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    # `min_chars` at two values that cannot change the ranking on this corpus: the fixture has
+    # no fragment near the floor, so the two runs are identical by construction.
+    report = sweep_chunker(cases, corpus, {"min_chars": [40, 41]})
+    text = render_sweep_markdown(report)
+
+    assert "PLANO" in text
+    assert "menos chunks" in text
+
+
+def test_the_sweep_cannot_move_the_characterization_fixture(corpus) -> None:
+    """Step 17b (M7), asserted where the sweep lives.
+
+    The sweep passes `ChunkerParams` as an ARGUMENT and never assigns
+    `DEFAULT_CHUNKER_PARAMS`, so the pinned ranking — which passes its own parameters — is
+    untouchable by it. Checked by running the sweep and then re-running the pinned assertion
+    in the same process: if the sweep mutated the module constant, the fixture would move.
+    """
+    from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    from tests.test_knowledge_lexical import test_ranking_matches_the_characterization_fixture
+
+    before = DEFAULT_CHUNKER_PARAMS
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    sweep_chunker(cases, corpus, {"target": [400, 2400], "overlap": [0, 300]})
+
+    assert DEFAULT_CHUNKER_PARAMS is before, "the sweep mutated the module default"
+    test_ranking_matches_the_characterization_fixture()
+
+
+def test_the_sweep_honours_and_publishes_the_limit(corpus, monkeypatch) -> None:
+    """The sweep runs `evaluate` once per combination; the depth it runs at is the caller's
+    `limit` (the CLI's `--limit`), never silently the k. Asserted at the seam — the limit
+    each `evaluate` call received — and on the published report, which carries it.
+
+    Seen red on the snapshot's `9dfa34e`: `sweep_chunker` took no `limit`, `evaluate` received
+    none, and `--limit 10` / `--limit 150` produced byte-identical sweep reports.
+    """
+    from xbrain.knowledge import evaluation
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    received: list[int | None] = []
+    real = evaluation.evaluate
+
+    def recording(*args, **kwargs):
+        received.append(kwargs.get("limit"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(evaluation, "evaluate", recording)
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [800, 1600]}, k=10, limit=150)
+
+    assert received == [150, 150]
+    assert report.limit == 150 and report.to_dict()["limit"] == 150
+    assert "150" in render_sweep_markdown(report)
+    # And with no limit given the sweep runs at its k — declared, not implicit.
+    received.clear()
+    default = sweep_chunker(cases, corpus, {"target": [800]}, k=10)
+    assert received == [10] and default.limit == 10
+
+
+def test_the_published_depth_is_the_depth_the_cells_ran_at_never_the_one_asked_for(
+    corpus, monkeypatch
+) -> None:
+    """A DEVIATION FROM THE SNAPSHOT, and the reason for it. `evaluate` clamps its own depth
+    to `max(limit, max(ks))`, so a `limit` BELOW `k` never reaches the index — the snapshot's
+    `sweep_chunker` nonetheless recorded the unclamped value, and `report.limit` would then
+    name a depth no cell ran at, which is exactly the figure CLAUDE.md rule 2 forbids. The
+    sweep clamps too, so the published number and the executed one are one number.
+
+    Seen red against the ported-verbatim version: `report.limit` was 3 while every `evaluate`
+    call received 3 and ran at 10.
+    """
+    from xbrain.knowledge import evaluation
+    from xbrain.knowledge.evaluation import sweep_chunker
+
+    seen: list[int] = []
+    real = evaluation.evaluate
+
+    def recording(*args, **kwargs):
+        report = real(*args, **kwargs)
+        # What the retriever was actually asked for, read off `evaluate`'s own arithmetic.
+        seen.append(max(kwargs.get("limit") or 0, max(kwargs["ks"])))
+        return report
+
+    monkeypatch.setattr(evaluation, "evaluate", recording)
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    report = sweep_chunker(cases, corpus, {"target": [800]}, k=10, limit=3)
+
+    assert seen == [10], seen
+    assert report.limit == 10, "the report names a depth no cell ran at"
+
+
+def test_evaluate_closes_the_index_it_built(corpus) -> None:
+    """`evaluate` builds a `:memory:` index through `build_index` and used to return with the
+    connection still open — and `sweep_chunker` calls `evaluate` once per combination, so a
+    twelve-cell sweep opened twelve handles and closed none of them explicitly.
+
+    ASSERTED ON THE CONNECTION, not on a `ResourceWarning`. The snapshot's note records one
+    `unclosed database` warning per `evaluate`; that warning did NOT reproduce on this tree,
+    so the surface read here is the one that answers the question directly (rule 9). Seen red
+    before the `finally`: `SELECT 1` on the captured connection succeeded.
+    """
+    import sqlite3
+
+    from xbrain.knowledge import evaluation
+
+    built = []
+    real = evaluation.build_index
+
+    def capture(*args, **kwargs):
+        index, stats = real(*args, **kwargs)
+        built.append(index)
+        return index, stats
+
+    evaluation.build_index = capture
+    try:
+        evaluate(resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items), corpus)
+    finally:
+        evaluation.build_index = real
+
+    assert len(built) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        built[0].connection.execute("SELECT 1")
+
+
+def test_a_one_cell_sweep_does_not_report_a_tie_it_could_not_have_measured(corpus) -> None:
+    """A SECOND DEVIATION FROM THE SNAPSHOT. `_sweep_verdict` tested `len(distinct) == 1`,
+    which is also true of a ONE-ROW table, so `xbrain eval --sweep-chunker target=800` printed
+    «PLANO: todas las combinaciones puntúan igual» — a verdict about a tie over a table with
+    nothing to tie against, and one that no input could have made say anything else. That is
+    the shape CLAUDE.md rule 2 rejects, inside the instrument that exists so a published
+    number can be re-derived honestly.
+
+    Seen red against the ported-verbatim version, on the real corpus and on this fixture: one
+    row, `PLANO` printed.
+    """
+    from xbrain.knowledge.evaluation import render_sweep_markdown, sweep_chunker
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    one = render_sweep_markdown(sweep_chunker(cases, corpus, {"target": [800]}))
+
+    assert "PLANO" not in one, one
+    assert "UNA COMBINACIÓN" in one and "target=800" in one, one
+    # And a real tie still says PLANO, so the deviation narrowed the claim and did not delete it.
+    flat = render_sweep_markdown(sweep_chunker(cases, corpus, {"min_chars": [40, 41]}))
+    assert "PLANO" in flat, flat

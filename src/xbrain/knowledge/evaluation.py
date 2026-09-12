@@ -42,7 +42,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
@@ -325,26 +325,37 @@ def evaluate(
     results: list[CaseResult] = []
     unmeasured: list[dict[str, Any]] = []
     latencies: list[float] = []
-    for case in cases:
-        blocked = unsupported_filters(case.filters, strategy)
-        if blocked:
-            unmeasured.append(
-                {
-                    "id": case.id,
-                    "strata": list(case.strata),
-                    "provenance": case.provenance,
-                    "unsupported_filters": list(blocked),
-                    "reason": (
-                        f"la estrategia `{strategy}` no puede aplicar {list(blocked)}; "
-                        "puntuar el caso sería fabricar un cero (spec §8.6.8)"
-                    ),
-                }
-            )
-            continue
-        started = time.perf_counter()
-        hits = _search(index, case, limit=depth)
-        latencies.append((time.perf_counter() - started) * 1000)
-        results.append(_score(case, hits, ks))
+    try:
+        for case in cases:
+            blocked = unsupported_filters(case.filters, strategy)
+            if blocked:
+                unmeasured.append(
+                    {
+                        "id": case.id,
+                        "strata": list(case.strata),
+                        "provenance": case.provenance,
+                        "unsupported_filters": list(blocked),
+                        "reason": (
+                            f"la estrategia `{strategy}` no puede aplicar {list(blocked)}; "
+                            "puntuar el caso sería fabricar un cero (spec §8.6.8)"
+                        ),
+                    }
+                )
+                continue
+            started = time.perf_counter()
+            hits = _search(index, case, limit=depth)
+            latencies.append((time.perf_counter() - started) * 1000)
+            results.append(_score(case, hits, ks))
+    finally:
+        # The `:memory:` index lives exactly as long as the scoring. `sweep_chunker` calls
+        # this once per COMBINATION, so a twelve-cell sweep opened twelve handles and closed
+        # none of them explicitly — release left to whenever the local was reclaimed.
+        # Measured before this line, by capturing the index `build_index` returned and
+        # querying it after `evaluate` had returned: `SELECT 1` succeeded, i.e. STILL OPEN.
+        # (The `ResourceWarning: unclosed database` the snapshot's own note records did NOT
+        # reproduce on this tree, so the assertion is on the connection state, which is the
+        # surface that answers the question anyway — rule 9.)
+        index.connection.close()
 
     by_stratum = _aggregate(results, STRATA, lambda case: case.strata)
     by_provenance = _aggregate(results, {"real", "construido"}, lambda case: (case.provenance,))
@@ -718,3 +729,282 @@ def _cell(values: dict[str, Any], name: str) -> str:
     if value == NO_COVERAGE:
         return "sin cobertura"
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# The chunker sweep (Plan 02 §7 · §15.12, the signed-measurement half; delivery row 02.13)
+# ---------------------------------------------------------------------------
+#
+# WHY THE INSTRUMENT SHIPS EVEN THOUGH THE MEASUREMENT IS NOT A CI CHECK. Plan 02 §15
+# declares criteria 11 and 12 *local measurements, not CI checks*, and they do not block a
+# merge. That exempts the MEASUREMENT, not the INSTRUMENT: `800/0` and `CHUNKER_VERSION v2`
+# are published in the README and in `docs/knowledge-index.md` as the number Plan 03 has to
+# beat, and without this code that number cannot be re-derived by anyone. A figure whose
+# instrument is absent is the difference CLAUDE.md rule 2 draws between a measurement and a
+# number that restates a constant.
+#
+# THE SWEEP CHANGES `ChunkerParams` AS AN ARGUMENT AND NEVER THE MODULE CONSTANT (M7), which
+# is the whole reason `chunk_surfaces` takes `params` at all: `tests/fixtures/
+# knowledge_ranking.json` pins today's ranking by passing its OWN parameters, so a sweep that
+# assigned `DEFAULT_CHUNKER_PARAMS` would break the fixture that exists to pin the ranking,
+# and the comfortable repair would be to regenerate it — at which point it pins nothing.
+#
+# WHAT `limit` MEANS HERE, and it is NOT what the snapshot's docstring said. In this tree
+# `evaluate`'s `limit` is the depth the RETRIEVER is asked for — it reaches `index.search(...,
+# limit)` as a row count — and `_score` deduplicates owners afterwards. The snapshot this
+# block is ported from carried an owner-counted depth (`OWNER_CHUNK_MULTIPLIER`,
+# `MAX_CHUNK_DEPTH`, `depth_exhausted`) that this tree's harness does not have, so every
+# mention of «owners (U-6)» is dropped rather than repeated: a report that labelled a row
+# count as an owner count would be a figure that cannot come out any other way.
+
+
+@dataclass(frozen=True)
+class SweepRow:
+    """One `(target, overlap)` combination and what it scored.
+
+    `chunks` is carried beside the metrics because spec §13.15 asks for negative results to be
+    published rather than hidden: when two combinations tie on recall, the tie-break is the
+    one that produces FEWER chunks, and that only works if the count is in the table.
+    """
+
+    params: ChunkerParams
+    chunks: int
+    recall: float | None
+    mrr: float | None
+    by_stratum: dict[str, Any]
+    # `recall@1` is depth-independent — it reads the FIRST deduplicated owner, which is the
+    # owner of the top-ranked chunk whatever depth was materialised below it — and it is the
+    # figure the real decision rested on (S-1, round 08). Published on every row so a reader
+    # can check the tie-break without re-running the sweep at another k.
+    recall_at_1: float | None = None
+
+
+@dataclass(frozen=True)
+class SweepReport:
+    """Every combination, best first, with the k the ranking was decided on and the retrieval
+    depth every cell ran at — the two numbers a reader needs to compare a cell with the next
+    sweep's."""
+
+    k: int
+    rows: tuple[SweepRow, ...]
+    limit: int = 0
+
+    @property
+    def winner(self) -> SweepRow | None:
+        return self.rows[0] if self.rows else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "k": self.k,
+            "limit": self.limit,
+            "rows": [
+                {
+                    "target": row.params.target,
+                    "max_chars": row.params.max_chars,
+                    "overlap": row.params.overlap,
+                    "min_chars": row.params.min_chars,
+                    "chunks": row.chunks,
+                    f"recall@{self.k}": row.recall,
+                    "recall@1": row.recall_at_1,
+                    "mrr": row.mrr,
+                    "by_stratum": row.by_stratum,
+                }
+                for row in self.rows
+            ],
+        }
+
+
+def parse_sweep(values: Sequence[str]) -> dict[str, list[int]]:
+    """`["target=800,1200", "overlap=0,150"]` -> `{"target": [800, 1200], ...}`.
+
+    Whitespace inside one value is also split, so the plan's own syntax —
+    `--sweep-chunker "target=800,1200,1600,2400 overlap=0,150,300"` — works as written when
+    quoted, and so does one flag per axis. An unknown key is REFUSED rather than ignored: a
+    typo that silently swept nothing would publish the default's numbers under the name of a
+    sweep.
+    """
+    grid: dict[str, list[int]] = {}
+    for value in values:
+        for token in value.split():
+            if "=" not in token:
+                raise ValueError(f"Formato de barrido inválido: {token!r}. Usa `clave=v1,v2`.")
+            key, raw = token.split("=", 1)
+            if key not in {"target", "max_chars", "overlap", "min_chars"}:
+                raise ValueError(
+                    f"Eje de barrido desconocido: {key!r}. "
+                    "Válidos: target, max_chars, overlap, min_chars."
+                )
+            grid[key] = [int(part) for part in raw.split(",") if part.strip()]
+    return grid
+
+
+def sweep_chunker(
+    cases: Sequence[GoldenCase],
+    corpus: Corpus,
+    grid: Mapping[str, Sequence[int]],
+    *,
+    strategy: str = "lexical",
+    k: int = 10,
+    base: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
+    limit: int | None = None,
+) -> SweepReport:
+    """Score every combination in `grid` against the golden set (Plan 02 §7).
+
+    THE CRITERION, IN ORDER (S-1, round 08): `recall@k` first, MRR second, FEWER CHUNKS last.
+    Plan 02 §7 wrote «si empata, se escoge el que produzca menos chunks» and the README
+    repeated it, while this function has ordered by MRR before the chunk count since before
+    any measurement existed — and on the real sweep `800/*` and `1200/*` tied on `recall@10`
+    and the tie-break was the whole decision: the written rule chose 1200/0, the applied one
+    800/0 (MRR 0.8179 against 0.7667). A gate found the published winner contradicting the
+    published rule. The rule that stands is this one, and the plan and the README now say it,
+    with the reason: `recall@k` and MRR are both retrieval QUALITY — whether the relevant item
+    is on the page, and where on it — and the consumer of `search` is an agent that reads the
+    top of the page, so rank position is not a tie-breaking nicety; the chunk count is a COST
+    (disk, build time) and a cost breaks a tie in quality only when quality is flat, which is
+    what spec §13.15's «flat result» means. `recall@1` is published on every row because it is
+    the depth-independent form of the same argument. The report names WHICH criterion decided,
+    so the reader never infers it from the table.
+
+    A combination that scores nothing measurable sorts last instead of sorting first, which is
+    what a `None` would do under a naive `max`.
+
+    `limit` is the retrieval depth every cell runs at: the CLI's `--limit`, threaded through
+    and published on the report. The first version of the sweep called `evaluate` with no
+    depth and the CLI's `_run_sweep` never passed the option the command advertised, so
+    `--limit 10` and `--limit 150` produced byte-identical reports on the real corpus.
+
+    IT IS PUBLISHED AT THE VALUE THE RUN USED, not at the value asked for. `evaluate` clamps
+    its own depth to `max(limit, max(ks))`, so a `limit` below `k` never reaches the index;
+    clamping here too is what keeps `report.limit` from naming a depth no cell ran at. It
+    defaults to `k`.
+    """
+    depth = max(limit if limit is not None else k, k)
+    rows: list[SweepRow] = []
+    for params in _combinations(grid, base):
+        report = evaluate(cases, corpus, strategy=strategy, ks=(1, k), params=params, limit=depth)
+        overall = _overall(report, k)
+        first = _measured(report, "recall@1")
+        rows.append(
+            SweepRow(
+                params=params,
+                chunks=report.index_stats.chunks if report.index_stats else 0,
+                recall=overall[0],
+                mrr=overall[1],
+                by_stratum=report.by_stratum,
+                recall_at_1=sum(first) / len(first) if first else None,
+            )
+        )
+    rows.sort(key=lambda row: (-(row.recall or -1.0), -(row.mrr or -1.0), row.chunks))
+    return SweepReport(k=k, rows=tuple(rows), limit=depth)
+
+
+def _combinations(grid: Mapping[str, Sequence[int]], base: ChunkerParams) -> list[ChunkerParams]:
+    """The cartesian product of the swept axes, with the unswept ones held at `base`.
+
+    Deterministic order — the axes are sorted and each axis keeps the order it was given — so
+    two runs of the same sweep produce the same table and a diff between them is readable.
+    """
+    axes = sorted(grid)
+    combos = [dict[str, int]()]
+    for axis in axes:
+        combos = [{**combo, axis: value} for combo in combos for value in grid[axis]]
+    return [
+        ChunkerParams(
+            target=combo.get("target", base.target),
+            max_chars=combo.get("max_chars", base.max_chars),
+            overlap=combo.get("overlap", base.overlap),
+            min_chars=combo.get("min_chars", base.min_chars),
+        )
+        for combo in combos
+    ]
+
+
+def _overall(report: EvaluationReport, k: int) -> tuple[float | None, float | None]:
+    """The mean `recall@k` and MRR over every SCORED case, or `(None, None)` if none scored.
+
+    Computed over the cases rather than over the stratum means, because the strata have very
+    different sizes and averaging the averages would weight a one-case stratum like a
+    twelve-case one.
+    """
+    recalls = _measured(report, f"recall@{k}")
+    mrrs = _measured(report, "mrr")
+    return (
+        sum(recalls) / len(recalls) if recalls else None,
+        sum(mrrs) / len(mrrs) if mrrs else None,
+    )
+
+
+def _measured(report: EvaluationReport, metric: str) -> list[float]:
+    """Every case that actually measured `metric`. A `None` is an ABSENCE, never a zero.
+
+    Filtering here rather than defaulting to 0.0 is the same rule B1 established at bucket
+    level, applied one layer down: a case that could not measure a metric must not drag the
+    mean towards a number nobody observed.
+    """
+    values = []
+    for case in report.cases:
+        value = case.metrics.get(metric)
+        if value is not None:
+            values.append(float(value))
+    return values
+
+
+def render_sweep_markdown(report: SweepReport) -> str:
+    """The sweep table, winner first (Plan 02 §7).
+
+    Published even when flat, and the flatness is stated in the table rather than left for a
+    reader to notice: spec §13.15 asks for negative results to be documented, and a sweep
+    whose rows are indistinguishable is a result about the chunker, not a missing measurement.
+    """
+    lines = [
+        f"Profundidad: {report.limit} resultados por caso.",
+        f"Criterio: recall@{report.k}, luego MRR, luego menos chunks (S-1).",
+        f"| target | overlap | chunks | recall@{report.k} | recall@1 | MRR |",
+        "|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in report.rows:
+        lines.append(
+            f"| {row.params.target} | {row.params.overlap} | {row.chunks} "
+            f"| {_number(row.recall)} | {_number(row.recall_at_1)} | {_number(row.mrr)} |"
+        )
+    if report.winner is not None:
+        lines += ["", _sweep_verdict(report)]
+    return "\n".join(lines)
+
+
+def _sweep_verdict(report: SweepReport) -> str:
+    """Which criterion DECIDED, said in the report (S-1): a tie on `recall@k` is named, with
+    the rows it spans, and the criterion that broke it is named with its two values."""
+    winner = report.winner
+    assert winner is not None
+    label = f"target={winner.params.target}, overlap={winner.params.overlap}"
+    # A DEVIATION FROM THE SNAPSHOT, and the reason. `len(distinct) == 1` is true for a
+    # ONE-ROW sweep as well, so a single-combination run always printed «PLANO: todas las
+    # combinaciones puntúan igual» — a verdict about a tie, over a table with nothing to tie
+    # against, that no input could have made say anything else. That is the shape CLAUDE.md
+    # rule 2 rejects, inside the instrument that exists to publish an honest measurement.
+    # A single cell is a measurement of one combination and says so.
+    if len(report.rows) == 1:
+        return f"UNA COMBINACIÓN: {label}; no hay barrido que comparar."
+    distinct = {(_number(r.recall), _number(r.mrr)) for r in report.rows}
+    if len(distinct) == 1:
+        return "PLANO: todas las combinaciones puntúan igual; gana la que produce menos chunks."
+    tied = [r for r in report.rows[1:] if _number(r.recall) == _number(winner.recall)]
+    if not tied:
+        return f"Gana {label}: decidió recall@{report.k} ({_number(winner.recall)})."
+    names = ", ".join(f"{r.params.target}/{r.params.overlap}" for r in tied)
+    runner_up = tied[0]
+    if _number(runner_up.mrr) != _number(winner.mrr):
+        return (
+            f"Gana {label}: empate en recall@{report.k} ({_number(winner.recall)}) con {names}; "
+            f"decidió MRR ({_number(winner.mrr)} frente a {_number(runner_up.mrr)}; "
+            f"recall@1 {_number(winner.recall_at_1)} frente a {_number(runner_up.recall_at_1)})."
+        )
+    return (
+        f"Gana {label}: empate en recall@{report.k} y en MRR con {names}; "
+        f"decidió menos chunks ({winner.chunks} frente a {runner_up.chunks})."
+    )
+
+
+def _number(value: float | None) -> str:
+    return "sin cobertura" if value is None else f"{value:.4f}"

@@ -273,6 +273,50 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
     assert "0" in result.output and "medid" in result.output, result.output
 
 
+def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path) -> None:
+    """Plan 02 §7 at the command that has to exist for the number to be re-derivable: the
+    delivery matrix's row 02.13 lists `M cli.py (--sweep-chunker)` and its outcome is *«el
+    baseline léxico está medido y publicado»*. §15.12's signed-measurement half is exempt
+    from CI, the INSTRUMENT is not.
+
+    Driven through the real CLI, because the flag is what a reader runs to re-derive `800/0`.
+    Seen red before the wiring: `Error: No such option: --sweep-chunker`.
+    """
+    result = runner.invoke(app, ["eval", "--sweep-chunker", "target=800,1600 overlap=0", "--json"])
+    payload = _json_stdout(result)
+
+    assert [row["target"] for row in payload["rows"]] != []
+    assert {row["target"] for row in payload["rows"]} == {800, 1600}
+    assert all("recall@1" in row and "chunks" in row for row in payload["rows"])
+    # The ordinary report's path is NOT reused: a sweep and an evaluation are two documents.
+    assert (workspace / "data" / "eval-sweep.json").exists()
+    assert (workspace / "data" / "eval-sweep.md").exists()
+    assert not (workspace / "data" / "eval-report.json").exists()
+
+
+def test_eval_sweep_honours_and_publishes_the_limit(workspace: Path) -> None:
+    """`xbrain eval --limit 150 --sweep-chunker …` produced a report byte-identical to
+    `--limit 10` on the snapshot's real corpus, because `_run_sweep` never passed the option
+    the command advertised. The report carries the depth it ran at.
+    """
+    payload = _json_stdout(
+        runner.invoke(app, ["eval", "--limit", "150", "--sweep-chunker", "target=800", "--json"])
+    )
+    assert payload["limit"] == 150
+    default = _json_stdout(runner.invoke(app, ["eval", "--sweep-chunker", "target=800", "--json"]))
+    assert default["limit"] == 10
+
+
+def test_eval_sweep_refuses_an_unknown_axis_through_the_command(workspace: Path) -> None:
+    """A typo that swept nothing would publish the DEFAULT's numbers under the name of a
+    sweep. The refusal has to reach the CLI's exit code, not only `parse_sweep`.
+    """
+    result = runner.invoke(app, ["eval", "--sweep-chunker", "targt=800"])
+
+    assert result.exit_code != 0, result.output
+    assert "desconocido" in result.output, result.output
+
+
 def test_inspect_chunks_an_article_on_its_block_boundaries(workspace: Path) -> None:
     """m8, the other production caller: `knowledge inspect --chunks`.
 
