@@ -53,6 +53,28 @@ UTC = timezone.utc
 
 ZERO = index_build.StoreSignal(0, 0, 0, 0, 0, 0)
 
+# THE LONE SURROGATES ARE BUILT AT RUNTIME, never written as `"\ud800"` source literals.
+#
+# pytest's assertion rewriter re-`compile()`s this module from its own AST, and CPython
+# 3.13 encodes every string constant to UTF-8 while building the code object — which a
+# lone surrogate cannot survive. Measured on this file, `compile(ast.parse(src), path,
+# "exec")` is OK on 3.12.11 and raises `UnicodeEncodeError: 'utf-8' codec can't encode
+# character '\ud800' ... surrogates not allowed` on 3.13.7 — and pytest turns that into
+# `Interrupted: 1 error during collection`, so ZERO tests run, not merely this file's.
+# `pyproject.toml` declares `requires-python = ">=3.12"` and the repo venv runs 3.13,
+# while both CI gates pin `uv python install 3.12`: the one interpreter nothing measured
+# is the one a developer uses. A sweep of `ast.parse` + `compile` over every `.py` under
+# `src/` and `tests/` on 3.13.7 found this file and no other.
+#
+# `chr()` keeps the SUBJECT exactly — these tests exist to prove the fingerprint planes
+# REFUSE an unencodable string, and they still hand the planes the same character — while
+# moving it out of the compiler's reach. One definition per shape (rule 5), so the next
+# case cannot reintroduce the literal by hand.
+LONE_SURROGATE = chr(0xD800)
+# The surrogate PAIR that `ensure_ascii=True` collides with U+1F600, the astral character
+# it spells: two lone surrogates, so the same compile failure and the same repair.
+SURROGATE_PAIR = chr(0xD83D) + chr(0xDE00)
+
 
 @pytest.fixture()
 def corpus() -> tuple[dict[str, Item], list[Topic], dict[str, TopicPage]]:
@@ -730,7 +752,7 @@ def test_the_canonical_encoding_is_injective_where_ensure_ascii_would_not_be() -
     on the ENCODER because the surrogate side raises at `_sha256`'s `.encode("utf-8")`, which
     is fail-closed and not a hash to compare.
     """
-    assert index_build._canonical("t", ["\ud83d\ude00"]) != index_build._canonical(
+    assert index_build._canonical("t", [SURROGATE_PAIR]) != index_build._canonical(
         "t", ["\U0001f600"]
     )
 
@@ -795,7 +817,7 @@ def test_a_lone_surrogate_is_refused_by_the_hash_and_never_replaced() -> None:
     same content — the fail-open family the whole module exists to close.
     """
     with pytest.raises(UnicodeEncodeError):
-        index_build._sha256(index_build._canonical("t", ["\ud800"]))
+        index_build._sha256(index_build._canonical("t", [LONE_SURROGATE]))
 
 
 def test_absent_and_empty_are_not_the_same_atom() -> None:
@@ -2037,12 +2059,16 @@ def test_an_empty_vocabulary_is_not_one_holding_an_empty_description() -> None:
 @pytest.mark.parametrize(
     "call",
     [
-        pytest.param(lambda: index_build.vocab_fingerprint([_topic(description="\ud800")]), id="v"),
         pytest.param(
-            lambda: index_build.topics_fingerprint({"a": _page(overview="\ud800")}), id="t"
+            lambda: index_build.vocab_fingerprint([_topic(description=LONE_SURROGATE)]), id="v"
         ),
-        pytest.param(lambda: index_build.item_fingerprint(_item(bookmark_folder="\ud800")), id="i"),
-        pytest.param(lambda: index_build.store_fingerprint({"\ud800": _item()}), id="s"),
+        pytest.param(
+            lambda: index_build.topics_fingerprint({"a": _page(overview=LONE_SURROGATE)}), id="t"
+        ),
+        pytest.param(
+            lambda: index_build.item_fingerprint(_item(bookmark_folder=LONE_SURROGATE)), id="i"
+        ),
+        pytest.param(lambda: index_build.store_fingerprint({LONE_SURROGATE: _item()}), id="s"),
     ],
 )
 def test_a_lone_surrogate_is_refused_by_every_plane_under_one_named_error(call) -> None:
@@ -2079,7 +2105,7 @@ def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, exp
     directory is what the guard has to be about, and that is the assertion that reddens.
     """
     with pytest.raises(index_build.FingerprintError) as caught:
-        index_build._fingerprint(domain, ["\ud800"])
+        index_build._fingerprint(domain, [LONE_SURROGATE])
     message = str(caught.value)
     assert expected in message
     assert "data/" not in message
@@ -2088,7 +2114,7 @@ def test_the_refusal_names_the_input_file_the_operator_has_to_repair(domain, exp
 def test_a_plane_with_no_table_entry_still_raises_the_named_error_and_keeps_the_cause() -> None:
     """`_PLANE_INPUT[domain]` was a direct subscript evaluated INSIDE the handler, so the next
     plane added without a table entry raised a LOOKUP BUG on top of the fault being reported.
-    Measured before the fix: `_fingerprint("a-plane-added-later", ["\ud800"])` raised
+    Measured before the fix: `_fingerprint("a-plane-added-later", [LONE_SURROGATE])` raised
     `KeyError: 'a-plane-added-later'` and the `UnicodeEncodeError` it was reporting was LOST —
     the operator got a `KeyError` naming a domain string instead of the message naming the
     byte. The four current call sites all pass literals, so this is latent; but `_fingerprint`
@@ -2100,7 +2126,7 @@ def test_a_plane_with_no_table_entry_still_raises_the_named_error_and_keeps_the_
     a `FingerprintError` would still be the defect.
     """
     with pytest.raises(index_build.FingerprintError) as caught:
-        index_build._fingerprint("a-plane-added-later", ["\ud800"])
+        index_build._fingerprint("a-plane-added-later", [LONE_SURROGATE])
     message = str(caught.value)
     assert "a-plane-added-later" in message
     assert "surrogates not allowed" in message
@@ -2115,7 +2141,7 @@ def test_refusing_beats_surrogatepass_because_the_index_cannot_store_it_either()
     connection = sqlite3.connect(":memory:")
     connection.execute("CREATE TABLE t (x TEXT)")
     with pytest.raises(UnicodeEncodeError):
-        connection.execute("INSERT INTO t VALUES (?)", ("\ud800",))
+        connection.execute("INSERT INTO t VALUES (?)", (LONE_SURROGATE,))
     connection.close()
 
 
@@ -2138,7 +2164,7 @@ def test_a_surrogate_in_surface_text_is_refused_one_layer_lower_and_is_not_named
     as covering more than it does.
     """
     with pytest.raises(UnicodeEncodeError):
-        index_build.item_fingerprint(_item(text="\ud800"))
+        index_build.item_fingerprint(_item(text=LONE_SURROGATE))
 
 
 # ---------------------------------------------------------------------------
