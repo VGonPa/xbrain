@@ -25,6 +25,7 @@ import yaml
 from typer.testing import CliRunner
 
 from xbrain.cli import app
+from xbrain.knowledge import contracts, evaluation
 
 FIXTURES = Path(__file__).parent / "fixtures"
 runner = CliRunner()
@@ -244,7 +245,33 @@ def test_eval_reports_the_corpus_it_measured(workspace: Path) -> None:
     assert payload["corpus"]["chunks"] > 0
 
 
-def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: Path) -> None:
+# The strategy that CANNOT be measured, injected rather than borrowed (F-2).
+#
+# The two fail-closed tests below need a case no backend can score. Until the evaluator
+# regained its derived `SUPPORTED_FILTERS`, that was free: `lexical` could push only
+# `has_surfaces` and `origins`, so trimming the golden set to FX7 — a `source` filter —
+# left every bucket empty. Closing that gap removed the construction along with it, which
+# is rule 6 at work: the repair invalidated the evidence its own guards stood on.
+#
+# Borrowing the next unimplemented entry of the frozen `Strategy` literal would rebuild the
+# same coupling one level up — a fail-closed guard whose survival depends on Plan 03 not
+# landing. So the backend is INVENTED: it exists (`IMPLEMENTED_STRATEGIES`, or
+# `resolve_strategy` degrades it to `lexical` and every filter is pushed after all) and it
+# can push no filter at all (`SUPPORTED_FILTERS`).
+STUB_BACKEND = "stub_backend_that_pushes_no_filter"
+
+
+@pytest.fixture()
+def unscorable_strategy(monkeypatch) -> str:
+    """A retrieval backend that runs and can apply no filter, so a filtered case is UNMEASURED."""
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical", STUB_BACKEND}))
+    monkeypatch.setitem(evaluation.SUPPORTED_FILTERS, STUB_BACKEND, frozenset())
+    return STUB_BACKEND
+
+
+def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(
+    workspace: Path, unscorable_strategy: str
+) -> None:
     """M2: a gate that compared the threshold against NOTHING must not report PASS.
 
     `_failures` skips every bucket with no coverage and every metric carrying the sentinel —
@@ -255,8 +282,10 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
     can fail".
 
     Driven through the real CLI, because the exit code is the only surface a caller reads:
-    the golden set is trimmed to FX7, whose `source` filter the lexical baseline cannot
-    push into `WHERE`, so the case is UNMEASURED and every bucket ends up empty.
+    the golden set is trimmed to FX7, and the run is pointed at an INJECTED backend that can
+    push no filter at all, so the case is UNMEASURED and every bucket ends up empty. The
+    first version of this test used `lexical` for that, which stopped working the day the
+    evaluator regained all eight filters — see `unscorable_strategy`.
     """
     golden = yaml.safe_load((workspace / "eval" / "golden-set.yaml").read_text(encoding="utf-8"))
     golden["cases"] = [c for c in golden["cases"] if c["id"] == "FX7"]
@@ -265,7 +294,7 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(workspace: P
         yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
     )
 
-    result = runner.invoke(app, ["eval", "--min-recall", "1.0"])
+    result = runner.invoke(app, ["eval", "--min-recall", "1.0", "--strategy", unscorable_strategy])
 
     assert result.exit_code != 0, (
         "a threshold of 1.0 passed having scored zero cases:\n" + result.output
@@ -292,6 +321,44 @@ def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path)
     assert (workspace / "data" / "eval-sweep.json").exists()
     assert (workspace / "data" / "eval-sweep.md").exists()
     assert not (workspace / "data" / "eval-report.json").exists()
+
+
+def test_the_sweep_ARTEFACTS_on_disk_name_the_retriever_that_ranked_them(
+    workspace: Path, monkeypatch
+) -> None:
+    """End of the chain: the two FILES a reader opens, not the in-process report object.
+
+    `data/eval-sweep.{json,md}` is the artefact Plan 03 has to beat, and it named no retriever
+    anywhere — `xbrain eval --strategy vector --sweep-chunker …` wrote a ranked table produced
+    entirely by bm25, with `strategy` absent from the JSON and absent from the markdown, while
+    the SAME command without `--sweep-chunker` headed its report «`lexical` · solicitada
+    `vector`, sin backend». One command, two branches, one of them silent about its instrument
+    (F-2). The report object is asserted in `tests/test_knowledge_evaluation.py`; this asserts
+    the bytes, because a field that never reaches the file is a field nobody reads.
+
+    The premise is pinned, not inherited: `vector` is the example of a declared-but-
+    unimplemented strategy and reading that from production would expire when Plan 03 lands.
+
+    Seen red before the fix: `"strategy" not in payload`, and the written markdown contained
+    the word `vector` nowhere.
+    """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
+    result = runner.invoke(
+        app, ["eval", "--strategy", "vector", "--sweep-chunker", "target=800,1600", "--json"]
+    )
+    payload = _json_stdout(result)
+
+    assert payload["strategy"] == "lexical", "what ran"
+    assert payload["requested_strategy"] == "vector", "what was asked for"
+    assert payload["degraded"] == ["vector_not_implemented"]
+
+    on_disk = json.loads((workspace / "data" / "eval-sweep.json").read_text(encoding="utf-8"))
+    assert on_disk["strategy"] == "lexical"
+    assert on_disk["requested_strategy"] == "vector"
+
+    markdown = (workspace / "data" / "eval-sweep.md").read_text(encoding="utf-8")
+    assert markdown.splitlines()[0].startswith("Recuperador: `lexical`")
+    assert "vector_not_implemented" in markdown.splitlines()[0]
 
 
 def test_eval_sweep_honours_and_publishes_the_limit(workspace: Path) -> None:
@@ -386,14 +453,17 @@ def test_eval_sweep_refuses_a_threshold_it_cannot_apply(workspace: Path) -> None
     assert plain.exit_code != 0, plain.output
 
 
-def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(workspace: Path) -> None:
+def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(
+    workspace: Path, unscorable_strategy: str
+) -> None:
     """F2-3 at the surface a caller reads. A sweep whose every combination was unscorable
     printed «PLANO: todas las combinaciones puntúan igual» and exited 0 — a positive claim
     about a ranking that never happened, reported as a success.
 
-    The golden set is trimmed to FX7, whose `source` filter the lexical baseline cannot push
-    into `WHERE`, so every case is UNMEASURED for every combination — the same construction
-    the threshold's own fail-closed test uses.
+    The golden set is trimmed to FX7 and the run is pointed at an INJECTED backend that can
+    push no filter at all, so every case is UNMEASURED for every combination — the same
+    construction the threshold's own fail-closed test uses, and for the same reason it is an
+    injection rather than `lexical`.
 
     The empty grid is asserted beside it because it is the same predicate — no winner — and
     it used to publish `rows: []` with exit 0 as well.
@@ -405,7 +475,10 @@ def test_eval_sweep_without_a_winner_is_not_reported_as_a_success(workspace: Pat
         yaml.safe_dump(golden, allow_unicode=True), encoding="utf-8"
     )
 
-    unmeasured = runner.invoke(app, ["eval", "--sweep-chunker", "target=800,1600"])
+    unmeasured = runner.invoke(
+        app,
+        ["eval", "--sweep-chunker", "target=800,1600", "--strategy", unscorable_strategy],
+    )
 
     assert unmeasured.exit_code != 0, "a sweep that scored nothing exited 0:\n" + unmeasured.output
     assert "SIN MEDICIÓN" in unmeasured.output, unmeasured.output

@@ -505,9 +505,14 @@ generates an Obsidian wiki.
   group fails the anexo-A.3 leak rule; founding a case on the second would enshrine a possible
   hallucination as ground truth. Zero usable candidates — and the population measured is proper
   nouns, not all facts. **A case whose filters the strategy cannot apply is UNMEASURED, not
-  0.0**: the FTS5 baseline pushes only `has_surfaces`/`origins` into `WHERE`, and the first real
-  run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at filtering" when
-  the instrument does not exist yet (spec §8.6.8). The baseline is the SAME FTS5 the persisted
+  0.0**: under Plan 01 the FTS5 baseline pushed only `has_surfaces`/`origins` into `WHERE`, and
+  the first real run reported `filtros: recall@10 = 0.0`, which reads as "retrieval failed at
+  filtering" when the instrument does not exist yet (spec §8.6.8). **That gap is now closed and
+  the RULE is what survives** (PR #179): the harness builds through `index_build`'s writer, the
+  same one `xbrain index build` drives, so all **eight** filters of spec §7.2 are pushed and the
+  two `filtros` cases are scored rather than reported unmeasured. `SUPPORTED_FILTERS` is derived
+  from `SearchFilters.model_fields`, so a ninth filter added to the frozen contract cannot
+  silently keep the set at eight. Read "only two" as history; do not quote it as a limit. The baseline is the SAME FTS5 the persisted
   index will use, on `sqlite3(":memory:")` — same DDL, same `unicode61 remove_diacritics 2`
   (no stemming: FTS5 has none multilingual, and the English one would wreck the Spanish half),
   same `bm25()`, same explicit `chunk_id` tie-break — so what dies later is where the database
@@ -533,9 +538,16 @@ generates an Obsidian wiki.
   Do not re-stamp a measured figure to a new version without that proof: which of the two a
   version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
   correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
-  in this branch and the derived figure did not — rule 6. Read the old pair as history.)* That, and no stemming, is what Plan 03's vector
-  layer has to beat. Picking between `OR`, minimum-should-match and per-term weighting is Plan
-  02's sweep. **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
+  in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
+  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7395 · MRR 0.7357** — NOT the
+  `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
+  it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
+  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
+  `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
+  tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
+  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat.
+  Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
+  **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
   counts the comparisons it made and fails closed at zero, because `passed = not failures` let
   `--min-recall 1.0` exit 0 having scored nothing.
 - **The persistent index (`data/index/`, `xbrain index build|update|status` · `search` · `get`)
@@ -584,10 +596,15 @@ generates an Obsidian wiki.
   stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
   tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
   `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
-  (`unicode61 remove_diacritics 2`). And `xbrain eval` is a DIFFERENT filter surface: it pushes
-  only `has_surfaces`/`origins`, so a golden-set case declaring any of the other six is
-  **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as "retrieval failed at
-  filtering" when the instrument was not there. Operation: `docs/knowledge-index.md`.
+  (`unicode61 remove_diacritics 2`). And `xbrain eval` is **no longer a different filter surface** (PR #179):
+  the harness stopped walking the corpus its own way and now builds through `index_build`'s
+  writer, so it pushes the **same eight** filters `search` does and the two `filtros` cases of
+  the golden set are scored. **The rule outlives the gap**: a case whose filters a strategy
+  cannot apply is still **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as
+  "retrieval failed at filtering" when the instrument was not there — and that is what will
+  protect Plan 03's vector strategy, which starts with no filter columns of its own. The earlier
+  line here said the harness pushes only two; it was true until #179 and is now false.
+  Operation: `docs/knowledge-index.md`.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·

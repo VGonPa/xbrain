@@ -3420,7 +3420,7 @@ def eval_command(
     limit: int = typer.Option(
         10,
         "--limit",
-        help="Profundidad de recuperación por caso (nunca por debajo del mayor k).",
+        help="Profundidad de recuperación por caso, en OWNERS (nunca por debajo del mayor k).",
     ),
     k: list[int] = typer.Option(
         [], "--k", help="Valores de k a reportar (repetible; el barrido admite uno solo)."

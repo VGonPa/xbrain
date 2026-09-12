@@ -243,12 +243,22 @@ a way of setting it to two values, and resolving that silently would hand back a
 corpus nobody asked for. Unknown values are refused with the valid ones listed —
 an unknown `--topic` prints the whole vocabulary.
 
-**`xbrain eval` is a different surface, and it can push only two of the eight.**
-The evaluation harness measures the baseline retriever, which supports
-`has_surfaces` and `origins`; a golden-set case declaring any of the other six is
-reported **unmeasured**, never `0.0`. A zero from a filter nobody applied reads
-as "retrieval failed at filtering" when the truth is that the instrument was not
-there.
+**`xbrain eval` pushes the same eight.** The evaluation harness used to walk the
+corpus its own way, writing chunks and no metadata, so it could push only
+`has_surfaces` and `origins` — and even that pair was a fabricated zero, because
+its `surfaces` table held no rows for the `EXISTS` to match. It now builds
+through the same writer `xbrain index build` drives, so the measured retriever is
+the one `search` queries and all eight filters reach `WHERE`. The set is derived
+from `SearchFilters`, not written out a second time, so a ninth filter cannot
+leave the harness silently declaring eight.
+
+**The rule that gap produced still stands, and it is the one to remember.** A
+golden-set case whose filters a strategy cannot push is reported **unmeasured**,
+never `0.0`. A zero from a filter nobody applied reads as "retrieval failed at
+filtering" when the truth is that the instrument was not there. Nothing in the
+golden set is unmeasured for this reason today; Plan 03's vector strategy will
+arrive with no filter columns of its own, and this is what keeps its first report
+honest.
 
 ## Known limits of the lexical baseline
 
