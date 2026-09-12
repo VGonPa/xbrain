@@ -255,6 +255,18 @@ def _paginate(
     start_surface, start_chunk = _decode(cursor)
     page = _Page(budget=limits.char_budget)
 
+    # B2: an out-of-range surface index signals "complete" when it should error — the same
+    # family as a negative component (a restart in disguise), but positional rather than
+    # signed. A cursor pointing past the end of the surfaces looks like "you have seen
+    # everything" when the consumer may have missed the whole corpus, and spec §9.3 forbids
+    # silent cuts. The check is here, not in `_decode`, because the population (`wanted`) only
+    # exists at this scope — `_decode` has only the raw string.
+    if start_surface >= len(wanted) and cursor:
+        raise ValueError(
+            f"Cursor inválido: {cursor!r} apunta más allá de las superficies disponibles. "
+            "Usa el que devolvió la respuesta anterior."
+        )
+
     for position, surface in enumerate(wanted):
         if position < start_surface:
             continue
@@ -263,6 +275,16 @@ def _paginate(
             page.take_surface(surface)
             continue
         pieces = _chunks_of(item, surface, params)
+        # B2: same rationale for the chunk index on the FINAL surface. Mid-pagination, a
+        # cursor past the current surface's chunks just advances to the next one; on the last
+        # surface it would report completion when chunks remain unvisited. The check is
+        # "at the starting surface" (position == start_surface) AND "beyond the last chunk"
+        # (resume >= len(pieces)) AND "there is no following surface to fall through to".
+        if position == start_surface and resume >= len(pieces) and position + 1 >= len(wanted):
+            raise ValueError(
+                f"Cursor inválido: {cursor!r} apunta más allá de los fragmentos disponibles. "
+                "Usa el que devolvió la respuesta anterior."
+            )
         stopped = page.take_chunks(pieces, resume, partial(_encode, position))
         if stopped is not None:
             return page.surfaces_out(), page.chunks_out(), True, stopped
@@ -356,8 +378,19 @@ def _ranked_chunks(
         index.connection.close()
     ordered = [by_id[hit.chunk_id] for hit in hits if hit.chunk_id in by_id]
 
+    offset = _decode_query(cursor)
+    # B2: an out-of-range query offset signals "complete" when it should error — same family
+    # as the surface/chunk check in `_paginate`. The ranking is deterministic, so an offset
+    # past the end is either a corrupted cursor or a replay against a smaller result set, and
+    # both are invalid.
+    if cursor and offset >= len(ordered):
+        raise ValueError(
+            f"Cursor inválido: {cursor!r} apunta más allá de los resultados disponibles. "
+            "Usa el que devolvió la respuesta anterior."
+        )
+
     page = _Page(budget=limits.char_budget)
-    stopped = page.take_chunks(ordered, _decode_query(cursor), _encode_query)
+    stopped = page.take_chunks(ordered, offset, _encode_query)
     return page.chunks_out(), stopped is not None, stopped
 
 

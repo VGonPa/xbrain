@@ -304,6 +304,76 @@ def test_a_malformed_cursor_is_refused(long_article_context: QueryContext) -> No
 
 
 # ---------------------------------------------------------------------------
+# B2 — out-of-range cursors are refused, not silently completed
+# ---------------------------------------------------------------------------
+
+
+def test_an_out_of_range_surface_cursor_is_refused(context: QueryContext) -> None:
+    """B2 (gate review): a cursor whose surface index exceeds `len(wanted)` was returning
+    `surfaces=(), chunks=(), truncated=False, cursor=None` — the signal for "complete" — when
+    the consumer may have missed the whole corpus. Same family as a negative component (a
+    restart in disguise) but positional rather than signed. Spec §9.3: "truncamiento explícito
+    + cursor, nunca corte silencioso". The silent completion violated the explicit half.
+
+    Reproduced on HEAD before the fix:
+        get("k03", ctx, surfaces=("external_article",), cursor="1:0")
+        → surfaces=(), chunks=(), truncated=False, cursor=None
+
+    Now raises the same ValueError as a malformed or negative cursor.
+    """
+    with pytest.raises(ValueError, match="Cursor"):
+        # k03 has exactly 1 external_article surface, so index 1 is out of range.
+        get("k03", context, surfaces=("external_article",), cursor="1:0")
+
+
+def test_an_out_of_range_chunk_cursor_on_the_final_surface_is_refused(
+    context: QueryContext,
+) -> None:
+    """B2 (gate review): a cursor whose chunk index exceeds `len(pieces)` on the FINAL surface
+    was returning an empty bundle with `truncated=False` — same silent completion as B2's
+    surface case. Mid-pagination, a cursor past the current surface's chunks advances to the
+    next surface; on the LAST surface it signals completion when chunks remain unvisited.
+
+    Reproduced on HEAD before the fix:
+        get("k03", ctx, surfaces=("external_article",), cursor="0:99999")
+        → surfaces=(), chunks=(), truncated=False, cursor=None
+
+    Now raises ValueError.
+    """
+    with pytest.raises(ValueError, match="Cursor"):
+        # k03's external_article has far fewer than 99999 chunks at any reasonable budget.
+        get(
+            "k03",
+            context,
+            surfaces=("external_article",),
+            limits=GetLimits(char_budget=100),  # force chunking
+            cursor="0:99999",
+        )
+
+
+def test_an_out_of_range_query_cursor_is_refused(context: QueryContext) -> None:
+    """B2 (gate review): a query cursor whose offset exceeds `len(ordered)` was returning
+    `chunks=(), truncated=False, cursor=None` — the same silent completion as the positional
+    cases. The ranking is deterministic, so an offset past the end is either a corrupted
+    cursor or a replay against a smaller result set, and both are invalid.
+
+    Reproduced on HEAD before the fix:
+        get("k03", ctx, surfaces=("external_article",), query="Quillfeather", cursor="q:99999")
+        → chunks=(), truncated=False, cursor=None
+
+    Now raises ValueError.
+    """
+    with pytest.raises(ValueError, match="Cursor"):
+        get(
+            "k03",
+            context,
+            surfaces=("external_article",),
+            query="Quillfeather",
+            cursor="q:99999",
+        )
+
+
+# ---------------------------------------------------------------------------
 # The query path (spec §7.3)
 # ---------------------------------------------------------------------------
 
@@ -756,7 +826,10 @@ def _indexed_chunk_ids(data: Path, item_id: str, surface_type: str) -> list[str]
         connection.close()
 
 
-def test_get_cuts_with_the_chunker_parameters_its_context_carries(tmp_path: Path, corpus) -> None:
+@pytest.mark.parametrize("route", ["paged", "query"])
+def test_get_cuts_with_the_chunker_parameters_its_context_carries(
+    tmp_path: Path, corpus, route: str
+) -> None:
     """`get` re-cuts the body it pages; `QueryContext.params` is what it must cut WITH.
 
     `chunk_id` is `<surface_id>:<chunk_index>:<chunker_version>` and carries no trace of the
@@ -772,6 +845,10 @@ def test_get_cuts_with_the_chunker_parameters_its_context_carries(tmp_path: Path
     chunks at the default (423/423/423/471) and 9 at `target=200, max_chars=400`. The
     precondition below asserts that inequality rather than the two counts, so the test stays
     honest if the fixture's body ever moves.
+
+    BOTH ROUTES (B1, gate review): the original test only exercised the paged route. The
+    query route passes through `_ranked_chunks` → `_chunks_of(item, surface, params)`, and if
+    the `params` argument were ever broken there, no test would catch it.
 
     Seen red with `params=DEFAULT_CHUNKER_PARAMS` hard-coded in `_chunks_of`: `get` returns
     2 chunk ids where the index holds 8, and the first id names 800 characters in one place
@@ -802,14 +879,18 @@ def test_get_cuts_with_the_chunker_parameters_its_context_carries(tmp_path: Path
     body = next(s for s in item_surfaces(store["k03"]) if s.surface_type == "external_article").text
     served: list[tuple[str, str]] = []
     cursor: str | None = None
+    # A query that appears across the fixture body — "Retrieval quality" appears in all
+    # paragraphs of k03's article, so the query route returns multiple chunks.
+    query_term = "Retrieval quality"
     for _page in range(50):
-        bundle = get(
-            "k03",
-            context,
-            surfaces=("external_article",),
-            limits=GetLimits(char_budget=len(body) // 4),
-            cursor=cursor,
-        )
+        kwargs: dict = {
+            "surfaces": ("external_article",),
+            "limits": GetLimits(char_budget=len(body) // 4),
+            "cursor": cursor,
+        }
+        if route == "query":
+            kwargs["query"] = query_term
+        bundle = get("k03", context, **kwargs)
         assert bundle.surfaces == (), "the budget must force the chunk route or nothing is cut"
         served += [(chunk.chunk_id, chunk.text) for chunk in bundle.chunks]
         if not bundle.truncated:
@@ -818,8 +899,32 @@ def test_get_cuts_with_the_chunker_parameters_its_context_carries(tmp_path: Path
     else:
         pytest.fail("pagination never terminated")
 
-    assert [chunk_id for chunk_id, _text in served] == indexed
-    assert dict(served)[indexed[0]] != default_cut[0].text
+    # The PAGED route delivers ALL chunks in emitter order.
+    # The QUERY route delivers only chunks that score for the query, ranked by relevance.
+    # What BOTH must do is cut with `params`, not the module default — that's the invariant.
+    served_ids = [chunk_id for chunk_id, _text in served]
+    if route == "paged":
+        # Paged route preserves order, so exact list comparison.
+        assert served_ids == indexed
+        # The first indexed chunk's TEXT under the tight params must differ from the default.
+        assert dict(served)[indexed[0]] != default_cut[0].text
+    else:
+        # Query route: verify that returned chunks use the tight parameters' cut, not the
+        # default. The key observable is chunk id membership: every returned chunk id must
+        # exist in the index built with `tight` params, and each such chunk's text must match
+        # the indexed text exactly — proving the query route used the same params.
+        assert served, "the query route must return at least one chunk"
+        for chunk_id, text in served:
+            assert chunk_id in indexed, (
+                f"query route returned chunk {chunk_id!r} not in indexed set — wrong params?"
+            )
+        # Additional: no chunk should be as long as the default cut's first chunk, which is
+        # ~423 chars at default params vs ~200 chars at tight params.
+        default_first_len = len(default_cut[0].text)
+        for chunk_id, text in served:
+            assert len(text) < default_first_len, (
+                f"chunk {chunk_id!r} is {len(text)} chars, same as default cut — wrong params"
+            )
 
 
 def test_the_default_budget_is_the_one_get_applies_when_the_caller_names_none(
