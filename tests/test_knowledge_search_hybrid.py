@@ -16,12 +16,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge import index_build
+from xbrain.knowledge import index_build, search_service
 from xbrain.knowledge.contracts import SearchFilters, SearchMatch, SearchResponse
 from xbrain.knowledge.index_schema import db_path, open_index
 from xbrain.knowledge.search_service import QueryContext, search
@@ -260,3 +261,171 @@ def test_hybrid_is_deterministic(tmp_path: Path, corpus) -> None:
     second = search(QUERY, context, strategy="hybrid", limit=50)
 
     assert first.model_dump_json() == second.model_dump_json()
+
+
+# --------------------------------------------------------------------------------------------
+# Regressions for the three defects reproduced on PR #184
+# --------------------------------------------------------------------------------------------
+
+
+def _walk_pages(context: QueryContext, strategy: str) -> list[str]:
+    """Every item id a `limit=1` cursor walk serves, in order."""
+    served: list[str] = []
+    cursor = None
+    for _ in range(500):
+        response = search(QUERY, context, strategy=strategy, limit=1, cursor=cursor)
+        served += [result.item_id for result in response.results]
+        cursor = response.cursor
+        if cursor is None:
+            return served
+    raise AssertionError("the cursor walk did not terminate")
+
+
+def test_hybrid_pages_of_one_reassemble_the_unpaged_ranking(tmp_path: Path, corpus) -> None:
+    """Defect 1: at `limit=1` the walk served one item twice and never served another.
+
+    Each page had materialised its OWN window, and RRF over a deeper window re-orders the head,
+    so the pages were slices of different rankings. Pages must be disjoint and reassemble one.
+    """
+    data = _data(tmp_path, corpus, with_plane=True)
+    context = _context(data, corpus, QueryEmbedder(_pick(data, contains_query=False)[1]))
+
+    whole = search(QUERY, context, strategy="hybrid", limit=500)
+    walked = _walk_pages(context, "hybrid")
+
+    assert not whole.truncated
+    assert len(whole.results) > 2, "paging a ranking of two pages or fewer proves nothing"
+    assert len(walked) == len(set(walked)), walked
+    assert walked == [result.item_id for result in whole.results]
+
+
+MANY = "Marrowgate"
+
+
+def _many_chunk_corpus(corpus):  # noqa: ANN001, ANN202 - the fixture tuple, passed through
+    """The fixture with `k08`'s transcript cut into many windows, every one naming `Marrowgate`.
+
+    The corpus `test_a_long_transcript_yields_one_result_with_at_most_three_matches` builds, so
+    ONE item holds more lexical matches than any per-item cap — the only shape in which the two
+    channels' per-item heads can disagree about a chunk both of them found.
+    """
+    store, vocab, pages = corpus
+    item = store["k08"]
+    assert item.content is not None
+    sources = list(item.content.sources)
+    long_text = " ".join(f"{MANY} segment {n} of the talk." for n in range(400))
+    sources[0] = sources[0].model_copy(update={"text": long_text})
+    content = item.content.model_copy(update={"sources": sources})
+    return {**store, "k08": item.model_copy(update={"content": content})}, vocab, pages
+
+
+def _all_chunks(data: Path) -> dict[str, tuple[str, str, str]]:
+    """`{chunk_id: (owner_type, owner_id, text)}` for every chunk the lexical plane holds."""
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        rows = connection.execute("SELECT chunk_id, owner_type, owner_id, text FROM chunks")
+        return {str(row[0]): (str(row[1]), str(row[2]), str(row[3])) for row in rows}
+    finally:
+        connection.close()
+
+
+def test_a_chunk_both_channels_found_is_explained_by_both(tmp_path: Path, corpus) -> None:
+    """Defect 2: a chunk both channels found was served naming only one of them.
+
+    The loss came from asking each channel for only the item's best `cap` chunks: a chunk
+    inside one channel's cap and outside the other's was explained by that channel alone. So
+    the test makes the two heads DIFFER on purpose: `head` is bm25's best chunk of `k08`
+    (read through the public `lexical` strategy) and `target` is another chunk of `k08` that
+    also names the word, embedded as the query so the vector channel ranks it first. Both
+    channels found both chunks — premises asserted, not assumed: every served chunk names the
+    word, and the corpus is smaller than the vector window — so whichever one is served must
+    say `("lexical", "vector")`. On the defective code the served chunk named one channel.
+    """
+    many = _many_chunk_corpus(corpus)
+    data = _data(tmp_path, many, with_plane=True)
+    chunks = _all_chunks(data)
+    matching = {
+        chunk_id: text
+        for chunk_id, (owner_type, owner_id, text) in chunks.items()
+        if (owner_type, owner_id) == ("item", "k08") and MANY.lower() in text.lower()
+    }
+    assert len(matching) > 3, "premise: more lexical matches in one item than the default cap"
+    assert len(chunks) < search_service.FUSED_CHUNK_WINDOW, "premise: the window holds them all"
+
+    lexical = search(MANY, replace(_context(data, many), max_matches_per_item=1))
+    head = next(r for r in lexical.results if r.item_id == "k08").matches[0].chunk_id
+    target = min(chunk_id for chunk_id in matching if chunk_id != head)
+    context = replace(_context(data, many, QueryEmbedder(matching[target])), max_matches_per_item=1)
+
+    response = search(MANY, context, strategy="hybrid", limit=500)
+    k08 = next(result for result in response.results if result.item_id == "k08")
+
+    assert k08.matches, "k08 must be served with evidence"
+    for match in k08.matches:
+        assert match.chunk_id in matching, "premise: the served chunk names the word"
+        assert match.matched_by == ("lexical", "vector"), match
+        assert match.lexical_rank is not None and match.vector_rank is not None, match
+
+
+def _edit_summary(item: Item, text: str) -> Item:
+    """The change `enrich` makes: a new summary and a new `enriched_at`."""
+    assert item.enriched is not None
+    return item.model_copy(
+        update={
+            "enriched": item.enriched.model_copy(
+                update={
+                    "summary": text,
+                    "enriched_at": item.enriched.enriched_at + timedelta(hours=1),
+                }
+            )
+        }
+    )
+
+
+def _summary_chunks(data: Path) -> dict[str, tuple[str, str]]:
+    """`{item_id: (chunk_id, text)}` of each item's first summary chunk."""
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT owner_id, chunk_id, text FROM chunks WHERE owner_type = 'item' "
+            "AND surface_type = 'summary' AND chunk_index = 0"
+        )
+        return {str(row[0]): (str(row[1]), str(row[2])) for row in rows}
+    finally:
+        connection.close()
+
+
+def test_a_vector_left_stale_by_update_is_not_served_and_the_response_says_so(
+    tmp_path: Path, corpus
+) -> None:
+    """Defect 3: after `index update` without re-embedding, the old geometry was served.
+
+    The summary is rewritten and the index updated WITHOUT an embedder, so the chunk id
+    survives (it is positional) and its row still holds the vector of the OLD text. A query
+    embedded as that old text found it at cosine 1 and served it with a `vector_rank` and an
+    empty `degraded`.
+    """
+    store, vocab, pages = corpus
+    data = _data(tmp_path, corpus, with_plane=True)
+    before = _summary_chunks(data)
+    item_id = next(
+        owner for owner in sorted(before) if QUERY.lower() not in before[owner][1].lower()
+    )
+    chunk_id, old_text = before[item_id]
+    edited = {**store, item_id: _edit_summary(store[item_id], "Resumen reescrito tras enrich.")}
+    save_store(edited, data / "items.json")
+    inputs = index_build.load_index_inputs(
+        data / "items.json", data / "vocab.yaml", data / "topics.json"
+    )
+    index_build.update(data / "index", inputs)
+    assert _summary_chunks(data)[item_id][0] == chunk_id, "premise: the id survived the edit"
+
+    context = _context(data, (edited, vocab, pages), QueryEmbedder(old_text))
+    response = search(QUERY, context, strategy="hybrid", limit=500)
+
+    assert search_service.VECTOR_PLANE_BEHIND in response.index.degraded
+    assert not [
+        match
+        for match in _matches(response)
+        if match.chunk_id == chunk_id and "vector" in match.matched_by
+    ]
