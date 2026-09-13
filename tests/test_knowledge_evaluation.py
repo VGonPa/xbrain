@@ -1078,6 +1078,50 @@ def test_the_depth_is_counted_in_owners_and_published(corpus) -> None:
     assert deeper.cases[0].retrieved[:3] == retrieved
 
 
+# At depth 1 the lexical window of this query holds TWO owners: the second sits inside the
+# window the retriever hands `_score` and outside the ranking the report publishes.
+WINDOW_DEEPER_THAN_DEPTH_QUERY = "Quillfeather"
+
+
+def test_mrr_is_read_off_the_published_ranking_never_past_it(corpus) -> None:
+    """MRR has the SAME horizon as `retrieved`: the `limit` owners the case was materialised
+    to (PR #186, F1). The window the retriever hands `_score` is deeper than that — lexical
+    opens `OWNER_CHUNK_MULTIPLIER` chunks per owner, the fused path 1,000 chunks per channel —
+    and MRR was taken over the WHOLE window while `retrieved` kept only its prefix. Measured on
+    the bake-off's own reports: V1's lexical MRR was 1/51, from a rank the 20 published owners
+    do not contain, and 5 of 21 vector cases carried an MRR no reader could rebuild. Two
+    strategies with different windows compared MRRs at different depths, and that difference
+    decided the `exacto` gate.
+
+    The precondition first (rule 1): the relevant owner really is in the window and really is
+    outside the published ranking. Then the positive half, so that zeroing MRR cannot pass: one
+    owner deeper it is a reciprocal rank again. Seen red on `b3fdc8b`: MRR 0.5 on a case whose
+    `retrieved` does not hold the item.
+    """
+    index, _stats = build_index(corpus)
+    try:
+        window, _exhausted = index.search_owners(WINDOW_DEEPER_THAN_DEPTH_QUERY, 1)
+    finally:
+        index.connection.close()
+    owners = list(dict.fromkeys(f"{hit.owner_type}:{hit.owner_id}" for hit in window))
+    assert len(owners) >= 2 and owners[1].startswith("item:"), f"the precondition moved: {owners}"
+    first, second = owners[0], owners[1]
+    case = _case(
+        id="HORIZON",
+        query=WINDOW_DEEPER_THAN_DEPTH_QUERY,
+        strata=("exacto",),
+        relevant_items=(second.split(":", 1)[1],),
+    )
+
+    shallow = evaluate([case], corpus, ks=(1,)).cases[0]
+    assert shallow.retrieved == (first,), "precondition: the relevant owner is not published"
+    assert shallow.metrics["mrr"] == 0.0, "MRR read a rank past the published ranking"
+
+    deeper = evaluate([case], corpus, ks=(1,), limit=2).cases[0]
+    assert deeper.retrieved[:2] == (first, second)
+    assert deeper.metrics["mrr"] == 0.5
+
+
 def test_a_ranking_that_ran_out_of_depth_says_so_rather_than_reporting_a_short_list(
     corpus, monkeypatch
 ) -> None:
@@ -2063,6 +2107,30 @@ def test_the_bakeoff_excludes_a_named_case_with_its_reason_and_never_pairs_it() 
     assert stratum["cases"] == ["S"] and stratum["verdict"] == "mejora"
     assert stratum["excluded"] == {"D": "la verdad de terreno se movió"}
     assert verdict["excluded"] == {"D": "la verdad de terreno se movió"}
+
+
+def test_the_bakeoff_refuses_to_break_a_tie_with_mrrs_read_at_different_depths() -> None:
+    """MRR is read at the report's `limit` (F1, PR #186), and `compare_reports` breaks every
+    `recall@k` tie with it. Two reports materialised to different depths therefore carry MRRs
+    over different horizons, and comparing them is F1 moved from the scorer into the
+    comparison: refused, naming both depths — one side without a depth included — and the
+    depth that WAS compared is published beside the verdict.
+
+    Seen red on `b3fdc8b`: a verdict came back for 20 against 10, and it named no depth.
+    """
+    from xbrain.knowledge.evaluation import compare_reports
+
+    lexical = _synthetic("lexical", {"S": ("semantico", 0.0)}) | {"limit": 20}
+    candidate = _synthetic("hybrid", {"S": ("semantico", 1.0)})
+
+    with pytest.raises(ValueError, match=r"20 .* 10"):
+        compare_reports(lexical, candidate | {"limit": 10}, k=10)
+    with pytest.raises(ValueError, match=r"20 .* None"):
+        compare_reports(lexical, candidate, k=10)
+
+    verdict = compare_reports(lexical, candidate | {"limit": 20}, k=10)
+    assert verdict["limit"] == 20
+    assert verdict["strata"]["semantico"]["verdict"] == "mejora"
 
 
 def test_parse_fusion_sweep_reads_both_syntaxes_and_refuses_what_fuse_cannot_take() -> None:

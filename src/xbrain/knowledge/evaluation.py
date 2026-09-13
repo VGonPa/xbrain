@@ -575,12 +575,22 @@ def _score(
     one retrieved item, not six. Deduplicated by FIRST occurrence, which preserves the rank
     the best chunk earned. `retrieved` is the owner ranking up to `depth` — the owners the
     case was materialised to (U-6), so a reader sees the population every k was cut from.
+
+    MRR IS READ OFF THAT SAME PREFIX, never past it (PR #186, F1). `hits` is the retriever's
+    WINDOW, and the window is deeper than `depth` by construction — lexical opens
+    `OWNER_CHUNK_MULTIPLIER` chunks per owner, the fused path `FUSED_CHUNK_WINDOW` chunks per
+    channel — so an MRR over the whole window scored a rank the report never published and
+    compared two strategies at two different depths. Measured on the bake-off's own reports:
+    V1's lexical MRR was 1/51 beside 20 published owners, and 5 of 21 vector cases carried an
+    MRR nobody could rebuild from `retrieved`. Now every metric of a case re-derives from its
+    published ranking and its ground truth.
     """
     ranked: list[str] = []
     for hit in hits:
         key = _owner_key(hit.owner_type, hit.owner_id)
         if key not in ranked:
             ranked.append(key)
+    published = ranked[:depth]
     relevant = {_owner_key("item", i) for i in case.relevant_items}
     relevant |= {_owner_key("topic", t) for t in case.relevant_topics}
 
@@ -609,12 +619,12 @@ def _score(
         # Binary, and `None` on the same 0/0 `recall` is `None` on (`_ndcg`).
         metrics[f"ndcg@{k}"] = _ndcg(ranked, relevant, k) if relevant else None
         metrics[f"surface_recall@{k}"] = _surface_recall(case, hits, k)
-    metrics["mrr"] = _mrr(ranked, relevant) if relevant else None
+    metrics["mrr"] = _mrr(published, relevant) if relevant else None
     return CaseResult(
         id=case.id,
         provenance=case.provenance,
         strata=case.strata,
-        retrieved=tuple(ranked[:depth]),
+        retrieved=tuple(published),
         metrics=metrics,
         no_results=not hits,
         depth_exhausted=depth_exhausted,
@@ -1160,6 +1170,14 @@ def sweep_chunker(
     CHUNKS. Every `800/0`-derived figure published before this child — `CHUNKER_VERSION`
     included — is a derivative of that older instrument and is retired with it. Re-derive on
     the corpus in front of you; these numbers move with it.
+
+    AND THOSE TWO MRRs ARE RETIRED IN TURN (PR #186, F1): they were read over the retriever's
+    WINDOW, past the 10 owners each cell published. Re-measured 2026-09-13 with MRR read off
+    the published ranking — same corpus sha256 `4fed54a0…`, same golden set, lexical only —
+    `800/0` and `800/150` BOTH come out `recall@10` 0.7395 · `recall@1` 0.5165 · MRR 0.7326:
+    MRR no longer separates them, and the chunk count decides, for `800/0`. Only those two cells
+    were re-measured, so the paragraph above is the pre-F1 instrument's answer and the full
+    grid's winner is NOT re-derived here.
 
     A combination that scores nothing measurable sorts last instead of sorting first, which is
     what a `None` would do under a naive `max`. And when NO combination scored, the report has
@@ -1767,7 +1785,18 @@ def compare_reports(
     finds the same items and ranks them higher is `mejora`. `passes_gates` is true only when
     `exacto` is measured and not worse AND every decisive stratum is measured and better. It
     decides nothing by itself; the published document does, with these numbers beside it.
+
+    ONE DEPTH OR NO VERDICT (PR #186, F1). MRR is read at each report's `limit` — the owners it
+    published — so two reports materialised to different depths carry MRRs over different
+    horizons, and the MRR that breaks a `recall@k` tie would be deciding between two rulers. A
+    mismatch raises, naming both, and the depth that was compared travels in the output.
     """
+    if baseline.get("limit") != candidate.get("limit"):
+        raise ValueError(
+            f"Profundidades distintas: {baseline.get('limit')} owners frente a "
+            f"{candidate.get('limit')}. El MRR que desempata se lee a la profundidad de cada "
+            "informe; dos profundidades no se comparan."
+        )
     metric = f"recall@{k}"
     # EXCLUSIONS ARE AN ARGUMENT, NOT A HAND-EDITED REPORT (Plan 03 §3.3-3.4). A case whose
     # ground truth no longer verifies on the corpus being measured does not decide; it is
@@ -1794,6 +1823,7 @@ def compare_reports(
     return {
         "k": k,
         "metric": metric,
+        "limit": baseline.get("limit"),
         "baseline_strategy": baseline.get("strategy"),
         "candidate_strategy": candidate.get("strategy"),
         "excluded": excluded,

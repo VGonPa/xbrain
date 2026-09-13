@@ -238,7 +238,9 @@ def _merge_short(
     from the measured character counts, predicted 18–25k — and the plan says landing outside
     that range means the chunker is not doing what it describes. What the harness measures
     now: the shipped `800/0` emits **22,933** chunks over 2,474 items, `recall@10` 0.7395 /
-    MRR 0.7357, population and instrument in `evaluation.sweep_chunker`. The whole gap was
+    MRR 0.7326, population and instrument in `evaluation.sweep_chunker`. (It read MRR 0.7357
+    until PR #186 F1 stopped MRR reading past the 10 published owners; re-measured 2026-09-13
+    on the same corpus, `recall@10` unchanged.) The whole gap was
     small paragraphs: `x_article` averaged **194 chars** across 11,016 chunks from 210
     articles.
 
