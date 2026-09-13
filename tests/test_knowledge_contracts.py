@@ -25,7 +25,7 @@ really does travel with an origin.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import get_args
+from typing import Literal, get_args, get_origin
 
 import pytest
 from pydantic import ValidationError
@@ -37,7 +37,9 @@ from xbrain.knowledge.contracts import (
     TEXT_FIELDS_WITHOUT_ORIGIN,
     DerivedText,
     EvidenceBundle,
+    GraphEdge,
     GraphExpansionResponse,
+    GraphPath,
     IndexStatusRef,
     SearchFilters,
     SearchMatch,
@@ -152,7 +154,9 @@ def test_a_search_match_serializes_its_excerpt_next_to_its_origin() -> None:
 
 
 # The version each envelope carries TODAY, and why (U-1, round 07).
-# `GraphExpansionResponse` is still the Plan 01 freeze: nothing in its shape moved.
+# `GraphExpansionResponse` is at "1" although Plan 04.1 ADDED keys to its shape — the one
+# envelope where the rule does not move the number, because nothing had ever emitted it. The
+# reason is written once, on the model's docstring.
 # `EvidenceBundle` is at "2" because round 06
 # made `KnowledgeChunk.locator` REQUIRED, and under `extra="forbid"` that is the incompatible
 # change the freeze exists to name: the Pydantic consumer of version 1 refuses a bundle with
@@ -464,3 +468,123 @@ def test_the_attribution_author_is_inside_the_totality_partition() -> None:
 
     assert Author in CONTRACT_MODELS
     assert {("Author", "handle"), ("Author", "name")} <= TEXT_FIELDS_WITHOUT_ORIGIN
+
+
+# ---------------------------------------------------------------------------
+# Plan 04.1 — the graph contract says what spec §6.2 and Plan 04 §2 require
+# ---------------------------------------------------------------------------
+
+# The ONE value each field admits, transcribed from Plan 04 §2 by hand. Read off the model
+# instead, a changed value would move both sides of the assertion and stay green.
+GRAPH_RESPONSE_SEMANTICS = {
+    "semantics": "co_occurrence_in_corpus",
+    "disclaimer_key": "graph_edge_is_corpus_not_world",
+}
+
+
+@pytest.mark.parametrize(("field_name", "only_value"), sorted(GRAPH_RESPONSE_SEMANTICS.items()))
+def test_the_graph_response_carries_its_semantics_as_a_literal_no_other_guard_sees(
+    field_name: str, only_value: str
+) -> None:
+    """Spec §6.4 / Plan 04 §11.6: the corpus-not-world distinction travels IN THE DATA, in a
+    field no producer can omit or set to anything else.
+
+    NOT REDUNDANT WITH `test_every_declared_str_field_is_classified` — this is the only test
+    that covers these two fields. `is_str_field` is False for a `Literal`, so neither field is
+    in the partition, and deleting either one, or changing the value it admits, leaves the
+    totality guard GREEN. The blindness is executed below rather than claimed in prose.
+    (Widening one to `str` is the case the totality guard DOES catch: an unclassified `str`.)
+
+    Seen red before Plan 04.1 added the fields: `GraphExpansionResponse.semantics is missing`.
+    """
+    field = GraphExpansionResponse.model_fields.get(field_name)
+    assert field is not None, f"GraphExpansionResponse.{field_name} is missing"
+    assert get_origin(field.annotation) is Literal
+    assert get_args(field.annotation) == (only_value,)
+    assert field.default == only_value
+
+    assert not is_str_field(field)
+    assert ("GraphExpansionResponse", field_name) not in (
+        TEXT_FIELDS_REQUIRING_ORIGIN | TEXT_FIELDS_WITHOUT_ORIGIN
+    )
+
+    # A producer that writes nothing still emits the value...
+    assert GraphExpansionResponse().model_dump(mode="json")[field_name] == only_value
+    # ...and one that writes anything else is refused, in Python and on the wire, on THAT key.
+    with pytest.raises(ValidationError) as refused:
+        GraphExpansionResponse(**{field_name: "causal_relation_in_world"})
+    assert {error["loc"] for error in refused.value.errors()} == {(field_name,)}
+    with pytest.raises(ValidationError) as refused:
+        GraphExpansionResponse.model_validate_json(
+            f'{{"{field_name}": "causal_relation_in_world"}}'
+        )
+    assert {error["loc"] for error in refused.value.errors()} == {(field_name,)}
+
+
+def _co_occurrence_edge(**overrides: object) -> dict:
+    """A `CO_OCCURS_WITH` edge complete in every field except, by default, its fingerprints."""
+    return {
+        "source": "topic:agent-evaluation",
+        "target": "topic:ai-coding",
+        "relation": "CO_OCCURS_WITH",
+        "method": "topic-cooccurrence/v1",
+        "weight": 0.25,
+        "shared_items": 2,
+        "supporting_item_ids": ["1", "2"],
+        **overrides,
+    }
+
+
+def test_a_co_occurrence_edge_without_input_fingerprints_does_not_validate() -> None:
+    """Spec §6.2: a co-occurrence edge keeps *fingerprints de los inputs*.
+
+    The field defaults to `()`, and a default alone would make this edge LEGAL and defeat §6.2
+    in silence — Pydantic cannot make one field's default depend on another, so a
+    `model_validator` does. Asserted on the refusal's REASON, not merely that one happened: an
+    edge missing `method` raises `ValidationError` too, and a bare `pytest.raises` would pass
+    for the wrong reason (rule 1). The explicit `()` case matters for the same reason — before
+    the field existed it was refused as `extra_forbidden`, which is not this refusal.
+
+    Seen red before the validator: `DID NOT RAISE <class 'pydantic_core.ValidationError'>`.
+    """
+    for document in (_co_occurrence_edge(), _co_occurrence_edge(input_fingerprints=[])):
+        with pytest.raises(ValidationError) as refused:
+            GraphEdge.model_validate(document)
+        [error] = refused.value.errors()
+        assert error["type"] == "value_error"
+        assert "CO_OCCURS_WITH" in error["msg"] and "input_fingerprints" in error["msg"]
+
+
+def test_input_fingerprints_are_required_exactly_where_spec_6_2_requires_them() -> None:
+    """The validator conditions on the relation, and the other half is asserted too.
+
+    Spec §6.2 lists the fingerprints among what a CO-OCCURRENCE edge keeps; an assignment edge
+    is sustained by the item's own assignment and is not asked for them. A blanket requirement
+    would pass the test above and make every assignment edge unconstructible. The assignment
+    relations are pinned against the declared `Literal`, so a fourth relation cannot join the
+    contract without someone deciding which side of the validator it is on.
+
+    And the edge that validates has to SURVIVE the wire inside the envelope that transports it,
+    fingerprints and semantics included — the parity population Plan 04 §4.4 asks 04.7 for.
+    """
+    assignment_relations = {"HAS_PRIMARY_TOPIC", "HAS_TOPIC"}
+    declared = set(get_args(GraphEdge.model_fields["relation"].annotation))
+    assert declared == assignment_relations | {"CO_OCCURS_WITH"}
+    for relation in sorted(assignment_relations):
+        edge = GraphEdge(
+            source="item:1", target="topic:ai-coding", relation=relation, method="assignment"
+        )
+        assert edge.input_fingerprints == ()
+
+    co_occurrence = GraphEdge.model_validate(_co_occurrence_edge(input_fingerprints=["a" * 64]))
+    response = GraphExpansionResponse(
+        seeds=("topic:agent-evaluation",),
+        edges=(co_occurrence,),
+        paths=(
+            GraphPath(nodes=("topic:agent-evaluation", "topic:ai-coding"), edges=(co_occurrence,)),
+        ),
+    )
+    payload = response.model_dump(mode="json")
+    assert payload["edges"][0]["input_fingerprints"] == ["a" * 64]
+    assert payload["semantics"] == "co_occurrence_in_corpus"
+    assert GraphExpansionResponse.model_validate_json(response.model_dump_json()) == response

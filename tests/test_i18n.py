@@ -53,6 +53,7 @@ def test_strings_dataclass_has_exactly_the_expected_fields() -> None:
         "quoted_unavailable_deleted",
         "quoted_unavailable_protected",
         "quoted_unavailable_unknown",
+        "graph_edge_is_corpus_not_world",
     }
 
 
@@ -110,3 +111,25 @@ def test_every_language_localises_the_quoted_post_strings() -> None:
     assert english.quoted_unavailable_deleted != spanish.quoted_unavailable_deleted
     assert english.quoted_unavailable_protected != spanish.quoted_unavailable_protected
     assert english.quoted_unavailable_unknown != spanish.quoted_unavailable_unknown
+
+
+def test_the_graph_disclaimer_key_resolves_to_its_sentence_in_both_languages() -> None:
+    """`GraphExpansionResponse.disclaimer_key` is a KEY; the sentence lives here (Plan 04 §2,
+    TDD 17). The field NAME is the key, so a renderer resolves it with `getattr`.
+
+    The key is read off the CONTRACT's `Literal`, never retyped: a key and a field that drift
+    apart go red here instead of at the first render (rule 5). The sentences are pinned whole
+    because what they must say is the point — co-occurrence IN THIS CORPUS, not a relation in
+    the world — and a presence check would pass on a sentence that says the opposite.
+    """
+    from typing import get_args
+
+    from xbrain.knowledge.contracts import GraphExpansionResponse
+
+    (key,) = get_args(GraphExpansionResponse.model_fields["disclaimer_key"].annotation)
+    assert getattr(strings_for("English"), key) == (
+        "This edge reflects co-occurrence in this corpus, not a relationship in the world."
+    )
+    assert getattr(strings_for("Spanish"), key) == (
+        "Esta arista refleja coocurrencia en este corpus, no una relación en el mundo."
+    )
