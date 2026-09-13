@@ -7,6 +7,20 @@ turned off cannot be measured against the ranking it claims to improve.
 **The graph re-orders, it never admits.** A neighbour of a seed that no channel scored is not a
 result: co-occurrence in the corpus says two items share topics, not that the second answers the
 query (spec §6.4). So the graph can lift a candidate a channel found, and cannot conjure one.
+
+**It rides the LEXICAL channel only, and that is a decision, not an omission.** Plan 04 §3.1 says
+«se ejecuta `hybrid`», and it was written when Plan 03 was expected to promote `hybrid`. It did
+not: the bake-off is incomplete, criterion §13.8 is NOT MET and `lexical` is still the default
+(`docs/embeddings-bakeoff.md`). Spec §5.7 promotes `hybrid_graph` only against what the default
+does, so the delta that rule asks for is the graph's over `lexical`; grafting the graph onto an
+unpromoted vector channel would measure two changes as one. The fused path also ranks CHUNKS by
+RRF inside a fixed window while `rank_with_graph` fuses ITEM rankings, and which level the graph
+term joins is a design the Plan does not fix. So a `hybrid_graph` match never carries `vector`
+and its `vector_rank` is `null` — the explanation says what ran.
+
+**An index behind the store does not run the graph.** `search` answers `lexical` with the index's
+own `index_behind_store` declared (`search_service._resolve_channel`), the one door every strategy
+degrades through; `graph_expand` keeps refusing such an index, as its own guard.
 """
 
 from __future__ import annotations

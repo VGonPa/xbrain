@@ -298,6 +298,41 @@ def test_search_hybrid_graph_pagina_por_encima_del_horizonte_sin_duplicar_ni_per
     assert walked == whole
 
 
+def test_search_hybrid_graph_con_indice_por_detras_del_store_degrada_por_la_puerta_unica(
+    tmp_path: Path,
+) -> None:
+    # Punto 4b. `graph_expand` REFUSA un índice por detrás del store (no tiene campo `degraded`),
+    # y `search` le pasaba ese índice: pedir `hybrid_graph` lanzaba `ValueError` mientras
+    # `lexical` y `hybrid` degradan declarándolo. Plan 04 §«Degradaciones»: `hybrid_graph`
+    # responde declarando `index_behind_store`, nunca en silencio — y nunca con un grafo stale.
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    store = {k: Item.model_validate(v) for k, v in raw["items"].items()}
+    vocab = [Topic.model_validate(v) for v in raw["vocab"].values()]
+    pages = {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()}
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+    items = data / "items.json"
+    items.write_text(items.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    # La fixture es lo que dice ser: la señal barata YA declara el índice por detrás, y la
+    # puerta del grafo lo rechaza (regla 1).
+    lexical = search_service.search("export", context, limit=2)
+    assert "index_behind_store" in lexical.index.degraded
+    with pytest.raises(ValueError, match="index_behind_store"):
+        graph_expand(["item:k03"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
+
+    graph = search_service.search(
+        "export", context, limit=2, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    # Responde lo que corrió — léxico — con la causa ya declarada por el índice, y sin `graph`.
+    assert graph.strategy == "lexical"
+    assert graph.index.degraded == lexical.index.degraded
+    assert graph.results == lexical.results
+
+
 def test_search_hybrid_graph_sirve_graph_en_matched_by_del_item_elevado(tmp_path: Path) -> None:
     # Paso 19 A TRAVÉS DE `search`, no de `rank_with_graph`: la función ya añadía `graph`, y
     # `_graph_order` lo tiraba al volver — el item elevado salía con `("lexical",)`.

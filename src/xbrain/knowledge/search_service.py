@@ -493,6 +493,12 @@ def _resolve_channel(
 
     enabled = graph_strategy.GRAPH_ENABLED_BY_DEFAULT if graph_enabled is None else graph_enabled
     if graph_strategy.graph_channel_runs(requested, enabled=enabled):
+        if "index_behind_store" in index.degraded:
+            # The graph does not run over a graph that may not be the corpus's (Plan 04,
+            # «Degradaciones»), and `graph_expand` would refuse it anyway — degrading HERE, at
+            # the one door, is what keeps `search` from raising where every other strategy
+            # declares. The index's own `index_behind_store` already names the cause.
+            return FALLBACK_STRATEGY, (), None
         return requested, (), None
     if requested not in _VECTOR_STRATEGIES:
         return (*lexical_resolution, None)
