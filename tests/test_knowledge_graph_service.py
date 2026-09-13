@@ -149,14 +149,44 @@ def test_every_served_path_rests_on_item_ids_that_resolve_in_the_live_store(
             assert support, path
             assert all(item_id in context.store for item_id in support), path
 
-    # Item 2 leaves the live store after the index was built. The persisted a→b edge still lists
-    # it, and so does the assignment item:2 → topic:a: serving either would hand the consumer an
-    # id that `get` cannot open. The expansion refuses and names the id and the repair.
-    without_2 = {k: v for k, v in _KNOWN.items() if k != "2"}
-    stale = QueryContext(**{**context.__dict__, "store": without_2})
+
+def _without(context: QueryContext, item_id: str) -> QueryContext:
+    """`context` with `item_id` gone from the LIVE store only — the index still lists it."""
+    store = {k: v for k, v in context.store.items() if k != item_id}
+    return QueryContext(**{**context.__dict__, "store": store})
+
+
+def test_a_co_occurrence_whose_listed_support_left_the_store_is_refused(tmp_path: Path) -> None:
+    # One arm per test: with both kinds of edge in play, dropping either arm of the check leaves
+    # the other one to refuse, and the test stays green having pinned neither.
+    context = _context(tmp_path)
+    # Capped at one neighbour, topic:a serves ONLY its strongest edge — the a→b co-occurrence
+    # (Jaccard 0.5) over the weight-0 assignments — so no assignment edge is walked at all.
+    (path,) = graph_expand(("topic:a",), context, max_hops=1, max_neighbors_per_node=1).paths
+    (edge,) = path.edges
+    assert (edge.relation, edge.supporting_item_ids) == ("CO_OCCURS_WITH", ("1", "2"))
+
+    # Item 2 leaves the live store; the persisted a→b edge still lists it.
     with pytest.raises(ValueError, match="xbrain index update") as refused:
-        graph_expand(("topic:a",), stale, max_hops=1)
+        graph_expand(("topic:a",), _without(context, "2"), max_hops=1, max_neighbors_per_node=1)
     assert "'2'" in str(refused.value)
+    assert "CO_OCCURS_WITH" in str(refused.value)
+
+
+def test_an_assignment_whose_item_left_the_store_is_refused(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    # Item 3 carries only `a`, so it supports no co-occurrence edge: the a→b edge served beside
+    # it rests on {1, 2}, which stay. Only the assignment item:3 → topic:a can name it.
+    response = graph_expand(("topic:a",), context, max_hops=1)
+    assert "item:3" in {p.nodes[-1] for p in response.paths}
+    co_occurrences = [e for e in response.edges if e.relation == "CO_OCCURS_WITH"]
+    assert co_occurrences
+    assert all("3" not in e.supporting_item_ids for e in co_occurrences)
+
+    with pytest.raises(ValueError, match="xbrain index update") as refused:
+        graph_expand(("topic:a",), _without(context, "3"), max_hops=1)
+    assert "'3'" in str(refused.value)
+    assert "HAS_PRIMARY_TOPIC" in str(refused.value)
 
 
 def test_an_index_behind_the_store_is_refused_not_expanded(tmp_path: Path) -> None:
