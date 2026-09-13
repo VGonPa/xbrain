@@ -10,7 +10,11 @@ from datetime import UTC, datetime
 import pytest
 
 from xbrain.knowledge.contracts import GraphEdge
-from xbrain.knowledge.graph_build import build_graph_edges
+from xbrain.knowledge.graph_build import (
+    ASSIGNMENT_METHOD,
+    CO_OCCURRENCE_METHOD,
+    build_graph_edges,
+)
 from xbrain.models import Author, Enrichment, Item
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
@@ -107,3 +111,27 @@ def test_a_large_topic_does_not_dominate_after_normalisation() -> None:
     assert big_small.shared_items == x_y.shared_items == 2
     assert x_y.weight > big_small.weight
     assert max(co.values(), key=lambda e: e.weight).source in {"topic:x", "topic:y"}
+
+
+def test_edges_carry_method_weights_support_and_input_fingerprints() -> None:
+    edges = build_graph_edges(_KNOWN)
+    co = _co_occurrence(edges)
+
+    a_b = co[("topic:a", "topic:b")]
+    assert a_b.method == CO_OCCURRENCE_METHOD
+    assert (a_b.weight, a_b.shared_items) == (pytest.approx(0.5), 2)
+    assert a_b.supporting_item_ids == ("1", "2")
+    assert len(a_b.input_fingerprints) == 1
+    assert {e.method for e in _assignments(edges)} == {ASSIGNMENT_METHOD}
+
+    # Re-assigning a SUPPORTING item's topics keeps the support set {1, 2} but must move the
+    # fingerprint: an id-only hash would certify an edge whose inputs changed underneath it.
+    reassigned = {**_KNOWN, "1": _item("1", primary="a", topics=["b", "c"])}
+    moved = _co_occurrence(build_graph_edges(reassigned))[("topic:a", "topic:b")]
+    assert moved.supporting_item_ids == a_b.supporting_item_ids
+    assert moved.input_fingerprints != a_b.input_fingerprints
+
+    # Re-assigning an item OUTSIDE the support (item 3 is only on `a`) must not move it.
+    outside = {**_KNOWN, "3": _item("3", primary="a", topics=["z"])}
+    still = _co_occurrence(build_graph_edges(outside))[("topic:a", "topic:b")]
+    assert still.input_fingerprints == a_b.input_fingerprints
