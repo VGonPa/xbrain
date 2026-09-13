@@ -5,14 +5,16 @@ Never asserts corpus figures: every item, topic and count below is built here.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from xbrain import i18n
 from xbrain.i18n import SUPPORTED_LANGUAGES, strings_for
-from xbrain.knowledge import index_build
+from xbrain.knowledge import graph_service, index_build
 from xbrain.knowledge.graph_build import (
     ASSIGNMENT_METHOD,
     CO_OCCURRENCE_METHOD,
@@ -215,3 +217,31 @@ def test_the_serialized_expansion_carries_semantics_and_disclaimer_key(tmp_path:
     # The key names a sentence that exists, non-empty, in every supported language.
     for language in SUPPORTED_LANGUAGES:
         assert getattr(strings_for(language), payload["disclaimer_key"]).strip()
+
+
+def test_the_disclaimer_sentence_comes_from_i18n_strings_in_both_languages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context(tmp_path)
+    response = graph_expand(("topic:a",), context, max_hops=1)
+
+    # The real sentences are two, one per language — a single inline English sentence would
+    # answer both calls with the same text.
+    english = graph_service.disclaimer(response, "English")
+    spanish = graph_service.disclaimer(response, "Spanish")
+    assert english == strings_for("English").graph_edge_is_corpus_not_world
+    assert spanish == strings_for("Spanish").graph_edge_is_corpus_not_world
+    assert english != spanish
+
+    # Replace the table the sentence lives in. An inline copy — equal by value to the real
+    # sentence — cannot follow the replacement; only a read through `i18n.Strings` can.
+    for language in ("English", "Spanish"):
+        monkeypatch.setitem(
+            i18n._STRINGS,
+            language,
+            dataclasses.replace(
+                strings_for(language), graph_edge_is_corpus_not_world=f"sentinel {language}"
+            ),
+        )
+    assert graph_service.disclaimer(response, "English") == "sentinel English"
+    assert graph_service.disclaimer(response, "Spanish") == "sentinel Spanish"

@@ -18,6 +18,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
+from xbrain.i18n import strings_for
 from xbrain.knowledge.contracts import GraphEdge, GraphExpansionResponse, GraphNode, GraphPath
 from xbrain.knowledge.graph_build import DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
 from xbrain.knowledge.index_store import open_for_query
@@ -153,3 +154,13 @@ def graph_expand(
         edges=tuple(edges.values()),
         paths=tuple(paths),
     )
+
+
+def disclaimer(response: GraphExpansionResponse, language: str) -> str:
+    """The sentence a human reads for `response.disclaimer_key`, in `language` (spec §6.4).
+
+    Resolved through the KEY the response carries, never written here: `i18n.Strings` is the
+    one place the sentence lives, in both languages, so a renderer and a future MCP adapter
+    cannot drift into two wordings of the same warning.
+    """
+    return str(getattr(strings_for(language), response.disclaimer_key))
