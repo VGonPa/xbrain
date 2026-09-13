@@ -3030,7 +3030,12 @@ def _index_options(cfg: Config):
     """
     from xbrain.knowledge.index_build import IndexOptions
 
-    return IndexOptions(vault_dir=cfg.output_dir)
+    return IndexOptions(
+        vault_dir=cfg.output_dir,
+        graph_min_shared_items=cfg.index_graph_min_shared_items,
+        graph_min_weight=cfg.index_graph_min_weight,
+        graph_max_neighbors_per_node=cfg.index_graph_max_neighbors_per_node,
+    )
 
 
 def _query_context(cfg: Config, inputs):

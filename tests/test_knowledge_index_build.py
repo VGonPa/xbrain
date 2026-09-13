@@ -1279,7 +1279,14 @@ def test_the_index_options_are_carried_inert_and_02_7_is_what_must_redden_this()
     pass-through is invisible today (measured: SURVIVED) and stays invisible AFTER 02.7 makes
     options live: the item cell reddens, the store cell reports the equality it always did.
     Binding it needs the pass-through asserted by EFFECT, beside the consumer 02.7 gives it.
+
+    Plan 04.2 ADDED three fields, and they are NOT inert: `_write_graph` reads the `graph_*`
+    thresholds (bound by effect in `test_knowledge_graph_build.py`, config → `_index_options` →
+    `build_graph_edges`). The inertness above is still true of `params` and `vault_dir` only,
+    and the graph fields shape `graph_edges`, never the item fingerprint.
     """
+    from xbrain.knowledge import graph_build
+
     item = _item()
     assert index_build.item_fingerprint(
         item, options=index_build.IndexOptions(params=ChunkerParams(target=1), vault_dir=Path("/x"))
@@ -1290,9 +1297,20 @@ def test_the_index_options_are_carried_inert_and_02_7_is_what_must_redden_this()
     assert [f.name for f in dataclasses.fields(index_build.IndexOptions)] == [
         "params",
         "vault_dir",
+        "graph_min_shared_items",
+        "graph_min_weight",
+        "graph_max_neighbors_per_node",
     ]
     assert index_build.IndexOptions().params == DEFAULT_CHUNKER_PARAMS
     assert index_build.IndexOptions().vault_dir is None
+    defaults = index_build.IndexOptions()
+    assert defaults.graph_min_shared_items == graph_build.DEFAULT_GRAPH_MIN_SHARED_ITEMS
+    assert defaults.graph_min_weight == graph_build.DEFAULT_GRAPH_MIN_WEIGHT
+    assert defaults.graph_max_neighbors_per_node == graph_build.DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
+    # The graph thresholds do not reach the item fingerprint either.
+    assert index_build.item_fingerprint(
+        item, options=index_build.IndexOptions(graph_min_shared_items=9, graph_min_weight=0.9)
+    ) == index_build.item_fingerprint(item)
 
 
 def test_the_emitter_version_is_the_belt_for_an_item_with_no_surfaces_at_all(monkeypatch) -> None:

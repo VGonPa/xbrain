@@ -99,10 +99,11 @@ def test_the_schema_version_is_declared() -> None:
     over the text alone, so every row of it would fail verification: the door must refuse
     it by name rather than answer «22,286 chunks excluded». "4" since the 02.6a2a review
     dropped the dead `source_failures.attempts` column so the DDL and the versioned public
-    `SourceFailure` hold the same fields. The pin exists so a layout change cannot ship
-    without the bump that makes an existing index refuse the query.
+    `SourceFailure` hold the same fields. "5" since Plan 04.2 added the `graph_edges` plane.
+    The pin exists so a layout change cannot ship without the bump that makes an existing index
+    refuse the query.
     """
-    assert SCHEMA_VERSION == "4"
+    assert SCHEMA_VERSION == "5"
 
 
 # ---------------------------------------------------------------------------

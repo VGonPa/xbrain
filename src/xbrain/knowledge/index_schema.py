@@ -99,7 +99,11 @@ from xbrain.models import _reject_local_path_traversal
 # a v4 base finds `source_failures.attempts` missing and refuses it. The table also diverges
 # from Plan 02's frozen DDL in TWO cells now — that DDL still declares `attempts` and still
 # omits the `http_status` an earlier child added — so 02.7's writer is built against THIS file.
-SCHEMA_VERSION = "4"
+# "5" since Plan 04.2: `graph_edges`. A v4 base is refused without the bump too (`_verify_schema`).
+# THIS IS THE INDEX'S LAYOUT VERSION, NOT A CONTRACT VERSION: `contracts.py` versions the
+# public envelopes (`SearchResponse`, `EvidenceBundle`, `GraphExpansionResponse`) on their own
+# `schema_version` fields, and neither number moves the other.
+SCHEMA_VERSION = "5"
 
 DB_FILENAME = "knowledge.db"
 MANIFEST_FILENAME = "manifest.json"
@@ -118,6 +122,7 @@ TABLES: frozenset[str] = frozenset(
         "topics",
         "source_failures",
         "unfetched_links",
+        "graph_edges",
     }
 )
 
@@ -257,6 +262,25 @@ CREATE TABLE IF NOT EXISTS unfetched_links (
     detail  TEXT
 );
 CREATE INDEX IF NOT EXISTS unfetched_links_item ON unfetched_links (item_id);
+
+-- Plan 04.2: the minimal graph (spec §6.2), DERIVED from the items' topic assignments by
+-- `graph_build` and rewritten whole on every build/update. An edge says these topics were
+-- assigned together to these items, never that the concepts are related (spec §6.4). The
+-- CHECK is the schema half of «there is no item–item edge»: two items meet only through a topic.
+CREATE TABLE IF NOT EXISTS graph_edges (
+    source                   TEXT NOT NULL,
+    target                   TEXT NOT NULL,
+    relation                 TEXT NOT NULL,
+    method                   TEXT NOT NULL,
+    weight                   REAL NOT NULL,
+    shared_items             INTEGER NOT NULL,
+    supporting_item_ids_json TEXT NOT NULL,
+    input_fingerprints_json  TEXT NOT NULL,
+    PRIMARY KEY (source, target, relation),
+    CHECK (NOT (source LIKE 'item:%' AND target LIKE 'item:%'))
+);
+CREATE INDEX IF NOT EXISTS graph_edges_source ON graph_edges (source, relation);
+CREATE INDEX IF NOT EXISTS graph_edges_target ON graph_edges (target, relation);
 
 {fts5_table_sql("chunks_fts", content="chunks")};
 {fts5_table_sql("profiles_fts", columns=("profile_text",), content="profiles")};
