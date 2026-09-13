@@ -165,6 +165,33 @@ def test_search_hybrid_graph_sirve_un_item_traido_por_vecindad_fuera_del_top_k_l
     assert "k07" in [r.item_id for r in graph.results]
 
 
+def test_search_hybrid_graph_sirve_graph_en_matched_by_del_item_elevado(tmp_path: Path) -> None:
+    # Paso 19 A TRAVÉS DE `search`, no de `rank_with_graph`: la función ya añadía `graph`, y
+    # `_graph_order` lo tiraba al volver — el item elevado salía con `("lexical",)`.
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    store = {k: Item.model_validate(v) for k, v in raw["items"].items()}
+    vocab = [Topic.model_validate(v) for v in raw["vocab"].values()]
+    pages = {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()}
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    # La fixture es lo que dice ser: `k07` casa en léxico FUERA del top-2 y la estrategia lo sube.
+    top_k = [r.item_id for r in search_service.search("export", context, limit=2).results]
+    assert "k07" not in top_k
+
+    graph = search_service.search(
+        "export", context, limit=2, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    lifted = {r.item_id: r for r in graph.results}["k07"]
+    assert lifted.matches
+    # `graph` AÑADIDO al canal que ya lo traía, en el orden del contrato que fija fusion.
+    assert fusion._CHANNEL_ORDER.index("lexical") < fusion._CHANNEL_ORDER.index("graph")
+    assert {m.matched_by for m in lifted.matches} == {("lexical", "graph")}
+
+
 def test_search_hybrid_graph_admite_un_vecino_que_cae_fuera_de_la_ventana_de_la_pagina(
     tmp_path: Path,
 ) -> None:

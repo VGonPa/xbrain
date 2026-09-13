@@ -350,13 +350,14 @@ def search(
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
         fused_window: _FusedWindow | None = None
+        graph_channels: Mapping[str, tuple[Channel, ...]] = {}
         if channel is None:
             needed = max(beyond, GRAPH_CANDIDATE_HORIZON) if executed == "hybrid_graph" else beyond
             ordered, excluded, exhausted = _materialise(
                 index, query, filters, context, needed=needed
             )
             if executed == "hybrid_graph":
-                ordered = _graph_order(ordered, context)
+                ordered, graph_channels = _graph_order(ordered, context)
         else:
             ordered, excluded, exhausted, fused_window = _materialise_fused(
                 index, channel, query, context, needed=beyond
@@ -369,7 +370,10 @@ def search(
             lexical_page, evidence_excluded = _settle_evidence(
                 index, query, filters, context, window
             )
-            page = [(item_id, hits, {}) for item_id, hits in lexical_page]
+            page = [
+                (item_id, hits, _graph_explanations(hits, graph_channels.get(item_id, ())))
+                for item_id, hits in lexical_page
+            ]
         else:
             page = _settle_fused(context, window, fused_window)
         excluded |= evidence_excluded
@@ -399,11 +403,15 @@ def search(
 
 def _graph_order(
     ordered: list[tuple[str, list[LexicalHit]]], context: QueryContext
-) -> list[tuple[str, list[LexicalHit]]]:
-    """The lexical ranking re-ordered by `rank_with_graph`.
+) -> tuple[list[tuple[str, list[LexicalHit]]], dict[str, tuple[Channel, ...]]]:
+    """The lexical ranking re-ordered by `rank_with_graph`, and each item's `matched_by`.
 
     The graph ADMITS into the page a lexical candidate from past it — that is what
     `GRAPH_CANDIDATE_HORIZON` exists for — and never admits one that no channel scored.
+
+    The channels are RETURNED, not dropped: `rank_with_graph` is where `graph` is added in the
+    contract's order, and a page that re-derived `("lexical",)` served every lifted item as if
+    the graph had never touched it (Plan 04 §3.5).
     """
     from xbrain.knowledge import graph_strategy
 
@@ -411,7 +419,31 @@ def _graph_order(
     ranked = graph_strategy.rank_with_graph(
         {"lexical": list(hits)}, context, seeds=graph_strategy.GRAPH_SEEDS, limit=len(hits)
     )
-    return [(item.item_id, hits[item.item_id]) for item in ranked]
+    ranking = [(item.item_id, hits[item.item_id]) for item in ranked]
+    return ranking, {item.item_id: item.matched_by for item in ranked}
+
+
+def _graph_explanations(
+    hits: Sequence[LexicalHit], matched_by: tuple[Channel, ...]
+) -> dict[str, FusedChunk]:
+    """What `_match` serves for an item the graph reached: the lexical match, plus `graph`.
+
+    Empty unless `graph` is among the channels, so an item the graph did not reach is served
+    exactly as `lexical` serves it. The rank and the score stay the lexical channel's — the
+    graph acts on ITEMS, and has no rank or score of its own for a chunk.
+    """
+    if "graph" not in matched_by:
+        return {}
+    return {
+        hit.chunk_id: FusedChunk(
+            chunk_id=hit.chunk_id,
+            matched_by=matched_by,
+            lexical_rank=position,
+            vector_rank=None,
+            score=hit.score,
+        )
+        for position, hit in enumerate(hits, start=1)
+    }
 
 
 def _resolve_channel(
