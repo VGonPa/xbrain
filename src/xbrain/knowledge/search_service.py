@@ -126,8 +126,10 @@ FUSED_CHUNK_WINDOW = 1_000
 # rank 1, overtakes the lexical head's `1/(k+1)`. So this is a BOUND, not a tuned value — and it
 # is `hybrid`'s own per-channel bound, so the graph looks at least as deep as the fused strategy
 # it is measured against (owners here, chunks there: never shallower), and a delta between the
-# two is not an artefact of depth. Fixed per query, not sized by the page, for #184's reason; its
-# cost on the live corpus is not measured yet.
+# two is not an artefact of depth. Fixed per query, not sized by the page, for #184's reason: the
+# graph re-orders EXACTLY the first `GRAPH_CANDIDATE_HORIZON` owners and the rest keep their
+# lexical order (`_graph_order`), so a page past the horizon slices the same ranking as page one.
+# Its cost on the live corpus is not measured yet.
 GRAPH_CANDIDATE_HORIZON = FUSED_CHUNK_WINDOW
 
 # A search bucket: an item id, its chunk hits in rank order, and — on a fused strategy — the
@@ -412,14 +414,23 @@ def _graph_order(
     The channels are RETURNED, not dropped: `rank_with_graph` is where `graph` is added in the
     contract's order, and a page that re-derived `("lexical",)` served every lifted item as if
     the graph had never touched it (Plan 04 §3.5).
+
+    THE GRAPH SEES EXACTLY THE FIRST `GRAPH_CANDIDATE_HORIZON` OWNERS, whatever the page
+    materialised. It used to re-rank ALL of `ordered`, whose length is sized by the page, so a
+    page past the horizon handed the graph a deeper set and got a different ranking: walking a
+    cursor served one id twice and never served another (u28 twice and u40 never, on the fixture
+    of the pagination test). The owners past the horizon follow in lexical order — `ordered` is
+    a prefix of one ranking at every depth, so the head the graph re-orders is the same set for
+    every page, and every page is a slice of ONE ranking.
     """
     from xbrain.knowledge import graph_strategy
 
-    hits = dict(ordered)
+    horizon = GRAPH_CANDIDATE_HORIZON
+    hits = dict(ordered[:horizon])
     ranked = graph_strategy.rank_with_graph(
         {"lexical": list(hits)}, context, seeds=graph_strategy.GRAPH_SEEDS, limit=len(hits)
     )
-    ranking = [(item.item_id, hits[item.item_id]) for item in ranked]
+    ranking = [(item.item_id, hits[item.item_id]) for item in ranked] + ordered[horizon:]
     return ranking, {item.item_id: item.matched_by for item in ranked}
 
 

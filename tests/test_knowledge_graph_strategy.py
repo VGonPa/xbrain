@@ -10,10 +10,11 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast, get_args
 
-from datetime import UTC, datetime
+import pytest
 
 from tests.test_knowledge_search_service import FIXTURES, _build, _context, _persist
 from xbrain.knowledge import fusion, graph_strategy, search_service
@@ -248,6 +249,53 @@ def test_search_hybrid_graph_con_limit_10_sirve_al_vecino_del_puesto_40_del_lexi
 
     assert graph.strategy == "hybrid_graph"
     assert "u40" in [r.item_id for r in graph.results]
+
+
+def test_search_hybrid_graph_pagina_por_encima_del_horizonte_sin_duplicar_ni_perder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Por encima del horizonte el grafo reordenaba lo que la PÁGINA había materializado, así que
+    # cada página cortaba su propio ranking: con 4,102 items y las constantes reales, `limit=500`
+    # duplicaba un id y perdía otro al cruzar el dueño 1,000. El mecanismo no depende de cuánto
+    # vale el horizonte, así que se baja a 4 para cruzarlo con 50 items (se lee en cada llamada).
+    monkeypatch.setattr(search_service, "GRAPH_CANDIDATE_HORIZON", 4)
+    store = {
+        f"u{n:02d}": _ranked_item(f"u{n:02d}", filler=n, topic="hub" if n in (1, 3, 40) else None)
+        for n in range(1, 51)
+    }
+    context = _ranked_context(tmp_path, store, ["hub"])
+
+    # La fixture es lo que dice ser: `u03` (dentro del horizonte) y `u40` (fuera) son vecinos de
+    # la cabeza, así que el grafo SÍ reordena y hay un vecino que solo una página honda vería.
+    lexical = [r.item_id for r in search_service.search("zeta", context, limit=50).results]
+    assert lexical.index("u03") + 1 == 3
+    assert lexical.index("u40") + 1 == 40
+    reached = graph_expand([f"item:{lexical[0]}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
+    assert {"item:u03", "item:u40"} <= {node.node_id for node in reached.nodes}
+
+    def page(limit: int, cursor: str | None = None) -> tuple[list[str], str | None]:
+        response = search_service.search(
+            "zeta", context, limit=limit, strategy="hybrid_graph", graph_enabled=True, cursor=cursor
+        )
+        return [r.item_id for r in response.results], response.cursor
+
+    whole, _ = page(50)
+    assert whole[0] == "u03"  # el grafo actuó dentro del horizonte
+
+    # EL ORDEN NO DEPENDE DEL LIMIT: cada página corta es un prefijo del ranking entero.
+    for limit in (1, 3, 10, 39, 41):
+        assert page(limit)[0] == whole[:limit], limit
+
+    # LA UNIÓN DE LAS PÁGINAS ES EL RANKING: ni un id dos veces, ni uno perdido.
+    walked: list[str] = []
+    ids, cursor = page(7)
+    walked += ids
+    while cursor is not None:
+        ids, cursor = page(7, cursor)
+        walked += ids
+    assert len(walked) == len(set(walked))
+    assert set(walked) == set(store)
+    assert walked == whole
 
 
 def test_search_hybrid_graph_sirve_graph_en_matched_by_del_item_elevado(tmp_path: Path) -> None:
