@@ -5,11 +5,13 @@ Never asserts corpus figures: every item, topic and count below is built here.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from xbrain.i18n import SUPPORTED_LANGUAGES, strings_for
 from xbrain.knowledge import index_build
 from xbrain.knowledge.graph_build import (
     ASSIGNMENT_METHOD,
@@ -199,3 +201,17 @@ def test_a_giant_topic_is_bounded_to_max_neighbors_per_node(tmp_path: Path) -> N
     # Strength ranks first, so the topic neighbour is not crowded out by the item list.
     assert "topic:b" in neighbours(capped)
     assert {n.node_id for n in capped.nodes} == {"topic:a", *neighbours(capped)}
+
+
+def test_the_serialized_expansion_carries_semantics_and_disclaimer_key(tmp_path: Path) -> None:
+    # Read off the JSON a consumer receives, not off the model's attributes: a field excluded at
+    # serialization would still be readable on the object and absent from every consumer.
+    context = _context(tmp_path)
+
+    payload = json.loads(graph_expand(("topic:a",), context, max_hops=1).model_dump_json())
+
+    assert payload["semantics"] == "co_occurrence_in_corpus"
+    assert payload["disclaimer_key"] == "graph_edge_is_corpus_not_world"
+    # The key names a sentence that exists, non-empty, in every supported language.
+    for language in SUPPORTED_LANGUAGES:
+        assert getattr(strings_for(language), payload["disclaimer_key"]).strip()
