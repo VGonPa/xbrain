@@ -97,9 +97,12 @@ from xbrain.knowledge.vector_index import (
 )
 from xbrain.models import Item, Topic, TopicPage
 
-# The strategies that need the vector channel. `hybrid_graph` is in it because Plan 04 §3.1 says
-# «se ejecuta `hybrid`»: left out, its channel was never opened, the graph re-ranked a purely
-# lexical ranking, and a response named `hybrid_graph` with no vector and `degraded` empty.
+# The strategies for which `search` opens the vector channel — that question and no other.
+# `hybrid_graph` is in it because Plan 04 §3.1 says «se ejecuta `hybrid`»: left out, its channel
+# was never opened, the graph re-ranked a purely lexical ranking, and a response named
+# `hybrid_graph` with no vector and `degraded` empty. It does NOT decide what `--embeddings-model`
+# pairs with: the harness answers that with its own set (`evaluation.EMBEDDING_MODEL_STRATEGIES`),
+# because it runs no graph, and sharing this constant flipped both of its pairings silently.
 _VECTOR_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid", "hybrid_graph"})
 
 # Declared when a vector strategy is asked for WITH filters. The plane has no filter columns,

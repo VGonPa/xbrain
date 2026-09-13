@@ -1767,6 +1767,85 @@ def test_the_evaluation_refuses_an_index_whose_manifest_holds_another_model(
     assert spec is not None and spec.model == "fake/model-a", "nothing was rebuilt over it"
 
 
+def test_an_embeddings_model_beside_hybrid_graph_is_refused_because_the_harness_runs_no_graph() -> (
+    None
+):
+    """Plan 04.4, rule 5: `--embeddings-model` pairs with what the HARNESS scores whole, which is
+    not the same question as which strategies `search` opens the vector channel for.
+
+    Both used to be answered by `search_service._VECTOR_STRATEGIES`. 5175f58 put `hybrid_graph`
+    in it — right for `search` — and this pairing flipped from refused to accepted with every
+    test green, while the refusal went on suggesting only `vector` and `hybrid`. The harness has
+    no graph channel, so a report headed `hybrid_graph` with a model is never `hybrid_graph`'s
+    ranking (next tests). The SUGGESTION is asserted where it sits, after the clause that
+    introduces it, so a message merely mentioning the refused strategy cannot satisfy it.
+
+    Seen red at 5787866 (DID NOT RAISE) and by putting `hybrid_graph` back into
+    `evaluation.EMBEDDING_MODEL_STRATEGIES`.
+    """
+    from xbrain.knowledge.evaluation import require_vector_arguments
+    from xbrain.knowledge.search_service import _VECTOR_STRATEGIES
+
+    # The two questions really answer differently: `search` DOES open the channel for it.
+    assert "hybrid_graph" in _VECTOR_STRATEGIES
+
+    with pytest.raises(ValueError) as refused:
+        require_vector_arguments("hybrid_graph", "fake/model-a")
+
+    message = str(refused.value)
+    clause = "solo puntúa un modelo de embeddings con "
+    assert clause in message, message
+    suggestion = message.split(clause, 1)[1]
+    assert "`--strategy hybrid`" in suggestion and "`--strategy vector`" in suggestion
+    assert "hybrid_graph" not in suggestion
+
+
+def test_hybrid_graph_without_an_embeddings_model_is_not_refused_as_a_vector_strategy() -> None:
+    """The other half of the same flip: 5175f58 turned `xbrain eval --strategy hybrid_graph`
+    (no model) from a declared `lexical` degradation into a refusal demanding a model — one the
+    harness then could not honour either (test above). Restored: the pairing door lets it
+    through, and `_resolve_strategy` degrades it and says so.
+
+    Seen red at 5787866 (`mide un modelo de embeddings y no se nombró ninguno`).
+    """
+    from xbrain.knowledge.evaluation import require_vector_arguments
+
+    require_vector_arguments("hybrid_graph", None)
+
+
+def test_evaluate_refuses_hybrid_graph_with_vectors_instead_of_scoring_vector_under_its_name(
+    tmp_path: Path, corpus
+) -> None:
+    """The route the shared constant opened (review P1; the line Plan 03 §5 draws).
+
+    Measured at 5787866 on the fixture corpus: `evaluate(strategy="hybrid_graph", vectors=…)`
+    published `strategy: hybrid_graph` with `degraded: []` over a fused window holding ZERO
+    lexical hits — `_fused_hits` fuses the lexical channel only for `hybrid` — and its chunk
+    ranking was `vector`'s, chunk for chunk, with no graph run, because the harness has none.
+    Refused at the one pairing door instead, before the plane is built or a query embedded.
+
+    Seen red at 5787866 (a report came back) and by putting `hybrid_graph` back into
+    `evaluation.EMBEDDING_MODEL_STRATEGIES`.
+    """
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    data = _vector_workspace(tmp_path, corpus)
+    index_dir = tmp_path / "eval-index"
+    embedded: list[str] = []
+
+    with pytest.raises(ValueError) as refused:
+        evaluate(
+            [case],
+            corpus,
+            strategy="hybrid_graph",
+            vectors=_vectors(data, index_dir, query_calls=embedded),
+        )
+
+    assert "no se puede medir con `--strategy hybrid_graph`" in str(refused.value)
+    assert not index_dir.exists(), "refused before the plane was built"
+    assert embedded == [], "and before a single query was embedded"
+
+
 def test_the_evaluation_refuses_a_backend_serving_another_model_before_writing_anything(
     tmp_path: Path, corpus
 ) -> None:

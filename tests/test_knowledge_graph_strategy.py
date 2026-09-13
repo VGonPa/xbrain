@@ -526,6 +526,57 @@ def test_search_hybrid_graph_con_plano_vectorial_ejecuta_hybrid_y_el_grafo_sobre
     assert any({"vector", "graph"} <= set(match.matched_by) for match, _ in lifted)
 
 
+def test_search_hybrid_graph_con_canal_vectorial_reordena_la_fusion_y_nunca_el_vector_solo(
+    tmp_path: Path,
+) -> None:
+    # Plan 04 §3.1 + Plan 03 §5, POR `search`: con el canal vectorial ABIERTO, lo que el grafo
+    # reordena es la FUSIÓN léxico+vector. `evaluate` servía el ranking de `vector` bajo el nombre
+    # `hybrid_graph` (`_fused_hits` solo fusiona léxico para `hybrid`); aquí se ata que `search` no
+    # pueda hacerlo sin ponerse rojo, por las DOS vías en que se puede fallar:
+    #   1. el léxico no entra en la ventana — el chunk que bm25 Y el vector encuentran saldría
+    #      `("vector",)` sin `lexical_rank`;
+    #   2. la ventana se fusiona pero el ORDEN que recibe el grafo es el del vector — las
+    #      explicaciones seguirían diciendo `lexical` y solo el orden lo delata. `rank_with_graph`
+    #      solo SUMA a los vecinos alcanzados, así que los items que el grafo no tocó conservan el
+    #      orden relativo de la base: el de `hybrid`.
+    corpus = _vector_corpus()
+    data = vector_fixture._data(tmp_path, corpus, with_plane=True)
+    both = vector_fixture._pick(data, contains_query=True)[0]
+    passage = vector_fixture._pick(data, contains_query=False)[1]
+    embedder = vector_fixture.QueryEmbedder(passage)
+    context = vector_fixture._context(data, corpus, embedder)
+    query = vector_fixture.QUERY
+
+    graph = search_service.search(
+        query, context, limit=50, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    assert graph.strategy == "hybrid_graph"
+    assert embedder.calls == [query]
+    # 1. el chunk que ambos canales encuentran lleva ambos, con su rango en cada uno.
+    match = vector_fixture._match(graph, both)
+    assert {"lexical", "vector"} <= set(match.matched_by)
+    assert match.lexical_rank is not None and match.vector_rank is not None
+    # 2. los items que el grafo NO elevó salen en el orden relativo de `hybrid`, no en el de `vector`.
+    untouched = [
+        r.item_id
+        for r in graph.results
+        if r.matches and not any("graph" in m.matched_by for m in r.matches)
+    ]
+    hybrid = [
+        r.item_id
+        for r in search_service.search(query, context, strategy="hybrid", limit=50).results
+    ]
+    vector = [
+        r.item_id
+        for r in search_service.search(query, context, strategy="vector", limit=50).results
+    ]
+    # La fixture es lo que dice ser (regla 1): sobre ESOS items `hybrid` y `vector` ordenan
+    # distinto, así que la aserción de abajo no puede pasar por coincidencia.
+    assert [i for i in vector if i in untouched] != [i for i in hybrid if i in untouched]
+    assert untouched == [i for i in hybrid if i in untouched]
+
+
 @pytest.mark.parametrize(
     ("with_plane", "with_embedder", "cause"),
     [
