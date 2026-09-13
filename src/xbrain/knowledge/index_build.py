@@ -56,6 +56,7 @@ from pydantic import BaseModel
 from xbrain.executors.api import iter_content_sources
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
+from xbrain.knowledge.graph_build import build_graph_edges
 from xbrain.knowledge.index_schema import (
     REBUILD_ADVICE,
     SCHEMA_VERSION,
@@ -2100,6 +2101,34 @@ def _write_everything(
         write_topic(
             index, topic, topic_pages.get(topic.slug), primary, secondary, counters, options=options
         )
+    _write_graph(index.connection, store)
+
+
+def _write_graph(connection: sqlite3.Connection, store: Mapping[str, Item]) -> None:
+    """Replace the whole graph plane with the edges `graph_build` derives from `store`.
+
+    Rewritten WHOLE, never patched: one item's re-assignment moves the Jaccard weight of every
+    pair touching its topics, so an incremental patch would have to recompute them all anyway.
+    Reads only the in-memory store — the graph never writes `items.json`.
+    """
+    connection.execute("DELETE FROM graph_edges")
+    connection.executemany(
+        "INSERT INTO graph_edges (source, target, relation, method, weight, shared_items, "
+        "supporting_item_ids_json, input_fingerprints_json) VALUES (?,?,?,?,?,?,?,?)",
+        [
+            (
+                edge.source,
+                edge.target,
+                edge.relation,
+                edge.method,
+                edge.weight,
+                edge.shared_items,
+                json.dumps(list(edge.supporting_item_ids)),
+                json.dumps(list(edge.input_fingerprints)),
+            )
+            for edge in build_graph_edges(store)
+        ],
+    )
 
 
 def _fresh_manifest(

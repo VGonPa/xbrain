@@ -5,10 +5,13 @@ Never asserts corpus figures: every item, topic and count below is built here.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from xbrain.knowledge import index_build
 from xbrain.knowledge.contracts import GraphEdge, GraphNode
 from xbrain.knowledge.graph_build import (
     ASSIGNMENT_METHOD,
@@ -16,7 +19,10 @@ from xbrain.knowledge.graph_build import (
     RELATION_ENDPOINTS,
     build_graph_edges,
 )
-from xbrain.models import Author, Enrichment, Item
+from xbrain.knowledge.index_schema import db_path, open_index
+from xbrain.models import Author, Enrichment, Item, Topic
+from xbrain.rubrics import save_vocab
+from xbrain.store import save_store
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -198,3 +204,47 @@ def test_no_item_to_item_edge_exists_in_the_schema() -> None:
     for edge in build_graph_edges(_KNOWN):
         endpoints = (edge.source.split(":", 1)[0], edge.target.split(":", 1)[0])
         assert endpoints == RELATION_ENDPOINTS[edge.relation]
+
+
+_VOCAB = [Topic(slug=s, description=f"topic {s}") for s in ("a", "b", "c")]
+
+
+def _persisted(tmp_path: Path) -> Path:
+    """A data/ holding `_KNOWN` and its vocabulary, written through the store's own writers."""
+    data = tmp_path / "data"
+    save_store(dict(_KNOWN), data / "items.json")
+    save_vocab(list(_VOCAB), data / "vocab.yaml")
+    return data
+
+
+def _inputs(data: Path) -> index_build.IndexInputs:
+    return index_build.load_index_inputs(
+        data / "items.json", data / "vocab.yaml", data / "topics.json"
+    )
+
+
+def _graph_rows(data: Path) -> list[tuple]:
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        return [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT source, target, relation FROM graph_edges ORDER BY source, target, relation"
+            )
+        ]
+    finally:
+        connection.close()
+
+
+def test_graph_build_does_not_mutate_items_json(tmp_path: Path) -> None:
+    data = _persisted(tmp_path)
+    before = hashlib.sha256((data / "items.json").read_bytes()).hexdigest()
+
+    index_build.build(data / "index", _inputs(data))
+
+    # The graph WAS built — without this, an unchanged hash would also hold for a build that
+    # never wrote a single edge, and the assertion below would prove nothing.
+    rows = _graph_rows(data)
+    assert ("topic:a", "topic:b", "CO_OCCURS_WITH") in rows
+    assert ("item:1", "topic:a", "HAS_PRIMARY_TOPIC") in rows
+    assert hashlib.sha256((data / "items.json").read_bytes()).hexdigest() == before

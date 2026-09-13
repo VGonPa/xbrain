@@ -118,6 +118,7 @@ TABLES: frozenset[str] = frozenset(
         "topics",
         "source_failures",
         "unfetched_links",
+        "graph_edges",
     }
 )
 
@@ -257,6 +258,25 @@ CREATE TABLE IF NOT EXISTS unfetched_links (
     detail  TEXT
 );
 CREATE INDEX IF NOT EXISTS unfetched_links_item ON unfetched_links (item_id);
+
+-- Plan 04.2: the minimal graph (spec §6.2), DERIVED from the items' topic assignments by
+-- `graph_build` and rewritten whole on every build/update. An edge says these topics were
+-- assigned together to these items, never that the concepts are related (spec §6.4). The
+-- CHECK is the schema half of «there is no item–item edge»: two items meet only through a topic.
+CREATE TABLE IF NOT EXISTS graph_edges (
+    source                   TEXT NOT NULL,
+    target                   TEXT NOT NULL,
+    relation                 TEXT NOT NULL,
+    method                   TEXT NOT NULL,
+    weight                   REAL NOT NULL,
+    shared_items             INTEGER NOT NULL,
+    supporting_item_ids_json TEXT NOT NULL,
+    input_fingerprints_json  TEXT NOT NULL,
+    PRIMARY KEY (source, target, relation),
+    CHECK (NOT (source LIKE 'item:%' AND target LIKE 'item:%'))
+);
+CREATE INDEX IF NOT EXISTS graph_edges_source ON graph_edges (source, relation);
+CREATE INDEX IF NOT EXISTS graph_edges_target ON graph_edges (target, relation);
 
 {fts5_table_sql("chunks_fts", content="chunks")};
 {fts5_table_sql("profiles_fts", columns=("profile_text",), content="profiles")};
