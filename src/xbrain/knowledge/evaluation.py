@@ -162,10 +162,17 @@ METRIC_UNITS: dict[str, str] = {
 # 0.0 — so `filtros` stays a lexical measurement and says so, instead of the bake-off quoting a
 # number for filtering that no vector channel performed. Measured on the golden set: F1 and F2
 # are the two cases this removes from the vector reports, and the only two.
+#
+# `hybrid_graph` runs the SAME channels as `hybrid` (Plan 04 §3.1,
+# `search_service._VECTOR_STRATEGIES`) and the vector plane has no filter columns, so it pushes
+# none either: declaring anything else
+# would SCORE a filtered case instead of reporting it unmeasured. The `.get(strategy, frozenset())`
+# fallback already gave that answer — the entry makes the declaration honest, not accidental.
 SUPPORTED_FILTERS: dict[str, frozenset[str]] = {
     "lexical": frozenset(SearchFilters.model_fields),
     "vector": frozenset(),
     "hybrid": frozenset(),
+    "hybrid_graph": frozenset(),
 }
 
 

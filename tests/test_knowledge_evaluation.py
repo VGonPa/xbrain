@@ -445,8 +445,9 @@ def test_every_implemented_strategy_declares_which_filters_it_can_push() -> None
     `IMPLEMENTED_STRATEGIES` says which retrievers run without vectors, and the search
     service's own vector set says which run with them (Plan 03.5); `SUPPORTED_FILTERS` says
     what each can push into `WHERE`. A strategy runnable without an entry here would fall to
-    `SUPPORTED_FILTERS.get(strategy, frozenset())` — right today for the vector pair by
-    accident, and wrong the day one of them gains filter columns. Read off `search_service`
+    `SUPPORTED_FILTERS.get(strategy, frozenset())` — right today for the vector strategies
+    (`vector`, `hybrid`, `hybrid_graph`) by accident, and wrong the day one of them gains filter
+    columns. Read off `search_service`
     and not off `evaluation`, so the binding is between two modules rather than one module
     and itself (rule 1, row 4).
     """
