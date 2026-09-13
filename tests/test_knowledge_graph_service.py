@@ -84,9 +84,7 @@ def test_expansion_distinguishes_the_primary_topic_from_a_secondary_one(tmp_path
 
     response = graph_expand(("item:1",), context, max_hops=1)
 
-    relation_of = {
-        (e.source, e.target): e.relation for e in response.edges if e.source == "item:1"
-    }
+    relation_of = {(e.source, e.target): e.relation for e in response.edges if e.source == "item:1"}
     assert relation_of == {
         ("item:1", "topic:a"): "HAS_PRIMARY_TOPIC",
         ("item:1", "topic:b"): "HAS_TOPIC",
