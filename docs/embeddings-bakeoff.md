@@ -40,6 +40,7 @@ check de CI · **Instrumento:** `xbrain eval --strategy vector|hybrid --embeddin
 | Profundidad | 20 owners por caso, `k ∈ {1, 5, 10, 20}` — la misma para las tres estrategias |
 | Índice vectorial | uno por modelo en `data/eval-index/<modelo>/`, escrito por `index_build.build(..., vectors=…)`: el mismo escritor y el mismo plano que `xbrain index build --embeddings` |
 | `vector` / `hybrid` | la ventana fusionada del propio `search_service` (`FUSED_CHUNK_WINDOW` = 1.000 chunks por canal) y RRF con las constantes de `fusion.py` en vigor (`RRF_K` = 60, pesos 1 / 1); se puntúa por OWNER sobre el ranking de chunks, igual que la línea base léxica |
+| Código | xbrain `547a860`: las corridas `vector`/`hybrid` (11:09–11:22) son anteriores al commit (11:42) y usaron su `src/`, que es idéntico al de `b3fdc8b` |
 | Embedder | `scripts/xbrain-embed` (sentence-transformers 6.0.1 · torch 2.14.0 · MPS) vía `[embeddings].command`, pesos `safetensors` en caché local, `HF_HUB_OFFLINE=1`, `batch_size` 1.024 |
 | Máquina | Apple M2 · 16 GB · **el swap ya estaba en uso antes de la primera corrida**: 13,2 GB usados de 14,3 GB, por otras sesiones abiertas |
 
@@ -266,58 +267,149 @@ por separado:
 
 ## 9. Cómo re-derivarlo
 
-**1. El embedder, fuera de xbrain.** Un entorno propio con `sentence-transformers` (xbrain no lleva ninguna
+Todo corre en un **checkout aislado** y sobre **copias**: nada escribe en el `data/` de trabajo ni en el
+checkout desde el que lees esto. Los bloques comparten variables; ejecútalos en orden y en la misma shell
+(bash o zsh).
+
+**Qué fija la corrida publicada, y qué no.**
+
+| | Referencia | Estado |
+|---|---|---|
+| Código | xbrain `547a860` (su `src/` es el de `b3fdc8b`) | fijado |
+| Corpus | `data/items.json` sha256 `4fed54a0…` · `data/vocab.yaml` `e73fbede…` · `data/topics.json` `7a40f4f1…` | fijado **por prefijo** de 8 hex: distingue una versión del store de otra; no es una firma |
+| Golden set | `eval/golden-set.yaml` v3 en `547a860`; su id exacto es `git rev-parse 547a860:eval/golden-set.yaml` | fijado por commit |
+| Entorno de xbrain | el `uv.lock` de `547a860` | referencia reproducible |
+| Embedder | Python 3.12 · sentence-transformers 6.0.1 · torch 2.14.0 · MPS · Apple M2 16 GB | fijado; las versiones de `transformers` y `huggingface_hub` **no se anotaron** |
+| Pesos | `safetensors` del repositorio HF de cada modelo | **revisión NO fijada**: una revisión posterior puede mover las cifras de `vector`/`hybrid` |
+| Informes | `eval-lexical.json` · `eval-minilm-l12-vector.json` · `eval-minilm-l12-hybrid.json` | **no versionados y sin sha256 publicado**; el paso 6 dice por qué su sha256 tampoco serviría |
+
+**Con `HEAD` ≥ `90dc74e` las columnas MRR no reproducen las de este documento:** desde ese commit
+`compare_reports` ordena y publica `mrr@k`, y las cifras de la §3 y la §5 son el `mrr` sin corte. Para
+reproducir las tablas tal como están, usa `547a860`.
+
+**1. Checkout aislado y entorno de xbrain.**
+
+```bash
+SRC=/ruta/al/clon/de/xbrain       # cualquier clon con el historial de VGonPa/xbrain
+STORE=/ruta/al/store/data         # contiene items.json, vocab.yaml y topics.json medidos
+WORK=$(mktemp -d)
+CHECKOUT=$WORK/xbrain
+git clone --no-checkout "$SRC" "$CHECKOUT"
+git -C "$CHECKOUT" checkout --detach 547a860
+(cd "$CHECKOUT" && uv sync --locked)    # con el índice privado de pip de esta máquina: añade --index-url https://pypi.org/simple
+git -C "$CHECKOUT" rev-parse HEAD:eval/golden-set.yaml   # anota el id del golden set que vas a medir
+```
+
+**2. Una raíz `XBRAIN_REPO_ROOT` por candidato.** `xbrain` resuelve `config.toml` y `data/` contra esa
+raíz, así que cada candidato tiene su propio `config.toml` y su copia de sólo lectura del store; los índices
+de evaluación (`data/eval-index/<modelo>/`) se escriben dentro de la raíz, nunca en el store. La función
+comprueba los prefijos de la §1 y avisa si el corpus no es el publicado:
+
+```bash
+root() {   # $1 = nombre del candidato
+  mkdir -p "$WORK/roots/$1/data"
+  cp "$STORE/items.json" "$STORE/vocab.yaml" "$STORE/topics.json" "$WORK/roots/$1/data/"
+  chmod a-w "$WORK/roots/$1/data/items.json" "$WORK/roots/$1/data/vocab.yaml" "$WORK/roots/$1/data/topics.json"
+  for pair in items.json:4fed54a0 vocab.yaml:e73fbede topics.json:7a40f4f1; do
+    f=${pair%%:*}; want=${pair##*:}
+    got=$(shasum -a 256 "$WORK/roots/$1/data/$f" | cut -c1-8)
+    [ "$got" = "$want" ] || echo "DISTINTO: $f empieza por $got…, la §1 midió $want… — no es el corpus publicado"
+  done
+}
+```
+
+**3. El embedder, fuera de xbrain.** Un entorno propio con `sentence-transformers` (xbrain no lleva ninguna
 librería de modelos) y los pesos en `safetensors`, sin los duplicados `onnx/` ni `*.bin` de los repositorios
 — sin eso, e5-base ocupa tres veces lo que usa. **Presupuesto medido:** ~0,9 GB el entorno, 0,47 GB MiniLM
 o e5-small, 1,1 GB e5-base, ~0,1 GB por índice de evaluación, **más el crecimiento del swap si la máquina
 está en presión de memoria** (§6.3).
 
 ```bash
-uv venv --python 3.12 embedenv
-VIRTUAL_ENV=embedenv uv pip install --index-url https://pypi.org/simple sentence-transformers
-HF_HOME=hf embedenv/bin/python -c "
+uv venv --python 3.12 "$WORK/embedenv"
+VIRTUAL_ENV="$WORK/embedenv" uv pip install --index-url https://pypi.org/simple \
+    'sentence-transformers==6.0.1' 'torch==2.14.0'
+MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2   # o intfloat/multilingual-e5-base, …
+HF_HOME="$WORK/hf" "$WORK/embedenv/bin/python" -c "
 from huggingface_hub import snapshot_download
-snapshot_download('intfloat/multilingual-e5-base',
+print(snapshot_download('$MODEL',
     allow_patterns=['*.json', '*.txt', '*.model', 'model.safetensors', '1_Pooling/*', '2_Normalize/*', 'sentencepiece*'],
-    ignore_patterns=['onnx/*', 'openvino/*'])"
+    ignore_patterns=['onnx/*', 'openvino/*']))"
 ```
 
-**2. Un `config.toml` por candidato**, porque los prefijos son del MODELO y viajan en config, no en código:
+La ruta impresa termina en `snapshots/<revisión>`: anota esa revisión, que es exactamente lo que la corrida
+publicada no fijó.
 
-```toml
+**4. Un `config.toml` por candidato**, porque los prefijos son del MODELO y viajan en config, no en código
+(`""` para MiniLM; `"query: "` / `"passage: "` para la familia E5):
+
+```bash
+root minilm-l12
+cat > "$WORK/roots/minilm-l12/config.toml" <<EOF
 [embeddings]
-command = "env HF_HOME=/ruta/hf HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false /ruta/embedenv/bin/python /ruta/xbrain/scripts/xbrain-embed"
+command = "env HF_HOME=$WORK/hf HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false $WORK/embedenv/bin/python $CHECKOUT/scripts/xbrain-embed"
 batch_size = 1024
 timeout_seconds = 1800
-query_prefix = "query: "      # "" para MiniLM
-passage_prefix = "passage: "  # "" para MiniLM
+query_prefix = ""
+passage_prefix = ""
+EOF
 ```
 
-**3. Las corridas.** `vector` construye `data/eval-index/<modelo>/` y `hybrid` lo reutiliza mientras el
+**5. Las corridas**, con el golden set del checkout por ruta explícita y profundidad 20 también explícita.
+`vector` construye `data/eval-index/<modelo>/` dentro de la raíz y `hybrid` lo reutiliza mientras el
 manifest declare el mismo modelo y el store no se haya movido (el informe dice `construido` o
-`reutilizado`); si el manifest declara OTRO modelo, el comando falla sin tocar nada:
+`reutilizado`); si el manifest declara OTRO modelo, el comando falla sin tocar nada. `--limit 20` importa
+sobre todo en el barrido: `--sweep-fusion` usa `max(--limit, k)` y con el `--limit 10` por defecto mide a
+profundidad 10, que no reproduce el MRR de la §5 (el mismo motivo por el que la §3 da 0,7366 y no 0,7357):
 
 ```bash
-xbrain eval --strategy lexical --report data/eval-lexical.json
-xbrain eval --strategy vector --embeddings-model intfloat/multilingual-e5-base --report data/eval-e5-base-vector.json
-xbrain eval --strategy hybrid --embeddings-model intfloat/multilingual-e5-base --report data/eval-e5-base-hybrid.json
-xbrain eval --strategy hybrid --embeddings-model <modelo> --sweep-fusion "rrf_k=20,60,120 w_vector=0.5,1,2"
+x() { r=$1; shift; XBRAIN_REPO_ROOT="$WORK/roots/$r" uv run --project "$CHECKOUT" xbrain eval \
+        --golden-set "$CHECKOUT/eval/golden-set.yaml" --limit 20 "$@"; }
+mkdir -p "$WORK/reports"
+x minilm-l12 --strategy lexical --report "$WORK/reports/eval-lexical.json"
+x minilm-l12 --strategy vector --embeddings-model "$MODEL" --report "$WORK/reports/eval-minilm-l12-vector.json"
+x minilm-l12 --strategy hybrid --embeddings-model "$MODEL" --report "$WORK/reports/eval-minilm-l12-hybrid.json"
+x minilm-l12 --strategy hybrid --embeddings-model "$MODEL" --sweep-fusion "rrf_k=20,60,120 w_vector=0.5,1,2"
 ```
 
-La corrida publicada usó `XBRAIN_REPO_ROOT` con un `config.toml` por candidato y una copia de sólo lectura de
-los tres ficheros de entrada (mismos sha256 que los de la §1), para no escribir los índices de evaluación
-dentro del `data/` de trabajo.
-
-**4. La comparación**, con el instrumento que se publica y las exclusiones como argumento:
+**6. La comparación y la verificación de la corrida.** Primero la puerta, con el instrumento que se publica
+y las exclusiones como argumento:
 
 ```bash
-uv run python -c "
+uv run --project "$CHECKOUT" python -c "
 import json
 from xbrain.knowledge.evaluation import compare_reports
-lexical = json.load(open('data/eval-lexical.json'))
-candidate = json.load(open('data/eval-e5-base-hybrid.json'))
+lexical = json.load(open('$WORK/reports/eval-lexical.json'))
+candidate = json.load(open('$WORK/reports/eval-minilm-l12-hybrid.json'))
 exclude = {'U3': 'población crecida', 'S8': 'hecho fuera de la nota del topic', 'V2': 'fuga A.3'}
 print(json.dumps(compare_reports(lexical, candidate, k=10, exclude=exclude), ensure_ascii=False, indent=2))"
+```
+
+Después, las huellas. **El sha256 de un informe no sirve para reproducirlo**: dos corridas léxicas sobre el
+mismo store y el mismo golden set dieron los mismos `retrieved` y las mismas métricas en los 23 casos y aun
+así ficheros distintos, porque `corpus.source` guarda la ruta del store y `latency` el reloj (en
+`vector`/`hybrid` también cambian `seconds` y `built` del índice). Lo que se ancla por sha256 son las
+entradas; los informes se comparan por contenido sin esos campos:
+
+```bash
+(cd "$WORK" && shasum -a 256 roots/minilm-l12/data/items.json roots/minilm-l12/data/vocab.yaml \
+    roots/minilm-l12/data/topics.json xbrain/eval/golden-set.yaml reports/*.json > SHA256SUMS)
+same() { uv run --project "$CHECKOUT" python - "$1" "$2" <<'PY'
+import json, sys
+VOLATILE = {"latency", "seconds", "built"}   # reloj y caché del índice: no son resultado
+def clean(node):
+    if isinstance(node, dict):
+        return {k: clean(v) for k, v in node.items() if k not in VOLATILE}
+    if isinstance(node, list):
+        return [clean(v) for v in node]
+    return node
+a, b = (clean(json.load(open(p))) for p in sys.argv[1:3])
+for doc in (a, b):
+    doc.get("corpus", {}).pop("source", None)   # la ruta del store, no su contenido
+diff = sorted(k for k in a.keys() | b.keys() if a.get(k) != b.get(k))
+print("idénticos" if not diff else f"difieren en: {diff}")
+PY
+}
+same "$WORK/reports/eval-lexical.json" /ruta/a/otra/corrida/eval-lexical.json
 ```
 
 ## 10. Puertas del spec §8.6 y criterios del Plan 03 §13
