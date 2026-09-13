@@ -28,6 +28,16 @@ from xbrain.models import Enrichment, Item
 ASSIGNMENT_METHOD = "enrichment_assignment"
 CO_OCCURRENCE_METHOD = "jaccard_topic_co_occurrence"
 
+# The (source node type, target node type) of every relation `GraphEdge` admits. There is NO
+# item–item relation: two items are related only THROUGH a topic both carry, so a consumer
+# always sees which assignment connects them (spec §6.2). A relation added to the contract
+# without an entry here turns `test_no_item_to_item_edge_exists_in_the_schema` red.
+RELATION_ENDPOINTS: dict[str, tuple[str, str]] = {
+    "HAS_PRIMARY_TOPIC": ("item", "topic"),
+    "HAS_TOPIC": ("item", "topic"),
+    "CO_OCCURS_WITH": ("topic", "topic"),
+}
+
 
 def _assigned_topics(enriched: Enrichment) -> tuple[str, ...]:
     """The item's topics, primary first, each slug once."""

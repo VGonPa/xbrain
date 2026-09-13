@@ -9,10 +9,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from xbrain.knowledge.contracts import GraphEdge
+from xbrain.knowledge.contracts import GraphEdge, GraphNode
 from xbrain.knowledge.graph_build import (
     ASSIGNMENT_METHOD,
     CO_OCCURRENCE_METHOD,
+    RELATION_ENDPOINTS,
     build_graph_edges,
 )
 from xbrain.models import Author, Enrichment, Item
@@ -180,3 +181,20 @@ def test_min_shared_items_leaves_fewer_pairs_than_no_threshold() -> None:
     assert len(_unordered_pairs(filtered)) < len(_unordered_pairs(unfiltered))
     # The threshold prunes co-occurrence only; every assignment survives it.
     assert _assignments(filtered) == _assignments(unfiltered)
+
+
+def test_no_item_to_item_edge_exists_in_the_schema() -> None:
+    # Read the relations off the CONTRACT'S schema, not off a list written here: a relation
+    # added to `GraphEdge` without declared endpoints must turn this red.
+    schema_relations = set(GraphEdge.model_json_schema()["properties"]["relation"]["enum"])
+    node_types = set(GraphNode.model_json_schema()["properties"]["node_type"]["enum"])
+
+    assert set(RELATION_ENDPOINTS) == schema_relations
+    assert all({s, t} <= node_types for s, t in RELATION_ENDPOINTS.values())
+    assert ("item", "item") not in RELATION_ENDPOINTS.values()
+
+    # And what the builder emits obeys the declared endpoints, on a store where every item
+    # shares topics with every other — the shape that would tempt an item–item edge.
+    for edge in build_graph_edges(_KNOWN):
+        endpoints = (edge.source.split(":", 1)[0], edge.target.split(":", 1)[0])
+        assert endpoints == RELATION_ENDPOINTS[edge.relation]
