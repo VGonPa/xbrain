@@ -99,7 +99,12 @@ from xbrain.models import _reject_local_path_traversal
 # a v4 base finds `source_failures.attempts` missing and refuses it. The table also diverges
 # from Plan 02's frozen DDL in TWO cells now — that DDL still declares `attempts` and still
 # omits the `http_status` an earlier child added — so 02.7's writer is built against THIS file.
-SCHEMA_VERSION = "4"
+# "5" since Plan 04.2: the `graph_edges` plane. A v4 base has no graph, so updating over it
+# would re-seal a manifest over a plane that was never written; the stamp refuses it by name.
+# THIS IS THE INDEX'S LAYOUT VERSION, NOT A CONTRACT VERSION: `contracts.py` versions the
+# public envelopes (`SearchResponse`, `EvidenceBundle`, `GraphExpansionResponse`) on their own
+# `schema_version` fields, and neither number moves the other.
+SCHEMA_VERSION = "5"
 
 DB_FILENAME = "knowledge.db"
 MANIFEST_FILENAME = "manifest.json"

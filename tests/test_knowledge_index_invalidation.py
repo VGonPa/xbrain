@@ -213,6 +213,22 @@ def test_a_different_chunker_version_refuses_the_update(built: Path, corpus) -> 
         _update(built)
 
 
+def test_a_base_stamped_with_the_pre_graph_schema_refuses_the_update(built: Path, corpus) -> None:
+    """Plan 04.2: `graph_edges` is a layout change, so a base sealed as "4" is not incremental.
+
+    A v4 base has no graph plane, and updating over it would re-seal a manifest certifying a
+    graph that was never written. Seen red with `SCHEMA_VERSION` still "4": the same stamp
+    compared equal and the update ran.
+    """
+    path = manifest_path(built / "index")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = "4"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(IndexIncompatibleError, match="index build --force"):
+        _update(built)
+
+
 # ---------------------------------------------------------------------------
 # 6 — the item with no `content` (rule 6)
 # ---------------------------------------------------------------------------
