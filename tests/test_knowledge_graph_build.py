@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
+from xbrain.knowledge.contracts import GraphEdge
 from xbrain.knowledge.graph_build import build_graph_edges
 from xbrain.models import Author, Enrichment, Item
 
@@ -32,6 +35,23 @@ def _item(item_id: str, primary: str | None, topics: list[str]) -> Item:
     )
 
 
+def _assignments(edges: list[GraphEdge]) -> list[GraphEdge]:
+    return [e for e in edges if e.relation != "CO_OCCURS_WITH"]
+
+
+def _co_occurrence(edges: list[GraphEdge]) -> dict[tuple[str, str], GraphEdge]:
+    return {(e.source, e.target): e for e in edges if e.relation == "CO_OCCURS_WITH"}
+
+
+# items(a) = {1, 2, 3} · items(b) = {1, 2, 4} · items(c) = {2, 4}
+_KNOWN = {
+    "1": _item("1", primary="a", topics=["b"]),
+    "2": _item("2", primary="a", topics=["b", "c"]),
+    "3": _item("3", primary="a", topics=[]),
+    "4": _item("4", primary="b", topics=["c"]),
+}
+
+
 def test_primary_topic_and_topics_each_produce_their_own_edge_kind() -> None:
     store = {"1": _item("1", primary="agents", topics=["rag"])}
 
@@ -48,10 +68,24 @@ def test_primary_topic_repeated_in_topics_does_not_produce_a_double_edge() -> No
     # The enrichment lists the primary topic inside `topics` too, and repeats a secondary one.
     store = {"1": _item("1", primary="agents", topics=["agents", "rag", "rag"])}
 
-    edges = build_graph_edges(store)
+    edges = _assignments(build_graph_edges(store))
 
     pairs = [(e.source, e.target) for e in edges]
     assert sorted(pairs) == [("item:1", "topic:agents"), ("item:1", "topic:rag")]
     relation_of = {(e.source, e.target): e.relation for e in edges}
     assert relation_of[("item:1", "topic:agents")] == "HAS_PRIMARY_TOPIC"
     assert relation_of[("item:1", "topic:rag")] == "HAS_TOPIC"
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "shared", "union"),
+    [("a", "b", 2, 4), ("a", "c", 1, 4), ("b", "c", 2, 3)],
+)
+def test_co_occurrence_weight_is_jaccard_and_symmetric(a: str, b: str, shared: int, union: int) -> None:
+    co = _co_occurrence(build_graph_edges(_KNOWN))
+
+    forward = co[(f"topic:{a}", f"topic:{b}")]
+    backward = co[(f"topic:{b}", f"topic:{a}")]
+    assert forward.weight == pytest.approx(shared / union)
+    assert backward.weight == forward.weight
+    assert forward.shared_items == backward.shared_items == shared
