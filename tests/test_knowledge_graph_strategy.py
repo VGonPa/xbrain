@@ -13,12 +13,69 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast, get_args
 
+from datetime import UTC, datetime
+
 from tests.test_knowledge_search_service import FIXTURES, _build, _context, _persist
 from xbrain.knowledge import fusion, graph_strategy, search_service
 from xbrain.knowledge.contracts import GraphExpansionResponse, GraphNode, Strategy
 from xbrain.knowledge.graph_service import graph_expand
 from xbrain.knowledge.search_service import QueryContext
-from xbrain.models import Item, Topic, TopicPage
+from xbrain.models import Author, Content, Enrichment, Item, Topic, TopicPage
+
+_T = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+# Chunks per item. `search_owners` opens `owners * OWNER_CHUNK_MULTIPLIER` (4) ROWS, so with one
+# matching chunk per item a window sized for 11 owners already held 44 of them and the 40th was
+# inside it under every too-small horizon. Six chunks each put 39 × 6 = 234 rows in front of the
+# 40th item — more than the widest mutated window (22 owners × 4 = 88 rows) can reach.
+_CHUNKS_PER_ITEM = 6
+
+
+def _ranked_item(item_id: str, filler: int, topic: str | None) -> Item:
+    """An item whose article matches `zeta` in every chunk; more `filler` = a lower bm25."""
+    paragraph = "zeta " + " ".join(["relleno"] * (80 + filler))
+    text = "\n\n".join([paragraph] * _CHUNKS_PER_ITEM)
+    return Item(
+        id=item_id,
+        source="bookmark",
+        url=f"https://x.com/u/status/{item_id}",
+        author=Author(handle="u", name="U"),
+        text=f"tweet {item_id}",
+        created_at=_T,
+        captured_at=_T,
+        content=Content.model_validate(
+            {
+                "fetched_at": _T.isoformat(),
+                "sources": [
+                    {
+                        "outcome": "success",
+                        "kind": "x_article",
+                        "url": f"https://x.com/i/article/{item_id}",
+                        "text": text,
+                        "attempts": 1,
+                        "title": f"Article {item_id}",
+                    }
+                ],
+            }
+        ),
+        enriched=Enrichment(
+            enriched_at=_T,
+            executor="manual",
+            summary="s",
+            primary_topic=topic,
+            topics=[],
+        ),
+    )
+
+
+def _ranked_context(tmp_path: Path, store: dict[str, Item], slugs: Sequence[str]) -> QueryContext:
+    """A REAL index (graph plane included) over `store`, and the context `search` reads."""
+    vocab = [Topic(slug=slug, description=f"topic {slug}") for slug in slugs]
+    data = tmp_path / "data"
+    _persist(data, store, vocab, {})
+    _build(data)
+    return _context(data, store, vocab, {})
 
 
 def test_hybrid_graph_existe_es_desactivable_y_el_default_no_cambia() -> None:
@@ -163,6 +220,34 @@ def test_search_hybrid_graph_sirve_un_item_traido_por_vecindad_fuera_del_top_k_l
     assert graph.strategy == "hybrid_graph"
     assert "hybrid_graph_not_implemented" not in graph.index.degraded
     assert "k07" in [r.item_id for r in graph.results]
+
+
+def test_search_hybrid_graph_con_limit_10_sirve_al_vecino_del_puesto_40_del_lexico(
+    tmp_path: Path,
+) -> None:
+    # Puerta 11.13 atada al CONTRATO, no a un mínimo. El test de `k03` solo exigía un horizonte
+    # >= limit + 2, así que `needed = beyond + 1`, `needed = 2 * beyond` y un horizonte de 3
+    # pasaban con el vecino del puesto 40 FUERA. Aquí el vecino está en el 40 y la página es 10.
+    store = {
+        f"u{n:02d}": _ranked_item(f"u{n:02d}", filler=n, topic="hub" if n in (1, 40) else None)
+        for n in range(1, 51)
+    }
+    context = _ranked_context(tmp_path, store, ["hub"])
+
+    # La fixture es lo que dice ser: `u40` es el 40º del léxico, fuera del top-10, y es vecino
+    # de la cabeza desde la que el grafo se expande (regla 1).
+    ranking = [r.item_id for r in search_service.search("zeta", context, limit=50).results]
+    assert len(ranking) == 50
+    assert ranking.index("u40") + 1 == 40
+    reached = graph_expand([f"item:{ranking[0]}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
+    assert "item:u40" in {node.node_id for node in reached.nodes}
+
+    graph = search_service.search(
+        "zeta", context, limit=10, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    assert graph.strategy == "hybrid_graph"
+    assert "u40" in [r.item_id for r in graph.results]
 
 
 def test_search_hybrid_graph_sirve_graph_en_matched_by_del_item_elevado(tmp_path: Path) -> None:
