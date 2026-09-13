@@ -349,3 +349,128 @@ def test_each_graph_config_field_reaches_graph_build(tmp_path: Path, monkeypatch
     assert seen.get("min_shared_items") == 4
     assert seen.get("min_weight") == pytest.approx(0.3)
     assert seen.get("max_neighbors_per_node") == 7
+
+
+# Every threshold explicit, so no test below leans on a default the Plan 04.5 sweep may move.
+_NO_PRUNING = index_build.IndexOptions(
+    graph_min_shared_items=1, graph_min_weight=0.0, graph_max_neighbors_per_node=10
+)
+
+
+def _stored_edges(data: Path, relation: str) -> dict[tuple[str, str], tuple[str, int, list[str]]]:
+    """`{(source, target): (method, shared_items, supporting_item_ids)}` READ BACK from the table."""
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        return {
+            (source, target): (method, shared, json.loads(support))
+            for source, target, method, shared, support in connection.execute(
+                "SELECT source, target, method, shared_items, supporting_item_ids_json "
+                "FROM graph_edges WHERE relation = ?",
+                (relation,),
+            )
+        }
+    finally:
+        connection.close()
+
+
+def test_the_persisted_co_occurrence_columns_are_what_the_builder_derived(tmp_path: Path) -> None:
+    """B-1: `method`, `shared_items` and `supporting_item_ids` as the ROW holds them.
+
+    Step 5 asserts the in-memory `GraphEdge`; nothing read these columns back, so persisting
+    `""`, `0` or `[]` in `_write_graph` left the whole suite green while 04.3 is going to read
+    exactly these columns. The expected values are derived by hand from `_KNOWN` — items(a) =
+    {1, 2, 3}, items(b) = {1, 2, 4}, items(c) = {2, 4} — not from `build_graph_edges`, so the
+    writer is compared against the population and not against its own input.
+    """
+    data = _persisted(tmp_path)
+    index_build.build(data / "index", _inputs(data), options=_NO_PRUNING)
+
+    method = CO_OCCURRENCE_METHOD
+    assert _stored_edges(data, "CO_OCCURS_WITH") == {
+        ("topic:a", "topic:b"): (method, 2, ["1", "2"]),
+        ("topic:b", "topic:a"): (method, 2, ["1", "2"]),
+        ("topic:a", "topic:c"): (method, 1, ["2"]),
+        ("topic:c", "topic:a"): (method, 1, ["2"]),
+        ("topic:b", "topic:c"): (method, 2, ["2", "4"]),
+        ("topic:c", "topic:b"): (method, 2, ["2", "4"]),
+    }
+    assignments = _stored_edges(data, "HAS_PRIMARY_TOPIC") | _stored_edges(data, "HAS_TOPIC")
+    assert len(assignments) == 8
+    assert {row[0] for row in assignments.values()} == {ASSIGNMENT_METHOD}
+
+
+def test_the_co_occurrence_method_names_its_algorithm_version(tmp_path: Path) -> None:
+    """B-2: spec §6.2 asks a co-occurrence edge for the «versión del algoritmo».
+
+    The literal is Plan 04 §1.2/§1.4's, typed here rather than imported, so the constant
+    cannot satisfy this test by agreeing with itself (rule 1).
+    """
+    data = _persisted(tmp_path)
+    index_build.build(data / "index", _inputs(data), options=_NO_PRUNING)
+
+    methods = {row[0] for row in _stored_edges(data, "CO_OCCURS_WITH").values()}
+    assert methods == {"topic-cooccurrence/v1"}
+
+
+def _sealed_graph(data: Path) -> dict:
+    """The manifest's `graph` block as the FILE on disk holds it."""
+    from xbrain.knowledge.index_schema import manifest_path
+
+    return json.loads(manifest_path(data / "index").read_text(encoding="utf-8"))["graph"]
+
+
+def _edge_rows(data: Path) -> int:
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        return int(connection.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0])
+    finally:
+        connection.close()
+
+
+def test_the_manifest_seals_the_graph_block_the_build_applied(tmp_path: Path) -> None:
+    """B-2: Plan 04 §1.4 — the manifest records the algorithm and the thresholds it ran under.
+
+    Three non-default thresholds, each changing the population: `min_shared_items=2` drops
+    a–c (1 shared item), `max_neighbors_per_node=1` keeps b → c (2/3) over b → a (1/2), and
+    `min_weight=0.3` is kept below both survivors. So 8 assignments + a → b, b → c, c → b.
+    """
+    data = _persisted(tmp_path)
+    options = index_build.IndexOptions(
+        graph_min_shared_items=2, graph_min_weight=0.3, graph_max_neighbors_per_node=1
+    )
+    index_build.build(data / "index", _inputs(data), options=options)
+
+    assert _sealed_graph(data) == {
+        "algorithm_version": "topic-cooccurrence/v1",
+        "min_shared_items": 2,
+        "min_weight": 0.3,
+        "max_neighbors_per_node": 1,
+        "edges": 11,
+    }
+    assert _edge_rows(data) == 11
+
+
+def test_update_rewrites_the_graph_when_a_threshold_moves(tmp_path: Path) -> None:
+    """M-3: a threshold change with the store untouched must not leave the old plane standing.
+
+    Before the block, an update with no item delta wrote nothing, so raising `min_shared_items`
+    kept serving a–c (1 shared item) under a configuration that excludes it.
+    """
+    data = _persisted(tmp_path)
+    index_build.build(data / "index", _inputs(data), options=_NO_PRUNING)
+    assert ("topic:a", "topic:c") in _stored_edges(data, "CO_OCCURS_WITH")
+
+    raised = index_build.IndexOptions(
+        graph_min_shared_items=2, graph_min_weight=0.0, graph_max_neighbors_per_node=10
+    )
+    index_build.update(data / "index", _inputs(data), options=raised)
+
+    pairs = set(_stored_edges(data, "CO_OCCURS_WITH"))
+    assert pairs == {
+        ("topic:a", "topic:b"),
+        ("topic:b", "topic:a"),
+        ("topic:b", "topic:c"),
+        ("topic:c", "topic:b"),
+    }
+    assert _sealed_graph(data)["min_shared_items"] == 2
+    assert _sealed_graph(data)["edges"] == _edge_rows(data) == 12

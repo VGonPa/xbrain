@@ -31,7 +31,10 @@ from xbrain.knowledge.vector_index import text_fingerprint
 from xbrain.models import Enrichment, Item
 
 ASSIGNMENT_METHOD = "enrichment_assignment"
-CO_OCCURRENCE_METHOD = "jaccard_topic_co_occurrence"
+# Spec §6.2 asks a co-occurrence edge for the «versión del algoritmo»; Plan 04 §1.2/§1.4 fix the
+# value. Bump the `/vN` when the derivation changes: the manifest's `graph.algorithm_version` is
+# this same constant, so `index update` rewrites a plane derived under another version.
+CO_OCCURRENCE_METHOD = "topic-cooccurrence/v1"
 
 # The index's defaults for the three `[index].graph_*` settings and the support cap: ONE
 # definition, imported by `config.py` and `index_build.IndexOptions` (rule 5). UNSWEPT starting

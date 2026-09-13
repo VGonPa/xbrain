@@ -36,6 +36,16 @@ SEALED_SIGNAL = index_build.StoreSignal(
     topics_json_size=158798,
 )
 
+# The `graph` block Plan 04 §1.4 adds, written out by hand rather than built by `graph_block`,
+# so the two sides of a comparison are not one. Values distinct from any default.
+GRAPH_BLOCK = {
+    "algorithm_version": "topic-cooccurrence/v1",
+    "min_shared_items": 3,
+    "min_weight": 0.05,
+    "max_neighbors_per_node": 5,
+    "edges": 7,
+}
+
 
 def _manifest(**overrides: object) -> index_build.Manifest:
     """A manifest every door accepts, so each test can move exactly one thing."""
@@ -53,6 +63,7 @@ def _manifest(**overrides: object) -> index_build.Manifest:
         "skipped": dict.fromkeys(index_build.SKIPPED_CAUSES, 0),
         "failed": [],
         "embeddings": None,
+        "graph": dict(GRAPH_BLOCK),
     }
     return index_build.Manifest(**{**base, **overrides})  # type: ignore[arg-type]
 
@@ -89,6 +100,7 @@ def test_the_document_declares_exactly_the_fields_the_contract_names() -> None:
         "counts",
         "skipped",
         "failed",
+        "graph",  # Plan 04 §1.4, not spec §5.6
     }
     assert index_build.MANIFEST_FIELDS == from_spec
     assert set(_manifest().to_dict()) == from_spec
@@ -526,6 +538,42 @@ def test_the_embeddings_slot_is_null_or_a_whole_vector_spec() -> None:
     ):
         with pytest.raises(index_schema.IndexIncompatibleError, match="embeddings"):
             index_build.Manifest.from_dict(_document(embeddings=broken))
+
+
+def test_the_graph_block_is_total_closed_and_typed() -> None:
+    """Plan 04 §1.4: the algorithm and thresholds `graph_edges` was derived under, or a refusal.
+
+    `update` rewrites the graph when this block disagrees with its options, so a block missing a
+    threshold compares less than it should and leaves a moved threshold's plane standing, and a
+    `null` would let a writer that forgot the graph seal a manifest anyway. Same rules as the
+    `embeddings` slot: total, closed, typed — `True` is an `int` and `"3"` is a hand edit.
+    """
+    assert index_build.GRAPH_FIELDS == set(GRAPH_BLOCK)
+    assert index_build.Manifest.from_dict(_document()).graph == GRAPH_BLOCK
+
+    for planted in (None, 3, [1]):
+        with pytest.raises(index_schema.IndexIncompatibleError, match="graph"):
+            index_build.Manifest.from_dict(_document(graph=planted))
+    for field_name in GRAPH_BLOCK:
+        with pytest.raises(index_schema.IndexIncompatibleError, match=field_name):
+            index_build.Manifest.from_dict(
+                _document(graph={k: v for k, v in GRAPH_BLOCK.items() if k != field_name})
+            )
+    with pytest.raises(index_schema.IndexIncompatibleError, match="max_supporting_item_ids"):
+        index_build.Manifest.from_dict(
+            _document(graph={**GRAPH_BLOCK, "max_supporting_item_ids": 20})
+        )
+    for broken in (
+        {**GRAPH_BLOCK, "algorithm_version": 1},
+        {**GRAPH_BLOCK, "min_shared_items": "3"},
+        {**GRAPH_BLOCK, "min_shared_items": True},
+        {**GRAPH_BLOCK, "min_weight": "0.05"},
+        {**GRAPH_BLOCK, "min_weight": False},
+        {**GRAPH_BLOCK, "max_neighbors_per_node": 5.0},
+        {**GRAPH_BLOCK, "edges": -1},
+    ):
+        with pytest.raises(index_schema.IndexIncompatibleError, match="graph"):
+            index_build.Manifest.from_dict(_document(graph=broken))
 
 
 def test_the_failed_list_is_a_list_of_text_objects_or_the_document_is_refused() -> None:

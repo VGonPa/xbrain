@@ -57,6 +57,7 @@ from xbrain.executors.api import iter_content_sources
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
 from xbrain.knowledge.graph_build import (
+    CO_OCCURRENCE_METHOD,
     DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE,
     DEFAULT_GRAPH_MIN_SHARED_ITEMS,
     DEFAULT_GRAPH_MIN_WEIGHT,
@@ -927,7 +928,15 @@ MANIFEST_FIELDS: frozenset[str] = frozenset(
         "counts",
         "skipped",
         "failed",
+        "graph",
     }
+)
+
+# Plan 04 §1.4's `graph` block: the algorithm and the three thresholds `graph_edges` was derived
+# under, and how many edges it holds. `update` compares everything but `edges` against the options
+# it runs with and rewrites the plane when they moved, so a threshold change is not left standing.
+GRAPH_FIELDS: frozenset[str] = frozenset(
+    {"algorithm_version", "min_shared_items", "min_weight", "max_neighbors_per_node", "edges"}
 )
 
 # The NESTED schemas, each read off the thing it describes wherever one exists (rule 5), so a
@@ -977,6 +986,9 @@ class Manifest:
     chunker_params: dict[str, int]
     counts: dict[str, int]
     skipped: dict[str, int]
+    # Plan 04 §1.4 — `GRAPH_FIELDS`, built by `graph_block`. REQUIRED, with no default: every
+    # build writes a graph plane, so a manifest that does not say how it was derived is refused.
+    graph: dict[str, object]
     failed: list[dict[str, str]] = field(default_factory=list)
     # The `VectorSpec` the vector plane was written under, or `None` for an index with no
     # plane — which is the normal, supported state, since embeddings are opt-in end to end.
@@ -1002,6 +1014,7 @@ class Manifest:
             "counts": dict(self.counts),
             "skipped": dict(self.skipped),
             "failed": [dict(entry) for entry in self.failed],
+            "graph": dict(self.graph),
         }
 
     @classmethod
@@ -1050,6 +1063,7 @@ class Manifest:
             counts=_counter_mapping(raw["counts"], "counts", COUNT_PLANES),
             skipped=_counter_mapping(raw["skipped"], "skipped", SKIPPED_CAUSES),
             failed=_failures(raw["failed"]),
+            graph=_graph_slot(raw["graph"]),
         )
 
 
@@ -1170,6 +1184,47 @@ def manifest_spec(manifest: Manifest) -> VectorSpec | None:
     if manifest.embeddings is None:
         return None
     return VectorSpec(**cast(dict, manifest.embeddings))
+
+
+def graph_block(options: IndexOptions, edges: int) -> dict[str, object]:
+    """Plan 04 §1.4's `graph` block: what `_write_graph` derived the plane under, and its size.
+
+    `algorithm_version` IS `CO_OCCURRENCE_METHOD`, the constant stamped on every co-occurrence
+    edge, so the manifest and the rows cannot name two versions (rule 5).
+    """
+    return {
+        "algorithm_version": CO_OCCURRENCE_METHOD,
+        "min_shared_items": options.graph_min_shared_items,
+        "min_weight": options.graph_min_weight,
+        "max_neighbors_per_node": options.graph_max_neighbors_per_node,
+        "edges": edges,
+    }
+
+
+def _graph_derivation(block: Mapping[str, object]) -> dict[str, object]:
+    """The block without `edges`: what DECIDES the plane, as opposed to what it came to hold."""
+    return {key: value for key, value in block.items() if key != "edges"}
+
+
+def _graph_slot(value: object) -> dict[str, object]:
+    """The `graph` block, TOTAL, CLOSED and TYPED — never `null`: every build writes a graph.
+
+    `bool` is refused where a number belongs for the reason `_EMBEDDINGS_TYPES` gives: `True`
+    is an `int` in Python. `min_weight` takes an `int` as well as a `float` because a
+    hand-written `0` and the writer's `0.0` compare equal.
+    """
+    raw = _closed_keys(value, "graph", GRAPH_FIELDS)
+    version = raw["algorithm_version"]
+    if type(version) is not str:
+        raise _malformed("graph", f"'algorithm_version' debe ser str, es {version!r}")
+    for key in ("min_shared_items", "max_neighbors_per_node", "edges"):
+        if type(raw[key]) is not int:
+            raise _malformed("graph", f"{key!r} debe ser int, es {raw[key]!r}")
+    if type(raw["min_weight"]) not in (int, float):
+        raise _malformed("graph", f"'min_weight' debe ser un número, es {raw['min_weight']!r}")
+    if cast(int, raw["edges"]) < 0:
+        raise _malformed("graph", f"'edges' debe ser no negativo, es {raw['edges']!r}")
+    return raw
 
 
 def _failures(value: object) -> list[dict[str, str]]:
@@ -1918,6 +1973,7 @@ class ManifestTallies:
 
     counts: dict[str, int]
     skipped: dict[str, int]
+    graph_edges: int
 
 
 def manifest_tallies(connection: sqlite3.Connection) -> ManifestTallies:
@@ -1935,6 +1991,7 @@ def manifest_tallies(connection: sqlite3.Connection) -> ManifestTallies:
             "no_speech": int(summed[2]),
             "failed_sources": int(failed_source_rows),
         },
+        graph_edges=int(connection.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]),
     )
 
 
@@ -2189,6 +2246,7 @@ def _fresh_manifest(
         embeddings=embeddings_block(vectors.spec) if vectors else None,
         counts=dict(tallies.counts),
         skipped=dict(tallies.skipped),
+        graph=graph_block(options, tallies.graph_edges),
         failed=failed,
     )
 
@@ -2413,6 +2471,7 @@ def _apply_update(
     counters: WriteCounters,
     *,
     topics_rebuilt: bool,
+    graph_moved: bool,
     options: IndexOptions,
 ) -> tuple[int, int, int]:
     """Delete then rewrite, inside the CALLER'S transaction.
@@ -2446,8 +2505,9 @@ def _apply_update(
     for item_id in rewrite:
         write_item(index, store[item_id], inputs.vocab, counters, options=options)
     # The graph is a function of every assignment AND carries the vocabulary/page fingerprints,
-    # so any item delta or a moved vocabulary/page plane rewrites it; a no-op run writes nothing.
-    if topics_rebuilt or delta.added or delta.changed or delta.removed:
+    # so any item delta or a moved vocabulary/page plane rewrites it — and so does `graph_moved`,
+    # the manifest's `graph` block disagreeing with the options. A no-op run writes nothing.
+    if topics_rebuilt or graph_moved or delta.added or delta.changed or delta.removed:
         _write_graph(connection, store, inputs.vocab, inputs.topic_pages, options=options)
     if topics_rebuilt:
         # Counted: the report's `chunks_deleted` omitted the topic plane, so after a
@@ -2581,6 +2641,7 @@ def _next_manifest(
         embeddings=previous.embeddings,
         counts=dict(tallies.counts),
         skipped=dict(tallies.skipped),
+        graph=graph_block(options, tallies.graph_edges),
         failed=[dict(entry) for entry in previous.failed],
     )
 
@@ -2653,6 +2714,10 @@ def update(
             vocab_fingerprint(inputs.vocab) != manifest.vocab_fingerprint
             or topics_fingerprint(inputs.topic_pages) != manifest.topics_fingerprint
         )
+        # Plan 04 §1.4: the plane was derived under another threshold or algorithm version.
+        graph_moved = _graph_derivation(manifest.graph) != _graph_derivation(
+            graph_block(options, edges=0)
+        )
         try:
             with reading_base(database), connection:
                 deleted_chunks, deleted_profiles, topics_refreshed = _apply_update(
@@ -2662,6 +2727,7 @@ def update(
                     delta,
                     counters,
                     topics_rebuilt=topics_rebuilt,
+                    graph_moved=graph_moved,
                     options=options,
                 )
                 tallies = manifest_tallies(connection)

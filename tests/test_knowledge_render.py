@@ -1088,6 +1088,13 @@ def _manifest(**kwargs):
         "chunker_params": {"target": 800, "max_chars": 2000, "overlap": 0, "min_chars": 40},
         "counts": {"items": 3, "chunks": 9},
         "skipped": {"empty_text": 1},
+        "graph": {
+            "algorithm_version": "topic-cooccurrence/v1",
+            "min_shared_items": 2,
+            "min_weight": 0.0,
+            "max_neighbors_per_node": 10,
+            "edges": 0,
+        },
     }
     fields.update(kwargs)
     return Manifest(**fields)
