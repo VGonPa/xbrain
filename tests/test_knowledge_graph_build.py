@@ -95,7 +95,9 @@ def test_primary_topic_repeated_in_topics_does_not_produce_a_double_edge() -> No
     ("a", "b", "shared", "union"),
     [("a", "b", 2, 4), ("a", "c", 1, 4), ("b", "c", 2, 3)],
 )
-def test_co_occurrence_weight_is_jaccard_and_symmetric(a: str, b: str, shared: int, union: int) -> None:
+def test_co_occurrence_weight_is_jaccard_and_symmetric(
+    a: str, b: str, shared: int, union: int
+) -> None:
     co = _co_occurrence(build_graph_edges(_KNOWN))
 
     forward = co[(f"topic:{a}", f"topic:{b}")]
@@ -204,9 +206,7 @@ def test_max_neighbors_per_node_keeps_each_topics_strongest_co_occurrences() -> 
     # From `b`: c (2/3) > a (1/2). From `a`: b (1/2) > c (1/4). From `c`: b (2/3) > a (1/4).
     capped = build_graph_edges(_KNOWN, max_neighbors_per_node=1)
 
-    neighbours = {
-        (e.source, e.target) for e in capped if e.relation == "CO_OCCURS_WITH"
-    }
+    neighbours = {(e.source, e.target) for e in capped if e.relation == "CO_OCCURS_WITH"}
     assert neighbours == {
         ("topic:a", "topic:b"),
         ("topic:b", "topic:c"),
@@ -303,9 +303,7 @@ def test_update_recomputes_the_graph_when_topics_or_vocabulary_change(tmp_path: 
     assert _a_b_edge(data) == built
 
     # The vocabulary moves (a description edit): the edge's input fingerprints must move.
-    save_vocab(
-        [Topic(slug="a", description="a rewritten"), *_VOCAB[1:]], data / "vocab.yaml"
-    )
+    save_vocab([Topic(slug="a", description="a rewritten"), *_VOCAB[1:]], data / "vocab.yaml")
     _update(data)
     after_vocab = _a_b_edge(data)
     assert after_vocab[1] != built[1]

@@ -16,13 +16,18 @@ Two edge families:
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Mapping
+from typing import Literal
 
 from xbrain.knowledge.contracts import GraphEdge
 from xbrain.knowledge.ids import topic_id
+
+# `hashlib` is confined to the modules `tests/test_knowledge_seams.py` declares
+# (`HASHLIB_MODULES`), so the support fingerprint borrows the one public `sha256(text)` those
+# modules already expose instead of importing a hasher of its own.
+from xbrain.knowledge.vector_index import text_fingerprint
 from xbrain.models import Enrichment, Item
 
 ASSIGNMENT_METHOD = "enrichment_assignment"
@@ -67,7 +72,7 @@ def _support_fingerprint(store: Mapping[str, Item], item_ids: tuple[str, ...]) -
         assert enriched is not None  # only enriched items can support an edge
         atoms.append([item_id, enriched.primary_topic, list(enriched.topics)])
     blob = json.dumps(atoms, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return text_fingerprint(blob)
 
 
 def build_graph_edges(
@@ -106,7 +111,9 @@ def build_graph_edges(
         source = f"item:{item_id}"
         for slug in _assigned_topics(enriched):
             members[slug].add(item_id)
-            relation = "HAS_PRIMARY_TOPIC" if slug == enriched.primary_topic else "HAS_TOPIC"
+            relation: Literal["HAS_PRIMARY_TOPIC", "HAS_TOPIC"] = (
+                "HAS_PRIMARY_TOPIC" if slug == enriched.primary_topic else "HAS_TOPIC"
+            )
             edges.append(
                 GraphEdge(
                     source=source,
