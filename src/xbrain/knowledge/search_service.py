@@ -400,7 +400,11 @@ def search(
 def _graph_order(
     ordered: list[tuple[str, list[LexicalHit]]], context: QueryContext
 ) -> list[tuple[str, list[LexicalHit]]]:
-    """The lexical ranking re-ordered by `rank_with_graph`: the graph lifts, it never admits."""
+    """The lexical ranking re-ordered by `rank_with_graph`.
+
+    The graph ADMITS into the page a lexical candidate from past it — that is what
+    `GRAPH_CANDIDATE_HORIZON` exists for — and never admits one that no channel scored.
+    """
     from xbrain.knowledge import graph_strategy
 
     hits = dict(ordered)
