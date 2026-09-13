@@ -162,10 +162,19 @@ METRIC_UNITS: dict[str, str] = {
 # 0.0 — so `filtros` stays a lexical measurement and says so, instead of the bake-off quoting a
 # number for filtering that no vector channel performed. Measured on the golden set: F1 and F2
 # are the two cases this removes from the vector reports, and the only two.
+#
+# `hybrid_graph` runs the SAME channels as `hybrid` in `search` (Plan 04 §3.1,
+# `search_service._VECTOR_STRATEGIES`) and the vector plane has no filter columns, so it pushes
+# none either: declaring anything else would SCORE a filtered case instead of reporting it
+# unmeasured. The `.get(strategy, frozenset())` fallback already gave that answer — the entry
+# makes the declaration honest, not accidental. It is declared for what `search` runs: the
+# HARNESS scores `hybrid_graph` under no model (`EMBEDDING_MODEL_STRATEGIES`), so a run asking
+# for it executes `lexical`, and this entry is not consulted until the harness runs the graph.
 SUPPORTED_FILTERS: dict[str, frozenset[str]] = {
     "lexical": frozenset(SearchFilters.model_fields),
     "vector": frozenset(),
     "hybrid": frozenset(),
+    "hybrid_graph": frozenset(),
 }
 
 
@@ -1486,22 +1495,39 @@ class EmbeddingModelMismatch(ValueError):
     """
 
 
+# WHICH STRATEGIES THE HARNESS SCORES WITH AN EMBEDDINGS MODEL — the only ones `--embeddings-model`
+# pairs with (`require_vector_arguments`). Deliberately NOT `search_service._VECTOR_STRATEGIES`:
+# that set answers «does `search` open the vector channel for this strategy?», this one «is a
+# report headed by a model a measurement of THIS strategy?». The two agreed by accident, and one
+# constant answering both flipped both pairings the moment Plan 04.4 put `hybrid_graph` in the
+# first (rule 5): `evaluate(strategy="hybrid_graph", vectors=…)` published a report named
+# `hybrid_graph` whose ranking was `vector`'s, chunk for chunk — `_fused_hits` fuses the lexical
+# channel only for `hybrid` — and in which no graph ran, because the harness has no graph channel.
+# `hybrid_graph` joins this set when the harness executes the graph over `hybrid`'s fusion, not
+# before; until then, without a model it degrades to `lexical` and says so (`_resolve_strategy`).
+EMBEDDING_MODEL_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid"})
+
+
 def require_vector_arguments(strategy: str, model: str | None) -> None:
     """The ONE place `--strategy` and `--embeddings-model` are paired (Plan 03 §3.2).
 
-    A vector strategy with no model has nothing to measure, and a model beside `lexical` would
-    head a report none of whose numbers it produced. Read by the CLI before anything is loaded
-    — the embedder probe loads a model — and by `evaluate` for the half an API caller can reach.
+    A vector strategy with no model has nothing to measure, and a model beside a strategy the
+    harness does not score with one would head a report that is not that strategy's measurement:
+    `lexical`, none of whose numbers the model produced, or `hybrid_graph`, whose graph the
+    harness does not run. Paired against `EMBEDDING_MODEL_STRATEGIES`, never against the search
+    service's vector set (see the constant), and the suggestion is built from that constant so it
+    cannot enumerate anything else. Read by the CLI before anything is loaded — the embedder
+    probe loads a model — and by `evaluate` for the half an API caller can reach.
     """
-    from xbrain.knowledge.search_service import _VECTOR_STRATEGIES
-
-    if model is not None and strategy not in _VECTOR_STRATEGIES:
+    if model is not None and strategy not in EMBEDDING_MODEL_STRATEGIES:
+        usable = " o ".join(f"`--strategy {name}`" for name in sorted(EMBEDDING_MODEL_STRATEGIES))
         raise ValueError(
-            f"`--embeddings-model {model}` no mide nada con la estrategia `{strategy}`: ninguna "
-            "cifra de ese informe la produciría ese modelo. Úsalo con `--strategy vector` o "
-            "`--strategy hybrid`."
+            f"`--embeddings-model {model}` no se puede medir con `--strategy {strategy}`: el "
+            f"arnés de evaluación solo puntúa un modelo de embeddings con {usable}. Con otra "
+            "estrategia el informe llevaría el nombre de ese modelo sobre un ranking que ese "
+            "modelo no produjo, o que no es el de la estrategia pedida."
         )
-    if model is None and strategy in _VECTOR_STRATEGIES:
+    if model is None and strategy in EMBEDDING_MODEL_STRATEGIES:
         raise ValueError(
             f"`--strategy {strategy}` mide un modelo de embeddings y no se nombró ninguno: pasa "
             "`--embeddings-model <modelo>` (Plan 03 §3.2)."

@@ -51,7 +51,7 @@ froze on purpose.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from xbrain import embeddings
@@ -66,7 +66,7 @@ from xbrain.knowledge.contracts import (
     Strategy,
     resolve_strategy,
 )
-from xbrain.knowledge.fusion import FusedChunk, fuse
+from xbrain.knowledge.fusion import _CHANNEL_ORDER, FusedChunk, fuse
 from xbrain.knowledge.index_build import load_manifest, manifest_spec, stored_chunk_texts
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.index_store import (
@@ -97,8 +97,13 @@ from xbrain.knowledge.vector_index import (
 )
 from xbrain.models import Item, Topic, TopicPage
 
-# The strategies that need the vector channel. `hybrid_graph` is Plan 04's and keeps degrading.
-_VECTOR_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid"})
+# The strategies for which `search` opens the vector channel — that question and no other.
+# `hybrid_graph` is in it because Plan 04 §3.1 says «se ejecuta `hybrid`»: left out, its channel
+# was never opened, the graph re-ranked a purely lexical ranking, and a response named
+# `hybrid_graph` with no vector and `degraded` empty. It does NOT decide what `--embeddings-model`
+# pairs with: the harness answers that with its own set (`evaluation.EMBEDDING_MODEL_STRATEGIES`),
+# because it runs no graph, and sharing this constant flipped both of its pairings silently.
+_VECTOR_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid", "hybrid_graph"})
 
 # Declared when a vector strategy is asked for WITH filters. The plane has no filter columns,
 # and a filter applied after scoring is not a filter (`VectorPlane.search`), so the vector
@@ -118,6 +123,19 @@ VECTOR_PLANE_BEHIND = "vector_plane_behind"
 # BOUND, declared like `MAX_CHUNK_DEPTH`: a channel that fills it makes the response
 # `truncated`, never complete. Not a tuned value.
 FUSED_CHUNK_WINDOW = 1_000
+
+# THE GRAPH NEEDS CANDIDATES THE PAGE DOES NOT (Plan 04.4, gate 11.13). `hybrid_graph` re-ranks
+# what `_materialise` hands it, so a window of `offset + limit + 1` owners left every neighbour
+# past the page outside it, and the graph's delta was 0 by construction. No finite horizon is
+# EXACT: under RRF a neighbour at ANY lexical depth `r` scores `1/(k+r) + w/(k+g)` and, at graph
+# rank 1, overtakes the lexical head's `1/(k+1)`. So this is a BOUND, not a tuned value — and it
+# is `hybrid`'s own per-channel bound, so the graph looks at least as deep as the fused strategy
+# it is measured against (owners here, chunks there: never shallower), and a delta between the
+# two is not an artefact of depth. Fixed per query, not sized by the page, for #184's reason: the
+# graph re-orders EXACTLY the first `GRAPH_CANDIDATE_HORIZON` owners and the rest keep their
+# lexical order (`_graph_order`), so a page past the horizon slices the same ranking as page one.
+# Its cost on the live corpus is not measured yet.
+GRAPH_CANDIDATE_HORIZON = FUSED_CHUNK_WINDOW
 
 # A search bucket: an item id, its chunk hits in rank order, and — on a fused strategy — the
 # explanation of each hit keyed by `chunk_id` (empty on `lexical`, where the channel is implied).
@@ -284,6 +302,7 @@ def search(
     limit: int = 10,
     strategy: Strategy = "lexical",
     cursor: str | None = None,
+    graph_enabled: bool | None = None,
 ) -> SearchResponse:
     """Run one query end to end and return the frozen envelope (spec §7.2).
 
@@ -327,19 +346,32 @@ def search(
     channel: _VectorChannel | None = None
     try:
         executed, strategy_degradation, channel = _resolve_channel(
-            query, strategy, filters, index, context, (executed, strategy_degradation)
+            query,
+            strategy,
+            filters,
+            index,
+            context,
+            (executed, strategy_degradation),
+            graph_enabled=graph_enabled,
         )
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
+        graph_runs = executed == "hybrid_graph"
+        needed = max(beyond, GRAPH_CANDIDATE_HORIZON) if graph_runs else beyond
         fused_window: _FusedWindow | None = None
+        graph_channels: Mapping[str, tuple[Channel, ...]] = {}
         if channel is None:
             ordered, excluded, exhausted = _materialise(
-                index, query, filters, context, needed=beyond
+                index, query, filters, context, needed=needed
             )
         else:
             ordered, excluded, exhausted, fused_window = _materialise_fused(
-                index, channel, query, context, needed=beyond
+                index, channel, query, context, needed=needed
             )
+        # The graph re-ranks WHICHEVER ranking ran — `hybrid`'s fused one when the vector channel
+        # opened, `lexical`'s when it could not (and `_resolve_channel` declared why).
+        if graph_runs:
+            ordered, graph_channels = _graph_order(ordered, context)
         _refuse_cursor_past_the_ranking(cursor, offset, len(ordered))
         window = ordered[offset : offset + limit]
         page: list[_Settled]
@@ -348,9 +380,19 @@ def search(
             lexical_page, evidence_excluded = _settle_evidence(
                 index, query, filters, context, window
             )
-            page = [(item_id, hits, {}) for item_id, hits in lexical_page]
+            page = [
+                (item_id, hits, _graph_explanations(hits, graph_channels.get(item_id, ())))
+                for item_id, hits in lexical_page
+            ]
         else:
-            page = _settle_fused(context, window, fused_window)
+            page = [
+                (
+                    item_id,
+                    hits,
+                    _graph_fused_explanations(explained, graph_channels.get(item_id, ())),
+                )
+                for item_id, hits, explained in _settle_fused(context, window, fused_window)
+            ]
         excluded |= evidence_excluded
         corrupt_chunks_excluded = len(excluded)
         results = tuple(
@@ -376,6 +418,94 @@ def search(
         index.close()
 
 
+def _graph_order(
+    ordered: list[tuple[str, list[LexicalHit]]], context: QueryContext
+) -> tuple[list[tuple[str, list[LexicalHit]]], dict[str, tuple[Channel, ...]]]:
+    """The strategy's owner ranking re-ordered by `rank_with_graph`, and each item's `matched_by`.
+
+    THE BASE RANKING ENTERS AS ONE RANKING — the owner order of what ran, `hybrid`'s fused order or
+    `lexical`'s — so the graph's RRF term is added over the rank that strategy already served, and
+    with no neighbour the page IS that strategy's page (Plan 04 §3 measures the delta against
+    `hybrid`; a re-fusion at item level would change the base too, and measure two changes as one).
+    Its `lexical` key only selects the base term's weight: on the fused path the channels a match
+    NAMES come from the window it was scored in (`_graph_fused_explanations`), never from that key.
+
+    DECISION LEFT EXPLICIT — THE RANKING IS NOT WIDENED. The graph re-orders candidates a channel
+    already scored inside its window (`FUSED_CHUNK_WINDOW` per channel, `GRAPH_CANDIDATE_HORIZON`
+    owners). Plan 04 §3.3 also describes re-running both scorers restricted to `item_id IN
+    (candidatos ∪ expandidos)` with no `LIMIT`, which would reach a neighbour past that window; that
+    is NOT done here, so such a neighbour is not rescored and does not enter. Whether to widen is a
+    decision for 04.5 with the cost measured, not a side effect of this fix.
+
+    The graph ADMITS into the page a lexical candidate from past it — that is what
+    `GRAPH_CANDIDATE_HORIZON` exists for — and never admits one that no channel scored.
+
+    The channels are RETURNED, not dropped: `rank_with_graph` is where `graph` is added in the
+    contract's order, and a page that re-derived `("lexical",)` served every lifted item as if
+    the graph had never touched it (Plan 04 §3.5).
+
+    THE GRAPH SEES EXACTLY THE FIRST `GRAPH_CANDIDATE_HORIZON` OWNERS, whatever the page
+    materialised. It used to re-rank ALL of `ordered`, whose length is sized by the page, so a
+    page past the horizon handed the graph a deeper set and got a different ranking: walking a
+    cursor served one id twice and never served another (u28 twice and u40 never, on the fixture
+    of the pagination test). The owners past the horizon follow in lexical order — `ordered` is
+    a prefix of one ranking at every depth, so the head the graph re-orders is the same set for
+    every page, and every page is a slice of ONE ranking.
+    """
+    from xbrain.knowledge import graph_strategy
+
+    horizon = GRAPH_CANDIDATE_HORIZON
+    hits = dict(ordered[:horizon])
+    ranked = graph_strategy.rank_with_graph(
+        {"lexical": list(hits)}, context, seeds=graph_strategy.GRAPH_SEEDS, limit=len(hits)
+    )
+    ranking = [(item.item_id, hits[item.item_id]) for item in ranked] + ordered[horizon:]
+    return ranking, {item.item_id: item.matched_by for item in ranked}
+
+
+def _graph_explanations(
+    hits: Sequence[LexicalHit], matched_by: tuple[Channel, ...]
+) -> dict[str, FusedChunk]:
+    """What `_match` serves for an item the graph reached: the lexical match, plus `graph`.
+
+    Empty unless `graph` is among the channels, so an item the graph did not reach is served
+    exactly as `lexical` serves it. The rank and the score stay the lexical channel's — the
+    graph acts on ITEMS, and has no rank or score of its own for a chunk.
+    """
+    if "graph" not in matched_by:
+        return {}
+    return {
+        hit.chunk_id: FusedChunk(
+            chunk_id=hit.chunk_id,
+            matched_by=matched_by,
+            lexical_rank=position,
+            vector_rank=None,
+            score=hit.score,
+        )
+        for position, hit in enumerate(hits, start=1)
+    }
+
+
+def _graph_fused_explanations(
+    explanations: Mapping[str, FusedChunk], matched_by: tuple[Channel, ...]
+) -> Mapping[str, FusedChunk]:
+    """Each fused match's explanation, with `graph` ADDED when the graph reached its item.
+
+    Each chunk keeps the channels that found it in the window — `lexical`, `vector` or both — with
+    their ranks and RRF score, and `graph` joins in the contract's order. The item's channels are
+    never copied onto every chunk: a chunk only the vector channel found must not say `lexical`.
+    """
+    if "graph" not in matched_by:
+        return explanations
+    return {
+        chunk_id: replace(
+            fused,
+            matched_by=tuple(ch for ch in _CHANNEL_ORDER if ch in {*fused.matched_by, "graph"}),
+        )
+        for chunk_id, fused in explanations.items()
+    }
+
+
 def _resolve_channel(
     query: str,
     requested: Strategy,
@@ -383,8 +513,22 @@ def _resolve_channel(
     index: OpenIndex,
     context: QueryContext,
     lexical_resolution: tuple[Strategy, tuple[str, ...]],
+    *,
+    graph_enabled: bool | None = None,
 ) -> tuple[Strategy, tuple[str, ...], _VectorChannel | None]:
     """The strategy that RUNS, its degradation, and the vector channel when it can run.
+
+    `hybrid_graph` RUNS only when `graph_channel_runs` says so — asked for by name AND switched
+    on, the switch defaulting to `GRAPH_ENABLED_BY_DEFAULT` (off). Switched off it keeps
+    `resolve_strategy`'s `hybrid_graph_not_implemented`: one door decides, not two. Switched on it
+    opens the vector channel through THIS door exactly as `hybrid` does (Plan 04 §3.1). When that
+    channel cannot run, the graph still runs over the lexical ranking, so the response keeps the
+    name `hybrid_graph` and DECLARES the same cause `hybrid` would (`embeddings_not_configured`,
+    `embedder_unavailable`, `vector_filters_unsupported`, the manifest's `no_embeddings`) —
+    answering `lexical` would hide a graph that re-ordered the page, and answering in silence is
+    the defect this closes. With the index behind the store the graph cannot run at all, and the
+    door resolves `hybrid` — what the strategy is without its graph (Plan 04 §3.1, §8) — so one
+    cause degrades `hybrid` and `hybrid_graph` to the same answer.
 
     THE LINE THAT IS NOT CROSSED (Plan 03 §5, spec §9.3): the response names `vector` or
     `hybrid` only when this returns a channel — a plane the manifest declares, loaded under the
@@ -401,18 +545,37 @@ def _resolve_channel(
     backend, and answering it lexically would hide it (Plan 03 §5, «no se consulta a medias»).
     So is a missing `numpy` (criterion §13.12): its error names the install command.
     """
-    if requested not in _VECTOR_STRATEGIES:
+    # Imported here: `graph_strategy` imports `QueryContext` from this module.
+    from xbrain.knowledge import graph_strategy
+
+    enabled = graph_strategy.GRAPH_ENABLED_BY_DEFAULT if graph_enabled is None else graph_enabled
+    graph_runs = graph_strategy.graph_channel_runs(requested, enabled=enabled)
+    if graph_runs and "index_behind_store" in index.degraded:
+        # The graph does not run over a graph that may not be the corpus's (Plan 04,
+        # «Degradaciones»), and `graph_expand` would refuse it anyway — deciding HERE, at the
+        # one door, is what keeps `search` from raising where every other strategy declares.
+        # What `hybrid_graph` has left without its graph IS `hybrid` (§3.1), and §8 names that
+        # fallback: «degrada a `hybrid` declarándolo». So the door goes on as `hybrid` — the
+        # vector channel still opens, or names why it cannot — instead of dropping to `lexical`
+        # over a cause `hybrid` does not degrade for. `index_behind_store` is the index's own.
+        requested, graph_runs = "hybrid", False
+    if requested not in _VECTOR_STRATEGIES or (
+        requested == graph_strategy.GRAPH_STRATEGY and not graph_runs
+    ):
         return (*lexical_resolution, None)
+    # What answers when the vector channel cannot run: `hybrid` has only `lexical` left, while
+    # `hybrid_graph` still runs its graph over the lexical ranking and names the cause.
+    fallback: Strategy = requested if graph_runs else FALLBACK_STRATEGY
     spec = manifest_spec(index.manifest)
     if requested == "vector" and (spec is None or context.embed_query is None):
         raise VectorStrategyUnavailable(_vector_unavailable_message(no_plane=spec is None))
     if context.embed_query is None:
-        return FALLBACK_STRATEGY, (EMBEDDINGS_NOT_CONFIGURED,), None
+        return fallback, (EMBEDDINGS_NOT_CONFIGURED,), None
     if spec is None:
         # The manifest's own `no_embeddings` already names the cause; saying it twice adds noise.
-        return FALLBACK_STRATEGY, (), None
+        return fallback, (), None
     if filters != SearchFilters():
-        return FALLBACK_STRATEGY, (VECTOR_FILTERS_UNSUPPORTED,), None
+        return fallback, (VECTOR_FILTERS_UNSUPPORTED,), None
     plane = load_vector_plane(context.index_dir, expected=spec)
     try:
         behind = _plane_behind(index, plane)
@@ -421,12 +584,12 @@ def _resolve_channel(
         plane.close()
         if requested == "vector":
             raise
-        return FALLBACK_STRATEGY, (EMBEDDER_UNAVAILABLE,), None
+        return fallback, (EMBEDDER_UNAVAILABLE,), None
     except BaseException:
         plane.close()
         raise
     degradation = (VECTOR_PLANE_BEHIND,) if behind else ()
-    channel = _VectorChannel(plane=plane, vector=vector, lexical=requested == "hybrid")
+    channel = _VectorChannel(plane=plane, vector=vector, lexical=requested != "vector")
     return requested, degradation, channel
 
 
