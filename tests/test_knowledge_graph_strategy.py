@@ -2,17 +2,23 @@
 
 Paso 20: existe, es desactivable, y el default NO cambia.
 Paso 18: la vecindad del grafo sola no admite a un candidato.
+Conexión: `search(strategy="hybrid_graph")` sirve el orden de `rank_with_graph`.
 """
 
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import cast, get_args
 
+from tests.test_knowledge_search_service import FIXTURES, _build, _context, _persist
 from xbrain.knowledge import fusion, graph_strategy, search_service
 from xbrain.knowledge.contracts import GraphExpansionResponse, GraphNode, Strategy
+from xbrain.knowledge.graph_service import graph_expand
 from xbrain.knowledge.search_service import QueryContext
+from xbrain.models import Item, Topic, TopicPage
 
 
 def test_hybrid_graph_existe_es_desactivable_y_el_default_no_cambia() -> None:
@@ -125,3 +131,35 @@ def test_un_item_en_el_puesto_40_del_lexico_que_llega_por_vecindad_entra_en_el_t
     lifted = {r.item_id: r for r in ranked}
     assert "i40" in lifted
     assert lifted["i40"].matched_by == ("lexical", "graph")
+
+
+def test_search_hybrid_graph_sirve_un_item_traido_por_vecindad_fuera_del_top_k_lexico(
+    tmp_path: Path,
+) -> None:
+    # Conexión. Un índice REAL (plano del grafo incluido) y `graph_expand` REAL, sin dobles
+    # (regla 3): `search` con el grafo encendido sirve lo que `rank_with_graph` ordena.
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    store = {k: Item.model_validate(v) for k, v in raw["items"].items()}
+    vocab = [Topic.model_validate(v) for v in raw["vocab"].values()]
+    pages = {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()}
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    # La fixture es lo que dice ser: `k07` casa en léxico, pero FUERA del top-2, y es vecino de la
+    # cabeza. Si ya estuviera en el top-2, verlo en la página no probaría nada (regla 1).
+    ranking = [r.item_id for r in search_service.search("export", context, limit=50).results]
+    top_k = [r.item_id for r in search_service.search("export", context, limit=2).results]
+    assert "k07" in ranking
+    assert "k07" not in top_k
+    reached = graph_expand([f"item:{top_k[0]}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
+    assert "item:k07" in {node.node_id for node in reached.nodes}
+
+    graph = search_service.search(
+        "export", context, limit=2, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    assert graph.strategy == "hybrid_graph"
+    assert "hybrid_graph_not_implemented" not in graph.index.degraded
+    assert "k07" in [r.item_id for r in graph.results]
