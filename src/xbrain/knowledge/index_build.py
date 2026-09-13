@@ -56,7 +56,13 @@ from pydantic import BaseModel
 from xbrain.executors.api import iter_content_sources
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, chunk_surfaces
 from xbrain.knowledge.ids import CHUNKER_VERSION, SURFACE_VERSION
-from xbrain.knowledge.graph_build import build_graph_edges
+from xbrain.knowledge.graph_build import (
+    DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE,
+    DEFAULT_GRAPH_MIN_SHARED_ITEMS,
+    DEFAULT_GRAPH_MIN_WEIGHT,
+    MAX_SUPPORTING_ITEM_IDS,
+    build_graph_edges,
+)
 from xbrain.knowledge.index_schema import (
     REBUILD_ADVICE,
     SCHEMA_VERSION,
@@ -385,6 +391,11 @@ class IndexOptions:
 
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
     vault_dir: Path | None = None
+    # Plan 04.2: the graph thresholds. Unlike the two fields above these ARE read — by
+    # `_write_graph` — and they shape `graph_edges` only: `item_fingerprint` does not hash them.
+    graph_min_shared_items: int = DEFAULT_GRAPH_MIN_SHARED_ITEMS
+    graph_min_weight: float = DEFAULT_GRAPH_MIN_WEIGHT
+    graph_max_neighbors_per_node: int = DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
 
 
 # The column order of `surfaces`, as ONE tuple type: hashed by `item_fingerprint`, and the
@@ -2101,7 +2112,7 @@ def _write_everything(
         write_topic(
             index, topic, topic_pages.get(topic.slug), primary, secondary, counters, options=options
         )
-    _write_graph(index.connection, store, vocab, topic_pages)
+    _write_graph(index.connection, store, vocab, topic_pages, options=options)
 
 
 def _write_graph(
@@ -2109,6 +2120,8 @@ def _write_graph(
     store: Mapping[str, Item],
     vocab: Sequence[Topic],
     topic_pages: Mapping[str, TopicPage],
+    *,
+    options: IndexOptions,
 ) -> None:
     """Replace the whole graph plane with the edges `graph_build` derives from `store`.
 
@@ -2135,6 +2148,10 @@ def _write_graph(
             )
             for edge in build_graph_edges(
                 store,
+                min_shared_items=options.graph_min_shared_items,
+                min_weight=options.graph_min_weight,
+                max_neighbors_per_node=options.graph_max_neighbors_per_node,
+                max_supporting_item_ids=MAX_SUPPORTING_ITEM_IDS,
                 input_fingerprints=(vocab_fingerprint(vocab), topics_fingerprint(topic_pages)),
             )
         ],
@@ -2431,7 +2448,7 @@ def _apply_update(
     # The graph is a function of every assignment AND carries the vocabulary/page fingerprints,
     # so any item delta or a moved vocabulary/page plane rewrites it; a no-op run writes nothing.
     if topics_rebuilt or delta.added or delta.changed or delta.removed:
-        _write_graph(connection, store, inputs.vocab, inputs.topic_pages)
+        _write_graph(connection, store, inputs.vocab, inputs.topic_pages, options=options)
     if topics_rebuilt:
         # Counted: the report's `chunks_deleted` omitted the topic plane, so after a
         # `topics.json`-only update it read `+22,287 / -21,583` while the base moved by one.

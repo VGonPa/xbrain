@@ -149,6 +149,18 @@ command = "parakeet-mlx"
 #   Character ceiling per `xbrain get` response. Above it the response is truncated
 #   DECLARING SO and returns a cursor to continue — never silently. ~40k is a long
 #   article with its metadata: the common case does not paginate.
+#
+# graph_min_shared_items = 2
+# graph_min_weight = 0.0
+# graph_max_neighbors_per_node = 10
+#   The co-occurrence graph `index build` writes beside the lexical planes. Two topics
+#   get a CO_OCCURS_WITH edge when at least `graph_min_shared_items` items carry both
+#   AND their Jaccard (shared items / union of their items) reaches `graph_min_weight`;
+#   each topic then keeps only its `graph_max_neighbors_per_node` strongest edges. An
+#   edge means "assigned together to these items of xbrain", never "related in the
+#   world". These defaults are NOT measured: the sweep that fixes them has not run.
+#   A change takes effect on the next `xbrain index build --force` — `index update`
+#   rewrites the graph only when items, vocabulary or topic pages move.
 
 [embeddings]
 # The EXTERNAL embedding backend the knowledge index's vector plane shells out to.

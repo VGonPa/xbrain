@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from xbrain.knowledge import index_build
+from xbrain import cli
+from xbrain.config import load_config
+from xbrain.knowledge import graph_build, index_build
 from xbrain.knowledge.contracts import GraphEdge, GraphNode
 from xbrain.knowledge.graph_build import (
     ASSIGNMENT_METHOD,
@@ -321,3 +323,31 @@ def test_update_recomputes_the_graph_when_topics_or_vocabulary_change(tmp_path: 
     save_store({**_KNOWN, "3": _item("3", primary="a", topics=["b"])}, data / "items.json")
     _update(data)
     assert _a_b_edge(data)[0] == pytest.approx(0.75)
+
+
+def test_each_graph_config_field_reaches_graph_build(tmp_path: Path, monkeypatch) -> None:
+    # Three DISTINCT values, none a default, so a field wired to another field's slot goes red.
+    data = _persisted(tmp_path)
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "vault"\noutput_subdir = "x-knowledge"\ndata_dir = "data"\n'
+        '[x]\nhandle = "u"\n'
+        "[index]\n"
+        "graph_min_shared_items = 4\n"
+        "graph_min_weight = 0.3\n"
+        "graph_max_neighbors_per_node = 7\n",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def spy(store, **kwargs):
+        seen.update(kwargs)
+        return graph_build.build_graph_edges(store, **kwargs)
+
+    monkeypatch.setattr(index_build, "build_graph_edges", spy)
+
+    options = cli._index_options(load_config(tmp_path))
+    index_build.build(data / "index", _inputs(data), options=options)
+
+    assert seen.get("min_shared_items") == 4
+    assert seen.get("min_weight") == pytest.approx(0.3)
+    assert seen.get("max_neighbors_per_node") == 7

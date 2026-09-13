@@ -28,6 +28,16 @@ from xbrain.models import Enrichment, Item
 ASSIGNMENT_METHOD = "enrichment_assignment"
 CO_OCCURRENCE_METHOD = "jaccard_topic_co_occurrence"
 
+# The index's defaults for the three `[index].graph_*` settings and the support cap: ONE
+# definition, imported by `config.py` and `index_build.IndexOptions` (rule 5). UNSWEPT starting
+# points: Plan 04 §1.3 fixes the threshold by a sweep of `min_shared_items ∈ {2, 3, 5, 8}` ×
+# `min_weight ∈ {0.0, 0.02, 0.05, 0.10}` that has not run, so these are that sweep's most
+# permissive corner, not its winner. 10 and 20 are spec §6.3's bounds.
+DEFAULT_GRAPH_MIN_SHARED_ITEMS = 2
+DEFAULT_GRAPH_MIN_WEIGHT = 0.0
+DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE = 10
+MAX_SUPPORTING_ITEM_IDS = 20
+
 # The (source node type, target node type) of every relation `GraphEdge` admits. There is NO
 # item–item relation: two items are related only THROUGH a topic both carry, so a consumer
 # always sees which assignment connects them (spec §6.2). A relation added to the contract

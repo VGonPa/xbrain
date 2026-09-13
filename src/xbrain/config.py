@@ -83,6 +83,11 @@ class Config:
     index_dir: Path
     index_max_matches_per_item: int
     index_get_char_budget: int
+    # `[index].graph_*` — the thresholds `index build` applies to the co-occurrence graph
+    # (Plan 04.2). Defaults live in `knowledge.graph_build` and are imported, never retyped.
+    index_graph_min_shared_items: int
+    index_graph_min_weight: float
+    index_graph_max_neighbors_per_node: int
     # `[embeddings]` — the EXTERNAL embedding backend the knowledge index's vector
     # plane shells out to (Plan 03 §1.4). Like `[vision].command` there is NO bundled
     # default: `embeddings_command` starts at `""` and, unset, `search` keeps serving
@@ -139,8 +144,9 @@ class Config:
         return self.repo_root / "auth" / "storage_state.json"
 
 
-def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
-    """`[index]` → `(index_dir, max_matches_per_item, get_char_budget)`, range-checked.
+def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int, int, float, int]:
+    """`[index]` → `(index_dir, max_matches_per_item, get_char_budget, graph_min_shared_items,
+    graph_min_weight, graph_max_neighbors_per_node)`, range-checked.
 
     THE DEFAULTS ARE IMPORTED, NEVER RETYPED (rule 5). `40000` written here would be a
     second definition of a budget `get_service` owns, and `"index"` a second definition of
@@ -157,6 +163,11 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
     asked of the RESOLVED path, which is what follows the link.
     """
     from xbrain.knowledge.get_service import DEFAULT_CHAR_BUDGET
+    from xbrain.knowledge.graph_build import (
+        DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE,
+        DEFAULT_GRAPH_MIN_SHARED_ITEMS,
+        DEFAULT_GRAPH_MIN_WEIGHT,
+    )
     from xbrain.knowledge.index_schema import DEFAULT_INDEX_DIR_NAME
 
     index = settings.get("index", {})
@@ -172,7 +183,19 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
     char_budget = int(index.get("get_char_budget", DEFAULT_CHAR_BUDGET))
     if char_budget < 1:
         raise ValueError("config.toml: [index].get_char_budget must be >= 1")
-    return index_dir, max_matches, char_budget
+    graph_min_shared = int(index.get("graph_min_shared_items", DEFAULT_GRAPH_MIN_SHARED_ITEMS))
+    graph_min_weight = float(index.get("graph_min_weight", DEFAULT_GRAPH_MIN_WEIGHT))
+    graph_max_neighbors = int(
+        index.get("graph_max_neighbors_per_node", DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE)
+    )
+    return (
+        index_dir,
+        max_matches,
+        char_budget,
+        graph_min_shared,
+        graph_min_weight,
+        graph_max_neighbors,
+    )
 
 
 def _embeddings_settings(settings: dict) -> tuple[str, str | None, int, int, str, str]:
@@ -264,7 +287,14 @@ def load_config(repo_root: Path) -> Config:
             "config.toml: [frames].interval_seconds must be > 0 (0 selects every frame)"
         )
     data_dir = repo_root / paths["data_dir"]
-    index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
+    (
+        index_dir,
+        index_max_matches,
+        index_char_budget,
+        index_graph_min_shared_items,
+        index_graph_min_weight,
+        index_graph_max_neighbors_per_node,
+    ) = _index_settings(settings, data_dir)
     (
         embeddings_command,
         embeddings_model,
@@ -299,6 +329,9 @@ def load_config(repo_root: Path) -> Config:
         index_dir=index_dir,
         index_max_matches_per_item=index_max_matches,
         index_get_char_budget=index_char_budget,
+        index_graph_min_shared_items=index_graph_min_shared_items,
+        index_graph_min_weight=index_graph_min_weight,
+        index_graph_max_neighbors_per_node=index_graph_max_neighbors_per_node,
         embeddings_command=embeddings_command,
         embeddings_model=embeddings_model,
         embeddings_batch_size=embeddings_batch_size,
