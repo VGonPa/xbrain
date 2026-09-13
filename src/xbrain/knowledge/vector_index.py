@@ -99,12 +99,20 @@ _META_FIELDS = frozenset(
 )
 
 # The sentence every refusal of this plane ends with. ONE string, so the loader, the writer
-# and the tests name the same command. It is NOT `index_schema.REBUILD_ADVICE`: that one says
-# `xbrain index build --force`, which rebuilds the LEXICAL plane too, and the whole point of
-# spec §5.5 is that a model change does not cost that.
+# and the tests name the same command. It is NOT `index_schema.REBUILD_ADVICE`, which omits
+# `--embeddings` and would seal an index with no plane at all.
+#
+# IT SAYS WHAT THE COMMAND DOES, NOT WHAT spec §5.5 WANTS IT TO DO. §5.5 promises that a model
+# change costs the vector plane alone; there is no vector-only rebuild, and `--embeddings` is
+# wired to the FULL build, which unlinks the lexical base first and re-derives it. An advice
+# promising «el plano léxico no se toca» sent the operator into that window blind: if the
+# embedder then fails, no index answers — not even lexically — until `xbrain index build`.
+# A vector-only rebuild that preserves the lexical plane is a declared follow-up (PR #185).
 VECTOR_REBUILD_ADVICE = (
-    "Reconstruye el plano vectorial con `xbrain index build --embeddings --force` "
-    "(el plano léxico no se toca)."
+    "Reconstruye el índice con su plano vectorial: `xbrain index build --embeddings --force`. "
+    "Reconstruye también el plano léxico desde el store (no hay reconstrucción solo "
+    "vectorial), y si el embedder falla a mitad no queda índice que responder —ni léxico— "
+    "hasta un `xbrain index build`."
 )
 
 # How far a row's L2 norm may sit from 1.0 before the writer calls it unnormalized. A unit

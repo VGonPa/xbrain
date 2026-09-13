@@ -62,6 +62,18 @@ DEGRADED_TEXT: dict[str, str] = {
         "· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases "
         "exactas, no similitud conceptual."
     ),
+    # The two causes the manifest cannot declare (Plan 03 §5): they belong to THIS machine's
+    # config and backend, so the sentence names the setting, not an index command.
+    "embeddings_not_configured": (
+        "⚠ Pediste `hybrid` y ha respondido `lexical`: `[embeddings].command` está vacío en "
+        "config.toml, así que la consulta no se puede embeber. Estos resultados NO son de "
+        "`hybrid` — configúralo con el embedder que construyó el plano vectorial."
+    ),
+    "embedder_unavailable": (
+        "⚠ Pediste `hybrid` y ha respondido `lexical`: el binario de `[embeddings].command` no "
+        "respondió (no existe, no es ejecutable, falló o agotó el timeout). Estos resultados NO "
+        "son de `hybrid` — comprueba que ese comando arranca y responde."
+    ),
 }
 
 

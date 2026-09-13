@@ -54,6 +54,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from xbrain import embeddings
 from xbrain.knowledge.chunking import DEFAULT_CHUNKER_PARAMS, ChunkerParams, fragment_locator
 from xbrain.knowledge.contracts import (
     FALLBACK_STRATEGY,
@@ -66,7 +67,7 @@ from xbrain.knowledge.contracts import (
     resolve_strategy,
 )
 from xbrain.knowledge.fusion import FusedChunk, fuse
-from xbrain.knowledge.index_build import manifest_spec, stored_chunk_texts
+from xbrain.knowledge.index_build import load_manifest, manifest_spec, stored_chunk_texts
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.index_store import (
     OpenIndex,
@@ -88,7 +89,12 @@ from xbrain.knowledge.surfaces import (
     item_topics,
     knowledge_item,
 )
-from xbrain.knowledge.vector_index import VectorPlane, load_vector_plane
+from xbrain.knowledge.vector_index import (
+    VECTOR_REBUILD_ADVICE,
+    VectorPlane,
+    VectorPlaneIncompatible,
+    load_vector_plane,
+)
 from xbrain.models import Item, Topic, TopicPage
 
 # The strategies that need the vector channel. `hybrid_graph` is Plan 04's and keeps degrading.
@@ -185,10 +191,76 @@ class QueryContext:
     language: str = "English"
     max_matches_per_item: int = 3
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS
-    # How a query becomes a vector (Plan 03 §4). The adapter binds `embeddings.embed_query` with
-    # the configured command and the MANIFEST's prefix; `None` means no embedder is configured,
-    # and a vector strategy then degrades to `lexical` instead of pretending (spec §9.3).
+    # How a query becomes a vector (Plan 03 §4). `bind_query_embedder` is the production value;
+    # `None` means no embedder is configured, and then `hybrid` degrades to `lexical` declaring
+    # `embeddings_not_configured` while `vector` is an error (Plan 03 §5, spec §9.3).
     embed_query: Callable[[str], Sequence[float]] | None = None
+
+
+# Plan 03 §5: why a requested vector channel did not run, in the two cases the INDEX cannot
+# declare. The manifest knows whether a plane exists (`no_embeddings`); it cannot know whether
+# THIS machine is configured to embed a query, or whether the backend answered.
+EMBEDDINGS_NOT_CONFIGURED = "embeddings_not_configured"
+EMBEDDER_UNAVAILABLE = "embedder_unavailable"
+
+
+class VectorStrategyUnavailable(ValueError):
+    """`vector` was asked for and its channel cannot run (Plan 03 §5, row 6 · criterion §13.3).
+
+    NOT a degradation: the caller named the retriever explicitly, and a lexical answer under
+    that request is the pretence spec §9.3 forbids. A `ValueError`, so the CLI turns it into a
+    clean exit 1 whose message says how to get vectors.
+    """
+
+
+def bind_query_embedder(
+    command: str,
+    *,
+    index_dir: Path,
+    timeout_seconds: int,
+    runner: embeddings.Runner | None = None,
+) -> Callable[[str], Sequence[float]] | None:
+    """`[embeddings].command` bound as `QueryContext.embed_query` — `None` when it is empty.
+
+    Empty (or blank) is the supported, unconfigured state, so it becomes `None` and the service
+    declares `embeddings_not_configured`, instead of an `EmbedderNotFound` that would read as a
+    backend that is DOWN.
+
+    MODEL AND QUERY PREFIX ARE READ FROM THE MANIFEST, never from `config.toml`: the query has to
+    land in the geometry the plane was written in, and the manifest is what says which one that
+    is. The dimension is deliberately NOT passed as `expected_dimension` — a mismatch raised
+    there is an `EmbedderFailed`, the same class as a timeout, and `hybrid` would degrade over
+    it. A backend serving ANOTHER model is not a backend that is down: the plane refuses the
+    query vector instead (`VectorPlaneIncompatible`, row 4), so two models are never mixed.
+
+    A MATCHING DIMENSION DOES NOT PROVE THE SAME MODEL (Plan 03 §13.4). The backend declares its
+    model on every batch, and a declaration other than the manifest's is refused HERE, as the
+    same `VectorPlaneIncompatible` — not an `EmbeddingError`, so `hybrid` cannot degrade over it:
+    two models of one width produce cosines that look exactly as healthy as real ones.
+    """
+    if not command.strip():
+        return None
+
+    def embed(query: str) -> Sequence[float]:
+        spec = manifest_spec(load_manifest(index_dir))
+        batch = embeddings.embed_query(
+            query,
+            command=command,
+            model=spec.model if spec else None,
+            prefix=spec.query_prefix if spec else "",
+            timeout_seconds=timeout_seconds,
+            runner=runner,
+        )
+        if spec is not None and batch.model != spec.model:
+            raise VectorPlaneIncompatible(
+                f"el embedder de `[embeddings].command` sirve el modelo {batch.model!r} y este "
+                f"plano vectorial se escribió con {spec.model!r}: jamás se comparan vectores de "
+                "dos modelos, aunque tengan la misma dimensión. Configura el embedder con ese "
+                f"modelo o, si el que vale es el nuevo: {VECTOR_REBUILD_ADVICE}"
+            )
+        return batch.vectors[0]
+
+    return embed
 
 
 @dataclass(frozen=True)
@@ -316,8 +388,10 @@ def _resolve_channel(
 
     THE LINE THAT IS NOT CROSSED (Plan 03 §5, spec §9.3): the response names `vector` or
     `hybrid` only when this returns a channel — a plane the manifest declares, loaded under the
-    manifest's own spec, and a query vector already in hand. Anything short of that keeps
-    `resolve_strategy`'s answer: `lexical`, with the degradation declared.
+    manifest's own spec, and a query vector already in hand. Short of that, `hybrid` answers
+    `lexical` naming the CAUSE (`embeddings_not_configured`, `embedder_unavailable`, or the
+    manifest's own `no_embeddings`) — never `hybrid_not_implemented`, which stopped being true
+    in 03.5 — and `vector`, asked for by name, raises instead (row 6).
 
     The embedder is called LAST, after every reason not to run has been ruled out: a subprocess
     spent on a query that cannot be scored is a cost with nothing to show for it.
@@ -325,24 +399,50 @@ def _resolve_channel(
     A plane the manifest declares and the disk cannot serve is REFUSED by `load_vector_plane`
     rather than degraded: that is an index problem with an actionable rebuild, not a missing
     backend, and answering it lexically would hide it (Plan 03 §5, «no se consulta a medias»).
+    So is a missing `numpy` (criterion §13.12): its error names the install command.
     """
     if requested not in _VECTOR_STRATEGIES:
         return (*lexical_resolution, None)
     spec = manifest_spec(index.manifest)
-    if spec is None or context.embed_query is None:
-        return (*lexical_resolution, None)
+    if requested == "vector" and (spec is None or context.embed_query is None):
+        raise VectorStrategyUnavailable(_vector_unavailable_message(no_plane=spec is None))
+    if context.embed_query is None:
+        return FALLBACK_STRATEGY, (EMBEDDINGS_NOT_CONFIGURED,), None
+    if spec is None:
+        # The manifest's own `no_embeddings` already names the cause; saying it twice adds noise.
+        return FALLBACK_STRATEGY, (), None
     if filters != SearchFilters():
         return FALLBACK_STRATEGY, (VECTOR_FILTERS_UNSUPPORTED,), None
     plane = load_vector_plane(context.index_dir, expected=spec)
     try:
         behind = _plane_behind(index, plane)
         vector = tuple(float(value) for value in context.embed_query(query))
+    except embeddings.EmbeddingError:
+        plane.close()
+        if requested == "vector":
+            raise
+        return FALLBACK_STRATEGY, (EMBEDDER_UNAVAILABLE,), None
     except BaseException:
         plane.close()
         raise
     degradation = (VECTOR_PLANE_BEHIND,) if behind else ()
     channel = _VectorChannel(plane=plane, vector=vector, lexical=requested == "hybrid")
     return requested, degradation, channel
+
+
+def _vector_unavailable_message(*, no_plane: bool) -> str:
+    """What `--strategy vector` is missing, and a command that EXISTS to supply it (row 6)."""
+    if no_plane:
+        return (
+            "`--strategy vector` necesita vectores y este índice no tiene plano vectorial: "
+            "configura `[embeddings].command` en config.toml y ejecuta "
+            "`xbrain index build --embeddings --force`. `--strategy hybrid` responde léxico "
+            "declarando la degradación."
+        )
+    return (
+        "`--strategy vector` necesita embeber la consulta y `[embeddings].command` está vacío "
+        "en config.toml: configúralo con el embedder que construyó el plano vectorial."
+    )
 
 
 def _plane_behind(index: OpenIndex, plane: VectorPlane) -> bool:
