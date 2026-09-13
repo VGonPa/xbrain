@@ -53,9 +53,13 @@ def _support_fingerprint(store: Mapping[str, Item], item_ids: tuple[str, ...]) -
 def build_graph_edges(
     store: Mapping[str, Item],
     *,
+    min_shared_items: int = 1,
     max_supporting_item_ids: int | None = None,
 ) -> list[GraphEdge]:
     """Every assignment edge and every `CO_OCCURS_WITH` edge the store's enrichments imply.
+
+    `min_shared_items` prunes co-occurrence pairs that share fewer items; assignment edges are
+    never pruned. A value below 1 behaves as 1, since a pair sharing nothing is not an edge.
 
     `max_supporting_item_ids` caps the ids an edge LISTS, never what it DECLARES: `shared_items`
     stays the full `|A ∩ B|`, and the weight and the fingerprint are computed over the whole
@@ -84,7 +88,7 @@ def build_graph_edges(
     for i, a in enumerate(slugs):
         for b in slugs[i + 1 :]:
             shared = members[a] & members[b]
-            if not shared:
+            if len(shared) < max(min_shared_items, 1):
                 continue
             support = tuple(sorted(shared))
             weight = len(shared) / len(members[a] | members[b])

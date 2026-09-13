@@ -156,3 +156,27 @@ def test_truncated_supporting_item_ids_still_declare_the_total() -> None:
     ]
     assert edge_moved.supporting_item_ids == ("1", "2")
     assert edge_moved.input_fingerprints != edge.input_fingerprints
+
+
+def _unordered_pairs(edges: list[GraphEdge]) -> set[tuple[str, str]]:
+    return {tuple(sorted((e.source, e.target))) for e in edges if e.relation == "CO_OCCURS_WITH"}
+
+
+def test_min_shared_items_leaves_fewer_pairs_than_no_threshold() -> None:
+    # p–q share 5 items; r–s and p–r share 1 each.
+    store = {n: _item(n, primary="p", topics=["q"]) for n in ("1", "2", "3", "4", "5")}
+    store["6"] = _item("6", primary="r", topics=["s"])
+    store["7"] = _item("7", primary="p", topics=["r"])
+
+    unfiltered = build_graph_edges(store)
+    filtered = build_graph_edges(store, min_shared_items=5)
+
+    assert _unordered_pairs(unfiltered) == {
+        ("topic:p", "topic:q"),
+        ("topic:r", "topic:s"),
+        ("topic:p", "topic:r"),
+    }
+    assert _unordered_pairs(filtered) == {("topic:p", "topic:q")}
+    assert len(_unordered_pairs(filtered)) < len(_unordered_pairs(unfiltered))
+    # The threshold prunes co-occurrence only; every assignment survives it.
+    assert _assignments(filtered) == _assignments(unfiltered)
