@@ -3,14 +3,22 @@
 It reads `graph_edges` through the same query door `search` uses (`open_for_query`), so an
 index the code cannot answer honestly is refused here too, and it never writes the store or
 the index.
+
+EDGES ARE RETURNED AS STORED, never re-oriented. An assignment edge always reads
+`item → topic` and an expansion seeded at a topic reaches the item by walking it backwards; a
+`CO_OCCURS_WITH` edge is stored in both directions, so walking it forwards is enough. A path
+therefore names its nodes in the order they were REACHED, while each edge keeps the direction
+`graph_build` gave it — the relation is what the consumer reads, never the arrow.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Sequence
+from typing import Literal
 
-from xbrain.knowledge.contracts import GraphEdge, GraphExpansionResponse
+from xbrain.knowledge.contracts import GraphEdge, GraphExpansionResponse, GraphNode, GraphPath
 from xbrain.knowledge.index_store import open_for_query
 from xbrain.knowledge.search_service import QueryContext
 
@@ -34,13 +42,30 @@ def _edge(row: Sequence[object]) -> GraphEdge:
     )
 
 
+def _incident(connection: sqlite3.Connection, node_id: str) -> list[GraphEdge]:
+    """Every edge leaving `node_id`, plus the assignment edges arriving at it."""
+    rows = connection.execute(
+        f"SELECT {_EDGE_COLUMNS} FROM graph_edges WHERE source = ? "
+        "UNION ALL "
+        f"SELECT {_EDGE_COLUMNS} FROM graph_edges WHERE target = ? "
+        "AND relation != 'CO_OCCURS_WITH' "
+        "ORDER BY source, target, relation",
+        (node_id, node_id),
+    )
+    return [_edge(row) for row in rows]
+
+
+def _node_type(node_id: str) -> Literal["item", "topic"]:
+    return "item" if node_id.startswith("item:") else "topic"
+
+
 def graph_expand(
     seeds: Sequence[str],
     context: QueryContext,
     *,
     max_hops: int = 1,
 ) -> GraphExpansionResponse:
-    """Expand `seeds` over the persisted graph, keeping every edge's relation as stored."""
+    """Expand `seeds` over the persisted graph, one explicit path per reached node."""
     index = open_for_query(
         context.index_dir,
         context.items_path,
@@ -50,14 +75,22 @@ def graph_expand(
     )
     try:
         connection = index.lexical.connection
-        edges: list[GraphEdge] = []
+        reached: dict[str, None] = dict.fromkeys(seeds)
+        edges: dict[tuple[str, str, str], GraphEdge] = {}
+        paths: list[GraphPath] = []
         for seed in seeds:
-            rows = connection.execute(
-                f"SELECT {_EDGE_COLUMNS} FROM graph_edges WHERE source = ? "
-                "ORDER BY target, relation",
-                (seed,),
-            )
-            edges.extend(_edge(row) for row in rows)
+            for edge in _incident(connection, seed):
+                edges[(edge.source, edge.target, edge.relation)] = edge
+                other = edge.target if edge.source == seed else edge.source
+                if other in reached:
+                    continue
+                reached[other] = None
+                paths.append(GraphPath(nodes=(seed, other), edges=(edge,)))
     finally:
         index.close()
-    return GraphExpansionResponse(seeds=tuple(seeds), edges=tuple(edges))
+    return GraphExpansionResponse(
+        seeds=tuple(seeds),
+        nodes=tuple(GraphNode(node_id=n, node_type=_node_type(n)) for n in reached),
+        edges=tuple(edges.values()),
+        paths=tuple(paths),
+    )
