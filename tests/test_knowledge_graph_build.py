@@ -6,6 +6,7 @@ Never asserts corpus figures: every item, topic and count below is built here.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,9 +21,9 @@ from xbrain.knowledge.graph_build import (
     build_graph_edges,
 )
 from xbrain.knowledge.index_schema import db_path, open_index
-from xbrain.models import Author, Enrichment, Item, Topic
+from xbrain.models import Author, Enrichment, Item, Topic, TopicPage
 from xbrain.rubrics import save_vocab
-from xbrain.store import save_store
+from xbrain.store import save_store, save_topic_pages
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -248,3 +249,52 @@ def test_graph_build_does_not_mutate_items_json(tmp_path: Path) -> None:
     assert ("topic:a", "topic:b", "CO_OCCURS_WITH") in rows
     assert ("item:1", "topic:a", "HAS_PRIMARY_TOPIC") in rows
     assert hashlib.sha256((data / "items.json").read_bytes()).hexdigest() == before
+
+
+def _a_b_edge(data: Path) -> tuple[float, list[str]]:
+    """`(weight, input_fingerprints)` of the stored `topic:a → topic:b` co-occurrence edge."""
+    connection = open_index(db_path(data / "index"), read_only=True)
+    try:
+        weight, fingerprints = connection.execute(
+            "SELECT weight, input_fingerprints_json FROM graph_edges "
+            "WHERE source = 'topic:a' AND target = 'topic:b' AND relation = 'CO_OCCURS_WITH'"
+        ).fetchone()
+    finally:
+        connection.close()
+    return weight, json.loads(fingerprints)
+
+
+def _update(data: Path) -> None:
+    index_build.update(data / "index", _inputs(data))
+
+
+def test_update_recomputes_the_graph_when_topics_or_vocabulary_change(tmp_path: Path) -> None:
+    data = _persisted(tmp_path)
+    index_build.build(data / "index", _inputs(data))
+    built = _a_b_edge(data)
+
+    # Control: an update with nothing changed leaves the edge exactly as built.
+    _update(data)
+    assert _a_b_edge(data) == built
+
+    # The vocabulary moves (a description edit): the edge's input fingerprints must move.
+    save_vocab(
+        [Topic(slug="a", description="a rewritten"), *_VOCAB[1:]], data / "vocab.yaml"
+    )
+    _update(data)
+    after_vocab = _a_b_edge(data)
+    assert after_vocab[1] != built[1]
+
+    # The topic pages move (topics.json gains an overview): they must move again.
+    page = TopicPage(slug="a", overview="o", synthesized_at=_T, post_count_at_synth=3)
+    save_topic_pages({"a": page}, data / "topics.json")
+    _update(data)
+    after_topics = _a_b_edge(data)
+    assert after_topics[1] != after_vocab[1]
+
+    # And an item re-assignment is recomputed, not left stale: item 3 joins `b`, so
+    # items(a) = {1, 2, 3} and items(b) = {1, 2, 3, 4} → Jaccard 3/4 where it was 2/4.
+    assert built[0] == pytest.approx(0.5)
+    save_store({**_KNOWN, "3": _item("3", primary="a", topics=["b"])}, data / "items.json")
+    _update(data)
+    assert _a_b_edge(data)[0] == pytest.approx(0.75)

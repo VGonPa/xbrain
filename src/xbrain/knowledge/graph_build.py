@@ -65,6 +65,7 @@ def build_graph_edges(
     *,
     min_shared_items: int = 1,
     max_supporting_item_ids: int | None = None,
+    input_fingerprints: tuple[str, ...] = (),
 ) -> list[GraphEdge]:
     """Every assignment edge and every `CO_OCCURS_WITH` edge the store's enrichments imply.
 
@@ -74,6 +75,11 @@ def build_graph_edges(
     `max_supporting_item_ids` caps the ids an edge LISTS, never what it DECLARES: `shared_items`
     stays the full `|A ∩ B|`, and the weight and the fingerprint are computed over the whole
     support, so a truncated edge is still distinguishable from a thin one.
+
+    `input_fingerprints` are the caller's fingerprints of the OTHER planes the graph is read
+    beside (the index passes vocabulary and topic pages), appended after the support's own on
+    every `CO_OCCURS_WITH` edge. They are passed in rather than computed here because they are
+    `index_build`'s definitions, and `index_build` imports this module.
     """
     edges: list[GraphEdge] = []
     members: dict[str, set[str]] = defaultdict(set)
@@ -113,7 +119,7 @@ def build_graph_edges(
                         weight=weight,
                         shared_items=len(shared),
                         supporting_item_ids=support[:max_supporting_item_ids],
-                        input_fingerprints=(fingerprint,),
+                        input_fingerprints=(fingerprint, *input_fingerprints),
                     )
                 )
     return edges

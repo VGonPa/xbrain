@@ -2101,15 +2101,22 @@ def _write_everything(
         write_topic(
             index, topic, topic_pages.get(topic.slug), primary, secondary, counters, options=options
         )
-    _write_graph(index.connection, store)
+    _write_graph(index.connection, store, vocab, topic_pages)
 
 
-def _write_graph(connection: sqlite3.Connection, store: Mapping[str, Item]) -> None:
+def _write_graph(
+    connection: sqlite3.Connection,
+    store: Mapping[str, Item],
+    vocab: Sequence[Topic],
+    topic_pages: Mapping[str, TopicPage],
+) -> None:
     """Replace the whole graph plane with the edges `graph_build` derives from `store`.
 
     Rewritten WHOLE, never patched: one item's re-assignment moves the Jaccard weight of every
     pair touching its topics, so an incremental patch would have to recompute them all anyway.
-    Reads only the in-memory store — the graph never writes `items.json`.
+    Reads only the in-memory store — the graph never writes `items.json`. Each co-occurrence
+    edge carries the vocabulary and topic-page fingerprints it was derived beside (spec §6.2),
+    so an edge built under another vocabulary is distinguishable from a current one.
     """
     connection.execute("DELETE FROM graph_edges")
     connection.executemany(
@@ -2126,7 +2133,10 @@ def _write_graph(connection: sqlite3.Connection, store: Mapping[str, Item]) -> N
                 json.dumps(list(edge.supporting_item_ids)),
                 json.dumps(list(edge.input_fingerprints)),
             )
-            for edge in build_graph_edges(store)
+            for edge in build_graph_edges(
+                store,
+                input_fingerprints=(vocab_fingerprint(vocab), topics_fingerprint(topic_pages)),
+            )
         ],
     )
 
@@ -2418,6 +2428,10 @@ def _apply_update(
         deleted_profiles += delete_profile_rows(connection, [item_id])
     for item_id in rewrite:
         write_item(index, store[item_id], inputs.vocab, counters, options=options)
+    # The graph is a function of every assignment AND carries the vocabulary/page fingerprints,
+    # so any item delta or a moved vocabulary/page plane rewrites it; a no-op run writes nothing.
+    if topics_rebuilt or delta.added or delta.changed or delta.removed:
+        _write_graph(connection, store, inputs.vocab, inputs.topic_pages)
     if topics_rebuilt:
         # Counted: the report's `chunks_deleted` omitted the topic plane, so after a
         # `topics.json`-only update it read `+22,287 / -21,583` while the base moved by one.
