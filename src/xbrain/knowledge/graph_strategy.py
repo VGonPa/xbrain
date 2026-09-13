@@ -103,15 +103,16 @@ def _rescore(scored: Sequence[FusedChunk], graph_ranks: Mapping[str, int]) -> di
 def _merge(
     scored: Sequence[FusedChunk], graph_ranks: Mapping[str, int], scores: Mapping[str, float]
 ) -> tuple[GraphRankedItem, ...]:
-    """The ranked items, best first, ties broken by `item_id`."""
+    """The ranked items, best first, ties broken by `item_id`.
+
+    `graph` is ADDED to the channels that found an item, never put in their place, and named in
+    fusion's contract order — the graph explains a lift, it does not erase who found the item.
+    """
     fused_by = {chunk.chunk_id: chunk.matched_by for chunk in scored}
-    merged = [
-        GraphRankedItem(
-            item_id=item_id,
-            matched_by=("graph",) if item_id in graph_ranks else fused_by.get(item_id, ()),
-            score=score,
-        )
-        for item_id, score in scores.items()
-    ]
+    merged = []
+    for item_id, score in scores.items():
+        channels = {*fused_by.get(item_id, ()), *(("graph",) if item_id in graph_ranks else ())}
+        matched_by = tuple(ch for ch in fusion._CHANNEL_ORDER if ch in channels)
+        merged.append(GraphRankedItem(item_id, matched_by, score))  # type: ignore[arg-type]
     merged.sort(key=lambda item: (-item.score, item.item_id))
     return tuple(merged)

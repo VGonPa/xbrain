@@ -77,3 +77,24 @@ def test_un_candidato_solo_grafo_que_no_puntua_en_ningun_canal_no_entra() -> Non
     # ella — así que la ausencia de `fantasma` no es la de un canal que no se ejecutó.
     assert [r.item_id for r in ranked] == ["c", "a", "b"]
     assert "fantasma" not in {r.item_id for r in ranked}
+
+
+def test_matched_by_anade_graph_a_los_canales_que_ya_lo_encontraron() -> None:
+    # Paso 19. `b` llega por léxico y `c` por léxico y vector; los dos son además vecinos de la
+    # semilla `a`. El mapping se construye con `vector` PRIMERO, así que si el orden saliera del
+    # caller y no del contrato (`Channel`, el que fija fusion), `c` diría vector antes que léxico.
+    calls: list[tuple[str, ...]] = []
+    ranked = graph_strategy.rank_with_graph(
+        {"vector": ["a", "c"], "lexical": ["a", "b", "c"]},
+        _CONTEXT,
+        seeds=1,
+        limit=10,
+        expand=_expansion(["item:b", "item:c"], calls),
+    )
+
+    matched_by = {r.item_id: r.matched_by for r in ranked}
+    assert calls == [("item:a",)]
+    assert matched_by["b"] == ("lexical", "graph")
+    assert matched_by["c"] == ("lexical", "vector", "graph")
+    # la semilla no es vecina de sí misma: conserva sus canales, sin `graph`.
+    assert matched_by["a"] == ("lexical", "vector")
