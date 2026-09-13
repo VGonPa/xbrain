@@ -151,3 +151,24 @@ def test_every_served_path_rests_on_item_ids_that_resolve_in_the_live_store(
     with pytest.raises(ValueError, match="xbrain index update") as refused:
         graph_expand(("topic:a",), stale, max_hops=1)
     assert "'2'" in str(refused.value)
+
+
+def test_max_hops_one_returns_no_node_two_hops_away(tmp_path: Path) -> None:
+    # item:3 carries only `a`. One hop: topic:a. Two hops: items 1 and 2 (also assigned `a`)
+    # and topic:b (a→b co-occurs). Asserting only the one-hop half would pass on an expansion
+    # that cannot walk at all, so the two-hop half proves the bound is a bound.
+    context = _context(tmp_path)
+
+    two = graph_expand(("item:3",), context, max_hops=2)
+    one = graph_expand(("item:3",), context, max_hops=1)
+
+    assert {n.node_id for n in two.nodes} == {"item:3", "topic:a", "item:1", "item:2", "topic:b"}
+    assert _path_to(two, "topic:b").nodes == ("item:3", "topic:a", "topic:b")
+    assert [e.relation for e in _path_to(two, "topic:b").edges] == [
+        "HAS_PRIMARY_TOPIC",
+        "CO_OCCURS_WITH",
+    ]
+
+    assert {n.node_id for n in one.nodes} == {"item:3", "topic:a"}
+    assert all(len(p.nodes) <= 2 for p in one.paths)
+    assert all({e.source, e.target} <= {"item:3", "topic:a"} for e in one.edges)

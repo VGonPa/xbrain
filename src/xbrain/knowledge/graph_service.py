@@ -102,23 +102,32 @@ def graph_expand(
     )
     try:
         connection = index.lexical.connection
-        reached: dict[str, None] = dict.fromkeys(seeds)
+        # The path that FIRST reached each node, in reach order: a hop extends it rather than
+        # restarting from the seed, so every served path is explicit end to end (spec §6.3).
+        path_of: dict[str, GraphPath] = {seed: GraphPath(nodes=(seed,)) for seed in seeds}
         edges: dict[tuple[str, str, str], GraphEdge] = {}
         paths: list[GraphPath] = []
-        for seed in seeds:
-            for edge in _incident(connection, seed):
-                _require_resolvable(edge, context.store)
-                edges[(edge.source, edge.target, edge.relation)] = edge
-                other = edge.target if edge.source == seed else edge.source
-                if other in reached:
-                    continue
-                reached[other] = None
-                paths.append(GraphPath(nodes=(seed, other), edges=(edge,)))
+        frontier = list(path_of)
+        for _ in range(max_hops):
+            next_frontier: list[str] = []
+            for node in frontier:
+                for edge in _incident(connection, node):
+                    other = edge.target if edge.source == node else edge.source
+                    if other in path_of:
+                        continue
+                    _require_resolvable(edge, context.store)
+                    edges[(edge.source, edge.target, edge.relation)] = edge
+                    base = path_of[node]
+                    path = GraphPath(nodes=(*base.nodes, other), edges=(*base.edges, edge))
+                    path_of[other] = path
+                    paths.append(path)
+                    next_frontier.append(other)
+            frontier = next_frontier
     finally:
         index.close()
     return GraphExpansionResponse(
         seeds=tuple(seeds),
-        nodes=tuple(GraphNode(node_id=n, node_type=_node_type(n)) for n in reached),
+        nodes=tuple(GraphNode(node_id=n, node_type=_node_type(n)) for n in path_of),
         edges=tuple(edges.values()),
         paths=tuple(paths),
     )
