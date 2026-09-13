@@ -87,10 +87,18 @@ SQLITE_OPENER_FUNCTIONS = frozenset(
     }
 )
 # The modules allowed to import `sqlite3` at all. `index_build` and `lexical` take a
-# `sqlite3.Connection` and read `sqlite3.DatabaseError`; a fourth module that needs the
-# exceptions is added here on purpose, never by accident.
+# `sqlite3.Connection` and read `sqlite3.DatabaseError`. `graph_service` (Plan 04.3) is a
+# READER of the index through the query door — the same shape as `lexical`: it walks
+# `graph_edges` over the connection `open_for_query` already opened, and names
+# `sqlite3.Connection` only as a TYPE. It never opens one; `SQLITE_OPENERS` still polices
+# that. A fifth module that needs the exceptions is added here on purpose, never by accident.
 SQLITE_IMPORTERS = frozenset(
-    {"xbrain.knowledge.index_schema", "xbrain.knowledge.index_build", "xbrain.knowledge.lexical"}
+    {
+        "xbrain.knowledge.index_schema",
+        "xbrain.knowledge.index_build",
+        "xbrain.knowledge.lexical",
+        "xbrain.knowledge.graph_service",
+    }
 )
 
 DOOR_FUNCTION = "xbrain.knowledge.index_schema.open_index"

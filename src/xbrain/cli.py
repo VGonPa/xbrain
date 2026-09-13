@@ -3404,6 +3404,44 @@ def get_command(
         typer.echo(render_get(bundle, surfaces=surface, query=query))
 
 
+@app.command("graph-expand")
+@_handle_cli_errors
+@_handle_index_errors
+def graph_expand_command(
+    item_id: str = typer.Option(..., "--item", help="Id del item semilla."),
+    max_hops: int = typer.Option(1, "--max-hops", min=1, help="Saltos máximos."),
+    max_neighbors: int | None = typer.Option(
+        None, "--max-neighbors", min=1, help="Vecinos máximos por nodo (los más fuertes)."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
+) -> None:
+    """Expande un item sobre el grafo del índice: nodos, aristas y un camino explícito por nodo.
+
+    Lee por la misma puerta de consulta que `search`, así que un índice que el código no puede
+    contestar con honestidad se rechaza aquí también. Una arista es co-ocurrencia EN ESTE
+    corpus, nunca una relación del mundo: la respuesta lo lleva en `semantics`.
+    """
+    from xbrain.knowledge.graph_build import DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
+    from xbrain.knowledge.graph_service import disclaimer, graph_expand
+
+    cfg = _config()
+    inputs = _index_inputs(cfg)
+    response = graph_expand(
+        (f"item:{item_id}",),
+        _query_context(cfg, inputs),
+        max_hops=max_hops,
+        max_neighbors_per_node=(
+            DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE if max_neighbors is None else max_neighbors
+        ),
+    )
+    if json_out:
+        _echo_json(response.model_dump(mode="json"))
+    else:
+        typer.echo(disclaimer(response, cfg.output_language))
+        for path in response.paths:
+            typer.echo(" → ".join(path.nodes))
+
+
 def _run_sweep(
     cfg,
     cases,
