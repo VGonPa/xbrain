@@ -62,8 +62,12 @@ def rank_with_graph(
 
     The seeds are the `seeds` best fused items; `expand` is `graph_expand`, injectable only so a
     test can hand it a fixture envelope instead of a built index.
+
+    The channels are scored over EVERY candidate and the page is cut only after the graph has
+    acted: cutting to `limit` first would drop the 40th lexical match before its neighbourhood
+    could lift it, making the graph's contribution zero by construction.
     """
-    scored = fusion.fuse(rankings)[:limit]
+    scored = fusion.fuse(rankings)
     response = _expand_seeds(scored[:seeds], context, expand)
     graph_ranks = _collect_candidates(response)
     return _merge(scored, graph_ranks, _rescore(scored, graph_ranks))[:limit]

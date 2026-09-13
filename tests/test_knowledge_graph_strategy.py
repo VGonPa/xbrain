@@ -10,7 +10,7 @@ import inspect
 from collections.abc import Callable, Sequence
 from typing import cast, get_args
 
-from xbrain.knowledge import graph_strategy, search_service
+from xbrain.knowledge import fusion, graph_strategy, search_service
 from xbrain.knowledge.contracts import GraphExpansionResponse, GraphNode, Strategy
 from xbrain.knowledge.search_service import QueryContext
 
@@ -98,3 +98,30 @@ def test_matched_by_anade_graph_a_los_canales_que_ya_lo_encontraron() -> None:
     assert matched_by["c"] == ("lexical", "vector", "graph")
     # la semilla no es vecina de sí misma: conserva sus canales, sin `graph`.
     assert matched_by["a"] == ("lexical", "vector")
+
+
+def test_un_item_en_el_puesto_40_del_lexico_que_llega_por_vecindad_entra_en_el_top_10() -> None:
+    # Paso 18b. Los canales se puntúan sobre el conjunto COMPLETO de candidatos: puntuar sobre
+    # el top-k ya cortado deja fuera a `i40` antes de que el grafo pueda levantarlo, y el delta
+    # del grafo sale 0 POR CONSTRUCCIÓN.
+    lexical = [f"i{n:02d}" for n in range(1, 51)]
+    calls: list[tuple[str, ...]] = []
+
+    # La fixture es lo que dice ser: `i40` está REALMENTE en el puesto 40, y la fusión sin grafo
+    # lo deja fuera del top-10. Si ya estuviera dentro, entrar no probaría nada (regla 1).
+    assert lexical.index("i40") + 1 == 40
+    assert "i40" not in {chunk.chunk_id for chunk in fusion.fuse({"lexical": lexical})[:10]}
+
+    ranked = graph_strategy.rank_with_graph(
+        {"lexical": lexical},
+        _CONTEXT,
+        seeds=1,
+        limit=10,
+        expand=_expansion(["topic:t", "item:i40"], calls),
+    )
+
+    assert calls == [("item:i01",)]
+    assert len(ranked) == 10
+    lifted = {r.item_id: r for r in ranked}
+    assert "i40" in lifted
+    assert lifted["i40"].matched_by == ("lexical", "graph")
