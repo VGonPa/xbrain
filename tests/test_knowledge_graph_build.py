@@ -190,6 +190,29 @@ def test_min_shared_items_leaves_fewer_pairs_than_no_threshold() -> None:
     assert _assignments(filtered) == _assignments(unfiltered)
 
 
+def test_min_weight_drops_co_occurrence_below_the_jaccard_floor() -> None:
+    # On `_KNOWN`: J(a,b) = 0.5, J(a,c) = 0.25, J(b,c) = 2/3.
+    filtered = build_graph_edges(_KNOWN, min_weight=0.4)
+
+    assert _unordered_pairs(filtered) == {("topic:a", "topic:b"), ("topic:b", "topic:c")}
+    assert _assignments(filtered) == _assignments(build_graph_edges(_KNOWN))
+
+
+def test_max_neighbors_per_node_keeps_each_topics_strongest_co_occurrences() -> None:
+    # From `b`: c (2/3) > a (1/2). From `a`: b (1/2) > c (1/4). From `c`: b (2/3) > a (1/4).
+    capped = build_graph_edges(_KNOWN, max_neighbors_per_node=1)
+
+    neighbours = {
+        (e.source, e.target) for e in capped if e.relation == "CO_OCCURS_WITH"
+    }
+    assert neighbours == {
+        ("topic:a", "topic:b"),
+        ("topic:b", "topic:c"),
+        ("topic:c", "topic:b"),
+    }
+    assert _assignments(capped) == _assignments(build_graph_edges(_KNOWN))
+
+
 def test_no_item_to_item_edge_exists_in_the_schema() -> None:
     # Read the relations off the CONTRACT'S schema, not off a list written here: a relation
     # added to `GraphEdge` without declared endpoints must turn this red.

@@ -64,6 +64,8 @@ def build_graph_edges(
     store: Mapping[str, Item],
     *,
     min_shared_items: int = 1,
+    min_weight: float = 0.0,
+    max_neighbors_per_node: int | None = None,
     max_supporting_item_ids: int | None = None,
     input_fingerprints: tuple[str, ...] = (),
 ) -> list[GraphEdge]:
@@ -71,6 +73,10 @@ def build_graph_edges(
 
     `min_shared_items` prunes co-occurrence pairs that share fewer items; assignment edges are
     never pruned. A value below 1 behaves as 1, since a pair sharing nothing is not an edge.
+    `min_weight` prunes pairs whose Jaccard falls below it. `max_neighbors_per_node` keeps, per
+    SOURCE topic, only its strongest co-occurrence edges (weight, then shared items, then target
+    id), so a topic's outgoing list is bounded even when it overlaps everything; because it
+    ranks per source, `a → b` can survive while `b → a` is cut from a busier `b`.
 
     `max_supporting_item_ids` caps the ids an edge LISTS, never what it DECLARES: `shared_items`
     stays the full `|A ∩ B|`, and the weight and the fingerprint are computed over the whole
@@ -100,17 +106,20 @@ def build_graph_edges(
                 )
             )
 
+    outgoing: dict[str, list[GraphEdge]] = defaultdict(list)
     slugs = sorted(members)
     for i, a in enumerate(slugs):
         for b in slugs[i + 1 :]:
             shared = members[a] & members[b]
             if len(shared) < max(min_shared_items, 1):
                 continue
-            support = tuple(sorted(shared))
             weight = len(shared) / len(members[a] | members[b])
+            if weight < min_weight:
+                continue
+            support = tuple(sorted(shared))
             fingerprint = _support_fingerprint(store, support)
             for left, right in ((a, b), (b, a)):
-                edges.append(
+                outgoing[left].append(
                     GraphEdge(
                         source=topic_id(left),
                         target=topic_id(right),
@@ -122,4 +131,7 @@ def build_graph_edges(
                         input_fingerprints=(fingerprint, *input_fingerprints),
                     )
                 )
+    for slug in slugs:
+        ranked = sorted(outgoing[slug], key=lambda e: (-e.weight, -e.shared_items, e.target))
+        edges.extend(ranked[:max_neighbors_per_node])
     return edges
