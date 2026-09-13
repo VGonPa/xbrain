@@ -266,11 +266,52 @@ por separado:
 
 ## 9. Cómo re-derivarlo
 
-**1. El embedder, fuera de xbrain.** Un entorno propio con `sentence-transformers` (xbrain no lleva ninguna
-librería de modelos) y los pesos en `safetensors`, sin los duplicados `onnx/` ni `*.bin` de los repositorios
-— sin eso, e5-base ocupa tres veces lo que usa. **Presupuesto medido:** ~0,9 GB el entorno, 0,47 GB MiniLM
-o e5-small, 1,1 GB e5-base, ~0,1 GB por índice de evaluación, **más el crecimiento del swap si la máquina
-está en presión de memoria** (§6.3).
+Todo corre en una **raíz aislada**. `XBRAIN_REPO_ROOT` apunta a un directorio que NO es un checkout y que
+contiene un `config.toml` y una copia de sólo lectura de los tres ficheros de entrada; así los índices de
+evaluación nunca se escriben en el `data/` de trabajo. Dos trampas, medidas sobre la versión anterior de esta
+sección en `90dc74e` (las dos salían con exit 1):
+
+- **`--golden-set` y `--report` relativos se resuelven contra `XBRAIN_REPO_ROOT`, no contra el checkout.**
+  Sin `--golden-set` absoluto: `Error: golden set no encontrado: <raíz>/eval/golden-set.yaml`.
+- **`load_config` exige `[paths]` y un `[x].handle` no vacío**, aunque `eval` no los use. Con un
+  `config.toml` que sólo tenga `[embeddings]`: `Error: 'paths'`.
+
+### 9.1 Versión y entorno de la corrida publicada
+
+| | |
+|---|---|
+| xbrain | corridas de 11:08 a 11:22 sobre el árbol sin commitear de `VGonPa/plan03-7-bakeoff` (base `e38959f`), commiteado como **`547a860`** a las 11:42. `lexical` re-corrido en `547a860` y en `90dc74e`: mismos `retrieved` y métricas en los 23 casos. `vector`/`hybrid` no se pueden re-correr: los pesos se borraron (§8) |
+| Python y uv de xbrain | CPython 3.13.7 · uv 0.8.24 · el extra `embeddings` del `uv.lock` (`numpy` 2.5.3); los comandos corren con `uv run` desde el checkout |
+| Golden set | `eval/golden-set.yaml` sha256 `ed6dd7600f946fba0d367eaa7bd020092820dc1684da79c74b820a91fe3fa319`, idéntico en `e38959f`, `547a860` y `90dc74e` (último cambio: `427fea9`) |
+| Entrada copiada | `items.json` `4fed54a0bee5e747fffa7efcace8502733defdc445d0e9a88194a9c293312cde` · `vocab.yaml` `e73fbedecdcaf6a8cf9609fb72487481a1917b2611bf96c4529097dcf2cca595` · `topics.json` `7a40f4f12d285d44cb4205c0c85ce5c79448872c0fc3c7f92894b5d7ca28363e`. La copia de la corrida conserva esos sha256, pero hoy sus permisos no son de sólo lectura; el `chmod` de la §9.4 sí lo es |
+| Embedder | `scripts/xbrain-embed` en un entorno aparte (§9.3): sentence-transformers 6.0.1 · torch 2.14.0 · MPS · `HF_HUB_OFFLINE=1`. **No quedaron registradas ni la revisión de los pesos de Hugging Face ni la versión exacta de Python de ese entorno.** Los pesos ya no existen: re-correr descarga la revisión vigente, que puede no ser la medida |
+| Profundidad | `limit: 20` en los tres informes. La corrida publicada no pasó `--limit`: los 20 salieron de `max(--limit 10 por defecto, mayor k por defecto 20)`. Los comandos de la §9.5 los fijan con `--limit 20`, para no depender de esos defaults |
+
+### 9.2 Artefactos
+
+Fuera de Git, igual que `data/`. El original está en el scratchpad de la sesión del bake-off, bajo
+`/private/tmp`, que no sobrevive a un reinicio; hay una copia con las mismas sumas en
+`zz-support-files/docs/reports/2026-09-13-plan03-7-bakeoff/` del checkout principal (ignorado por Git).
+
+| fichero | sha256 | qué es |
+|---|---|---|
+| `eval-lexical.json` · `.md` | `6161f8eba4f28aeae2d7a8a07f9ffa766649b3d99f9b23b663b1f2e23863ff01` · `3c85462561958e3137842e5630f419e85eaa8c1531392ba95a21fa2d880ac3f6` | línea base léxica (§3) |
+| `eval-minilm-l12-vector.json` · `.md` | `53349515a3708088c2de4e6c9410c08ecc9f7e3cb5b7e2e2b8baa11829fe6d3b` · `a821528196c4416e3a02aef9cc00d8bb2c2e7a0a0fd787e666bad26f94a48796` | MiniLM `vector`, índice construido (§6.1) |
+| `eval-minilm-l12-hybrid.json` · `.md` | `e9257c4f6e3f97a26b4a3d8c971115e3b2485d78cea8e339a8ccb225c956e4af` · `276a115b7fe03c5ebccf16fc33a00ae0c5b190632f1f6bcdb8cd8f7f447300cc` | MiniLM `hybrid`, índice reutilizado |
+| `run.log` | `22114ee72698a937eb42e3c7926f48b5b6695694301c979dbf42931168cb1b5a` | swap y disco por corrida, y la parada de e5-small (§6.3) |
+| `run-bakeoff.sh` | `d0ef4a3b2ba542dcc66d8a6924903d00b419250f1617fa0947348392d4c34239` | el script de `vector`/`hybrid`; no incluye la corrida léxica, de las 11:08, anterior a él |
+
+**Una re-corrida no reproduce esos sha256, ni debe.** `corpus.source` y `embeddings.command_version` llevan
+rutas absolutas, y `latency` e `indexing.seconds` son tiempos. Lo que tiene que coincidir es
+`cases[].retrieved`, las métricas por caso, `by_stratum` y `by_provenance`. Desde `90dc74e` el informe añade
+además `mrr@k` y `metric_units`, que los artefactos de arriba no traen.
+
+### 9.3 El embedder, fuera de xbrain
+
+Un entorno propio con `sentence-transformers` (xbrain no lleva ninguna librería de modelos) y los pesos en
+`safetensors`, sin los duplicados `onnx/` ni `*.bin` de los repositorios — sin eso, e5-base ocupa tres veces
+lo que usa. **Presupuesto medido:** ~0,9 GB el entorno, 0,47 GB MiniLM o e5-small, 1,1 GB e5-base, ~0,1 GB
+por índice de evaluación, **más el crecimiento del swap si la máquina está en presión de memoria** (§6.3).
 
 ```bash
 uv venv --python 3.12 embedenv
@@ -282,42 +323,112 @@ snapshot_download('intfloat/multilingual-e5-base',
     ignore_patterns=['onnx/*', 'openvino/*'])"
 ```
 
-**2. Un `config.toml` por candidato**, porque los prefijos son del MODELO y viajan en config, no en código:
+### 9.4 La raíz aislada y un `config.toml` por candidato
 
-```toml
+Los prefijos son del MODELO y viajan en config, no en código. `[paths]` y `[x]` están porque `load_config`
+los exige: `eval` no lee ni `vault` ni `handle`, y la corrida léxica tampoco lee `[embeddings]`. El
+directorio `data/` de la raíz queda escribible, porque `vector` escribe ahí `eval-index/<modelo>/`; los
+tres ficheros, no.
+
+```bash
+XBRAIN_SRC=/ruta/xbrain      # checkout de xbrain: 547a860 para las cifras publicadas (§9.1)
+STORE=/ruta/xbrain/data      # el data/ de trabajo: sólo se lee, una vez
+BAKEOFF=/ruta/bakeoff        # la raíz aislada, fuera de cualquier checkout
+EMBEDENV=/ruta/embedenv      # §9.3
+HF=/ruta/hf                  # §9.3
+
+mkdir -p "$BAKEOFF/data" "$BAKEOFF/reports"
+cp "$STORE/items.json" "$STORE/vocab.yaml" "$STORE/topics.json" "$BAKEOFF/data/"
+chmod a-w "$BAKEOFF/data/items.json" "$BAKEOFF/data/vocab.yaml" "$BAKEOFF/data/topics.json"
+(cd "$BAKEOFF/data" && shasum -a 256 -c - <<'EOF'
+4fed54a0bee5e747fffa7efcace8502733defdc445d0e9a88194a9c293312cde  items.json
+e73fbedecdcaf6a8cf9609fb72487481a1917b2611bf96c4529097dcf2cca595  vocab.yaml
+7a40f4f12d285d44cb4205c0c85ce5c79448872c0fc3c7f92894b5d7ca28363e  topics.json
+EOF
+)
+
+candidate_config() {  # $1 = directorio · $2 = query_prefix · $3 = passage_prefix
+  mkdir -p "$1"
+  cat > "$1/config.toml" <<EOF
+[paths]
+vault = "vault"
+output_subdir = "x-knowledge"
+data_dir = "$BAKEOFF/data"
+
+[x]
+handle = "bakeoff"
+
 [embeddings]
-command = "env HF_HOME=/ruta/hf HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false /ruta/embedenv/bin/python /ruta/xbrain/scripts/xbrain-embed"
+command = "env HF_HOME=$HF HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false $EMBEDENV/bin/python $XBRAIN_SRC/scripts/xbrain-embed"
 batch_size = 1024
 timeout_seconds = 1800
-query_prefix = "query: "      # "" para MiniLM
-passage_prefix = "passage: "  # "" para MiniLM
+query_prefix = "$2"
+passage_prefix = "$3"
+EOF
+}
+candidate_config "$BAKEOFF/cfg-lexical" "" ""
+candidate_config "$BAKEOFF/cfg-minilm-l12" "" ""
+candidate_config "$BAKEOFF/cfg-e5-base" "query: " "passage: "
 ```
 
-**3. Las corridas.** `vector` construye `data/eval-index/<modelo>/` y `hybrid` lo reutiliza mientras el
-manifest declare el mismo modelo y el store no se haya movido (el informe dice `construido` o
-`reutilizado`); si el manifest declara OTRO modelo, el comando falla sin tocar nada:
+Si `shasum -c` dice `FAILED`, el corpus se ha movido: lo que se mida ya no re-deriva la §3–§7, mide otro
+corpus (CLAUDE.md, regla 2).
+
+### 9.5 Las corridas
+
+Desde el checkout, con el golden set en ruta **absoluta** y la profundidad fijada. Los tres primeros comandos
+son los de los artefactos de la §9.2. `vector` construye `$BAKEOFF/data/eval-index/<modelo>/` y `hybrid` lo
+reutiliza mientras el manifest declare el mismo modelo y el store no se haya movido (el informe dice
+`construido` o `reutilizado`); si el manifest declara OTRO modelo, el comando falla sin tocar nada. El barrido
+sin `--limit 20` corre a profundidad 10 (`max(--limit, k)`) y su MRR no se compara con el de la §5.
+
+`vector` y `hybrid` necesitan `numpy`, que viaja en el extra `embeddings` y no en el entorno que crea un
+`uv run` a secas: sin él fallan con `el plano vectorial necesita numpy`. `uv sync` es exacto y quita lo que no
+se le pide, así que en un checkout de desarrollo añade `--extra dev`, como hace CI.
 
 ```bash
-xbrain eval --strategy lexical --report data/eval-lexical.json
-xbrain eval --strategy vector --embeddings-model intfloat/multilingual-e5-base --report data/eval-e5-base-vector.json
-xbrain eval --strategy hybrid --embeddings-model intfloat/multilingual-e5-base --report data/eval-e5-base-hybrid.json
-xbrain eval --strategy hybrid --embeddings-model <modelo> --sweep-fusion "rrf_k=20,60,120 w_vector=0.5,1,2"
+cd "$XBRAIN_SRC"
+uv sync --locked --extra embeddings
+GOLDEN="$XBRAIN_SRC/eval/golden-set.yaml"
+MINILM=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+E5=intfloat/multilingual-e5-base
+
+XBRAIN_REPO_ROOT="$BAKEOFF/cfg-lexical" uv run xbrain eval --strategy lexical \
+  --golden-set "$GOLDEN" --limit 20 --report "$BAKEOFF/reports/eval-lexical.json"
+XBRAIN_REPO_ROOT="$BAKEOFF/cfg-minilm-l12" uv run xbrain eval --strategy vector --embeddings-model "$MINILM" \
+  --golden-set "$GOLDEN" --limit 20 --report "$BAKEOFF/reports/eval-minilm-l12-vector.json"
+XBRAIN_REPO_ROOT="$BAKEOFF/cfg-minilm-l12" uv run xbrain eval --strategy hybrid --embeddings-model "$MINILM" \
+  --golden-set "$GOLDEN" --limit 20 --report "$BAKEOFF/reports/eval-minilm-l12-hybrid.json"
+
+# Para completar el §13.8, lo mismo con cada candidato que falta:
+XBRAIN_REPO_ROOT="$BAKEOFF/cfg-e5-base" uv run xbrain eval --strategy vector --embeddings-model "$E5" \
+  --golden-set "$GOLDEN" --limit 20 --report "$BAKEOFF/reports/eval-e5-base-vector.json"
+XBRAIN_REPO_ROOT="$BAKEOFF/cfg-e5-base" uv run xbrain eval --strategy hybrid --embeddings-model "$E5" \
+  --golden-set "$GOLDEN" --limit 20 --report "$BAKEOFF/reports/eval-e5-base-hybrid.json"
+XBRAIN_REPO_ROOT="$BAKEOFF/cfg-e5-base" uv run xbrain eval --strategy hybrid --embeddings-model "$E5" \
+  --golden-set "$GOLDEN" --limit 20 --sweep-fusion "rrf_k=20,60,120 w_vector=0.5,1,2" \
+  --report "$BAKEOFF/reports/sweep-e5-base.json"
 ```
 
-La corrida publicada usó `XBRAIN_REPO_ROOT` con un `config.toml` por candidato y una copia de sólo lectura de
-los tres ficheros de entrada (mismos sha256 que los de la §1), para no escribir los índices de evaluación
-dentro del `data/` de trabajo.
+### 9.6 La comparación
 
-**4. La comparación**, con el instrumento que se publica y las exclusiones como argumento:
+Con el instrumento publicado y las exclusiones como argumento. **La versión de `XBRAIN_SRC` decide qué
+informes acepta:**
+
+- en **`547a860`**, `compare_reports` ordena por `recall@10` y luego por el `mrr` sin corte, y sobre los
+  artefactos de la §9.2 reproduce las tablas de la §5.2;
+- desde **`90dc74e`** (F1) ordena por `mrr@10`, que esos artefactos no traen: sobre ellos marca cada estrato
+  `sin cobertura`, con todos los casos sin parear por «mrr@10 ausente o no medido». Con esa versión se
+  comparan informes producidos por ella misma con los comandos de la §9.5.
 
 ```bash
-uv run python -c "
-import json
+cd "$XBRAIN_SRC" && uv run python - "$BAKEOFF/reports/eval-lexical.json" "$BAKEOFF/reports/eval-minilm-l12-hybrid.json" <<'EOF'
+import json, sys
 from xbrain.knowledge.evaluation import compare_reports
-lexical = json.load(open('data/eval-lexical.json'))
-candidate = json.load(open('data/eval-e5-base-hybrid.json'))
-exclude = {'U3': 'población crecida', 'S8': 'hecho fuera de la nota del topic', 'V2': 'fuga A.3'}
-print(json.dumps(compare_reports(lexical, candidate, k=10, exclude=exclude), ensure_ascii=False, indent=2))"
+lexical, candidate = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:3])
+exclude = {"U3": "población crecida", "S8": "hecho fuera de la nota del topic", "V2": "fuga A.3"}
+print(json.dumps(compare_reports(lexical, candidate, k=10, exclude=exclude), ensure_ascii=False, indent=2))
+EOF
 ```
 
 ## 10. Puertas del spec §8.6 y criterios del Plan 03 §13
