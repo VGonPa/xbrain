@@ -298,6 +298,67 @@ def test_search_hybrid_graph_pagina_por_encima_del_horizonte_sin_duplicar_ni_per
     assert walked == whole
 
 
+def test_search_hybrid_graph_export_limit_1_reproduce_donde_queda_k07_y_por_que(
+    tmp_path: Path,
+) -> None:
+    # La revisión esperaba `k07` en la página 1 de `export` con `limit=1`. Este test no lo
+    # decide por un vecino "mejor": RECALCULA la puntuación RRF de cada candidato con la fórmula
+    # de spec/Plan 03 §4 a partir de dos medidas independientes de `rank_with_graph` — el puesto
+    # léxico que sirve `search` y el orden de alcance que devuelve `graph_expand` REAL — y exige
+    # que `search`, página a página, sirva exactamente ese orden.
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    store = {k: Item.model_validate(v) for k, v in raw["items"].items()}
+    vocab = [Topic.model_validate(v) for v in raw["vocab"].values()]
+    pages = {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()}
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    # La fixture es lo que dice ser: `k07` es el 3º del léxico, FUERA de la ventana de 2 dueños
+    # que `limit=1` materializaba, y es vecino de la cabeza.
+    lexical = [r.item_id for r in search_service.search("export", context, limit=50).results]
+    assert lexical.index("k07") + 1 == 3
+    reached = graph_expand([f"item:{lexical[0]}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
+    reach = [
+        n.node_id.removeprefix("item:")
+        for n in reached.nodes
+        if n.node_type == "item" and n.node_id not in reached.seeds
+    ]
+    assert "k07" in reach
+
+    k, weight = fusion.RRF_K, graph_strategy.GRAPH_WEIGHT
+    expected_score = {
+        item: 1 / (k + lexical.index(item) + 1)
+        + (weight / (k + reach.index(item) + 1) if item in reach else 0.0)
+        for item in lexical
+    }
+    expected = sorted(lexical, key=lambda item: (-expected_score[item], item))
+
+    walked: list[str] = []
+    cursor: str | None = None
+    while True:
+        response = search_service.search(
+            "export", context, limit=1, strategy="hybrid_graph", graph_enabled=True, cursor=cursor
+        )
+        walked += [r.item_id for r in response.results]
+        cursor = response.cursor
+        if cursor is None:
+            break
+
+    # `search` sirve el orden de la fórmula, página a página.
+    assert walked == expected
+    # `k07` SÍ se eleva: del 3º léxico al puesto que la fórmula le da, delante de su puesto léxico.
+    assert walked.index("k07") < lexical.index("k07")
+    # Y NO es el 1º porque la fórmula pone a otro por encima, con la diferencia a la vista:
+    # `k07` pierde en léxico Y en orden de alcance frente a quien encabeza.
+    head = expected[0]
+    assert head != "k07"
+    assert lexical.index(head) < lexical.index("k07")
+    assert reach.index(head) < reach.index("k07")
+    assert expected_score[head] > expected_score["k07"]
+
+
 def test_search_hybrid_graph_con_indice_por_detras_del_store_degrada_por_la_puerta_unica(
     tmp_path: Path,
 ) -> None:
