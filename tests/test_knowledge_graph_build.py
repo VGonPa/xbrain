@@ -89,3 +89,21 @@ def test_co_occurrence_weight_is_jaccard_and_symmetric(a: str, b: str, shared: i
     assert forward.weight == pytest.approx(shared / union)
     assert backward.weight == forward.weight
     assert forward.shared_items == backward.shared_items == shared
+
+
+def test_a_large_topic_does_not_dominate_after_normalisation() -> None:
+    # `big` sits on 10 items and overlaps `small` on 2 of them; `x` and `y` share their only 2.
+    # Both pairs share exactly 2 items, so a raw count ties them — only normalisation separates.
+    store = {str(n): _item(str(n), primary="big", topics=[]) for n in range(1, 11)}
+    store["1"] = _item("1", primary="big", topics=["small"])
+    store["2"] = _item("2", primary="big", topics=["small"])
+    store["11"] = _item("11", primary="x", topics=["y"])
+    store["12"] = _item("12", primary="x", topics=["y"])
+
+    co = _co_occurrence(build_graph_edges(store))
+
+    big_small = co[("topic:big", "topic:small")]
+    x_y = co[("topic:x", "topic:y")]
+    assert big_small.shared_items == x_y.shared_items == 2
+    assert x_y.weight > big_small.weight
+    assert max(co.values(), key=lambda e: e.weight).source in {"topic:x", "topic:y"}
