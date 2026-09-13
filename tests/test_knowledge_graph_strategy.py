@@ -163,3 +163,34 @@ def test_search_hybrid_graph_sirve_un_item_traido_por_vecindad_fuera_del_top_k_l
     assert graph.strategy == "hybrid_graph"
     assert "hybrid_graph_not_implemented" not in graph.index.degraded
     assert "k07" in [r.item_id for r in graph.results]
+
+
+def test_search_hybrid_graph_admite_un_vecino_que_cae_fuera_de_la_ventana_de_la_pagina(
+    tmp_path: Path,
+) -> None:
+    # Puerta 11.13. `search` materializaba `offset + limit + 1` dueños y SOLO ENTONCES llamaba al
+    # grafo: un vecino fuera de esa ventana no podía entrar y el delta del grafo salía 0 por
+    # construcción. El test anterior no lo ve — `k07` está en el puesto 3 con `limit=2`, DENTRO
+    # de la ventana `limit + 1`.
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    store = {k: Item.model_validate(v) for k, v in raw["items"].items()}
+    vocab = [Topic.model_validate(v) for v in raw["vocab"].values()]
+    pages = {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()}
+    data = tmp_path / "data"
+    _persist(data, store, vocab, pages)
+    _build(data)
+    context = _context(data, store, vocab, pages)
+
+    # La fixture es lo que dice ser: con `limit=1` la ventana es de 2 dueños, `k03` es el 3º del
+    # léxico — fuera — y es vecino de la cabeza, desde la que el grafo se expande.
+    ranking = [r.item_id for r in search_service.search("policy", context, limit=50).results]
+    assert ranking.index("k03") + 1 == 3
+    reached = graph_expand([f"item:{ranking[0]}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
+    assert "item:k03" in {node.node_id for node in reached.nodes}
+
+    graph = search_service.search(
+        "policy", context, limit=1, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    assert graph.strategy == "hybrid_graph"
+    assert [r.item_id for r in graph.results] == ["k03"]

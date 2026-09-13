@@ -119,6 +119,17 @@ VECTOR_PLANE_BEHIND = "vector_plane_behind"
 # `truncated`, never complete. Not a tuned value.
 FUSED_CHUNK_WINDOW = 1_000
 
+# THE GRAPH NEEDS CANDIDATES THE PAGE DOES NOT (Plan 04.4, gate 11.13). `hybrid_graph` re-ranks
+# what `_materialise` hands it, so a window of `offset + limit + 1` owners left every neighbour
+# past the page outside it, and the graph's delta was 0 by construction. No finite horizon is
+# EXACT: under RRF a neighbour at ANY lexical depth `r` scores `1/(k+r) + w/(k+g)` and, at graph
+# rank 1, overtakes the lexical head's `1/(k+1)`. So this is a BOUND, not a tuned value — and it
+# is `hybrid`'s own per-channel bound, so the graph looks at least as deep as the fused strategy
+# it is measured against (owners here, chunks there: never shallower), and a delta between the
+# two is not an artefact of depth. Fixed per query, not sized by the page, for #184's reason; its
+# cost on the live corpus is not measured yet.
+GRAPH_CANDIDATE_HORIZON = FUSED_CHUNK_WINDOW
+
 # A search bucket: an item id, its chunk hits in rank order, and — on a fused strategy — the
 # explanation of each hit keyed by `chunk_id` (empty on `lexical`, where the channel is implied).
 _Settled = tuple[str, list[LexicalHit], Mapping[str, FusedChunk]]
@@ -340,8 +351,9 @@ def search(
         beyond = offset + limit + 1
         fused_window: _FusedWindow | None = None
         if channel is None:
+            needed = max(beyond, GRAPH_CANDIDATE_HORIZON) if executed == "hybrid_graph" else beyond
             ordered, excluded, exhausted = _materialise(
-                index, query, filters, context, needed=beyond
+                index, query, filters, context, needed=needed
             )
             if executed == "hybrid_graph":
                 ordered = _graph_order(ordered, context)
