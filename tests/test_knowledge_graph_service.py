@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from xbrain.knowledge import index_build
 from xbrain.knowledge.graph_build import ASSIGNMENT_METHOD, CO_OCCURRENCE_METHOD
 from xbrain.knowledge.graph_service import graph_expand
@@ -120,3 +122,32 @@ def test_every_path_carries_node_types_relation_method_weight_and_support(
     assert edge.method == ASSIGNMENT_METHOD
     assert node_type["item:3"] == "item"
     assert node_type["topic:a"] == "topic"
+
+
+def test_every_served_path_rests_on_item_ids_that_resolve_in_the_live_store(
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+
+    response = graph_expand(("topic:a",), context, max_hops=1)
+
+    # The support of an edge, read off the edge itself: the listed ids of a co-occurrence, the
+    # item endpoint of an assignment. Written here, not borrowed from the service under test.
+    assert response.paths
+    for path in response.paths:
+        for edge in path.edges:
+            if edge.relation == "CO_OCCURS_WITH":
+                support = edge.supporting_item_ids
+            else:
+                support = (edge.source.removeprefix("item:"),)
+            assert support, path
+            assert all(item_id in context.store for item_id in support), path
+
+    # Item 2 leaves the live store after the index was built. The persisted a→b edge still lists
+    # it, and so does the assignment item:2 → topic:a: serving either would hand the consumer an
+    # id that `get` cannot open. The expansion refuses and names the id and the repair.
+    without_2 = {k: v for k, v in _KNOWN.items() if k != "2"}
+    stale = QueryContext(**{**context.__dict__, "store": without_2})
+    with pytest.raises(ValueError, match="xbrain index update") as refused:
+        graph_expand(("topic:a",), stale, max_hops=1)
+    assert "'2'" in str(refused.value)

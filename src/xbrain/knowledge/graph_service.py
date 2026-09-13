@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from xbrain.knowledge.contracts import GraphEdge, GraphExpansionResponse, GraphNode, GraphPath
@@ -59,13 +59,40 @@ def _node_type(node_id: str) -> Literal["item", "topic"]:
     return "item" if node_id.startswith("item:") else "topic"
 
 
+def _support_ids(edge: GraphEdge) -> tuple[str, ...]:
+    """The store ids an edge rests on: its listed support, or the item it assigns."""
+    if edge.relation == "CO_OCCURS_WITH":
+        return edge.supporting_item_ids
+    return (edge.source.removeprefix("item:"),)
+
+
+def _require_resolvable(edge: GraphEdge, store: Mapping[str, object]) -> None:
+    """Refuse an edge whose support is no longer in the LIVE store.
+
+    The graph is derived and the store is the truth: an id the index lists but the store no
+    longer holds is one `get` cannot open, so serving it would cite evidence that does not
+    exist. The contract has no field to declare an excluded edge, so the refusal is WHOLE and
+    names the repair — dropping it quietly would be the silent cut spec §9.3 forbids.
+    """
+    missing = [item_id for item_id in _support_ids(edge) if item_id not in store]
+    if missing:
+        raise ValueError(
+            f"La arista {edge.source} → {edge.target} ({edge.relation}) se apoya en items que "
+            f"ya no están en el store: {missing!r}. El grafo del índice va por detrás del "
+            "store: ejecuta `xbrain index update`."
+        )
+
+
 def graph_expand(
     seeds: Sequence[str],
     context: QueryContext,
     *,
     max_hops: int = 1,
 ) -> GraphExpansionResponse:
-    """Expand `seeds` over the persisted graph, one explicit path per reached node."""
+    """Expand `seeds` over the persisted graph, one explicit path per reached node.
+
+    Every served edge's support resolves in `context.store` (`_require_resolvable`).
+    """
     index = open_for_query(
         context.index_dir,
         context.items_path,
@@ -80,6 +107,7 @@ def graph_expand(
         paths: list[GraphPath] = []
         for seed in seeds:
             for edge in _incident(connection, seed):
+                _require_resolvable(edge, context.store)
                 edges[(edge.source, edge.target, edge.relation)] = edge
                 other = edge.target if edge.source == seed else edge.source
                 if other in reached:
