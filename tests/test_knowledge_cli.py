@@ -892,3 +892,33 @@ def test_index_build_embeddings_with_the_binary_absent_is_embedder_not_found(
     assert "[embeddings].command" in result.output
     assert "Traceback" not in result.output
     assert not _manifest_exists(workspace)
+
+
+# ---------------------------------------------------------------------------
+# Plan 04.3 — graph-expand
+# ---------------------------------------------------------------------------
+
+
+def test_graph_expand_returns_nodes_edges_and_explicit_paths(workspace: Path) -> None:
+    """`graph-expand --item` over a REAL built index: every reached node carries its path.
+
+    k02 is assigned `agent-evaluation` (primary) and k08 shares it, so two hops from `item:k02`
+    must reach `item:k08` THROUGH the topic — a path that names both hops, not a bare neighbour.
+    """
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+
+    payload = _json_stdout(
+        runner.invoke(app, ["graph-expand", "--item", "k02", "--max-hops", "2", "--json"])
+    )
+
+    assert payload["seeds"] == ["item:k02"]
+    node_ids = {node["node_id"] for node in payload["nodes"]}
+    assert {"item:k02", "topic:agent-evaluation", "item:k08"} <= node_ids
+    assert payload["edges"], "a seed with topic assignments has incident edges"
+    for path in payload["paths"]:
+        assert path["nodes"][0] == "item:k02"
+        assert len(path["nodes"]) == len(path["edges"]) + 1
+        for (a, b), edge in zip(zip(path["nodes"], path["nodes"][1:]), path["edges"]):
+            assert {edge["source"], edge["target"]} == {a, b}
+    to_k08 = next(p for p in payload["paths"] if p["nodes"][-1] == "item:k08")
+    assert to_k08["nodes"] == ["item:k02", "topic:agent-evaluation", "item:k08"]
