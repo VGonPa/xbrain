@@ -19,7 +19,7 @@ import pytest
 from tests import test_knowledge_search_hybrid as vector_fixture
 from tests.test_knowledge_search_service import FIXTURES, _build, _context, _persist
 from xbrain.knowledge import fusion, graph_strategy, search_service
-from xbrain.knowledge.contracts import GraphExpansionResponse, GraphNode, Strategy
+from xbrain.knowledge.contracts import GraphExpansionResponse, GraphNode, SearchFilters, Strategy
 from xbrain.knowledge.graph_service import graph_expand
 from xbrain.knowledge.search_service import QueryContext
 from xbrain.models import Author, Content, Enrichment, Item, Topic, TopicPage
@@ -604,3 +604,54 @@ def test_search_hybrid_graph_sin_canal_vectorial_lo_declara_y_no_finge_vector(
     assert not [m for r in graph.results for m in r.matches if "vector" in m.matched_by]
     if embedder is not None:
         assert embedder.calls == []
+
+
+@pytest.mark.parametrize(
+    ("requested", "executed"), [("hybrid_graph", "hybrid_graph"), ("hybrid", "lexical")]
+)
+def test_search_con_filtros_y_canal_vectorial_disponible_lo_declara_y_respeta_el_filtro(
+    tmp_path: Path, requested: Strategy, executed: Strategy
+) -> None:
+    # El plano vectorial no tiene columnas de filtro y `_materialise_fused` no recibe `filters`:
+    # si el canal vectorial abre bajo un filtro, lo que sirve es geometría SIN filtrar. Especializar
+    # la guarda para que `hybrid_graph` la saltara dejaba `degraded` vacío, llamaba al embedder y,
+    # con `source=own_tweet`, servía 12 items de los que 11 eran `bookmark` — con la suite verde.
+    # Se atan las DOS cosas, porque cada una deja viva la otra: la DECLARACIÓN (una guarda que
+    # declara pero abre el canal igual pasaría un test solo de resultados... y al revés) y que los
+    # RESULTADOS respetan el filtro pedido.
+    corpus = _vector_corpus()
+    data = vector_fixture._data(tmp_path, corpus, with_plane=True)
+    embedder = vector_fixture.QueryEmbedder(vector_fixture._pick(data, contains_query=False)[1])
+    context = vector_fixture._context(data, corpus, embedder)
+    store = corpus[0]
+    # `reviews` y no `QUERY`: el único `own_tweet` de la fixture (k06) no dice `Quillfeather`, y un
+    # filtro que no deja pasar nada haría vacua la aserción b).
+    query = "reviews"
+
+    # La fixture es lo que dice ser (regla 1): SIN filtro, la misma consulta con el canal vectorial
+    # abierto sirve items de otra fuente, así que "todo es own_tweet" no puede salir por coincidencia.
+    unfiltered = search_service.search(
+        query, context, limit=50, strategy=requested, graph_enabled=True
+    )
+    assert embedder.calls == [query]
+    assert {store[r.item_id].source for r in unfiltered.results} - {"own_tweet"}
+
+    embedder.calls.clear()
+    filtered = search_service.search(
+        query,
+        context,
+        limit=50,
+        strategy=requested,
+        graph_enabled=True,
+        filters=SearchFilters(source="own_tweet"),
+    )
+
+    # a) la degradación se DECLARA.
+    assert filtered.strategy == executed
+    assert search_service.VECTOR_FILTERS_UNSUPPORTED in filtered.index.degraded
+    # b) lo servido RESPETA el filtro — y no está vacío, o la aserción sería vacua.
+    assert filtered.results
+    assert {store[r.item_id].source for r in filtered.results} == {"own_tweet"}
+    # Y el canal vectorial no corrió: ni embedder, ni `vector` en ningún match.
+    assert embedder.calls == []
+    assert not [m for r in filtered.results for m in r.matches if "vector" in m.matched_by]
