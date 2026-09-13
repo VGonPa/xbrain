@@ -340,11 +340,21 @@ La ruta impresa termina en `snapshots/<revisión>`: anota esa revisión, que es 
 publicada no fijó.
 
 **4. Un `config.toml` por candidato**, porque los prefijos son del MODELO y viajan en config, no en código
-(`""` para MiniLM; `"query: "` / `"passage: "` para la familia E5):
+(`""` para MiniLM; `"query: "` / `"passage: "` para la familia E5). `load_config` exige `[paths]` y un
+`[x].handle` no vacío aunque `eval` no los use para medir: sin ellos el primer `xbrain eval` muere con
+`KeyError`. Van apuntando dentro de la raíz, para que nada salga de `$WORK`:
 
 ```bash
 root minilm-l12
 cat > "$WORK/roots/minilm-l12/config.toml" <<EOF
+[paths]
+vault = "$WORK/roots/minilm-l12/vault"
+output_subdir = "notes"
+data_dir = "data"
+
+[x]
+handle = "bakeoff"
+
 [embeddings]
 command = "env HF_HOME=$WORK/hf HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false $WORK/embedenv/bin/python $CHECKOUT/scripts/xbrain-embed"
 batch_size = 1024
@@ -387,14 +397,16 @@ print(json.dumps(compare_reports(lexical, candidate, k=10, exclude=exclude), ens
 Después, las huellas. **El sha256 de un informe no sirve para reproducirlo**: dos corridas léxicas sobre el
 mismo store y el mismo golden set dieron los mismos `retrieved` y las mismas métricas en los 23 casos y aun
 así ficheros distintos, porque `corpus.source` guarda la ruta del store y `latency` el reloj (en
-`vector`/`hybrid` también cambian `seconds` y `built` del índice). Lo que se ancla por sha256 son las
-entradas; los informes se comparan por contenido sin esos campos:
+`vector`/`hybrid` también cambian `seconds` y `built` del índice, y `embeddings.command_version` lleva las
+rutas absolutas de `$WORK` y `$CHECKOUT`). Lo que se ancla por sha256 son las entradas; los informes se
+comparan por contenido sin esos campos, y `command_version` sin sus directorios — la forma del comando y
+la versión del contrato del embedder sí se comparan:
 
 ```bash
 (cd "$WORK" && shasum -a 256 roots/minilm-l12/data/items.json roots/minilm-l12/data/vocab.yaml \
     roots/minilm-l12/data/topics.json xbrain/eval/golden-set.yaml reports/*.json > SHA256SUMS)
 same() { uv run --project "$CHECKOUT" python - "$1" "$2" <<'PY'
-import json, sys
+import json, re, sys
 VOLATILE = {"latency", "seconds", "built"}   # reloj y caché del índice: no son resultado
 def clean(node):
     if isinstance(node, dict):
@@ -405,6 +417,9 @@ def clean(node):
 a, b = (clean(json.load(open(p))) for p in sys.argv[1:3])
 for doc in (a, b):
     doc.get("corpus", {}).pop("source", None)   # la ruta del store, no su contenido
+    emb = doc.get("embeddings")                  # None en un informe léxico
+    if isinstance(emb, dict) and "command_version" in emb:
+        emb["command_version"] = re.sub(r"/\S*/", "", emb["command_version"])   # /w/embedenv/bin/python -> python
 diff = sorted(k for k in a.keys() | b.keys() if a.get(k) != b.get(k))
 print("idénticos" if not diff else f"difieren en: {diff}")
 PY
