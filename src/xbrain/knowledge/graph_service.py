@@ -26,9 +26,19 @@ from xbrain.knowledge.index_store import open_for_query
 from xbrain.knowledge.search_service import QueryContext
 from xbrain.models import _reject_local_path_traversal
 
-_EDGE_COLUMNS = (
-    "source, target, relation, method, weight, shared_items, "
-    "supporting_item_ids_json, input_fingerprints_json"
+# Written out whole, never interpolated: a `UNION ALL` needs the column list in each arm, and a
+# literal is what lets bandit (B608) see that nothing but the `?` values binds into it. `_edge`
+# unpacks exactly these eight columns, in this order.
+_INCIDENT_SQL = (
+    "SELECT source, target, relation, method, weight, shared_items, "
+    "supporting_item_ids_json, input_fingerprints_json "
+    "FROM graph_edges WHERE source = ? "
+    "UNION ALL "
+    "SELECT source, target, relation, method, weight, shared_items, "
+    "supporting_item_ids_json, input_fingerprints_json "
+    "FROM graph_edges WHERE target = ? "
+    "AND relation != 'CO_OCCURS_WITH' "
+    "ORDER BY source, target, relation"
 )
 
 
@@ -48,14 +58,7 @@ def _edge(row: Sequence[object]) -> GraphEdge:
 
 def _incident(connection: sqlite3.Connection, node_id: str) -> list[GraphEdge]:
     """Every edge leaving `node_id`, plus the assignment edges arriving at it."""
-    rows = connection.execute(
-        f"SELECT {_EDGE_COLUMNS} FROM graph_edges WHERE source = ? "
-        "UNION ALL "
-        f"SELECT {_EDGE_COLUMNS} FROM graph_edges WHERE target = ? "
-        "AND relation != 'CO_OCCURS_WITH' "
-        "ORDER BY source, target, relation",
-        (node_id, node_id),
-    )
+    rows = connection.execute(_INCIDENT_SQL, (node_id, node_id))
     return [_edge(row) for row in rows]
 
 
