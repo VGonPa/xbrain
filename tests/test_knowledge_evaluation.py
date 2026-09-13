@@ -1924,7 +1924,7 @@ def _synthetic(strategy: str, cases: dict[str, tuple[str, float]], unmeasured=()
                 "id": case_id,
                 "provenance": "construido",
                 "strata": [stratum],
-                "metrics": {"recall@10": value, "mrr": value},
+                "metrics": {"recall@10": value, "mrr@10": value, "mrr": value},
             }
             for case_id, (stratum, value) in cases.items()
         ],
@@ -2063,6 +2063,162 @@ def test_the_bakeoff_excludes_a_named_case_with_its_reason_and_never_pairs_it() 
     assert stratum["cases"] == ["S"] and stratum["verdict"] == "mejora"
     assert stratum["excluded"] == {"D": "la verdad de terreno se movió"}
     assert verdict["excluded"] == {"D": "la verdad de terreno se movió"}
+
+
+def test_mrr_at_k_reads_the_same_owner_prefix_as_recall_at_k(corpus) -> None:
+    """PR #186, Codex F1: the bare `mrr` walks the WHOLE ranking the retriever returned, so a
+    relevant owner past `k` still earns a reciprocal rank that `recall@k` cannot see. `mrr@k`
+    is cut at the same prefix, and a prefix does not move with the depth (U-6).
+
+    The relevant owner is deliberately SECOND: `mrr@1` must be 0.0 while the window MRR is 0.5.
+    """
+    retrieved = evaluate([_dominated_case()], corpus, ks=(10,)).cases[0].retrieved
+    owner_type, owner_id = retrieved[1].split(":", 1)
+    relevant = (
+        {"relevant_items": (owner_id,)}
+        if owner_type == "item"
+        else {"relevant_topics": (owner_id,)}
+    )
+    case = _case(id="SECOND", query=OWNER_DOMINATED_QUERY, strata=("enterrado",), **relevant)
+
+    shallow = evaluate([case], corpus, ks=(1, 10)).cases[0]
+    deep = evaluate([case], corpus, ks=(1, 10), limit=20).cases[0]
+
+    assert shallow.retrieved[1] == retrieved[1], "precondition: the relevant owner is second"
+    assert shallow.metrics["recall@1"] == 0.0
+    assert shallow.metrics["mrr@1"] == 0.0, "a rank past k leaked into the cut MRR"
+    assert shallow.metrics["mrr@10"] == pytest.approx(0.5)
+    assert shallow.metrics["mrr"] == pytest.approx(0.5)
+    assert deep.metrics["mrr@1"] == shallow.metrics["mrr@1"]
+    assert deep.metrics["mrr@10"] == shallow.metrics["mrr@10"]
+
+
+def test_the_bakeoff_ranks_by_mrr_at_k_never_by_ranks_past_the_published_depth() -> None:
+    """PR #186, Codex F1 — the shape of V1 in the published bake-off: found by neither strategy
+    in the top 20, lexical window rank 51, hybrid window rank 56. Compared on the bare `mrr`
+    that read 0.0196 → 0.0179 and published «hybrid empeora exacto»; those ranks are past the
+    depth both reports publish and are cut by windows of different sizes. At `mrr@10` both
+    sides measured 0.0 and the guardrail holds — seen red on the window MRR: `empeora`."""
+    from xbrain.knowledge.evaluation import compare_reports
+
+    def report(strategy: str, window_mrr: float) -> dict:
+        return {
+            "strategy": strategy,
+            "limit": 20,
+            "cases": [
+                {
+                    "id": "V1",
+                    "provenance": "construido",
+                    "strata": ["exacto"],
+                    "metrics": {"recall@10": 0.0, "mrr@10": 0.0, "mrr": window_mrr},
+                }
+            ],
+            "unmeasured": [],
+        }
+
+    verdict = compare_reports(report("lexical", 1 / 51), report("hybrid", 1 / 56), k=10)
+    exacto = verdict["strata"]["exacto"]
+
+    assert exacto["verdict"] == "empata", "a rank no report publishes decided the guardrail"
+    assert verdict["rank_metric"] == "mrr@10"
+    assert set(exacto["baseline"]) == {"recall@10", "mrr@10"}, "the window MRR is still read"
+    assert not any(reason.startswith("exacto") for reason in verdict["reasons"])
+
+
+def test_a_case_without_mrr_at_k_on_one_side_is_unpaired_never_read_as_zero() -> None:
+    """The old comparison read a missing MRR as `or 0.0`: a report written before `mrr@k`
+    existed would have paired on `recall@10` and lost its rank term as a measured zero."""
+    from xbrain.knowledge.evaluation import compare_reports
+
+    lexical = _synthetic("lexical", {"S": ("semantico", 0.0), "OLD": ("semantico", 1.0)})
+    candidate = _synthetic("hybrid", {"S": ("semantico", 1.0), "OLD": ("semantico", 1.0)})
+    del lexical["cases"][1]["metrics"]["mrr@10"]
+
+    stratum = compare_reports(lexical, candidate, k=10)["strata"]["semantico"]
+
+    assert stratum["cases"] == ["S"]
+    assert stratum["unpaired"] == ["OLD"]
+    assert "mrr@10" in stratum["unpaired_reasons"]["OLD"]
+    assert "baseline `lexical`" in stratum["unpaired_reasons"]["OLD"]
+
+
+def test_the_comparison_publishes_each_denominator_its_unit_and_why_a_member_stayed_out() -> None:
+    """PR #186, Codex F2: every mean ships with the population it was divided by, the unit `k`
+    counts, the depth of each report and, per member left out, WHY — unmeasured by one
+    strategy, unmeasured by both, or excluded by argument. A case both strategies skipped used
+    to vanish from the comparison instead of being named outside it."""
+    from xbrain.knowledge.evaluation import compare_reports
+
+    lexical = _synthetic(
+        "lexical", {"S": ("semantico", 0.0), "T": ("semantico", 1.0), "D": ("semantico", 1.0)}
+    )
+    candidate = _synthetic("vector", {"S": ("semantico", 1.0), "D": ("semantico", 0.0)})
+    lexical["limit"] = candidate["limit"] = 20
+    candidate["unmeasured"] = [
+        {"id": "T", "strata": ["semantico"], "reason": "la estrategia `vector` no puede aplicar"}
+    ]
+    for side in (lexical, candidate):
+        side["unmeasured"].append({"id": "B", "strata": ["semantico"], "reason": "filtro"})
+
+    verdict = compare_reports(lexical, candidate, k=10, exclude={"D": "fuga"})
+    stratum = verdict["strata"]["semantico"]
+
+    assert stratum["cases"] == ["S"]
+    assert stratum["denominators"] == {"recall@10": 1, "mrr@10": 1}
+    assert verdict["units"] == {"recall@10": "owners", "mrr@10": "owners"}
+    assert verdict["depth"] == {"baseline": 20, "candidate": 20}
+    assert stratum["unpaired"] == ["B", "T"]
+    assert stratum["unpaired_reasons"]["T"].startswith("no medido en candidate `vector`")
+    assert stratum["unpaired_reasons"]["B"].startswith("no medido en baseline `lexical`")
+    assert stratum["excluded"] == {"D": "fuga"}
+
+
+def test_the_markdown_publishes_each_denominator_the_unit_of_k_and_the_unmeasured_count(
+    corpus,
+) -> None:
+    """PR #186, Codex F2, on the surface that gets quoted: `recall@10` over two cases and
+    `superficies@10` over the one that names a surface sit in the same row, so each cell
+    carries its own denominator, each column its unit, and the row the cases it left out."""
+    from dataclasses import replace
+
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = RelevantSurface(
+        owner_type="item",
+        owner_id=item_id,
+        surface_type=item_surfaces(corpus.items[item_id])[0].surface_type,
+    )
+    named = _case(
+        id="NAMED",
+        query=query,
+        strata=("exacto",),
+        relevant_items=(item_id,),
+        relevant_surfaces=(surface,),
+    )
+    unnamed = _case(id="UNNAMED", query=query, strata=("exacto",), relevant_items=(item_id,))
+    skipped = {
+        "id": "FX",
+        "strata": ["exacto"],
+        "provenance": "construido",
+        "unsupported_filters": ["source"],
+        "reason": "no aplicable",
+    }
+    report = replace(evaluate([named, unnamed], corpus, ks=(1, 10)), unmeasured=(skipped,))
+
+    lines = render_markdown(report).splitlines()
+    columns = [
+        cell.strip() for cell in next(ln for ln in lines if ln.startswith("| bucket |")).split("|")
+    ]
+    row = [
+        cell.strip() for cell in next(ln for ln in lines if ln.startswith("| exacto |")).split("|")
+    ]
+
+    assert row[columns.index("no medidos")] == "1"
+    assert row[columns.index("recall@10 [owners]")].endswith("(2)")
+    assert row[columns.index("MRR@10 [owners]")].endswith("(2)")
+    assert row[columns.index("superficies@10 [chunks]")].endswith("(1)")
 
 
 def test_parse_fusion_sweep_reads_both_syntaxes_and_refuses_what_fuse_cannot_take() -> None:

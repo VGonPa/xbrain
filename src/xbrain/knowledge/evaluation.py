@@ -82,6 +82,17 @@ SURFACES_WITHOUT_DATA: tuple[str, ...] = ("thread", "user_note")
 
 DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 
+# What `k` counts in each metric family (m6; PR #186, Codex F2). Published on every report and
+# every comparison, because a denominator read in the wrong unit is a wrong number: `recall@10`
+# is the first ten deduplicated OWNERS, `surface_recall@10` the first ten CHUNKS.
+METRIC_UNITS: dict[str, str] = {
+    "recall": "owners",
+    "precision": "owners",
+    "mrr": "owners",
+    "ndcg": "owners",
+    "surface_recall": "chunks",
+}
+
 # THE DEPTH IS COUNTED IN OWNERS (U-6, round 07 — gate Codex F5). Every metric here is defined
 # over deduplicated owners (spec §5.4 groups by item), and `evaluate` asked the index for
 # `max(limit, max(ks))` CHUNKS: seven windows of one transcript at the top meant ten chunks
@@ -283,6 +294,7 @@ class EvaluationReport:
             "embeddings": self.embeddings,
             "indexing": self.indexing,
             "limit": self.limit,
+            "metric_units": dict(METRIC_UNITS),
             "corpus": self.corpus,
             "threshold": self.threshold,
             "passed": self.passed,
@@ -609,6 +621,18 @@ def _score(
         # Binary, and `None` on the same 0/0 `recall` is `None` on (`_ndcg`).
         metrics[f"ndcg@{k}"] = _ndcg(ranked, relevant, k) if relevant else None
         metrics[f"surface_recall@{k}"] = _surface_recall(case, hits, k)
+        # MRR CUT AT k, over the SAME owner prefix `recall@k` reads (PR #186, Codex F1). The
+        # bare `mrr` below walks the WHOLE ranking the retriever returned, and that ranking's
+        # length is the retriever's window, not the report's depth: the lexical owner loop
+        # stops past `depth` owners, the fused window holds up to 1,000 chunks per channel.
+        # Measured on the published bake-off reports (depth 20): V1's lexical `mrr` is 1/51
+        # and its hybrid one 1/56, S8's vector one 1/268 — so a «hybrid empeora exacto»
+        # decided on 0.0196 → 0.0179 was decided on ranks no report publishes.
+        # A prefix of the ranking is the same under any depth ≥ k (U-6), so `mrr@k` is one
+        # number per strategy and comparable across them; `compare_reports` reads this one.
+        metrics[f"mrr@{k}"] = _mrr(ranked[:k], relevant) if relevant else None
+    # Window-dependent: comparable only between reports that share the retriever's window
+    # (one strategy, one depth — the two sweeps). Never across strategies; see `mrr@k`.
     metrics["mrr"] = _mrr(ranked, relevant) if relevant else None
     return CaseResult(
         id=case.id,
@@ -835,14 +859,24 @@ def render_markdown(report: EvaluationReport) -> str:
         "> Una celda `sin cobertura` NO es un cero: ningún caso del bucket pudo medir esa",
         "> métrica (spec §8.6.8). `measured` en el JSON lleva el denominador de cada media.",
         "",
+        "> Entre paréntesis, el DENOMINADOR de cada media: los casos del bucket que midieron esa",
+        "> métrica. `no medidos` son los casos del bucket que esta estrategia no puntuó (sus",
+        "> filtros): no entran en NINGÚN denominador. Unidad de `k` entre corchetes.",
+        "",
+        "> `MRR@10` es el rango recíproco dentro de los mismos 10 owners que `recall@10`, y se",
+        "> compara entre estrategias. El `mrr` sin corte del JSON recorre la ventana entera del",
+        "> recuperador, que no es la misma en `lexical` que en `vector`/`hybrid`: no se compara.",
+        "",
         "> `vacíos` cuenta los casos del bucket cuya consulta no recuperó NI UN CHUNK. Un 0,0",
         "> con `vacíos = casos` no dice que el recuperador ordenase mal: dice que no llegó a",
         "> ordenar nada. Sobre esos casos `precision@k` sale *no medida*, nunca 0,0 — su",
         "> numerador es 0 por construcción y repetiría el conjunto vacío (M3).",
         "",
     ]
-    lines += _table("Por estrato", report.by_stratum)
-    lines += _table("Por procedencia", report.by_provenance)
+    lines += _table("Por estrato", report.by_stratum, _unmeasured_counts(report, "strata"))
+    lines += _table(
+        "Por procedencia", report.by_provenance, _unmeasured_counts(report, "provenance")
+    )
     lines += [
         "## Sin cobertura",
         "",
@@ -898,32 +932,50 @@ def _vector_lines(report: EvaluationReport) -> list[str]:
     ]
 
 
-def _table(title: str, buckets: dict[str, Any]) -> list[str]:
+# The columns of the human table, in order: the metric and the unit its `k` counts. `nDCG@10`
+# is BINARY (no grades exist) and `superficies@10` is `surface_recall@10`, whose unit is the
+# CHUNK, not the owner (m6) — spec §8.4 asks for both beside recall.
+_TABLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("recall@1", "recall@1", "recall"),
+    ("recall@10", "recall@10", "recall"),
+    ("precision@10", "precision@10", "precision"),
+    ("mrr@10", "MRR@10", "mrr"),
+    ("ndcg@10", "nDCG@10", "ndcg"),
+    ("surface_recall@10", "superficies@10", "surface_recall"),
+)
+
+
+def _unmeasured_counts(report: EvaluationReport, field: str) -> dict[str, int]:
+    """How many cases of each bucket the strategy did NOT score — outside every denominator."""
+    counts: dict[str, int] = {}
+    for entry in report.unmeasured:
+        keys = entry.get(field) or ()
+        for key in (keys,) if isinstance(keys, str) else keys:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _table(title: str, buckets: dict[str, Any], unmeasured: Mapping[str, int]) -> list[str]:
+    header = " | ".join(f"{label} [{METRIC_UNITS[unit]}]" for _, label, unit in _TABLE_COLUMNS)
     lines = [
         f"## {title}",
         "",
-        # `nDCG@10` is BINARY (no grades exist) and `superficies@10` is `surface_recall@10`,
-        # whose unit is the CHUNK, not the owner (m6) — spec §8.4 asks for both beside recall.
-        "| bucket | casos | vacíos | recall@1 | recall@10 | precision@10 | MRR | nDCG@10 "
-        "| superficies@10 |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        f"| bucket | casos | vacíos | no medidos | {header} |",
+        "|---|---:|---:|---:|" + "---:|" * len(_TABLE_COLUMNS),
     ]
     for name, values in buckets.items():
+        skipped = unmeasured.get(name, 0)
         if values == NO_COVERAGE:
             lines.append(
-                f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — | — | — |"
+                f"| {name} | — | — | {skipped} | sin cobertura | sin cobertura | sin cobertura "
+                "| — | — | — |"
             )
             continue
-        cells = [
-            _cell(values, "recall@1"),
-            _cell(values, "recall@10"),
-            _cell(values, "precision@10"),
-            _cell(values, "mrr"),
-            _cell(values, "ndcg@10"),
-            _cell(values, "surface_recall@10"),
-        ]
+        cells = [_cell(values, metric) for metric, _, _ in _TABLE_COLUMNS]
         lines.append(
-            f"| {name} | {values['cases']} | {values['no_results']} | " + " | ".join(cells) + " |"
+            f"| {name} | {values['cases']} | {values['no_results']} | {skipped} | "
+            + " | ".join(cells)
+            + " |"
         )
     lines.append("")
     return lines
@@ -933,14 +985,16 @@ def _cell(values: dict[str, Any], name: str) -> str:
     """One metric cell — words when nobody measured it, never a number (spec §8.6.8).
 
     The markdown is where a fabricated zero does its damage, because it is the surface that
-    gets read and quoted. A `0.0` here is indistinguishable from a measured failure.
+    gets read and quoted. A `0.0` here is indistinguishable from a measured failure. A number
+    carries its denominator in parentheses (PR #186, Codex F2): `cases` is the bucket, and a
+    mean over fewer of them is a different population under the same row.
     """
     value = values.get(name)
     if value is None:
         return "—"
     if value == NO_COVERAGE:
         return "sin cobertura"
-    return str(value)
+    return f"{value} ({values.get('measured', {}).get(name, '?')})"
 
 
 # ---------------------------------------------------------------------------
@@ -1763,18 +1817,28 @@ def compare_reports(
     two absences are not an equality, and «hybrid no degrada exacto» over zero cases is the
     vacuous pass rule 11 calls fail-open.
 
-    The verdict orders by `recall@k`, then MRR — the sweep's S-1 criterion — so a candidate that
-    finds the same items and ranks them higher is `mejora`. `passes_gates` is true only when
+    The verdict orders by `recall@k`, then `mrr@k` — the sweep's S-1 criterion — so a candidate
+    that finds the same items and ranks them higher is `mejora`. `passes_gates` is true only when
     `exacto` is measured and not worse AND every decisive stratum is measured and better. It
     decides nothing by itself; the published document does, with these numbers beside it.
+
+    THE MRR IS `mrr@k`, NEVER THE BARE `mrr` (PR #186, Codex F1): both halves of the verdict are
+    read off the same top-k owner prefix, so they share one depth whatever window each
+    retriever materialised. A case that does not carry `mrr@k` on both sides is UNPAIRED with
+    its reason — the old `or 0.0` read a missing MRR as a measured zero.
+
+    EVERY MEAN SHIPS WITH ITS DENOMINATOR AND ITS UNIT (Codex F2): `denominators` per stratum,
+    `units` and each report's `depth` at the top, and `unpaired_reasons` naming why each
+    member of the stratum stayed out — unmeasured by a strategy, a metric missing, or excluded.
     """
     metric = f"recall@{k}"
+    rank_metric = f"mrr@{k}"
     # EXCLUSIONS ARE AN ARGUMENT, NOT A HAND-EDITED REPORT (Plan 03 §3.3-3.4). A case whose
     # ground truth no longer verifies on the corpus being measured does not decide; it is
     # carried into the output by name, with its reason, so the published verdict re-derives.
     excluded = dict(exclude or {})
     strata = {
-        name: _compare_stratum(baseline, candidate, name, metric, excluded)
+        name: _compare_stratum(baseline, candidate, name, (metric, rank_metric), excluded)
         for name in (*GUARDRAIL_STRATA, *DECISIVE_STRATA)
     }
     rejected = {
@@ -1785,15 +1849,19 @@ def compare_reports(
     reasons = [f"{name}: {reason}" for name, reason in rejected.items()]
     for name in GUARDRAIL_STRATA:
         if strata[name]["verdict"] == "empeora":
-            reasons.append(f"{name}: empeora — {_movement(strata[name], metric)}")
+            reasons.append(f"{name}: empeora — {_movement(strata[name], metric, rank_metric)}")
     for name in DECISIVE_STRATA:
         if strata[name]["verdict"] in {"empata", "empeora"}:
             reasons.append(
-                f"{name}: no mejora ({strata[name]['verdict']}) — {_movement(strata[name], metric)}"
+                f"{name}: no mejora ({strata[name]['verdict']}) — "
+                f"{_movement(strata[name], metric, rank_metric)}"
             )
     return {
         "k": k,
         "metric": metric,
+        "rank_metric": rank_metric,
+        "units": {metric: METRIC_UNITS["recall"], rank_metric: METRIC_UNITS["mrr"]},
+        "depth": {"baseline": baseline.get("limit"), "candidate": candidate.get("limit")},
         "baseline_strategy": baseline.get("strategy"),
         "candidate_strategy": candidate.get("strategy"),
         "excluded": excluded,
@@ -1808,22 +1876,33 @@ def _compare_stratum(
     baseline: Mapping[str, Any],
     candidate: Mapping[str, Any],
     stratum: str,
-    metric: str,
+    metrics: tuple[str, str],
     excluded: Mapping[str, str],
 ) -> dict[str, Any]:
+    metric, rank_metric = metrics
     base = _stratum_metrics(baseline, stratum)
     cand = _stratum_metrics(candidate, stratum)
-    members = base.keys() | cand.keys()
+    # A case BOTH strategies left unmeasured is in neither `cases` list, only in `unmeasured`:
+    # without this it vanished from the comparison instead of being named as outside it.
+    members = base.keys() | cand.keys() | _unmeasured_members(baseline, candidate, stratum)
     left_out = {case_id: excluded[case_id] for case_id in sorted(members) if case_id in excluded}
     paired = sorted(
         case_id
         for case_id in base.keys() & cand.keys()
         if case_id not in excluded
-        and base[case_id].get(metric) is not None
-        and cand[case_id].get(metric) is not None
+        and all(side[case_id].get(name) is not None for side in (base, cand) for name in metrics)
     )
     unpaired = sorted(members - set(paired) - set(left_out))
-    entry: dict[str, Any] = {"cases": paired, "unpaired": unpaired, "excluded": left_out}
+    entry: dict[str, Any] = {
+        "cases": paired,
+        "unpaired": unpaired,
+        "unpaired_reasons": {
+            case_id: _unpaired_reason(case_id, baseline, candidate, base, cand, metrics)
+            for case_id in unpaired
+        },
+        "excluded": left_out,
+        "denominators": {metric: len(paired), rank_metric: len(paired)},
+    }
     if not paired:
         named = [*unpaired, *left_out]
         outside = f" (fuera: {', '.join(named)})" if named else ""
@@ -1836,17 +1915,17 @@ def _compare_stratum(
         }
     means = {
         side: {
-            metric: round(sum(float(values[c][metric]) for c in paired) / len(paired), 4),
-            "mrr": round(sum(float(values[c].get("mrr") or 0.0) for c in paired) / len(paired), 4),
+            name: round(sum(float(values[c][name]) for c in paired) / len(paired), 4)
+            for name in metrics
         }
         for side, values in (("baseline", base), ("candidate", cand))
     }
-    before = (means["baseline"][metric], means["baseline"]["mrr"])
-    after = (means["candidate"][metric], means["candidate"]["mrr"])
+    before = (means["baseline"][metric], means["baseline"][rank_metric])
+    after = (means["candidate"][metric], means["candidate"][rank_metric])
     verdict = "mejora" if after > before else "empeora" if after < before else "empata"
     per_case = {
         case_id: {
-            side: {metric: values[case_id][metric], "mrr": values[case_id].get("mrr")}
+            side: {name: values[case_id][name] for name in metrics}
             for side, values in (("baseline", base), ("candidate", cand))
         }
         for case_id in paired
@@ -1862,11 +1941,45 @@ def _stratum_metrics(report: Mapping[str, Any], stratum: str) -> dict[str, Mappi
     }
 
 
-def _movement(entry: Mapping[str, Any], metric: str) -> str:
+def _unmeasured_members(
+    baseline: Mapping[str, Any], candidate: Mapping[str, Any], stratum: str
+) -> set[str]:
+    return {
+        str(entry["id"])
+        for report in (baseline, candidate)
+        for entry in report.get("unmeasured", ())
+        if stratum in entry.get("strata", ())
+    }
+
+
+def _unpaired_reason(
+    case_id: str,
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    base: Mapping[str, Mapping[str, Any]],
+    cand: Mapping[str, Mapping[str, Any]],
+    metrics: tuple[str, ...],
+) -> str:
+    """Why one member of a stratum is outside the paired denominator — the first cause found."""
+    for side, report, values in (("baseline", baseline, base), ("candidate", candidate, cand)):
+        label = f"{side} `{report.get('strategy')}`"
+        if case_id not in values:
+            skipped = next(
+                (e for e in report.get("unmeasured", ()) if str(e.get("id")) == case_id), None
+            )
+            why = (skipped or {}).get("reason") or "el caso no está en el informe"
+            return f"no medido en {label}: {why}"
+        missing = [name for name in metrics if values[case_id].get(name) is None]
+        if missing:
+            return f"{', '.join(missing)} ausente o no medido en {label}"
+    return "sin causa registrada"  # pragma: no cover - `paired` holds every other member
+
+
+def _movement(entry: Mapping[str, Any], metric: str, rank_metric: str) -> str:
     return (
         f"{metric} {entry['baseline'][metric]} → {entry['candidate'][metric]}, "
-        f"MRR {entry['baseline']['mrr']} → {entry['candidate']['mrr']} "
-        f"sobre {', '.join(entry['cases'])}"
+        f"{rank_metric} {entry['baseline'][rank_metric]} → {entry['candidate'][rank_metric]} "
+        f"sobre {', '.join(entry['cases'])} (n={len(entry['cases'])})"
     )
 
 
