@@ -3495,6 +3495,114 @@ def _run_sweep(
         raise ValueError(payload["verdict"])
 
 
+def _eval_vectors(cfg: Config, model: str):
+    """`--embeddings-model` → the `VectorEvaluation` the bake-off runs (Plan 03 §3.2).
+
+    `[embeddings].command` with the MODEL OVERRIDDEN, and nothing else: prefixes, batch size
+    and timeout stay the configured ones, and the report records all of them. The passage side
+    is `_vector_build` itself — the same probe, the same batching, the same refusal of a batch
+    from another model that `index build --embeddings` applies — so the bake-off measures the
+    plane that command would write, not a second way of writing one (rule 5).
+
+    The query side refuses a backend that declares another model for the same reason the
+    passage side does: a matching dimension does not prove the same model (Plan 03 §13.4).
+    """
+    from dataclasses import replace
+
+    from xbrain.embeddings import EmbedderFailed, embed_query
+    from xbrain.knowledge.evaluation import VectorEvaluation, eval_index_dir
+
+    measured = replace(cfg, embeddings_model=model)
+    build = _vector_build(measured)
+
+    def query(text: str) -> tuple[float, ...]:
+        batch = embed_query(
+            text,
+            command=measured.embeddings_command,
+            model=model,
+            prefix=measured.embeddings_query_prefix,
+            expected_dimension=build.spec.dimension,
+            timeout_seconds=measured.embeddings_timeout_seconds,
+        )
+        if batch.model != build.spec.model:
+            raise EmbedderFailed(
+                f"el embedder sirvió el modelo {batch.model!r} para una consulta y el plano se "
+                f"escribió con {build.spec.model!r}: jamás se comparan vectores de dos modelos"
+            )
+        return batch.vectors[0]
+
+    return VectorEvaluation(
+        requested_model=model,
+        build=build,
+        embed_query=query,
+        index_dir=eval_index_dir(cfg.data_dir, model),
+        items_path=cfg.items_path,
+        vocab_path=cfg.data_dir / "vocab.yaml",
+        topics_path=cfg.topics_path,
+        command=measured.embeddings_command,
+    )
+
+
+def _run_fusion_sweep(
+    cfg,
+    cases,
+    corpus,
+    axes: list[str],
+    vectors,
+    report: Path | None,
+    *,
+    json_out: bool,
+    limit: int,
+    ks: list[int],
+    min_recall: float | None,
+) -> None:
+    """`eval --strategy hybrid --sweep-fusion`: score every `(RRF_K, w_lexical, w_vector)`.
+
+    The same refusals as `--sweep-chunker`, for the same reasons: a threshold has no bucket to
+    judge in a table of combinations, and a ranking happens at ONE k. The plane is built or
+    reused once and every query embedded once, whatever the grid.
+    """
+    from xbrain.knowledge.evaluation import (
+        DEFAULT_SWEEP_K,
+        parse_fusion_sweep,
+        render_fusion_sweep_markdown,
+        sweep_fusion as run_sweep,
+    )
+
+    if min_recall is not None:
+        raise ValueError(
+            "`--min-recall` no se aplica a `--sweep-fusion`: el barrido publica una TABLA de "
+            "combinaciones y no hay bucket contra el que comparar el umbral."
+        )
+    if len(ks) > 1:
+        raise ValueError(
+            f"`--sweep-fusion` ordena por un solo `recall@k` y recibió {len(ks)} valores de "
+            "`--k`: repite el barrido con un `--k` por corrida."
+        )
+    result = run_sweep(
+        cases,
+        corpus,
+        vectors,
+        parse_fusion_sweep(axes),
+        k=ks[0] if ks else DEFAULT_SWEEP_K,
+        limit=limit,
+    )
+    json_path = report or (cfg.data_dir / "eval-fusion-sweep.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_fusion_sweep_markdown(result), encoding="utf-8")
+    if json_out:
+        _echo_json(payload)
+    else:
+        typer.echo(render_fusion_sweep_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    if result.winner is None:
+        raise ValueError(payload["verdict"])
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
@@ -3526,6 +3634,19 @@ def eval_command(
         "--sweep-chunker",
         help="Barrido del troceo: `target=800,1200 overlap=0,150` (repetible o entrecomillado).",
     ),
+    embeddings_model: str | None = typer.Option(
+        None,
+        "--embeddings-model",
+        help=(
+            "Modelo a medir con `--strategy vector|hybrid` (bake-off, Plan 03 §3.2). Construye "
+            "o reutiliza `data/eval-index/<modelo>/` con `[embeddings].command`."
+        ),
+    ),
+    sweep_fusion: list[str] = typer.Option(
+        [],
+        "--sweep-fusion",
+        help="Barrido de la fusión RRF: `rrf_k=20,60 w_vector=0.5,1` (solo `--strategy hybrid`).",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
     """Evalúa la recuperación contra el golden set y publica el informe.
@@ -3537,12 +3658,46 @@ def eval_command(
     puede salir de otra manera (regla 2 de CLAUDE.md). Con umbral, el comando es una puerta y
     nombra el bucket que falló.
     """
-    from xbrain.knowledge.evaluation import DEFAULT_KS, evaluate, render_markdown
+    from xbrain.knowledge.evaluation import (
+        DEFAULT_KS,
+        evaluate,
+        render_markdown,
+        require_vector_arguments,
+    )
     from xbrain.knowledge.goldenset import load_cases, load_scenarios, resolve_cases
 
+    # EVERY REFUSAL BEFORE ANYTHING IS LOADED OR EMBEDDED: `_eval_vectors` probes the embedder,
+    # which loads a model, and a flag combination that cannot be honoured must not cost one.
+    if sweep_chunker and (embeddings_model or sweep_fusion):
+        raise ValueError(
+            "`--sweep-chunker` mide el troceo con el recuperador léxico en memoria: no admite "
+            "`--embeddings-model` ni `--sweep-fusion`. Corre cada barrido por separado."
+        )
+    if not sweep_chunker:
+        require_vector_arguments(strategy, embeddings_model)
+    if sweep_fusion and strategy != "hybrid":
+        raise ValueError(
+            f"`--sweep-fusion` barre las constantes de la fusión RRF y `--strategy {strategy}` "
+            "no fusiona dos canales: úsalo con `--strategy hybrid`."
+        )
     cfg, corpus = _knowledge_corpus()
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)
+    vectors = _eval_vectors(cfg, embeddings_model) if embeddings_model else None
+    if sweep_fusion:
+        _run_fusion_sweep(
+            cfg,
+            cases,
+            corpus,
+            sweep_fusion,
+            vectors,
+            report,
+            json_out=json_out,
+            limit=limit,
+            ks=k,
+            min_recall=min_recall,
+        )
+        return
     if sweep_chunker:
         _run_sweep(
             cfg,
@@ -3565,6 +3720,7 @@ def eval_command(
         threshold=min_recall,
         scenarios=load_scenarios(path),
         limit=limit,
+        vectors=vectors,
     )
     payload = result.to_dict()
     json_path = report or (cfg.data_dir / "eval-report.json")

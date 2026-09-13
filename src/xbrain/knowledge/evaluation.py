@@ -39,17 +39,27 @@ that cannot come out any other way (CLAUDE.md rule 2). A caller that wants a gat
 from __future__ import annotations
 
 import json
+import math
+import re
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.contracts import SearchFilters, resolve_strategy
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
-from xbrain.knowledge.index_schema import open_memory_index
-from xbrain.knowledge.lexical import LexicalHit, LexicalIndex
+from xbrain.knowledge.index_schema import IndexError_, open_memory_index
+from xbrain.knowledge.lexical import LexicalHit, LexicalIndex, distinct_owners
 from xbrain.knowledge.models import KnowledgeChunk
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only; the vector path imports at call time
+    from xbrain.knowledge.index_build import VectorBuild
+    from xbrain.knowledge.index_store import OpenIndex
+    from xbrain.knowledge.vector_index import VectorPlane
 from xbrain.knowledge.surfaces import (
     article_block_texts,
     item_surfaces,
@@ -133,8 +143,18 @@ DEFAULT_KS: tuple[int, ...] = (1, 5, 10, 20)
 # against head: `surfaces` rows 0 -> 43, and `search("the", 50, has_surfaces=('post',))`
 # 0 chunks -> 24. Nothing PUBLISHED moves, because no case declares it — but what made that
 # safe was «no case reaches the filter», never «the filter was equivalent».
+#
+# THE VECTOR PAIR PUSHES NONE, AND THAT IS PLAN 03.7's HALF OF THE RULE. The plane has no filter
+# columns and a filter applied after scoring is not a filter, which is why `search` refuses to
+# run the vector channel under one (`search_service.VECTOR_FILTERS_UNSUPPORTED`). Here the
+# same fact makes a filtered case UNMEASURED under `vector` and `hybrid` — never scored, never
+# 0.0 — so `filtros` stays a lexical measurement and says so, instead of the bake-off quoting a
+# number for filtering that no vector channel performed. Measured on the golden set: F1 and F2
+# are the two cases this removes from the vector reports, and the only two.
 SUPPORTED_FILTERS: dict[str, frozenset[str]] = {
     "lexical": frozenset(SearchFilters.model_fields),
+    "vector": frozenset(),
+    "hybrid": frozenset(),
 }
 
 
@@ -240,6 +260,11 @@ class EvaluationReport:
     # The depth every case ran at, in OWNERS (U-6): a figure travels with the depth that
     # produced it, or it is a figure that cannot come out any other way (rule 2).
     limit: int = 0
+    # WHAT PRODUCED THE VECTORS, and what indexing them cost (Plan 03 §3.2, §3.5). `None` on a
+    # lexical report, never an empty block: a report that ran no model has no model to name,
+    # and `{}` would read as a model whose every property went unrecorded.
+    embeddings: dict[str, Any] | None = None
+    indexing: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.requested_strategy:
@@ -255,6 +280,8 @@ class EvaluationReport:
             "strategy": self.strategy,
             "requested_strategy": self.requested_strategy,
             "degraded": list(self.degraded),
+            "embeddings": self.embeddings,
+            "indexing": self.indexing,
             "limit": self.limit,
             "corpus": self.corpus,
             "threshold": self.threshold,
@@ -415,8 +442,16 @@ def evaluate(
     scenarios: Sequence[GoldenScenario] = (),
     params: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
     limit: int | None = None,
+    vectors: VectorEvaluation | None = None,
 ) -> EvaluationReport:
     """Score every case and aggregate by stratum and by provenance.
+
+    `vectors` is what makes `vector` and `hybrid` RUN (Plan 03.7): the model asked for, the
+    embedder that serves it, and where the evaluation's own persisted index lives. Without it
+    those two strategies resolve as they always did — degraded to `lexical` and declared — and
+    with it they are scored over the SAME chunks the lexical baseline scores, through the
+    search service's own fused window (`_retriever`). Passing it with `lexical` is refused: a
+    model named on a report none of whose numbers it produced is F-2 in the other direction.
 
     `threshold`, when given, turns the report into a gate: any bucket whose `recall@max(ks)`
     falls below it becomes a named failure. When absent, the report only reports — spec §8.6
@@ -436,34 +471,24 @@ def evaluate(
     that cannot come out any other way. A caller may raise it to see whether a miss is a
     ranking problem or an absence. It is published on the report.
     """
-    executed, degraded = resolve_strategy(strategy)
+    executed, degraded = _resolve_strategy(strategy, vectors)
     depth = max(limit or 0, max(ks))
     index, stats = build_index(corpus, params=params)
-    results: list[CaseResult] = []
     unmeasured: list[dict[str, Any]] = []
-    latencies: list[float] = []
+    timings: dict[str, list[float]] = {"total": [], "embedding": []}
+    run: _VectorRun | None = None
     try:
-        for case in cases:
-            blocked = unsupported_filters(case.filters, executed)
-            if blocked:
-                unmeasured.append(
-                    {
-                        "id": case.id,
-                        "strata": list(case.strata),
-                        "provenance": case.provenance,
-                        "unsupported_filters": list(blocked),
-                        "reason": (
-                            f"la estrategia `{executed}` no puede aplicar {list(blocked)}; "
-                            "puntuar el caso sería fabricar un cero (spec §8.6.8)"
-                        ),
-                    }
-                )
-                continue
-            started = time.perf_counter()
-            hits, exhausted = _search(index, case, owners=depth)
-            latencies.append((time.perf_counter() - started) * 1000)
-            results.append(_score(case, hits, ks, depth=depth, depth_exhausted=exhausted))
+        if vectors is not None:
+            run = _open_vector_run(vectors, params=params)
+        results = _score_cases(
+            cases, executed, ks, depth, _retriever(index, run, executed, depth), unmeasured, timings
+        )
     finally:
+        # The vector run holds a read-only SQLite handle and a memory map of the matrix, and a
+        # fusion sweep calls into the same plane once per cell: released here, with the
+        # `:memory:` index, rather than whenever the locals happen to be reclaimed.
+        if run is not None:
+            run.close()
         # The `:memory:` index lives exactly as long as the scoring. `sweep_chunker` calls
         # this once per COMBINATION, so a twelve-cell sweep opened twelve handles and closed
         # none of them explicitly — release left to whenever the local was reclaimed.
@@ -492,7 +517,9 @@ def evaluate(
         cases=tuple(results),
         by_stratum=by_stratum,
         by_provenance=by_provenance,
-        latency=_percentiles(latencies),
+        latency=_latency(timings),
+        embeddings=run.embeddings if run is not None else None,
+        indexing=run.indexing if run is not None else None,
         without_coverage={
             "strata": sorted(k for k, v in by_stratum.items() if v == NO_COVERAGE),
             "surfaces": list(SURFACES_WITHOUT_DATA),
@@ -579,6 +606,8 @@ def _score(
         # measurement of a real failure. Different denominators, different answers.
         precision = None if not top else found / len(top)
         metrics[f"precision@{k}"] = precision if relevant else None
+        # Binary, and `None` on the same 0/0 `recall` is `None` on (`_ndcg`).
+        metrics[f"ndcg@{k}"] = _ndcg(ranked, relevant, k) if relevant else None
         metrics[f"surface_recall@{k}"] = _surface_recall(case, hits, k)
     metrics["mrr"] = _mrr(ranked, relevant) if relevant else None
     return CaseResult(
@@ -792,6 +821,7 @@ def render_markdown(report: EvaluationReport) -> str:
         f"- Profundidad: {report.limit} owners por caso (U-6: la lista se materializa hasta"
         " tener esos owners, y cada `recall@k` sale de su prefijo).",
         f"- Latencia p50 {report.latency['p50_ms']} ms · p95 {report.latency['p95_ms']} ms.",
+        *_vector_lines(report),
         "",
         "> Las cifras de arriba son una fotografía del corpus medido, no una constante del",
         "> producto. Vuelve a derivarlas al ejecutar (CLAUDE.md regla 2).",
@@ -847,22 +877,50 @@ def render_markdown(report: EvaluationReport) -> str:
     return "\n".join(lines)
 
 
+def _vector_lines(report: EvaluationReport) -> list[str]:
+    """What produced the vectors and what they cost — on a report that ran a model, and only
+    there: a lexical report has no model to name (Plan 03 §3.2, §3.5)."""
+    if report.embeddings is None or report.indexing is None:
+        return []
+    spec, cost, latency = report.embeddings, report.indexing, report.latency
+    built = (
+        f"construido en {cost['seconds']} s" if cost["built"] else "reutilizado (no se re-embebió)"
+    )
+    return [
+        f"- Modelo: `{spec['model']}` · dimensión {spec['dimension']} · normalizado "
+        f"{spec['normalized']} · prefijos query {spec['query_prefix']!r} / passage "
+        f"{spec['passage_prefix']!r} · {spec['command_version']}.",
+        f"- Índice de evaluación: {built} · plano vectorial de {cost['vector_rows']} filas para "
+        f"{cost['vector_chunks']} chunks, {cost['vector_bytes']} bytes en disco.",
+        f"- La latencia incluye embeber la consulta: p50 {latency.get('embedding_p50_ms')} ms · "
+        f"p95 {latency.get('embedding_p95_ms')} ms; recuperar: p50 "
+        f"{latency.get('retrieval_p50_ms')} ms · p95 {latency.get('retrieval_p95_ms')} ms.",
+    ]
+
+
 def _table(title: str, buckets: dict[str, Any]) -> list[str]:
     lines = [
         f"## {title}",
         "",
-        "| bucket | casos | vacíos | recall@1 | recall@10 | precision@10 | MRR |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        # `nDCG@10` is BINARY (no grades exist) and `superficies@10` is `surface_recall@10`,
+        # whose unit is the CHUNK, not the owner (m6) — spec §8.4 asks for both beside recall.
+        "| bucket | casos | vacíos | recall@1 | recall@10 | precision@10 | MRR | nDCG@10 "
+        "| superficies@10 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, values in buckets.items():
         if values == NO_COVERAGE:
-            lines.append(f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — |")
+            lines.append(
+                f"| {name} | — | — | sin cobertura | sin cobertura | sin cobertura | — | — | — |"
+            )
             continue
         cells = [
             _cell(values, "recall@1"),
             _cell(values, "recall@10"),
             _cell(values, "precision@10"),
             _cell(values, "mrr"),
+            _cell(values, "ndcg@10"),
+            _cell(values, "surface_recall@10"),
         ]
         lines.append(
             f"| {name} | {values['cases']} | {values['no_results']} | " + " | ".join(cells) + " |"
@@ -1304,3 +1362,803 @@ def _decided_verdict(report: SweepReport, winner: SweepRow, label: str) -> str:
 
 def _number(value: float | None) -> str:
     return "sin cobertura" if value is None else f"{value:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Plan 03.7 — `vector` and `hybrid` in the harness, and the bake-off's instruments
+# ---------------------------------------------------------------------------
+#
+# ONE INDEX PER MODEL, WRITTEN BY THE BUILDER THAT WRITES THE REAL ONE. The vector strategies
+# are scored over a persisted index `index_build.build(..., vectors=...)` writes — the writer
+# and the plane `xbrain index build --embeddings` produce — under `data/eval-index/<model>/`,
+# never over `data/index/`, which belongs to `search`. Its manifest is what TDD 23 reads.
+#
+# THE RANKING IS THE SEARCH SERVICE'S FUSED WINDOW, NOT A SECOND FUSION. `_fused_hits` calls
+# `search_service._fused_window` and `_fuse_hits` — private, and imported anyway, because the
+# alternative is a second copy of «which chunks each channel offers and how they are fused»:
+# the five-hands divergence of rule 5, inside the module that exists to measure the first
+# copy. What the harness does NOT take from the service is the item grouping: it scores OWNERS
+# off the chunk ranking exactly as it scores the lexical baseline, so the three strategies are
+# compared on one unit. And like the baseline it leaves the profile plane out, so `hybrid`'s
+# profile fill (Plan 03 §4.3) is outside this measurement — declared, not forgotten.
+
+# The strata the bake-off DECIDES on, and the one it must not break (Plan 03 §3.3; spec §8.6.3
+# and §8.6.4). Named once, so the comparison and the published document read the same list.
+DECISIVE_STRATA: tuple[str, ...] = ("semantico", "cruzado_idioma")
+GUARDRAIL_STRATA: tuple[str, ...] = ("exacto",)
+
+# How one case is retrieved: `(hits in rank order, depth exhausted, query-embedding ms)`.
+Retrieval = tuple[Sequence[LexicalHit], bool, "float | None"]
+
+
+def eval_index_dir(data_dir: Path, model: str) -> Path:
+    """Where the evaluation index of `model` lives: `data/eval-index/<model>/`, one per model.
+
+    One per model is what lets `vector` and `hybrid` share a plane built once while two
+    candidates never share one. The directory is keyed by the name, and the manifest inside is
+    checked against the request anyway (TDD 23), because a directory name proves nothing.
+    """
+    return data_dir / "eval-index" / re.sub(r"[^A-Za-z0-9._-]+", "__", model)
+
+
+@dataclass(frozen=True)
+class VectorEvaluation:
+    """Everything `vector` and `hybrid` need that the corpus does not carry.
+
+    `build` is the SAME `VectorBuild` `index build --embeddings` receives: its `spec` is what
+    the backend DECLARED on a probe, so `spec.model` is the model that will produce the
+    vectors, and `requested_model` is the one the report is about to be headed with. The two
+    are compared before anything is written.
+
+    The three input paths are here because a persisted index is sealed against the FILES it was
+    read from (P1b), and the harness's `Corpus` carries objects, not files.
+    """
+
+    requested_model: str
+    build: VectorBuild
+    embed_query: Callable[[str], Sequence[float]]
+    index_dir: Path
+    items_path: Path
+    vocab_path: Path
+    topics_path: Path
+    command: str = ""
+
+
+class EmbeddingModelMismatch(ValueError):
+    """The model that would produce the numbers is not the model asked for (TDD 23).
+
+    A `ValueError`, so the CLI turns it into a clean exit 1. Never answered with a rebuild: the
+    index it refuses may be someone's measurement of the other model.
+    """
+
+
+def require_vector_arguments(strategy: str, model: str | None) -> None:
+    """The ONE place `--strategy` and `--embeddings-model` are paired (Plan 03 §3.2).
+
+    A vector strategy with no model has nothing to measure, and a model beside `lexical` would
+    head a report none of whose numbers it produced. Read by the CLI before anything is loaded
+    — the embedder probe loads a model — and by `evaluate` for the half an API caller can reach.
+    """
+    from xbrain.knowledge.search_service import _VECTOR_STRATEGIES
+
+    if model is not None and strategy not in _VECTOR_STRATEGIES:
+        raise ValueError(
+            f"`--embeddings-model {model}` no mide nada con la estrategia `{strategy}`: ninguna "
+            "cifra de ese informe la produciría ese modelo. Úsalo con `--strategy vector` o "
+            "`--strategy hybrid`."
+        )
+    if model is None and strategy in _VECTOR_STRATEGIES:
+        raise ValueError(
+            f"`--strategy {strategy}` mide un modelo de embeddings y no se nombró ninguno: pasa "
+            "`--embeddings-model <modelo>` (Plan 03 §3.2)."
+        )
+
+
+def _resolve_strategy(
+    strategy: str, vectors: VectorEvaluation | None
+) -> tuple[str, tuple[str, ...]]:
+    """What runs: the contract's resolution without vectors, the requested strategy with them.
+
+    A typo is refused AS a typo before the model is mentioned, so `--strategy lexcial
+    --embeddings-model m` names the misspelling rather than a pairing nobody asked about.
+    """
+    if vectors is None:
+        return resolve_strategy(strategy)
+    resolve_strategy(strategy)
+    require_vector_arguments(strategy, vectors.requested_model)
+    return strategy, ()
+
+
+@dataclass(frozen=True)
+class _VectorRun:
+    """An evaluation index proved queryable, its plane, and what the report records of both."""
+
+    index: OpenIndex
+    plane: VectorPlane
+    embed_query: Callable[[str], Sequence[float]]
+    embeddings: dict[str, Any]
+    indexing: dict[str, Any]
+
+    def close(self) -> None:
+        self.plane.close()
+        self.index.close()
+
+
+def _open_vector_run(vectors: VectorEvaluation, *, params: ChunkerParams) -> _VectorRun:
+    """Build the evaluation index of `vectors.requested_model`, or reuse it, and open it.
+
+    FOUR OUTCOMES, in this order, and the order is what keeps a refusal from costing a build:
+
+    1. the backend declares ANOTHER model than the one asked for -> refused, nothing written;
+    2. the directory's manifest names ANOTHER model -> refused, the index left as it was;
+    3. the index is current for this spec AND this store -> reused, `built: false`;
+    4. anything else (absent, behind the store, another prefix, torn) -> rebuilt and timed.
+
+    Reuse asks the two questions `search` asks — `index_behind_store` off the cheap signal, and
+    `vector_verdict` on the plane's coverage of every chunk's CURRENT text — because a plane
+    reused over a store that moved measures a corpus that is no longer there.
+
+    `command_version` is recorded HERE and not in the index manifest, on purpose and declared:
+    the manifest's `embeddings` block is `VectorSpec`, closed and validated since 03.4, and the
+    embedder contract has no version query. What is recorded is the command that ran and the
+    wire contract it spoke — the two things a re-run needs to reproduce the vectors.
+    """
+    from xbrain.embeddings import SCHEMA_VERSION
+    from xbrain.knowledge.index_build import IndexOptions, build, load_index_inputs
+
+    spec = vectors.build.spec
+    if spec.model != vectors.requested_model:
+        raise EmbeddingModelMismatch(
+            f"se pidió medir `{vectors.requested_model}` y el embedder de `[embeddings].command` "
+            f"declara `{spec.model}`: el informe llevaría el nombre de un modelo que no produjo "
+            "sus vectores. Configura el embedder para servir el modelo pedido."
+        )
+    stored = _stored_model(vectors.index_dir)
+    if stored is not None and stored != vectors.requested_model:
+        raise EmbeddingModelMismatch(
+            f"el índice de evaluación de {vectors.index_dir} declara el modelo `{stored}` en su "
+            f"manifest y se pidió medir `{vectors.requested_model}`: jamás se comparan vectores "
+            "de dos modelos, y reconstruir encima borraría en silencio la medición del otro. "
+            "Usa otro directorio o bórralo a mano."
+        )
+    seconds: float | None = None
+    if not _reusable(vectors, params):
+        started = time.perf_counter()
+        inputs = load_index_inputs(vectors.items_path, vectors.vocab_path, vectors.topics_path)
+        build(
+            vectors.index_dir,
+            inputs,
+            options=IndexOptions(params=params),
+            force=True,
+            vectors=vectors.build,
+        )
+        seconds = round(time.perf_counter() - started, 3)
+    index, plane = _open_plane(vectors, params)
+    command = vectors.command or "(embedder inyectado)"
+    return _VectorRun(
+        index=index,
+        plane=plane,
+        embed_query=vectors.embed_query,
+        embeddings={
+            "model": spec.model,
+            "dimension": spec.dimension,
+            "normalized": spec.normalized,
+            "query_prefix": spec.query_prefix,
+            "passage_prefix": spec.passage_prefix,
+            "command_version": f"{command} · contrato del embedder v{SCHEMA_VERSION}",
+        },
+        indexing={
+            "built": seconds is not None,
+            "seconds": seconds,
+            "vector_chunks": plane.chunk_count,
+            "vector_rows": plane.row_count,
+            "vector_bytes": _plane_bytes(vectors.index_dir),
+        },
+    )
+
+
+def _stored_model(index_dir: Path) -> str | None:
+    """The model an existing evaluation index's manifest declares, or `None` if it declares none.
+
+    An unreadable manifest declares nothing anybody could have measured, so it is rebuilt over
+    rather than refused — the refusal is reserved for a READABLE claim of another model.
+    """
+    from xbrain.knowledge.index_build import load_manifest, manifest_spec
+    from xbrain.knowledge.index_schema import manifest_path
+
+    if not manifest_path(index_dir).exists():
+        return None
+    try:
+        spec = manifest_spec(load_manifest(index_dir))
+    except IndexError_:
+        return None
+    return spec.model if spec is not None else None
+
+
+def _reusable(vectors: VectorEvaluation, params: ChunkerParams) -> bool:
+    """Whether the index on disk answers for THIS spec over THIS store, chunk for chunk."""
+    from xbrain.knowledge.index_build import stored_chunk_texts, vector_verdict
+    from xbrain.knowledge.index_store import open_for_query
+
+    try:
+        index = open_for_query(
+            vectors.index_dir,
+            vectors.items_path,
+            vectors.vocab_path,
+            vectors.topics_path,
+            params=params,
+        )
+    except IndexError_:
+        return False
+    try:
+        if "index_behind_store" in index.degraded:
+            return False
+        verdict = vector_verdict(
+            vectors.index_dir,
+            index.manifest,
+            expected=vectors.build.spec,
+            texts=stored_chunk_texts(index.lexical.connection),
+        )
+        return verdict.usable
+    finally:
+        index.close()
+
+
+def _open_plane(vectors: VectorEvaluation, params: ChunkerParams) -> tuple[OpenIndex, VectorPlane]:
+    from xbrain.knowledge.index_store import open_for_query
+    from xbrain.knowledge.vector_index import load_vector_plane
+
+    index = open_for_query(
+        vectors.index_dir,
+        vectors.items_path,
+        vectors.vocab_path,
+        vectors.topics_path,
+        params=params,
+    )
+    try:
+        return index, load_vector_plane(vectors.index_dir, expected=vectors.build.spec)
+    except BaseException:
+        index.close()
+        raise
+
+
+def _plane_bytes(index_dir: Path) -> int:
+    """The plane's size on disk — BOTH files, read off the filesystem rather than multiplied."""
+    from xbrain.knowledge.vector_index import VECTORS_FILENAME, VECTORS_META_FILENAME
+
+    return sum(
+        (index_dir / name).stat().st_size for name in (VECTORS_FILENAME, VECTORS_META_FILENAME)
+    )
+
+
+def _retriever(
+    index: LexicalIndex, run: _VectorRun | None, strategy: str, depth: int
+) -> Callable[[GoldenCase], Retrieval]:
+    """How one case is retrieved under `strategy`: the lexical owner window, or the fused one."""
+    if run is None:
+
+        def lexical(case: GoldenCase) -> Retrieval:
+            hits, exhausted = _search(index, case, owners=depth)
+            return hits, exhausted, None
+
+        return lexical
+
+    def fused(case: GoldenCase) -> Retrieval:
+        vector, embedding_ms = _embed_query(run, case)
+        hits, exhausted = _fused_hits(run, case.query, vector, strategy, depth)
+        return hits, exhausted, embedding_ms
+
+    return fused
+
+
+def _embed_query(run: _VectorRun, case: GoldenCase) -> tuple[tuple[float, ...], float]:
+    """The query's vector and what embedding it cost, in milliseconds."""
+    started = time.perf_counter()
+    vector = tuple(float(value) for value in run.embed_query(case.query))
+    return vector, (time.perf_counter() - started) * 1000
+
+
+def _fused_hits(
+    run: _VectorRun, query: str, vector: tuple[float, ...], strategy: str, depth: int
+) -> tuple[list[LexicalHit], bool]:
+    """The chunk ranking `search` fuses for `strategy`, and whether its bound cut the owners short.
+
+    `_fused_window` reports a channel that FILLED `FUSED_CHUNK_WINDOW` — on the real corpus the
+    vector channel always does — so «exhausted» here is that AND fewer owners than the depth:
+    a full window that still holds the owners asked for did not cut the list (U-6).
+    """
+    from xbrain.knowledge.search_service import _fuse_hits, _fused_window, _VectorChannel
+
+    channel = _VectorChannel(plane=run.plane, vector=vector, lexical=strategy == "hybrid")
+    window, _excluded, full = _fused_window(run.index, channel, query)
+    hits = [hit for hit, _ in _fuse_hits(window.fuses_lexical, window.lexical, window.vector)]
+    return hits, full and distinct_owners(hits) < depth
+
+
+def _score_cases(
+    cases: Sequence[GoldenCase],
+    strategy: str,
+    ks: tuple[int, ...],
+    depth: int,
+    retrieve: Callable[[GoldenCase], Retrieval],
+    unmeasured: list[dict[str, Any]],
+    timings: dict[str, list[float]],
+) -> list[CaseResult]:
+    """Score every case `strategy` can apply; record the rest as unmeasured, and what each cost."""
+    results: list[CaseResult] = []
+    for case in cases:
+        blocked = unsupported_filters(case.filters, strategy)
+        if blocked:
+            unmeasured.append(
+                {
+                    "id": case.id,
+                    "strata": list(case.strata),
+                    "provenance": case.provenance,
+                    "unsupported_filters": list(blocked),
+                    "reason": (
+                        f"la estrategia `{strategy}` no puede aplicar {list(blocked)}; "
+                        "puntuar el caso sería fabricar un cero (spec §8.6.8)"
+                    ),
+                }
+            )
+            continue
+        started = time.perf_counter()
+        hits, exhausted, embedding_ms = retrieve(case)
+        timings["total"].append((time.perf_counter() - started) * 1000)
+        if embedding_ms is not None:
+            timings["embedding"].append(embedding_ms)
+        results.append(_score(case, hits, ks, depth=depth, depth_exhausted=exhausted))
+    return results
+
+
+def _latency(timings: Mapping[str, list[float]]) -> dict[str, float]:
+    """p50/p95 of the whole query — and, when the query had to be embedded, of each half.
+
+    In production `search --strategy hybrid` pays the embedder on EVERY query, so that cost is
+    part of the latency; it is split out because the two halves move for different reasons (a
+    model and an index), and one blended figure could not say which one got slower.
+    """
+    total = list(timings["total"])
+    latency = _percentiles(total)
+    embedding = list(timings.get("embedding", ()))
+    if embedding:
+        retrieval = [whole - spent for whole, spent in zip(total, embedding, strict=True)]
+        latency |= {f"embedding_{key}": value for key, value in _percentiles(embedding).items()}
+        latency |= {f"retrieval_{key}": value for key, value in _percentiles(retrieval).items()}
+    return latency
+
+
+def _ndcg(ranked: Sequence[str], relevant: set[str], k: int) -> float:
+    """Binary nDCG@k over owners (spec §8.4): gain 1 for a relevant owner, 0 for anything else.
+
+    BINARY because the golden set carries no relevance grades, and grades invented here would
+    be ground truth the evaluation generated for itself (spec §8.3). The ideal ranking puts
+    every relevant owner first, up to `k`.
+    """
+    gain = sum(
+        1.0 / math.log2(position + 1)
+        for position, key in enumerate(ranked[:k], start=1)
+        if key in relevant
+    )
+    ideal = sum(1.0 / math.log2(position + 1) for position in range(1, min(len(relevant), k) + 1))
+    return gain / ideal
+
+
+def compare_reports(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    k: int = DEFAULT_SWEEP_K,
+    exclude: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Spec §8.6 gates 3 and 4, case by case: `candidate` against `baseline` (normally lexical).
+
+    PAIRED, NEVER MEAN AGAINST MEAN. A stratum is compared over the cases BOTH reports measured
+    `recall@k` on — named in `cases` — and every other member is named in `unpaired`. Two means
+    over different populations under one stratum name is the rule-2 defect, and a vector report
+    walks into it first: the filtered cases it cannot measure are the ones lexical scores best.
+
+    A STRATUM WITH NOTHING PAIRED IS REFUSED (TDD 28, B2): `sin cobertura`, listed in
+    `rejected_strata` with its reason, and any gate needing it fails naming it. Never `empata`:
+    two absences are not an equality, and «hybrid no degrada exacto» over zero cases is the
+    vacuous pass rule 11 calls fail-open.
+
+    The verdict orders by `recall@k`, then MRR — the sweep's S-1 criterion — so a candidate that
+    finds the same items and ranks them higher is `mejora`. `passes_gates` is true only when
+    `exacto` is measured and not worse AND every decisive stratum is measured and better. It
+    decides nothing by itself; the published document does, with these numbers beside it.
+    """
+    metric = f"recall@{k}"
+    # EXCLUSIONS ARE AN ARGUMENT, NOT A HAND-EDITED REPORT (Plan 03 §3.3-3.4). A case whose
+    # ground truth no longer verifies on the corpus being measured does not decide; it is
+    # carried into the output by name, with its reason, so the published verdict re-derives.
+    excluded = dict(exclude or {})
+    strata = {
+        name: _compare_stratum(baseline, candidate, name, metric, excluded)
+        for name in (*GUARDRAIL_STRATA, *DECISIVE_STRATA)
+    }
+    rejected = {
+        name: entry["reason"]
+        for name, entry in strata.items()
+        if entry["verdict"] == NO_COVERAGE["coverage"]
+    }
+    reasons = [f"{name}: {reason}" for name, reason in rejected.items()]
+    for name in GUARDRAIL_STRATA:
+        if strata[name]["verdict"] == "empeora":
+            reasons.append(f"{name}: empeora — {_movement(strata[name], metric)}")
+    for name in DECISIVE_STRATA:
+        if strata[name]["verdict"] in {"empata", "empeora"}:
+            reasons.append(
+                f"{name}: no mejora ({strata[name]['verdict']}) — {_movement(strata[name], metric)}"
+            )
+    return {
+        "k": k,
+        "metric": metric,
+        "baseline_strategy": baseline.get("strategy"),
+        "candidate_strategy": candidate.get("strategy"),
+        "excluded": excluded,
+        "strata": strata,
+        "rejected_strata": rejected,
+        "passes_gates": not reasons,
+        "reasons": reasons,
+    }
+
+
+def _compare_stratum(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    stratum: str,
+    metric: str,
+    excluded: Mapping[str, str],
+) -> dict[str, Any]:
+    base = _stratum_metrics(baseline, stratum)
+    cand = _stratum_metrics(candidate, stratum)
+    members = base.keys() | cand.keys()
+    left_out = {case_id: excluded[case_id] for case_id in sorted(members) if case_id in excluded}
+    paired = sorted(
+        case_id
+        for case_id in base.keys() & cand.keys()
+        if case_id not in excluded
+        and base[case_id].get(metric) is not None
+        and cand[case_id].get(metric) is not None
+    )
+    unpaired = sorted(members - set(paired) - set(left_out))
+    entry: dict[str, Any] = {"cases": paired, "unpaired": unpaired, "excluded": left_out}
+    if not paired:
+        named = [*unpaired, *left_out]
+        outside = f" (fuera: {', '.join(named)})" if named else ""
+        return entry | {
+            "verdict": NO_COVERAGE["coverage"],
+            "reason": (
+                "ningún caso con verdad de terreno enumerada medido en las dos estrategias"
+                f"{outside}: sin él no hay comparación, y dos ausencias no son un empate (B2)"
+            ),
+        }
+    means = {
+        side: {
+            metric: round(sum(float(values[c][metric]) for c in paired) / len(paired), 4),
+            "mrr": round(sum(float(values[c].get("mrr") or 0.0) for c in paired) / len(paired), 4),
+        }
+        for side, values in (("baseline", base), ("candidate", cand))
+    }
+    before = (means["baseline"][metric], means["baseline"]["mrr"])
+    after = (means["candidate"][metric], means["candidate"]["mrr"])
+    verdict = "mejora" if after > before else "empeora" if after < before else "empata"
+    per_case = {
+        case_id: {
+            side: {metric: values[case_id][metric], "mrr": values[case_id].get("mrr")}
+            for side, values in (("baseline", base), ("candidate", cand))
+        }
+        for case_id in paired
+    }
+    return entry | means | {"verdict": verdict, "reason": None, "per_case": per_case}
+
+
+def _stratum_metrics(report: Mapping[str, Any], stratum: str) -> dict[str, Mapping[str, Any]]:
+    return {
+        str(case["id"]): case["metrics"]
+        for case in report.get("cases", ())
+        if stratum in case.get("strata", ())
+    }
+
+
+def _movement(entry: Mapping[str, Any], metric: str) -> str:
+    return (
+        f"{metric} {entry['baseline'][metric]} → {entry['candidate'][metric]}, "
+        f"MRR {entry['baseline']['mrr']} → {entry['candidate']['mrr']} "
+        f"sobre {', '.join(entry['cases'])}"
+    )
+
+
+# The axes a fusion sweep may move, and the type each is read as: `RRF_K` is an integer in the
+# formula, the weights are real.
+FUSION_AXES: dict[str, type] = {"rrf_k": int, "w_lexical": float, "w_vector": float}
+
+
+def parse_fusion_sweep(values: Sequence[str]) -> dict[str, list[float]]:
+    """`["rrf_k=10,60 w_vector=0.5,1"]` -> `{"rrf_k": [10, 60], "w_vector": [0.5, 1.0]}`.
+
+    The syntax of `parse_sweep`, and its refusal of an unknown axis: a typo that swept nothing
+    would publish the constants in force as the winner of a sweep that never ran.
+    """
+    grid: dict[str, list[float]] = {}
+    for value in values:
+        for token in value.split():
+            if "=" not in token:
+                raise ValueError(f"Formato de barrido inválido: {token!r}. Usa `clave=v1,v2`.")
+            key, raw = token.split("=", 1)
+            reader = FUSION_AXES.get(key)
+            if reader is None:
+                raise ValueError(
+                    f"Eje de barrido de fusión desconocido: {key!r}. "
+                    f"Válidos: {', '.join(FUSION_AXES)}."
+                )
+            grid[key] = [reader(part) for part in raw.split(",") if part.strip()]
+    _check_fusion_grid(grid)
+    return grid
+
+
+def _check_fusion_grid(grid: Mapping[str, Sequence[float]]) -> None:
+    """Refuse what `fuse` cannot honour, before a single cell is scored."""
+    unknown = sorted(set(grid) - set(FUSION_AXES))
+    if unknown:
+        raise ValueError(f"Ejes de barrido de fusión desconocidos: {unknown}.")
+    for value in grid.get("rrf_k", ()):
+        if value < 1:
+            raise ValueError(
+                f"rrf_k={value} no es válido: RRF divide por RRF_K + rango, y con RRF_K < 1 el "
+                "primer puesto divide por cero o por un número negativo."
+            )
+    for axis in ("w_lexical", "w_vector"):
+        for value in grid.get(axis, ()):
+            if value < 0:
+                raise ValueError(
+                    f"{axis}={value} no es válido: un peso negativo PENALIZA que el canal "
+                    "encuentre un chunk."
+                )
+
+
+@dataclass(frozen=True)
+class FusionRow:
+    """One `(RRF_K, w_lexical, w_vector)` cell and what `hybrid` scored under it."""
+
+    rrf_k: int
+    w_lexical: float
+    w_vector: float
+    recall: float | None
+    mrr: float | None
+    recall_at_1: float | None
+    by_stratum: dict[str, Any]
+    in_force: bool
+
+
+@dataclass(frozen=True)
+class FusionSweepReport:
+    """Every cell, best first; the cell in force in `fusion.py` is always one of them."""
+
+    k: int
+    rows: tuple[FusionRow, ...]
+    limit: int
+    embeddings: dict[str, Any]
+    indexing: dict[str, Any]
+    unmeasured: tuple[str, ...] = ()
+
+    @property
+    def winner(self) -> FusionRow | None:
+        """The top row, and only when it scored — the same guard as `SweepReport.winner`."""
+        if not self.rows:
+            return None
+        top = self.rows[0]
+        return top if top.recall is not None else None
+
+    @property
+    def moves(self) -> bool:
+        """Whether the sweep beat the constants in force — the ONLY case `fusion.py` changes."""
+        winner = self.winner
+        return winner is not None and not winner.in_force
+
+    def to_dict(self) -> dict[str, Any]:
+        winner = self.winner
+        return {
+            "strategy": "hybrid",
+            "k": self.k,
+            "limit": self.limit,
+            "embeddings": self.embeddings,
+            "indexing": self.indexing,
+            "unmeasured": list(self.unmeasured),
+            "winner": (
+                None
+                if winner is None
+                else {
+                    "rrf_k": winner.rrf_k,
+                    "w_lexical": winner.w_lexical,
+                    "w_vector": winner.w_vector,
+                }
+            ),
+            "moves": self.moves,
+            "verdict": _fusion_verdict(self),
+            "rows": [
+                {
+                    "rrf_k": row.rrf_k,
+                    "w_lexical": row.w_lexical,
+                    "w_vector": row.w_vector,
+                    f"recall@{self.k}": row.recall,
+                    "recall@1": row.recall_at_1,
+                    "mrr": row.mrr,
+                    "in_force": row.in_force,
+                    "by_stratum": row.by_stratum,
+                }
+                for row in self.rows
+            ],
+        }
+
+
+def sweep_fusion(
+    cases: Sequence[GoldenCase],
+    corpus: Corpus,
+    vectors: VectorEvaluation,
+    grid: Mapping[str, Sequence[float]],
+    *,
+    k: int = DEFAULT_SWEEP_K,
+    limit: int | None = None,
+    params: ChunkerParams = DEFAULT_CHUNKER_PARAMS,
+) -> FusionSweepReport:
+    """Score `hybrid` at every `(RRF_K, w_lexical, w_vector)` in `grid` (Plan 03 §4.1).
+
+    ONE PLANE AND ONE EMBEDDING PER QUERY, WHATEVER THE GRID. The index is built or reused once
+    and every scored query embedded once; each cell then only re-fuses. Unswept axes hold the
+    values in force, and the cell IN FORCE is always scored — appended when the grid omits it —
+    so «the sweep moves the constants» is always a comparison against a measured current.
+
+    THE CRITERION is the chunker sweep's (S-1): `recall@k`, then MRR; and on a tie the cell in
+    force wins, because a tie does not license an edit (spec §13.15 — a flat result is a
+    result). `corpus` is accepted for symmetry with `evaluate` and names the population; the
+    ranking reads the persisted evaluation index built from the same files.
+    """
+    from xbrain.knowledge import fusion
+
+    _ = corpus
+    _check_fusion_grid(grid)
+    depth = max(limit if limit is not None else k, k)
+    in_force = (fusion.RRF_K, fusion.CHANNEL_WEIGHTS["lexical"], fusion.CHANNEL_WEIGHTS["vector"])
+    run = _open_vector_run(vectors, params=params)
+    try:
+        measured = [case for case in cases if not unsupported_filters(case.filters, "hybrid")]
+        queries = {case.id: _embed_query(run, case)[0] for case in measured}
+        rows = [
+            _fusion_row(run, measured, queries, cell, in_force=in_force, k=k, depth=depth)
+            for cell in _fusion_cells(grid, in_force)
+        ]
+    finally:
+        run.close()
+    rows.sort(
+        key=lambda row: (
+            -(row.recall if row.recall is not None else -1.0),
+            -(row.mrr if row.mrr is not None else -1.0),
+            not row.in_force,
+            row.rrf_k,
+            row.w_lexical,
+            row.w_vector,
+        )
+    )
+    scored = {case.id for case in measured}
+    return FusionSweepReport(
+        k=k,
+        rows=tuple(rows),
+        limit=depth,
+        embeddings=run.embeddings,
+        indexing=run.indexing,
+        unmeasured=tuple(case.id for case in cases if case.id not in scored),
+    )
+
+
+def _fusion_cells(
+    grid: Mapping[str, Sequence[float]], in_force: tuple[int, float, float]
+) -> list[tuple[int, float, float]]:
+    """The cartesian product in the order given, with the cell in force appended if absent."""
+    axes = (
+        grid.get("rrf_k", [in_force[0]]),
+        grid.get("w_lexical", [in_force[1]]),
+        grid.get("w_vector", [in_force[2]]),
+    )
+    cells = [(int(r), float(lex), float(vec)) for r, lex, vec in product(*axes)]
+    if cells and in_force not in cells:
+        cells.append(in_force)
+    return cells
+
+
+def _fusion_row(
+    run: _VectorRun,
+    cases: Sequence[GoldenCase],
+    queries: Mapping[str, tuple[float, ...]],
+    cell: tuple[int, float, float],
+    *,
+    in_force: tuple[int, float, float],
+    k: int,
+    depth: int,
+) -> FusionRow:
+    rrf_k, w_lexical, w_vector = cell
+    with _fusion_constants(rrf_k, w_lexical, w_vector):
+        results = []
+        for case in cases:
+            hits, exhausted = _fused_hits(run, case.query, queries[case.id], "hybrid", depth)
+            results.append(_score(case, hits, (1, k), depth=depth, depth_exhausted=exhausted))
+    # A `None` is an ABSENCE, never a zero — `_measured`'s rule, over results rather than a report.
+    recalls = [value for r in results if (value := r.metrics.get(f"recall@{k}")) is not None]
+    mrrs = [value for r in results if (value := r.metrics.get("mrr")) is not None]
+    firsts = [value for r in results if (value := r.metrics.get("recall@1")) is not None]
+    return FusionRow(
+        rrf_k=rrf_k,
+        w_lexical=w_lexical,
+        w_vector=w_vector,
+        recall=sum(recalls) / len(recalls) if recalls else None,
+        mrr=sum(mrrs) / len(mrrs) if mrrs else None,
+        recall_at_1=sum(firsts) / len(firsts) if firsts else None,
+        by_stratum=_aggregate(results, STRATA, lambda case: case.strata),
+        in_force=cell == in_force,
+    )
+
+
+@contextmanager
+def _fusion_constants(rrf_k: int, w_lexical: float, w_vector: float) -> Iterator[None]:
+    """Set `fusion.RRF_K` and `fusion.CHANNEL_WEIGHTS` for one cell, and put them BACK.
+
+    Module state, deliberately: `fusion` reads both at CALL time precisely so a measured winner
+    takes effect (its docstring), and a parameter added to `fuse` for the sweep's sake would be
+    a second way to choose the constants, one `search` never uses. The restore is a `finally`
+    because the other failure is silent: every later fusion in the process on the last cell's
+    constants.
+    """
+    from xbrain.knowledge import fusion
+
+    saved = (fusion.RRF_K, fusion.CHANNEL_WEIGHTS)
+    fusion.RRF_K = rrf_k
+    fusion.CHANNEL_WEIGHTS = {"lexical": w_lexical, "vector": w_vector}
+    try:
+        yield
+    finally:
+        fusion.RRF_K, fusion.CHANNEL_WEIGHTS = saved
+
+
+def render_fusion_sweep_markdown(report: FusionSweepReport) -> str:
+    """The fusion table, winner first, with the verdict that says whether `fusion.py` moves."""
+    lines = [
+        f"Recuperador: `hybrid` · modelo `{report.embeddings.get('model')}`",
+        f"Profundidad: {report.limit} owners por caso (U-6).",
+        f"Criterio: recall@{report.k}, luego MRR; en empate gana la combinación EN VIGOR "
+        "(spec §13.15: un empate no mueve las constantes).",
+        f"| RRF_K | w_lexical | w_vector | recall@{report.k} | recall@1 | MRR | en vigor |",
+        "|---:|---:|---:|---:|---:|---:|:---:|",
+    ]
+    for row in report.rows:
+        lines.append(
+            f"| {row.rrf_k} | {row.w_lexical} | {row.w_vector} | {_number(row.recall)} "
+            f"| {_number(row.recall_at_1)} | {_number(row.mrr)} | {'sí' if row.in_force else ''} |"
+        )
+    if report.unmeasured:
+        lines += [
+            "",
+            f"No medidos (filtros que el plano no aplica): {', '.join(report.unmeasured)}.",
+        ]
+    lines += ["", _fusion_verdict(report)]
+    return "\n".join(lines)
+
+
+def _fusion_verdict(report: FusionSweepReport) -> str:
+    if not report.rows:
+        return "SIN COMBINACIONES: el barrido no produjo ninguna fila, así que no hay ganador."
+    winner = report.winner
+    if winner is None:
+        return (
+            f"SIN MEDICIÓN: ninguna de las {len(report.rows)} combinaciones pudo puntuarse, así "
+            "que no hay ganador."
+        )
+    label = f"RRF_K={winner.rrf_k}, w_lexical={winner.w_lexical}, w_vector={winner.w_vector}"
+    if not report.moves:
+        return f"El barrido no mueve las constantes: gana la combinación en vigor ({label})."
+    current = next(row for row in report.rows if row.in_force)
+    return (
+        f"El barrido MUEVE las constantes: gana {label} (recall@{report.k} "
+        f"{_number(winner.recall)}, MRR {_number(winner.mrr)}) frente a la combinación en vigor "
+        f"(recall@{report.k} {_number(current.recall)}, MRR {_number(current.mrr)})."
+    )

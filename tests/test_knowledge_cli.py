@@ -302,6 +302,107 @@ def test_eval_with_a_threshold_fails_when_nothing_could_be_measured(
     assert "0" in result.output and "medid" in result.output, result.output
 
 
+def test_eval_refuses_a_vector_strategy_without_naming_the_model(workspace: Path) -> None:
+    """Plan 03 §3.2: a vector measurement is a measurement OF A MODEL. Without the flag there
+    is no model to measure, and answering with lexical numbers under a vector request is the
+    F-2 pretence — so the command stops and names the flag."""
+    for strategy in ("vector", "hybrid"):
+        result = runner.invoke(app, ["eval", "--strategy", strategy])
+        assert result.exit_code != 0, result.output
+        assert "--embeddings-model" in result.output
+
+
+def test_eval_refuses_an_embeddings_model_it_would_not_use(workspace: Path) -> None:
+    """A model named beside `lexical` would sit in a report none of whose numbers it produced.
+
+    First written asserting only the exit code and the flag's name in the output — and it
+    PASSED before the flag existed, on Typer's own «No such option: --embeddings-model». So
+    the refusal is asserted by what it says about the strategy, not by the flag being quoted.
+    """
+    result = runner.invoke(app, ["eval", "--strategy", "lexical", "--embeddings-model", "x/y"])
+    assert result.exit_code != 0
+    assert "No such option" not in result.output, result.output
+    assert "--embeddings-model" in result.output and "lexical" in result.output
+
+
+def _fake_eval_vectors(seen: list[str]):
+    """`cli._eval_vectors` without a subprocess (§13.11): the model named is recorded, and the
+    evaluation it returns runs the fake circle embedder over the workspace's own data."""
+    from tests.test_knowledge_evaluation import _vectors
+
+    def fake(cfg, model: str):
+        seen.append(model)
+        return _vectors(cfg.data_dir, cfg.data_dir / "eval-index", requested=model)
+
+    return fake
+
+
+def test_eval_measures_the_model_it_was_asked_for_and_writes_it_into_the_report(
+    workspace: Path, monkeypatch
+) -> None:
+    """The flag's VALUE reaches the harness and the report file, which is what a reader opens
+    to learn whose numbers these are. Seen red with the flag parsed and never passed on."""
+    from xbrain import cli
+
+    seen: list[str] = []
+    monkeypatch.setattr(cli, "_eval_vectors", _fake_eval_vectors(seen))
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--strategy",
+            "vector",
+            "--embeddings-model",
+            "fake/cli-model",
+            "--report",
+            "data/eval-fake.json",
+            "--json",
+        ],
+    )
+    payload = _json_stdout(result)
+
+    assert seen == ["fake/cli-model"]
+    assert payload["strategy"] == "vector"
+    assert payload["embeddings"]["model"] == "fake/cli-model"
+    on_disk = json.loads((workspace / "data" / "eval-fake.json").read_text(encoding="utf-8"))
+    assert on_disk["embeddings"]["model"] == "fake/cli-model"
+
+
+def test_eval_fusion_sweep_needs_hybrid_and_writes_its_own_report(
+    workspace: Path, monkeypatch
+) -> None:
+    """`--sweep-fusion` sweeps the constants of the FUSION, so it has nothing to sweep under
+    `vector`, which fuses one channel; refused by name. Under `hybrid` it writes its own pair
+    of files, never the ordinary report's."""
+    from xbrain import cli
+
+    monkeypatch.setattr(cli, "_eval_vectors", _fake_eval_vectors([]))
+    refused = runner.invoke(
+        app,
+        ["eval", "--strategy", "vector", "--embeddings-model", "m/x", "--sweep-fusion", "rrf_k=10"],
+    )
+    assert refused.exit_code != 0 and "hybrid" in refused.output
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--strategy",
+            "hybrid",
+            "--embeddings-model",
+            "m/x",
+            "--sweep-fusion",
+            "rrf_k=10,60",
+            "--json",
+        ],
+    )
+    payload = _json_stdout(result)
+    assert {row["rrf_k"] for row in payload["rows"]} == {10, 60}
+    assert (workspace / "data" / "eval-fusion-sweep.json").exists()
+    assert (workspace / "data" / "eval-fusion-sweep.md").exists()
+    assert not (workspace / "data" / "eval-report.json").exists()
+
+
 def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path) -> None:
     """Plan 02 §7 at the command that has to exist for the number to be re-derivable: the
     delivery matrix's row 02.13 lists `M cli.py (--sweep-chunker)` and its outcome is *«el

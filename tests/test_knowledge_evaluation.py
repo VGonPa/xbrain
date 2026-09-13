@@ -322,30 +322,32 @@ def test_the_harness_scores_the_index_the_writer_produces_not_a_second_walk(corp
     assert not (by_source["bookmark"] & by_source["own_tweet"]), "and they are disjoint"
 
 
-def test_the_guardrail_no_longer_depends_on_vector_being_unimplemented(corpus) -> None:
-    """The coupling F-2 named, asserted so it cannot come back silently.
+def test_a_real_vector_backend_reports_the_filter_cases_unmeasured_never_scored(
+    tmp_path: Path, corpus
+) -> None:
+    """The day F-2's guardrail was waiting for, and what it turns out to mean (Plan 03.7).
 
-    `vector` IS declared in the frozen `Strategy` literal, so the day it has a backend it is
-    added to `IMPLEMENTED_STRATEGIES` and this simulates that day. The guardrail above must
-    still hold — it uses an injected stub — and `evaluate(strategy="vector")` must stop
-    reporting the filter cases as unmeasurable, because a real vector backend that declares
-    all eight filters can apply them.
+    The test this replaces SIMULATED a vector backend that pushed all eight filters, and
+    asserted the filter cases would then be scored. The real backend is the opposite: the
+    vector plane has no filter columns, and a filter applied after scoring is not a filter
+    (`search_service.VECTOR_FILTERS_UNSUPPORTED`). So a filtered case under `vector` is the
+    exact population CLAUDE.md names — *a case whose filters a strategy cannot apply is
+    UNMEASURED, never 0.0* — and it must reach `unmeasured`, never the `filtros` mean.
+
+    Seen red by declaring every filter for `vector` in `SUPPORTED_FILTERS`: FX7 is scored and
+    `filtros` publishes a number the vector channel never filtered for.
     """
-    monkeypatch_free = frozenset({"lexical", "vector"})
-    original_implemented = contracts.IMPLEMENTED_STRATEGIES
-    original_filters = dict(evaluation.SUPPORTED_FILTERS)
-    contracts.IMPLEMENTED_STRATEGIES = monkeypatch_free  # type: ignore[misc]
-    evaluation.SUPPORTED_FILTERS["vector"] = frozenset(SearchFilters.model_fields)
-    try:
-        cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
-        payload = evaluate(cases, corpus, strategy="vector").to_dict()
-        assert payload["strategy"] == "vector"
-        assert payload["unmeasured"] == []
-        assert payload["degraded"] == []
-    finally:
-        contracts.IMPLEMENTED_STRATEGIES = original_implemented  # type: ignore[misc]
-        evaluation.SUPPORTED_FILTERS.clear()
-        evaluation.SUPPORTED_FILTERS.update(original_filters)
+    data = _vector_workspace(tmp_path, corpus)
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    payload = evaluate(
+        cases, corpus, strategy="vector", vectors=_vectors(data, tmp_path / "eval-index")
+    ).to_dict()
+
+    assert payload["strategy"] == "vector" and payload["degraded"] == []
+    unmeasured = {entry["id"]: entry for entry in payload["unmeasured"]}
+    assert unmeasured["FX7"]["unsupported_filters"] == ["source"]
+    assert payload["by_stratum"]["filtros"] == NO_COVERAGE
+    assert "FX7" not in {case["id"] for case in payload["cases"]}
 
 
 def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(
@@ -387,12 +389,18 @@ def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(
 def test_every_implemented_strategy_declares_which_filters_it_can_push() -> None:
     """Rule 5: the two tables that must agree are asserted to agree, not hoped to.
 
-    `IMPLEMENTED_STRATEGIES` says which retrievers run; `SUPPORTED_FILTERS` says what each
-    can push into `WHERE`. A strategy implemented without an entry here would fall to
-    `SUPPORTED_FILTERS.get(strategy, frozenset())` and report every filtered case as
-    UNMEASURED — the gap silently reopening under a strategy that works.
+    `IMPLEMENTED_STRATEGIES` says which retrievers run without vectors, and the search
+    service's own vector set says which run with them (Plan 03.5); `SUPPORTED_FILTERS` says
+    what each can push into `WHERE`. A strategy runnable without an entry here would fall to
+    `SUPPORTED_FILTERS.get(strategy, frozenset())` — right today for the vector pair by
+    accident, and wrong the day one of them gains filter columns. Read off `search_service`
+    and not off `evaluation`, so the binding is between two modules rather than one module
+    and itself (rule 1, row 4).
     """
-    assert set(evaluation.SUPPORTED_FILTERS) == set(contracts.IMPLEMENTED_STRATEGIES)
+    from xbrain.knowledge import search_service
+
+    runnable = set(contracts.IMPLEMENTED_STRATEGIES) | set(search_service._VECTOR_STRATEGIES)
+    assert set(evaluation.SUPPORTED_FILTERS) == runnable
 
 
 def test_the_lexical_strategy_now_scores_the_filter_stratum(corpus) -> None:
@@ -1447,3 +1455,687 @@ def test_the_top_row_is_the_winner_only_when_it_actually_scored() -> None:
 
     assert SweepReport(k=10, rows=(unscored, scored)).winner is None
     assert SweepReport(k=10, rows=(scored, unscored)).winner is scored
+
+
+# ---------------------------------------------------------------------------
+# Plan 03.7 — the harness per strategy, and the bake-off's instruments (TDD 22, 23, 28)
+# ---------------------------------------------------------------------------
+#
+# NO TEST HERE TOUCHES A MODEL (criterion §13.11). The embedder is a hash onto the unit
+# circle, as in `test_knowledge_search_hybrid.py`: a query embedded AS a chunk's text finds
+# THAT chunk at cosine 1, which is what lets a test choose, deterministically, a relevant item
+# the vector channel reaches and bm25 cannot. What is asserted is where a number came FROM —
+# the channel that ran, the model that built the plane, the cases a verdict rests on — and
+# never a value of `RRF_K` or of the weights, which this child is the one allowed to move.
+
+NO_OVERLAP_QUERY = "Zzyzxquorumbleflange"
+
+
+def _circle(text: str) -> tuple[float, float]:
+    import math
+
+    angle = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+    angle *= 2 * math.pi
+    return (math.cos(angle), math.sin(angle))
+
+
+class _PassageEmbedder:
+    """The build side: one circle point per text, counting how many texts it was paid for."""
+
+    def __init__(self) -> None:
+        self.texts = 0
+
+    def __call__(self, texts):
+        self.texts += len(texts)
+        return [_circle(text) for text in texts]
+
+
+def _vector_workspace(tmp_path: Path, corpus) -> Path:
+    """The fixture corpus as the three files a persisted index is built from and sealed against."""
+    from xbrain.rubrics import save_vocab
+    from xbrain.store import save_store, save_topic_pages
+
+    data = tmp_path / "data"
+    save_store(corpus.items, data / "items.json")
+    save_vocab(corpus.vocab, data / "vocab.yaml")
+    save_topic_pages(corpus.topic_pages, data / "topics.json")
+    return data
+
+
+def _vectors(
+    data: Path,
+    index_dir: Path,
+    *,
+    requested: str = "fake/model-a",
+    served: str | None = None,
+    queries: dict[str, str] | None = None,
+    passages: _PassageEmbedder | None = None,
+    query_calls: list[str] | None = None,
+    query_delay: float = 0.0,
+):
+    """A `VectorEvaluation` over `data`, with a backend that serves `served` (default: `requested`).
+
+    `queries` maps a query onto the TEXT its vector should land on; an unmapped query lands on
+    its own hash, which matches no chunk.
+    """
+    import time as _time
+
+    from xbrain.knowledge.evaluation import VectorEvaluation
+    from xbrain.knowledge.index_build import VectorBuild
+    from xbrain.knowledge.vector_index import VectorSpec
+
+    spec = VectorSpec(
+        model=served or requested,
+        dimension=2,
+        normalized=True,
+        query_prefix="query: ",
+        passage_prefix="passage: ",
+    )
+    targets = queries or {}
+
+    def embed_query(query: str) -> tuple[float, float]:
+        if query_calls is not None:
+            query_calls.append(query)
+        if query_delay:
+            _time.sleep(query_delay)
+        return _circle(targets.get(query, query))
+
+    return VectorEvaluation(
+        requested_model=requested,
+        build=VectorBuild(spec=spec, embed=passages or _PassageEmbedder()),
+        embed_query=embed_query,
+        index_dir=index_dir,
+        items_path=data / "items.json",
+        vocab_path=data / "vocab.yaml",
+        topics_path=data / "topics.json",
+        command="fake-embedder --offline",
+    )
+
+
+def _chunk_text(corpus, item_id: str) -> str:
+    """The first chunk of `item_id` as the writer stores it — the text the plane embeds."""
+    index, _stats = build_index(corpus)
+    try:
+        row = index.connection.execute(
+            "SELECT text FROM chunks WHERE owner_type = 'item' AND owner_id = ? "
+            "ORDER BY chunk_id LIMIT 1",
+            (item_id,),
+        ).fetchone()
+    finally:
+        index.connection.close()
+    assert row is not None, f"{item_id} has no chunk in the fixture corpus"
+    return str(row[0])
+
+
+def _other_item(corpus, not_this: str) -> str:
+    """Another item that owns at least one chunk."""
+    index, _stats = build_index(corpus)
+    try:
+        row = index.connection.execute(
+            "SELECT owner_id FROM chunks WHERE owner_type = 'item' AND owner_id != ? "
+            "ORDER BY owner_id LIMIT 1",
+            (not_this,),
+        ).fetchone()
+    finally:
+        index.connection.close()
+    assert row is not None
+    return str(row[0])
+
+
+def test_a_vector_evaluation_is_reported_per_stratum_and_provenance_by_the_vector_channel(
+    tmp_path: Path, corpus
+) -> None:
+    """TDD 22 (Plan 03 §7): `eval --strategy vector` reports by stratum and provenance — and
+    the numbers are the VECTOR channel's.
+
+    The second half is what makes the first worth asserting: a report of the right shape
+    produced by bm25 is F-2 again. So the case is one bm25 CANNOT answer — a query with no
+    word in the corpus, embedded onto the relevant item's chunk. Lexically it retrieves
+    nothing (asserted: the precondition); through the plane it is rank 1.
+
+    Seen red with the vector path scoring the lexical index: `recall@1` came back 0.0.
+    """
+    item_id, _query = _some_item(corpus)
+    case = _case(
+        id="NO-OVERLAP", query=NO_OVERLAP_QUERY, strata=("semantico",), relevant_items=(item_id,)
+    )
+    data = _vector_workspace(tmp_path, corpus)
+    vectors = _vectors(
+        data, tmp_path / "eval-index", queries={NO_OVERLAP_QUERY: _chunk_text(corpus, item_id)}
+    )
+
+    lexical = evaluate([case], corpus, ks=(1, 10))
+    assert lexical.cases[0].metrics["recall@1"] == 0.0, "precondition: bm25 cannot reach it"
+
+    payload = evaluate([case], corpus, strategy="vector", ks=(1, 10), vectors=vectors).to_dict()
+
+    assert payload["strategy"] == "vector" and payload["requested_strategy"] == "vector"
+    assert payload["degraded"] == []
+    assert "recall@1" not in payload, "never one global figure"
+    assert payload["by_stratum"]["semantico"]["recall@1"] == 1.0
+    assert payload["by_provenance"]["construido"]["recall@1"] == 1.0
+    assert payload["by_stratum"]["exacto"] == NO_COVERAGE
+
+
+def _unique_token(corpus, item_id: str) -> str:
+    """A word of `item_id`'s first chunk that bm25 finds in NO other owner."""
+    import re as _re
+
+    index, _stats = build_index(corpus)
+    try:
+        for token in _re.findall(r"[A-Za-z]{6,}", _chunk_text(corpus, item_id)):
+            owners = {(hit.owner_type, hit.owner_id) for hit in index.search(token, 200)}
+            if owners == {("item", item_id)}:
+                return token
+    finally:
+        index.connection.close()
+    raise AssertionError(f"{item_id} has no word unique to it in the fixture corpus")
+
+
+def test_hybrid_fuses_both_channels_and_names_itself(tmp_path: Path, corpus, monkeypatch) -> None:
+    """TDD 22 for `hybrid`: the page is the FUSION of both channels, not either one alone.
+
+    Built so the order is decided by arithmetic, not by the fixture: the query is a word only
+    `lexical_item` holds, and its vector lands on `vector_item`'s chunk, which shares no word
+    with it. So `vector_item` scores one channel's rank 1, `1/(K+1)`; `lexical_item` scores
+    that PLUS a vector rank of its own; every other owner scores less than `1/(K+1)`. Under
+    equal weights the fused order is `lexical_item`, `vector_item` for ANY `RRF_K` — while the
+    plane alone puts `vector_item` first, and bm25 alone never reaches it.
+
+    THE PREMISE IS PINNED HERE, not inherited: `RRF_K` and the weights are set by the test,
+    because 03.7 is the child allowed to move the ones in `fusion.py`.
+
+    Seen red by fusing the vector channel alone (`lexical=False`): `vector_item` came first.
+    """
+    from xbrain.knowledge import fusion
+
+    monkeypatch.setattr(fusion, "RRF_K", 60)
+    monkeypatch.setattr(fusion, "CHANNEL_WEIGHTS", {"lexical": 1.0, "vector": 1.0})
+    lexical_item, _query = _some_item(corpus)
+    vector_item = _other_item(corpus, lexical_item)
+    # The precondition — no other owner, `vector_item` included, holds the word — is what
+    # `_unique_token` returns by construction.
+    token = _unique_token(corpus, lexical_item)
+    target = _chunk_text(corpus, vector_item)
+    case = _case(id="FUSED", query=token, strata=("semantico",), relevant_items=(vector_item,))
+    data = _vector_workspace(tmp_path, corpus)
+    vectors = _vectors(data, tmp_path / "eval-index", queries={token: target})
+
+    report = evaluate([case], corpus, strategy="hybrid", ks=(1, 10), vectors=vectors)
+
+    assert report.strategy == "hybrid" and report.degraded == ()
+    assert report.cases[0].retrieved[:2] == (f"item:{lexical_item}", f"item:{vector_item}")
+
+
+def test_a_vector_strategy_names_no_model_it_did_not_measure(corpus) -> None:
+    """A model passed with `lexical` would publish a lexical report beside a model name that
+    produced none of its numbers — refused, like every flag a path cannot honour."""
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    with pytest.raises(ValueError, match="lexical"):
+        evaluate([case], corpus, strategy="lexical", vectors=_vectors(Path("."), Path(".")))
+
+
+def test_the_evaluation_refuses_an_index_whose_manifest_holds_another_model(
+    tmp_path: Path, corpus
+) -> None:
+    """TDD 23 (Plan 03 §7): eval detects and FAILS when the manifest's model is not the one
+    asked for.
+
+    Two models' vectors never share a matrix, and a report headed with model B computed over
+    a plane model A wrote is a number whose label does not describe its instrument (rule 2).
+    Rebuilding silently over it is the other wrong answer: that index is someone's measurement
+    of model A in a directory the operator named. So it refuses, naming BOTH models, and the
+    manifest is left as it was found.
+
+    Seen red with reuse decided on the dimension alone: both fake models are two wide, the
+    plane was reused, and model A's numbers were published as model B's.
+    """
+    from xbrain.knowledge.evaluation import EmbeddingModelMismatch
+    from xbrain.knowledge.index_build import load_manifest, manifest_spec
+
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    data = _vector_workspace(tmp_path, corpus)
+    index_dir = tmp_path / "eval-index"
+    evaluate([case], corpus, strategy="vector", vectors=_vectors(data, index_dir))
+
+    with pytest.raises(EmbeddingModelMismatch, match="fake/model-a") as refused:
+        evaluate(
+            [case],
+            corpus,
+            strategy="vector",
+            vectors=_vectors(data, index_dir, requested="fake/model-b"),
+        )
+
+    assert "fake/model-b" in str(refused.value)
+    spec = manifest_spec(load_manifest(index_dir))
+    assert spec is not None and spec.model == "fake/model-a", "nothing was rebuilt over it"
+
+
+def test_the_evaluation_refuses_a_backend_serving_another_model_before_writing_anything(
+    tmp_path: Path, corpus
+) -> None:
+    """TDD 23, the other door: `--embeddings-model B` answered by a backend that serves A.
+
+    The backend declares its model on every batch and a build seals what it DECLARED, so
+    without this the manifest would say one model and the report another, each internally
+    consistent. Refused before a byte of the index exists.
+    """
+    from xbrain.knowledge.evaluation import EmbeddingModelMismatch
+
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    data = _vector_workspace(tmp_path, corpus)
+    index_dir = tmp_path / "eval-index"
+
+    with pytest.raises(EmbeddingModelMismatch, match="fake/served"):
+        evaluate(
+            [case],
+            corpus,
+            strategy="vector",
+            vectors=_vectors(data, index_dir, requested="fake/asked", served="fake/served"),
+        )
+    assert not index_dir.exists()
+
+
+def test_the_vector_index_is_built_once_timed_sized_and_then_reused(tmp_path: Path, corpus) -> None:
+    """Plan 03 §3.2: full indexing time and the plane's size on disk, per candidate — and
+    `vector` then `hybrid` over the SAME plane, never embedded twice.
+
+    Without the reuse the protocol costs two corpus embeddings per candidate. The counter
+    proves the embedder was not paid again; `built` says which run paid; the size is read off
+    the two files on disk, not off a count someone multiplied.
+    """
+    from xbrain.knowledge.vector_index import VECTORS_FILENAME, VECTORS_META_FILENAME
+
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    data = _vector_workspace(tmp_path, corpus)
+    index_dir = tmp_path / "eval-index"
+    passages = _PassageEmbedder()
+
+    first = evaluate(
+        [case], corpus, strategy="vector", vectors=_vectors(data, index_dir, passages=passages)
+    ).to_dict()
+    paid = passages.texts
+    second = evaluate(
+        [case], corpus, strategy="hybrid", vectors=_vectors(data, index_dir, passages=passages)
+    ).to_dict()
+
+    assert paid > 0 and passages.texts == paid, "the second run re-embedded the corpus"
+    assert first["indexing"]["built"] is True and second["indexing"]["built"] is False
+    assert first["indexing"]["seconds"] > 0 and second["indexing"]["seconds"] is None
+    on_disk = sum(
+        (index_dir / name).stat().st_size for name in (VECTORS_FILENAME, VECTORS_META_FILENAME)
+    )
+    assert first["indexing"]["vector_bytes"] == on_disk == second["indexing"]["vector_bytes"]
+    assert set(first["embeddings"]) == {
+        "model",
+        "dimension",
+        "normalized",
+        "query_prefix",
+        "passage_prefix",
+        "command_version",
+    }
+    assert first["embeddings"]["model"] == "fake/model-a"
+    assert first["embeddings"]["passage_prefix"] == "passage: "
+    assert "fake-embedder --offline" in first["embeddings"]["command_version"]
+
+
+def test_the_vector_index_is_rebuilt_when_the_store_moved_under_it(tmp_path: Path, corpus) -> None:
+    """Reuse is legal only over the store it was built from. The cheap signal moving is the
+    trigger `search` already declares as `index_behind_store`; here it forces a rebuild,
+    because a measurement over a stale plane is a measurement of a corpus that is gone."""
+    import os
+
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    data = _vector_workspace(tmp_path, corpus)
+    index_dir = tmp_path / "eval-index"
+    passages = _PassageEmbedder()
+    evaluate(
+        [case], corpus, strategy="vector", vectors=_vectors(data, index_dir, passages=passages)
+    )
+    paid = passages.texts
+
+    items = data / "items.json"
+    stat = items.stat()
+    os.utime(items, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    again = evaluate(
+        [case], corpus, strategy="vector", vectors=_vectors(data, index_dir, passages=passages)
+    ).to_dict()
+
+    assert again["indexing"]["built"] is True
+    assert passages.texts == 2 * paid
+
+
+def test_a_vector_evaluation_times_the_query_embedding_apart_from_retrieval(
+    tmp_path: Path, corpus
+) -> None:
+    """Spec §8.4's p50/p95 of a QUERY. In production `search` pays the embedder on every query,
+    so that cost belongs in the latency — and is published beside retrieval, never folded in
+    silently, because the two move for different reasons (a model against an index)."""
+    item_id, query = _some_item(corpus)
+    case = _case(id="ONE", query=query, strata=("exacto",), relevant_items=(item_id,))
+    data = _vector_workspace(tmp_path, corpus)
+    latency = evaluate(
+        [case],
+        corpus,
+        strategy="vector",
+        vectors=_vectors(data, tmp_path / "eval-index", query_delay=0.02),
+    ).to_dict()["latency"]
+
+    assert latency["embedding_p50_ms"] >= 20.0
+    assert latency["p50_ms"] >= latency["embedding_p50_ms"]
+    assert {"retrieval_p50_ms", "retrieval_p95_ms", "embedding_p95_ms", "p95_ms"} <= set(latency)
+
+
+def test_ndcg_is_binary_and_published_beside_surface_recall(corpus) -> None:
+    """Spec §8.4 asks for nDCG «when relevance grades exist». The golden set has no grades, so
+    this is BINARY nDCG — a relevant owner gains 1, anything else 0 — which adds what MRR
+    cannot see: the position of EVERY relevant owner, not only the first.
+
+    Checked against an independent computation, with the relevant owner deliberately SECOND,
+    so a scorer that returned 1.0 for «found» goes red.
+    """
+    import math
+
+    retrieved = evaluate([_dominated_case()], corpus, ks=(10,)).cases[0].retrieved
+    owner_type, owner_id = retrieved[1].split(":", 1)
+    relevant = (
+        {"relevant_items": (owner_id,)}
+        if owner_type == "item"
+        else {"relevant_topics": (owner_id,)}
+    )
+    case = _case(id="SECOND", query=OWNER_DOMINATED_QUERY, strata=("enterrado",), **relevant)
+
+    result = evaluate([case], corpus, ks=(10,)).cases[0]
+    assert result.retrieved[1] == retrieved[1], "precondition: the relevant owner is second"
+    assert result.metrics["ndcg@10"] == pytest.approx(1 / math.log2(3))
+
+    header = next(
+        line
+        for line in render_markdown(evaluate([case], corpus, ks=(1, 10))).splitlines()
+        if line.startswith("| bucket |")
+    )
+    assert "nDCG@10" in header and "superficies@10" in header
+
+
+def _synthetic(strategy: str, cases: dict[str, tuple[str, float]], unmeasured=()) -> dict:
+    """A report payload with one metric pair per case — the shape `to_dict()` publishes."""
+    return {
+        "strategy": strategy,
+        "cases": [
+            {
+                "id": case_id,
+                "provenance": "construido",
+                "strata": [stratum],
+                "metrics": {"recall@10": value, "mrr": value},
+            }
+            for case_id, (stratum, value) in cases.items()
+        ],
+        "unmeasured": [{"id": case_id} for case_id in unmeasured],
+    }
+
+
+def test_the_bakeoff_refuses_to_decide_a_stratum_with_no_enumerated_ground_truth(corpus) -> None:
+    """TDD 28 (Plan 03 §7, B2): a stratum whose cases carry no enumerated relevant set is
+    REFUSED by the bake-off — never read as flat, never as «does not degrade».
+
+    `recall@k` over no enumerated owner is 0/0, and the harness already reports it unmeasured
+    per case. What nothing stopped was the COMPARISON reading two unmeasured sides as equal:
+    a decisive stratum with nothing in it would pass «hybrid mejora semántico» vacuously, or
+    block it for no measured reason. So that stratum is `sin cobertura`, listed with its
+    reason, and a gate that needs it cannot pass. The contrast strata are decided with their
+    cases NAMED, so this is not a comparison that refuses everything.
+
+    Seen red with the stratum means compared directly: `semantico` read `empata`.
+    """
+    from xbrain.knowledge.evaluation import compare_reports
+    from xbrain.knowledge.goldenset import RelevantSurface
+    from xbrain.knowledge.surfaces import item_surfaces
+
+    item_id, query = _some_item(corpus)
+    surface = item_surfaces(corpus.items[item_id])[0]
+    only_surfaces = RelevantSurface(
+        owner_type="item", owner_id=item_id, surface_type=surface.surface_type
+    )
+    cases = [
+        _case(
+            id="SEM-SURFACES-ONLY",
+            query=query,
+            strata=("semantico",),
+            relevant_surfaces=(only_surfaces,),
+        ),
+        _case(
+            id="CROSS-ENUMERATED",
+            query=query,
+            strata=("cruzado_idioma",),
+            relevant_items=(item_id,),
+        ),
+        _case(id="EXACT-ENUMERATED", query=query, strata=("exacto",), relevant_items=(item_id,)),
+    ]
+    report = evaluate(cases, corpus, ks=(10,)).to_dict()
+
+    verdict = compare_reports(report, report, k=10)
+
+    assert verdict["strata"]["semantico"]["verdict"] == "sin cobertura"
+    assert "enumerad" in verdict["rejected_strata"]["semantico"]
+    assert verdict["strata"]["exacto"]["cases"] == ["EXACT-ENUMERATED"]
+    assert verdict["strata"]["exacto"]["verdict"] == "empata"
+    assert verdict["strata"]["cruzado_idioma"]["cases"] == ["CROSS-ENUMERATED"]
+    assert verdict["passes_gates"] is False
+    assert any("semantico" in reason for reason in verdict["reasons"])
+
+
+def test_the_gates_pass_only_when_exact_holds_and_both_decisive_strata_improve() -> None:
+    """Spec §8.6.3 and §8.6.4 as one decision, asserted in BOTH directions: a comparison that
+    never passes is as useless as one that always does."""
+    from xbrain.knowledge.evaluation import compare_reports
+
+    lexical = _synthetic(
+        "lexical", {"X": ("exacto", 1.0), "S": ("semantico", 0.0), "C": ("cruzado_idioma", 0.0)}
+    )
+    better = _synthetic(
+        "hybrid", {"X": ("exacto", 1.0), "S": ("semantico", 1.0), "C": ("cruzado_idioma", 1.0)}
+    )
+    breaks_exact = _synthetic(
+        "hybrid", {"X": ("exacto", 0.5), "S": ("semantico", 1.0), "C": ("cruzado_idioma", 1.0)}
+    )
+    flat_cross = _synthetic(
+        "hybrid", {"X": ("exacto", 1.0), "S": ("semantico", 1.0), "C": ("cruzado_idioma", 0.0)}
+    )
+
+    assert compare_reports(lexical, better, k=10)["passes_gates"] is True
+    refused = compare_reports(lexical, breaks_exact, k=10)
+    assert refused["passes_gates"] is False
+    assert refused["strata"]["exacto"]["verdict"] == "empeora"
+    assert any("exacto" in reason for reason in refused["reasons"])
+    flat = compare_reports(lexical, flat_cross, k=10)
+    assert flat["passes_gates"] is False
+    assert any("cruzado_idioma" in reason for reason in flat["reasons"])
+
+
+def test_the_bakeoff_compares_only_cases_measured_on_both_sides_and_names_the_rest() -> None:
+    """A case the candidate could not measure (a filter the plane cannot apply) is not paired:
+    folding the baseline's value in would compare two populations under one stratum name.
+
+    Both shapes of «not measured on one side»: `F` is absent from the candidate's cases, and
+    `N` is present with no `recall@10`. The first version held only `F`, and a comparison that
+    paired every id present on both sides passed it (seen green under that mutation)."""
+    from xbrain.knowledge.evaluation import compare_reports
+
+    lexical = _synthetic(
+        "lexical", {"F": ("semantico", 1.0), "S": ("semantico", 0.0), "N": ("semantico", 1.0)}
+    )
+    candidate = _synthetic("vector", {"S": ("semantico", 1.0)}, unmeasured=("F",))
+    candidate["cases"].append(
+        {
+            "id": "N",
+            "provenance": "construido",
+            "strata": ["semantico"],
+            "metrics": {"recall@10": None, "mrr": None},
+        }
+    )
+
+    stratum = compare_reports(lexical, candidate, k=10)["strata"]["semantico"]
+
+    assert stratum["cases"] == ["S"]
+    assert stratum["unpaired"] == ["F", "N"]
+    assert stratum["baseline"]["recall@10"] == 0.0, "F's or N's 1.0 diluted the baseline"
+    assert stratum["verdict"] == "mejora"
+
+
+def test_the_bakeoff_excludes_a_named_case_with_its_reason_and_never_pairs_it() -> None:
+    """Plan 03 §3.3-3.4: a case whose ground truth no longer verifies on THIS corpus does not
+    decide — and is published by name with the reason, never dropped in silence.
+
+    Measured on the live store the day the bake-off ran, the golden set had drifted under
+    four cases (a fact moved off a re-synthesized topic note, a leak to newer articles, a
+    population that grew). Filtering them out of the report files by hand would make the
+    published verdict impossible to re-derive; the instrument takes the exclusions as an
+    argument and carries them into its output.
+    """
+    from xbrain.knowledge.evaluation import compare_reports
+
+    lexical = _synthetic("lexical", {"S": ("semantico", 0.0), "D": ("semantico", 1.0)})
+    candidate = _synthetic("hybrid", {"S": ("semantico", 1.0), "D": ("semantico", 0.0)})
+
+    verdict = compare_reports(
+        lexical, candidate, k=10, exclude={"D": "la verdad de terreno se movió"}
+    )
+    stratum = verdict["strata"]["semantico"]
+
+    assert stratum["cases"] == ["S"] and stratum["verdict"] == "mejora"
+    assert stratum["excluded"] == {"D": "la verdad de terreno se movió"}
+    assert verdict["excluded"] == {"D": "la verdad de terreno se movió"}
+
+
+def test_parse_fusion_sweep_reads_both_syntaxes_and_refuses_what_fuse_cannot_take() -> None:
+    """Same syntax as `--sweep-chunker`, and the same refusal of a typo — plus the two values
+    `fuse` cannot honour: `RRF_K < 1` divides by zero at rank one, a negative weight PENALISES
+    being found."""
+    from xbrain.knowledge.evaluation import parse_fusion_sweep
+
+    assert parse_fusion_sweep(["rrf_k=10,60 w_vector=0.5,1"]) == {
+        "rrf_k": [10, 60],
+        "w_vector": [0.5, 1.0],
+    }
+    with pytest.raises(ValueError, match="desconocido"):
+        parse_fusion_sweep(["rrf=10"])
+    with pytest.raises(ValueError, match="rrf_k"):
+        parse_fusion_sweep(["rrf_k=0"])
+    with pytest.raises(ValueError, match="w_vector"):
+        parse_fusion_sweep(["w_vector=-1"])
+
+
+def test_the_fusion_sweep_scores_every_cell_over_one_plane_and_one_embedding_per_query(
+    tmp_path: Path, corpus
+) -> None:
+    """Plan 03 §4.1 puts the sweep of `RRF_K` and the weights INSIDE this evaluation, and the
+    delivery cut gives 03.7 the hunk that applies the winner — so the instrument ships, or the
+    published winner cannot be re-derived (rule 2). It must cost ONE plane and ONE query
+    embedding per scored case whatever the grid; otherwise a 12-cell sweep is 12 embeddings.
+    """
+    from xbrain.knowledge.evaluation import sweep_fusion, unsupported_filters
+
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    scored = [case for case in cases if not unsupported_filters(case.filters, "hybrid")]
+    data = _vector_workspace(tmp_path, corpus)
+    passages, calls = _PassageEmbedder(), []
+    report = sweep_fusion(
+        cases,
+        corpus,
+        _vectors(data, tmp_path / "eval-index", passages=passages, query_calls=calls),
+        {"rrf_k": [10, 60], "w_vector": [0.5, 1.0]},
+    )
+
+    assert len(report.rows) == 4
+    assert sorted(calls) == sorted(case.query for case in scored), "one embedding per case"
+    assert passages.texts > 0
+    assert report.to_dict()["rows"][0].keys() >= {
+        "rrf_k",
+        "w_lexical",
+        "w_vector",
+        "recall@10",
+        "mrr",
+    }
+
+
+def test_the_fusion_sweep_reaches_fuse_and_restores_the_constants_even_when_a_cell_fails(
+    tmp_path: Path, corpus, monkeypatch
+) -> None:
+    """Two properties failing in opposite directions. `fusion` reads `RRF_K` and the weights
+    at CALL time, which is what lets a sweep move them — so a sweep that never set them would
+    score every cell alike, and one that forgot to restore them would leave every later fusion
+    in the process running on the last cell's constants.
+
+    Silencing bm25 against silencing the plane must change a ranking (the relevant item is the
+    plane's answer and not bm25's), and after a cell RAISES the module holds what it held.
+    """
+    from xbrain.knowledge import fusion, search_service
+    from xbrain.knowledge.evaluation import sweep_fusion
+
+    before = (fusion.RRF_K, dict(fusion.CHANNEL_WEIGHTS))
+    lexical_item, lexical_query = _some_item(corpus)
+    vector_item = _other_item(corpus, lexical_item)
+    case = _case(
+        id="SPLIT", query=lexical_query, strata=("semantico",), relevant_items=(vector_item,)
+    )
+    data = _vector_workspace(tmp_path, corpus)
+    vectors = _vectors(
+        data, tmp_path / "eval-index", queries={lexical_query: _chunk_text(corpus, vector_item)}
+    )
+
+    report = sweep_fusion(
+        [case], corpus, vectors, {"w_lexical": [0.0, 1.0], "w_vector": [0.0, 1.0]}
+    )
+    cells = {(row.w_lexical, row.w_vector): row.recall_at_1 for row in report.rows}
+    assert cells[(0.0, 1.0)] == 1.0, "only the plane: its answer is first"
+    assert cells[(1.0, 0.0)] == 0.0, "only bm25: the plane's answer is not first"
+    assert (fusion.RRF_K, dict(fusion.CHANNEL_WEIGHTS)) == before
+
+    real = search_service.fuse
+    seen: list[int] = []
+
+    def failing(rankings):
+        seen.append(fusion.RRF_K)
+        if len(seen) > 1:
+            raise RuntimeError("cell failed")
+        return real(rankings)
+
+    monkeypatch.setattr(search_service, "fuse", failing)
+    with pytest.raises(RuntimeError, match="cell failed"):
+        sweep_fusion([case], corpus, vectors, {"rrf_k": [7, 9]})
+    assert seen == [7, 9], "the constant reached `fuse` in each cell"
+    assert (fusion.RRF_K, dict(fusion.CHANNEL_WEIGHTS)) == before
+
+
+def test_a_flat_fusion_sweep_keeps_the_constants_in_force(tmp_path: Path, corpus) -> None:
+    """Spec §13.15: a flat result is a RESULT. When every cell scores alike, the winner is the
+    cell already in `fusion.py`, and the verdict says the sweep does not move it — so the
+    hunk this child may apply to `fusion.py` is never applied on a tie.
+
+    Flat BY CONSTRUCTION, not by luck of the fixture: the query has no word in the corpus, so
+    bm25 contributes nothing and a one-channel RRF is monotone in that channel's rank — every
+    `RRF_K` produces the same order."""
+    from xbrain.knowledge import fusion
+    from xbrain.knowledge.evaluation import render_fusion_sweep_markdown, sweep_fusion
+
+    item_id, _query = _some_item(corpus)
+    case = _case(
+        id="FLAT", query=NO_OVERLAP_QUERY, strata=("semantico",), relevant_items=(item_id,)
+    )
+    data = _vector_workspace(tmp_path, corpus)
+    vectors = _vectors(
+        data, tmp_path / "eval-index", queries={NO_OVERLAP_QUERY: _chunk_text(corpus, item_id)}
+    )
+
+    report = sweep_fusion(
+        [case], corpus, vectors, {"rrf_k": [fusion.RRF_K + 1, fusion.RRF_K, fusion.RRF_K - 1]}
+    )
+
+    assert report.winner is not None and report.winner.rrf_k == fusion.RRF_K
+    assert report.moves is False
+    assert "no mueve" in render_fusion_sweep_markdown(report)
