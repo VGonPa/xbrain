@@ -385,14 +385,63 @@ def test_search_hybrid_graph_con_indice_por_detras_del_store_degrada_por_la_puer
     with pytest.raises(ValueError, match="index_behind_store"):
         graph_expand(["item:k03"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS)
 
+    hybrid = search_service.search("export", context, limit=2, strategy="hybrid")
     graph = search_service.search(
         "export", context, limit=2, strategy="hybrid_graph", graph_enabled=True
     )
 
-    # Responde lo que corrió — léxico — con la causa ya declarada por el índice, y sin `graph`.
-    assert graph.strategy == "lexical"
-    assert graph.index.degraded == lexical.index.degraded
-    assert graph.results == lexical.results
+    # Sin grafo, lo que queda de `hybrid_graph` ES `hybrid` (Plan 04 §3.1, §8): responde lo que
+    # `hybrid` responde en el mismo estado — aquí léxico, porque no hay embedder — con las mismas
+    # causas declaradas, y sin `graph`.
+    assert graph.strategy == hybrid.strategy == "lexical"
+    assert graph.index.degraded == hybrid.index.degraded
+    assert {"index_behind_store", search_service.EMBEDDINGS_NOT_CONFIGURED} <= set(
+        graph.index.degraded
+    )
+    assert graph.results == hybrid.results
+    assert not [m for r in graph.results for m in r.matches if "graph" in m.matched_by]
+
+
+def test_search_hybrid_graph_con_indice_por_detras_del_store_y_plano_responde_como_hybrid(
+    tmp_path: Path,
+) -> None:
+    # Con el índice por detrás del store el grafo no corre (`graph_expand` lo rechaza), y lo que
+    # queda de `hybrid_graph` sin grafo ES `hybrid` (Plan 04 §3.1). §8 lo dice fila a fila: «grafo
+    # viejo → `hybrid_graph` degrada a `hybrid` declarándolo». La puerta devolvía `lexical`: la
+    # misma causa bajaba DOS niveles donde `hybrid` baja cero, y tiraba un canal vectorial que podía
+    # correr sin llamar siquiera al embedder.
+    corpus = _vector_corpus()
+    data = vector_fixture._data(tmp_path, corpus, with_plane=True)
+    embedder = vector_fixture.QueryEmbedder(vector_fixture._pick(data, contains_query=False)[1])
+    context = vector_fixture._context(data, corpus, embedder)
+    items = data / "items.json"
+    items.write_text(items.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    query = vector_fixture.QUERY
+
+    # La fixture es lo que dice ser (regla 1): el índice va por detrás, el grafo lo rechaza, y
+    # `hybrid` en ESE estado sigue corriendo su canal vectorial.
+    hybrid = search_service.search(query, context, limit=50, strategy="hybrid")
+    assert "index_behind_store" in hybrid.index.degraded
+    assert hybrid.strategy == "hybrid"
+    assert embedder.calls == [query]
+    assert [m for r in hybrid.results for m in r.matches if "vector" in m.matched_by]
+    with pytest.raises(ValueError, match="index_behind_store"):
+        graph_expand(
+            [f"item:{hybrid.results[0].item_id}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS
+        )
+
+    embedder.calls.clear()
+    graph = search_service.search(
+        query, context, limit=50, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    # Responde lo que corrió — `hybrid`, con su canal vectorial — y declara lo mismo que `hybrid`.
+    assert graph.strategy == "hybrid"
+    assert embedder.calls == [query]
+    assert graph.index.degraded == hybrid.index.degraded
+    assert graph.results == hybrid.results
+    # Y ningún match dice `graph`: el grafo no corrió.
+    assert not [m for r in graph.results for m in r.matches if "graph" in m.matched_by]
 
 
 def test_search_hybrid_graph_sirve_graph_en_matched_by_del_item_elevado(tmp_path: Path) -> None:

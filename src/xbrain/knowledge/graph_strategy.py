@@ -19,9 +19,11 @@ the graph re-ranks the lexical ranking and `degraded` names the cause. The graph
 ITEM level over the rank the base strategy served (`search_service._graph_order`), so without a
 neighbour the page is exactly that strategy's.
 
-**An index behind the store does not run the graph.** `search` answers `lexical` with the index's
-own `index_behind_store` declared (`search_service._resolve_channel`), the one door every strategy
-degrades through; `graph_expand` keeps refusing such an index, as its own guard.
+**An index behind the store does not run the graph.** `search` answers what `hybrid` answers in
+that state — `hybrid` itself, or `lexical` naming why the vector channel cannot run — with the
+index's own `index_behind_store` declared (`search_service._resolve_channel`, the one door every
+strategy degrades through; Plan 04 §8: «degrada a `hybrid` declarándolo»). `graph_expand` keeps
+refusing such an index, as its own guard.
 """
 
 from __future__ import annotations

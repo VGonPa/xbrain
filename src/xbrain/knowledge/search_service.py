@@ -526,7 +526,9 @@ def _resolve_channel(
     name `hybrid_graph` and DECLARES the same cause `hybrid` would (`embeddings_not_configured`,
     `embedder_unavailable`, `vector_filters_unsupported`, the manifest's `no_embeddings`) —
     answering `lexical` would hide a graph that re-ordered the page, and answering in silence is
-    the defect this closes.
+    the defect this closes. With the index behind the store the graph cannot run at all, and the
+    door resolves `hybrid` — what the strategy is without its graph (Plan 04 §3.1, §8) — so one
+    cause degrades `hybrid` and `hybrid_graph` to the same answer.
 
     THE LINE THAT IS NOT CROSSED (Plan 03 §5, spec §9.3): the response names `vector` or
     `hybrid` only when this returns a channel — a plane the manifest declares, loaded under the
@@ -550,10 +552,13 @@ def _resolve_channel(
     graph_runs = graph_strategy.graph_channel_runs(requested, enabled=enabled)
     if graph_runs and "index_behind_store" in index.degraded:
         # The graph does not run over a graph that may not be the corpus's (Plan 04,
-        # «Degradaciones»), and `graph_expand` would refuse it anyway — degrading HERE, at
-        # the one door, is what keeps `search` from raising where every other strategy
-        # declares. The index's own `index_behind_store` already names the cause.
-        return FALLBACK_STRATEGY, (), None
+        # «Degradaciones»), and `graph_expand` would refuse it anyway — deciding HERE, at the
+        # one door, is what keeps `search` from raising where every other strategy declares.
+        # What `hybrid_graph` has left without its graph IS `hybrid` (§3.1), and §8 names that
+        # fallback: «degrada a `hybrid` declarándolo». So the door goes on as `hybrid` — the
+        # vector channel still opens, or names why it cannot — instead of dropping to `lexical`
+        # over a cause `hybrid` does not degrade for. `index_behind_store` is the index's own.
+        requested, graph_runs = "hybrid", False
     if requested not in _VECTOR_STRATEGIES or (
         requested == graph_strategy.GRAPH_STRATEGY and not graph_runs
     ):
