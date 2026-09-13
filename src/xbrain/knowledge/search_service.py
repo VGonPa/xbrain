@@ -51,7 +51,7 @@ froze on purpose.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from xbrain import embeddings
@@ -66,7 +66,7 @@ from xbrain.knowledge.contracts import (
     Strategy,
     resolve_strategy,
 )
-from xbrain.knowledge.fusion import FusedChunk, fuse
+from xbrain.knowledge.fusion import _CHANNEL_ORDER, FusedChunk, fuse
 from xbrain.knowledge.index_build import load_manifest, manifest_spec, stored_chunk_texts
 from xbrain.knowledge.index_schema import REBUILD_ADVICE, IndexIncompatibleError
 from xbrain.knowledge.index_store import (
@@ -97,8 +97,10 @@ from xbrain.knowledge.vector_index import (
 )
 from xbrain.models import Item, Topic, TopicPage
 
-# The strategies that need the vector channel. `hybrid_graph` is Plan 04's and keeps degrading.
-_VECTOR_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid"})
+# The strategies that need the vector channel. `hybrid_graph` is in it because Plan 04 §3.1 says
+# «se ejecuta `hybrid`»: left out, its channel was never opened, the graph re-ranked a purely
+# lexical ranking, and a response named `hybrid_graph` with no vector and `degraded` empty.
+_VECTOR_STRATEGIES: frozenset[str] = frozenset({"vector", "hybrid", "hybrid_graph"})
 
 # Declared when a vector strategy is asked for WITH filters. The plane has no filter columns,
 # and a filter applied after scoring is not a filter (`VectorPlane.search`), so the vector
@@ -351,19 +353,22 @@ def search(
         )
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
+        graph_runs = executed == "hybrid_graph"
+        needed = max(beyond, GRAPH_CANDIDATE_HORIZON) if graph_runs else beyond
         fused_window: _FusedWindow | None = None
         graph_channels: Mapping[str, tuple[Channel, ...]] = {}
         if channel is None:
-            needed = max(beyond, GRAPH_CANDIDATE_HORIZON) if executed == "hybrid_graph" else beyond
             ordered, excluded, exhausted = _materialise(
                 index, query, filters, context, needed=needed
             )
-            if executed == "hybrid_graph":
-                ordered, graph_channels = _graph_order(ordered, context)
         else:
             ordered, excluded, exhausted, fused_window = _materialise_fused(
-                index, channel, query, context, needed=beyond
+                index, channel, query, context, needed=needed
             )
+        # The graph re-ranks WHICHEVER ranking ran — `hybrid`'s fused one when the vector channel
+        # opened, `lexical`'s when it could not (and `_resolve_channel` declared why).
+        if graph_runs:
+            ordered, graph_channels = _graph_order(ordered, context)
         _refuse_cursor_past_the_ranking(cursor, offset, len(ordered))
         window = ordered[offset : offset + limit]
         page: list[_Settled]
@@ -377,7 +382,14 @@ def search(
                 for item_id, hits in lexical_page
             ]
         else:
-            page = _settle_fused(context, window, fused_window)
+            page = [
+                (
+                    item_id,
+                    hits,
+                    _graph_fused_explanations(explained, graph_channels.get(item_id, ())),
+                )
+                for item_id, hits, explained in _settle_fused(context, window, fused_window)
+            ]
         excluded |= evidence_excluded
         corrupt_chunks_excluded = len(excluded)
         results = tuple(
@@ -406,7 +418,21 @@ def search(
 def _graph_order(
     ordered: list[tuple[str, list[LexicalHit]]], context: QueryContext
 ) -> tuple[list[tuple[str, list[LexicalHit]]], dict[str, tuple[Channel, ...]]]:
-    """The lexical ranking re-ordered by `rank_with_graph`, and each item's `matched_by`.
+    """The strategy's owner ranking re-ordered by `rank_with_graph`, and each item's `matched_by`.
+
+    THE BASE RANKING ENTERS AS ONE RANKING — the owner order of what ran, `hybrid`'s fused order or
+    `lexical`'s — so the graph's RRF term is added over the rank that strategy already served, and
+    with no neighbour the page IS that strategy's page (Plan 04 §3 measures the delta against
+    `hybrid`; a re-fusion at item level would change the base too, and measure two changes as one).
+    Its `lexical` key only selects the base term's weight: on the fused path the channels a match
+    NAMES come from the window it was scored in (`_graph_fused_explanations`), never from that key.
+
+    DECISION LEFT EXPLICIT — THE RANKING IS NOT WIDENED. The graph re-orders candidates a channel
+    already scored inside its window (`FUSED_CHUNK_WINDOW` per channel, `GRAPH_CANDIDATE_HORIZON`
+    owners). Plan 04 §3.3 also describes re-running both scorers restricted to `item_id IN
+    (candidatos ∪ expandidos)` with no `LIMIT`, which would reach a neighbour past that window; that
+    is NOT done here, so such a neighbour is not rescored and does not enter. Whether to widen is a
+    decision for 04.5 with the cost measured, not a side effect of this fix.
 
     The graph ADMITS into the page a lexical candidate from past it — that is what
     `GRAPH_CANDIDATE_HORIZON` exists for — and never admits one that no channel scored.
@@ -457,6 +483,26 @@ def _graph_explanations(
     }
 
 
+def _graph_fused_explanations(
+    explanations: Mapping[str, FusedChunk], matched_by: tuple[Channel, ...]
+) -> Mapping[str, FusedChunk]:
+    """Each fused match's explanation, with `graph` ADDED when the graph reached its item.
+
+    Each chunk keeps the channels that found it in the window — `lexical`, `vector` or both — with
+    their ranks and RRF score, and `graph` joins in the contract's order. The item's channels are
+    never copied onto every chunk: a chunk only the vector channel found must not say `lexical`.
+    """
+    if "graph" not in matched_by:
+        return explanations
+    return {
+        chunk_id: replace(
+            fused,
+            matched_by=tuple(ch for ch in _CHANNEL_ORDER if ch in {*fused.matched_by, "graph"}),
+        )
+        for chunk_id, fused in explanations.items()
+    }
+
+
 def _resolve_channel(
     query: str,
     requested: Strategy,
@@ -471,7 +517,13 @@ def _resolve_channel(
 
     `hybrid_graph` RUNS only when `graph_channel_runs` says so — asked for by name AND switched
     on, the switch defaulting to `GRAPH_ENABLED_BY_DEFAULT` (off). Switched off it keeps
-    `resolve_strategy`'s `hybrid_graph_not_implemented`: one door decides, not two.
+    `resolve_strategy`'s `hybrid_graph_not_implemented`: one door decides, not two. Switched on it
+    opens the vector channel through THIS door exactly as `hybrid` does (Plan 04 §3.1). When that
+    channel cannot run, the graph still runs over the lexical ranking, so the response keeps the
+    name `hybrid_graph` and DECLARES the same cause `hybrid` would (`embeddings_not_configured`,
+    `embedder_unavailable`, `vector_filters_unsupported`, the manifest's `no_embeddings`) —
+    answering `lexical` would hide a graph that re-ordered the page, and answering in silence is
+    the defect this closes.
 
     THE LINE THAT IS NOT CROSSED (Plan 03 §5, spec §9.3): the response names `vector` or
     `hybrid` only when this returns a channel — a plane the manifest declares, loaded under the
@@ -492,26 +544,30 @@ def _resolve_channel(
     from xbrain.knowledge import graph_strategy
 
     enabled = graph_strategy.GRAPH_ENABLED_BY_DEFAULT if graph_enabled is None else graph_enabled
-    if graph_strategy.graph_channel_runs(requested, enabled=enabled):
-        if "index_behind_store" in index.degraded:
-            # The graph does not run over a graph that may not be the corpus's (Plan 04,
-            # «Degradaciones»), and `graph_expand` would refuse it anyway — degrading HERE, at
-            # the one door, is what keeps `search` from raising where every other strategy
-            # declares. The index's own `index_behind_store` already names the cause.
-            return FALLBACK_STRATEGY, (), None
-        return requested, (), None
-    if requested not in _VECTOR_STRATEGIES:
+    graph_runs = graph_strategy.graph_channel_runs(requested, enabled=enabled)
+    if graph_runs and "index_behind_store" in index.degraded:
+        # The graph does not run over a graph that may not be the corpus's (Plan 04,
+        # «Degradaciones»), and `graph_expand` would refuse it anyway — degrading HERE, at
+        # the one door, is what keeps `search` from raising where every other strategy
+        # declares. The index's own `index_behind_store` already names the cause.
+        return FALLBACK_STRATEGY, (), None
+    if requested not in _VECTOR_STRATEGIES or (
+        requested == graph_strategy.GRAPH_STRATEGY and not graph_runs
+    ):
         return (*lexical_resolution, None)
+    # What answers when the vector channel cannot run: `hybrid` has only `lexical` left, while
+    # `hybrid_graph` still runs its graph over the lexical ranking and names the cause.
+    fallback: Strategy = requested if graph_runs else FALLBACK_STRATEGY
     spec = manifest_spec(index.manifest)
     if requested == "vector" and (spec is None or context.embed_query is None):
         raise VectorStrategyUnavailable(_vector_unavailable_message(no_plane=spec is None))
     if context.embed_query is None:
-        return FALLBACK_STRATEGY, (EMBEDDINGS_NOT_CONFIGURED,), None
+        return fallback, (EMBEDDINGS_NOT_CONFIGURED,), None
     if spec is None:
         # The manifest's own `no_embeddings` already names the cause; saying it twice adds noise.
-        return FALLBACK_STRATEGY, (), None
+        return fallback, (), None
     if filters != SearchFilters():
-        return FALLBACK_STRATEGY, (VECTOR_FILTERS_UNSUPPORTED,), None
+        return fallback, (VECTOR_FILTERS_UNSUPPORTED,), None
     plane = load_vector_plane(context.index_dir, expected=spec)
     try:
         behind = _plane_behind(index, plane)
@@ -520,12 +576,12 @@ def _resolve_channel(
         plane.close()
         if requested == "vector":
             raise
-        return FALLBACK_STRATEGY, (EMBEDDER_UNAVAILABLE,), None
+        return fallback, (EMBEDDER_UNAVAILABLE,), None
     except BaseException:
         plane.close()
         raise
     degradation = (VECTOR_PLANE_BEHIND,) if behind else ()
-    channel = _VectorChannel(plane=plane, vector=vector, lexical=requested == "hybrid")
+    channel = _VectorChannel(plane=plane, vector=vector, lexical=requested != "vector")
     return requested, degradation, channel
 
 

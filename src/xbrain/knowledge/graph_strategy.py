@@ -8,15 +8,16 @@ turned off cannot be measured against the ranking it claims to improve.
 result: co-occurrence in the corpus says two items share topics, not that the second answers the
 query (spec §6.4). So the graph can lift a candidate a channel found, and cannot conjure one.
 
-**It rides the LEXICAL channel only, and that is a decision, not an omission.** Plan 04 §3.1 says
-«se ejecuta `hybrid`», and it was written when Plan 03 was expected to promote `hybrid`. It did
-not: the bake-off is incomplete, criterion §13.8 is NOT MET and `lexical` is still the default
-(`docs/embeddings-bakeoff.md`). Spec §5.7 promotes `hybrid_graph` only against what the default
-does, so the delta that rule asks for is the graph's over `lexical`; grafting the graph onto an
-unpromoted vector channel would measure two changes as one. The fused path also ranks CHUNKS by
-RRF inside a fixed window while `rank_with_graph` fuses ITEM rankings, and which level the graph
-term joins is a design the Plan does not fix. So a `hybrid_graph` match never carries `vector`
-and its `vector_rank` is `null` — the explanation says what ran.
+**It runs `hybrid` underneath, as Plan 04 §3.1 says («se ejecuta `hybrid`»).** An earlier version
+rode the lexical channel only, as a declared decision, and that turned out to be the defect: with
+the plane and the embedder available the embedder was never called, and the response still named
+`hybrid_graph` with `degraded` empty — naming a strategy whose vector channel did not run, the
+line Plan 03 §5 draws. Now `search_service._resolve_channel` opens the vector channel for
+`hybrid_graph` through the same door as `hybrid`, and the graph re-ranks the fused owner ranking;
+a match names `vector` only when the vector channel found its chunk. When that channel cannot run
+the graph re-ranks the lexical ranking and `degraded` names the cause. The graph term joins at
+ITEM level over the rank the base strategy served (`search_service._graph_order`), so without a
+neighbour the page is exactly that strategy's.
 
 **An index behind the store does not run the graph.** `search` answers `lexical` with the index's
 own `index_behind_store` declared (`search_service._resolve_channel`), the one door every strategy

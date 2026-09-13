@@ -16,6 +16,7 @@ from typing import cast, get_args
 
 import pytest
 
+from tests import test_knowledge_search_hybrid as vector_fixture
 from tests.test_knowledge_search_service import FIXTURES, _build, _context, _persist
 from xbrain.knowledge import fusion, graph_strategy, search_service
 from xbrain.knowledge.contracts import GraphExpansionResponse, GraphNode, Strategy
@@ -450,3 +451,105 @@ def test_search_hybrid_graph_admite_un_vecino_que_cae_fuera_de_la_ventana_de_la_
 
     assert graph.strategy == "hybrid_graph"
     assert [r.item_id for r in graph.results] == ["k03"]
+
+
+def _vector_corpus() -> tuple[dict[str, Item], list[Topic], dict[str, TopicPage]]:
+    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
+    return (
+        {k: Item.model_validate(v) for k, v in raw["items"].items()},
+        [Topic.model_validate(v) for v in raw["vocab"].values()],
+        {k: TopicPage.model_validate(v) for k, v in raw["topics"].items()},
+    )
+
+
+def test_search_hybrid_graph_con_plano_vectorial_ejecuta_hybrid_y_el_grafo_sobre_ambos_canales(
+    tmp_path: Path,
+) -> None:
+    # Plan 04 §3.1-§3.3: `hybrid_graph` EJECUTA `hybrid` y el grafo reordena candidatos puntuados por
+    # léxico Y vector. Con el plano y el embedder DISPONIBLES, `search` corría solo léxico, no llamaba
+    # al embedder y dejaba `degraded` vacío: una respuesta que se llama hybrid_graph sin su vector.
+    corpus = _vector_corpus()
+    data = vector_fixture._data(tmp_path, corpus, with_plane=True)
+    target, text = vector_fixture._pick(data, contains_query=False)
+    embedder = vector_fixture.QueryEmbedder(text)
+    context = vector_fixture._context(data, corpus, embedder)
+    query = vector_fixture.QUERY
+
+    # La fixture es lo que dice ser (regla 1): `hybrid` corre el vector, `target` es un chunk que
+    # SOLO el vector encuentra, y hay vecinos de la cabeza de `hybrid` que el vector trajo.
+    hybrid = search_service.search(query, context, strategy="hybrid", limit=50)
+    assert hybrid.strategy == "hybrid"
+    assert embedder.calls == [query]
+    hybrid_matches = {m.chunk_id: m for r in hybrid.results for m in r.matches}
+    assert hybrid_matches[target].matched_by == ("vector",)
+    reached = graph_expand(
+        [f"item:{hybrid.results[0].item_id}"], context, max_hops=graph_strategy.GRAPH_MAX_HOPS
+    )
+    neighbours = {
+        node.node_id.removeprefix("item:")
+        for node in reached.nodes
+        if node.node_type == "item" and node.node_id not in reached.seeds
+    }
+    vector_found = {
+        r.item_id for r in hybrid.results if any("vector" in m.matched_by for m in r.matches)
+    }
+    assert neighbours & vector_found
+
+    embedder.calls.clear()
+    graph = search_service.search(
+        query, context, limit=50, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    # 1. el canal vectorial CORRIÓ: el embedder se llamó, y nada se declara degradado por su causa.
+    assert embedder.calls == [query]
+    assert graph.strategy == "hybrid_graph"
+    assert not {
+        search_service.EMBEDDINGS_NOT_CONFIGURED,
+        search_service.EMBEDDER_UNAVAILABLE,
+        "no_embeddings",
+    } & set(graph.index.degraded)
+    served = {m.chunk_id: m for r in graph.results for m in r.matches}
+    assert served[target].matched_by == ("vector",)
+    assert served[target].vector_rank is not None
+    # 2. un vecino que el vector trajo lleva `vector` Y `graph`, junto a `lexical` si también lo
+    # trajo, en el orden del contrato que fija fusion — medido contra el chunk que sirvió `hybrid`.
+    lifted = [
+        (match, hybrid_matches[match.chunk_id])
+        for r in graph.results
+        if r.item_id in neighbours & vector_found
+        for match in r.matches
+    ]
+    assert lifted
+    for match, before in lifted:
+        channels = {*before.matched_by, "graph"}
+        assert match.matched_by == tuple(c for c in fusion._CHANNEL_ORDER if c in channels)
+    assert any({"vector", "graph"} <= set(match.matched_by) for match, _ in lifted)
+
+
+@pytest.mark.parametrize(
+    ("with_plane", "with_embedder", "cause"),
+    [
+        (True, False, search_service.EMBEDDINGS_NOT_CONFIGURED),
+        (False, True, "no_embeddings"),
+    ],
+)
+def test_search_hybrid_graph_sin_canal_vectorial_lo_declara_y_no_finge_vector(
+    tmp_path: Path, with_plane: bool, with_embedder: bool, cause: str
+) -> None:
+    # Si el vector NO puede correr, `hybrid_graph` no calla: `degraded` NOMBRA la causa, por la
+    # misma puerta que `hybrid`, y ningún match dice `vector`.
+    corpus = _vector_corpus()
+    data = vector_fixture._data(tmp_path, corpus, with_plane=with_plane)
+    passage = vector_fixture._pick(data, contains_query=False)[1]
+    embedder = vector_fixture.QueryEmbedder(passage) if with_embedder else None
+    context = vector_fixture._context(data, corpus, embedder)
+
+    graph = search_service.search(
+        vector_fixture.QUERY, context, limit=50, strategy="hybrid_graph", graph_enabled=True
+    )
+
+    assert cause in graph.index.degraded
+    assert graph.results
+    assert not [m for r in graph.results for m in r.matches if "vector" in m.matched_by]
+    if embedder is not None:
+        assert embedder.calls == []
