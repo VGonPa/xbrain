@@ -135,3 +135,24 @@ def test_edges_carry_method_weights_support_and_input_fingerprints() -> None:
     outside = {**_KNOWN, "3": _item("3", primary="a", topics=["z"])}
     still = _co_occurrence(build_graph_edges(outside))[("topic:a", "topic:b")]
     assert still.input_fingerprints == a_b.input_fingerprints
+
+
+def test_truncated_supporting_item_ids_still_declare_the_total() -> None:
+    # `p` and `q` share all three items; the cap keeps only two ids.
+    store = {n: _item(n, primary="p", topics=["q"]) for n in ("1", "2", "3")}
+
+    edge = _co_occurrence(build_graph_edges(store, max_supporting_item_ids=2))[
+        ("topic:p", "topic:q")
+    ]
+
+    assert edge.supporting_item_ids == ("1", "2")
+    assert edge.shared_items == 3  # the TOTAL, not the length of the truncated tuple
+    assert edge.weight == pytest.approx(1.0)
+
+    # The fingerprint still covers the item the cap dropped: re-assigning item 3 moves it.
+    moved = {**store, "3": _item("3", primary="p", topics=["q", "r"])}
+    edge_moved = _co_occurrence(build_graph_edges(moved, max_supporting_item_ids=2))[
+        ("topic:p", "topic:q")
+    ]
+    assert edge_moved.supporting_item_ids == ("1", "2")
+    assert edge_moved.input_fingerprints != edge.input_fingerprints
