@@ -922,3 +922,25 @@ def test_graph_expand_returns_nodes_edges_and_explicit_paths(workspace: Path) ->
             assert {edge["source"], edge["target"]} == {a, b}
     to_k08 = next(p for p in payload["paths"] if p["nodes"][-1] == "item:k08")
     assert to_k08["nodes"] == ["item:k02", "topic:agent-evaluation", "item:k08"]
+
+
+def test_graph_expand_response_carries_semantics_and_disclaimer_key(workspace: Path) -> None:
+    """Plan 04 §11.6 on a REAL command response, not on a model built in the test.
+
+    The values are read off the CONTRACT's defaults, never retyped here, and the key must name
+    the i18n sentence the human render prints — so dropping either field from what the command
+    serialises, or printing a sentence of its own, goes red.
+    """
+    from xbrain.i18n import strings_for
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    fields = contracts.GraphExpansionResponse.model_fields
+
+    payload = _json_stdout(runner.invoke(app, ["graph-expand", "--item", "k02", "--json"]))
+
+    assert payload["semantics"] == fields["semantics"].default
+    assert payload["disclaimer_key"] == fields["disclaimer_key"].default
+    sentence = getattr(strings_for("English"), payload["disclaimer_key"])
+    human = runner.invoke(app, ["graph-expand", "--item", "k02"])
+    assert human.exit_code == 0, human.output
+    assert human.stdout.splitlines()[0] == sentence
