@@ -16,6 +16,7 @@ from typing import cast, get_args
 
 import pytest
 
+from tests import test_knowledge_degradation as degradation
 from tests import test_knowledge_search_hybrid as vector_fixture
 from tests.test_knowledge_search_service import FIXTURES, _build, _context, _persist
 from xbrain.knowledge import fusion, graph_strategy, search_service
@@ -690,32 +691,50 @@ def test_search_hybrid_graph_fusionado_pagina_por_encima_del_horizonte_sin_dupli
         assert page(limit)[0] == ranking[:limit], limit
 
 
+def _no_embedder(tmp_path: Path, data: Path) -> None:
+    return None
+
+
+def _counting_embedder(tmp_path: Path, data: Path) -> vector_fixture.QueryEmbedder:
+    return vector_fixture.QueryEmbedder(vector_fixture._pick(data, contains_query=False)[1])
+
+
 @pytest.mark.parametrize(
-    ("with_plane", "with_embedder", "cause"),
+    ("with_plane", "backend", "cause"),
     [
-        (True, False, search_service.EMBEDDINGS_NOT_CONFIGURED),
-        (False, True, "no_embeddings"),
+        (True, _no_embedder, search_service.EMBEDDINGS_NOT_CONFIGURED),
+        (False, _counting_embedder, "no_embeddings"),
+        # Plano presente y un comando que no existe: el embedder SE LLAMA y falla. Sin esta fila,
+        # cambiar la rama `except EmbeddingError` a `() if graph_runs else (EMBEDDER_UNAVAILABLE,)`
+        # dejaba la suite entera verde con un `hybrid_graph` sin vector y `degraded` vacío.
+        (True, degradation._absent, search_service.EMBEDDER_UNAVAILABLE),
     ],
+    ids=["embeddings_not_configured", "no_embeddings", "embedder_unavailable"],
 )
 def test_search_hybrid_graph_sin_canal_vectorial_lo_declara_y_no_finge_vector(
-    tmp_path: Path, with_plane: bool, with_embedder: bool, cause: str
+    tmp_path: Path,
+    with_plane: bool,
+    backend: Callable[[Path, Path], Callable[[str], Sequence[float]] | None],
+    cause: str,
 ) -> None:
     # Si el vector NO puede correr, `hybrid_graph` no calla: `degraded` NOMBRA la causa, por la
     # misma puerta que `hybrid`, y ningún match dice `vector`.
     corpus = _vector_corpus()
     data = vector_fixture._data(tmp_path, corpus, with_plane=with_plane)
-    passage = vector_fixture._pick(data, contains_query=False)[1]
-    embedder = vector_fixture.QueryEmbedder(passage) if with_embedder else None
+    embedder = backend(tmp_path, data)
     context = vector_fixture._context(data, corpus, embedder)
 
     graph = search_service.search(
         vector_fixture.QUERY, context, limit=50, strategy="hybrid_graph", graph_enabled=True
     )
 
-    assert cause in graph.index.degraded
+    # La fixture es lo que dice ser (regla 1): la respuesta sigue siendo `hybrid_graph` y sirve
+    # resultados, así que lo que decide cada fila es la aserción sobre `degraded`.
+    assert graph.strategy == "hybrid_graph"
     assert graph.results
+    assert cause in graph.index.degraded
     assert not [m for r in graph.results for m in r.matches if "vector" in m.matched_by]
-    if embedder is not None:
+    if isinstance(embedder, vector_fixture.QueryEmbedder):
         assert embedder.calls == []
 
 
