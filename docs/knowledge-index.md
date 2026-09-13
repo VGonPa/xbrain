@@ -7,6 +7,11 @@ This page is the operational half: when to rebuild, what it costs, and what the
 lexical baseline cannot do. The shape of it — planes, manifest, invalidation — is in
 [ARCHITECTURE.md](../ARCHITECTURE.md#the-persistent-index).
 
+An optional **vector plane** and the `vector` / `hybrid` strategies sit beside the
+lexical index. They are opt-in, `lexical` stays the default, and the bake-off that
+would justify changing that is incomplete — see
+[The vector plane and `hybrid`](#the-vector-plane-and-hybrid--opt-in-and-not-the-default).
+
 Everything here was measured on one corpus and re-derived on 2026-09-12: **2,474
 items, 45 topics**, macOS/APFS, a warm page cache. Your numbers will differ; the
 commands that produce them are printed beside each one, so read these as a shape
@@ -252,18 +257,20 @@ the one `search` queries and all eight filters reach `WHERE`. The set is derived
 from `SearchFilters`, not written out a second time, so a ninth filter cannot
 leave the harness silently declaring eight.
 
-**The rule that gap produced still stands, and it is the one to remember.** A
+**The rule that gap produced still stands, and it has a live instance again.** A
 golden-set case whose filters a strategy cannot push is reported **unmeasured**,
 never `0.0`. A zero from a filter nobody applied reads as "retrieval failed at
-filtering" when the truth is that the instrument was not there. Nothing in the
-golden set is unmeasured for this reason today; Plan 03's vector strategy will
-arrive with no filter columns of its own, and this is what keeps its first report
-honest.
+filtering" when the truth is that the instrument was not there. `lexical` scores
+both `filtros` cases. The vector plane has **no filter columns**, so under
+`--strategy vector` and `--strategy hybrid` those two cases come back unmeasured —
+and `search` answers a filtered `vector`/`hybrid` request lexically, declaring it
+([below](#when-the-vector-channel-cannot-run)).
 
 ## Known limits of the lexical baseline
 
-These are declared, not discovered later. Plan 03's vector layer is what
-addresses the first two.
+These are declared, not discovered later. The optional vector plane is designed
+for the stemming and meaning gaps; whether it closes them on this corpus has not
+been shown — the only candidate measured did not.
 
 **No stemming, and it is visible.** FTS5 has no multilingual stemmer, and the
 English one would wreck the Spanish half of a bilingual corpus, so there is
@@ -284,15 +291,16 @@ the index and go undiscounted. This is also why a fixture-sized index ranks
 differently from the real one.
 
 **Lexical means lexical.** It retrieves proper nouns, figures and exact phrases,
-not conceptual similarity. Every response says so: `degraded: ["no_embeddings"]`,
-read off the manifest rather than hard-coded, so the day a vector backend writes
-an `embeddings` block the flag stops appearing on its own.
+not conceptual similarity. Every response over an index built without
+`--embeddings` says so: `degraded: ["no_embeddings"]`, read off the manifest's
+`embeddings` block rather than hard-coded, so an index built with `--embeddings`
+stops declaring it on its own.
 
-**A strategy with no backend degrades, it does not refuse.** `--strategy vector`
-answers with `lexical` and labels the gap `vector_not_implemented`, in the
-response and in a warning line. A *typo* (`--strategy vectro`) is refused
-instead: answering it with lexical results would turn a mistake into a
-measurement.
+**A strategy you name is run or declared, never faked.** `hybrid` without a working
+vector channel answers `lexical` and names the cause; `vector` without one is an
+**error**, because you asked for vectors by name; `hybrid_graph` (Plan 04) answers
+`lexical` labelled `hybrid_graph_not_implemented`. A *typo* (`--strategy vectro`) is
+refused: answering it with lexical results would turn a mistake into a measurement.
 
 **The staleness signal is cheap and falible, in one known direction.**
 `index_behind_store` compares the `mtime_ns` and size of the three inputs against
@@ -310,9 +318,252 @@ fingerprints — or just `index build --force`.
 granularity has not been measured here. The contract leans on the *size*, which
 does not depend on the filesystem.
 
+## The vector plane and `hybrid` — opt-in, and not the default
+
+Everything above is the lexical index, and it is what `search` runs unless you ask
+for something else. Plan 03 adds a second, **optional** plane — one embedding per
+distinct chunk text — and two strategies that read it: `vector` (the geometry alone)
+and `hybrid` (bm25 and the geometry, fused). **`lexical` stays the default and
+`hybrid` has not been promoted**: the bake-off that would justify it is incomplete
+([below](#the-bake-off-incomplete)). Nothing in this section is needed to use `search`.
+
+### What you need
+
+**1 · `numpy`, through the `[embeddings]` extra.** It is deliberately not a runtime
+dependency. From a checkout of this repo the extra is installed with
+`uv sync --extra embeddings` — CI runs `uv sync --extra dev --extra embeddings --locked`.
+`uv sync` removes packages its flags did not ask for, so a later plain `uv sync`
+uninstalls `numpy` again. Without it, `import xbrain` and lexical `search` keep
+working, and a query that needs the matrix fails naming
+`uv pip install 'xbrain[embeddings]'` instead of raising an `ImportError`.
+
+**2 · An embedder: any program that honours the contract.** xbrain carries no model
+library. It runs `[embeddings].command` as a subprocess — split with `shlex`, never
+through a shell — as `<command> [--model M]`, writes one JSON request to its stdin
+and reads one JSON response from its stdout:
+
+```
+in:  {"schema_version": "1", "model": "…|null", "texts": ["…", "…"]}
+out: {"schema_version": "1", "model": "…", "dimension": N, "normalized": true, "vectors": [[…], …]}
+```
+
+The reference backend is `scripts/xbrain-embed` (sentence-transformers, local:
+nothing leaves the machine). Its dependencies are not in `pyproject.toml`, and its
+shebang is `#!/usr/bin/env python3`, so a `command` naming the script alone runs
+whichever `python3` comes first on `PATH`. Name the interpreter that has
+`sentence-transformers` installed, as the bake-off did — its
+[§9](embeddings-bakeoff.md#9-cómo-re-derivarlo) is the recipe that was actually
+executed, environment and weights included. The wrapper's default model
+(`intfloat/multilingual-e5-base`) is a starting point, **not** a model chosen by
+evaluation.
+
+Try the command by hand before indexing. The request below is yours, so whatever
+the backend prints — a traceback included — is safe to read, which is not true of
+a failure during a build (see [troubleshooting](troubleshooting.md#embedder--exited-n--its-stderr-is-not-repeated-here)):
+
+```bash
+printf '%s' '{"schema_version": "1", "model": null, "texts": ["hola"]}' \
+  | /path/to/embedder-env/bin/python /path/to/xbrain/scripts/xbrain-embed
+```
+
+### Configuring it
+
+```toml
+[embeddings]
+command = "/path/to/embedder-env/bin/python /path/to/xbrain/scripts/xbrain-embed"
+# model = "intfloat/multilingual-e5-base"  # omit → the backend's own default
+# batch_size = 64                           # texts per subprocess call (>= 1)
+# timeout_seconds = 600                     # wall-clock cap per call (>= 1)
+# query_prefix = "query: "                  # E5/BGE want these; most models want ""
+# passage_prefix = "passage: "
+```
+
+| Key | Default | Read by |
+|---|---|---|
+| `command` | `""` — the plane is off | `index build --embeddings` and every `vector`/`hybrid` query |
+| `model` | unset → the backend's default | `index build --embeddings` only |
+| `batch_size` | `64` | `index build --embeddings` |
+| `timeout_seconds` | `600` | the build and every query |
+| `passage_prefix` | `""` | `index build --embeddings`, which records it in the manifest |
+| `query_prefix` | `""` | recorded in the manifest by the build; **queries read the manifest's copy** |
+
+The last column is the part to read twice. A query has to land in the geometry the
+plane was written in, so `search` takes the **model and the query prefix from the
+manifest**, not from `config.toml`. Editing `model` or a prefix changes nothing until
+the next `index build --embeddings --force`, and a backend that answers a query with
+a model other than the manifest's is refused even at the same dimension.
+
+### Building it
+
+```bash
+uv run xbrain index build --embeddings            # no index yet
+uv run xbrain index build --embeddings --force    # over an existing index
+uv run xbrain index status                        # the `embeddings` line and the plane's verdict
+```
+
+What `--embeddings` does, in order:
+
+1. refuses an empty `command` before anything is built;
+2. sends **one probe batch**: the model, dimension and normalization the backend
+   declares become the plane's spec, and a missing or non-executable binary fails
+   here, before a byte is written;
+3. builds the lexical plane exactly as a plain `build` does, and commits it;
+4. embeds each **distinct** chunk text once — identical texts share one row, each
+   chunk keeping its own id, owner, author and URL — in `batch_size` batches, each
+   held to the probe's dimension and model. Every response is validated (count,
+   shape, finite values, no zero vector, UTF-8, schema version) and re-normalized
+   when it is not unit length;
+5. writes `vectors.f32` (a float32 matrix) and `vectors.meta.json` beside
+   `knowledge.db`, and only then seals the manifest, whose `embeddings` block is
+   exactly the spec: `model`, `dimension`, `normalized`, `query_prefix`,
+   `passage_prefix`.
+
+A plain `build --force` without `--embeddings` deletes an existing plane and seals
+`embeddings: null`: a matrix the manifest does not declare is refused, never queried.
+`--embeddings --dry-run` does not call the embedder and, from the CLI, reports the
+lexical counts only. The human build line prints no vector numbers; `--json` carries
+`vector_chunks` and `vector_rows`.
+
+**There is no vector-only rebuild.** `--embeddings --force` re-derives the lexical
+plane from the store too, and the previous manifest and database are gone before the
+first row is written. If the embedder then fails — a timeout, a crash, a batch of
+another dimension or model — **no index answers, not even lexically**, until
+`xbrain index build` runs again. Every refusal of the plane ends with that warning
+spelled out. A fresh build whose embedder fails leaves the lexical rows committed and
+**no manifest**, so every door refuses the directory: nothing is rolled back, whatever
+Plan 03 §5 row 5 promised, and the tests pin the state that actually happens.
+
+### Keeping it current: `update` does not re-embed
+
+`xbrain index update` rewrites the chunks of every item that moved and **never calls
+the embedder** — Plan 03 §2.3's "update re-embeds only the changed chunks" was not
+built. What keeps that from being silent:
+
+- `index update` reports the plane's debt (in `--json`: `vector_state`,
+  `vector_missing` — chunks with no vector of their current text — and
+  `vector_orphaned` — rows whose chunk is gone);
+- `index status` reports the plane's state: `absent` (none declared), `current`,
+  `behind`, `missing` (declared, files gone), `undeclared` (files the manifest does
+  not declare) or `unreadable` (a meta it cannot load, or `numpy` missing). When it is
+  not current, the `→` line gives the reason and the rebuild command;
+- a `vector`/`hybrid` query over a plane that is behind still runs the vector channel
+  over the chunks it covers, **never serves a stale vector**, and declares
+  `vector_plane_behind`.
+
+So after `enrich`, `topics`, `fetch` or `digest-video`: `index update` keeps lexical
+search current, and `index build --embeddings --force` is what brings vector coverage
+back.
+
+### Querying it
+
+```bash
+uv run xbrain search "…" --strategy hybrid
+uv run xbrain search "…" --strategy vector --json
+```
+
+- **`vector`** embeds the query (one subprocess call, with the manifest's model and
+  query prefix) and ranks chunks by cosine. It serves only what the geometry found.
+- **`hybrid`** takes bm25's top chunks and the vector plane's top chunks — a fixed
+  window of `FUSED_CHUNK_WINDOW` per channel, so every page is a slice of one
+  ranking, and a channel that fills the window marks the response `truncated` —
+  and fuses them by **Reciprocal Rank Fusion**:
+  `score = Σ w_channel / (RRF_K + rank_channel)`. It then groups by item like
+  `lexical`, and tops up from the profile plane; an item that arrives only by its
+  profile comes back with `matches: []`, never with a fabricated excerpt.
+- Both channels go through the **same fingerprint gate** the lexical door applies.
+  The vector plane stores no text, owner, author or URL — only which chunk a row
+  belongs to — so a vector hit is hydrated from the lexical plane's row.
+- **Every fused match explains itself.** `matched_by` names the channels that found
+  the chunk; `lexical_rank` and `vector_rank` are `null` when that channel did not
+  find it, never `0`; the human view prints `via lexical+vector`. `score` is the RRF
+  signal on `vector`/`hybrid` (bm25's on `lexical`): uncalibrated, and not a
+  probability.
+- `RRF_K = 60` and weights `1 / 1` in `knowledge/fusion.py` are the standard
+  starting point, **not measured values**: `xbrain eval --strategy hybrid
+  --sweep-fusion …` exists and has not been run on any candidate.
+
+### When the vector channel cannot run
+
+**The line that is not crossed: a response names `vector` or `hybrid` only when the
+vector channel ran** — a plane the manifest declares, loaded under the manifest's own
+spec, and the query vector in hand. Short of that, `hybrid` answers
+`strategy: "lexical"`, `degraded` names the cause, and not one match carries `vector`
+in `matched_by` or a `vector_rank`; `vector`, asked for by name, is an error. Two
+situations are errors under **both** strategies, because degrading would hide a
+misconfiguration that makes every later vector answer wrong.
+
+Rows 1–6 are Plan 03 §5; the last three are what the code added.
+
+| Situation | `index build --embeddings` | `search --strategy hybrid` | `search --strategy vector` |
+|---|---|---|---|
+| **1** · `[embeddings].command` empty | refused before building: `` `--embeddings` necesita un embedder: configura `[embeddings].command` … `` | `lexical` · `embeddings_not_configured`, and the line `⚠ Pediste hybrid y ha respondido lexical: [embeddings].command está vacío…` | **error** naming `[embeddings].command` |
+| **2** · binary missing or not executable | the probe raises `embedder '…' not found — install it or set a valid [embeddings].command…` (or `could not be executed`); nothing written | `lexical` · `embedder_unavailable` | **error**: that same message |
+| **3** · the manifest declares a plane whose files are gone | — | **error**: `no hay plano vectorial en … Reconstruye el índice con su plano vectorial: xbrain index build --embeddings --force …`; the query is not embedded | **error**: same |
+| **4** · the backend returns another dimension, or declares another model | fails mid-build (`models are never mixed`) — with `--force`, no index until `index build` | **error**, never degraded: a backend serving another model is not a backend that is down | **error**: same |
+| **5** · timeout, non-zero exit, unusable output | fails mid-build (`timed out after Ns`, `exited N`…): no manifest sealed; with `--force`, no index until `index build` | `lexical` · `embedder_unavailable` | **error**: the backend's own message |
+| **6** · the index has no plane (built without `--embeddings`) | — | `lexical` · `no_embeddings` (plus `embeddings_not_configured` if the command is empty too); the embedder is not called | **error**: `…este índice no tiene plano vectorial: configura [embeddings].command … y ejecuta xbrain index build --embeddings --force…` |
+| any filter (`--topic`, `--from`, `--kind`, …), plane and command in place | — | `lexical` · `vector_filters_unsupported` | `lexical` · `vector_filters_unsupported` |
+| the plane is behind the lexical base | — | `hybrid` runs · `vector_plane_behind` | `vector` runs · `vector_plane_behind` |
+| `numpy` not installed, plane in place | — | **error** naming `uv pip install 'xbrain[embeddings]'` | **error**: same |
+
+Rows 3 and 5 of the build are where the code **diverges from the plan on purpose and
+says so**: nothing is queried half-built, and nothing is rolled back either. The
+filter row is the other one to know: `vector` is the one strategy that otherwise never
+degrades, and a filtered `vector` request does. In the human view,
+`vector_filters_unsupported` and `vector_plane_behind` have no sentence of their own
+yet and print as the bare flag (`⚠ vector_filters_unsupported`); the header still says
+`estrategia lexical` when the channel did not run.
+
+### What it costs
+
+No figure is republished here. The only measurement is the bake-off's, of one
+candidate on one laptop that was already swapping; its
+[§6](embeddings-bakeoff.md#6-coste-indexación-disco-latencia-y-memoria) states those
+conditions beside every number. Two properties hold whatever the numbers turn out to be:
+
+- the reference embedder serves **one request per process and loads the model every
+  time**, and `search` calls it once per query — so on `vector`/`hybrid`, embedding the
+  query dominates the latency, not retrieving. `hybrid` as a default would need a
+  persistent embedder first, whichever model wins;
+- the matrix holds `dimension × 4` bytes per **distinct** chunk text, plus
+  `vectors.meta.json`, which maps every chunk id to its row.
+
+### The bake-off: incomplete
+
+[`docs/embeddings-bakeoff.md`](embeddings-bakeoff.md) is the measurement, with its
+population, its conditions and its re-derivation. What it decides:
+
+- **Plan 03 §13.8 — a bake-off with ≥ 3 candidates, winner and losers — does NOT
+  PASS: 1 of 3.** `paraphrase-multilingual-MiniLM-L12-v2` was measured and lost under
+  both strategies. `multilingual-e5-small` was interrupted mid-build by memory and
+  disk pressure; `multilingual-e5-base` did not start; `bge-m3` and
+  `jina-embeddings-v3` were not run.
+- **There is no winner.** `hybrid` is not promoted, `lexical` stays the default, and
+  the fusion constants did not move. That is "the cheap floor does not beat lexical",
+  not "no model beats lexical": the candidates that could have were never measured.
+- Closing §13.8 means running the remaining candidates on a machine without memory
+  pressure, with `xbrain eval --strategy vector|hybrid --embeddings-model <model>`,
+  following the bake-off's §9.
+
+### What the vector plane does not solve
+
+- **Filters.** The plane has no filter columns; a filtered request is answered
+  lexically, and `eval` leaves the `filtros` cases unmeasured under `vector`/`hybrid`.
+- **Coverage after `update`.** There is no incremental re-embed and no vector-only
+  rebuild: `index build --embeddings --force` rebuilds both planes.
+- **Query latency** with the reference embedder: a subprocess and a model load per query.
+- **The profile plane is outside every published number.** `eval` scores chunk
+  rankings under all three strategies, so `hybrid`'s profile top-up is not measured.
+- **Real use.** Every scorable case in the golden set the bake-off measured is
+  `construido`; the `real` provenance has no coverage.
+- **Verification.** `matched_by` says which channel found a chunk, not whether the
+  chunk supports a claim. That is still `xbrain get` and the `verifica con` line.
+
 ## Configuration
 
-Everything has a default; the whole `[index]` section is optional. See
+Everything has a default; the whole `[index]` section is optional. The
+`[embeddings]` section is optional too, and unset is a supported state:
+[configuring it](#configuring-it) is above. See
 [`config.toml.example`](../config.toml.example).
 
 ```toml

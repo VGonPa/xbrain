@@ -748,13 +748,17 @@ So the count is not a floor on the ensemble's false negatives, and an earlier dr
 a consumer never has to know the shape of `items.json`, hunt for a markdown heading, or guess
 which account wrote a quoted tweet. **Nothing in it mutates the store.** `knowledge inspect`,
 `search` and `get` write nothing at all; `eval` writes only its own report
-(`data/eval-report.json` and `data/eval-report.md`, or wherever `--report` points), and
-`index build` and `index update` write only `data/index/`, which is derived. None of the six
+(`data/eval-report.json` and `data/eval-report.md`, or wherever `--report` points) plus, with
+`--embeddings-model`, an evaluation index under `data/eval-index/<model>/`; and
+`index build` and `index update` write only `data/index/` (vector plane included), which is
+derived. None of the six
 takes a snapshot, because none of them can destroy anything a rebuild would not restore.
 
-It is built over four plans. The contract and the evaluation landed first; the persistent
-index, `search` and `get` are this one. Embeddings, the minimal graph and the MCP adapter come
-later and consume these names without renegotiating them.
+It is built over four plans. The contract and the evaluation landed first; then the persistent
+index, `search` and `get`; then an **optional** vector plane with the `vector` and `hybrid`
+strategies ([The vector plane and hybrid retrieval](#the-vector-plane-and-hybrid-retrieval)),
+which did not change the default. The minimal graph and the MCP adapter come later and consume
+these names without renegotiating them.
 
 ### The four entities
 
@@ -900,7 +904,7 @@ tokens before the row goes.
 
 The manifest is written last, so its presence means the build finished. It carries the schema,
 emitter and chunker versions, the chunker's parameters, the counts, what was skipped, what
-failed, an `embeddings` slot Plan 03 fills — and **two kinds of change signal**, which is the
+failed, an `embeddings` block (`null`, or the spec the vector plane was written under) — and **two kinds of change signal**, which is the
 part worth reading twice.
 
 | Signal | Cost | What it detects | What it does |
@@ -1008,15 +1012,20 @@ alone, and why the two cursor shapes refuse each other by name instead of restar
 `IndexStatusRef.degraded` is a fixed-order tuple, so two responses over the same state are
 byte-identical.
 
-- **`no_embeddings`** — read off the manifest's `embeddings` block, not hard-coded, so the day
-  Plan 03 writes that block the flag stops appearing with no other change. A constant would
-  keep declaring a degradation that no longer applied, with the test beside it green.
+- **`no_embeddings`** — read off the manifest's `embeddings` block, not hard-coded, so an index
+  built with `--embeddings` stops declaring it with no other change. A constant would keep
+  declaring a degradation that no longer applied, with the test beside it green.
 - **`index_behind_store`** — the cheap signal disagreed with the manifest. Declared, not
   repaired and not raised: possibly-stale evidence is answerable as long as the answer says so.
-- **`<strategy>_not_implemented`** — a strategy declared in the contract but with no backend
-  runs `lexical` and says which one it was asked for, in the response *and* in a warning line.
-  A **misspelled** strategy raises instead: a typo is not a degradation, and answering it with
-  lexical results would turn it into a measurement.
+- **`embeddings_not_configured` · `embedder_unavailable` · `vector_filters_unsupported` ·
+  `vector_plane_behind`** — why a requested vector channel did not run, or ran over a partial
+  plane. The first two belong to THIS machine's config and backend, which the manifest cannot
+  know, so the query door adds them; see
+  [below](#the-vector-plane-and-hybrid-retrieval).
+- **`<strategy>_not_implemented`** — a strategy declared in the contract with no backend; since
+  Plan 03 that is only `hybrid_graph`. It runs `lexical` and says which one it was asked for, in
+  the response *and* in a warning line. A **misspelled** strategy raises instead: a typo is not
+  a degradation, and answering it with lexical results would turn it into a measurement.
 
 #### One model, two renderings
 
@@ -1053,6 +1062,101 @@ inside it, so a guard that has stopped guarding is visible rather than quietly g
 three maps. The point of both is rule 11: what can be *removed* already fails closed; what can
 be *hollowed out* needs a guard.
 
+### The vector plane and hybrid retrieval
+
+Plan 03 adds a second plane beside the lexical one, and two strategies that read it. **It is
+opt-in end to end, and it did not change the default**: `search` runs `lexical` unless asked,
+and `hybrid` was not promoted because the bake-off that would justify it is incomplete (last
+paragraph). Operation, configuration and every error message: `docs/knowledge-index.md`.
+
+**The embedder is a subprocess, the third sibling of `transcribe.py` and `vision.py`.**
+`src/xbrain/embeddings.py` runs `[embeddings].command` as `<command> [--model M]` — `shlex`, no
+shell — with one JSON request on stdin and one JSON response on stdout (`schema_version` "1").
+No model library enters the core, and `[embeddings].command` has **no default**: shipping one
+would be choosing the model without evaluating it. Every response row is validated before it
+becomes a vector (count, ragged widths, declared vs sent dimension, non-finite values, the zero
+vector, UTF-8), and normalization is **verified, not trusted**: a backend claiming unit vectors
+of norm 5 would multiply every stored similarity by five. Errors are `EmbedderNotFound` (the
+backend is absent) and `EmbedderFailed` (it ran and failed). **No message quotes a text, and
+the backend's stderr is not relayed**, because a crashing embedder's traceback prints the
+`repr` of the chunk it failed on — the corpus. `scripts/xbrain-embed` is only the reference
+backend.
+
+**`numpy` is the `[embeddings]` extra, never a runtime dependency**, imported inside
+`vector_index._numpy()`. `import xbrain` works without it; a query that needs the matrix raises
+`VectorBackendUnavailable` naming `uv pip install 'xbrain[embeddings]'`; `index status` reports
+the plane `unreadable` instead of dying.
+
+```
+data/index/
+├── knowledge.db          the lexical planes (unchanged)
+├── vectors.f32           rows × dimension float32, C-order, nothing else
+├── vectors.meta.json     spec · matrix sha256 · chunk_id → row · sha256(text) → row
+└── manifest.json         embeddings: null | {model, dimension, normalized, query_prefix, passage_prefix}
+```
+
+**The plane stores geometry and nothing else.** Rows are keyed by `sha256(text)`, so identical
+texts share one row, and the map runs `chunk_id → row`, **many-to-one**: each chunk keeps its
+own id, and therefore its own surface, owner, author and URL (spec §5.6, criterion §13.6). The
+plane holds no owner, author, URL or text — those have one home, the lexical `chunks` table — so
+a vector hit is hydrated through that row and passes the **same** resolvability and fingerprint
+gate as a lexical hit. The manifest's `embeddings` block IS `VectorSpec`, read off its dataclass
+fields like `CHUNKER_PARAM_NAMES`, so it cannot declare a property nothing produced. The spec is
+what the backend **declared on a probe batch**, not what config says, and a query reads model
+and query prefix **off the manifest**: the query has to land in the geometry the plane was
+written in.
+
+**Invalidation, as built — three points where the code is not Plan 03's text:**
+
+| Plan 03 said | What the code does, and why it says so |
+|---|---|
+| changing model invalidates only the vector plane; the lexical one survives | the plane is refused under another model, but the only repair, `index build --embeddings --force`, **re-derives the lexical plane too**. There is no vector-only rebuild, and a failed embedder then leaves **no index at all**; `VECTOR_REBUILD_ADVICE` says exactly that |
+| `update` re-embeds only the changed chunks | `update` **never calls the embedder**. `vector_verdict` reports the plane `behind` (chunks with no vector of their current text, rows with no chunk), and a query skips stale vectors, declaring `vector_plane_behind` — `VectorPlane.covers` asks by id **and** text, because a `chunk_id` survives an edit |
+| an embedder timeout rolls the build back | nothing rolls back: the lexical rows commit before the plane is written, and what keeps the directory from being served is only that the manifest is written last |
+
+**Why RRF, and not a sum of scores.** bm25 is negative-is-better over one corpus's term
+statistics; cosine is a geometry fixed by one model. A sum would need a per-corpus calibration
+redone with every model change. Reciprocal Rank Fusion (`knowledge/fusion.py`) reads only ranks —
+`Σ w_channel / (RRF_K + rank_channel)`, ties broken by `chunk_id` — and has one parameter.
+`RRF_K = 60` and weights `1 / 1` are the standard starting point, **read at call time** so a
+measured winner can move them; no sweep has, and no test pins their values. The fused window is
+**fixed** at `FUSED_CHUNK_WINDOW` chunks per channel rather than sized by the page: RRF over a
+deeper window re-orders the head, so a window grown per page gave every page its own ranking
+and a cursor walk served one item twice. A channel that fills the window makes the response
+`truncated`.
+
+**The explanation is the product** (spec §5.3, criterion §13.7). Every fused match keeps
+`matched_by`, `lexical_rank` and `vector_rank` — `None` exactly when that channel did not find
+the chunk, because `0` reads as a rank better than first — and the evidence is read off the SAME
+window the rank came from, so a chunk both channels found is explained by both. `score` is the
+RRF signal: uncalibrated, and never called a probability. `hybrid` tops up from the profile
+plane; a profile-only item has `matches: []`, never an invented excerpt. `vector` does not,
+because a bm25 profile candidate is not something the geometry found.
+
+**Degradation: the line that is not crossed.** `search_service._resolve_channel` is the one
+place a strategy is decided, and a response names `vector` or `hybrid` only when it returns a
+channel: a plane the manifest declares, loaded under the manifest's spec, and the query vector
+already in hand. The embedder is called last, after every reason not to run is ruled out.
+Short of that, `hybrid` answers `lexical` naming the cause (`embeddings_not_configured`,
+`embedder_unavailable`, the manifest's own `no_embeddings`, or `vector_filters_unsupported`,
+because the plane has no filter columns and a filter applied after scoring is not a filter),
+and `vector` raises `VectorStrategyUnavailable` or the backend's own error. Two situations
+raise under **both**, because degrading would hide a misconfiguration that makes every later
+vector answer wrong: a plane the manifest declares and the disk cannot serve, and a query
+vector of another dimension or another model — a matching width does not prove the same model.
+`tests/test_knowledge_degradation.py` holds one test per row of Plan 03 §5 and the test that no
+failure path says `hybrid`.
+
+**The model was supposed to be chosen by measurement, and it has not been.**
+`xbrain eval --strategy vector|hybrid --embeddings-model <model>` builds each candidate's plane
+through the same `VectorBuild` `index build --embeddings` uses, under `data/eval-index/<model>/`,
+and refuses a plane written by another model. The run it produced, `docs/embeddings-bakeoff.md`,
+measured **1 of the ≥ 3 candidates criterion §13.8 requires — §13.8 does NOT PASS**. The one
+candidate measured does not improve the `semantico` or `cruzado_idioma` strata over lexical,
+so `hybrid` is not promoted and the fusion constants did not move; the stronger candidates were
+never measured, so this is not evidence that no model would. Its figures carry their population
+and conditions there and are not repeated here.
+
 ### The evaluation, and where its gate really reaches
 
 `eval/golden-set.yaml` is **tracked in Git** — the one exception to "nothing personal is
@@ -1079,8 +1183,9 @@ the two `filtros` cases were unmeasured. It now builds through `index_build`'s w
 same one `xbrain index build` drives — so all eight filters of spec §7.2 are pushed and those
 two cases are scored. `SUPPORTED_FILTERS` is derived from `SearchFilters.model_fields` rather
 than written out again, so a ninth filter added to the frozen contract cannot leave the
-harness quietly declaring eight. The UNMEASURED rule stays because Plan 03's vector strategy
-arrives with no filter columns of its own.
+harness quietly declaring eight. The UNMEASURED rule stays, and it has a live instance again:
+the vector plane has no filter columns, so under `--strategy vector|hybrid` the two `filtros`
+cases are reported unmeasured, never 0.0.
 
 The baseline is the SAME FTS5 the persisted index uses, on `sqlite3(":memory:")`
 (`index_schema.open_memory_index`, one DDL for both): same
@@ -1113,7 +1218,8 @@ proven by the version-stripped ranking fixture being byte-identical across the b
 ids moved and the chunk COUNT did not. *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
 chunker v1 and the store md5 `5aaf62f4…` — correct for that population, and left undated after
 the chunker moved; F-4 corrected the other three sites and missed this one.)* Those are what the
-vector layer of Plan 03 has to beat.
+vector layer of Plan 03 had to beat; the bake-off that tried is incomplete and found no winner
+([above](#the-vector-plane-and-hybrid-retrieval)).
 
 **A threshold that reached no bucket fails closed.** `--min-recall` counts the
 `(bucket, metric)` comparisons it actually made; at zero it reports an explicit failure
@@ -1338,6 +1444,7 @@ xbrain/
 │   ├── cli.py               ← typer CLI — one command per stage
 │   ├── models.py            ← pydantic data models — the shapes
 │   ├── config.py            ← config.toml loader
+│   ├── embeddings.py        ← [embeddings].command subprocess contract (no ML in core)
 │   │
 │   ├── knowledge/           ← the READ contract (search/get/graph_expand)
 │   │   ├── provenance.py    ← Origin, TrustClass, ORIGIN_TRUST — one total table
@@ -1348,6 +1455,8 @@ xbrain/
 │   │   ├── profile.py       ← the item's retrieval profile (never a citation)
 │   │   ├── contracts.py     ← Search*/Evidence*/Graph*, frozen per envelope (SearchResponse "2", EvidenceBundle "2", Graph "1")
 │   │   ├── goldenset.py     ← two-stage loader: structure, then resolution
+│   │   ├── vector_index.py  ← the vector plane: float32 matrix, dedupe by text, cosine top-k
+│   │   ├── fusion.py        ← Reciprocal Rank Fusion + the per-match explanation
 │   │   ├── lexical_fts.py   ← the FTS5 DDL + scorer: ONE tokenizer, ONE bm25
 │   │   ├── lexical.py       ← the retriever over a persisted connection
 │   │   ├── index_schema.py  ← data/index/ DDL, the open door, drift + corruption checks

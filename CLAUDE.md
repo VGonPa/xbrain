@@ -545,7 +545,8 @@ generates an Obsidian wiki.
   harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
   `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
   tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
-  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat.
+  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
+  has not beaten it (next bullet but one: incomplete, §13.8 NOT MET).
   Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
   **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
   counts the comparisons it made and fails closed at zero, because `passed = not failures` let
@@ -584,10 +585,12 @@ generates an Obsidian wiki.
   the index. **`get` never reads the index at all** and works with `data/index/` deleted: an
   index able to answer it would be a second copy of the corpus that nothing invalidates.
   Degradations are a fixed-order tuple, DECLARED not simulated: `no_embeddings` is read off the
-  manifest's `embeddings` block (not hard-coded — the day Plan 03 writes it the flag stops
-  appearing by itself), and `--strategy vector` degrades to lexical labelled
-  `vector_not_implemented` while a TYPO raises (a typo is not a degradation; answering it with
-  lexical results would turn it into a measurement). `render.py` is the human view of the SAME
+  manifest's `embeddings` block (not hard-coded — an index built with `--embeddings` stops
+  declaring it by itself), a requested vector channel that did not run is named by cause (next
+  bullet), `hybrid_graph` degrades to lexical labelled `hybrid_graph_not_implemented`, and a TYPO
+  raises (a typo is not a degradation; answering it with lexical results would turn it into a
+  measurement). *(This line said `--strategy vector` degrades labelled `vector_not_implemented`;
+  true until Plan 03.6, false since — `vector` without vectors is now an error.)* `render.py` is the human view of the SAME
   response model `--json` serialises and reaches back into nothing. **Measured 2026-09-12 on the
   live corpus (2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
   `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
@@ -601,10 +604,49 @@ generates an Obsidian wiki.
   writer, so it pushes the **same eight** filters `search` does and the two `filtros` cases of
   the golden set are scored. **The rule outlives the gap**: a case whose filters a strategy
   cannot apply is still **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as
-  "retrieval failed at filtering" when the instrument was not there — and that is what will
-  protect Plan 03's vector strategy, which starts with no filter columns of its own. The earlier
+  "retrieval failed at filtering" when the instrument was not there — and that rule has a live
+  instance again: the vector plane has no filter columns, so under `--strategy vector|hybrid`
+  the two `filtros` cases are UNMEASURED, and `search` answers a filtered `vector`/`hybrid`
+  request lexically, declaring `vector_filters_unsupported`. The earlier
   line here said the harness pushes only two; it was true until #179 and is now false.
   Operation: `docs/knowledge-index.md`.
+- **The vector plane and `hybrid` (Plan 03) are OPT-IN, and `lexical` is still the default.**
+  Embeddings follow the `transcribe`/`vision` shape: `[embeddings].command` is an EXTERNAL
+  subprocess (`embeddings.py`: `shlex`, no shell, JSON on stdin/stdout, `schema_version` "1",
+  every row validated, normalization verified rather than trusted) with **no bundled default** —
+  the model is chosen by the golden set, not by a default — and `scripts/xbrain-embed` is only the
+  reference backend. **The backend's stderr is never relayed**: a crashing embedder's traceback
+  quotes the chunk it failed on, i.e. the corpus. `numpy` is the `[embeddings]` extra, imported
+  lazily, so `import xbrain` works without it and a query that needs the matrix names
+  `uv pip install 'xbrain[embeddings]'`. `xbrain index build --embeddings` writes
+  `data/index/vectors.f32` + `vectors.meta.json` and a manifest `embeddings` block that IS
+  `VectorSpec` (model · dimension · normalized · both prefixes), as DECLARED by a probe batch; a
+  query reads model and query prefix **off the manifest**, never off `config.toml`. The plane
+  stores no text, owner, author or URL (rows keyed by `sha256(text)`, `chunk_id → row`
+  many-to-one), so a vector hit is hydrated through the lexical `chunks` row and the same
+  fingerprint gate. **Three facts where the code is NOT Plan 03's text — do not "fix" the docs
+  back:** there is **no vector-only rebuild** (`--embeddings --force` re-derives the lexical
+  plane too, and a failed embedder then leaves NO index, not even lexical — `VECTOR_REBUILD_ADVICE`
+  says so); **`index update` never re-embeds** (the plane goes `behind`, `status` says so, and a
+  query skips stale vectors declaring `vector_plane_behind`); **a failed build rolls nothing back**
+  (lexical rows committed, no manifest, every door refuses). `hybrid` fuses by RRF
+  (`fusion.py`; `RRF_K`=60 and weights 1/1 are unswept starting points, read at call time) over a
+  fixed `FUSED_CHUNK_WINDOW` per channel, and every match keeps `matched_by` / `lexical_rank` /
+  `vector_rank` (`None` for a channel that did not find it, never 0). **The line not crossed:** a
+  response says `vector`/`hybrid` only when the vector channel ran; otherwise `hybrid` answers
+  `lexical` naming the cause (`embeddings_not_configured` · `embedder_unavailable` ·
+  `no_embeddings` · `vector_filters_unsupported`) and `vector` is an ERROR — except a filtered
+  `vector` request, which answers lexically declaring `vector_filters_unsupported`. A declared
+  plane the disk cannot serve, and a query vector of another dimension or another model, are
+  errors under BOTH (`tests/test_knowledge_degradation.py`, one test per §5 row). Full matrix
+  with the message each case prints: `docs/knowledge-index.md`. **The bake-off is INCOMPLETE and
+  criterion §13.8 does NOT PASS** (`docs/embeddings-bakeoff.md`, measured 2026-09-13): 1 of the
+  ≥ 3 candidates required — `paraphrase-multilingual-MiniLM-L12-v2`, measured and losing under
+  both strategies; `multilingual-e5-small` interrupted by memory and disk pressure;
+  `multilingual-e5-base`, `bge-m3` and `jina-embeddings-v3` never run. So `hybrid` is NOT promoted
+  and the fusion constants did not move. Read it as "the cheap floor does not beat lexical",
+  NEVER as "no model beats lexical". Quote none of its figures without its §1 (corpus sha256,
+  golden-set version, one laptop already swapping); re-derive with its §9.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·
