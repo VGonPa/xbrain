@@ -30,6 +30,10 @@ GRAPH_ENABLED_BY_DEFAULT: Final[bool] = False
 # time so a measured value changes the ranking.
 GRAPH_WEIGHT: float = 1.0
 
+# How many of the fusion's best items the graph expands from — a starting point like
+# `GRAPH_WEIGHT`, read at call time.
+GRAPH_SEEDS: int = 1
+
 # item → topic → item: one hop only reaches the seed's topics, never another item.
 GRAPH_MAX_HOPS: Final[int] = 2
 

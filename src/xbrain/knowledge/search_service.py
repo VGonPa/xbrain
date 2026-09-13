@@ -284,6 +284,7 @@ def search(
     limit: int = 10,
     strategy: Strategy = "lexical",
     cursor: str | None = None,
+    graph_enabled: bool | None = None,
 ) -> SearchResponse:
     """Run one query end to end and return the frozen envelope (spec §7.2).
 
@@ -327,7 +328,13 @@ def search(
     channel: _VectorChannel | None = None
     try:
         executed, strategy_degradation, channel = _resolve_channel(
-            query, strategy, filters, index, context, (executed, strategy_degradation)
+            query,
+            strategy,
+            filters,
+            index,
+            context,
+            (executed, strategy_degradation),
+            graph_enabled=graph_enabled,
         )
         # One owner beyond the page: what decides `truncated` without guessing.
         beyond = offset + limit + 1
@@ -336,6 +343,8 @@ def search(
             ordered, excluded, exhausted = _materialise(
                 index, query, filters, context, needed=beyond
             )
+            if executed == "hybrid_graph":
+                ordered = _graph_order(ordered, context)
         else:
             ordered, excluded, exhausted, fused_window = _materialise_fused(
                 index, channel, query, context, needed=beyond
@@ -376,6 +385,19 @@ def search(
         index.close()
 
 
+def _graph_order(
+    ordered: list[tuple[str, list[LexicalHit]]], context: QueryContext
+) -> list[tuple[str, list[LexicalHit]]]:
+    """The lexical ranking re-ordered by `rank_with_graph`: the graph lifts, it never admits."""
+    from xbrain.knowledge import graph_strategy
+
+    hits = dict(ordered)
+    ranked = graph_strategy.rank_with_graph(
+        {"lexical": list(hits)}, context, seeds=graph_strategy.GRAPH_SEEDS, limit=len(hits)
+    )
+    return [(item.item_id, hits[item.item_id]) for item in ranked]
+
+
 def _resolve_channel(
     query: str,
     requested: Strategy,
@@ -383,8 +405,14 @@ def _resolve_channel(
     index: OpenIndex,
     context: QueryContext,
     lexical_resolution: tuple[Strategy, tuple[str, ...]],
+    *,
+    graph_enabled: bool | None = None,
 ) -> tuple[Strategy, tuple[str, ...], _VectorChannel | None]:
     """The strategy that RUNS, its degradation, and the vector channel when it can run.
+
+    `hybrid_graph` RUNS only when `graph_channel_runs` says so — asked for by name AND switched
+    on, the switch defaulting to `GRAPH_ENABLED_BY_DEFAULT` (off). Switched off it keeps
+    `resolve_strategy`'s `hybrid_graph_not_implemented`: one door decides, not two.
 
     THE LINE THAT IS NOT CROSSED (Plan 03 §5, spec §9.3): the response names `vector` or
     `hybrid` only when this returns a channel — a plane the manifest declares, loaded under the
@@ -401,6 +429,12 @@ def _resolve_channel(
     backend, and answering it lexically would hide it (Plan 03 §5, «no se consulta a medias»).
     So is a missing `numpy` (criterion §13.12): its error names the install command.
     """
+    # Imported here: `graph_strategy` imports `QueryContext` from this module.
+    from xbrain.knowledge import graph_strategy
+
+    enabled = graph_strategy.GRAPH_ENABLED_BY_DEFAULT if graph_enabled is None else graph_enabled
+    if graph_strategy.graph_channel_runs(requested, enabled=enabled):
+        return requested, (), None
     if requested not in _VECTOR_STRATEGIES:
         return (*lexical_resolution, None)
     spec = manifest_spec(index.manifest)
