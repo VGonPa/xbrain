@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Literal
 
 from xbrain.i18n import strings_for
@@ -23,6 +24,7 @@ from xbrain.knowledge.contracts import GraphEdge, GraphExpansionResponse, GraphN
 from xbrain.knowledge.graph_build import DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
 from xbrain.knowledge.index_store import open_for_query
 from xbrain.knowledge.search_service import QueryContext
+from xbrain.models import _reject_local_path_traversal
 
 _EDGE_COLUMNS = (
     "source, target, relation, method, weight, shared_items, "
@@ -164,3 +166,20 @@ def disclaimer(response: GraphExpansionResponse, language: str) -> str:
     cannot drift into two wordings of the same warning.
     """
     return str(getattr(strings_for(language), response.disclaimer_key))
+
+
+def resolve_locator(root: Path, relative: str) -> Path:
+    """`root / relative`, resolved and PROVEN to stay inside `root` (spec §10.6, Plan 04 m8).
+
+    Two checks, and they are not the same check — the pair `index_schema.resolve_index_dir`
+    applies to the index directory. `_reject_local_path_traversal` refuses an absolute path and
+    a literal `..`; it does not establish containment, because a symlink under `root` pointing
+    anywhere passes it untouched. `is_relative_to` on the RESOLVED paths is what contains it.
+    """
+    _reject_local_path_traversal(relative)
+    resolved = (root / relative).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise ValueError(
+            f"El localizador {relative!r} resuelve a {resolved}, fuera de {root.resolve()}."
+        )
+    return resolved

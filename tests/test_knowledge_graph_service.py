@@ -245,3 +245,26 @@ def test_the_disclaimer_sentence_comes_from_i18n_strings_in_both_languages(
         )
     assert graph_service.disclaimer(response, "English") == "sentinel English"
     assert graph_service.disclaimer(response, "Spanish") == "sentinel Spanish"
+
+
+def test_a_locator_escaping_output_dir_is_refused_by_containment_not_only_by_dotdot(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "vault"
+    (output_dir / "items").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    # `topics/` inside the vault is a symlink OUT of it.
+    (output_dir / "topics").symlink_to(elsewhere, target_is_directory=True)
+
+    # Contained: resolved under the root.
+    assert (
+        graph_service.resolve_locator(output_dir, "items/1.md")
+        == (output_dir / "items" / "1.md").resolve()
+    )
+    # A literal `..` is refused.
+    with pytest.raises(ValueError):
+        graph_service.resolve_locator(output_dir, "../elsewhere/a.md")
+    # No `..` and not absolute — a traversal filter passes it — and it still lands outside.
+    with pytest.raises(ValueError, match="fuera de"):
+        graph_service.resolve_locator(output_dir, "topics/a.md")
