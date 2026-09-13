@@ -33,7 +33,10 @@ def build_graph_edges(store: Mapping[str, Item]) -> list[GraphEdge]:
                     method=ASSIGNMENT_METHOD,
                 )
             )
-        for slug in enriched.topics:
+        # One edge per (item, topic): the primary topic is not re-emitted as HAS_TOPIC when the
+        # enrichment also lists it in `topics`, and a repeated slug is emitted once.
+        secondary = dict.fromkeys(s for s in enriched.topics if s != enriched.primary_topic)
+        for slug in secondary:
             edges.append(
                 GraphEdge(
                     source=source,

@@ -42,3 +42,16 @@ def test_primary_topic_and_topics_each_produce_their_own_edge_kind() -> None:
     assert ("HAS_TOPIC", "item:1", "topic:rag") in triples
     # The primary topic comes from `primary_topic`, not from `topics`: "rag" is not primary.
     assert ("HAS_PRIMARY_TOPIC", "item:1", "topic:rag") not in triples
+
+
+def test_primary_topic_repeated_in_topics_does_not_produce_a_double_edge() -> None:
+    # The enrichment lists the primary topic inside `topics` too, and repeats a secondary one.
+    store = {"1": _item("1", primary="agents", topics=["agents", "rag", "rag"])}
+
+    edges = build_graph_edges(store)
+
+    pairs = [(e.source, e.target) for e in edges]
+    assert sorted(pairs) == [("item:1", "topic:agents"), ("item:1", "topic:rag")]
+    relation_of = {(e.source, e.target): e.relation for e in edges}
+    assert relation_of[("item:1", "topic:agents")] == "HAS_PRIMARY_TOPIC"
+    assert relation_of[("item:1", "topic:rag")] == "HAS_TOPIC"
