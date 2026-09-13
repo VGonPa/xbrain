@@ -577,6 +577,70 @@ def test_search_hybrid_graph_con_canal_vectorial_reordena_la_fusion_y_nunca_el_v
     assert untouched == [i for i in hybrid if i in untouched]
 
 
+def test_search_hybrid_graph_fusionado_pagina_por_encima_del_horizonte_sin_duplicar_ni_perder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # El test de paginación por encima del horizonte corre SIN embedder, por la rama léxica, y no
+    # toca `_materialise_fused`: pasarle `needed=beyond` en vez de `needed` dejaba la suite verde y
+    # el paseo con cursor duplicaba un id y perdía otro. En la rama fusionada `needed` solo acota
+    # `_fill_from_profiles`; cuando los dueños de chunk no llenan el horizonte, lo completan
+    # candidatos del plano de perfiles, y si cuántos entran depende de la página, el grafo reordena
+    # una cabeza distinta en cada página. La fixture tiene 49 chunks y una ventana de 1000 los cubre
+    # todos, así que ninguna consulta llega a ese plano; en el corpus real (22.933 chunks) la
+    # ventana NO cubre a todos los dueños. Se bajan ventana y horizonte para reproducir esa forma
+    # con la fixture (los dos se leen en cada llamada).
+    monkeypatch.setattr(search_service, "FUSED_CHUNK_WINDOW", 2)
+    monkeypatch.setattr(search_service, "GRAPH_CANDIDATE_HORIZON", 5)
+    horizon = search_service.GRAPH_CANDIDATE_HORIZON
+    corpus = _vector_corpus()
+    data = vector_fixture._data(tmp_path, corpus, with_plane=True)
+    chunks = vector_fixture._item_chunks(data)
+    [aim] = [chunk_id for chunk_id in chunks if chunk_id.startswith("item:k05:post:")]
+    embedder = vector_fixture.QueryEmbedder(chunks[aim])
+    context = vector_fixture._context(data, corpus, embedder)
+    query = "export"
+
+    def page(limit: int, cursor: str | None = None) -> tuple[list[str], str | None]:
+        response = search_service.search(
+            query, context, limit=limit, strategy="hybrid_graph", graph_enabled=True, cursor=cursor
+        )
+        return [r.item_id for r in response.results], response.cursor
+
+    whole = search_service.search(
+        query, context, limit=50, strategy="hybrid_graph", graph_enabled=True
+    )
+    ranking = [r.item_id for r in whole.results]
+
+    # La fixture es lo que dice ser (regla 1):
+    # 1. el canal vectorial CORRIÓ, y lo servido lo encontraron léxico, vector y grafo;
+    assert whole.strategy == "hybrid_graph"
+    assert embedder.calls == [query]
+    assert {"lexical", "vector", "graph"} <= {
+        channel for r in whole.results for m in r.matches for channel in m.matched_by
+    }
+    # 2. los dueños de chunk NO llenan el horizonte — lo completa el plano de perfiles, la población
+    #    que `needed` dimensiona — y el ranking lo CRUZA: hay dueños que el grafo no ve;
+    chunk_owners = [r.item_id for r in whole.results if r.matches]
+    assert len(chunk_owners) < horizon < len(ranking)
+    # 3. y el grafo SÍ reordena: sin él, el ranking sería el de `hybrid`.
+    hybrid = search_service.search(query, context, limit=50, strategy="hybrid")
+    assert ranking != [r.item_id for r in hybrid.results]
+
+    # LA UNIÓN DE LAS PÁGINAS ES EL RANKING: ni un id dos veces, ni uno perdido.
+    for limit in (1, 2, 3):
+        walked, cursor = page(limit)
+        while cursor is not None:
+            ids, cursor = page(limit, cursor)
+            walked += ids
+        assert len(walked) == len(set(walked)), (limit, walked)
+        assert set(walked) == set(ranking), (limit, walked)
+        assert walked == ranking, limit
+
+    # EL ORDEN NO DEPENDE DEL LIMIT: cada página corta es un prefijo del ranking entero.
+    for limit in range(1, len(ranking) + 1):
+        assert page(limit)[0] == ranking[:limit], limit
+
+
 @pytest.mark.parametrize(
     ("with_plane", "with_embedder", "cause"),
     [
