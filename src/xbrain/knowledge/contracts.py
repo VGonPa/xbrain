@@ -28,7 +28,9 @@ incompatible for the OLD one, which forbids it — the version-1 reader refuses 
 outright, so the number has to move for the refusal to name the version rather than a field
 nobody told it about. No document at either number is persisted
 anywhere (the index stores `locator_json` per surface, never a bundle), so there is no
-migration, only the honest number. `EVIDENCE_SCHEMA_VERSION` is READ off the model, never
+migration, only the honest number. The graph envelope is the one shape that gained keys
+WITHOUT moving (Plan 04.1), and the reason — nothing had ever emitted it — is on
+`GraphExpansionResponse`. `EVIDENCE_SCHEMA_VERSION` is READ off the model, never
 written a second time, so an adapter that stamps an envelope by hand (`cli.py`'s inspect
 payloads) cannot drift from it.
 
@@ -46,7 +48,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, cast, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.fields import FieldInfo
 
 from xbrain.knowledge.models import (
@@ -288,6 +290,12 @@ class GraphEdge(BaseModel):
     `CO_OCCURS_WITH` edge means *these topics were assigned together to these items of
     xbrain*, and NOT *these concepts are causally related in the world*. Carrying the support
     ids is what lets a consumer check which of the two it is looking at.
+
+    `input_fingerprints` is spec §6.2's *fingerprints de los inputs* (Plan 04.1). It defaults
+    to `()` because an assignment edge (`HAS_PRIMARY_TOPIC`, `HAS_TOPIC`) is sustained by the
+    item's own assignment and §6.2 does not ask it for them — but a default alone would make a
+    `CO_OCCURS_WITH` edge without them legal and defeat §6.2 in silence. Pydantic cannot
+    condition one field's default on another field, so the validator below does.
     """
 
     model_config = _FROZEN
@@ -299,6 +307,16 @@ class GraphEdge(BaseModel):
     weight: float = 0.0
     shared_items: int = 0
     supporting_item_ids: tuple[str, ...] = ()
+    input_fingerprints: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _co_occurrence_carries_its_input_fingerprints(self) -> GraphEdge:
+        """A `CO_OCCURS_WITH` edge with no `input_fingerprints` is refused (spec §6.2)."""
+        if self.relation == "CO_OCCURS_WITH" and not self.input_fingerprints:
+            raise ValueError(
+                "a CO_OCCURS_WITH edge must carry its input_fingerprints (spec §6.2); got none"
+            )
+        return self
 
 
 class GraphPath(BaseModel):
@@ -311,11 +329,33 @@ class GraphPath(BaseModel):
 
 
 class GraphExpansionResponse(BaseModel):
-    """The `graph_expand` envelope (spec §7.4)."""
+    """The `graph_expand` envelope (spec §7.4).
+
+    `semantics` and `disclaimer_key` put spec §6.4's distinction IN THE DATA (Plan 04 §2,
+    §11.6): an edge here means *these topics were assigned together to these items of
+    xbrain*, never *these concepts are related in the world*. Both are a `Literal` defaulted to
+    its only value, so no producer can omit them or write another value — a `str` with a
+    default could be overwritten with anything. `disclaimer_key` is a KEY, not a sentence: the
+    text a human reads is the `i18n.Strings` field of that name, in both languages.
+
+    A `Literal` is INVISIBLE to the text-field partition below (`is_str_field` is False for
+    it), so `test_every_declared_str_field_is_classified` stays green if either field is
+    deleted or its value changed. A dedicated test in `tests/test_knowledge_contracts.py` is
+    the only guard on them; do not delete it as redundant.
+
+    STILL AT "1" although Plan 04.1 added keys to this shape (these two, and
+    `GraphEdge.input_fingerprints` inside it). That is not the defaulted-key exemption the
+    module docstring denies: the rule exists so a version-1 consumer's refusal names the
+    version, and when these keys were added nothing had ever emitted this envelope — no
+    `graph_expand`, no CLI, no MCP — so there was no version-1 document and no consumer of
+    one. Bumping would announce a break that never happened.
+    """
 
     model_config = _FROZEN
 
     schema_version: Literal["1"] = "1"
+    semantics: Literal["co_occurrence_in_corpus"] = "co_occurrence_in_corpus"
+    disclaimer_key: Literal["graph_edge_is_corpus_not_world"] = "graph_edge_is_corpus_not_world"
     seeds: tuple[str, ...] = ()
     nodes: tuple[GraphNode, ...] = ()
     edges: tuple[GraphEdge, ...] = ()

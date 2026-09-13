@@ -47,6 +47,9 @@ class Strings:
     quoted_unavailable_deleted: str  # `not_found`  — X tombstoned it
     quoted_unavailable_protected: str  # `forbidden`  — protected / suspended
     quoted_unavailable_unknown: str  # anything else — X served us nothing usable
+    # The sentence behind `GraphExpansionResponse.disclaimer_key` (Plan 04 §2). The field
+    # NAME is the key, so a renderer resolves it with `getattr(strings, disclaimer_key)`.
+    graph_edge_is_corpus_not_world: str
 
 
 _STRINGS: dict[str, Strings] = {
@@ -67,6 +70,9 @@ _STRINGS: dict[str, Strings] = {
         quoted_unavailable_deleted="deleted or never existed",
         quoted_unavailable_protected="protected or suspended account",
         quoted_unavailable_unknown="X served no content for it",
+        graph_edge_is_corpus_not_world=(
+            "This edge reflects co-occurrence in this corpus, not a relationship in the world."
+        ),
     ),
     "Spanish": Strings(
         language="Spanish",
@@ -85,6 +91,9 @@ _STRINGS: dict[str, Strings] = {
         quoted_unavailable_deleted="borrado o inexistente",
         quoted_unavailable_protected="cuenta protegida o suspendida",
         quoted_unavailable_unknown="X no sirvió su contenido",
+        graph_edge_is_corpus_not_world=(
+            "Esta arista refleja coocurrencia en este corpus, no una relación en el mundo."
+        ),
     ),
 }
 
