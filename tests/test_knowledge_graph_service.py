@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from xbrain.knowledge import index_build
-from xbrain.knowledge.graph_build import ASSIGNMENT_METHOD, CO_OCCURRENCE_METHOD
+from xbrain.knowledge.graph_build import (
+    ASSIGNMENT_METHOD,
+    CO_OCCURRENCE_METHOD,
+    DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE,
+)
 from xbrain.knowledge.graph_service import graph_expand
 from xbrain.knowledge.search_service import QueryContext
 from xbrain.models import Author, Enrichment, Item, Topic
@@ -172,3 +176,26 @@ def test_max_hops_one_returns_no_node_two_hops_away(tmp_path: Path) -> None:
     assert {n.node_id for n in one.nodes} == {"item:3", "topic:a"}
     assert all(len(p.nodes) <= 2 for p in one.paths)
     assert all({e.source, e.target} <= {"item:3", "topic:a"} for e in one.edges)
+
+
+def test_a_giant_topic_is_bounded_to_max_neighbors_per_node(tmp_path: Path) -> None:
+    # Fifteen more items carry `a` as primary: topic:a now has 18 item neighbours plus topic:b.
+    # `graph_build` caps co-occurrence per topic, but NOT assignments — a topic's item list is
+    # bounded only by the corpus, so the expansion is where the bound has to hold.
+    giant = {f"g{n:02d}": _item(f"g{n:02d}", primary="a", topics=[]) for n in range(1, 16)}
+    context = _context(tmp_path, {**_KNOWN, **giant})
+
+    def neighbours(response) -> list[str]:
+        return [p.nodes[-1] for p in response.paths if p.nodes[:-1] == ("topic:a",)]
+
+    unbounded = graph_expand(("topic:a",), context, max_hops=1, max_neighbors_per_node=100)
+    capped = graph_expand(("topic:a",), context, max_hops=1, max_neighbors_per_node=5)
+    default = graph_expand(("topic:a",), context, max_hops=1)
+
+    # The population is what makes the cap the thing that cuts: 19 exist, 5 are served.
+    assert len(neighbours(unbounded)) == 18 + 1
+    assert len(neighbours(capped)) == 5
+    assert len(neighbours(default)) == DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
+    # Strength ranks first, so the topic neighbour is not crowded out by the item list.
+    assert "topic:b" in neighbours(capped)
+    assert {n.node_id for n in capped.nodes} == {"topic:a", *neighbours(capped)}

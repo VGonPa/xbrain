@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from xbrain.knowledge.contracts import GraphEdge, GraphExpansionResponse, GraphNode, GraphPath
+from xbrain.knowledge.graph_build import DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE
 from xbrain.knowledge.index_store import open_for_query
 from xbrain.knowledge.search_service import QueryContext
 
@@ -55,6 +56,22 @@ def _incident(connection: sqlite3.Connection, node_id: str) -> list[GraphEdge]:
     return [_edge(row) for row in rows]
 
 
+def _ranked(edges: Sequence[GraphEdge], node_id: str) -> list[GraphEdge]:
+    """`node_id`'s incident edges, strongest first, so `max_neighbors_per_node` keeps the best.
+
+    Weight first (a co-occurrence carries its Jaccard; an assignment carries 0), then a primary
+    assignment before a secondary one, then the other endpoint's id for a stable tie-break. So a
+    topic assigned to a thousand items still serves its topic neighbours before its item list.
+    UNSWEPT: the same starting-point status as `graph_build`'s thresholds.
+    """
+
+    def key(edge: GraphEdge) -> tuple[float, bool, str]:
+        other = edge.target if edge.source == node_id else edge.source
+        return (-edge.weight, edge.relation != "HAS_PRIMARY_TOPIC", other)
+
+    return sorted(edges, key=key)
+
+
 def _node_type(node_id: str) -> Literal["item", "topic"]:
     return "item" if node_id.startswith("item:") else "topic"
 
@@ -88,6 +105,7 @@ def graph_expand(
     context: QueryContext,
     *,
     max_hops: int = 1,
+    max_neighbors_per_node: int = DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE,
 ) -> GraphExpansionResponse:
     """Expand `seeds` over the persisted graph, one explicit path per reached node.
 
@@ -111,10 +129,14 @@ def graph_expand(
         for _ in range(max_hops):
             next_frontier: list[str] = []
             for node in frontier:
-                for edge in _incident(connection, node):
+                served = 0
+                for edge in _ranked(_incident(connection, node), node):
                     other = edge.target if edge.source == node else edge.source
                     if other in path_of:
                         continue
+                    if served == max_neighbors_per_node:
+                        break
+                    served += 1
                     _require_resolvable(edge, context.store)
                     edges[(edge.source, edge.target, edge.relation)] = edge
                     base = path_of[node]
