@@ -350,6 +350,59 @@ def test_a_real_vector_backend_reports_the_filter_cases_unmeasured_never_scored(
     assert "FX7" not in {case["id"] for case in payload["cases"]}
 
 
+def test_the_guardrail_no_longer_depends_on_vector_being_unimplemented(
+    tmp_path: Path, corpus, monkeypatch
+) -> None:
+    """Now that `vector` RUNS, its filter cases are unmeasured because of what it DECLARES it
+    can push — never because it is missing from `IMPLEMENTED_STRATEGIES`.
+
+    WHY THIS EXACT NAME. It is an acceptance node of criterion 11 in
+    `eval/plan02-acceptance.yaml`, and `tests/test_plan02_acceptance.py` fails closed on a node
+    id that stops resolving. Plan 03.7 replaced the test of this name with the real-backend
+    test above (a simulated vector pushing eight filters became a real one pushing none) and
+    the node went with it. That test stays as it is; this one is not an alias of it.
+
+    WHAT IT PINS THAT NOTHING ELSE DID. «Unimplemented» is still literally true in production:
+    `vector` runs only through `vectors=` and is NOT in `contracts.IMPLEMENTED_STRATEGIES`. An
+    `unsupported_filters` that read the gap off that membership instead of `SUPPORTED_FILTERS`
+    gives byte-identical reports today — the vector pair declares no filter either way — and
+    every test of the knowledge files that reach the harness stayed green under it (257,
+    measured). The coupling shows only when the DECLARATION moves while the STATUS stays put,
+    so that is what this does, over a real vector backend that ran (hash embedder, no model):
+    as shipped the guardrail fires on a strategy that was not degraded; with `vector` declared
+    able to push every filter, the same case is scored. That score is meaningless — the plane
+    filtered nothing, which is why production declares nothing — and is not asserted; what is
+    asserted is WHERE the decision came from. The status is PINNED, not inherited, so the day
+    `vector` joins `IMPLEMENTED_STRATEGIES` this test does not quietly stop discriminating.
+
+    Seen red both ways, by mutating `unsupported_filters` and restoring it: returning `()` for
+    any runnable strategy (the guardrail lives only while vector cannot run) fails the first
+    half; `supported = frozenset()` unless the strategy is in `IMPLEMENTED_STRATEGIES` fails
+    the second.
+    """
+    monkeypatch.setattr(contracts, "IMPLEMENTED_STRATEGIES", frozenset({"lexical"}))
+    data = _vector_workspace(tmp_path, corpus)
+    cases = resolve_cases(load_cases(FIXTURE_GOLDEN), corpus.items)
+    index_dir = tmp_path / "eval-index"
+
+    shipped = evaluate(
+        cases, corpus, strategy="vector", vectors=_vectors(data, index_dir)
+    ).to_dict()
+    assert shipped["strategy"] == "vector" and shipped["degraded"] == [], "vector RAN"
+    unmeasured = {entry["id"]: entry for entry in shipped["unmeasured"]}
+    assert unmeasured["FX7"]["unsupported_filters"] == ["source"]
+
+    monkeypatch.setitem(
+        evaluation.SUPPORTED_FILTERS, "vector", frozenset(SearchFilters.model_fields)
+    )
+    declared = evaluate(
+        cases, corpus, strategy="vector", vectors=_vectors(data, index_dir)
+    ).to_dict()
+    assert declared["strategy"] == "vector" and declared["degraded"] == [], "same status"
+    assert declared["unmeasured"] == [], "the declaration decided, not the status"
+    assert "FX7" in {case["id"] for case in declared["cases"]}
+
+
 def test_an_unimplemented_strategy_publishes_the_strategy_that_actually_ran(
     corpus, monkeypatch
 ) -> None:
