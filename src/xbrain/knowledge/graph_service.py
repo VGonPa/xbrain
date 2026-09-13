@@ -106,6 +106,22 @@ def _require_resolvable(edge: GraphEdge, store: Mapping[str, object]) -> None:
         )
 
 
+def _require_current(degraded: Sequence[str]) -> None:
+    """Refuse an index the cheap store signal already declared behind the store.
+
+    `search` can serve behind-store results because its response carries `degraded`; the
+    graph contract has no such field, so an expansion over a stale graph would read as fresh.
+    With no way to declare it, the refusal is WHOLE and names the repair, as in
+    `_require_resolvable`.
+    """
+    if "index_behind_store" in degraded:
+        raise ValueError(
+            "El índice va por detrás del store (`index_behind_store`): `items.json`, "
+            "`vocab.yaml` o `topics.json` cambió después de construirlo, así que sus aristas "
+            "pueden no ser las del corpus actual. Ejecuta `xbrain index update`."
+        )
+
+
 def graph_expand(
     seeds: Sequence[str],
     context: QueryContext,
@@ -115,7 +131,8 @@ def graph_expand(
 ) -> GraphExpansionResponse:
     """Expand `seeds` over the persisted graph, one explicit path per reached node.
 
-    Every served edge's support resolves in `context.store` (`_require_resolvable`).
+    An index behind the store is refused (`_require_current`), and every served edge's support
+    resolves in `context.store` (`_require_resolvable`).
     """
     index = open_for_query(
         context.index_dir,
@@ -125,6 +142,7 @@ def graph_expand(
         params=context.params,
     )
     try:
+        _require_current(index.degraded)
         connection = index.lexical.connection
         # The path that FIRST reached each node, in reach order: a hop extends it rather than
         # restarting from the seed, so every served path is explicit end to end (spec §6.3).

@@ -159,6 +159,19 @@ def test_every_served_path_rests_on_item_ids_that_resolve_in_the_live_store(
     assert "'2'" in str(refused.value)
 
 
+def test_an_index_behind_the_store_is_refused_not_expanded(tmp_path: Path) -> None:
+    # `extract` wrote a new item to `items.json` after the build: the cheap signal on DISK moves
+    # and `open_for_query` declares `index_behind_store`. The in-memory store is left intact, so
+    # `_require_resolvable` cannot be what refuses — only the degradation can.
+    context = _context(tmp_path)
+    assert graph_expand(("topic:a",), context, max_hops=1).paths
+    save_store({**_KNOWN, "5": _item("5", primary="c", topics=[])}, context.items_path)
+
+    with pytest.raises(ValueError, match="index_behind_store") as refused:
+        graph_expand(("topic:a",), context, max_hops=1)
+    assert "xbrain index update" in str(refused.value)
+
+
 def test_max_hops_one_returns_no_node_two_hops_away(tmp_path: Path) -> None:
     # item:3 carries only `a`. One hop: topic:a. Two hops: items 1 and 2 (also assigned `a`)
     # and topic:b (a→b co-occurs). Asserting only the one-hop half would pass on an expansion
