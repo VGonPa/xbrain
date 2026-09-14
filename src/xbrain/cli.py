@@ -45,15 +45,12 @@ from xbrain.fetch import (
     retry_failed,
     revalidate_stored_bodies,
 )
-from xbrain.fetch_x import (
-    browser_text_fetcher,
-    fetch_x_articles,
-    refetch_full_texts,
-)
+from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
+from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
 from xbrain.models import ArchiveImport, Author, Item, SourceName
 from xbrain.redescribe import (
     RedescribeReport,
@@ -2698,6 +2695,23 @@ def reextract_command(
 @_handle_cli_errors
 def refetch_truncated_command(
     apply: bool = typer.Option(False, "--apply", help="Actually re-fetch from X (network)"),
+    tabs: int | None = typer.Option(
+        None,
+        "--tabs",
+        help=(
+            "Pestañas reutilizadas en paralelo (por defecto 3, máximo 4). Cada una navega "
+            "EN LA MISMA pestaña de un post al siguiente, con una pausa aleatoria de 5-30 s "
+            "entre cargas: ni se abre un navegador por item ni se carga a ritmo de máquina."
+        ),
+    ),
+    headless: bool = typer.Option(
+        False,
+        "--headless/--no-headless",
+        help=(
+            "Navegador oculto. Por defecto headful (visible) — más difícil de "
+            "fingerprintear como bot."
+        ),
+    ),
 ) -> None:
     """List (or re-fetch) items whose tweet text was TRUNCATED at ingest.
 
@@ -2728,11 +2742,26 @@ def refetch_truncated_command(
     def _checkpoint() -> None:
         save_store(store, cfg.items_path)
 
-    with x_context(cfg.storage_state_path, headless=False) as context:
-        repaired = refetch_full_texts(
-            store, targets, browser_text_fetcher(context), checkpoint=_checkpoint
+    opened = clamp_tabs(tabs)
+    typer.echo(
+        f"Re-fetch en {opened} pestaña(s) reutilizada(s), pausa aleatoria de "
+        f"{PAUSE_MIN_MS // 1000}-{PAUSE_MAX_MS // 1000}s entre cargas. "
+        "Ctrl-C conserva lo reparado hasta el último checkpoint."
+    )
+    # `RefetchRateLimited` is a RuntimeError, so `_handle_cli_errors` already prints it as
+    # a clean exit-1. All this has to guarantee is that the repairs made before X started
+    # limiting us are on disk when it does.
+    try:
+        repaired = refetch_full_texts_pooled(
+            store,
+            targets,
+            cfg.storage_state_path,
+            headless=headless,
+            tabs=opened,
+            checkpoint=_checkpoint,
         )
-    save_store(store, cfg.items_path)
+    finally:
+        save_store(store, cfg.items_path)
     typer.echo(
         f"{repaired}/{len(targets)} textos completos recuperados → {cfg.items_path}\n"
         f"{repaired} resúmenes invalidados: vuelve a ejecutar `xbrain enrich`."
