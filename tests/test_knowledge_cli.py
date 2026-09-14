@@ -887,6 +887,47 @@ def test_search_hybrid_graph_through_the_command_leaves_the_graph_switched_off(
     assert not [m for r in payload["results"] for m in r["matches"] if "graph" in m["matched_by"]]
 
 
+def test_search_vector_with_a_filter_through_the_command_is_lexical_and_never_says_vector(
+    workspace: Path, monkeypatch
+) -> None:
+    """Audit A1 through the command: a filtered `--strategy vector` answers `lexical`.
+
+    `test_a_filtered_vector_request_is_answered_lexically_and_never_says_vector` binds the
+    service's filter branch; this binds the door a reader actually types. The plane is on disk
+    and the embedder answers — the control proves the vector channel RUNS here without a filter —
+    so under `--source bookmark` the only reason it does not run is the filter, and the response
+    must say so: `lexical`, `degraded == ["vector_filters_unsupported"]`, the lexical page for the
+    same filter, no match claiming `vector`, and the embedder never called. Naming `vector` in
+    that branch (audit M06) kept the whole suite green.
+    """
+    _build_index_with_a_plane(workspace)
+    calls = _a_working_embedder(workspace, monkeypatch)
+    unfiltered = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "vector", "--json"])
+    )
+    assert unfiltered["strategy"] == "vector", "premise: the vector channel runs without a filter"
+    calls.clear()
+
+    filtered = _json_stdout(
+        runner.invoke(
+            app, ["search", SEARCH_QUERY, "--strategy", "vector", "--source", "bookmark", "--json"]
+        )
+    )
+    lexical = _json_stdout(
+        runner.invoke(
+            app, ["search", SEARCH_QUERY, "--strategy", "lexical", "--source", "bookmark", "--json"]
+        )
+    )
+
+    assert filtered["strategy"] == "lexical"
+    assert filtered["index"]["degraded"] == ["vector_filters_unsupported"]
+    assert filtered["filters"]["source"] == "bookmark"
+    assert filtered["results"], "lexical stays operational"
+    assert filtered["results"] == lexical["results"]
+    assert not _vector_matches(filtered)
+    assert calls == []
+
+
 def test_index_build_embeddings_refuses_a_batch_from_another_model_than_the_probe(
     workspace: Path, monkeypatch
 ) -> None:
