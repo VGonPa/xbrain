@@ -12,6 +12,7 @@ import asyncio
 import random
 
 import pytest
+from playwright._impl._errors import TargetClosedError
 
 from xbrain.refetch_pool import (
     DEFAULT_TABS,
@@ -19,6 +20,8 @@ from xbrain.refetch_pool import (
     PAUSE_MAX_MS,
     PAUSE_MIN_MS,
     MAX_RATE_LIMIT_BACKOFFS,
+    RATE_LIMIT_BACKOFF_MIN_MS,
+    RefetchBrowserClosed,
     RefetchRateLimited,
     backoff_ms,
     clamp_tabs,
@@ -250,3 +253,230 @@ def test_results_gathered_before_the_rate_limit_are_kept_by_the_caller():
             )
         )
     assert len(rec.results) >= 2
+
+
+# --- the navigation gate: no tab starts a load while a 429 is unresolved ------------
+
+
+class Interleaved(Recorder):
+    """A fake whose loads and waits take TIME, so the tabs genuinely overlap.
+
+    `Recorder.sleep` returns without suspending, so under it a backoff never overlaps any
+    other tab's work and a gate that leaks cannot be seen. Here time is event-loop ticks:
+    a load is one, a page pause `PAUSE_TICKS`, a backoff `BACKOFF_TICKS` — long enough for
+    every other tab to come round to its next load while the backoff is still running.
+    """
+
+    PAUSE_TICKS = 2
+    BACKOFF_TICKS = 20
+
+    def __init__(self, *, throttled_url: str, late: bool) -> None:
+        super().__init__()
+        self.throttled_url = throttled_url
+        self.late = late
+        self.limited = False
+        self.backing_off = False
+        # (url, 429 pending, backoff running) at the instant each load began.
+        self.starts: list[tuple[str, bool, bool]] = []
+        self.events: list[tuple[str, asyncio.Task | None]] = []
+
+    async def fetch(self, index: int, url: str) -> str | None:
+        self.starts.append((url, self.limited, self.backing_off))
+        self.events.append(("load", asyncio.current_task()))
+        if url == self.throttled_url:
+            if self.late:
+                asyncio.ensure_future(self._late_429())
+            else:
+                self.limited = True
+        return await super().fetch(index, url)
+
+    async def _late_429(self) -> None:
+        # Production reads each response in a task its listener schedules, so the flag
+        # rises AFTER `goto` has returned — by then the tab can already be in its pause.
+        await asyncio.sleep(0)
+        self.limited = True
+
+    async def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        backoff = seconds >= RATE_LIMIT_BACKOFF_MIN_MS / 1000
+        self.events.append(("backoff" if backoff else "pause", asyncio.current_task()))
+        if backoff:
+            self.backing_off = True
+        for _ in range(self.BACKOFF_TICKS if backoff else self.PAUSE_TICKS):
+            await asyncio.sleep(0)
+        if backoff:
+            self.backing_off = False
+            self.events.append(("backoff_end", asyncio.current_task()))
+
+    def rate_limited(self) -> bool:
+        return self.limited
+
+    def clear_rate_limit(self) -> None:
+        self.limited = False
+
+
+def run_interleaved(urls, *, tabs, rec):
+    return run(
+        urls,
+        tabs=tabs,
+        rec=rec,
+        rate_limited=rec.rate_limited,
+        clear_rate_limit=rec.clear_rate_limit,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tabs", "urls", "throttled", "late"),
+    [
+        # Tab 1's load draws the 429; tab 0 takes the backoff; tab 1 must not load again
+        # until it is over. Before: the backoff CLEARED the flag and then slept, so tab 1
+        # read "not limited" and loaded in the middle of it.
+        (2, ["a", "b", "c", "d", "e", "f"], "b", False),
+        # The 429 is read after `goto` returned, while the tab is pausing. Before: the flag
+        # was polled BEFORE the pause, so the tab woke up and loaded straight into it.
+        (1, ["a", "b", "c"], "a", True),
+    ],
+    ids=["429-during-another-tabs-load", "429-read-after-the-load-returned"],
+)
+def test_no_tab_starts_a_load_while_a_429_is_pending_or_being_backed_off(
+    tabs, urls, throttled, late
+):
+    rec = Interleaved(throttled_url=throttled, late=late)
+    run_interleaved(urls, tabs=tabs, rec=rec)
+
+    # The scenario must actually have hit a backoff, or "nothing leaked" is vacuous.
+    assert len([w for w in rec.waits if w >= RATE_LIMIT_BACKOFF_MIN_MS / 1000]) == 1
+    assert sorted(url for url, _ in rec.results) == sorted(urls)
+    leaked = [start for start in rec.starts if start[1] or start[2]]
+    assert leaked == [], "a tab loaded while a 429 was pending or a backoff was running"
+
+
+def test_tabs_held_by_a_backoff_pause_again_instead_of_all_loading_the_instant_it_ends():
+    """Every tab parked at the gate is released at the same moment the backoff ends.
+
+    Loading them all in that tick would answer a rate limit with a synchronised burst of
+    `tabs` requests — the exact pattern the pacing exists to avoid. Each must pause first.
+    """
+    rec = Interleaved(throttled_url="u0", late=False)
+    run_interleaved([f"u{i}" for i in range(9)], tabs=3, rec=rec)
+
+    end = max(i for i, (kind, _) in enumerate(rec.events) if kind == "backoff_end")
+    after = rec.events[end + 1 :]
+    resumed = {task for kind, task in after if kind == "load"}
+    assert len(resumed) == 3, "every tab must have loaded again after the backoff"
+    for task in resumed:
+        first_load = next(i for i, (kind, t) in enumerate(after) if kind == "load" and t is task)
+        assert ("pause", task) in after[:first_load]
+
+
+# --- a closed browser is a stop, not a run of empty results -----------------------
+
+
+def test_a_closed_browser_stops_the_pool_instead_of_reporting_the_rest_as_empty():
+    """The operator closes the headful window while tab 0 loads `c`.
+
+    From then on every call on every tab raises Playwright's own `TargetClosedError`. The
+    pool used to swallow each one as "this post yielded nothing" and keep going: every
+    remaining item was counted as attempted, and the run finished as if it had worked.
+    """
+
+    class BrowserClosed(Recorder):
+        closed = False
+
+        async def fetch(self, index: int, url: str) -> str | None:
+            if url == "c":
+                self.closed = True
+            if self.closed:
+                raise TargetClosedError()
+            return await super().fetch(index, url)
+
+    rec = BrowserClosed()
+    with pytest.raises(RefetchBrowserClosed) as excinfo:
+        run(["a", "b", "c", "d", "e", "f"], tabs=2, rec=rec)
+
+    assert isinstance(excinfo.value.__cause__, TargetClosedError)
+    # What finished before the closure reached the caller (which checkpoints from it), and
+    # nothing after it was reported as an empty result.
+    assert rec.results == [("a", "body of a"), ("b", "body of b")]
+
+
+def test_a_browser_closed_mid_run_checkpoints_the_repairs_and_fails_the_run(monkeypatch, tmp_path):
+    """The same closure through `refetch_full_texts_pooled`, the function the CLI calls.
+
+    Before the fix it returned "1 repaired" and `refetch-truncated` exited 0, so an operator
+    who had closed the browser was told the run had completed.
+    """
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from tests.test_fetch_x import _tweet_detail_payload
+    from xbrain import cli, fetch_x, refetch_pool
+    from xbrain.models import Author, Item
+
+    monkeypatch.setattr(refetch_pool, "PAUSE_MIN_MS", 0)
+    monkeypatch.setattr(refetch_pool, "PAUSE_MAX_MS", 0)
+
+    class TweetDetail:
+        status = 200
+        url = "https://x.com/i/api/graphql/q/TweetDetail"
+
+        async def json(self) -> dict:
+            return _tweet_detail_payload()
+
+    class Page:
+        def __init__(self) -> None:
+            self.listeners: list = []
+
+        def on(self, event: str, listener) -> None:
+            self.listeners.append(listener)
+
+        async def goto(self, url: str, wait_until: str | None = None) -> None:
+            if url.endswith("/status/200"):
+                raise TargetClosedError()
+            for listener in self.listeners:
+                listener(TweetDetail())
+
+        async def wait_for_timeout(self, ms: float) -> None:
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+        async def close(self) -> None:
+            return None
+
+    class Context:
+        async def new_page(self) -> Page:
+            return Page()
+
+    @asynccontextmanager
+    async def fake_x_context_async(storage_state_path, headless=False):
+        yield Context()
+
+    monkeypatch.setattr(fetch_x, "x_context_async", fake_x_context_async)
+
+    def mk(rest_id: str, text: str) -> Item:
+        return Item(
+            id=rest_id,
+            source="bookmark",
+            url=f"https://x.com/bob/status/{rest_id}",
+            author=Author(handle="bob", name="Bob"),
+            text=text,
+            created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            captured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+
+    repaired, lost = mk("100", "The truncated post, now"), mk("200", "Cut off at the")
+    checkpointed: list[str] = []
+
+    with pytest.raises(RefetchBrowserClosed) as excinfo:
+        fetch_x.refetch_full_texts_pooled(
+            {"100": repaired, "200": lost},
+            [repaired, lost],
+            tmp_path / "state.json",
+            tabs=1,
+            checkpoint=lambda: checkpointed.append(repaired.text),
+        )
+
+    assert checkpointed[-1] == "The truncated post, now complete."
+    assert lost.text == "Cut off at the"
+    # The CLI turns this into `Error: …` + exit 1, not a traceback and not exit 0.
+    assert isinstance(excinfo.value, cli._OPERATOR_ERRORS)

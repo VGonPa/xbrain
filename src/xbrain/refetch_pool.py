@@ -22,6 +22,10 @@ import logging
 import random
 from typing import Awaitable, Callable, Iterable
 
+# The one Playwright name this module needs: how a closed browser, context or tab surfaces.
+# `playwright.async_api` does not re-export it (1.59); `_errors` declares its types public.
+from playwright._impl._errors import TargetClosedError
+
 logger = logging.getLogger(__name__)
 
 # Deliberately slow, human-paced. A real reader lingers on a post; the previous
@@ -50,6 +54,16 @@ class RefetchRateLimited(RuntimeError):
 
     Raised instead of grinding on: the caller has already checkpointed every repair made
     so far, so stopping loses nothing and protects the account. Resume later.
+    """
+
+
+class RefetchBrowserClosed(RuntimeError):
+    """The browser, its context or one of the pool's tabs was closed mid-run.
+
+    Not "this post yielded nothing": a closed tab fails every later load instantly, so
+    swallowing it would count each remaining item as attempted and let the run finish as
+    if it had worked. Raised instead; every result already reported stands, so the caller's
+    checkpoint keeps the repairs. Resume later.
     """
 
 
@@ -98,18 +112,49 @@ async def drain(
     The pause happens BEFORE each load except a worker's first, so a run of one item
     costs no wait, and no two workers are ever deliberately synchronised.
 
-    `rate_limited` is polled between items. When it answers true every worker parks for a
-    randomized backoff and the flag is cleared; past `MAX_RATE_LIMIT_BACKOFFS` the whole
-    pool raises `RefetchRateLimited` instead of continuing to poke a limited endpoint.
+    `rate_limited` is checked at ONE gate every tab passes immediately before each load —
+    after its pause, never before it. The tab that finds it true takes one randomized
+    backoff while HOLDING the gate, so no tab starts a load until that backoff is over, and
+    one 429 costs one backoff however many tabs are waiting. Past `MAX_RATE_LIMIT_BACKOFFS`
+    the pool raises `RefetchRateLimited` instead of continuing to poke a limited endpoint.
+
+    A closed browser, context or tab raises `RefetchBrowserClosed` rather than reporting
+    the post as empty; every result already passed to `on_result` stands.
     """
     queue: asyncio.Queue[str] = asyncio.Queue()
     for url in urls:
         queue.put_nowait(url)
     backoffs = 0
-    lock = asyncio.Lock()
+    gate = asyncio.Lock()
+
+    async def pass_gate() -> bool:
+        """Return once no 429 is pending or being backed off; True if a backoff ran meanwhile.
+
+        The lock is held across an await only for the backoff itself, so a tab that arrives
+        mid-backoff waits for its end instead of reading a flag that was already cleared.
+        """
+        nonlocal backoffs
+        seen = backoffs
+        async with gate:
+            while rate_limited():
+                if backoffs >= MAX_RATE_LIMIT_BACKOFFS:
+                    raise RefetchRateLimited(
+                        f"X devolvió 429 tras {backoffs} backoffs — re-fetch "
+                        "detenido; las reparaciones hechas ya están guardadas."
+                    )
+                wait = backoff_ms(rng)
+                logger.warning(
+                    "X devolvió 429 (rate limit) — esperando %.0fs antes de seguir.",
+                    wait / 1000,
+                )
+                await sleep(wait / 1000)
+                backoffs += 1
+                # Cleared only AFTER the wait: a 429 from a load already in flight when the
+                # backoff began is the same episode, and must not buy a second backoff.
+                clear_rate_limit()
+        return backoffs != seen
 
     async def worker(index: int) -> None:
-        nonlocal backoffs
         first = True
         while True:
             try:
@@ -117,33 +162,23 @@ async def drain(
             except asyncio.QueueEmpty:
                 return
 
-            if rate_limited():
-                async with lock:
-                    # Re-check inside the lock: the first worker through clears the flag,
-                    # and the rest must not each spend a separate backoff for one 429.
-                    if rate_limited():
-                        if backoffs >= MAX_RATE_LIMIT_BACKOFFS:
-                            raise RefetchRateLimited(
-                                f"X devolvió 429 tras {backoffs} backoffs — re-fetch "
-                                "detenido; las reparaciones hechas ya están guardadas."
-                            )
-                        backoffs += 1
-                        wait = backoff_ms(rng)
-                        logger.warning(
-                            "X devolvió 429 (rate limit) — esperando %.0fs antes de seguir.",
-                            wait / 1000,
-                        )
-                        clear_rate_limit()
-                        await sleep(wait / 1000)
-
             if not first:
                 await sleep(pause_ms(rng) / 1000)
             first = False
+            # A backoff releases every tab it held at the same instant; loading them all in
+            # that tick would answer a rate limit with a synchronised burst. Pause again.
+            while await pass_gate():
+                await sleep(pause_ms(rng) / 1000)
 
             try:
                 text = await fetch(index, url)
             except RefetchRateLimited:
                 raise
+            except TargetClosedError as exc:
+                raise RefetchBrowserClosed(
+                    "El navegador (o una pestaña) de X se cerró durante el re-fetch — "
+                    "detenido; las reparaciones hechas ya están guardadas."
+                ) from exc
             except Exception:  # noqa: BLE001 - one bad post must not kill the pool
                 logger.debug("refetch: la pestaña %d falló en %s", index, url, exc_info=True)
                 text = None
