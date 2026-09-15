@@ -68,7 +68,7 @@ def _ranked(edges: Sequence[GraphEdge], node_id: str) -> list[GraphEdge]:
     Weight first (a co-occurrence carries its Jaccard; an assignment carries 0), then a primary
     assignment before a secondary one, then the other endpoint's id for a stable tie-break. So a
     topic assigned to a thousand items still serves its topic neighbours before its item list.
-    UNSWEPT: the same starting-point status as `graph_build`'s thresholds.
+    UNSWEPT: the Plan 04.5 sweep measured `graph_build`'s thresholds, never this order.
     """
 
     def key(edge: GraphEdge) -> tuple[float, bool, str]:

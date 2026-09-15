@@ -3707,6 +3707,44 @@ def _run_graph_sweep(
         raise ValueError(payload["verdict"])
 
 
+def _refuse_eval_flags(
+    strategy: str,
+    embeddings_model: str | None,
+    *,
+    sweep_chunker: bool,
+    sweep_fusion: bool,
+    sweep_graph: bool,
+) -> None:
+    """Every flag combination `eval` cannot honour, refused before anything loads."""
+    from xbrain.knowledge.evaluation import require_vector_arguments
+
+    # EVERY REFUSAL BEFORE ANYTHING IS LOADED OR EMBEDDED: `_eval_vectors` probes the embedder,
+    # which loads a model, and a flag combination that cannot be honoured must not cost one.
+    if sweep_graph and (sweep_chunker or sweep_fusion or embeddings_model):
+        raise ValueError(
+            "`--sweep-graph` mide el umbral del grafo con `search` sobre su propio índice: no "
+            "admite `--sweep-chunker`, `--sweep-fusion` ni `--embeddings-model`. Corre cada "
+            "barrido por separado."
+        )
+    if sweep_graph and strategy != "hybrid_graph":
+        raise ValueError(
+            f"`--sweep-graph` barre los umbrales del grafo que recorre `hybrid_graph` y "
+            f"`--strategy {strategy}` no corre el grafo: úsalo con `--strategy hybrid_graph`."
+        )
+    if sweep_chunker and (embeddings_model or sweep_fusion):
+        raise ValueError(
+            "`--sweep-chunker` mide el troceo con el recuperador léxico en memoria: no admite "
+            "`--embeddings-model` ni `--sweep-fusion`. Corre cada barrido por separado."
+        )
+    if not sweep_chunker:
+        require_vector_arguments(strategy, embeddings_model)
+    if sweep_fusion and strategy != "hybrid":
+        raise ValueError(
+            f"`--sweep-fusion` barre las constantes de la fusión RRF y `--strategy {strategy}` "
+            "no fusiona dos canales: úsalo con `--strategy hybrid`."
+        )
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
@@ -3770,39 +3808,16 @@ def eval_command(
     puede salir de otra manera (regla 2 de CLAUDE.md). Con umbral, el comando es una puerta y
     nombra el bucket que falló.
     """
-    from xbrain.knowledge.evaluation import (
-        DEFAULT_KS,
-        evaluate,
-        render_markdown,
-        require_vector_arguments,
-    )
+    from xbrain.knowledge.evaluation import DEFAULT_KS, evaluate, render_markdown
     from xbrain.knowledge.goldenset import load_cases, load_scenarios, resolve_cases
 
-    # EVERY REFUSAL BEFORE ANYTHING IS LOADED OR EMBEDDED: `_eval_vectors` probes the embedder,
-    # which loads a model, and a flag combination that cannot be honoured must not cost one.
-    if sweep_graph and (sweep_chunker or sweep_fusion or embeddings_model):
-        raise ValueError(
-            "`--sweep-graph` mide el umbral del grafo con `search` sobre su propio índice: no "
-            "admite `--sweep-chunker`, `--sweep-fusion` ni `--embeddings-model`. Corre cada "
-            "barrido por separado."
-        )
-    if sweep_graph and strategy != "hybrid_graph":
-        raise ValueError(
-            f"`--sweep-graph` barre los umbrales del grafo que recorre `hybrid_graph` y "
-            f"`--strategy {strategy}` no corre el grafo: úsalo con `--strategy hybrid_graph`."
-        )
-    if sweep_chunker and (embeddings_model or sweep_fusion):
-        raise ValueError(
-            "`--sweep-chunker` mide el troceo con el recuperador léxico en memoria: no admite "
-            "`--embeddings-model` ni `--sweep-fusion`. Corre cada barrido por separado."
-        )
-    if not sweep_chunker:
-        require_vector_arguments(strategy, embeddings_model)
-    if sweep_fusion and strategy != "hybrid":
-        raise ValueError(
-            f"`--sweep-fusion` barre las constantes de la fusión RRF y `--strategy {strategy}` "
-            "no fusiona dos canales: úsalo con `--strategy hybrid`."
-        )
+    _refuse_eval_flags(
+        strategy,
+        embeddings_model,
+        sweep_chunker=bool(sweep_chunker),
+        sweep_fusion=bool(sweep_fusion),
+        sweep_graph=bool(sweep_graph),
+    )
     cfg, corpus = _knowledge_corpus()
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)

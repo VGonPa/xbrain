@@ -430,8 +430,12 @@ def test_the_cell_in_force_is_always_measured_and_marked(
 
 
 def test_the_graph_sweep_artefacts_publish_every_cell_the_rule_and_the_retriever(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The cell in force is pinned INSIDE the grid, so the table holds exactly the two cells named
+    # below whatever default the sweep last applied (the in-force append has its own test).
+    monkeypatch.setattr(graph_build, "DEFAULT_GRAPH_MIN_SHARED_ITEMS", 2)
+    monkeypatch.setattr(graph_build, "DEFAULT_GRAPH_MIN_WEIGHT", 0.0)
     data = _workspace(tmp_path)
     report = _sweep(data, {"min_shared_items": [2, 3], "min_weight": [0.0]})
 
@@ -465,3 +469,69 @@ def test_the_graph_sweep_artefacts_publish_every_cell_the_rule_and_the_retriever
     table = [line for line in lines if re.match(r"^\| \d+ \| ", line)]
     assert [line.split("|")[1:3] for line in table] == [[" 3 ", " 0.0 "], [" 2 ", " 0.0 "]]
     assert lines[-1] == payload["verdict"]
+
+
+# ---------------------------------------------------------------------------
+# The threshold the signed sweep chose is the one the code applies
+# ---------------------------------------------------------------------------
+
+SWEEP_DOC = REPO / "docs" / "graph-threshold-sweep.md"
+# Plan 04 §1.3's grid, typed here rather than imported, so the doc cannot satisfy it by agreeing
+# with a constant of its own (rule 1).
+PLAN_GRID = [(m, w) for m in (2, 3, 5, 8) for w in (0.0, 0.02, 0.05, 0.10)]
+
+
+def _applied_in_doc() -> tuple[int, float]:
+    match = re.search(
+        r"^\*\*Umbral aplicado:\*\* `min_shared_items = (\d+)` · `min_weight = ([0-9.]+)`$",
+        SWEEP_DOC.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    assert match, f"{SWEEP_DOC} does not declare the applied threshold"
+    return int(match.group(1)), float(match.group(2))
+
+
+def test_the_signed_sweep_publishes_every_cell_of_the_plan_grid() -> None:
+    """Plan 04 §1.3: «se publica la tabla, incluidos los ajustes que no aportaron»."""
+    cells = re.findall(
+        r"^\| (\d+) \| ([0-9.]+) \| ", SWEEP_DOC.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert sorted((int(m), float(w)) for m, w in cells) == sorted(PLAN_GRID)
+
+
+def test_the_applied_graph_threshold_is_the_winner_the_signed_sweep_published(
+    tmp_path: Path,
+) -> None:
+    """Delivery row 04.5: «el umbral queda aplicado donde se decidió». Bound in code, at every
+    place a build reads it: the module default, the config default, `IndexOptions`, and the
+    `graph` block a real build seals. Moving any of them without re-running the sweep is red."""
+    from xbrain.config import load_config
+
+    min_shared, min_weight = _applied_in_doc()
+    assert (min_shared, min_weight) in PLAN_GRID
+    assert graph_build.DEFAULT_GRAPH_MIN_SHARED_ITEMS == min_shared
+    assert graph_build.DEFAULT_GRAPH_MIN_WEIGHT == pytest.approx(min_weight)
+
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "vault"\noutput_subdir = "x-knowledge"\ndata_dir = "data"\n'
+        '[x]\nhandle = "u"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert (cfg.index_graph_min_shared_items, cfg.index_graph_min_weight) == (
+        min_shared,
+        min_weight,
+    )
+
+    data = _workspace(tmp_path)
+    index_build.build(data / "index", index_build.load_index_inputs(*(data / n for n in _INPUTS)))
+    sealed = index_build.load_manifest(data / "index").graph
+    assert (sealed["min_shared_items"], sealed["min_weight"]) == (min_shared, min_weight)
+
+
+def test_config_example_documents_the_applied_threshold() -> None:
+    example = (REPO / "config.toml.example").read_text(encoding="utf-8")
+    min_shared, min_weight = _applied_in_doc()
+    assert f"# graph_min_shared_items = {min_shared}\n" in example
+    assert f"# graph_min_weight = {min_weight}\n" in example
+    assert "the sweep that fixes them has not run" not in example
