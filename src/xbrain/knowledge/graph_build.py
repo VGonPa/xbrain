@@ -37,12 +37,15 @@ ASSIGNMENT_METHOD = "enrichment_assignment"
 CO_OCCURRENCE_METHOD = "topic-cooccurrence/v1"
 
 # The index's defaults for the three `[index].graph_*` settings and the support cap: ONE
-# definition, imported by `config.py` and `index_build.IndexOptions` (rule 5). UNSWEPT starting
-# points: Plan 04 §1.3 fixes the threshold by a sweep of `min_shared_items ∈ {2, 3, 5, 8}` ×
-# `min_weight ∈ {0.0, 0.02, 0.05, 0.10}` that has not run, so these are that sweep's most
-# permissive corner, not its winner. 10 and 20 are spec §6.3's bounds.
-DEFAULT_GRAPH_MIN_SHARED_ITEMS = 2
-DEFAULT_GRAPH_MIN_WEIGHT = 0.0
+# definition, imported by `config.py` and `index_build.IndexOptions` (rule 5). The two
+# thresholds are MEASURED: Plan 04.5's sweep of `min_shared_items ∈ {2, 3, 5, 8}` ×
+# `min_weight ∈ {0.0, 0.02, 0.05, 0.10}` chose them (`docs/graph-threshold-sweep.md`), and
+# `tests/test_knowledge_graph_sweep.py` binds these values to the one that document publishes,
+# so moving them without re-running the sweep is red. No cell made `hybrid_graph` improve
+# recall: this is the least damaging by the sweep's rule, applied because every build writes a
+# graph. `max_neighbors_per_node` was not swept; 10 and 20 are spec §6.3's bounds.
+DEFAULT_GRAPH_MIN_SHARED_ITEMS = 5
+DEFAULT_GRAPH_MIN_WEIGHT = 0.05
 DEFAULT_GRAPH_MAX_NEIGHBORS_PER_NODE = 10
 MAX_SUPPORTING_ITEM_IDS = 20
 

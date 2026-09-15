@@ -57,6 +57,11 @@ _KNOWN = {
 }
 _VOCAB = [Topic(slug=s, description=f"topic {s}") for s in ("a", "b", "c")]
 
+# The thresholds this fixture's populations are written against, stated rather than inherited:
+# the build's defaults are the Plan 04.5 sweep's to move (`docs/graph-threshold-sweep.md`), and a
+# test leaning on them would pin the very value the sweep exists to choose.
+_THRESHOLDS = index_build.IndexOptions(graph_min_shared_items=2, graph_min_weight=0.0)
+
 
 def _context(tmp_path: Path, store: dict[str, Item] | None = None) -> QueryContext:
     """A built index over `store` (default `_KNOWN`) and the context a query door reads."""
@@ -67,7 +72,7 @@ def _context(tmp_path: Path, store: dict[str, Item] | None = None) -> QueryConte
     inputs = index_build.load_index_inputs(
         data / "items.json", data / "vocab.yaml", data / "topics.json"
     )
-    index_build.build(data / "index", inputs)
+    index_build.build(data / "index", inputs, options=_THRESHOLDS)
     return QueryContext(
         store=store,
         vocab=tuple(_VOCAB),
@@ -101,7 +106,7 @@ def test_every_path_carries_node_types_relation_method_weight_and_support(
 ) -> None:
     # From topic:a at one hop: items 1, 2, 3 (assigned `a` as primary) and topic:b, which shares
     # items {1, 2} of the union {1, 2, 3, 4} — Jaccard 0.5. The a–c pair shares ONE item, below
-    # the build's default `min_shared_items=2`, so it is not an edge.
+    # the fixture's `min_shared_items=2` (`_THRESHOLDS`), so it is not an edge.
     context = _context(tmp_path)
 
     response = graph_expand(("topic:a",), context, max_hops=1)

@@ -403,6 +403,49 @@ def test_eval_fusion_sweep_needs_hybrid_and_writes_its_own_report(
     assert not (workspace / "data" / "eval-report.json").exists()
 
 
+def test_eval_graph_sweep_needs_hybrid_graph_and_writes_its_own_report(workspace: Path) -> None:
+    """Plan 04 §1.3 at the command a reader runs to re-derive the applied threshold: the table
+    is `hybrid_graph`'s, so the flag is refused under any other strategy and beside the other
+    sweeps; it writes its own pair of files and builds its own index, never `data/index/`."""
+    grid = "min_shared_items=2,3 min_weight=0.0"
+    for argv, needle in (
+        (["eval", "--sweep-graph", grid], "hybrid_graph"),
+        (
+            ["eval", "--strategy", "hybrid_graph", "--sweep-graph", grid, "--sweep-chunker", "x=1"],
+            "--sweep-chunker",
+        ),
+        (
+            ["eval", "--strategy", "hybrid_graph", "--sweep-graph", grid, "--min-recall", "0.5"],
+            "--min-recall",
+        ),
+        (
+            ["eval", "--strategy", "hybrid_graph", "--sweep-graph", grid, "--k", "5", "--k", "10"],
+            "--k",
+        ),
+    ):
+        refused = runner.invoke(app, argv)
+        assert refused.exit_code != 0 and needle in refused.output, (argv, refused.output)
+    assert not (workspace / "data" / "eval-graph-sweep.json").exists()
+
+    result = runner.invoke(
+        app, ["eval", "--strategy", "hybrid_graph", "--sweep-graph", grid, "--json"]
+    )
+
+    payload = _json_stdout(result)
+    assert {(row["min_shared_items"], row["min_weight"]) for row in payload["rows"]} >= {
+        (2, 0.0),
+        (3, 0.0),
+    }
+    assert payload["base"]["requested_strategy"] == "hybrid"
+    on_disk = json.loads((workspace / "data" / "eval-graph-sweep.json").read_text(encoding="utf-8"))
+    assert on_disk["verdict"] == payload["verdict"]
+    markdown = (workspace / "data" / "eval-graph-sweep.md").read_text(encoding="utf-8")
+    assert markdown.splitlines()[-1] == payload["verdict"]
+    assert (workspace / "data" / "eval-index" / "graph-sweep").is_dir()
+    assert not (workspace / "data" / "index").exists()
+    assert not (workspace / "data" / "eval-report.json").exists()
+
+
 def test_eval_sweep_publishes_the_table_and_writes_both_reports(workspace: Path) -> None:
     """Plan 02 §7 at the command that has to exist for the number to be re-derivable: the
     delivery matrix's row 02.13 lists `M cli.py (--sweep-chunker)` and its outcome is *«el

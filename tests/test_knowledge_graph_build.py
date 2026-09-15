@@ -266,7 +266,7 @@ def test_graph_build_does_not_mutate_items_json(tmp_path: Path) -> None:
     data = _persisted(tmp_path)
     before = hashlib.sha256((data / "items.json").read_bytes()).hexdigest()
 
-    index_build.build(data / "index", _inputs(data))
+    index_build.build(data / "index", _inputs(data), options=_NO_PRUNING)
 
     # The graph WAS built — without this, an unchanged hash would also hold for a build that
     # never wrote a single edge, and the assertion below would prove nothing.
@@ -290,12 +290,12 @@ def _a_b_edge(data: Path) -> tuple[float, list[str]]:
 
 
 def _update(data: Path) -> None:
-    index_build.update(data / "index", _inputs(data))
+    index_build.update(data / "index", _inputs(data), options=_NO_PRUNING)
 
 
 def test_update_recomputes_the_graph_when_topics_or_vocabulary_change(tmp_path: Path) -> None:
     data = _persisted(tmp_path)
-    index_build.build(data / "index", _inputs(data))
+    index_build.build(data / "index", _inputs(data), options=_NO_PRUNING)
     built = _a_b_edge(data)
 
     # Control: an update with nothing changed leaves the edge exactly as built.
