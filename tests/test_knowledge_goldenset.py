@@ -119,17 +119,19 @@ def test_no_expected_text_is_a_corpus_body(real_cases) -> None:
 
 
 def test_the_real_golden_set_covers_the_strata_that_were_empty(real_cases) -> None:
-    """`exacto` and `filtros` had ZERO cases in v1/v2 (spec anexo A.4).
+    """`exacto`, `filtros` and `expansion` had ZERO cases in v1/v2 (spec anexo A.4).
 
     A stratum with no case cannot say whether indexing for it helped — which is why the
-    migration had to add them rather than report a stratum at 0.0.
+    migration had to add them rather than report a stratum at 0.0. `expansion` waited for the
+    graph (Plan 04 §11.9): its members are the cases whose enumerated relevants
+    `evaluation.classify_expansion` measured as reachable only through the graph, and the sweep
+    names any drift between this tag and that measurement.
     """
     strata = {stratum for case in real_cases for stratum in case.strata}
-    assert {"exacto", "filtros"} <= strata
-    assert "expansion" not in strata, (
-        "the expansion stratum has no mechanism until Plan 04; a case for it would be "
-        "measuring something that does not exist"
-    )
+    assert {"exacto", "filtros", "expansion"} <= strata
+    expansion = [case for case in real_cases if "expansion" in case.strata]
+    # The graph lifts ITEMS: a case whose truth is topics or surfaces could not be one.
+    assert all(case.relevant_items for case in expansion)
 
 
 def test_every_scorable_case_has_an_enumerated_ground_truth(real_cases) -> None:

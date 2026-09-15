@@ -200,7 +200,7 @@ cases:
       ¿Cuándo comparaba Karpathy la interfaz de los chatbots con la informática de hace
       décadas, diciendo que su equivalente a la interfaz gráfica todavía no se ha inventado?
     provenance: construido
-    strata: [semantico, cruzado_idioma]
+    strata: [semantico, cruzado_idioma, expansion]
     filters: {}
     relevant_items:
       - "1917920257257459899"
@@ -212,12 +212,13 @@ cases:
       ('80s computer terminal' / 'GUI hasn't been invented') aparece en 1 solo item de los
       2.404, en su `post`, sin fugas a ninguna otra superficie. Más de 20 items mencionan a
       Karpathy en la ventana, así que filtrar por autor no discrimina: hay que llegar por
-      semántica. Pregunta en español, fuente en inglés.
+      semántica. Pregunta en español, fuente en inglés. Estrato `expansion` (Plan 04.5, medido 2026-09-15 sobre 2.495 items con `evaluation.classify_expansion`, `hybrid` respondido léxico, k=10): su único relevante queda en el puesto 34 y el grafo lo alcanza desde la semilla por un
+      topic compartido.
 
   - id: D1c
     query: "¿Tengo algo guardado sobre que la calidad de un modelo se degrada cuando el contexto se alarga mucho?"
     provenance: construido
-    strata: [semantico, enterrado]
+    strata: [semantico, enterrado, expansion]
     filters: {}
     relevant_items:
       - "2012280466024407047"
@@ -241,7 +242,8 @@ cases:
       1 en `video_transcript`, 1 en `video_digest` + `video_transcript`, y 3 de ellos también
       en `summary`. 'context rot' NO es ninguno de los 45 topics, así que la taxonomía no
       llega; y la pregunta NO usa el término, así que el léxico tampoco. Es el test limpio de
-      si la capa semántica aporta por encima de lo que ya existe.
+      si la capa semántica aporta por encima de lo que ya existe. Estrato `expansion` (Plan 04.5, medido 2026-09-15 sobre 2.495 items con `evaluation.classify_expansion`, `hybrid` respondido léxico, k=10): 6 de los 12 quedan fuera del
+      top 10 y el grafo los alcanza desde la semilla; 1 es directo y 5 son inalcanzables.
 
   - id: D1d
     query: >-
@@ -283,7 +285,7 @@ cases:
   - id: P1
     query: "¿Qué tengo guardado de Simon Willison?"
     provenance: construido
-    strata: [semantico, enterrado]
+    strata: [semantico, enterrado, expansion]
     filters: {}
     relevant_items:
       - "1940440271126438118"
@@ -301,11 +303,13 @@ cases:
       `quoted_post`, 3 en `x_article`, 1 en `post`+`summary`. Autor de 0 y autor citado en 0,
       así que un filtro por `author.handle` devuelve CERO y ningún metadato llega a la
       respuesta. El caso puro que planteó Víctor: encontrarle aunque no le haya bookmarkeado.
+      Estrato `expansion` (Plan 04.5, medido 2026-09-15 sobre 2.495 items con `evaluation.classify_expansion`, `hybrid` respondido léxico, k=10): 4 de los 6 quedan fuera del top 10 y el grafo
+      los alcanza desde la semilla; 1 es directo y 1 inalcanzable.
 
   - id: U3
     query: "¿Qué tengo sobre la metáfora de las riendas para controlar al modelo, esa disciplina nueva de ingeniería?"
     provenance: construido
-    strata: [semantico, cruzado_idioma]
+    strata: [semantico, cruzado_idioma, expansion]
     filters: {}
     relevant_items:
       - "2031408954517971368"
@@ -338,6 +342,8 @@ cases:
       PREGUNTA no usa el término y está en español, así que el léxico no la resuelve. Mide la
       GRANULARIDAD: su topic padre `agentic-engineering` tiene cientos de items, y aquí se
       quieren estos 22 — la taxonomía no falla por no cubrir, falla por ser demasiado gruesa.
+      Estrato `expansion` (Plan 04.5, medido 2026-09-15 sobre 2.495 items con `evaluation.classify_expansion`, `hybrid` respondido léxico, k=10): 20 de los 22 quedan fuera del top 10 y el
+      grafo los alcanza desde la semilla; los otros 2 son directos.
 
   # ---------------------------------------------------------------------------
   # relleno de superficies que v1 no tocaba (v2)
@@ -576,8 +582,15 @@ scenarios:
 #    (Nota: al menos 2 de los 14 — 'Self-Attention', 'Layer Norm' — son el artefacto de
 #    traducción de captions que arregló #90, no invenciones.)
 #
-# 3. ESTRATO `expansión`: sin cobertura hasta el Plan 04, que es donde existe el grafo.
-#    No se inventa un caso para un mecanismo que todavía no existe.
+# 3. ESTRATO `expansión` (Plan 04.5, 2026-09-15): poblado SIN escribir ninguna pregunta nueva.
+#    `evaluation.classify_expansion` clasificó los 58 pares (caso medido, relevante) de este
+#    fichero contra el ranking que `hybrid_graph` re-ordena: 18 directos, 31 fuera del top 10 y
+#    alcanzables por el grafo desde la semilla, 0 alcanzables sin puntuar y 9 inalcanzables. Los
+#    31 viven en D1b, D1c, P1 y U3, que llevan la etiqueta. Una pregunta escrita DESPUÉS de ver
+#    qué alcanza el grafo sería verdad de terreno hecha a la medida del mecanismo (spec §8.3).
+#    La etiqueta congela una medición: `eval --sweep-graph` la re-deriva en cada corrida y nombra
+#    la deriva en los dos sentidos. Medida con `hybrid` respondido léxico, sin plano vectorial:
+#    con vectores parte de esos 31 puede volverse directa, y entonces la etiqueta se revisa.
 #
 # 4. SUPERFICIES `thread` y `user_note`: CERO instancias en el corpus (medido 2026-08-31).
 #    El emisor las soporta; la evaluación no puede tener casos y no se inventa ninguno.
