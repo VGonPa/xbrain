@@ -491,6 +491,53 @@ def _applied_in_doc() -> tuple[int, float]:
     return int(match.group(1)), float(match.group(2))
 
 
+def _published_rows() -> list[GraphSweepRow]:
+    """The signed table's cells as the rows the sweep ranked, in the order the document prints.
+
+    Rebuilt from the published NUMBERS, and each one proven to re-render byte for byte into the
+    line it was read from — so what the tests below rank is the table a reader sees, not a
+    parse that dropped a column. The sub-threshold precision losses are not in the table; they
+    cannot move the rule either, which reads only whether a loss exceeds the ceiling.
+    """
+    rows = []
+    for line in SWEEP_DOC.read_text(encoding="utf-8").splitlines():
+        if not re.match(r"^\| \d+ \| ", line):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        shared, weight, edges, degree, recall, delta, entrants, useful = cells[:8]
+        degradation, rejected, in_force = cells[10:]
+        row = GraphSweepRow(
+            min_shared_items=int(shared),
+            min_weight=float(weight),
+            edges=int(edges),
+            mean_degree=float(degree),
+            recall=float(recall),
+            recall_delta=float(delta),
+            entrants=int(entrants),
+            useful=int(useful),
+            degradation=float(degradation),
+            precision_drops={
+                stratum: float(pp)
+                for pp, stratum in re.findall(r"cae ([0-9.]+) pp en `([^`]+)`", rejected)
+            },
+            graph_ran="no corrió" not in rejected,
+            in_force=in_force == "sí",
+        )
+        assert evaluation._graph_table_row(row) == line, f"unparseable table row: {line}"
+        rows.append(row)
+    return rows
+
+
+def _published_verdict() -> str:
+    match = re.search(
+        r"^\*\*Veredicto del instrumento, literal:\*\* (.+?)\n\n",
+        SWEEP_DOC.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"{SWEEP_DOC} does not publish the instrument's verdict"
+    return " ".join(match.group(1).split())
+
+
 def test_the_signed_sweep_publishes_every_cell_of_the_plan_grid() -> None:
     """Plan 04 §1.3: «se publica la tabla, incluidos los ajustes que no aportaron»."""
     cells = re.findall(
@@ -499,15 +546,33 @@ def test_the_signed_sweep_publishes_every_cell_of_the_plan_grid() -> None:
     assert sorted((int(m), float(w)) for m, w in cells) == sorted(PLAN_GRID)
 
 
+def test_the_signed_table_is_in_the_order_the_rule_gives_its_own_numbers() -> None:
+    """The published order is not the author's: `rank_graph_rows` over the published data must
+    reproduce it, so a row moved to the top by hand — or a winner renamed — is red."""
+    rows = _published_rows()
+    assert len(rows) == len(PLAN_GRID)
+    assert list(evaluation.rank_graph_rows(rows)) == rows
+
+
 def test_the_applied_graph_threshold_is_the_winner_the_signed_sweep_published(
     tmp_path: Path,
 ) -> None:
     """Delivery row 04.5: «el umbral queda aplicado donde se decidió». Bound in code, at every
     place a build reads it: the module default, the config default, `IndexOptions`, and the
-    `graph` block a real build seals. Moving any of them without re-running the sweep is red."""
+    `graph` block a real build seals.
+
+    THE WINNER IS DERIVED, NOT READ: the published rows are re-ranked by the rule and handed to
+    `GraphSweepReport`, whose `winner` and verdict are the instrument's own. The «Umbral
+    aplicado» line, the verdict paragraph and every default must all name THAT cell — so moving
+    the line, the defaults and `config.toml.example` together to another cell is still red,
+    because the numbers the sweep measured did not move with them."""
     from xbrain.config import load_config
 
-    min_shared, min_weight = _applied_in_doc()
+    report = GraphSweepReport(k=10, limit=10, rows=evaluation.rank_graph_rows(_published_rows()))
+    assert report.winner is not None, "the signed table has no winner to apply"
+    min_shared, min_weight = report.winner.min_shared_items, report.winner.min_weight
+    assert _applied_in_doc() == (min_shared, min_weight)
+    assert _published_verdict() == report.to_dict()["verdict"]
     assert (min_shared, min_weight) in PLAN_GRID
     assert graph_build.DEFAULT_GRAPH_MIN_SHARED_ITEMS == min_shared
     assert graph_build.DEFAULT_GRAPH_MIN_WEIGHT == pytest.approx(min_weight)
