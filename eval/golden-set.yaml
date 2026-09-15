@@ -334,16 +334,25 @@ cases:
       - "2082821641097126127"
       - "2092314144598814909"
       - "2093801030223867919"
+      - "2094209008580325405"
+      - "2097020722669289481"
     relevant_surfaces: []
     expected_text: "Harness Engineering."
     notes: >-
-      ENUMERADO EN ESTE PR. v2 decía '20 items' en prosa; re-derivado hoy son 22. Población
-      definida por la aparición literal de 'harness engineering' en alguna superficie; la
-      PREGUNTA no usa el término y está en español, así que el léxico no la resuelve. Mide la
-      GRANULARIDAD: su topic padre `agentic-engineering` tiene cientos de items, y aquí se
-      quieren estos 22 — la taxonomía no falla por no cubrir, falla por ser demasiado gruesa.
-      Estrato `expansion` (Plan 04.5, medido 2026-09-15 sobre 2.495 items con `evaluation.classify_expansion`, `hybrid` respondido léxico, k=10): 20 de los 22 quedan fuera del top 10 y el
-      grafo los alcanza desde la semilla; los otros 2 son directos.
+      ENUMERADO EN ESTE PR. v2 decía '20 items' en prosa; re-derivado el 2026-08-31 sobre 2.404
+      items eran 22. COMPLETADO A 24 el 2026-09-15 (PR #198, ronda 2), sobre 2.495 items
+      (`items.json` sha256 2773310f…): el literal está hoy en 24, y los dos que faltaban —
+      2094209008580325405, el artículo «Harness engineering: leveraging Codex in an agent-first
+      world», y 2097020722669289481, un post que lo pone de ejemplo — se capturaron el
+      2026-09-11, después de enumerar. `docs/embeddings-bakeoff.md` §2 ya los contaba y el caso
+      seguía en 22, así que dos relevantes verdaderos puntuaban como ruido. Población definida
+      por la aparición literal de 'harness engineering' en alguna superficie; la PREGUNTA no usa
+      el término y está en español, así que el léxico no la resuelve. Mide la GRANULARIDAD: su
+      topic padre `agentic-engineering` tiene cientos de items, y aquí se quieren estos 24 — la
+      taxonomía no falla por no cubrir, falla por ser demasiado gruesa. Estrato `expansion`
+      (Plan 04.5, medido 2026-09-15 sobre 2.495 items con `evaluation.classify_expansion`,
+      `hybrid` respondido léxico, k=10): 22 de los 24 quedan fuera del top 10 y un camino de
+      `graph_edges` los une a la semilla; los otros 2 son directos.
 
   # ---------------------------------------------------------------------------
   # relleno de superficies que v1 no tocaba (v2)
@@ -583,14 +592,18 @@ scenarios:
 #    traducción de captions que arregló #90, no invenciones.)
 #
 # 3. ESTRATO `expansión` (Plan 04.5, 2026-09-15): poblado SIN escribir ninguna pregunta nueva.
-#    `evaluation.classify_expansion` clasificó los 58 pares (caso medido, relevante) de este
-#    fichero contra el ranking que `hybrid_graph` re-ordena: 18 directos, 31 fuera del top 10 y
-#    alcanzables por el grafo desde la semilla, 0 alcanzables sin puntuar y 9 inalcanzables. Los
-#    31 viven en D1b, D1c, P1 y U3, que llevan la etiqueta. Una pregunta escrita DESPUÉS de ver
-#    qué alcanza el grafo sería verdad de terreno hecha a la medida del mecanismo (spec §8.3).
+#    `evaluation.classify_expansion` clasificó los 60 pares (caso medido, relevante) de este
+#    fichero contra el ranking que `hybrid_graph` re-ordena: 18 directos, 33 fuera del top 10 y
+#    unidos a la semilla por un camino del grafo persistido, 0 alcanzables sin puntuar y 9
+#    inalcanzables. Los 33 viven en D1b, D1c, P1 y U3, que llevan la etiqueta. La pertenencia
+#    lee la tabla `graph_edges`, la verdad de terreno y el ranking `hybrid`; NUNCA lo que
+#    devuelve `graph_expand`, el servicio cuya ayuda se mide (PR #198, ronda 2). Eran 58 y 31
+#    hasta que U3 pasó de 22 a 24 relevantes, y los dos añadidos son alcanzables: la cifra se
+#    movió por la verdad de terreno, no por el grafo. Una pregunta escrita DESPUÉS de ver qué
+#    alcanza el grafo sería verdad de terreno hecha a la medida del mecanismo (spec §8.3).
 #    La etiqueta congela una medición: `eval --sweep-graph` la re-deriva en cada corrida y nombra
 #    la deriva en los dos sentidos. Medida con `hybrid` respondido léxico, sin plano vectorial:
-#    con vectores parte de esos 31 puede volverse directa, y entonces la etiqueta se revisa.
+#    con vectores parte de esos 33 puede volverse directa, y entonces la etiqueta se revisa.
 #
 # 4. SUPERFICIES `thread` y `user_note`: CERO instancias en el corpus (medido 2026-08-31).
 #    El emisor las soporta; la evaluación no puede tener casos y no se inventa ninguno.
