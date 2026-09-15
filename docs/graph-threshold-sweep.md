@@ -1,6 +1,7 @@
 # Barrido del umbral del grafo — Plan 04.5
 
-**Fecha de la medición:** 2026-09-15, re-firmada el mismo día con el estrato `expansión` poblado · **Estado:**
+**Fecha de la medición:** 2026-09-15, re-firmada el mismo día con el estrato `expansión` poblado y otra vez tras la
+ronda 2 del PR #198 (U3 completo a 24 relevantes; el estrato leído de `graph_edges`) · **Estado:**
 medición local firmada (Plan 04 §1.3, §11.7 y §11.9), no un check de CI · **Instrumento:**
 `xbrain eval --strategy hybrid_graph --sweep-graph <rejilla>`
 
@@ -13,13 +14,18 @@ medición local firmada (Plan 04 §1.3, §11.7 y §11.9), no un check de CI · *
 **Umbral aplicado:** `min_shared_items = 5` · `min_weight = 0.05`
 
 - **Ninguna de las 16 combinaciones aporta.** Todas empeoran `recall@10` frente a `hybrid`
-  (Δ entre **−0,1208** y **−0,1763** sobre una base de **0,6301**), y todas pierden más de 3 pp de
+  (Δ entre **−0,1204** y **−0,1759** sobre una base de **0,6296**), y todas pierden más de 3 pp de
   precisión en al menos un estrato (`cruzado_idioma` en las 16; `expansion` y `semantico` además en 8).
-- **El estrato `expansión` (§11.9) está poblado y medido, y dice que no.** **31** pares (caso, relevante)
-  quedan fuera del top 10 de `hybrid` y el grafo los alcanza desde la semilla, repartidos en **4** casos
-  (D1b, D1c, P1, U3). En las 16 celdas el grafo metió **0 de esos 31** en el top 10, y los 62 a 99
-  candidatos que sí metió eran, todos, no relevantes. Es la condición de salida de la fila 04.5 —«la
+- **El estrato `expansión` (§11.9) está poblado y medido, y dice que no.** **33** pares (caso, relevante)
+  quedan fuera del top 10 de `hybrid` y un camino del grafo persistido los une a la semilla, repartidos en
+  **4** casos (D1b, D1c, P1, U3). En las 16 celdas el grafo metió **0 de esos 33** en el top 10, y los 62 a
+  99 candidatos que sí metió eran, todos, no relevantes. Es la condición de salida de la fila 04.5 —«la
   expansión aporta, o se dice con números que no»— con el denominador que la primera firma no tenía.
+- **La firma anterior decía «0 de esos 31», y el defecto era el denominador, no el cero.** U3 enumeraba 22
+  de los 24 items que su propio criterio literal incluye; los dos que faltaban (capturados el 2026-09-11)
+  también son alcanzables y tampoco entraron. Completarlo movió la población de 31 a 33, la base de
+  0,6301 a 0,6296 y el recall y el Δ de cada celda en 0,0004 o menos; no movió el orden de las 16 filas, ni
+  el ganador, ni una sola caída de precisión (§2, «Re-firmado tras la ronda 2»).
 - **Se aplica `min_shared_items = 5`, `min_weight = 0.05`** porque el índice siempre construye un grafo y
   algún umbral tiene que estar en vigor: es la primera por la regla de la §2 — el menor daño a `recall@10`
   (empatado con las otras tres celdas de `min_weight = 0.05`), el menor ruido de esas cuatro (94) y, entre
@@ -37,12 +43,12 @@ medición local firmada (Plan 04 §1.3, §11.7 y §11.9), no un check de CI · *
 |---|---|
 | Corpus | `data/items.json` sha256 `2773310f…` — 2.495 items · 45 topics · `vocab.yaml` sha256 `e73fbede…` · `topics.json` sha256 `d2f46a72…`. Los tres sha256 son idénticos antes y después de la corrida |
 | Fingerprints del índice | `store_fingerprint` `93f994d4…` · `vocab_fingerprint` `55da1032…` · `topics_fingerprint` `9af12df5…` (los que selló el manifest de la corrida) |
-| Golden set | `eval/golden-set.yaml` v3, sha256 `ed590920…`: 23 casos, **18 medidos** (4 de ellos en el estrato `expansion`); 5 declarados no medibles (§3) |
-| Código | xbrain `a88c753`: el instrumento de `719954c`, la clasificación del estrato `expansion` de `92fd2d5` y sus etiquetas en el golden set. El umbral aplicado entró en `3beeea5`; este documento se re-firma en el commit siguiente |
+| Golden set | `eval/golden-set.yaml` v3, sha256 `bf9aad8f…`: 23 casos, **18 medidos** (4 de ellos en el estrato `expansion`); 5 declarados no medibles (§3). U3 enumera 24 relevantes; en la firma anterior (golden set `ed590920…`) enumeraba 22 |
+| Código | xbrain `d1423c8`: el instrumento de `719954c`, la clasificación del estrato `expansion` de `92fd2d5` —que desde `ec162d3` lee la tabla `graph_edges` y no la salida de `graph_expand`— y sus etiquetas en el golden set. El umbral aplicado entró en `3beeea5`; este documento se re-firma en el commit siguiente |
 | Rejilla | `min_shared_items ∈ {2, 3, 5, 8}` × `min_weight ∈ {0.0, 0.02, 0.05, 0.10}` — la del Plan 04 §1.3, entera |
 | Profundidad | `k = 10` items por caso; un resultado directo expulsado de esa profundidad cuenta como puesto 11 |
 | Recuperación | `search_service.search` — la única puerta en la que existe `hybrid_graph` — sobre un índice propio en `data/eval-index/graph-sweep/`, construido con el escritor de `xbrain index build` y reescrito celda a celda con `index update`; cada celda comprueba contra su manifest que midió los umbrales que dice |
-| Máquina | Apple M2 · 16 GB · Python 3.13.7 · SQLite 3.50.4 · **312 s** de reloj para las 16 celdas más la clasificación del estrato `expansion` (ésta sola, 158 s en una corrida aparte sobre el mismo store) |
+| Máquina | Apple M2 · 16 GB · Python 3.13.7 · SQLite 3.50.4 · **317 s** de reloj para las 16 celdas más la clasificación del estrato `expansion` (ésta sola, 140 s leyendo `graph_expand` y 144 s leyendo `graph_edges`, en dos corridas aparte sobre el mismo store con el golden set `ed590920…`) |
 
 **Lo que el instrumento NO mide, dicho antes de los números.**
 
@@ -54,7 +60,7 @@ medición local firmada (Plan 04 §1.3, §11.7 y §11.9), no un check de CI · *
 2. **La unidad es el item que sirve `search`**, no el owner que puntúa `xbrain eval`: estas cifras no son
    comparables con el `recall@10` 0,7395 del arnés.
 3. **La población del estrato `expansión` es relativa a esa base léxica.** «Directo» es «en el top 10 de
-   `hybrid` respondido `lexical`»: con un plano vectorial parte de los 31 pares puede volverse directa, y
+   `hybrid` respondido `lexical`»: con un plano vectorial parte de los 33 pares puede volverse directa, y
    entonces la etiqueta del golden set se revisa. El barrido re-deriva la población en cada corrida y nombra
    la deriva entre etiqueta y medición en los dos sentidos (en esta corrida, ninguna). La población sale de
    los relevantes ya verificados del golden set: no se escribió ninguna pregunta nueva (§2).
@@ -65,6 +71,11 @@ medición local firmada (Plan 04 §1.3, §11.7 y §11.9), no un check de CI · *
 6. **Sólo se barren los dos umbrales.** `GRAPH_WEIGHT` (1,0), `GRAPH_SEEDS` (1) y
    `max_neighbors_per_node` (10) quedan en vigor y sin barrer — y la §4 muestra que son ellos, no el umbral,
    los que deciden el daño.
+7. **La verdad de terreno de los casos definidos por un literal se re-censó sobre este store** (ronda 2 del
+   PR #198): D1a, D1b, D1c, P1, P2, S3, V1, X1, X2, X3, F1 y F2 coinciden con su enumeración; U3 no coincidía
+   y se completó (22 → 24). **V2 se sigue midiendo con una fuga del anexo A.3** («Hashimoto» en 3
+   `x_article`, ya declarada en `docs/embeddings-bakeoff.md` §2): es un defecto de otra clase —una pregunta
+   que no discrimina, no una población incompleta— y este PR no lo toca.
 
 ## 2. La regla, fijada antes de medir
 
@@ -91,10 +102,10 @@ persistieron el mismo grafo.
 
 **El estrato `expansión`, fijado igual.** Cada par (caso medido, relevante) se clasifica contra el ranking
 que `hybrid_graph` re-ordena y la semilla desde la que expande (`evaluation.classify_expansion`):
-`direct` si está en el top 10; `graph_reachable` si no lo está, el grafo persistido lo alcanza desde la
-semilla en `GRAPH_MAX_HOPS` **sin presupuesto de vecinos** y un canal lo puntuó dentro de
-`GRAPH_CANDIDATE_HORIZON`; `graph_unscored` si lo alcanza pero nadie lo puntuó (el grafo nunca admite lo no
-puntuado, Plan 04 §3.4); `unreachable` en otro caso. Un caso lleva la etiqueta si tiene al menos un par
+`direct` si está en el top 10; `graph_reachable` si no lo está, un camino de a lo sumo `GRAPH_MAX_HOPS`
+aristas de la tabla `graph_edges` lo une a la semilla —**sin presupuesto de vecinos**— y un canal lo puntuó
+dentro de `GRAPH_CANDIDATE_HORIZON`; `graph_unscored` si ese camino existe pero nadie lo puntuó (el grafo
+nunca admite lo no puntuado, Plan 04 §3.4); `unreachable` en otro caso. Un caso lleva la etiqueta si tiene al menos un par
 `graph_reachable`. Esa regla se escribió **antes** de leer ninguna salida de la sonda que la aplicó. El
 presupuesto queda fuera a propósito: es lo que decide si el grafo llega a tiempo, que es lo que el barrido
 mide, y aplicarlo llamaría «sin cobertura» a un fallo del grafo. La población son los relevantes del golden
@@ -105,28 +116,48 @@ grafo sería verdad de terreno hecha a la medida del mecanismo (spec §8.3).
 mismos 18 casos—, así que el orden y el ganador son los de la primera firma. Lo que cambia es que `expansion`
 entra en la columna «descartada por» y que la columna «útiles» gana su denominador.
 
+**Lo que la pertenencia lee, y lo que no.** Tres cosas: la verdad de terreno, el ranking `hybrid` —la base
+que `hybrid_graph` re-ordena, sin la cual «pero no directamente» no significa nada— y la tabla `graph_edges`,
+recorrida en anchura. **Nunca la salida de `graph_expand` ni la de `hybrid_graph`.** La primera versión
+preguntaba a `graph_expand` qué alcanzaba, y la ronda 2 del PR #198 lo reprodujo: con la misma pregunta y los
+mismos relevantes, omitir un nodo de la respuesta del servicio pasaba ese par de `graph_reachable` a
+`unreachable`. La población contra la que se lee «útiles» se movía con el servicio cuya ayuda esa columna
+mide. Ahora un test falsea esa respuesta de tres maneras y exige que no se mueva un solo par; y sobre este
+store la clasificación nueva y la antigua dieron los 58 pares del golden set `ed590920…` idénticos byte a
+byte: la definición no cambió, cambió de dónde se lee.
+
+**Re-firmado tras la ronda 2.** U3 enumeraba 22 relevantes y su criterio literal («harness engineering» en
+alguna superficie) da 24 sobre este store: `2094209008580325405` y `2097020722669289481`, capturados el
+2026-09-11, después de enumerar. El caso no declara ventana, así que se completó en vez de excluirlos;
+`docs/embeddings-bakeoff.md` §2 ya los contaba. Los dos son `graph_reachable` (puestos 438 y 441 de `hybrid`)
+y ninguno entró en el top 10 de ninguna celda. Movió la población (31 → 33), la base (0,6301 → 0,6296) y el
+recall y el Δ de cada celda, en 0,0004 o menos. No movió el orden de las 16 filas, el ganador, `útiles = 0`
+ni ninguna caída de precisión. Había tres maneras de que saliera otra cosa y no ocurrió ninguna: que una
+celda levantara uno de los dos (útiles ≠ 0), que alguno fuera directo (la población se habría quedado en
+31) o que el nuevo denominador de U3 invirtiera dos celdas cercanas.
+
 ## 3. La tabla — las 16 combinaciones, en el orden de la regla
 
-Base: `hybrid` respondido como `lexical` · `recall@10` **0,6301** sobre 18 casos medidos.
+Base: `hybrid` respondido como `lexical` · `recall@10` **0,6296** sobre 18 casos medidos.
 
 | min_shared_items | min_weight | aristas | grado medio | recall@10 | Δ recall@10 | entrantes | útiles | ruido | precisión entrantes | degradación | descartada por | en vigor |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|:---:|
-| 5 | 0.05 | 160 | 3.56 | 0.5093 | -0.1208 | 94 | 0 | 94 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) | sí |
-| 2 | 0.05 | 164 | 3.64 | 0.5093 | -0.1208 | 94 | 0 | 94 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
-| 3 | 0.05 | 164 | 3.64 | 0.5093 | -0.1208 | 94 | 0 | 94 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
-| 8 | 0.05 | 146 | 3.24 | 0.5093 | -0.1208 | 96 | 0 | 96 | 0.0000 | 4.1282 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
-| 2 | 0.0 | 408 | 9.07 | 0.4609 | -0.1692 | 62 | 0 | 62 | 0.0000 | 3.0000 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 3 | 0.0 | 372 | 8.27 | 0.4609 | -0.1692 | 63 | 0 | 63 | 0.0000 | 3.0449 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 3 | 0.02 | 326 | 7.24 | 0.4609 | -0.1692 | 66 | 0 | 66 | 0.0000 | 3.1987 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 2 | 0.02 | 339 | 7.53 | 0.4609 | -0.1692 | 66 | 0 | 66 | 0.0000 | 3.1987 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 5 | 0.0 | 316 | 7.02 | 0.4609 | -0.1692 | 67 | 0 | 67 | 0.0000 | 3.1859 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 5 | 0.02 | 301 | 6.69 | 0.4609 | -0.1692 | 70 | 0 | 70 | 0.0000 | 3.3013 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 8 | 0.0 | 249 | 5.53 | 0.4609 | -0.1692 | 74 | 0 | 74 | 0.0000 | 3.4038 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 8 | 0.02 | 247 | 5.49 | 0.4609 | -0.1692 | 76 | 0 | 76 | 0.0000 | 3.5064 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
-| 2 | 0.1 | 52 | 1.16 | 0.4537 | -0.1763 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
-| 3 | 0.1 | 52 | 1.16 | 0.4537 | -0.1763 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
-| 5 | 0.1 | 52 | 1.16 | 0.4537 | -0.1763 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
-| 8 | 0.1 | 52 | 1.16 | 0.4537 | -0.1763 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 5 | 0.05 | 160 | 3.56 | 0.5093 | -0.1204 | 94 | 0 | 94 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) | sí |
+| 2 | 0.05 | 164 | 3.64 | 0.5093 | -0.1204 | 94 | 0 | 94 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 3 | 0.05 | 164 | 3.64 | 0.5093 | -0.1204 | 94 | 0 | 94 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 8 | 0.05 | 146 | 3.24 | 0.5093 | -0.1204 | 96 | 0 | 96 | 0.0000 | 4.1282 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 3.75 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 2 | 0.0 | 408 | 9.07 | 0.4606 | -0.1690 | 62 | 0 | 62 | 0.0000 | 3.0000 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 3 | 0.0 | 372 | 8.27 | 0.4606 | -0.1690 | 63 | 0 | 63 | 0.0000 | 3.0449 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 3 | 0.02 | 326 | 7.24 | 0.4606 | -0.1690 | 66 | 0 | 66 | 0.0000 | 3.1987 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 2 | 0.02 | 339 | 7.53 | 0.4606 | -0.1690 | 66 | 0 | 66 | 0.0000 | 3.1987 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 5 | 0.0 | 316 | 7.02 | 0.4606 | -0.1690 | 67 | 0 | 67 | 0.0000 | 3.1859 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 5 | 0.02 | 301 | 6.69 | 0.4606 | -0.1690 | 70 | 0 | 70 | 0.0000 | 3.3013 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 8 | 0.0 | 249 | 5.53 | 0.4606 | -0.1690 | 74 | 0 | 74 | 0.0000 | 3.4038 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 8 | 0.02 | 247 | 5.49 | 0.4606 | -0.1690 | 76 | 0 | 76 | 0.0000 | 3.5064 | la precisión cae 4.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3) |  |
+| 2 | 0.1 | 52 | 1.16 | 0.4537 | -0.1759 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 3 | 0.1 | 52 | 1.16 | 0.4537 | -0.1759 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 5 | 0.1 | 52 | 1.16 | 0.4537 | -0.1759 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
+| 8 | 0.1 | 52 | 1.16 | 0.4537 | -0.1759 | 99 | 0 | 99 | 0.0000 | 4.0705 | la precisión cae 6.00 pp en `cruzado_idioma` (> 3 pp, Plan 04 §3); la precisión cae 7.50 pp en `expansion` (> 3 pp, Plan 04 §3); la precisión cae 5.00 pp en `semantico` (> 3 pp, Plan 04 §3) |  |
 
 Columnas: **aristas** = filas `CO_OCCURS_WITH` persistidas (las dos direcciones); **grado medio** = esas
 aristas por topic con asignaciones; **entrantes** = items del top-10 de `hybrid_graph` que no estaban en el
@@ -138,8 +169,8 @@ Pérdida de precisión en los estratos que la columna «descartada por» no nomb
 `enterrado` 2,50 pp y `multimodal` 1,67 pp en las 16; `expansion` y `semantico` 2,50 pp en las 8 celdas de
 `min_weight` 0.0 y 0.02 — por debajo del umbral, así que no descartan.
 
-**Estrato `expansión`, literal del instrumento:** Estrato `expansion` (Plan 04 §11.9): 31 pares relevantes alcanzables sólo por el grafo en 4 casos (D1b, D1c, P1, U3) — 18 directos, 0 alcanzables sin puntuar, 9 inalcanzables. La columna «útiles» cuenta cuántos de esos 31 entraron en el top 10.
-En las 16 celdas, **útiles = 0**: ninguno de los 31.
+**Estrato `expansión`, literal del instrumento:** Estrato `expansion` (Plan 04 §11.9): 33 pares relevantes alcanzables sólo por el grafo en 4 casos (D1b, D1c, P1, U3) — 18 directos, 0 alcanzables sin puntuar, 9 inalcanzables. La columna «útiles» cuenta cuántos de esos 33 entraron en el top 10.
+En las 16 celdas, **útiles = 0**: ninguno de los 33.
 
 **No medidos, con su razón (spec §8.6.8):** S7, S8 y S9 — su verdad son topics y `search` sirve items, así
 que su recall sería 0/0, no 0,0; F1 y F2 — declaran filtros (`created_from`, `created_to`, `source` /
@@ -147,7 +178,7 @@ que su recall sería 0/0, no 0,0; F1 y F2 — declaran filtros (`created_from`, 
 
 **Veredicto del instrumento, literal:** NINGUNA COMBINACIÓN APORTA: ninguna mejora recall@10 frente a
 `hybrid` sin perder más de 3 pp de precisión en algún estrato. Se aplica min_shared_items=5,
-min_weight=0.05, la primera por la regla (Δ recall@10 -0.1208, ruido 94, degradación 4.0705 puestos),
+min_weight=0.05, la primera por la regla (Δ recall@10 -0.1204, ruido 94, degradación 4.0705 puestos),
 porque el índice siempre construye un grafo; `hybrid_graph` NO se promueve (Plan 04 §3).
 
 ## 4. Por qué ninguna aporta, y qué forma tiene el daño
@@ -168,7 +199,7 @@ topic se gasta en topics vecinos y se alcanzan **menos** items (62 entrantes con
 estricto sobra presupuesto para items y entran **más** (99 con 52 aristas). Por eso la curva no es monótona:
 `min_weight = 0.05` daña menos el recall que `0.0` y que `0.10`.
 
-**Y no es por falta de población.** Los 31 pares que sólo el grafo podía levantar existen, y ninguna celda
+**Y no es por falta de población.** Los 33 pares que sólo el grafo podía levantar existen, y ninguna celda
 levanta uno. Lo que dice el código —no medido celda a celda—: dentro de ese presupuesto de 10, las
 asignaciones de un topic se sirven ordenadas por peso, primario antes que secundario e id del item
 (`graph_service._ranked`), así que qué vecinos entran no depende en nada de la pregunta. Barrer
@@ -191,6 +222,10 @@ no a ordenar resultados.
 - `evaluation.classify_expansion` y el bloque `expansion` del informe del barrido (población, casos, pares
   por clase y la etiqueta contrastada con la medición); `eval/golden-set.yaml` etiqueta `expansion` en D1b,
   D1c, P1 y U3, con la medición en sus notas.
+- **Ronda 2 del PR #198.** `classify_expansion` lee la alcanzabilidad de la tabla `graph_edges` y ya no de
+  `graph_expand`, y conserva la negativa ante un índice por detrás del store; `eval/golden-set.yaml` completa
+  U3 a 24 relevantes. Tres tests nuevos en `tests/test_knowledge_graph_sweep.py`: falsear la salida del
+  servicio no mueve ningún par, la fuente es la tabla y un índice obsoleto se rechaza.
 - **Un índice ya construido se pone al día con `xbrain index update`**, que reescribe el plano del grafo
   cuando los umbrales difieren de los que selló su manifest; el plano léxico no se toca.
 - `GRAPH_ENABLED_BY_DEFAULT` y la estrategia por defecto de `search` **no cambian**.
@@ -205,7 +240,7 @@ SRC=/ruta/al/clon/de/xbrain     # cualquier clon con el historial de VGonPa/xbra
 STORE=/ruta/al/store/data       # contiene items.json, vocab.yaml y topics.json medidos
 WORK=$(mktemp -d)
 git clone --no-checkout "$SRC" "$WORK/xbrain"
-git -C "$WORK/xbrain" checkout --detach a88c753
+git -C "$WORK/xbrain" checkout --detach d1423c8
 (cd "$WORK/xbrain" && uv sync --locked)   # con el índice privado de pip de esta máquina: --index-url https://pypi.org/simple
 shasum -a 256 "$WORK/xbrain/eval/golden-set.yaml"                                   # compara con la §1
 
