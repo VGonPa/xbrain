@@ -42,6 +42,14 @@ dev = [
 embeddings = [
     "numpy>=2.0",
 ]
+# `mcp` is the SDK behind `xbrain mcp-serve`, OPTIONAL for the same reason `numpy` is: the
+# server is opt-in (stdio, launched by the agent that wants it), so a user who only runs the
+# CLI never pays for it (Plan 04 §4.5). `tests/test_ci_workflow.py` asserts more than its
+# absence from `[project.dependencies]`: it walks `uv.lock` and goes red if any runtime
+# dependency pulls `mcp` into a plain install.
+mcp = [
+    "mcp>=1.2",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -118,6 +126,15 @@ known_first_party = ["xbrain"]
 # extra — and deptry reads imports inside function bodies, so the finding is gone at its
 # source rather than suppressed. Verified on this tree: deptry is clean with the entry
 # removed, and reports DEP002 for `numpy` if the import is taken back out.
+#
+# `mcp` IS here, for the reason `numpy` once was: the delivery shape. 04.6 declares the
+# `[mcp]` extra, relocks and teaches CI to install it WITHOUT the server that imports it
+# (04.7), so Plan 04's only change under `.github/` is a diff a human reads in one sitting.
+# Measured on this tree, extra declared and no consumer:
+#
+#     pyproject.toml: DEP002 'mcp' defined as a dependency but not used in the codebase
+#
+# — a TRUE finding silenced for sequencing. Drop this entry in the PR that imports `mcp`.
 DEP002 = [
     "poethepoet",
     "radon",
@@ -130,6 +147,7 @@ DEP002 = [
     "pytest",
     "pytest-cov",
     "ruff",
+    "mcp",
 ]
 # DEP001 + DEP003: scripts/import_chrome_session.py + import_safari_session.py
 # import browser-cookie3 behind a guarded `try/except ImportError` — it is a

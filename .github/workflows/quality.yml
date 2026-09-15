@@ -86,11 +86,15 @@ jobs:
       # extra would then SKIP the vector plane's tests under a GREEN `quality` check. Forgetting
       # it here instead fails collection: red, loud, and impossible to mistake for a pass.
       #
+      # `--extra mcp` joins them for the MCP server, on the same terms: `mcp` is optional for a
+      # user (`xbrain mcp-serve` is opt-in) and mandatory for the suite, whose MCP tests import
+      # it directly — so forgetting it here fails collection instead of skipping under green.
+      #
       # `tests/test_ci_workflow.py` now asserts both halves of this command off its parsed
       # argv — until this PR nothing in the suite asserted anything at all about this step,
       # which made deleting `--locked` a silent, green-reporting downgrade.
       - name: Install dependencies from the lockfile
-        run: uv sync --extra dev --extra embeddings --locked
+        run: uv sync --extra dev --extra embeddings --extra mcp --locked
       - name: Quality gate
         run: bash scripts/check.sh
 
