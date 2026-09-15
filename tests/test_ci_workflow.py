@@ -1039,7 +1039,7 @@ def test_gate_job_may_file_the_red_branch_issue() -> None:
 # Two properties, and each is verified RED by deleting its own half from the YAML:
 #
 #   1. the command installs FROM THE LOCKFILE (`--locked`);
-#   2. the command installs the extras the suite needs, `dev` AND `embeddings`.
+#   2. the command installs the extras the suite needs, `dev`, `embeddings` AND `mcp`.
 #
 # Both read the PARSED step's `run:` argv, never the file text. That distinction is the
 # whole point: `quality.yml`'s own comment block contains the string `--locked`, so a
@@ -1061,10 +1061,11 @@ _UNLOCKED_INSTALL_COMMAND = "uv pip install"
 _LOCKED_FLAG = "--locked"
 
 #: Every extra the gate must install. `dev` carries the quality tools; `embeddings`
-#: carries `numpy`, which the vector plane's tests import directly — and they are
-#: forbidden from using `pytest.importorskip`, because a skipped test is a green gate
-#: that verified nothing, while a collection error is a red one (fail-closed).
-_REQUIRED_EXTRAS = ("dev", "embeddings")
+#: carries `numpy`, which the vector plane's tests import directly; `mcp` carries the SDK
+#: the MCP server's tests import directly — and none of them may use
+#: `pytest.importorskip`, because a skipped test is a green gate that verified nothing,
+#: while a collection error is a red one (fail-closed).
+_REQUIRED_EXTRAS = ("dev", "embeddings", "mcp")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
@@ -1177,7 +1178,7 @@ def test_the_gate_installs_from_the_lockfile() -> None:
 
 
 def test_the_gate_installs_every_extra_the_suite_needs() -> None:
-    """`dev` AND `embeddings` must be synced, each named explicitly on the command.
+    """`dev`, `embeddings` AND `mcp` must be synced, each named explicitly on the command.
 
     `embeddings` carries `numpy`, which the vector plane imports directly. Forget it and
     the tests that need it fail at COLLECTION — red, loud, fail-closed, and therefore
@@ -1300,3 +1301,88 @@ def test_numpy_is_an_optional_extra_and_never_a_runtime_dependency() -> None:
         f"backend: it must stay in `[project.optional-dependencies].embeddings` so that a "
         f"CLI-only user does not pay for it, exactly as every other opt-in backend here."
     )
+
+
+def _distribution(spec: str) -> str:
+    """The PEP 503-normalised distribution a requirement NAMES — never a prefix of it.
+
+    `startswith("mcp")` would also match `mcp-proxy`, or any package whose name merely begins
+    with those three letters, and answer for a dependency this test never meant to police.
+    """
+    match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", spec.strip())
+    return re.sub(r"[-_.]+", "-", match.group(0)).lower() if match else ""
+
+
+def _locked_runtime_closure() -> set[str]:
+    """Every distribution a plain `pip install xbrain` pulls in, as `uv.lock` pins it.
+
+    Starts from `xbrain`'s `dependencies` — never its `optional-dependencies` or dev groups —
+    and follows each package's own `dependencies`, plus the optional ones an `extra = [...]`
+    entry asks for. Markers are ignored ON PURPOSE: that over-approximates the closure, so the
+    only error it can make is a false alarm, never a runtime path it failed to see.
+    """
+    parsed = tomllib.loads(_LOCKFILE.read_text(encoding="utf-8"))
+    packages = {_distribution(str(p.get("name", ""))): p for p in parsed.get("package") or []}
+    assert _PROJECT_NAME in packages, f"{_LOCKFILE.name} has no `{_PROJECT_NAME}` package."
+    visited: set[tuple[str, str]] = set()
+    pending = list(packages[_PROJECT_NAME].get("dependencies") or [])
+    while pending:
+        entry = pending.pop()
+        name = _distribution(str(entry.get("name", "")))
+        package = packages.get(name) or {}
+        for unit in ["", *(str(extra) for extra in entry.get("extra") or [])]:
+            if (name, unit) not in visited:
+                visited.add((name, unit))
+                optional = package.get("optional-dependencies") or {}
+                pending.extend((optional.get(unit) if unit else package.get("dependencies")) or [])
+    return {name for name, _ in visited}
+
+
+def test_mcp_is_an_optional_extra_and_never_reaches_a_normal_install() -> None:
+    """`mcp` belongs to `[mcp]`, and a plain `pip install xbrain` must never pull it in.
+
+    The same answer `numpy` gets above, for the same reason: `xbrain mcp-serve` is opt-in, so
+    a user who only runs the CLI does not pay for a server they never start (Plan 04 §4.5).
+
+    One step stronger than the numpy test, because "absent from `[project.dependencies]`" is
+    not the property — it is one way of breaking it. A runtime dependency that starts requiring
+    `mcp` installs it just as surely while `pyproject.toml` stays untouched, so the last
+    assertion walks the runtime closure `uv.lock` actually pins.
+    """
+    extras = _declared_extras()
+    assert "mcp" in [_distribution(spec) for spec in extras.get("mcp", [])], (
+        f"`{_PYPROJECT.name}` declares no `mcp` extra carrying the `mcp` SDK "
+        f"(extras: {extras}), so the gate has nothing to sync for the MCP server's tests."
+    )
+    runtime = [spec for spec in _runtime_dependencies() if _distribution(spec) == "mcp"]
+    assert not runtime, (
+        f"`mcp` is declared in `[project.dependencies]` as {runtime}. It is the SDK of an "
+        f"OPT-IN server: it must stay in `[project.optional-dependencies].mcp`."
+    )
+    closure = _locked_runtime_closure()
+    direct = {_distribution(spec) for spec in _runtime_dependencies()}
+    assert direct <= closure, f"the closure walk lost direct dependencies: {direct - closure}"
+    assert "mcp" not in closure, (
+        f"`{_LOCKFILE.name}` resolves `mcp` inside the RUNTIME closure of `{_PROJECT_NAME}`: a "
+        f"dependency every user installs now requires it, so a plain install pays for the MCP "
+        f"server without anyone having edited `[project.dependencies]`."
+    )
+
+
+def test_the_runtime_closure_follows_transitive_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A walker that read only `xbrain`'s DIRECT dependencies would pass the test above forever.
+
+    The path that matters is the indirect one — a runtime dependency requiring `mcp`, here
+    through one of its own extras and under a non-normalised name — so the control forges it.
+    """
+    forged = tmp_path / "uv.lock"
+    forged.write_text(
+        'version = 1\n[[package]]\nname = "xbrain"\ndependencies = [{ name = "anthropic" }]\n'
+        '[[package]]\nname = "anthropic"\ndependencies = [{ name = "lxml", extra = ["cli"] }]\n'
+        '[[package]]\nname = "lxml"\n[package.optional-dependencies]\ncli = [{ name = "MCP" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "_LOCKFILE", forged)
+    assert _locked_runtime_closure() == {"anthropic", "lxml", "mcp"}

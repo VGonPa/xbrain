@@ -199,7 +199,7 @@ jobs:
       # that against a `quality` check that had honestly reported SUCCESS, and filed a public
       # issue accusing the repository of merging unverified code. On its first run.
       - name: Install dependencies from the lockfile
-        run: uv sync --extra dev --extra embeddings --locked
+        run: uv sync --extra dev --extra embeddings --extra mcp --locked
 
       # The whole point. If this disagrees with what GitHub published, the gate is lying.
       - name: Run the real quality gate, honestly
