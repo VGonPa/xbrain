@@ -788,6 +788,146 @@ def test_search_hybrid_human_view_names_what_to_fix_not_a_bare_code(
     assert "`lexical`" in naming[0] and "`hybrid`" in naming[0], naming[0]
 
 
+def _a_working_embedder(workspace: Path, monkeypatch) -> list[list[str]]:
+    """`[embeddings].command` configured and answering in the plane's own model — nothing runs.
+
+    `subprocess.run` is replaced, as in the build test below (`xbrain.embeddings` resolves it at
+    call time), and every call is recorded, so a test can tell a query that reached the backend
+    from one that never did.
+    """
+    import subprocess
+
+    from xbrain.embeddings import SCHEMA_VERSION
+
+    calls: list[list[str]] = []
+
+    def run(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202 - a subprocess.run stand-in
+        calls.append(list(argv))
+        texts = json.loads(kwargs["input"])["texts"]
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "model": "fake-model",
+            "dimension": 2,
+            "normalized": True,
+            "vectors": [[1.0, 0.0] for _ in texts],
+        }
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+
+    _configure_embeddings(workspace, "xbrain-embed")
+    monkeypatch.setattr(subprocess, "run", run)
+    return calls
+
+
+def test_search_without_a_strategy_is_the_lexical_request_even_where_hybrid_would_run(
+    workspace: Path, monkeypatch
+) -> None:
+    """Audit A2: the COMMAND's default is `lexical`, bound where it is published.
+
+    `test_hybrid_graph_existe_es_desactivable_y_el_default_no_cambia` reads the default off
+    `search_service.search`, but the command declares its OWN (`typer.Option("lexical", …)`),
+    and changing it to `"hybrid"` kept the whole suite green (audit M02). So this runs where a
+    promoted default would SHOW — a plane on disk and an embedder that answers, which the control
+    proves by really running `hybrid` — and omitting the flag must be the very same request as
+    `--strategy lexical`: the same envelope, nothing degraded, the embedder never called.
+    `strategy == "lexical"` alone would not bind it: an unconfigured `hybrid` default answers
+    `lexical` too, and confesses only in `degraded`.
+    """
+    _build_index_with_a_plane(workspace)
+    calls = _a_working_embedder(workspace, monkeypatch)
+    hybrid = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "hybrid", "--json"])
+    )
+    assert hybrid["strategy"] == "hybrid", "premise: a non-lexical default would run here"
+    calls.clear()
+
+    omitted = _json_stdout(runner.invoke(app, ["search", SEARCH_QUERY, "--json"]))
+    explicit = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "lexical", "--json"])
+    )
+
+    assert omitted == explicit
+    assert omitted["strategy"] == "lexical"
+    assert omitted["index"]["degraded"] == []
+    assert omitted["results"]
+    assert calls == []
+
+
+def test_search_hybrid_graph_through_the_command_leaves_the_graph_switched_off(
+    workspace: Path,
+) -> None:
+    """Audit A3: the command asks for `hybrid_graph` with the switch OFF — never its own `True`.
+
+    The service binds `GRAPH_ENABLED_BY_DEFAULT` (audit M01, red), but the command is a second
+    door: passing `graph_enabled=True` from `cli.py` kept the suite green (audit M03), because no
+    test ever ran `xbrain search --strategy hybrid_graph`. Here it runs, and its envelope must be
+    the one the service serves with the switch explicitly OFF — `lexical`, declaring
+    `hybrid_graph_not_implemented`, and no match reached through `graph`. The control proves the
+    comparison can tell the two apart: switched ON over the same index, the service answers
+    `hybrid_graph`.
+    """
+    from xbrain import cli
+    from xbrain.config import load_config
+    from xbrain.knowledge.search_service import search
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    cfg = load_config(workspace)
+    context = cli._query_context(cfg, cli._index_inputs(cfg))
+    switched_on = search(SEARCH_QUERY, context, strategy="hybrid_graph", graph_enabled=True)
+    assert switched_on.strategy == "hybrid_graph", "premise: the graph runs when switched on"
+
+    payload = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "hybrid_graph", "--json"])
+    )
+
+    switched_off = search(SEARCH_QUERY, context, strategy="hybrid_graph", graph_enabled=False)
+    assert payload == switched_off.model_dump(mode="json")
+    assert payload["strategy"] == "lexical"
+    assert "hybrid_graph_not_implemented" in payload["index"]["degraded"]
+    assert payload["results"]
+    assert not [m for r in payload["results"] for m in r["matches"] if "graph" in m["matched_by"]]
+
+
+def test_search_vector_with_a_filter_through_the_command_is_lexical_and_never_says_vector(
+    workspace: Path, monkeypatch
+) -> None:
+    """Audit A1 through the command: a filtered `--strategy vector` answers `lexical`.
+
+    `test_a_filtered_vector_request_is_answered_lexically_and_never_says_vector` binds the
+    service's filter branch; this binds the door a reader actually types. The plane is on disk
+    and the embedder answers — the control proves the vector channel RUNS here without a filter —
+    so under `--source bookmark` the only reason it does not run is the filter, and the response
+    must say so: `lexical`, `degraded == ["vector_filters_unsupported"]`, the lexical page for the
+    same filter, no match claiming `vector`, and the embedder never called. Naming `vector` in
+    that branch (audit M06) kept the whole suite green.
+    """
+    _build_index_with_a_plane(workspace)
+    calls = _a_working_embedder(workspace, monkeypatch)
+    unfiltered = _json_stdout(
+        runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", "vector", "--json"])
+    )
+    assert unfiltered["strategy"] == "vector", "premise: the vector channel runs without a filter"
+    calls.clear()
+
+    filtered = _json_stdout(
+        runner.invoke(
+            app, ["search", SEARCH_QUERY, "--strategy", "vector", "--source", "bookmark", "--json"]
+        )
+    )
+    lexical = _json_stdout(
+        runner.invoke(
+            app, ["search", SEARCH_QUERY, "--strategy", "lexical", "--source", "bookmark", "--json"]
+        )
+    )
+
+    assert filtered["strategy"] == "lexical"
+    assert filtered["index"]["degraded"] == ["vector_filters_unsupported"]
+    assert filtered["filters"]["source"] == "bookmark"
+    assert filtered["results"], "lexical stays operational"
+    assert filtered["results"] == lexical["results"]
+    assert not _vector_matches(filtered)
+    assert calls == []
+
+
 def test_index_build_embeddings_refuses_a_batch_from_another_model_than_the_probe(
     workspace: Path, monkeypatch
 ) -> None:

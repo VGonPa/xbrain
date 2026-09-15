@@ -33,9 +33,14 @@ import pytest
 from xbrain.embeddings import SCHEMA_VERSION as EMBEDDINGS_SCHEMA_VERSION
 from xbrain.embeddings import EmbedderFailed, EmbedderNotFound, embed_passages
 from xbrain.knowledge import index_build
-from xbrain.knowledge.contracts import SearchMatch, SearchResponse
+from xbrain.knowledge.contracts import SearchFilters, SearchMatch, SearchResponse
 from xbrain.knowledge.index_schema import IndexError_
-from xbrain.knowledge.search_service import QueryContext, bind_query_embedder, search
+from xbrain.knowledge.search_service import (
+    VECTOR_FILTERS_UNSUPPORTED,
+    QueryContext,
+    bind_query_embedder,
+    search,
+)
 from xbrain.knowledge.vector_index import (
     VECTOR_REBUILD_ADVICE,
     VECTORS_FILENAME,
@@ -579,6 +584,42 @@ def test_hybrid_over_an_index_without_a_plane_never_says_hybrid(tmp_path: Path, 
     assert "no_embeddings" in response.index.degraded
     assert "hybrid_not_implemented" not in response.index.degraded
     assert embedder.calls == []
+
+
+def _counting(tmp_path: Path, data: Path) -> CountingEmbedder:
+    return CountingEmbedder()
+
+
+@pytest.mark.parametrize("backend", [_counting, _absent])
+def test_a_filtered_vector_request_is_answered_lexically_and_never_says_vector(
+    tmp_path: Path, corpus, backend
+) -> None:
+    """The matrix's filter row, for the one strategy that otherwise never degrades (audit A1).
+
+    `vector` asked for by name is an ERROR when its channel cannot run (row 6) — EXCEPT under a
+    filter: the plane has no filter columns, so its channel is not allowed to run at all, and
+    the answer is `lexical` declaring `vector_filters_unsupported`. The filtered cells were
+    populated for `hybrid` and `hybrid_graph` only, so naming `vector` in that branch kept the
+    whole suite green (audit M06) — the rule written for one strategy, its neighbour empty.
+
+    Two backends, because a filter must short-circuit both: a working one, which is never paid
+    for a query it cannot score, and a configured binary that is gone, which RAISES under
+    `vector` if it is reached — so a guard moved after the embedder call goes red here instead
+    of degrading. And the page is the LEXICAL page: a response that says `lexical` over any
+    other ranking tells the same lie in its results instead of in its name.
+    """
+    data = _data(tmp_path, corpus, with_plane=True)
+    embed_query = backend(tmp_path, data)
+    context = _context(data, corpus, embed_query)
+    filters = SearchFilters(has_surfaces=("post",))
+
+    response = search(QUERY, context, strategy="vector", filters=filters)
+
+    _assert_lexical_and_honest(response)
+    assert tuple(response.index.degraded) == (VECTOR_FILTERS_UNSUPPORTED,)
+    assert response.results == search(QUERY, context, strategy="lexical", filters=filters).results
+    if isinstance(embed_query, CountingEmbedder):
+        assert embed_query.calls == []
 
 
 # --------------------------------------------------------------------------------------------
