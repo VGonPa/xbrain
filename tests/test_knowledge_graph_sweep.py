@@ -30,7 +30,7 @@ import pytest
 
 from tests.test_knowledge_search_service import _persist
 from xbrain.knowledge import evaluation, graph_build, graph_service, graph_strategy, index_build
-from xbrain.knowledge.contracts import GraphNode, SearchFilters
+from xbrain.knowledge.contracts import GraphEdge, SearchFilters
 from xbrain.knowledge.evaluation import GraphSweepReport, GraphSweepRow
 from xbrain.knowledge.goldenset import GoldenCase
 from xbrain.knowledge.search_service import QueryContext, search
@@ -553,17 +553,30 @@ _E1 = GoldenCase(
 )
 
 
-def _drop_reached(nodes: tuple[GraphNode, ...]) -> tuple[GraphNode, ...]:
-    return tuple(node for node in nodes if node.node_id not in {"item:r15", "item:c00"})
+def _drop_reached(node_id: str, edges: list[GraphEdge]) -> list[GraphEdge]:
+    return [edge for edge in edges if not {edge.source, edge.target} & {"item:r15", "item:c00"}]
 
 
-def _add_unreached(nodes: tuple[GraphNode, ...]) -> tuple[GraphNode, ...]:
-    return (*nodes, GraphNode(node_id="item:f14", node_type="item"))
+def _add_unreached(node_id: str, edges: list[GraphEdge]) -> list[GraphEdge]:
+    # `f14` has no topic: an assignment edge arriving at a topic, re-pointed, hangs it off `hub`.
+    arriving = [edge for edge in edges if edge.target == node_id]
+    return [*edges, *(edge.model_copy(update={"source": "item:f14"}) for edge in arriving[:1])]
+
+
+def _reached_relevant(context: QueryContext) -> set[str]:
+    """What `graph_expand` itself reaches of E1's relevant items from its seed (`s01`, the top hit)."""
+    walk = graph_service.graph_expand(
+        ("item:s01",),
+        context,
+        max_hops=graph_strategy.GRAPH_MAX_HOPS,
+        max_neighbors_per_node=len(context.store) + len(context.vocab),
+    )
+    return {node.node_id.removeprefix("item:") for node in walk.nodes} & set(_E1.relevant_items)
 
 
 @pytest.mark.parametrize(
     "rewrite",
-    [_drop_reached, _add_unreached, lambda nodes: ()],
+    [_drop_reached, _add_unreached, lambda node_id, edges: []],
     ids=["drop-reached-r15-c00", "add-unreached-f14", "reach-nothing"],
 )
 def test_the_expansion_stratum_never_reads_the_graph_service_whose_lift_it_measures(
@@ -574,31 +587,41 @@ def test_the_expansion_stratum_never_reads_the_graph_service_whose_lift_it_measu
     `graph_reachable`, a walk that loses a node shrinks the denominator in the same run that
     fails to lift it, and «0 of N» measures the service against itself.
 
-    So the service's OUTPUT is falsified three ways — a reached node dropped, an unreached one
-    added, nothing reached — and not one pair may move. Membership is read off the persisted
+    So the service is falsified three ways — a reached node dropped, an unreached one added,
+    nothing reached — and not one pair may move. Membership is read off the persisted
     `graph_edges`, the ground truth and the `hybrid` ranking the graph re-ranks; never off the
     graph channel. The honest classification is asserted FIRST, so a stratum that ignored the
     graph altogether (every pair `unreachable`, trivially stable) cannot pass.
+
+    THE FUNCTION IS FALSIFIED, NEVER A NAME (PR #198, round 3, F1). This test used to patch the
+    attribute `graph_service.graph_expand`, and a `from … import graph_expand` at a module's
+    HEADER binds the original object at import time: the circular classification, with its
+    import moved there, passed all three cases. The walk reads its edges through
+    `graph_service._incident`, which `graph_expand` looks up in its module's globals on every
+    call, so falsifying it there reaches the walk under any name that bound it. The service is
+    then asked directly, so a walk that stopped going through `_incident` fails here instead of
+    turning the invariance below into a tautology.
     """
     data = _workspace(tmp_path)
     _build(data, 3, force=True)
-    honest = evaluation.classify_expansion((_E1,), _context(data), k=10)
+    context = _context(data)
+    honest = evaluation.classify_expansion((_E1,), context, k=10)
     assert {(pair.item_id, pair.kind) for pair in honest} >= {
         ("r15", "graph_reachable"),
         ("c00", "graph_unscored"),
         ("f14", "unreachable"),
     }
+    honest_reach = _reached_relevant(context)
 
-    real = graph_service.graph_expand
+    real = graph_service._incident
+    monkeypatch.setattr(
+        graph_service,
+        "_incident",
+        lambda connection, node_id: rewrite(node_id, real(connection, node_id)),
+    )
 
-    def falsified(seeds, context, **kwargs):
-        response = real(seeds, context, **kwargs)
-        return response.model_copy(update={"nodes": rewrite(response.nodes)})
-
-    monkeypatch.setattr(graph_service, "graph_expand", falsified)
-    monkeypatch.setattr(graph_strategy, "graph_expand", falsified)
-
-    assert evaluation.classify_expansion((_E1,), _context(data), k=10) == honest
+    assert _reached_relevant(context) != honest_reach
+    assert evaluation.classify_expansion((_E1,), context, k=10) == honest
 
 
 def test_the_expansion_stratum_reads_reachability_off_the_persisted_graph_edges(
