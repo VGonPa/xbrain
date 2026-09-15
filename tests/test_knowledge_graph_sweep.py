@@ -472,6 +472,168 @@ def test_the_graph_sweep_artefacts_publish_every_cell_the_rule_and_the_retriever
 
 
 # ---------------------------------------------------------------------------
+# The expansion stratum (Plan 04 §11.9): the pairs only the graph COULD bring in
+# ---------------------------------------------------------------------------
+
+
+def _context(data: Path) -> QueryContext:
+    store, vocab = _threshold_sensitive_store()
+    return QueryContext(
+        store=store,
+        vocab=vocab,
+        index_dir=data / "index",
+        items_path=data / "items.json",
+        vocab_path=data / "vocab.yaml",
+        topics_path=data / "topics.json",
+    )
+
+
+def _build(data: Path, min_shared_items: int, *, force: bool = False) -> None:
+    inputs = index_build.load_index_inputs(*(data / n for n in _INPUTS))
+    options = index_build.IndexOptions(
+        graph_min_shared_items=min_shared_items, graph_min_weight=0.0
+    )
+    if force:
+        index_build.build(data / "index", inputs, options=options, force=True)
+    else:
+        index_build.update(data / "index", inputs, options=options)
+
+
+def test_every_relevant_pair_is_classified_by_the_route_that_can_reach_it(tmp_path: Path) -> None:
+    """Spec §8.2: `expansión` = «relevante accesible mediante el grafo mínimo» — and, Plan 04 §3,
+    NOT directly. So each relevant item of a measured case is one of four things, relative to the
+    ranking `hybrid_graph` re-ranks and the seed it expands from (`s01`, the top hit):
+
+    - `s01`, `f02`: already in the top 10 — the graph cannot add what is there (`direct`);
+    - `r15`: 15th, and shares `hub` with the seed — only the graph can lift it (`graph_reachable`);
+    - `c00`: shares `hub` too, but no channel scored it, and the graph never admits the unscored
+      (§3.4) — reachable, never liftable (`graph_unscored`);
+    - `f14`: 14th, with no topic at all — no route but the direct one, and it missed (`unreachable`).
+
+    THE NEIGHBOUR BUDGET IS NOT PART OF IT: at `2 / 0.0` the ten topic edges spend `hub`'s budget
+    and the walk never reaches `r15`, and the pair is still reachable — the budget is what the
+    sweep measures, so a classification that read it would call a failure of the graph «no
+    coverage». Proven by classifying under both thresholds.
+    """
+    data = _workspace(tmp_path)
+    case = GoldenCase(
+        id="E1",
+        query="zeta",
+        provenance="construido",
+        strata=("expansion",),
+        filters=SearchFilters(),
+        relevant_items=("s01", "f02", "r15", "c00", "f14"),
+    )
+    expected = {
+        ("s01", "direct", 1),
+        ("f02", "direct", 2),
+        ("r15", "graph_reachable", 15),
+        ("c00", "graph_unscored", None),
+        ("f14", "unreachable", 14),
+    }
+
+    _build(data, 2, force=True)
+    kept = evaluation.classify_expansion((case,), _context(data), k=10)
+    _build(data, 3)
+    pruned = evaluation.classify_expansion((case,), _context(data), k=10)
+
+    assert {(pair.item_id, pair.kind, pair.rank) for pair in kept} == expected
+    assert pruned == kept
+    assert {pair.case_id for pair in kept} == {"E1"}
+
+
+def test_the_graph_sweep_publishes_the_expansion_population_its_useful_column_counts_from(
+    tmp_path: Path,
+) -> None:
+    """`útiles = 0` is a finding only against a population that could have been lifted: over no
+    such pair it is 0 by construction (rule 2). So the report carries the population, and the
+    `useful` of every cell is a count OUT OF it."""
+    data = _workspace(tmp_path)
+
+    report = _sweep(data, {"min_shared_items": [2, 3], "min_weight": [0.0]})
+
+    expansion = report.to_dict()["expansion"]
+    assert expansion["population"] == 1
+    assert expansion["cases"] == ["G1"]
+    assert expansion["by_kind"] == {
+        "direct": 0,
+        "graph_reachable": 1,
+        "graph_unscored": 0,
+        "unreachable": 0,
+    }
+    assert expansion["pairs"] == [
+        {"case": "G1", "item": "r15", "kind": "graph_reachable", "rank": 15}
+    ]
+    assert expansion["untagged_with_population"] == []
+    assert expansion["tagged_without_population"] == []
+    rows = {(row.min_shared_items, row.min_weight): row for row in report.rows}
+    assert (rows[(2, 0.0)].useful, rows[(3, 0.0)].useful) == (0, 1)
+
+    lines = evaluation.render_graph_sweep_markdown(report).splitlines()
+    assert (
+        "Estrato `expansion` (Plan 04 §11.9): 1 pares relevantes alcanzables sólo por el grafo "
+        "en 1 casos (G1) — 0 directos, 0 alcanzables sin puntuar, 0 inalcanzables. La columna "
+        "«útiles» cuenta cuántos de esos 1 entraron en el top 10."
+    ) in lines
+
+
+def test_a_sweep_with_no_pair_only_the_graph_reaches_says_useful_cannot_be_anything_but_zero(
+    tmp_path: Path,
+) -> None:
+    """And the golden set's `expansion` tag is checked against the measurement, both ways: a
+    tagged case with no reachable pair, and a reachable pair in an untagged case, are named."""
+    data = _workspace(tmp_path)
+    tagged_direct = GoldenCase(
+        id="D1",
+        query="zeta",
+        provenance="construido",
+        strata=("expansion",),
+        filters=SearchFilters(),
+        relevant_items=("s01",),
+    )
+    untagged_direct = GoldenCase(
+        id="D2",
+        query="zeta",
+        provenance="construido",
+        strata=("semantico",),
+        filters=SearchFilters(),
+        relevant_items=("f02",),
+    )
+
+    report = _sweep(
+        data, {"min_shared_items": [3], "min_weight": [0.0]}, cases=(tagged_direct, untagged_direct)
+    )
+
+    expansion = report.to_dict()["expansion"]
+    assert expansion["population"] == 0
+    assert expansion["tagged_without_population"] == ["D1"]
+    lines = evaluation.render_graph_sweep_markdown(report).splitlines()
+    assert (
+        "Estrato `expansion` (Plan 04 §11.9): SIN COBERTURA — ninguno de los 2 pares relevantes "
+        "medidos es alcanzable sólo por el grafo (2 directos, 0 alcanzables sin puntuar, 0 "
+        "inalcanzables), así que «útiles» = 0 no puede salir de otra manera y no mide al grafo."
+    ) in lines
+    assert "Casos etiquetados `expansion` sin ningún par alcanzable sólo por el grafo: D1." in lines
+
+    reachable_untagged = GoldenCase(
+        id="G2",
+        query="zeta",
+        provenance="construido",
+        strata=("semantico",),
+        filters=SearchFilters(),
+        relevant_items=("r15",),
+    )
+    report = _sweep(
+        data, {"min_shared_items": [3], "min_weight": [0.0]}, cases=(reachable_untagged,)
+    )
+    assert report.to_dict()["expansion"]["untagged_with_population"] == ["G2"]
+    assert (
+        "Casos con pares alcanzables sólo por el grafo sin la etiqueta `expansion`: G2."
+        in evaluation.render_graph_sweep_markdown(report).splitlines()
+    )
+
+
+# ---------------------------------------------------------------------------
 # The threshold the signed sweep chose is the one the code applies
 # ---------------------------------------------------------------------------
 

@@ -13,8 +13,9 @@ THREE RULES, and they are the reason this module exists rather than a script:
    The report has no top-level metric key to reach for.
 
 2. **No coverage is NOT zero, at BOTH levels.** Spec §8.6.8: *failures and skips are
-   published; zeros are never fabricated by mixing in unmeasured cases*. `expansion` has no
-   mechanism until Plan 04; `thread` and `user_note` have zero instances in the corpus.
+   published; zeros are never fabricated by mixing in unmeasured cases*. A stratum with no
+   case (as `expansion` was before Plan 04 built the graph — `classify_expansion` now derives
+   its population) and `thread`/`user_note`, with zero instances in the corpus, are the cases.
    Reporting them at 0.0 would claim the retriever failed at something nobody asked, and the
    figure would sit in a table looking exactly like a measurement.
 
@@ -47,7 +48,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import product
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Mapping, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
 from xbrain.knowledge.contracts import SearchFilters, Strategy, resolve_strategy
@@ -2473,6 +2474,8 @@ class GraphSweepReport:
     corpus: dict[str, Any] = field(default_factory=dict)
     measured_cases: tuple[str, ...] = ()
     unmeasured: tuple[dict[str, Any], ...] = ()
+    expansion: tuple[ExpansionPair, ...] = ()
+    expansion_tagged: tuple[str, ...] = ()
 
     @property
     def winner(self) -> GraphSweepRow | None:
@@ -2526,6 +2529,7 @@ class GraphSweepReport:
             ),
             "useful": self.useful,
             "moves": self.moves,
+            "expansion": _expansion_block(self.expansion, self.expansion_tagged),
             "verdict": _graph_verdict(self),
             "rows": [
                 {
@@ -2631,6 +2635,8 @@ def sweep_graph(
             _graph_row(cell, measured, base, graph, stats, in_force=in_force, k=k, depth=depth)
         )
     return GraphSweepReport(
+        expansion=classify_expansion(measured, context, k=k) if rows else (),
+        expansion_tagged=tuple(case.id for case in measured if "expansion" in case.strata),
         k=k,
         limit=depth,
         rows=rank_graph_rows(rows),
@@ -2672,6 +2678,126 @@ def _graph_population(
             }
         )
     return measured, unmeasured
+
+
+ExpansionKind = Literal["direct", "graph_reachable", "graph_unscored", "unreachable"]
+_EXPANSION_KINDS: tuple[ExpansionKind, ...] = (
+    "direct",
+    "graph_reachable",
+    "graph_unscored",
+    "unreachable",
+)
+
+
+@dataclass(frozen=True)
+class ExpansionPair:
+    """One relevant item of a measured case, by the route that can bring it into the top k.
+
+    `rank` is its place in the ranking `hybrid_graph` re-ranks, read as deep as the classification
+    needed: always set for `direct` and `graph_reachable`; `None` for `graph_unscored` (no channel
+    scored it inside the horizon) and for an `unreachable` pair outside the top k of a case whose
+    horizon no pair required.
+    """
+
+    case_id: str
+    item_id: str
+    kind: ExpansionKind
+    rank: int | None
+
+
+def classify_expansion(
+    cases: Sequence[GoldenCase], context: Any, *, k: int = DEFAULT_SWEEP_K
+) -> tuple[ExpansionPair, ...]:
+    """Spec §8.2's `expansión` — «relevante accesible mediante el grafo mínimo» — measured per pair.
+
+    Plan 04 §3 adds «pero no directamente», so against the ranking `hybrid_graph` re-ranks (what
+    `search` serves for `hybrid`, to `GRAPH_CANDIDATE_HORIZON` owners) and the seeds it expands
+    from, each relevant item is `direct` (already in the top k: the graph cannot add it),
+    `graph_reachable` (outside it, reached from a seed by the persisted graph within
+    `GRAPH_MAX_HOPS`, and scored by a channel — the pairs only the graph can lift),
+    `graph_unscored` (reached, but no channel scored it, and the graph never admits the unscored,
+    §3.4) or `unreachable`.
+
+    THE WALK HAS NO NEIGHBOUR BUDGET. `max_neighbors_per_node` is what decides whether the graph
+    reaches a reachable pair in time, which is the thing the sweep measures; a classification
+    that applied it would report the graph's failure as a stratum without coverage. Assignment
+    edges do not depend on the co-occurrence thresholds, so the pairs are the same in every cell.
+    Reads the index at `context.index_dir`; never writes it or the store.
+
+    THE HORIZON IS READ ONLY WHEN A PAIR NEEDS IT. Serving `GRAPH_CANDIDATE_HORIZON` hydrated
+    results costs tens of seconds a query on the live corpus, and it decides one thing: whether a
+    reached pair outside the top k was scored. So the top k and the walk come first, and the
+    horizon is served only for a case holding such a pair.
+    """
+    from xbrain.knowledge import graph_strategy
+    from xbrain.knowledge.graph_service import graph_expand
+    from xbrain.knowledge.search_service import GRAPH_CANDIDATE_HORIZON
+
+    unbounded = len(context.store) + len(context.vocab)
+    pairs: list[ExpansionPair] = []
+    for case in cases:
+        head = _served_ids(case, context, max(k, graph_strategy.GRAPH_SEEDS))
+        seeds = [f"item:{item_id}" for item_id in head[: graph_strategy.GRAPH_SEEDS]]
+        walk = graph_expand(
+            seeds, context, max_hops=graph_strategy.GRAPH_MAX_HOPS, max_neighbors_per_node=unbounded
+        )
+        reached = {
+            node.node_id.removeprefix("item:") for node in walk.nodes if node.node_type == "item"
+        }
+        ranking = head
+        if any(item_id in reached and item_id not in head for item_id in case.relevant_items):
+            ranking = _served_ids(case, context, GRAPH_CANDIDATE_HORIZON)
+        place = {item_id: rank for rank, item_id in enumerate(ranking, start=1)}
+        pairs += [
+            _expansion_pair(case.id, item_id, place.get(item_id), reached, k)
+            for item_id in case.relevant_items
+        ]
+    return tuple(pairs)
+
+
+def _served_ids(case: GoldenCase, context: Any, limit: int) -> list[str]:
+    """The item ranking `search` serves `case` under `hybrid` — what `hybrid_graph` re-ranks."""
+    from xbrain.knowledge.search_service import search
+
+    response = search(
+        case.query,
+        context,
+        filters=case.filters,
+        limit=limit,
+        strategy="hybrid",
+        graph_enabled=True,
+    )
+    return [result.item_id for result in response.results]
+
+
+def _expansion_pair(
+    case_id: str, item_id: str, rank: int | None, reached: set[str], k: int
+) -> ExpansionPair:
+    kind: ExpansionKind
+    if rank is not None and rank <= k:
+        kind = "direct"
+    elif item_id not in reached:
+        kind = "unreachable"
+    else:
+        kind = "graph_reachable" if rank is not None else "graph_unscored"
+    return ExpansionPair(case_id, item_id, kind, rank)
+
+
+def _expansion_block(pairs: Sequence[ExpansionPair], tagged: Sequence[str]) -> dict[str, Any]:
+    """The expansion population the `useful` column counts out of, and the tag checked against it."""
+    reachable = [pair for pair in pairs if pair.kind == "graph_reachable"]
+    cases = list(dict.fromkeys(pair.case_id for pair in reachable))
+    return {
+        "population": len(reachable),
+        "cases": cases,
+        "by_kind": {kind: sum(pair.kind == kind for pair in pairs) for kind in _EXPANSION_KINDS},
+        "pairs": [
+            {"case": pair.case_id, "item": pair.item_id, "kind": pair.kind, "rank": pair.rank}
+            for pair in pairs
+        ],
+        "untagged_with_population": [case for case in cases if case not in tagged],
+        "tagged_without_population": [case for case in tagged if case not in cases],
+    }
 
 
 def _graph_cells(
@@ -2880,8 +3006,45 @@ def render_graph_sweep_markdown(report: GraphSweepReport) -> str:
             + "; ".join(f"{entry['id']} ({entry['reason']})" for entry in report.unmeasured)
             + ".",
         ]
+    if report.expansion:
+        lines += ["", *_expansion_lines(report)]
     lines += ["", _graph_verdict(report)]
     return "\n".join(lines)
+
+
+def _expansion_lines(report: GraphSweepReport) -> list[str]:
+    """Spec §11.9 in words: the population, or why `útiles = 0` could not be anything else."""
+    block = _expansion_block(report.expansion, report.expansion_tagged)
+    kinds = block["by_kind"]
+    others = (
+        f"{kinds['direct']} directos, {kinds['graph_unscored']} alcanzables sin puntuar, "
+        f"{kinds['unreachable']} inalcanzables"
+    )
+    head = "Estrato `expansion` (Plan 04 §11.9): "
+    if block["population"]:
+        population = block["population"]
+        lines = [
+            f"{head}{population} pares relevantes alcanzables sólo por el grafo en "
+            f"{len(block['cases'])} casos ({', '.join(block['cases'])}) — {others}. La columna "
+            f"«útiles» cuenta cuántos de esos {population} entraron en el top {report.k}."
+        ]
+    else:
+        lines = [
+            f"{head}SIN COBERTURA — ninguno de los {len(report.expansion)} pares relevantes "
+            f"medidos es alcanzable sólo por el grafo ({others}), así que «útiles» = 0 no puede "
+            "salir de otra manera y no mide al grafo."
+        ]
+    if block["tagged_without_population"]:
+        lines.append(
+            "Casos etiquetados `expansion` sin ningún par alcanzable sólo por el grafo: "
+            f"{', '.join(block['tagged_without_population'])}."
+        )
+    if block["untagged_with_population"]:
+        lines.append(
+            "Casos con pares alcanzables sólo por el grafo sin la etiqueta `expansion`: "
+            f"{', '.join(block['untagged_with_population'])}."
+        )
+    return lines
 
 
 def _graph_table_row(row: GraphSweepRow) -> str:
