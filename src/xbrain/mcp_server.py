@@ -28,6 +28,7 @@ instalarlo. Quien sólo use el CLI no paga la dependencia.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Sequence, cast
@@ -183,6 +184,42 @@ def _graph_expand(
     )
 
 
+def _structured_errors(handler: Callable[..., Any]) -> Callable[..., Any]:
+    """Traduce el error del operador a un `ToolError`, que es el único que llega al agente.
+
+    EL SDK SE COME LA CAUSA. Medido en este árbol: cualquier excepción que no sea un
+    `ToolError` sale como `UnexpectedToolError` y el texto que recibe el agente es literal y
+    completamente `Error executing tool xbrain.search`. El CLI, para el mismo fallo, imprime
+    `No hay índice en …/data/index. Constrúyelo con `xbrain index build`.` — así que sin esta
+    capa el operador recibe una instrucción accionable y el agente un mensaje que no dice
+    nada. El §4.3 pide lo contrario: «mismo tipo de error que el CLI».
+
+    QUÉ CUENTA COMO ERROR DEL OPERADOR NO SE RE-ENUMERA AQUÍ. Se importa: `_OPERATOR_ERRORS`
+    es la lista que usa el CLI e `IndexError_` la que atiende su segunda capa —hereda de
+    `Exception`, no de `ValueError`, y por eso el CLI necesita dos decoradores—. Una tercera
+    lista escrita a mano envejecería el día que alguien añada un tipo a la del CLI, y la
+    divergencia sería invisible: las dos puertas seguirían fallando, una con mensaje y otra
+    sin él (regla 5).
+
+    Lo que NO se traduce se deja subir tal cual: un fallo que no es del operador es un bug, y
+    convertirlo en un mensaje amable lo escondería.
+    """
+
+    @functools.wraps(handler)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        from xbrain.cli import _OPERATOR_ERRORS
+        from xbrain.knowledge.index_schema import IndexError_
+
+        try:
+            return handler(*args, **kwargs)
+        except (*_OPERATOR_ERRORS, IndexError_) as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """Una herramienta: su nombre, el handler que la sirve y lo que el agente lee de ella."""
@@ -232,7 +269,9 @@ def build_server() -> MCPServer:
     """El servidor con las tres herramientas registradas, y ninguna más."""
     server = _mcp_server_class()(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
     for spec in MCP_TOOLS.values():
-        server.add_tool(spec.handler, name=spec.name, description=spec.description)
+        server.add_tool(
+            _structured_errors(spec.handler), name=spec.name, description=spec.description
+        )
     return server
 
 

@@ -1,26 +1,166 @@
 # tests/test_mcp_server.py
 """El servidor MCP (Plan 04 §4): tres herramientas, y nada propio detrás de ellas.
 
-TODO LO DE AQUÍ ENTRA POR LA SUPERFICIE PÚBLICA DEL SERVIDOR — `build_server()` y los
-métodos `list_tools()` / `call_tool()` del objeto que devuelve, que son exactamente por
-donde entra el agente externo. Un test que llamara a la función interna que atiende una
-herramienta dejaría descubierto el camino real (el registro de la tool, el esquema, el
-envelope), que es donde vive el defecto que este fichero existe para cazar.
+TODO LO DE AQUÍ ENTRA POR LA SUPERFICIE PÚBLICA DE LAS DOS PUERTAS. Por MCP, un `mcp.Client`
+conectado en proceso al servidor — el cliente de verdad, con su handshake y su envelope, no
+la función del handler llamada a mano. Por el CLI, `CliRunner` sobre la app real. En 04.4
+probar la función y dejar el camino real descubierto costó seis rondas: el defecto vivía
+justo en el tramo que el test saltaba.
+
+Este módulo es además el que sirve el ARNÉS a los otros dos (`test_mcp_cli_equivalence.py`,
+`test_mcp_prompt_injection.py`): una sola definición de «workspace con el corpus de
+fixture», de «llamar a una tool» y de «desempaquetar el envelope». Tres copias de eso serían
+tres cosas que divergen en silencio, que es la regla 5 en la carpeta de tests.
 
 Las corrutinas se conducen con `asyncio.run` de la stdlib a propósito: el árbol no tiene
-`pytest-asyncio` y añadir un plugin es tocar `pyproject.toml` y el lock, que es el hijo
-04.6 y ya está integrado.
+`pytest-asyncio` y añadir un plugin es tocar `pyproject.toml` y el lock, que es el hijo 04.6
+y ya está integrado.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
+import pytest
+import yaml
+from typer.testing import CliRunner
+
+from xbrain.cli import app
 from xbrain.mcp_server import MCP_TOOLS, build_server
 
-# Las tres, literales. El conjunto viene del Plan 04 §4.1: `xbrain.search`,
-# `xbrain.get` y `xbrain.graph_expand` son las tres puertas de los tres servicios.
+FIXTURES = Path(__file__).parent / "fixtures"
+CORPUS = FIXTURES / "knowledge_corpus.json"
+runner = CliRunner()
+
+# Las tres, literales. El conjunto viene del Plan 04 §4.1: `xbrain.search`, `xbrain.get` y
+# `xbrain.graph_expand` son las tres puertas de los tres servicios.
 EXPECTED_TOOLS = {"xbrain.search", "xbrain.get", "xbrain.graph_expand"}
+
+
+# ---------------------------------------------------------------------------
+# El arnés: un repo de mentira con el corpus de fixture, y las dos puertas
+# ---------------------------------------------------------------------------
+
+
+def make_workspace(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    get_char_budget: int | None = None,
+    items: Mapping[str, Any] | None = None,
+) -> Path:
+    """Un directorio con forma de repo, con `data/` construido desde la fixture del corpus.
+
+    El corpus es una FIXTURE de población conocida (12 items, 2 topics del vocabulario),
+    nunca `data/`: en CI no hay store, y un test que fuese a buscarlo sería un test que deja
+    de correr allí sin decirlo.
+
+    `items` permite sustituir el diccionario de items —lo usa el test de inyección, que
+    necesita un item con un texto concreto— sin duplicar el resto del montaje.
+    """
+    raw = json.loads(CORPUS.read_text(encoding="utf-8"))
+    data = tmp_path / "data"
+    data.mkdir()
+    payload = raw["items"] if items is None else items
+    (data / "items.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (data / "topics.json").write_text(json.dumps(raw["topics"], indent=2), encoding="utf-8")
+    (data / "vocab.yaml").write_text(
+        yaml.safe_dump({"topics": list(raw["vocab"].values())}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    index = "" if get_char_budget is None else f"[index]\nget_char_budget = {get_char_budget}\n"
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "vault"\noutput_subdir = "x-knowledge"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n' + index,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def build_index() -> None:
+    """`xbrain index build` en el workspace actual."""
+    result = runner.invoke(app, ["index", "build"])
+    assert result.exit_code == 0, result.output
+
+
+@pytest.fixture()
+def workspace(tmp_path: Path, monkeypatch) -> Path:
+    """El repo de mentira, SIN índice: es el estado del que habla el paso 25."""
+    return make_workspace(tmp_path, monkeypatch)
+
+
+@pytest.fixture()
+def indexed_workspace(workspace: Path) -> Path:
+    """El repo de mentira con el índice ya construido."""
+    build_index()
+    return workspace
+
+
+def run_cli(argv: Sequence[str]) -> str:
+    """stdout de `xbrain <cmd> --json`, entero. Una línea de log suelta rompe el `json.loads`."""
+    result = runner.invoke(app, [*argv, "--json"])
+    assert result.exit_code == 0, result.output
+    return result.stdout
+
+
+def cli_error(argv: Sequence[str]) -> str:
+    """El mensaje del CLI cuando se niega: código 1 y la PRIMERA línea `Error: …`.
+
+    La primera, y no el stderr entero, porque en esta rama `_handle_cli_errors` envuelve a
+    `_handle_index_errors` y `typer.Exit` hereda de `RuntimeError`, así que el de fuera
+    vuelve a atrapar la salida del de dentro y añade un `Error:` vacío detrás. Es un defecto
+    cosmético anterior a este PR y ajeno a MCP; aquí sólo se esquiva, no se toca.
+    """
+    result = runner.invoke(app, [*argv, "--json"])
+    assert result.exit_code == 1, result.output
+    first = result.stderr.strip().splitlines()[0]
+    assert first.startswith("Error: "), result.stderr
+    return first.removeprefix("Error: ")
+
+
+def call_mcp_tool(tool: str, arguments: dict[str, Any]) -> Any:
+    """La herramienta, llamada por un cliente MCP real conectado en proceso al servidor."""
+
+    async def _call() -> Any:
+        from mcp import Client
+
+        async with Client(build_server()) as client:
+            return await client.call_tool(tool, arguments)
+
+    return asyncio.run(_call())
+
+
+def unwrap_mcp_content(result: Any) -> str:
+    """El payload de la tool, DESEMPAQUETADO de su envelope MCP.
+
+    Comprueba de paso que la llamada no fue un error y que el contenido es UN bloque de
+    texto: un segundo bloque, o un `is_error` silencioso, convertiría el resto del test en
+    una comparación contra lo que se le ocurriese al SDK.
+    """
+    assert result.is_error is False, result.content
+    blocks = [block for block in result.content if block.type == "text"]
+    assert len(blocks) == 1, [block.type for block in result.content]
+    return blocks[0].text
+
+
+def mcp_error(result: Any) -> str:
+    """El texto del error estructurado que ve el agente."""
+    assert result.is_error is True, result.content
+    blocks = [block for block in result.content if block.type == "text"]
+    assert len(blocks) == 1, [block.type for block in result.content]
+    return blocks[0].text
+
+
+# ---------------------------------------------------------------------------
+# Paso 23: las tres tools
+# ---------------------------------------------------------------------------
 
 
 def test_the_server_serves_these_three_tools_and_nothing_else() -> None:
@@ -34,3 +174,99 @@ def test_the_server_serves_these_three_tools_and_nothing_else() -> None:
     served = {tool.name for tool in asyncio.run(build_server().list_tools())}
     assert served == EXPECTED_TOOLS
     assert set(MCP_TOOLS) == EXPECTED_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# Paso 25: los errores estructurados (§4.3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ErrorCase:
+    """Una negativa, dicha en los dos idiomas, y la frase que la hace reconocible."""
+
+    id: str
+    argv: tuple[str, ...]
+    tool: str
+    arguments: dict[str, Any]
+    # Un fragmento que el mensaje TIENE que llevar. Sin esto la igualdad podría cumplirse
+    # entre dos mensajes vacíos, o entre dos genéricos que no dicen qué pasó.
+    names: str
+    indexed: bool = True
+
+
+ERROR_CASES: tuple[ErrorCase, ...] = (
+    ErrorCase(
+        id="missing-index-search",
+        argv=("search", "retrieval"),
+        tool="xbrain.search",
+        arguments={"query": "retrieval"},
+        names="xbrain index build",
+        indexed=False,
+    ),
+    ErrorCase(
+        id="missing-index-graph",
+        argv=("graph-expand", "--item", "k03"),
+        tool="xbrain.graph_expand",
+        arguments={"item_id": "k03"},
+        names="xbrain index build",
+        indexed=False,
+    ),
+    ErrorCase(
+        id="empty-query",
+        argv=("search", ""),
+        tool="xbrain.search",
+        arguments={"query": ""},
+        names="vacía",
+    ),
+    ErrorCase(
+        id="unknown-topic",
+        argv=("search", "agent", "--topic", "no-existe"),
+        tool="xbrain.search",
+        arguments={"query": "agent", "filters": {"topics": ["no-existe"]}},
+        names="agent-evaluation",
+    ),
+    ErrorCase(
+        id="unknown-item",
+        argv=("get", "no-existe"),
+        tool="xbrain.get",
+        arguments={"item_id": "no-existe"},
+        names="no-existe",
+    ),
+    ErrorCase(
+        id="unknown-surface",
+        argv=("get", "k03", "--surface", "no-existe"),
+        tool="xbrain.get",
+        arguments={"item_id": "k03", "surfaces": ["no-existe"]},
+        names="Superficies disponibles",
+    ),
+    ErrorCase(
+        # `strategy` se declara `str` y no `Literal` justo para que el rechazo lo dé el
+        # servicio, enumerando las estrategias, y no el esquema con un error de validación.
+        id="unknown-strategy",
+        argv=("search", "agent", "--strategy", "no-existe"),
+        tool="xbrain.search",
+        arguments={"query": "agent", "strategy": "no-existe"},
+        names="implementadas hoy",
+    ),
+)
+
+
+@pytest.mark.parametrize("case", ERROR_CASES, ids=lambda case: case.id)
+def test_mcp_refuses_with_the_same_message_as_the_cli(case: ErrorCase, workspace: Path) -> None:
+    """Paso 25 / §4.3: MCP da EL MISMO error estructurado que el CLI, no uno genérico.
+
+    Sin traducción explícita el SDK convierte cualquier excepción que no sea un `ToolError`
+    en un `UnexpectedToolError` cuyo texto para el agente es literalmente `Error executing
+    tool xbrain.search`: el operador recibe «constrúyelo con `xbrain index build`» y el
+    agente, nada. Esa asimetría es lo que este test caza.
+    """
+    if case.indexed:
+        build_index()
+    message = cli_error(case.argv)
+    assert case.names in message, message
+
+    text = mcp_error(call_mcp_tool(case.tool, case.arguments))
+    assert case.tool in text
+    assert text.endswith(message), text
+    assert "Traceback" not in text
