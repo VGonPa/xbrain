@@ -21,6 +21,7 @@ implementation of the strategy inside the harness would be a second definition o
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,8 +29,8 @@ from pathlib import Path
 import pytest
 
 from tests.test_knowledge_search_service import _persist
-from xbrain.knowledge import evaluation, graph_build, index_build
-from xbrain.knowledge.contracts import SearchFilters
+from xbrain.knowledge import evaluation, graph_build, graph_service, graph_strategy, index_build
+from xbrain.knowledge.contracts import GraphNode, SearchFilters
 from xbrain.knowledge.evaluation import GraphSweepReport, GraphSweepRow
 from xbrain.knowledge.goldenset import GoldenCase
 from xbrain.knowledge.search_service import QueryContext, search
@@ -540,6 +541,104 @@ def test_every_relevant_pair_is_classified_by_the_route_that_can_reach_it(tmp_pa
     assert {(pair.item_id, pair.kind, pair.rank) for pair in kept} == expected
     assert pruned == kept
     assert {pair.case_id for pair in kept} == {"E1"}
+
+
+_E1 = GoldenCase(
+    id="E1",
+    query="zeta",
+    provenance="construido",
+    strata=("expansion",),
+    filters=SearchFilters(),
+    relevant_items=("s01", "f02", "r15", "c00", "f14"),
+)
+
+
+def _drop_reached(nodes: tuple[GraphNode, ...]) -> tuple[GraphNode, ...]:
+    return tuple(node for node in nodes if node.node_id not in {"item:r15", "item:c00"})
+
+
+def _add_unreached(nodes: tuple[GraphNode, ...]) -> tuple[GraphNode, ...]:
+    return (*nodes, GraphNode(node_id="item:f14", node_type="item"))
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [_drop_reached, _add_unreached, lambda nodes: ()],
+    ids=["drop-reached-r15-c00", "add-unreached-f14", "reach-nothing"],
+)
+def test_the_expansion_stratum_never_reads_the_graph_service_whose_lift_it_measures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rewrite
+) -> None:
+    """PR #198, round 2, HIGH-1. The population the `useful` column counts out of must not move
+    with the answer it is compared against. If `graph_expand` decides which pairs are
+    `graph_reachable`, a walk that loses a node shrinks the denominator in the same run that
+    fails to lift it, and «0 of N» measures the service against itself.
+
+    So the service's OUTPUT is falsified three ways — a reached node dropped, an unreached one
+    added, nothing reached — and not one pair may move. Membership is read off the persisted
+    `graph_edges`, the ground truth and the `hybrid` ranking the graph re-ranks; never off the
+    graph channel. The honest classification is asserted FIRST, so a stratum that ignored the
+    graph altogether (every pair `unreachable`, trivially stable) cannot pass.
+    """
+    data = _workspace(tmp_path)
+    _build(data, 3, force=True)
+    honest = evaluation.classify_expansion((_E1,), _context(data), k=10)
+    assert {(pair.item_id, pair.kind) for pair in honest} >= {
+        ("r15", "graph_reachable"),
+        ("c00", "graph_unscored"),
+        ("f14", "unreachable"),
+    }
+
+    real = graph_service.graph_expand
+
+    def falsified(seeds, context, **kwargs):
+        response = real(seeds, context, **kwargs)
+        return response.model_copy(update={"nodes": rewrite(response.nodes)})
+
+    monkeypatch.setattr(graph_service, "graph_expand", falsified)
+    monkeypatch.setattr(graph_strategy, "graph_expand", falsified)
+
+    assert evaluation.classify_expansion((_E1,), _context(data), k=10) == honest
+
+
+def test_the_expansion_stratum_reads_reachability_off_the_persisted_graph_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """…and the corpus property it reads is the PERSISTED graph, the table `hybrid_graph` walks,
+    not a second derivation from the store's enrichments (rule 5): an index whose `graph_edges`
+    never held `r15 → hub` cannot call `r15` reachable, though the store still assigns it `hub`."""
+    data = _workspace(tmp_path)
+    derive = index_build.build_graph_edges
+
+    def without_r15(store, **kwargs):
+        return [edge for edge in derive(store, **kwargs) if edge.source != "item:r15"]
+
+    monkeypatch.setattr(index_build, "build_graph_edges", without_r15)
+    _build(data, 3, force=True)
+
+    pairs = evaluation.classify_expansion((_E1,), _context(data), k=10)
+
+    assert {(pair.item_id, pair.kind, pair.rank) for pair in pairs} == {
+        ("s01", "direct", 1),
+        ("f02", "direct", 2),
+        ("r15", "unreachable", 15),
+        ("c00", "graph_unscored", None),
+        ("f14", "unreachable", 14),
+    }
+
+
+def test_the_expansion_stratum_refuses_a_graph_behind_the_store(tmp_path: Path) -> None:
+    """Reading the table directly must not shed the refusal `graph_expand` gave for free: a graph
+    derived before `items.json` moved would classify pairs against assignments the corpus may no
+    longer hold, and nothing in the report would say so."""
+    data = _workspace(tmp_path)
+    _build(data, 3, force=True)
+    items = data / "items.json"
+    stat = items.stat()
+    os.utime(items, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    with pytest.raises(ValueError, match="index_behind_store"):
+        evaluation.classify_expansion((_E1,), _context(data), k=10)
 
 
 def test_the_graph_sweep_publishes_the_expansion_population_its_useful_column_counts_from(

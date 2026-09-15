@@ -2713,37 +2713,41 @@ def classify_expansion(
     Plan 04 §3 adds «pero no directamente», so against the ranking `hybrid_graph` re-ranks (what
     `search` serves for `hybrid`, to `GRAPH_CANDIDATE_HORIZON` owners) and the seeds it expands
     from, each relevant item is `direct` (already in the top k: the graph cannot add it),
-    `graph_reachable` (outside it, reached from a seed by the persisted graph within
-    `GRAPH_MAX_HOPS`, and scored by a channel — the pairs only the graph can lift),
-    `graph_unscored` (reached, but no channel scored it, and the graph never admits the unscored,
+    `graph_reachable` (outside it, a path of at most `GRAPH_MAX_HOPS` edges joins it to a seed in
+    the persisted graph, and a channel scored it — the pairs only the graph can lift),
+    `graph_unscored` (joined, but no channel scored it, and the graph never admits the unscored,
     §3.4) or `unreachable`.
 
-    THE WALK HAS NO NEIGHBOUR BUDGET. `max_neighbors_per_node` is what decides whether the graph
+    MEMBERSHIP NEVER READS THE GRAPH CHANNEL IT IS THEN USED TO MEASURE. It reads three things:
+    the ground truth, the `hybrid` ranking (the base `hybrid_graph` re-ranks — without it «pero no
+    directamente» has no meaning) and the `graph_edges` TABLE, walked here as a plain
+    breadth-first search. An earlier version asked `graph_expand` which items it reached, so the
+    population the sweep's `useful` column counts out of moved with the service whose lift that
+    column reports: a walk that dropped a node shrank the denominator in the same run that failed
+    to lift it (PR #198, round 2 — reproduced by omitting one node from the service's output).
+    `tests/test_knowledge_graph_sweep.py` falsifies that output and requires no pair to move.
+
+    THE PATH HAS NO NEIGHBOUR BUDGET. `max_neighbors_per_node` is what decides whether the graph
     reaches a reachable pair in time, which is the thing the sweep measures; a classification
     that applied it would report the graph's failure as a stratum without coverage. Assignment
     edges do not depend on the co-occurrence thresholds, so the pairs are the same in every cell.
-    Reads the index at `context.index_dir`; never writes it or the store.
+    Reads the index at `context.index_dir`, refusing one behind the store; never writes it or the
+    store.
 
     THE HORIZON IS READ ONLY WHEN A PAIR NEEDS IT. Serving `GRAPH_CANDIDATE_HORIZON` hydrated
     results costs tens of seconds a query on the live corpus, and it decides one thing: whether a
-    reached pair outside the top k was scored. So the top k and the walk come first, and the
+    reached pair outside the top k was scored. So the top k and the path come first, and the
     horizon is served only for a case holding such a pair.
     """
     from xbrain.knowledge import graph_strategy
-    from xbrain.knowledge.graph_service import graph_expand
     from xbrain.knowledge.search_service import GRAPH_CANDIDATE_HORIZON
 
-    unbounded = len(context.store) + len(context.vocab)
+    neighbours = _graph_neighbours(context)
     pairs: list[ExpansionPair] = []
     for case in cases:
         head = _served_ids(case, context, max(k, graph_strategy.GRAPH_SEEDS))
         seeds = [f"item:{item_id}" for item_id in head[: graph_strategy.GRAPH_SEEDS]]
-        walk = graph_expand(
-            seeds, context, max_hops=graph_strategy.GRAPH_MAX_HOPS, max_neighbors_per_node=unbounded
-        )
-        reached = {
-            node.node_id.removeprefix("item:") for node in walk.nodes if node.node_type == "item"
-        }
+        reached = _items_within(neighbours, seeds, graph_strategy.GRAPH_MAX_HOPS)
         ranking = head
         if any(item_id in reached and item_id not in head for item_id in case.relevant_items):
             ranking = _served_ids(case, context, GRAPH_CANDIDATE_HORIZON)
@@ -2753,6 +2757,47 @@ def classify_expansion(
             for item_id in case.relevant_items
         ]
     return tuple(pairs)
+
+
+# Every persisted edge, read as the walk reads it (`graph_service._INCIDENT_SQL`): an edge leads
+# from its source, an assignment edge also leads back from its topic, and a `CO_OCCURS_WITH` edge
+# is stored in both directions, so it is never reversed.
+_GRAPH_EDGES_SQL = "SELECT source, target, relation FROM graph_edges"
+
+
+def _graph_neighbours(context: Any) -> dict[str, set[str]]:
+    """The persisted `graph_edges` as adjacency — the table, not `graph_expand`'s answer over it."""
+    from xbrain.knowledge.graph_service import _require_current
+    from xbrain.knowledge.index_store import open_for_query
+
+    index = open_for_query(
+        context.index_dir,
+        context.items_path,
+        context.vocab_path,
+        context.topics_path,
+        params=context.params,
+    )
+    try:
+        _require_current(index.degraded)
+        rows = index.lexical.connection.execute(_GRAPH_EDGES_SQL).fetchall()
+    finally:
+        index.close()
+    neighbours: dict[str, set[str]] = {}
+    for source, target, relation in rows:
+        neighbours.setdefault(str(source), set()).add(str(target))
+        if relation != "CO_OCCURS_WITH":
+            neighbours.setdefault(str(target), set()).add(str(source))
+    return neighbours
+
+
+def _items_within(neighbours: Mapping[str, set[str]], seeds: Sequence[str], hops: int) -> set[str]:
+    """The item ids at most `hops` edges from `seeds`, the seeds included — breadth-first, no budget."""
+    reached = set(seeds)
+    frontier = set(seeds)
+    for _ in range(hops):
+        frontier = {other for node in frontier for other in neighbours.get(node, ())} - reached
+        reached |= frontier
+    return {node.removeprefix("item:") for node in reached if node.startswith("item:")}
 
 
 def _served_ids(case: GoldenCase, context: Any, limit: int) -> list[str]:
