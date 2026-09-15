@@ -3646,6 +3646,67 @@ def _run_fusion_sweep(
         raise ValueError(payload["verdict"])
 
 
+def _run_graph_sweep(
+    cfg,
+    cases,
+    axes: list[str],
+    report: Path | None,
+    *,
+    json_out: bool,
+    limit: int,
+    ks: list[int],
+    min_recall: float | None,
+) -> None:
+    """`eval --strategy hybrid_graph --sweep-graph`: score every `(min_shared_items, min_weight)`.
+
+    The refusals of the other two sweeps, for their reasons. The sweep builds its OWN index
+    under `data/eval-index/graph-sweep/` — never `data/index/`, which belongs to `search` — and
+    rewrites only its graph plane between cells.
+    """
+    from xbrain.knowledge.evaluation import (
+        DEFAULT_SWEEP_K,
+        eval_index_dir,
+        parse_graph_sweep,
+        render_graph_sweep_markdown,
+        sweep_graph as run_sweep,
+    )
+
+    if min_recall is not None:
+        raise ValueError(
+            "`--min-recall` no se aplica a `--sweep-graph`: el barrido publica una TABLA de "
+            "combinaciones y no hay bucket contra el que comparar el umbral."
+        )
+    if len(ks) > 1:
+        raise ValueError(
+            f"`--sweep-graph` ordena por un solo `recall@k` y recibió {len(ks)} valores de "
+            "`--k`: repite el barrido con un `--k` por corrida."
+        )
+    result = run_sweep(
+        cases,
+        parse_graph_sweep(axes),
+        items_path=cfg.items_path,
+        vocab_path=cfg.data_dir / "vocab.yaml",
+        topics_path=cfg.topics_path,
+        index_dir=eval_index_dir(cfg.data_dir, "graph-sweep"),
+        k=ks[0] if ks else DEFAULT_SWEEP_K,
+        limit=limit,
+    )
+    json_path = report or (cfg.data_dir / "eval-graph-sweep.json")
+    if not json_path.is_absolute():
+        json_path = _repo_root() / json_path
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path.with_suffix(".md").write_text(render_graph_sweep_markdown(result), encoding="utf-8")
+    if json_out:
+        _echo_json(payload)
+    else:
+        typer.echo(render_graph_sweep_markdown(result))
+        typer.echo(f"Informe: {json_path} · {json_path.with_suffix('.md')}")
+    if result.winner is None:
+        raise ValueError(payload["verdict"])
+
+
 @app.command("eval")
 @_handle_cli_errors
 def eval_command(
@@ -3690,6 +3751,14 @@ def eval_command(
         "--sweep-fusion",
         help="Barrido de la fusión RRF: `rrf_k=20,60 w_vector=0.5,1` (solo `--strategy hybrid`).",
     ),
+    sweep_graph: list[str] = typer.Option(
+        [],
+        "--sweep-graph",
+        help=(
+            "Barrido del umbral del grafo: `min_shared_items=2,3,5,8 min_weight=0.0,0.05` "
+            "(solo `--strategy hybrid_graph`; Plan 04 §1.3)."
+        ),
+    ),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
     """Evalúa la recuperación contra el golden set y publica el informe.
@@ -3711,6 +3780,17 @@ def eval_command(
 
     # EVERY REFUSAL BEFORE ANYTHING IS LOADED OR EMBEDDED: `_eval_vectors` probes the embedder,
     # which loads a model, and a flag combination that cannot be honoured must not cost one.
+    if sweep_graph and (sweep_chunker or sweep_fusion or embeddings_model):
+        raise ValueError(
+            "`--sweep-graph` mide el umbral del grafo con `search` sobre su propio índice: no "
+            "admite `--sweep-chunker`, `--sweep-fusion` ni `--embeddings-model`. Corre cada "
+            "barrido por separado."
+        )
+    if sweep_graph and strategy != "hybrid_graph":
+        raise ValueError(
+            f"`--sweep-graph` barre los umbrales del grafo que recorre `hybrid_graph` y "
+            f"`--strategy {strategy}` no corre el grafo: úsalo con `--strategy hybrid_graph`."
+        )
     if sweep_chunker and (embeddings_model or sweep_fusion):
         raise ValueError(
             "`--sweep-chunker` mide el troceo con el recuperador léxico en memoria: no admite "
@@ -3727,6 +3807,18 @@ def eval_command(
     path = golden_set if golden_set.is_absolute() else _repo_root() / golden_set
     cases = resolve_cases(load_cases(path), corpus.items)
     vectors = _eval_vectors(cfg, embeddings_model) if embeddings_model else None
+    if sweep_graph:
+        _run_graph_sweep(
+            cfg,
+            cases,
+            sweep_graph,
+            report,
+            json_out=json_out,
+            limit=limit,
+            ks=k,
+            min_recall=min_recall,
+        )
+        return
     if sweep_fusion:
         _run_fusion_sweep(
             cfg,

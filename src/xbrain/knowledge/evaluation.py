@@ -44,13 +44,13 @@ import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from xbrain.knowledge.chunking import ChunkerParams, DEFAULT_CHUNKER_PARAMS, chunk_surfaces
-from xbrain.knowledge.contracts import SearchFilters, resolve_strategy
+from xbrain.knowledge.contracts import SearchFilters, Strategy, resolve_strategy
 from xbrain.knowledge.goldenset import STRATA, GoldenCase, GoldenScenario
 from xbrain.knowledge.index_schema import IndexError_, open_memory_index
 from xbrain.knowledge.lexical import LexicalHit, LexicalIndex, distinct_owners
@@ -2020,19 +2020,7 @@ def parse_fusion_sweep(values: Sequence[str]) -> dict[str, list[float]]:
     The syntax of `parse_sweep`, and its refusal of an unknown axis: a typo that swept nothing
     would publish the constants in force as the winner of a sweep that never ran.
     """
-    grid: dict[str, list[float]] = {}
-    for value in values:
-        for token in value.split():
-            if "=" not in token:
-                raise ValueError(f"Formato de barrido inválido: {token!r}. Usa `clave=v1,v2`.")
-            key, raw = token.split("=", 1)
-            reader = FUSION_AXES.get(key)
-            if reader is None:
-                raise ValueError(
-                    f"Eje de barrido de fusión desconocido: {key!r}. "
-                    f"Válidos: {', '.join(FUSION_AXES)}."
-                )
-            grid[key] = [reader(part) for part in raw.split(",") if part.strip()]
+    grid = _parse_axes(values, FUSION_AXES, "de fusión")
     _check_fusion_grid(grid)
     return grid
 
@@ -2301,3 +2289,648 @@ def _fusion_verdict(report: FusionSweepReport) -> str:
         f"{_number(winner.recall)}, MRR {_number(winner.mrr)}) frente a la combinación en vigor "
         f"(recall@{report.k} {_number(current.recall)}, MRR {_number(current.mrr)})."
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 04.5 — the graph threshold sweep (Plan 04 §1.3, spec §14)
+# ---------------------------------------------------------------------------
+#
+# «UMBRAL DE COOCURRENCIA DEL GRAFO MÍNIMO: SE MIDE CONTRA EXPANSIÓN ÚTIL/RUIDO» (spec §14). Plan
+# 04 §1.3 sweeps `min_shared_items × min_weight` and asks each cell for its co-occurrence edges,
+# its mean degree and the recall delta of `hybrid_graph` against `hybrid`; spec §8.4 adds the two
+# figures that make «ruido» a number — the precision of the candidates only the graph brought into
+# the page, and the places the direct results lost to make room for them.
+#
+# THROUGH `search`, NOT A SECOND STRATEGY. `hybrid_graph` exists in exactly one place,
+# `search_service._graph_order`, and a copy of it here would be the rule-5 divergence inside the
+# module that exists to measure the first copy. So each cell derives its graph plane with the
+# writer `xbrain index build` uses — a build for the first cell, then `index_build.update`, which
+# rewrites the graph alone when only a threshold moved — and scores what `search` serves. The unit
+# is the ITEM, because that is what `search` pages: a case whose truth is a topic is unmeasured,
+# and none of these figures is comparable with the owner-level ones `evaluate` publishes.
+#
+# THE BASE IS `hybrid` AS `search` ANSWERS IT OVER THIS INDEX. The sweep writes no vector plane —
+# one per cell would re-embed the corpus for a threshold that does not touch a single vector — so
+# `hybrid` answers `lexical` and `hybrid_graph` re-ranks that same ranking, each declaring why, and
+# the report carries both declarations. The graph's term joins at item level over the rank the
+# base served, so the delta is the graph's and nothing else's.
+#
+# THE RULE IS FIXED HERE, BEFORE ANY CELL IS READ (`rank_graph_rows`), and pinned by tests on
+# constructed rows so that no measurement can move it.
+
+# Plan 04 §3 defines «degradar materialmente la precisión» before measuring, «para que no se
+# renegocie con el resultado delante»: a fall of MORE than 3 pp of `precision@10` in any stratum.
+MATERIAL_PRECISION_DROP_PP: float = 3.0
+
+# The axes a graph sweep may move: the two `build_graph_edges` thresholds `[index]` configures.
+GRAPH_AXES: dict[str, type] = {"min_shared_items": int, "min_weight": float}
+
+GRAPH_SWEEP_CRITERION = (
+    f"descarta la combinación que pierde más de {MATERIAL_PRECISION_DROP_PP:g} pp de precisión "
+    "en algún estrato (Plan 04 §3); entre las demás decide Δ recall frente a `hybrid`, luego "
+    "menos ruido (entrantes no relevantes), luego menos degradación de los resultados directos, "
+    "luego el grafo más disperso y, entre grafos idénticos, los umbrales menos restrictivos"
+)
+
+_CO_OCCURRENCE_EDGES_SQL = "SELECT COUNT(*) FROM graph_edges WHERE relation = 'CO_OCCURS_WITH'"
+_TOPIC_NODES_SQL = (
+    "SELECT COUNT(DISTINCT target) FROM graph_edges WHERE relation != 'CO_OCCURS_WITH'"
+)
+
+
+def parse_graph_sweep(values: Sequence[str]) -> dict[str, list[float]]:
+    """`["min_shared_items=2,3 min_weight=0.0,0.05"]` -> `{"min_shared_items": [2, 3], ...}`.
+
+    The syntax and the unknown-axis refusal of `parse_fusion_sweep`, through the same parser.
+    """
+    grid = _parse_axes(values, GRAPH_AXES, "del grafo")
+    _check_graph_grid(grid)
+    return grid
+
+
+def _parse_axes(
+    values: Sequence[str], axes: Mapping[str, type], noun: str
+) -> dict[str, list[float]]:
+    """`clave=v1,v2` tokens, each value read as its axis's type; an unknown axis is refused."""
+    grid: dict[str, list[float]] = {}
+    for value in values:
+        for token in value.split():
+            if "=" not in token:
+                raise ValueError(f"Formato de barrido inválido: {token!r}. Usa `clave=v1,v2`.")
+            key, raw = token.split("=", 1)
+            reader = axes.get(key)
+            if reader is None:
+                raise ValueError(
+                    f"Eje de barrido {noun} desconocido: {key!r}. Válidos: {', '.join(axes)}."
+                )
+            grid[key] = [reader(part) for part in raw.split(",") if part.strip()]
+    return grid
+
+
+def _check_graph_grid(grid: Mapping[str, Sequence[float]]) -> None:
+    """Refuse a threshold `build_graph_edges` would not apply as written, before any build."""
+    unknown = sorted(set(grid) - set(GRAPH_AXES))
+    if unknown:
+        raise ValueError(f"Ejes de barrido del grafo desconocidos: {unknown}.")
+    for value in grid.get("min_shared_items", ()):
+        if value < 1:
+            raise ValueError(
+                f"min_shared_items={value} no es válido: `build_graph_edges` trata un valor < 1 "
+                "como 1, así que la celda mediría la de 1 con otro nombre."
+            )
+    for value in grid.get("min_weight", ()):
+        if not 0 <= value <= 1:
+            raise ValueError(
+                f"min_weight={value} no es válido: el peso es un índice de Jaccard, en [0, 1], y "
+                "fuera de ese rango la celda lo conserva todo o no conserva nada."
+            )
+
+
+@dataclass(frozen=True)
+class GraphSweepRow:
+    """One `(min_shared_items, min_weight)` cell: the graph it persisted and what the graph did.
+
+    `entrants` are the items in `hybrid_graph`'s top k that `hybrid`'s top k did not hold — the
+    candidates only the graph brought in, since the graph adds a term and never takes one away;
+    `useful` is how many of them are relevant. `degradation` is the mean number of places a
+    direct result (one already in `hybrid`'s top k) lost. `precision_drops` is, per stratum
+    measured by both, how many percentage points of `precision@k` the graph cost (negative when
+    it gained). All three are summed or averaged over the SAME measured cases as the recall.
+    """
+
+    min_shared_items: int
+    min_weight: float
+    edges: int
+    mean_degree: float
+    recall: float | None
+    recall_delta: float | None
+    entrants: int
+    useful: int
+    degradation: float | None
+    precision_drops: dict[str, float]
+    graph_ran: bool
+    in_force: bool = False
+    degraded: tuple[str, ...] = ()
+
+    @property
+    def noise(self) -> int:
+        """Entrants that are not relevant: what the graph displaced the direct results for."""
+        return self.entrants - self.useful
+
+    @property
+    def entrant_precision(self) -> float | None:
+        """Spec §8.4's «precisión de candidatos añadidos exclusivamente por grafo». 0/0 is `None`."""
+        return self.useful / self.entrants if self.entrants else None
+
+    @property
+    def rejected_for(self) -> tuple[str, ...]:
+        """Why this cell cannot be a USEFUL winner — empty when nothing disqualifies it."""
+        if not self.graph_ran:
+            return ("el grafo no corrió: `hybrid_graph` respondió otra estrategia en algún caso",)
+        return tuple(
+            f"la precisión cae {drop:.2f} pp en `{stratum}` "
+            f"(> {MATERIAL_PRECISION_DROP_PP:g} pp, Plan 04 §3)"
+            for stratum, drop in sorted(self.precision_drops.items())
+            if drop > MATERIAL_PRECISION_DROP_PP
+        )
+
+
+def rank_graph_rows(rows: Iterable[GraphSweepRow]) -> tuple[GraphSweepRow, ...]:
+    """The cells in the order the rule prefers them — `GRAPH_SWEEP_CRITERION`, as a sort key.
+
+    A cell where the graph did not run measured another strategy and ranks last. A cell losing
+    more than `MATERIAL_PRECISION_DROP_PP` in any stratum ranks after every cell that does not.
+    Within each group: the larger recall delta, then less noise, then less degradation, then the
+    sparser graph, then the lower `min_shared_items` and `min_weight` — two cells that persisted
+    the same graph measured the same thing, and the constraint that changed nothing is not the
+    one to apply.
+    """
+
+    def key(row: GraphSweepRow) -> tuple[bool, bool, float, int, float, int, int, float]:
+        return (
+            not row.graph_ran,
+            bool(row.rejected_for),
+            -row.recall_delta if row.recall_delta is not None else math.inf,
+            row.noise,
+            row.degradation if row.degradation is not None else math.inf,
+            row.edges,
+            row.min_shared_items,
+            row.min_weight,
+        )
+
+    return tuple(sorted(rows, key=key))
+
+
+@dataclass(frozen=True)
+class GraphSweepReport:
+    """Every cell, in the rule's order, with the two retrievers it compared and on what."""
+
+    k: int
+    limit: int
+    rows: tuple[GraphSweepRow, ...]
+    base: dict[str, Any] = field(default_factory=dict)
+    graph: dict[str, Any] = field(default_factory=dict)
+    corpus: dict[str, Any] = field(default_factory=dict)
+    measured_cases: tuple[str, ...] = ()
+    unmeasured: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def winner(self) -> GraphSweepRow | None:
+        """The threshold to APPLY: the first cell, when the graph ran in it and it was scored.
+
+        Applied even when it helps nothing — the index always builds a graph, so some threshold
+        is always in force — which is why `useful` is a separate question.
+        """
+        if not self.rows:
+            return None
+        top = self.rows[0]
+        return top if top.graph_ran and top.recall_delta is not None else None
+
+    @property
+    def useful(self) -> bool:
+        """Whether the winner improves recall without a material loss of precision (Plan 04 §3)."""
+        winner = self.winner
+        return (
+            winner is not None
+            and not winner.rejected_for
+            and winner.recall_delta is not None
+            and winner.recall_delta > 0
+        )
+
+    @property
+    def moves(self) -> bool:
+        """Whether the winner is not the cell in force — the only case the defaults change."""
+        winner = self.winner
+        return winner is not None and not winner.in_force
+
+    def to_dict(self) -> dict[str, Any]:
+        winner = self.winner
+        return {
+            "strategy": "hybrid_graph",
+            "k": self.k,
+            "limit": self.limit,
+            "base": self.base,
+            "graph": self.graph,
+            "corpus": self.corpus,
+            "material_precision_drop_pp": MATERIAL_PRECISION_DROP_PP,
+            "criterion": GRAPH_SWEEP_CRITERION,
+            "measured_cases": list(self.measured_cases),
+            "unmeasured": [dict(entry) for entry in self.unmeasured],
+            "winner": (
+                None
+                if winner is None
+                else {
+                    "min_shared_items": winner.min_shared_items,
+                    "min_weight": winner.min_weight,
+                }
+            ),
+            "useful": self.useful,
+            "moves": self.moves,
+            "verdict": _graph_verdict(self),
+            "rows": [
+                {
+                    "min_shared_items": row.min_shared_items,
+                    "min_weight": row.min_weight,
+                    "edges": row.edges,
+                    "mean_degree": row.mean_degree,
+                    f"recall@{self.k}": row.recall,
+                    "recall_delta": row.recall_delta,
+                    "entrants": row.entrants,
+                    "useful": row.useful,
+                    "noise": row.noise,
+                    "entrant_precision": row.entrant_precision,
+                    "degradation": row.degradation,
+                    "precision_drops": row.precision_drops,
+                    "rejected_for": list(row.rejected_for),
+                    "graph_ran": row.graph_ran,
+                    "in_force": row.in_force,
+                    "degraded": list(row.degraded),
+                }
+                for row in self.rows
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class _Rankings:
+    """What `search` served for every measured case under one requested strategy."""
+
+    requested: str
+    ids: dict[str, tuple[str, ...]]
+    strategies: tuple[str, ...]
+    degraded: tuple[str, ...]
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "requested_strategy": self.requested,
+            "strategy": ", ".join(self.strategies) or self.requested,
+            "degraded": list(self.degraded),
+        }
+
+
+@dataclass(frozen=True)
+class _GraphCase:
+    recall: float
+    base_recall: float
+    precision: float | None
+    base_precision: float | None
+    entrants: int
+    useful: int
+    lost: tuple[int, ...]
+
+
+def sweep_graph(
+    cases: Sequence[GoldenCase],
+    grid: Mapping[str, Sequence[float]],
+    *,
+    items_path: Path,
+    vocab_path: Path,
+    topics_path: Path,
+    index_dir: Path,
+    k: int = DEFAULT_SWEEP_K,
+    limit: int | None = None,
+) -> GraphSweepReport:
+    """Score `hybrid_graph` against `hybrid` at every `(min_shared_items, min_weight)` in `grid`.
+
+    `index_dir` is the sweep's OWN index, rebuilt from the three inputs: never `data/index/`,
+    which belongs to `search`. The store is read once, as one snapshot, and never written. The
+    cell in force (`graph_build`'s defaults, read at call time) is always scored, appended when
+    the grid omits it, so «the sweep moves the default» is a comparison against a measurement.
+    `hybrid` is ranked once — no threshold touches it — and `hybrid_graph` once per cell.
+    """
+    from xbrain.knowledge import graph_build
+    from xbrain.knowledge.index_build import load_index_inputs
+    from xbrain.knowledge.search_service import QueryContext
+
+    _check_graph_grid(grid)
+    depth = max(limit if limit is not None else k, k)
+    in_force = (
+        int(graph_build.DEFAULT_GRAPH_MIN_SHARED_ITEMS),
+        float(graph_build.DEFAULT_GRAPH_MIN_WEIGHT),
+    )
+    measured, unmeasured = _graph_population(cases)
+    inputs = load_index_inputs(items_path, vocab_path, topics_path)
+    context = QueryContext(
+        store=inputs.store,
+        vocab=inputs.vocab,
+        topic_pages=inputs.topic_pages,
+        index_dir=index_dir,
+        items_path=items_path,
+        vocab_path=vocab_path,
+        topics_path=topics_path,
+    )
+    rows: list[GraphSweepRow] = []
+    base: _Rankings | None = None
+    corpus: dict[str, Any] = {}
+    for position, cell in enumerate(_graph_cells(grid, in_force)):
+        corpus = _derive_graph(index_dir, inputs, cell, rebuild=position == 0)
+        base = base or _rankings(measured, context, depth, "hybrid")
+        graph = _rankings(measured, context, depth, "hybrid_graph")
+        stats = _graph_edge_stats(context)
+        rows.append(
+            _graph_row(cell, measured, base, graph, stats, in_force=in_force, k=k, depth=depth)
+        )
+    return GraphSweepReport(
+        k=k,
+        limit=depth,
+        rows=rank_graph_rows(rows),
+        base=_base_block(measured, base, k),
+        graph=graph.describe() if rows else {"requested_strategy": "hybrid_graph"},
+        corpus={"items_path": str(items_path), **corpus},
+        measured_cases=tuple(case.id for case in measured),
+        unmeasured=tuple(unmeasured),
+    )
+
+
+def _graph_population(
+    cases: Sequence[GoldenCase],
+) -> tuple[list[GoldenCase], list[dict[str, Any]]]:
+    """The cases `search` can score for the graph, and every other one with its reason."""
+    measured: list[GoldenCase] = []
+    unmeasured: list[dict[str, Any]] = []
+    for case in cases:
+        blocked = unsupported_filters(case.filters, "hybrid_graph")
+        if blocked:
+            reason = (
+                f"`hybrid_graph` no puede aplicar {list(blocked)}: puntuar el caso sería "
+                "fabricar un cero (spec §8.6.8)"
+            )
+        elif not case.relevant_items:
+            reason = (
+                "la verdad del caso son topics y `search` sirve items: su recall sería 0/0, "
+                "no 0,0 (spec §8.6.8)"
+            )
+        else:
+            measured.append(case)
+            continue
+        unmeasured.append(
+            {
+                "id": case.id,
+                "strata": list(case.strata),
+                "provenance": case.provenance,
+                "reason": reason,
+            }
+        )
+    return measured, unmeasured
+
+
+def _graph_cells(
+    grid: Mapping[str, Sequence[float]], in_force: tuple[int, float]
+) -> list[tuple[int, float]]:
+    """The cartesian product in the order given, with the cell in force appended if absent."""
+    axes = (
+        grid.get("min_shared_items", [in_force[0]]),
+        grid.get("min_weight", [in_force[1]]),
+    )
+    cells = [(int(shared), float(weight)) for shared, weight in product(*axes)]
+    if cells and in_force not in cells:
+        cells.append(in_force)
+    return cells
+
+
+def _derive_graph(
+    index_dir: Path, inputs: Any, cell: tuple[int, float], *, rebuild: bool
+) -> dict[str, Any]:
+    """Write the graph plane for `cell` and PROVE it: the manifest must seal these thresholds.
+
+    Without the proof a plane that failed to move would be measured under every cell's name,
+    publishing one graph as a flat table of sixteen. Returns the fingerprints of what was built.
+    """
+    from xbrain.knowledge import index_build
+
+    options = index_build.IndexOptions(graph_min_shared_items=cell[0], graph_min_weight=cell[1])
+    if rebuild:
+        index_build.build(index_dir, inputs, options=options, force=True)
+    else:
+        index_build.update(index_dir, inputs, options=options)
+    manifest = index_build.load_manifest(index_dir)
+    sealed = (manifest.graph["min_shared_items"], manifest.graph["min_weight"])
+    if sealed != cell:
+        raise ValueError(
+            f"la combinación min_shared_items={cell[0]}, min_weight={cell[1]} no se midió: el "
+            f"manifest de {index_dir} sella min_shared_items={sealed[0]}, "
+            f"min_weight={sealed[1]}, y medir otra vez el mismo grafo publicaría una fila falsa."
+        )
+    return {
+        "items": len(inputs.store),
+        "topics": len(inputs.vocab),
+        "store_fingerprint": manifest.store_fingerprint,
+        "vocab_fingerprint": manifest.vocab_fingerprint,
+        "topics_fingerprint": manifest.topics_fingerprint,
+    }
+
+
+def _rankings(
+    cases: Sequence[GoldenCase], context: Any, depth: int, strategy: Strategy
+) -> _Rankings:
+    """The item ranking `search` serves each case at `depth`, and what it said about itself."""
+    from xbrain.knowledge.search_service import search
+
+    ids: dict[str, tuple[str, ...]] = {}
+    strategies: dict[str, None] = {}
+    degraded: dict[str, None] = {}
+    for case in cases:
+        response = search(
+            case.query,
+            context,
+            filters=case.filters,
+            limit=depth,
+            strategy=strategy,
+            graph_enabled=True,
+        )
+        ids[case.id] = tuple(result.item_id for result in response.results)
+        strategies[response.strategy] = None
+        degraded.update(dict.fromkeys(response.index.degraded))
+    return _Rankings(strategy, ids, tuple(strategies), tuple(degraded))
+
+
+def _graph_edge_stats(context: Any) -> tuple[int, float]:
+    """The co-occurrence edges the cell PERSISTED, and their mean per topic node."""
+    from xbrain.knowledge.index_store import open_for_query
+
+    index = open_for_query(
+        context.index_dir, context.items_path, context.vocab_path, context.topics_path
+    )
+    try:
+        connection = index.lexical.connection
+        edges = int(connection.execute(_CO_OCCURRENCE_EDGES_SQL).fetchone()[0])
+        topics = int(connection.execute(_TOPIC_NODES_SQL).fetchone()[0])
+    finally:
+        index.close()
+    return edges, (edges / topics if topics else 0.0)
+
+
+def _graph_row(
+    cell: tuple[int, float],
+    cases: Sequence[GoldenCase],
+    base: _Rankings,
+    graph: _Rankings,
+    stats: tuple[int, float],
+    *,
+    in_force: tuple[int, float],
+    k: int,
+    depth: int,
+) -> GraphSweepRow:
+    results = [
+        _graph_case(case, base.ids[case.id], graph.ids[case.id], k=k, depth=depth) for case in cases
+    ]
+    recall = _mean([result.recall for result in results])
+    base_recall = _mean([result.base_recall for result in results])
+    return GraphSweepRow(
+        min_shared_items=cell[0],
+        min_weight=cell[1],
+        edges=stats[0],
+        mean_degree=stats[1],
+        recall=recall,
+        recall_delta=None if recall is None or base_recall is None else recall - base_recall,
+        entrants=sum(result.entrants for result in results),
+        useful=sum(result.useful for result in results),
+        degradation=_mean([places for result in results for places in result.lost]),
+        precision_drops=_precision_drops(cases, results),
+        graph_ran=bool(cases) and graph.strategies == ("hybrid_graph",),
+        in_force=cell == in_force,
+        degraded=graph.degraded,
+    )
+
+
+def _graph_case(
+    case: GoldenCase,
+    base_ids: Sequence[str],
+    graph_ids: Sequence[str],
+    *,
+    k: int,
+    depth: int,
+) -> _GraphCase:
+    """One case's figures. A direct result pushed out of `depth` counts as place `depth + 1`."""
+    relevant = set(case.relevant_items)
+    base_top, graph_top = list(base_ids[:k]), list(graph_ids[:k])
+    entrants = set(graph_top) - set(base_top)
+    place = {item_id: rank for rank, item_id in enumerate(graph_ids[:depth], start=1)}
+    return _GraphCase(
+        recall=len(relevant & set(graph_top)) / len(relevant),
+        base_recall=len(relevant & set(base_top)) / len(relevant),
+        precision=len(relevant & set(graph_top)) / len(graph_top) if graph_top else None,
+        base_precision=len(relevant & set(base_top)) / len(base_top) if base_top else None,
+        entrants=len(entrants),
+        useful=len(entrants & relevant),
+        lost=tuple(
+            max(0, place.get(item_id, depth + 1) - rank)
+            for rank, item_id in enumerate(base_top, start=1)
+        ),
+    )
+
+
+def _precision_drops(
+    cases: Sequence[GoldenCase], results: Sequence[_GraphCase]
+) -> dict[str, float]:
+    """Percentage points of `precision@k` lost per stratum, over the cases measuring both."""
+    pairs: dict[str, list[tuple[float, float]]] = {}
+    for case, result in zip(cases, results, strict=True):
+        if result.precision is None or result.base_precision is None:
+            continue
+        for stratum in case.strata:
+            pairs.setdefault(stratum, []).append((result.base_precision, result.precision))
+    return {
+        stratum: round(sum(before - after for before, after in values) / len(values) * 100, 4)
+        for stratum, values in sorted(pairs.items())
+    }
+
+
+def _base_block(cases: Sequence[GoldenCase], base: _Rankings | None, k: int) -> dict[str, Any]:
+    """`hybrid` as it answered, with its recall over the same measured cases every row reads."""
+    if base is None:
+        return {"requested_strategy": "hybrid"}
+    recalls = [
+        len(set(case.relevant_items) & set(base.ids[case.id][:k])) / len(case.relevant_items)
+        for case in cases
+    ]
+    return {**base.describe(), "recall": _mean(recalls)}
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def render_graph_sweep_markdown(report: GraphSweepReport) -> str:
+    """The graph table, in the rule's order, EVERY cell included (Plan 04 §1.3), and the verdict."""
+    base = report.base
+    k = report.k
+    lines = [
+        "Recuperador: `hybrid_graph` sobre "
+        + retriever_label(
+            str(base.get("strategy", "hybrid")),
+            str(base.get("requested_strategy", "hybrid")),
+            tuple(base.get("degraded", ())),
+        ),
+        f"Base: `hybrid` · recall@{k} {_number(base.get('recall'))} sobre "
+        f"{len(report.measured_cases)} casos medidos.",
+        f"Profundidad: {report.limit} items por caso; un resultado directo expulsado de esa "
+        f"profundidad cuenta como puesto {report.limit + 1}.",
+        f"Criterio (fijado antes de medir): {GRAPH_SWEEP_CRITERION}.",
+        f"| min_shared_items | min_weight | aristas | grado medio | recall@{k} | Δ recall@{k} "
+        "| entrantes | útiles | ruido | precisión entrantes | degradación | descartada por "
+        "| en vigor |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|:---:|",
+    ]
+    lines += [_graph_table_row(row) for row in report.rows]
+    if report.unmeasured:
+        lines += [
+            "",
+            "No medidos: "
+            + "; ".join(f"{entry['id']} ({entry['reason']})" for entry in report.unmeasured)
+            + ".",
+        ]
+    lines += ["", _graph_verdict(report)]
+    return "\n".join(lines)
+
+
+def _graph_table_row(row: GraphSweepRow) -> str:
+    cells = [
+        str(row.min_shared_items),
+        str(row.min_weight),
+        str(row.edges),
+        f"{row.mean_degree:.2f}",
+        _number(row.recall),
+        _signed(row.recall_delta),
+        str(row.entrants),
+        str(row.useful),
+        str(row.noise),
+        _number(row.entrant_precision),
+        _number(row.degradation),
+        "; ".join(row.rejected_for),
+        "sí" if row.in_force else "",
+    ]
+    return "| " + " | ".join(cells) + " |"
+
+
+def _graph_verdict(report: GraphSweepReport) -> str:
+    if not report.rows:
+        return "SIN COMBINACIONES: el barrido no produjo ninguna fila, así que no hay umbral."
+    winner = report.winner
+    if winner is None:
+        return (
+            f"SIN MEDICIÓN: `hybrid_graph` no corrió en ninguna de las {len(report.rows)} "
+            "combinaciones, así que no hay umbral que aplicar."
+        )
+    label = f"min_shared_items={winner.min_shared_items}, min_weight={winner.min_weight}"
+    figures = (
+        f"Δ recall@{report.k} {_signed(winner.recall_delta)}, ruido {winner.noise}, "
+        f"degradación {_number(winner.degradation)} puestos"
+    )
+    ceiling = f"{MATERIAL_PRECISION_DROP_PP:g} pp"
+    if report.useful:
+        return (
+            f"Gana {label}: {figures} frente a `hybrid`, sin perder más de {ceiling} de precisión "
+            "en ningún estrato — cumple la regla de promoción del Plan 04 §3; promover "
+            "`hybrid_graph` es una decisión aparte."
+        )
+    return (
+        f"NINGUNA COMBINACIÓN APORTA: ninguna mejora recall@{report.k} frente a `hybrid` sin "
+        f"perder más de {ceiling} de precisión en algún estrato. Se aplica {label}, la primera "
+        f"por la regla ({figures}), porque el índice siempre construye un grafo; `hybrid_graph` "
+        "NO se promueve (Plan 04 §3)."
+    )
+
+
+def _signed(value: float | None) -> str:
+    return "sin cobertura" if value is None else f"{value:+.4f}"
