@@ -20,8 +20,9 @@ y ya está integrado.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -456,3 +457,80 @@ def test_every_tool_answers_with_the_network_blocked(
     block_network(monkeypatch)
     payload = json.loads(unwrap_mcp_content(call_mcp_tool(tool, arguments)))
     assert payload[evidence], f"{tool} no sirvió nada: el verde sería vacío"
+
+
+# ---------------------------------------------------------------------------
+# Paso 29: `xbrain mcp-serve` sin el extra (§4.5)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def without_the_mcp_extra() -> Iterator[None]:
+    """Simula que el extra `[mcp]` NO está instalado, de verdad.
+
+    No basta con borrar `mcp` de `sys.modules`: el import volvería a encontrarlo en el disco.
+    Se instala un buscador al frente de `sys.meta_path` que levanta `ModuleNotFoundError`
+    para `mcp` y todo lo que cuelgue de él, que es exactamente lo que ve una máquina que
+    instaló `xbrain` sin el extra.
+
+    Los módulos ya importados se apartan y se devuelven al salir: dejarlos fuera obligaría a
+    reimportarlos y el resto de la sesión acabaría con DOS copias de `mcp.types`, cuyas
+    clases no son la misma y cuyos `isinstance` empiezan a fallar sin explicación.
+    """
+    import sys
+
+    class Blocker:
+        """Un buscador que se niega a encontrar `mcp`."""
+
+        def find_spec(self, name: str, path: Any = None, target: Any = None) -> None:
+            if name == "mcp" or name.startswith("mcp."):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return None
+
+    hidden = {name: mod for name, mod in sys.modules.items() if name == "mcp" or name[:4] == "mcp."}
+    for name in hidden:
+        del sys.modules[name]
+    blocker = Blocker()
+    sys.meta_path.insert(0, blocker)
+    try:
+        yield
+    finally:
+        sys.meta_path.remove(blocker)
+        for name, mod in hidden.items():
+            sys.modules[name] = mod
+
+
+def test_the_blocker_actually_hides_the_extra() -> None:
+    """El control del paso 29: si el bloqueo no bloquea, el test de abajo no prueba nada."""
+    with without_the_mcp_extra():
+        with pytest.raises(ModuleNotFoundError):
+            import mcp  # noqa: F401
+    import mcp  # noqa: F401  - y vuelve a estar, para el resto de la sesión
+
+
+def test_mcp_serve_without_the_extra_is_actionable_not_a_traceback(workspace: Path) -> None:
+    """Paso 29 / §4.5: un mensaje que dice cómo arreglarlo, no un `ImportError` crudo.
+
+    Se comprueba sobre `result.exception`, no sobre la ausencia de la palabra «Traceback» en
+    stderr: `CliRunner` ATRAPA la excepción y la guarda ahí en vez de imprimirla, así que
+    «no hay traceback en stderr» se cumple igual cuando la excepción se ha escapado — la
+    aserción que parece probarlo y no prueba nada (regla 1).
+    """
+    with without_the_mcp_extra():
+        result = runner.invoke(app, ["mcp-serve"])
+    assert not isinstance(result.exception, ImportError), result.exception
+    assert result.exit_code == 1, result.output
+    assert "xbrain[mcp]" in result.stderr, result.stderr
+
+
+def test_mcp_serve_starts_the_stdio_server(workspace: Path, monkeypatch) -> None:
+    """El camino feliz: el subcomando existe y llega a `serve`.
+
+    Sin esto, el paso 29 podría estar verde con un comando que no sirve nada — el mensaje
+    accionable es lo único que se habría probado.
+    """
+    started: list[bool] = []
+    monkeypatch.setattr("xbrain.mcp_server.serve", lambda: started.append(True))
+    result = runner.invoke(app, ["mcp-serve"])
+    assert result.exit_code == 0, result.output
+    assert started == [True]
