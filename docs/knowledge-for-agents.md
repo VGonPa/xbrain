@@ -12,6 +12,37 @@ xbrain is **retrieval only**. It returns evidence with its provenance and does n
 write answers: no command on this path calls a generative model. The agent writes
 the answer, and is responsible for keeping it inside the evidence.
 
+## 0 · Before the first call: is there an index, and is it current?
+
+`search` and `graph_expand` answer from `data/index/`, and nothing builds or
+updates that directory on its own
+([when to rebuild](knowledge-index.md#when-to-rebuild-and-when-to-update)).
+`get` reads the live store and needs no index. So ask the index first:
+
+```bash
+uv run xbrain index status --json
+```
+
+Read `advice` first: **empty means there is nothing to do.** Otherwise it names
+the command to run. `incomplete` and `behind` say which case you are in. Do not
+read the exit code, which is 0 in every state, missing index included.
+
+| `index status --json` | `search` | `graph_expand` | Command in `advice` |
+|---|---|---|---|
+| `incomplete: true` | refused: ``No hay índice en …/data/index. Constrúyelo con `xbrain index build`.`` | refused, same message | `xbrain index build` |
+| `behind: true` | answers, declaring `index_behind_store` | refused: ``El índice va por detrás del store (`index_behind_store`): … Ejecuta `xbrain index update`.`` | `xbrain index update` |
+| both `false`, `advice` not empty | `vector`/`hybrid` answer, declaring `vector_plane_behind` | answers | `xbrain index build --embeddings --force` |
+
+The third row is the vector plane falling behind: `index update` never
+re-embeds, so the booleans stay `false` while `advice` asks for a full rebuild.
+That rebuild re-embeds every chunk, and took 260 s on 2,495 items with the
+reference embedder. A plain `build` or `update` takes seconds (2.2 s and 0.8 s of
+work on the same corpus), writes only `data/index/` and starts no other process.
+
+Over MCP there is no status or build tool. An agent that only has MCP gets the
+same refusals and the same `degraded` flags, cannot fix them, and has to tell
+whoever runs the server which command `advice` would have named.
+
 ## 1 · Search
 
 ```bash
@@ -102,8 +133,12 @@ the item does not have is refused listing the ones it does.
 
 Long bodies are paginated, never cut silently: over the budget (40,000 characters
 by default) the bundle comes back `truncated: true` with a `cursor`. Repeat the
-same `surfaces` and `query` with that cursor. `query` puts the fragments that
-match it first, which is the cheap way to read a two-hour transcript.
+same `surfaces` and `query` with that cursor.
+
+`query` changes what comes back. The bundle then carries only the fragments that
+match, ranked, in **`chunks`**, and `surfaces` is empty. That is the cheap way to
+read a two-hour transcript. An empty `chunks` means those words did not match
+that body, not that the item has no evidence: drop `query` to read the body whole.
 
 **What `get` returns is what you may cite.** If the claim is not in these bytes,
 xbrain does not support it. An unfetched link carries its URL and its reason
@@ -137,6 +172,13 @@ an item **has** a primary topic, an item **has** a secondary topic, and two topi
 **co-occur** when enough items carry both. There is no item-to-item edge: two items
 are related only through a topic they share, and the path shows which.
 
+`max_hops: 1` (the default) returns the item's own topics. `max_hops: 2` adds the
+topics that co-occur with them (`item → topic → topic`) and the other items of
+each topic (`item → topic → item`). `max_neighbors` keeps each node's strongest
+edges, 10 by default. On `2063609922667815064` in the 2,495-item corpus,
+`max_hops: 1` returns 3 paths and `max_hops: 2` returns 33, 20 of which end at an
+item.
+
 Every path is explicit, and every co-occurrence edge carries its `weight`
 (Jaccard: shared items over the union), `shared_items` and up to 20
 `supporting_item_ids`, all of which resolve in the store — an expansion that
@@ -154,15 +196,16 @@ And it does not improve search: measured on the golden set, re-ranking by graph
 neighbourhood lifted **0 of the 33** relevant results only the graph could reach,
 in every threshold tried ([graph-threshold-sweep.md](graph-threshold-sweep.md)).
 That is why `hybrid_graph` is not the default and cannot be switched on from
-`search` or MCP (only the `xbrain eval --sweep-graph` sweep runs it).
+`search` or MCP. The one command that runs it is the threshold sweep,
+`xbrain eval --strategy hybrid_graph --sweep-graph …`.
 
 ## Strategies, briefly
 
 | Ask for | You get |
 |---|---|
 | `lexical` (default) | bm25 over words. Always available. |
-| `vector` | meaning-based ranking, **only** with the opt-in vector plane and an embedder configured; otherwise an error. With filters, a lexical answer declaring `vector_filters_unsupported`. |
-| `hybrid` | both, fused; without a working vector channel, `lexical` naming the cause. |
+| `vector` | meaning-based ranking. Needs the opt-in vector plane **and** `[embeddings].command`; missing either is an error, with filters or without. With both in place, a filtered request is answered `lexical`, declaring `vector_filters_unsupported`. |
+| `hybrid` | both channels, fused. Without a working vector channel, or with any filter, `lexical`, and `index.degraded` names why. |
 | `hybrid_graph` | `lexical`, declaring `hybrid_graph_not_implemented`. |
 
 Nothing says `vector` or `hybrid` unless the vector channel actually ran. The only

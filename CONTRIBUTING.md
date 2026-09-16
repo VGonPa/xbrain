@@ -6,13 +6,16 @@ keep it small and focused are the most welcome.
 ## Development setup
 
 ```bash
-uv venv
-uv pip install -e ".[dev]" --index-url https://pypi.org/simple
+uv sync --extra dev --extra embeddings --extra mcp --locked
 uv run playwright install chromium
 ```
 
-The `[dev]` extra above also installs the quality-gate tools (`poe`, `ruff`,
-`mypy`, and the rest).
+That is the environment CI builds. `dev` brings the quality-gate tools (`poe`,
+`ruff`, `mypy`, and the rest). `embeddings` (numpy) and `mcp` (the MCP SDK) are
+optional for someone who only uses the CLI, but not for a contributor: without
+them the suite is red. pytest stops at collection (`No module named 'numpy'`),
+and forced past that error 128 tests fail. A later `uv sync` without these flags
+uninstalls both extras.
 
 Copy `config.toml.example` to `config.toml` and fill in your own values. That
 file is not tracked by git.
@@ -20,10 +23,16 @@ file is not tracked by git.
 ## Before opening a pull request
 
 - Run the full quality gate: `uv run poe check`. It must be green — warnings are
-  OK, failures are not.
+  OK, failures are not. Read the line it ends with (`ALL CRITICAL CHECKS PASSED`)
+  rather than the exit status. Coverage must reach 78% overall and 90% in
+  `src/xbrain/knowledge/`.
 - Individual checks are available too: `uv run poe test`, `uv run poe lint`,
   `uv run poe types`, and the rest of the `poe` tasks.
-- CI runs the same gate on every PR.
+- Target `develop`. CI runs the same gate on every PR into `develop`, `main` or a
+  `VGonPa/umbrella-*` branch. A PR into any other branch runs no gate, and GitHub
+  still reports it `CLEAN` (`CLAUDE.md` rule 14).
+- A change too large to review as one PR ships as child PRs onto a protected
+  umbrella branch (`CLAUDE.md` rule 15). The procedure is in `AGENTS.md`.
 - Every new module needs a matching `tests/test_*.py`. This project is built
   test-first.
 - Keep the PR focused on one change. No drive-by refactors.
@@ -163,6 +172,30 @@ shows. If
 your VLM's native CLI differs, point `command` at a thin wrapper that adapts it to
 this `<cmd> <image> → stdout description` contract.
 
+## The knowledge index (`index`, `search`, `get`, `graph-expand`, `mcp-serve`)
+
+This is the read side, in `src/xbrain/knowledge/` and `src/xbrain/mcp_server.py`.
+Read [ARCHITECTURE.md § The knowledge layer](ARCHITECTURE.md#the-knowledge-layer)
+before changing it. The lines a change there must not cross are listed once, in
+`AGENTS.md` § *The knowledge layer has its own contract*. Four facts reach
+contributors working anywhere else:
+
+- **Writing the store leaves the index behind.** Indexing is manual by design
+  ([When to rebuild](docs/knowledge-index.md#when-to-rebuild-and-when-to-update)).
+  Once a command has written `items.json`, `vocab.yaml` or `topics.json`,
+  `search` still answers but declares `index_behind_store`, and `graph-expand`
+  refuses until `xbrain index update` runs.
+- **`index build` and `index update` take no snapshot.** They write only
+  `data/index/`, which is derived: one `index build` recreates it. Keep them out
+  of the auto-snapshot set.
+- **The embedder is external, like the transcriber and the vision model.**
+  `[embeddings].command` reads one JSON request on stdin and writes one JSON
+  response on stdout. The contract is in
+  [What you need](docs/knowledge-index.md#what-you-need).
+- **`--json` and the MCP tools return the same models.** A change to a response
+  model changes both doors, and `tests/test_mcp_cli_equivalence.py` requires the
+  two to produce identical JSON.
+
 ## Pull requests written with AI agents
 
 XBrain is built with AI coding agents, and PRs written that way are welcome — under
@@ -180,7 +213,7 @@ the same bar as hand-written code:
   AI agent") is enough and appreciated.
 - **Do not point agents at this repo's dependencies** or open agent-generated PRs
   to upstream projects from this work.
-- **Point your agent at `CLAUDE.md` § *Rules paid for in blood*.** Seven rules, each one
+- **Point your agent at `CLAUDE.md` § *Rules paid for in blood*.** Fifteen rules, each one
   written the day it cost us a wrong answer that CI called green: assert where a value
   lives (not that a string appears somewhere), never quote a number without saying what
   it was measured on, bind agreeing components in code rather than prose, and invalidate

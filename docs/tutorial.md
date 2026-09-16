@@ -1,8 +1,9 @@
 # Tutorial — from zero to a searchable wiki
 
 A worked, end-to-end walkthrough: install XBrain, turn *your* X bookmarks into an
-Obsidian knowledge base, and digest a bookmarked talk into readable notes. Every
-command is copy-paste; the → lines show what you should see.
+Obsidian knowledge base, digest a bookmarked talk into readable notes, then
+search the corpus and hand it to an agent. Every command is copy-paste; the →
+lines show what you should see.
 
 New here? Do the [Quick start](../README.md#quick-start) first (install +
 authenticate), then come back — this tutorial picks up from a logged-in install.
@@ -18,10 +19,22 @@ uv run xbrain status
 # →   ...
 ```
 
-An empty store with no error means config + auth are good. If `status` complains
-about config, copy `config.toml.example` to `config.toml` and set your vault path
-+ X handle. If it can't authenticate, re-run the cookie import (see
-[Troubleshooting](troubleshooting.md#x-session-expired--auth-fails)).
+An empty store with no error means the config loads. If `status` fails with
+`No such file or directory: '…/config.toml'`, copy `config.toml.example` to
+`config.toml` and set your vault path + X handle.
+
+`status` says nothing about your login. It never reads
+`auth/storage_state.json` and prints the same counts with or without it. The
+session is first used by `sync`, in the next step. If there is no saved session,
+`sync` stops with exit code 1 before it opens a browser or writes anything:
+
+```
+Error: No hay sesión guardada en …/auth/storage_state.json. Ejecuta `xbrain login`.
+```
+
+Re-run the cookie import from the Quick start. A session that exists but has
+expired is a different failure: see
+[Troubleshooting](troubleshooting.md#x-session-expired--auth-fails).
 
 ## 2. Pull your posts and build the mechanical wiki
 
@@ -194,10 +207,13 @@ from the store, so it costs nothing you cannot rebuild:
 
 ```bash
 uv run xbrain index build
-# → 2474 items · 45 topics · 10570 superficies · 22933 chunks · 2474 perfiles
+# → 2495 items · 45 topics · 10686 superficies · 23145 chunks · 2495 perfiles
 # →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
-# →   3.1s
+# →   2.2s
 ```
+
+The outputs in this section come from one corpus of 2,495 posts (`store-2495` in
+[Measured versions](knowledge-index.md#measured-versions)).
 
 Now query it. Results come back grouped by item, each with the fragments that
 matched and where they came from:
@@ -239,12 +255,133 @@ uv run xbrain index status    # what it holds, how far behind it is
 uv run xbrain index update    # touch only what changed (0.8s when nothing did)
 ```
 
-Two limits to know before you judge the results. There is **no stemming** —
+Three limits to know before you judge the results. There is **no stemming**:
 `agente` and `agentes` are different words, and on this corpus their top tens
-shared zero items — and it is **lexical, not semantic**: it finds proper nouns,
-figures and exact phrases, not conceptual similarity. Every response declares the
-second one (`degraded: ["no_embeddings"]`). Details, costs and the rest of the
-limits: [The knowledge index](knowledge-index.md).
+share zero items. There is **no phrase search**: a query of several words
+matches any of them, quoted or not. And it is **lexical, not semantic**: it
+finds proper nouns and figures, not conceptual similarity. Without a vector
+plane (below), every response says so (`degraded: ["no_embeddings"]`). Details,
+costs and the rest of the limits: [The knowledge index](knowledge-index.md).
+
+### Search by meaning (optional, and not better yet)
+
+A second, **opt-in** plane ranks passages by meaning. `--strategy vector` uses
+it alone; `--strategy hybrid` fuses it with the word ranking. Without it, both
+tell you so:
+
+```bash
+uv run xbrain search "transformer attention" --strategy hybrid
+# → "transformer attention" · estrategia lexical
+uv run xbrain search "transformer attention" --strategy vector
+# → Error: `--strategy vector` necesita vectores y este índice no tiene plano vectorial: …
+```
+
+Know the result before you spend the time. The one embedding model measured did
+**not** beat word search, and the comparison stopped after one of three
+candidates ([bake-off](embeddings-bakeoff.md)). That is why `lexical` stays the
+default.
+
+The plane needs an embedder, a program xbrain runs as a subprocess. The
+reference one, `scripts/xbrain-embed`, needs `sentence-transformers` in a Python
+environment of its own: 793 MB installed, plus 458 MB of model on first use.
+
+```bash
+EMBED=~/.xbrain-embed
+uv venv --python 3.12 $EMBED
+VIRTUAL_ENV=$EMBED uv pip install --index-url https://pypi.org/simple sentence-transformers
+```
+
+In `config.toml`, name that environment's Python before the script. The
+script's shebang runs the first `python3` on your `PATH`, which does not have
+the library. Use absolute paths: the command runs without a shell, so `~` is not
+expanded.
+
+```toml
+[embeddings]
+command = "/Users/you/.xbrain-embed/bin/python /path/to/xbrain/scripts/xbrain-embed"
+model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+batch_size = 1024
+```
+
+MiniLM is the model the bake-off measured, and it needs no query or passage
+prefix. Each batch is one process that loads the model again, so the default
+`batch_size` of 64 would load it about 350 times on this corpus.
+
+Build both planes (the word index is rebuilt too), then query:
+
+```bash
+uv run xbrain index build --embeddings --force
+# → 2495 items · 45 topics · 10686 superficies · 23145 chunks · 2495 perfiles
+# →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
+# →   259.8s
+uv run xbrain search "transformer attention" --strategy hybrid --limit 3
+# → "transformer attention" · estrategia hybrid
+# → 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
+# →    · [video_transcript] origin=asr trust=machine_extracted · via lexical+vector
+# → …
+# → 3. 2063758059307175994  @kylejeong (Kyle Jeong) · 2026-06-07
+# →    · [x_article] origin=source trust=primary_source · via lexical+vector
+# →      Human attention is still roughly the same (attention spans may have gotten worse), …
+```
+
+`via` names the ranking that found each passage. Result 3 is about human
+attention, not transformers: meaning search does not rule out the wrong sense
+of a word.
+
+What it costs, on this corpus: the build took 260 s and 1.15 GB of memory, and
+each `vector` or `hybrid` query starts the embedder and loads the model (this
+one took 10 s). A filter (`--topic`, `--from`, …) sends the query back to
+`lexical`, declaring `vector_filters_unsupported`. And `index update` never
+re-embeds: after new content, queries declare `vector_plane_behind` until you
+run `index build --embeddings --force` again. Every failure and its message:
+[The vector plane](knowledge-index.md#the-vector-plane-and-hybrid--opt-in-and-not-the-default).
+
+### Look around a post: `graph-expand`
+
+`index build` also writes a small graph of posts and topics. From any post:
+
+```bash
+uv run xbrain graph-expand --item 2063609922667815064
+# → This edge reflects co-occurrence in this corpus, not a relationship in the world.
+# → item:2063609922667815064 → topic:agentic-engineering
+# → item:2063609922667815064 → topic:ai-agents
+# → item:2063609922667815064 → topic:ai-coding
+uv run xbrain graph-expand --item 2063609922667815064 --max-hops 2
+# → …
+# → item:2063609922667815064 → topic:agentic-engineering → topic:claude-code
+# → …
+# → item:2063609922667815064 → topic:agentic-engineering → item:1934807329989623905
+```
+
+Believe the first line. Two topics are linked because xbrain assigned both to
+enough of *your* posts, and for no other reason. Use the graph to pick what to
+read next, then `get` those posts. It does not improve search either: used to
+re-rank results, it lifted 0 of the 33 that only it could reach
+([graph sweep](graph-threshold-sweep.md)).
+
+Unlike `search`, it will not answer from an index that is behind the store. It
+stops with ``Ejecuta `xbrain index update`.``
+
+### Hand it to an agent: MCP
+
+`xbrain mcp-serve` offers `search`, `get` and `graph_expand` to Claude Code or
+any other MCP client, with the same answers as `--json`. From your xbrain
+checkout:
+
+```bash
+claude mcp add xbrain -- uv run --directory "$PWD" --extra mcp xbrain mcp-serve
+claude mcp get xbrain
+# → xbrain:
+# →   Scope: Local config (private to you in this project)
+# →   Status: ✔ Connected
+```
+
+`--extra mcp` installs the MCP SDK when the client starts the server; without
+it, `mcp-serve` exits naming `uv pip install 'xbrain[mcp]'`. The server is
+registered for the directory you ran `claude mcp add` in. Claude Desktop, the
+error messages and what the server can reach: [xbrain over MCP](mcp.md). What
+the agent should do with the answers:
+[Consuming xbrain from an agent](knowledge-for-agents.md).
 
 ## 8. See the whole corpus at a glance
 
@@ -268,6 +405,7 @@ uv run xbrain enrich        # enrich only the new posts
 uv run xbrain topics        # refresh topic pages
 uv run xbrain generate
 uv run xbrain index update  # put the search index back in step with the store
+uv run xbrain index build --embeddings --force   # only with a vector plane: update does not re-embed
 ```
 
 `index update` is last because every command above it writes the store. Skip it

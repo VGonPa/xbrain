@@ -26,7 +26,8 @@ The five that bite an agent hardest:
 ## Git workflow
 
 - `develop` is the integration branch: `feature-branch → PR → develop`. Branch from `develop`,
-  never from `main`; target every PR at `develop`.
+  never from `main`; target every PR at `develop`, except a child PR, which targets its
+  umbrella ([below](#delivering-a-large-initiative-develop--umbrella--child-prs)).
 - `develop → main` only via PR. Never merge or push directly to `main`.
 - Never commit personal data: `auth/storage_state.json`, `data/`, `config.toml` — all gitignored.
 - **Implementation plans never enter the repo.** They live in `zz-support-files/`, which is
@@ -35,12 +36,54 @@ The five that bite an agent hardest:
 ## Local gate, before you claim anything is green
 
 ```bash
+uv sync --extra dev --extra embeddings --extra mcp --locked   # the environment CI builds
 bash scripts/check.sh        # ruff · ruff format · mypy · bandit · detect-secrets · pytest · coverage
 ```
 
 Read the **conclusion the script prints** (`ALL CRITICAL CHECKS PASSED`), not `$?` of the pipeline
 that printed it. Coverage minimum is 78% globally and **90% for `src/xbrain/knowledge/`**. Radon
 D/E/F fails; C warns.
+
+The two optional extras are not optional for the gate. With only `dev` installed, pytest stops at
+collection (`No module named 'numpy'`), and forced past that error 128 tests fail. That is on
+purpose: a missing extra is a broken environment, and a skip would report green having exercised
+neither. A later `uv sync` without those flags uninstalls them.
+
+## The knowledge layer has its own contract
+
+`src/xbrain/knowledge/` and `src/xbrain/mcp_server.py` are the read side, built over Plans 01–04:
+`index build|update|status`, `search`, `get`, `graph-expand`, `eval`, `mcp-serve`. Before
+reviewing a diff there, read the document that owns it:
+
+| The diff touches | Read |
+|---|---|
+| models, provenance, chunking, the index and its invalidation | [ARCHITECTURE.md § The knowledge layer](ARCHITECTURE.md#the-knowledge-layer) |
+| commands, costs, measured store versions, the spec's §13 table | [docs/knowledge-index.md](docs/knowledge-index.md) |
+| `mcp_server.py` | [docs/mcp.md](docs/mcp.md) |
+| any response an agent consumes | [docs/knowledge-for-agents.md](docs/knowledge-for-agents.md) |
+
+The lines a change there must not cross, each written out in full in those documents:
+
+- **Queries write nothing and call no generative model.** `search` and `graph-expand` open the
+  index `mode=ro`; `get` reads the live store and never opens `data/index/`.
+- **`data/index/` is derived.** `index build` and `update` write only there and take no snapshot.
+  Do not add them to the auto-snapshot set, and never version the directory.
+- **Degradation is declared, never simulated.** A response names `vector` or `hybrid` only when
+  the vector channel ran; otherwise `index.degraded` says why.
+- **Provenance fails closed.** An unknown origin is classed `llm_synthesis`.
+- **`lexical` is the default because it was measured.** `hybrid` (bake-off: 1 of 3 candidates
+  run) and `hybrid_graph` (sweep: 0 of 33 graph-only results lifted into the top 10) were not
+  promoted. Changing a default takes a measurement.
+
+Three decisions are closed, so do not report them as defects: the §13 acceptance table is a
+document, not a test (`tests/test_spec_closure.py` was removed in Plan 04.8); the MCP trust
+boundary is declared, not locked ([docs/mcp.md](docs/mcp.md#the-trust-boundary)); the graph
+thresholds `5 / 0.05` are the least damaging cell of a negative sweep
+([docs/graph-threshold-sweep.md](docs/graph-threshold-sweep.md)).
+
+The spec and the plans live in `zz-support-files/`, which is gitignored and not in your clone. The
+spec's fifteen acceptance criteria are quoted verbatim, each with its state, in
+[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria-12-of-15-met).
 
 ## Delivering a large initiative: `develop` → umbrella → child PRs
 
@@ -139,6 +182,11 @@ number produces two PRs that must both be read to review either. Tests count and
 discounted: they are exactly where rule 1 lives.
 
 ### Reviewing a child PR
+
+First establish what you are reviewing. `gh pr view <n> --json baseRefName` names the base; a base
+of `VGonPa/umbrella-*` makes the PR a child. Run it merged onto that umbrella's tip, which already
+holds its predecessors (rule 4), not onto `develop`. `git branch -r --list 'origin/VGonPa/umbrella-*'`
+lists the umbrellas on the remote, merged ones included.
 
 Scale the panel to the PR: 3–4 lenses for XS purely-additive, 5 for S, 6–7 for M/L. **Reviewers
 execute** — run `check.sh`, run each acceptance criterion, and **mutate**: break what a test claims
