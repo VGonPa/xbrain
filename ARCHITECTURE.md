@@ -759,8 +759,8 @@ index, `search` and `get`; then an **optional** vector plane with the `vector` a
 strategies ([The vector plane and hybrid retrieval](#the-vector-plane-and-hybrid-retrieval)),
 which did not change the default; then [the minimal graph](#the-minimal-graph) and
 [the MCP server](#the-mcp-server), which consume these names without renegotiating them.
-Which of the spec's fifteen acceptance criteria that adds up to is
-[executable, not asserted](#closing-the-spec-what-is-met-and-what-is-not).
+Which of the spec's fifteen acceptance criteria that meets is listed
+[below](#closing-the-spec-what-is-met-and-what-is-not).
 
 ### The four entities
 
@@ -1349,12 +1349,13 @@ the answers: `docs/knowledge-for-agents.md`.
 
 ### Closing the spec: what is met and what is not
 
-`tests/test_spec_closure.py` is the spec's §13 as a table: each of the fifteen criteria with the
-tests (`file::test`) or document sections that prove it and its real state. Deleting a named
-test or renaming a cited heading turns it red, and each unmet criterion carries a witness that
-turns red the day it is fixed. **Three are not met**: §13.1 (there is no phrase search — the
-query is a disjunction of terms), §13.5 (Plan 03's bake-off measured 1 of the ≥ 3 candidates its
-own §13.8 requires) and §13.14 (`docs/tutorial.md` was last updated with Plan 02). Watch the
+The spec's §13 is a table in
+[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria-12-of-15-met):
+each of the fifteen criteria, the tests (`file::test`) or document sections that prove it, and
+its state. It is a document, not a test. The executable version (`tests/test_spec_closure.py`)
+was removed in Plan 04.8 as a scope decision. **Three are not met**: §13.1 (there is no phrase
+search — the query is a disjunction of terms), §13.5 (Plan 03's bake-off measured 1 of the ≥ 3
+candidates its own §13.8 requires) and §13.14 (`docs/tutorial.md` was last updated with Plan 02). Watch the
 numbering. The spec, Plan 01, Plan 02 and Plan 03 each have a §13 of their own, and only the
 spec's and Plan 03's §13 list acceptance criteria (Plan 01's is its quality gates, Plan 02's its
 documentation). Plan 04 has no §13: its criteria are its §11. "§13.8" in the bake-off is Plan 03's.

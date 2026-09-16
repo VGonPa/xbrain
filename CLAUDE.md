@@ -678,11 +678,15 @@ generates an Obsidian wiki.
   services with the CLI's loaders, derived schemas, the CLI's operator errors as `ToolError`,
   and `CORPUS_IS_DATA` on every tool; the trust boundary is DECLARED, not locked (no own network
   call; the only external process is `[embeddings].command`, off by default). Operation:
-  `docs/mcp.md`, `docs/knowledge-for-agents.md`. **`tests/test_spec_closure.py` is spec §13 as an
-  executable table**: 12 of 15 met; **§13.1** (no phrase search: terms are ORed), **§13.5** (the
-  bake-off above) and **§13.14** (`docs/tutorial.md` stops at Plan 02) are NOT, each with a
-  witness that turns red when fixed. «§13.N» is ambiguous — the spec, Plan 01, Plan 02 and Plan 03
-  each have a §13 (criteria only in the spec and Plan 03; Plan 04's criteria are its **§11**):
+  `docs/mcp.md`, `docs/knowledge-for-agents.md`. **Spec §13 is a TABLE in
+  `docs/knowledge-index.md`** (criterion · what proves it · state): 12 of 15 met; **§13.1** (no
+  phrase search: terms are ORed), **§13.5** (the bake-off above) and **§13.14**
+  (`docs/tutorial.md` stops at Plan 02) are NOT. Nothing checks the table: edit the row when a
+  state changes. It was an executable test, `tests/test_spec_closure.py`, until 04.8 removed it
+  as a SCOPE decision, not a quality one. It was 1,127 lines guarding fifteen sentences, and
+  across three review rounds it produced six blockers of one family: each round found another
+  way to leave it green. Do not rebuild it without a different approach. «§13.N» is ambiguous —
+  the spec, Plan 01, Plan 02 and Plan 03 each have a §13 (criteria only in the spec and Plan 03; Plan 04's criteria are its **§11**):
   name which.
   **Backlog, written so it is not lost:** no CLI/MCP switch for `hybrid_graph`; `index status`
   silent when the sealed graph thresholds/version differ from config (`index_build.py`,

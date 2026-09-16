@@ -782,6 +782,53 @@ labelled as untrusted data. Install and client configuration:
 [docs/mcp.md](mcp.md). How an agent should use the answers:
 [docs/knowledge-for-agents.md](knowledge-for-agents.md).
 
+## The spec's acceptance criteria: 12 of 15 met
+
+The design spec behind this page ends with fifteen acceptance criteria (its §13).
+This is their state, and where to check each one. Test paths are under `tests/`.
+
+| § | Criterion (spec §13, verbatim) | What proves it | State |
+|---|---|---|---|
+| 13.1 | un agente puede buscar por concepto, frase exacta, topic y filtros estructurados | Filters: `test_knowledge_lexical.py::test_every_declared_filter_is_actually_pushed_to_sql`. Topic: `test_knowledge_search_service.py::test_a_topic_note_match_returns_the_topics_supporting_items`. Concept: `test_knowledge_search_hybrid.py::test_vector_serves_only_what_the_vector_channel_found`. The gap: [There is no phrase search](#known-limits-of-the-lexical-baseline) | **NOT MET.** There is no exact-phrase search: `match_expression` (`lexical_fts.py`) joins the terms with `OR`, quotes included. Concept search exists only on the opt-in vector plane, and how good it is remains §13.5's open question. |
+| 13.2 | puede recuperar la fuente real sin depender del summary | `test_knowledge_get_service.py::test_get_returns_the_whole_article_body_untruncated`, `::test_get_works_with_the_index_directory_deleted`; `test_knowledge_search_service.py::test_a_summary_match_points_at_the_underlying_article` | Met |
+| 13.3 | cada fragmento expone procedencia, autoría y localizador | `test_knowledge_search_service.py::test_a_quoted_post_match_carries_the_quoted_author_not_the_poster`, `::test_a_match_locator_is_the_surface_locator_plus_the_character_range`; `test_mcp_prompt_injection.py::test_every_served_fragment_carries_its_three_labels` | Met |
+| 13.4 | summaries, digests y topic syntheses están disponibles pero etiquetados como derivados | `test_knowledge_provenance.py::test_is_derived_is_true_exactly_for_machine_produced_text`, `::test_unknown_fails_closed_to_llm_synthesis`; `test_knowledge_search_service.py::test_a_derived_match_with_no_primary_source_says_so` | Met |
+| 13.5 | la búsqueda textual y la vectorial se evalúan por separado y juntas | The instrument: `test_knowledge_evaluation.py::test_metrics_are_reported_per_stratum_and_provenance`, `::test_hybrid_fuses_both_channels_and_names_itself`. The evaluation: [`embeddings-bakeoff.md`](embeddings-bakeoff.md) §0 and §10 | **NOT MET.** The instrument exists; the evaluation does not. The bake-off Plan 03 owed this criterion (its own criterion 8: ≥ 3 candidates) measured **1 of 3** ([above](#the-bake-off-incomplete)). |
+| 13.6 | el índice incremental detecta cambios y nunca sirve chunks stale | `test_knowledge_index_invalidation.py::test_update_touches_only_the_changed_item`; `test_knowledge_search_service.py::test_a_chunk_with_a_manipulated_fingerprint_is_excluded_and_counted`, `::test_editing_the_store_without_reindexing_declares_the_index_behind`; `test_knowledge_search_hybrid.py::test_a_vector_left_stale_by_update_is_not_served_and_the_response_says_so` | Met, by the spec's own definitions: a stale chunk is excluded and counted, and an index behind the store is declared. The cheap signal's blind spot is in [Known limits](#known-limits-of-the-lexical-baseline). |
+| 13.7 | `search` agrupa matches sin ocultar la superficie que produjo cada uno | `test_knowledge_search_service.py::test_a_long_transcript_yields_one_result_with_at_most_three_matches`, `::test_a_primary_match_names_ITSELF_not_every_primary_surface_the_item_has`; `test_knowledge_search_hybrid.py::test_a_chunk_both_channels_found_is_explained_by_both` | Met |
+| 13.8 | `get` puede entregar fuentes largas de manera selectiva/paginada | `test_knowledge_get_service.py::test_a_body_over_the_budget_is_paginated_not_cut`, `::test_the_cursor_continues_where_the_previous_call_stopped`, `::test_asking_for_a_surface_the_item_does_not_have_lists_what_it_does` | Met (this is the **spec's** §13.8, not the bake-off's; see below). |
+| 13.9 | el grafo mínimo explica paths y conserva support ids | `test_knowledge_graph_service.py::test_every_path_carries_node_types_relation_method_weight_and_support`, `::test_every_served_path_rests_on_item_ids_that_resolve_in_the_live_store`; `test_knowledge_graph_build.py::test_no_item_to_item_edge_exists_in_the_schema` | Met |
+| 13.10 | la expansión por grafo puede activarse o desactivarse y tiene una métrica incremental | `test_knowledge_graph_strategy.py::test_hybrid_graph_existe_es_desactivable_y_el_default_no_cambia`; `test_knowledge_graph_sweep.py::test_the_graph_sweep_publishes_the_expansion_population_its_useful_column_counts_from`; [`graph-threshold-sweep.md`](graph-threshold-sweep.md) §0 | Met. The switch is `search(..., graph_enabled=True)`, which the CLI reaches only through `eval --strategy hybrid_graph --sweep-graph`. The metric is Δ recall@10 against `hybrid` plus the `expansion` stratum, and its result is negative. |
+| 13.11 | CLI JSON y MCP usan los mismos modelos y producen semántica equivalente | `test_mcp_cli_equivalence.py::test_mcp_and_cli_json_are_structurally_identical`; `test_mcp_server.py::test_the_output_schema_is_the_plan01_model_itself`, `::test_mcp_refuses_with_the_same_message_as_the_cli` | Met |
+| 13.12 | query y retrieval funcionan sin llamada a un LLM generativo | `test_mcp_server.py::test_the_mcp_server_imports_nothing_that_speaks_to_the_network` covers the MCP adapter only. No test covers the CLI doors (see below). Spot check: importing `xbrain.knowledge.search_service`, `get_service`, `graph_service` and `xbrain.mcp_server` leaves `anthropic` out of `sys.modules`, because every in-process generative call imports it lazily. The external vision command, a subprocess, is started by `digest-video --frames` and `redescribe-frames`, never by a query door | Met |
+| 13.13 | ningún artefacto personal o índice entra en Git | `test_knowledge_index_schema.py::test_the_index_directory_is_git_ignored`; `test_knowledge_goldenset.py::test_the_golden_set_is_tracked_and_the_reports_are_not`. For the rest: `git check-ignore --no-index config.toml auth/storage_state.json data/items.json` lists all three, and `git ls-files data auth` lists only the two `.gitkeep` | Met |
+| 13.14 | README, tutorial, arquitectura y troubleshooting se actualizan con el código de cada plan | README *Search & retrieval*; ARCHITECTURE *The minimal graph* and *The MCP server*; troubleshooting *The knowledge index* | **NOT MET.** `docs/tutorial.md` was last updated in Plan 02 (02.15). It teaches neither `vector`/`hybrid`, `graph-expand` nor MCP. |
+| 13.15 | los resultados negativos de evaluación se documentan en vez de ocultarse | [`embeddings-bakeoff.md`](embeddings-bakeoff.md) §0; [`graph-threshold-sweep.md`](graph-threshold-sweep.md) §0; [The graph — opt-in, and measured negative](#the-graph--opt-in-and-measured-negative) | Met |
+
+**Which §13.** «§13.N» is ambiguous. The spec, Plan 01, Plan 02 and Plan 03 each
+have a §13:
+
+- only the spec's and Plan 03's list acceptance criteria (Plan 01's §13 is its
+  quality gates, Plan 02's its documentation);
+- Plan 04 has no §13: its criteria are its §11.
+
+The table above is the **spec's** list. So «§13.8 — NO CUMPLE: 1 de 3» in the
+bake-off is criterion 8 of **Plan 03**, the ≥ 3-candidate bake-off. What it leaves
+unmet in the spec is §13.5. The spec's own §13.8 is `get`'s pagination, and it is
+met. Likewise, the «§13.12» in `test_knowledge_cli.py` and
+`test_knowledge_degradation.py` is Plan 03's criterion 12 (the `[embeddings]`
+extra), not the spec's «sin llamada a un LLM generativo».
+
+**A table, not a test.** Until Plan 04.8 this table was an executable test,
+`tests/test_spec_closure.py`. It was removed as a scope decision: 1,127 lines of
+machinery to guard fifteen sentences, and each of three review rounds found
+another way to leave it green. The criteria's proofs are ordinary tests, and
+deleting one already leaves the suite a test short, which is visible without
+extra machinery. Nothing watches this table, so when a criterion changes state,
+edit its row. Two tests left with that file: the check of §13.12 through the
+CLI doors, and the `git check-ignore` check behind §13.13's personal paths. The
+spot checks in those two rows replace them.
+
 ## Configuration
 
 Everything has a default; the whole `[index]` section is optional. The
