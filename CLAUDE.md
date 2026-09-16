@@ -135,9 +135,9 @@ generates an Obsidian wiki.
   speech (the transcript carries it); a SILENT non-slide video (screen recording,
   robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
   6) — its frames are the only evidence, so dropping them left hollow entries. Any
-  run prints `Huecos (sin voz ni frames): N` for items that still end with neither
-  speech nor frames (never a silent drop). Default off — a normal `digest-video`
-  run never touches ffmpeg/vision.
+  run appends `Huecos (sin voz ni frames): N` to its summary when N > 0 items still
+  end with neither speech nor frames (never a silent drop). Default off — a normal
+  `digest-video` run never touches ffmpeg/vision.
 - Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
   channel through which on-screen text (slide labels, code, chart axes) reaches
   the digest, and translating a NON-COGNATE label broke that channel — measured:

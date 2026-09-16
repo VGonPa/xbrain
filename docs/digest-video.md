@@ -177,14 +177,17 @@ speech nor frames.
 
 ### Finding and re-digesting hollow items
 
-A hollow item carries an `x_video` source with `has_speech: false` and no
-frames, so its note is a one-line "silent video". The summary counts them
-without naming them; list their ids from the store:
+A hollow item carries an `x_video` source with no words and no frames, so its
+note is a one-line "silent video". "No words" is `has_speech: false`, or a
+`true` flag with blank text (a transcriber can report speech and return only
+blank segments). The summary counts them without naming them; list their ids
+from the store:
 
 ```bash
 jq -r 'to_entries[]
   | select(any(.value.content.sources[]?;
-      .kind == "x_video" and .has_speech == false and (.frames | length) == 0))
+      .kind == "x_video" and (.frames | length) == 0
+      and (.has_speech != true or ((.text // "") | test("^\\s*$")))))
   | .key' data/items.json | paste -sd, -
 ```
 
@@ -199,6 +202,15 @@ Items digested without `--frames`, or before silent footage was described, come
 back with their frames. One that stays hollow had nothing describable, and the
 log says why: `frame extraction failed`, `no key frames extracted`, `unreadable`
 or `visual layer failed`.
+
+Two cases don't show up under `Huecos`, so run the `jq` recipe again after the
+re-digest; it is the only complete list:
+
+- A re-digest whose **fetch or transcription fails** attaches nothing. The item
+  keeps its OLD hollow source and is counted under `fallidos`, not `Huecos`.
+- `Huecos` counts only the items **this run attached**. Hollow items already in
+  the store (skipped as `ya digeridos` on a run without `--force`) are not
+  counted, so a summary without `Huecos` says nothing about that backlog.
 
 Then build the readable digest and render:
 

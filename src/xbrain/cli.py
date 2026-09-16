@@ -1661,7 +1661,8 @@ def digest_video(
     Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
     (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
     se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
-    `--frames` el flujo es idéntico al de PR2/PR3.
+    `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
+    `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
     """
     cfg = _config()
     if vision_model and not frames:
