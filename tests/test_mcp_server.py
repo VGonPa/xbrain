@@ -24,6 +24,7 @@ import contextlib
 import json
 import socket
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager as ContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -432,73 +433,319 @@ def _udp() -> socket.socket:
     return socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
+def _blackhole(family: int) -> tuple[str, int]:
+    """El mismo puerto DISCARD, en el loopback de la familia que toque."""
+    return ("127.0.0.1" if family == socket.AF_INET else "::1", 9)
+
+
+@contextlib.contextmanager
+def _preconnected_udp(family: int) -> Iterator[socket.socket]:
+    """Un socket UDP YA CONECTADO — y conectado AQUÍ, antes de que el cerrojo exista.
+
+    Esta función es el control entero. Un `send` no lleva destino: lo saca de un `connect`
+    ANTERIOR, y ese connect puede haber ocurrido mucho antes de que nadie echase el cerrojo
+    — al importar un módulo, al construir un cliente HTTP en el arranque. Cortar `connect`
+    no alcanza a lo que ya pasó por él: el destino vive en el kernel, donde no llega ningún
+    monkeypatch. Por eso el control conecta ANTES, y por eso `Egress.setup` abre antes que
+    `block_network` en el test. Un control que conectase después no reproduciría nada: se
+    estrellaría contra el `connect` parcheado y se pondría verde por el motivo equivocado.
+    """
+    if family == socket.AF_INET6 and not HAS_IPV6_LOOPBACK:
+        pytest.skip("esta máquina no tiene loopback IPv6: el control v6 no puede ejercerse")
+    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+        sock.connect(_blackhole(family))
+        yield sock
+
+
+@contextlib.contextmanager
+def _preconnected_tcp() -> Iterator[socket.socket]:
+    """Lo mismo para TCP, que es lo que `sendfile` exige: un flujo ya establecido.
+
+    El par entero vive en loopback —un `listen` efímero y su `accept`— porque `sendfile`
+    necesita un socket de verdad conectado a alguien de verdad, y un destino externo haría
+    que este control dependiese de la red que el cerrojo existe para prohibir.
+    """
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        with socket.socket() as client:
+            client.connect(listener.getsockname())
+            with listener.accept()[0]:
+                yield client
+
+
+def _sendfile_of_a_real_file(sock: socket.socket) -> int:
+    """`sendfile` de un fichero REGULAR, y el adjetivo es el control.
+
+    Con un `BytesIO` esta fila no probaría nada: `socket.sendfile` sólo baja a `os.sendfile`
+    cuando el objeto tiene un `fileno()` de fichero regular, y con cualquier otra cosa cae en
+    `_sendfile_use_send`, que ya está cortado por la fila de `send`. La fila se pondría verde
+    con su propio parche quitado, que es la regla 1 exacta. Con un fichero de disco no: sin
+    el parche de `sendfile`, los bytes salen por `os.sendfile` sin tocar `send`.
+    """
+    with open(__file__, "rb") as handle:
+        return sock.sendfile(handle)
+
+
+def _ipv6_loopback_works() -> bool:
+    """¿Hay pila IPv6 local? Se MIDE, no se supone.
+
+    UDP `connect` sobre loopback no habla con nadie —sólo fija el destino—, así que esto
+    no manda un byte: falla si y sólo si la familia no existe en esta máquina.
+    """
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe:
+            probe.connect(_blackhole(socket.AF_INET6))
+    except OSError:
+        return False
+    return True
+
+
+HAS_IPV6_LOOPBACK = _ipv6_loopback_works()
+
+# Las dos familias que llegan a la red. El cerrojo se decide por AQUÍ —por la familia del
+# socket—, nunca por el nombre del método: `send` es a la vez la salida a internet de
+# cualquier cliente HTTP y el despertador del bucle de eventos de asyncio, y sólo la familia
+# distingue una cosa de la otra.
+_INET_FAMILIES = frozenset({socket.AF_INET, socket.AF_INET6})
+
+
+def _refuse_always(original: Callable[..., Any]) -> Callable[..., Any]:
+    """Rechaza la llamada entera. Para las funciones de MÓDULO.
+
+    `create_connection`, `getaddrinfo` y `gethostbyname` no son métodos de un socket: no hay
+    un `self.family` que mirar, y tampoco hace falta. Existen para alcanzar la red y nada
+    más —no hay uso local de ninguna de las tres—, así que cortarlas de raíz no puede
+    romper IPC que el arnés necesite.
+    """
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise NoNetworkAllowed(f"salida a la red durante una consulta: {args[:2]}")
+
+    return refuse
+
+
+def _refuse_on_inet(original: Callable[..., Any]) -> Callable[..., Any]:
+    """Rechaza SÓLO si el socket alcanza la red; delega si es local. Para los MÉTODOS.
+
+    Los métodos de un socket tienen dos vidas con el mismo nombre. `send` sobre AF_INET es
+    salir a internet; `send` sobre el AF_UNIX del self-pipe de asyncio es cómo el bucle de
+    eventos se despierta a sí mismo (`csock.send(b"\0")` en `asyncio.selector_events`), y
+    ese bucle es quien conduce al cliente MCP de estos tests. Un rechazo a ciegas mataría el
+    servidor y el verde de abajo pasaría a significar «no llegó a ejecutarse nada», que es
+    la forma más barata de fabricar un verde.
+
+    Filtrar por familia parte esas dos vidas por donde de verdad se separan. Se mide, además,
+    y no se supone: `asyncio.new_event_loop()._csock.family` es `AF_UNIX` en esta máquina.
+    """
+
+    def refuse(self: socket.socket, *args: Any, **kwargs: Any) -> Any:
+        if self.family in _INET_FAMILIES:
+            raise NoNetworkAllowed(
+                f"salida a la red durante una consulta: familia {self.family!r}, {args[:1]}"
+            )
+        return original(self, *args, **kwargs)
+
+    return refuse
+
+
 @dataclass(frozen=True)
 class Egress:
-    """Una salida a la red: dónde se corta, y la llamada EXACTA que lo demuestra.
+    """Una salida a la red: dónde se corta, CÓMO se corta, y la llamada EXACTA que lo prueba.
 
     El parche y su control salen de la MISMA fila a propósito. Una lista de cosas parcheadas
     y otra de cosas comprobadas son dos definiciones de «qué es salir a la red» (regla 5), y
     el día que divergen el cerrojo se queda con un agujero y su control verde al lado — que
-    es exactamente cómo `sendto` sobrevivió a la primera versión de este módulo. Aquí no se
-    puede añadir un parche sin añadir la llamada que lo ejerce, ni al revés.
+    es exactamente cómo `sendto` sobrevivió a la primera versión de este módulo, y cómo
+    `send` sobrevivió a la segunda. Aquí no se puede añadir un parche sin añadir la llamada
+    que lo ejerce, ni al revés.
+
+    `setup` se abre ANTES de echar el cerrojo y `attempt` recibe lo que entregue. Ese orden no
+    es una comodidad: es lo único que reproduce el socket preconectado, la salida que
+    sobrevive a que cortes `connect`.
     """
 
     id: str
     owner: Any
     name: str
-    attempt: Callable[[], Any]
+    attempt: Callable[[Any], Any]
+    setup: Callable[[], ContextManager[Any]] = contextlib.nullcontext
+    patch: Callable[[Callable[..., Any]], Callable[..., Any]] = _refuse_always
 
 
 _EGRESS: tuple[Egress, ...] = (
     # CON conexión: el destino se fija antes, así que basta con cortar el `connect`. Es lo
     # que hace cualquier cliente HTTP, y por tanto cualquier `requests`/`httpx` del futuro.
-    Egress("connect", socket.socket, "connect", lambda: _udp().connect(BLACKHOLE)),
-    Egress("connect_ex", socket.socket, "connect_ex", lambda: _udp().connect_ex(BLACKHOLE)),
+    Egress(
+        "connect",
+        socket.socket,
+        "connect",
+        lambda _: _udp().connect(BLACKHOLE),
+        patch=_refuse_on_inet,
+    ),
+    Egress(
+        "connect_ex",
+        socket.socket,
+        "connect_ex",
+        lambda _: _udp().connect_ex(BLACKHOLE),
+        patch=_refuse_on_inet,
+    ),
     Egress(
         "create_connection",
         socket,
         "create_connection",
-        lambda: socket.create_connection(("example.invalid", 80)),
+        lambda _: socket.create_connection(("example.invalid", 80)),
     ),
     # RESOLUCIÓN: un nombre resuelto es una consulta que YA salió, aunque después no se
     # conecte nadie. `gethostbyname` no pasa por `getaddrinfo`: es otra entrada de la libc.
-    Egress("getaddrinfo", socket, "getaddrinfo", lambda: socket.getaddrinfo("example.invalid", 80)),
     Egress(
-        "gethostbyname", socket, "gethostbyname", lambda: socket.gethostbyname("example.invalid")
+        "getaddrinfo", socket, "getaddrinfo", lambda _: socket.getaddrinfo("example.invalid", 80)
+    ),
+    Egress(
+        "gethostbyname", socket, "gethostbyname", lambda _: socket.gethostbyname("example.invalid")
+    ),
+    # Las otras puertas de resolución de la libc. `gethostbyname` ya tenía la suya, y estas
+    # tres son entradas DISTINTAS: ninguna pasa por ella ni por `getaddrinfo`, así que
+    # cortar aquellas no las alcanza. `getfqdn` no lleva fila porque no es una entrada: es
+    # Python puro sobre `gethostbyaddr` y `gethostname` (leído en la stdlib), y cae con ella.
+    Egress(
+        "gethostbyname_ex",
+        socket,
+        "gethostbyname_ex",
+        lambda _: socket.gethostbyname_ex("example.invalid"),
+    ),
+    Egress("gethostbyaddr", socket, "gethostbyaddr", lambda _: socket.gethostbyaddr("127.0.0.1")),
+    Egress(
+        "getnameinfo", socket, "getnameinfo", lambda _: socket.getnameinfo(("127.0.0.1", 80), 0)
     ),
     # SIN conexión: el datagrama lleva su destino DENTRO de la llamada, así que no pasa por
-    # `connect` y el cerrojo de arriba no lo ve. Este es el agujero que encontró la revisión:
-    # con sólo `connect`/`getaddrinfo` parcheados, un `sendto` real dentro de `_search` dejaba
-    # los dos tests del paso 27 en verde.
-    Egress("sendto", socket.socket, "sendto", lambda: _udp().sendto(b"x", BLACKHOLE)),
-    Egress("sendmsg", socket.socket, "sendmsg", lambda: _udp().sendmsg([b"x"], [], 0, BLACKHOLE)),
+    # `connect` y el cerrojo de arriba no lo ve. Este es el agujero que encontró la primera
+    # revisión: con sólo `connect`/`getaddrinfo` parcheados, un `sendto` real dentro de
+    # `_search` dejaba los dos tests del paso 27 en verde.
+    Egress(
+        "sendto",
+        socket.socket,
+        "sendto",
+        lambda _: _udp().sendto(b"x", BLACKHOLE),
+        patch=_refuse_on_inet,
+    ),
+    Egress(
+        "sendmsg",
+        socket.socket,
+        "sendmsg",
+        lambda _: _udp().sendmsg([b"x"], [], 0, BLACKHOLE),
+        patch=_refuse_on_inet,
+    ),
+    # PRECONECTADAS: el agujero que encontró la SEGUNDA revisión, y el que se justificó mal.
+    # `send`/`sendall` no llevan destino, y de ahí se dedujo —aquí, por escrito— que
+    # cortar `connect` ya las alcanzaba. No las alcanza: el `connect` y el `send` están
+    # separados EN EL TIEMPO, y un socket conectado antes de echar el cerrojo se lo lleva
+    # puesto. Medido: con estas dos filas fuera, un `send` y un `sendall` dentro de `_search`
+    # entregaron sus datagramas a un receptor bindeado mientras los dos tests del paso 27
+    # seguían verdes. Por eso `setup` conecta ANTES: un control que conecte después choca
+    # con el `connect` parcheado y se pone verde sin haber ejercido nada.
+    Egress(
+        "send",
+        socket.socket,
+        "send",
+        lambda sock: sock.send(b"x"),
+        setup=lambda: _preconnected_udp(socket.AF_INET),
+        patch=_refuse_on_inet,
+    ),
+    Egress(
+        "sendall",
+        socket.socket,
+        "sendall",
+        lambda sock: sock.sendall(b"x"),
+        setup=lambda: _preconnected_udp(socket.AF_INET),
+        patch=_refuse_on_inet,
+    ),
+    # Y las mismas dos en IPv6, porque el predicado nombra DOS familias y una sola de ellas
+    # ejercida deja la otra sostenida por la lectura del código. Reducir `_INET_FAMILIES` a
+    # AF_INET —el «simplificado» más natural del mundo— tiene que ponerse rojo aquí.
+    Egress(
+        "send_ipv6",
+        socket.socket,
+        "send",
+        lambda sock: sock.send(b"x"),
+        setup=lambda: _preconnected_udp(socket.AF_INET6),
+        patch=_refuse_on_inet,
+    ),
+    Egress(
+        "sendall_ipv6",
+        socket.socket,
+        "sendall",
+        lambda sock: sock.sendall(b"x"),
+        setup=lambda: _preconnected_udp(socket.AF_INET6),
+        patch=_refuse_on_inet,
+    ),
+    # `sendfile` NO pasa por `send`: baja a `os.sendfile`, en el kernel, con el fichero y el
+    # socket y sin intermediario en Python. Medido en este árbol sobre un TCP preconectado:
+    # 17 bytes entregados al receptor y `send` sin llamarse ni una vez. Es el mismo agujero
+    # que `send`, un piso más abajo, y por eso lleva su propia fila.
+    Egress(
+        "sendfile",
+        socket.socket,
+        "sendfile",
+        _sendfile_of_a_real_file,
+        setup=_preconnected_tcp,
+        patch=_refuse_on_inet,
+    ),
 )
 
 
 def block_network(monkeypatch) -> None:
-    """Cierra la red: conectar, resolver un nombre o MANDAR UN DATAGRAMA levanta.
+    """Cierra la red: conectar, resolver un nombre o MANDAR — lleve o no el destino dentro.
 
-    Se corta en las filas de `_EGRESS`, y hay dos cosas que deliberadamente NO están ahí:
+    Se corta en las filas de `_EGRESS`, cada una con el rechazo que le toca: a ciegas para
+    las funciones de módulo, y por FAMILIA DEL SOCKET para los métodos (`_refuse_on_inet`),
+    que es lo que deja vivo el self-pipe AF_UNIX de asyncio sin dejar vivo un `send` a
+    internet.
+
+    LO QUE NO ESTÁ, Y POR QUÉ. Esta lista es la parte que ya se ha escrito mal dos veces, así
+    que aquí no se argumenta nada que no se haya ejecutado.
 
     · `socket.socket` — crear un socket no es salir a la red, y `asyncio.run` —quien conduce
       el cliente MCP en proceso— monta su self-pipe con `socket.socketpair()`, que por dentro
       construye uno. Cortar ahí mataría el bucle de eventos y el test «pasaría» por no haber
       llegado a ejecutar nada, que es la forma más barata de fabricar un verde.
 
-    · `send`/`sendall` — por lo mismo y por una razón más fuerte. Lo mismo: el self-pipe de
-      asyncio despierta el bucle con `csock.send(b"\\0")` (comprobado en
-      `asyncio.selector_events`), así que parchearlo rompe el servidor. Y la razón fuerte:
-      `send` NO lleva destino, lo saca del `connect` previo — que sí está cortado—, así que
-      un `send` a la red es inalcanzable con el cerrojo echado. `sendto` y `sendmsg` son las
-      dos que llevan el destino en la propia llamada, y por eso son las dos que hay que
-      cortar aparte.
+    · `send`/`sendall` ESTUVIERON fuera, y no debían. La versión anterior de este docstring
+      argumentaba que un `send` saca su destino de un `connect` ya cortado y que por tanto
+      era inalcanzable. Es falso y se midió: `connect` y `send` están separados EN EL TIEMPO,
+      y un socket conectado antes de que el cerrojo existiera se lleva el destino puesto, en
+      el kernel, donde no llega ningún monkeypatch. Con esas filas fuera, un `send` y un
+      `sendall` dentro de `_search` entregaron sus datagramas a un receptor bindeado mientras
+      los dos tests del paso 27 seguían verdes. Queda escrito porque el argumento equivocado
+      vivía AQUÍ, en prosa, donde el siguiente lector lo habría dado por bueno.
+
+    · `ssl.SSLSocket.send`/`sendall` — NO CUBIERTO, y es el mismo agujero. `SSLSocket` los
+      REDEFINE (comprobado: los dos están en su `__dict__`), así que parchear
+      `socket.socket` no los alcanza, y una conexión TLS establecida antes del cerrojo
+      escribiría por `self._sslobj` sin tocar ninguna fila. No lleva fila porque no lleva
+      control: fabricar un `SSLSocket` exige un handshake, y el intento de montarlo en
+      loopback sin servidor TLS se colgó — un control que puede colgar el suite es peor que
+      el agujero que cierra, y un parche sin control rompe la regla de `Egress`. Lo que sí
+      acota el riesgo, y es una acotación y no una defensa: para llegar a un `SSLSocket` hay
+      que haber pasado antes por `getaddrinfo` y por `connect`, los dos cortados, así que
+      sólo muerde si la conexión TLS es ANTERIOR al cerrojo.
+
+    · `os.write(sock.fileno(), …)` — NO CUBIERTO. Escribir por el descriptor desnudo esquiva
+      la clase entera. No se parchea porque `os.write` es por donde salen también el fichero
+      temporal, la salida de pytest y el propio store: cortarlo por familia exigiría
+      reconstruir un socket desde el fd en cada escritura del proceso.
+
+    · Un SUBPROCESO — NO CUBIERTO, y no es cubrible desde aquí: un `curl` hijo tiene su
+      propia tabla de sockets. Ninguna de las tres tools lanza uno; los comandos externos de
+      xbrain (`transcribe`, `vision`, `embeddings`) viven fuera de la ruta de consulta, y el
+      único que la tocaría es el embedder bajo `--strategy vector`, que estos tests no usan.
+
+    Todo lo demás que alcanza la red desde Python pasa por una fila de `_EGRESS`.
     """
-
-    def refuse(*args: Any, **kwargs: Any) -> Any:
-        raise NoNetworkAllowed(f"salida a la red durante una consulta: {args[:2]}")
-
     for egress in _EGRESS:
-        monkeypatch.setattr(egress.owner, egress.name, refuse)
+        monkeypatch.setattr(
+            egress.owner, egress.name, egress.patch(getattr(egress.owner, egress.name))
+        )
 
 
 @pytest.mark.parametrize("egress", _EGRESS, ids=lambda egress: egress.id)
@@ -511,14 +758,21 @@ def test_the_network_block_actually_bites(egress: Egress, monkeypatch) -> None:
     algo es demostrar aquí que el cerrojo está echado (regla 2).
 
     Se comprueba fila a fila, y no con dos llamadas de muestra, porque una muestra sólo
-    habla de lo que muestrea: el cerrojo anterior cortaba `create_connection` y
-    `getaddrinfo`, su control probaba esas dos, y `sendto` pasaba por al lado con los dos
-    tests en verde. `NoNetworkAllowed` es una clase de este módulo, así que sólo puede
-    levantarla el parche: ninguna fila puede ponerse verde por un fallo del sistema.
+    habla de lo que muestrea: el cerrojo cortaba `create_connection` y `getaddrinfo`, su
+    control probaba esas dos, y `sendto` pasaba por al lado con los dos tests en verde.
+    `NoNetworkAllowed` es una clase de este módulo, así que sólo puede levantarla el parche:
+    ninguna fila puede ponerse verde por un fallo del sistema.
+
+    El `setup()` de la fila corre ANTES de `block_network`, y ése es el orden que hace útil
+    a este test. Las filas preconectadas — `send`/`sendall`— existen porque un socket que
+    pasó por `connect` antes de que el cerrojo existiera se lleva el destino puesto: si el
+    control conectase después, chocaría con el `connect` parcheado y se pondría verde sin
+    haber ejercido jamás el `send`.
     """
-    block_network(monkeypatch)
-    with pytest.raises(NoNetworkAllowed):
-        egress.attempt()
+    with egress.setup() as handle:
+        block_network(monkeypatch)
+        with pytest.raises(NoNetworkAllowed):
+            egress.attempt(handle)
 
 
 @pytest.mark.parametrize(
