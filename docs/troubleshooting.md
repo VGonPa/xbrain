@@ -24,12 +24,15 @@ Fix — re-import cookies from a browser you're logged in to:
 Google/SSO accounts — the automated browser gets blocked. Cookie import is the
 recommended path.
 
-## "Re-saw 0 known items on a non-empty store" — the run aborts without saving
+## `refresh-quoted` / `refresh-media`: "re-vio 0 de los N items ya conocidos" — the run aborts without saving
 
-A safety tripwire: extraction saw none of the items it already has, which almost
-always means an **expired session** or an X GraphQL change, not that your
-bookmarks vanished. It aborts rather than overwrite good data. Re-authenticate
-(above) and re-run. If you're sure the store is stale, `--force` overrides it.
+A safety tripwire on the two re-capture backfills (`refresh-quoted` without
+`--from-store`, and `refresh-media`; `extract` and `sync` do not run it): the
+re-capture saw none of the items the store already has, which almost always means
+an **expired session** or an X GraphQL change, not that your bookmarks vanished.
+The message reads `<command> re-vio 0 de los N items ya conocidos — …`, and the run
+aborts rather than overwrite good data. Re-authenticate (above) and re-run. If
+you're sure the store is stale, `--force` saves anyway.
 
 ## `extract` captured nothing — "0 respuestas de … en toda la timeline"
 
@@ -116,7 +119,8 @@ router.
 ## `digest-video` is slow or times out
 
 Local vision (`--frames`) is the bottleneck: a slide-heavy talk can have up to
-40 key-frames, and a local VLM reloads the model per frame. On a 16 GB Mac,
+60 key-frames (`[frames].max_frames`, applied after dedup), and a local VLM
+reloads the model per frame. On a 16 GB Mac,
 `qwen-7b` is ~2 min/frame → a long talk takes over an hour.
 
 - **First run of a large model** can exceed the 300 s per-frame timeout while it
@@ -185,11 +189,15 @@ loses data — just re-run it.
 
 ## Do I need an API key?
 
-No. The default execution mode (`vocab`/`enrich`/`topics`/`describe`) uses a
-**Claude Code session** — no key, no cost — and `video-digest`/`verify` run **only**
-on that keyless `claude-code` (or `manual`) track; they have no `api` track at all.
-`ANTHROPIC_API_KEY` is only for `--executor api` on the first four stages (unattended
-LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
+Not for `vocab`/`enrich`/`topics`: their default execution mode
+(`[enrich].executor`, default `claude-code`) uses a **Claude Code session** — no
+key, no cost — and `video-digest`/`verify` run **only** on that keyless
+`claude-code` (or `manual`) track; they have no `api` track at all. **`describe` is
+the exception:** it does not read `[enrich].executor`, and with no `--executor` it
+runs the `api` track, which needs the key. Pass `--executor claude-code` (or
+`manual`) to describe photos without one. `ANTHROPIC_API_KEY` is only for the `api`
+track of those four stages (unattended LLM runs, and `describe`'s default) and cloud
+vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
 fallback fetcher for JavaScript-heavy pages.
 
 ## `video-digest` / `verify` say "no pending" or "nothing to verify"

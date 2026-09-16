@@ -309,13 +309,15 @@ generates an Obsidian wiki.
   key fail-safe → the record is skipped, not badged). Deliberately **not a union** — nothing binds
   a worksheet to the report it is applied against (no run-id), so a union would let a stale
   worksheet SUPPLY a fingerprint the record never carried, binding a verdict to a text those
-  judges never read. An unstamped record stays unwritable. `generate._verdict_badge` recomputes
-  `verification.fingerprint_output` on the item's CURRENT output and renders a localised badge
-  (❌ FAIL / ⚠️ REVIEW; PASS unbadged) **only when it matches the stored fingerprint** — a STALE
-  verdict (output re-generated in EITHER window) is silently NOT badged, so a fixed output never
-  shows a ❌. `fingerprint_output` is the single canonicalization shared by the export stamp + the
-  reader; `verdict`/`faithfulness`/`adherence` are a shared `Verdict` Literal and
-  `output_fingerprint` is `Field(pattern=...)`-hardened; labels via `i18n.Strings`.
+  judges never read. An unstamped record stays unwritable. `generate._verdict_badge` renders a
+  localised badge (❌ FAIL / ⚠️ REVIEW; PASS unbadged) **only while the verdict is current**, and
+  "current" is the `contract_fingerprint` check described next — NOT a recompute of
+  `fingerprint_output`, which `generate` never calls. A STALE verdict (output re-generated in
+  EITHER window, or source or rubrics changed) is silently NOT badged, so a fixed output never
+  shows a ❌. `fingerprint_output` is the single canonicalization behind the export stamp (the
+  write path carries that stamp; it never recomputes one); `verdict`/`faithfulness`/`adherence`
+  are a shared `Verdict` Literal and `output_fingerprint` is `Field(pattern=...)`-hardened;
+  labels via `i18n.Strings`.
   **`contract_fingerprint` (`verification.py`) is the second, stronger stamp, and the one
   that decides whether a badge may paint at all** — the gate in `_verdict_badge` is
   `verdict_is_current`, i.e. THIS fingerprint, not `output_fingerprint` alone. A verdict is

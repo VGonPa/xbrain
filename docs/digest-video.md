@@ -278,9 +278,14 @@ uv run xbrain digest-video --topic ai-coding      --frames --vision-model qwen-7
 ```bash
 --ids a,b,c        # specific item ids
 --topic ai-coding  # every video whose post is in that topic
---all-pending      # every not-yet-digested video (idempotent; re-runs skip done ones)
+--all-pending      # every fetchable pending video (download state; re-runs skip done ones)
 --source bookmarks|tweets|all   --limit N   --language en
 ```
+
+`--all-pending` selects by **download** state, not by digest state: it takes the
+videos `list-videos --status pending` shows — not downloaded, not failed, not
+`poster-era`. A video already downloaded by `download-videos` is not selected even
+if it was never digested; name it with `--ids` or `--topic`.
 
 `digest-video` is destructive (rewrites `items.json`) → it auto-snapshots first.
 Re-running skips videos already carrying an `x_video` source unless `--force`.
