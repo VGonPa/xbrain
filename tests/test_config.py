@@ -1,4 +1,5 @@
 # tests/test_config.py
+import re
 from pathlib import Path
 
 import pytest
@@ -285,6 +286,7 @@ def test_load_config_frames_defaults(tmp_path: Path):
     _write_repo(tmp_path)
     cfg = load_config(tmp_path)
     assert cfg.frames_max_frames == 60
+    assert cfg.frames_footage_max_frames == 6
     assert cfg.frames_scene_threshold == 0.4
     assert cfg.frames_interval_seconds == 15.0
     assert cfg.frames_dedupe is True
@@ -301,6 +303,7 @@ def test_load_config_frames_overrides(tmp_path: Path):
         'handle = "vgonpa"\n'
         "[frames]\n"
         "max_frames = 120\n"
+        "footage_max_frames = 3\n"
         "scene_threshold = 0.5\n"
         "interval_seconds = 20\n"
         "dedupe = false\n"
@@ -309,6 +312,7 @@ def test_load_config_frames_overrides(tmp_path: Path):
     )
     cfg = load_config(tmp_path)
     assert cfg.frames_max_frames == 120
+    assert cfg.frames_footage_max_frames == 3
     assert cfg.frames_scene_threshold == 0.5
     assert cfg.frames_interval_seconds == 20.0
     assert cfg.frames_dedupe is False
@@ -328,6 +332,23 @@ def test_load_config_frames_rejects_non_positive_max(tmp_path: Path):
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="max_frames"):
+        load_config(tmp_path)
+
+
+def test_load_config_frames_rejects_non_positive_footage_max(tmp_path: Path):
+    """`footage_max_frames = 0` would describe NO frame of a silent video — the
+    hollow entry the footage path exists to prevent — so it is refused on load.
+    The full message is pinned: `match="max_frames"` alone would also be satisfied
+    by the `[frames].max_frames` error, so it could pass on the wrong check."""
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "vgonpa"\n[frames]\nfootage_max_frames = 0\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match=re.escape("config.toml: [frames].footage_max_frames must be >= 1"),
+    ):
         load_config(tmp_path)
 
 

@@ -193,16 +193,21 @@ digest`** section, with the raw transcript and slide frames demoted into a
 collapsible `<details>` block below it — a 72-minute talk you never watched becomes
 a readable, searchable, topic-linked note. Before you run `video-digest` (or for a
 video with no digest yet) the section falls back to the raw transcript inline,
-exactly as before. A silent/no-speech clip degrades gracefully to a one-line
-"silent video" note instead of an empty digest.
+exactly as before. A clip with neither speech nor frames degrades gracefully to a
+one-line "silent video" note instead of an empty digest.
 
-For **slide/screen/demo-heavy** talks, add the opt-in `--frames` flag to
-`digest-video`: xbrain extracts the key slides, describes each with an **external**
-vision model, and records the descriptions on the video source — they feed the
-digest, `enrich` and `topics`, and embed into the `<details>` evidence block next
-to the transcript, so the visual content is captured too, not just the audio. It is
-content-aware: an interview / talking-head video is detected and its (camera-cut)
-frames are skipped, so you never waste vision calls where the slides are noise.
+For **slide/screen/demo-heavy** talks and **silent clips**, add the opt-in
+`--frames` flag to `digest-video`: xbrain extracts the key frames, describes each
+with an **external** vision model, and records the descriptions on the video
+source — they feed the digest, `enrich` and `topics`, and embed into the
+`<details>` evidence block next to the transcript, so the visual content is
+captured too, not just the audio. It is content-aware: slides are described; an
+interview / talking-head video is skipped only when it has speech (the transcript
+already carries it), so you never waste vision calls on camera cuts; a silent
+non-slide video (a screen recording, a robot, a GIF) is described as footage,
+capped by `[frames].footage_max_frames`, because its frames are all there is. A
+run prints `Huecos (sin voz ni frames): N` when an item still ends up with
+neither speech nor frames.
 
 *Example:*
 
@@ -740,7 +745,7 @@ uv run xbrain <command> [options]
 | `eval` | Evaluate retrieval against `eval/golden-set.yaml` (tracked in Git) and publish `data/eval-report.{json,md}` (not tracked — it carries corpus excerpts). Metrics per **strategy × stratum × provenance**, never one global figure. A stratum with no cases is reported as *sin cobertura*, never as 0.0, and a case whose filters the strategy cannot apply is reported as **not measured** rather than as a failure. **That is now a rule without a live instance:** the harness builds through the same writer `index build` drives, so all eight filters reach `WHERE` and the two `filtros` cases are scored — the earlier "no date/source columns until the persisted index exists" condition is satisfied. It has a live instance again under `--strategy vector\|hybrid`: the vector plane has no filter columns, so the two `filtros` cases are unmeasured there. **Report-only**: never writes `items.json`, never snapshots. Without `--min-recall` it reports without judging (the spec fixes merge thresholds *after* the baseline runs); with it, the command becomes a gate and exits non-zero naming the bucket that fell short — or, when the threshold could not be compared against a single bucket, naming that count, so a gate that measured nothing fails closed instead of reporting PASS. Cases that retrieved nothing at all are counted per bucket (`vacíos`), because a 0.0 from an empty result set is a different fault from a 0.0 from a bad ranking. `--strategy`, `--k`, `--limit`, `--golden-set`, `--report`, `--json`. `--embeddings-model <model>` (required with `--strategy vector\|hybrid`; builds or reuses `data/eval-index/<model>/`) and `--sweep-fusion` (`hybrid` only) are the embeddings bake-off's instrument — see [docs/embeddings-bakeoff.md](docs/embeddings-bakeoff.md). `--sweep-graph` (`hybrid_graph` only) measures the graph thresholds and the `expansion` stratum — see [docs/graph-threshold-sweep.md](docs/graph-threshold-sweep.md); it is the only command that switches the graph on, and `--strategy hybrid_graph` without it is answered `lexical`, declaring `hybrid_graph_not_implemented`. |
 | `list-videos` | **Read-only** catalog of every video referenced in `items.json` — one row per video entry with its state (`downloaded` / `failed` / `pending` / `poster-era`), estimated size (exact once downloaded, `unknown` without bitrate/duration), the item's `primary_topic` and a text snippet. Filters: `--topic`, `--status`, `--max-size`, `--source`, `--limit`. Human table by default; `--json` emits a stable machine array (`id, url, state, topic, size_bytes\|null, mp4_url, text`) an agent can parse to choose which videos to fetch. Writes nothing, takes no snapshot. |
 | `fetch-video` | **Ephemeral** download of the real mp4 for selected videos to `--to <dir>/<id>.mp4`, for agent-side processing (transcription/analysis is external — see below). Select with `--ids a,b` and/or `--topic <t>` (+ `--max-size`, `--limit`, `--source`). Reuses `download-videos`' content-validation, failure classification, atomic write and mp4/HLS/poster discriminator; HLS and poster-era are skipped + counted. **Deliberately non-persisting:** never mutates `items.json`, never snapshots, never touches `data/media/` — it writes only under `--to`. `--json` for machine output. |
-| `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). **`--frames`** (opt-in visual layer, needs `[vision].command`): for slide-heavy videos it extracts key slides (ffmpeg scene detection + interval sampling so the whole video is covered), describes each via the **external** vision model, records the descriptions on the `x_video` source, and embeds the slide images into the note like downloaded photos; talking-head videos are detected and skipped (logged). The transcript then flows through the normal `enrich → topics → generate` pipeline. |
+| `digest-video` | Turn bookmarked videos into text: **ephemeral** fetch → **external** transcriber (`[transcribe].command`, default `parakeet-mlx` — the ASR is *not* bundled in xbrain) → attach the transcript to the item as an `x_video` content source → discard the bytes. **Dedups by video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id from the mp4 path, not the signed URL): N bookmarks of one video → **one** fetch+transcribe, every item gets the transcript. No-speech / no-audio videos attach with empty text + `has_speech=false` (never a hard failure). Idempotent — skips items already carrying an `x_video` source unless `--force`. Destructive (rewrites `items.json`) → auto-snapshot. Select with `--ids a,b`, `--topic <t>`, or `--all-pending` (+ `--source`, `--limit`, `--language`). **`--frames`** (opt-in visual layer, needs `[vision].command`): it extracts key frames (ffmpeg scene detection + interval sampling so the whole video is covered), describes them via the **external** vision model, records the descriptions on the `x_video` source, and embeds the images into the note like downloaded photos. Slides are described (cap `[frames].max_frames`); a talking-head is skipped (logged) only when the video has speech, since the transcript carries it; a silent non-slide video is described as footage (cap `[frames].footage_max_frames`). Any run appends `Huecos (sin voz ni frames): N` to its summary when N > 0 items are left with neither speech nor frames. The transcript then flows through the normal `enrich → topics → generate` pipeline. |
 | `video-digest` | Generate the long-form **readable digest** per bookmarked video — the "what it is · key points · why it matters" synthesis of its transcript + slide-frame descriptions, written into the `x_video` source's `digest` field. Worksheet flow like the LLM stages: `--executor manual\|claude-code` exports `data/video-digest-worksheet.json`; fill it (Claude Code session or by hand) and `--apply <file>` writes every digest back to `items.json`. `generate` then renders the digest as the **headline** of the `## Video digest` section, with the raw transcript + slide frames demoted into a collapsible `<details>`. Auto-snapshots on `--apply` (the store write). Defaults to `[enrich].executor`; worksheet tracks only (no `api`). |
 | `redescribe-frames` | Re-caption video key frames **already on disk** (`data/media/<id>/frames/`) with the current caption rubric — zero network, zero X, zero ffmpeg. Exists because the caption RUBRIC can change (it did in #90: captions were found translating on-screen text instead of transcribing it verbatim) while the pixels never do, so a corpus-wide fix does not need to re-fetch a single video. Staleness is a **contract comparison**, not a timestamp: every `x_video` source remembers the caption contract its frames were captioned under, and anything but the current one is re-described (`--force` re-describes everything regardless), so re-running this on an already-current corpus costs zero vision calls. Stamping is **all-or-nothing per source**: a video is marked current only once every one of its frames re-describes cleanly, so one permanently-missing frame image leaves the whole video stale forever — every future run re-pays for its surviving frames too, and because the vision model is non-deterministic that also keeps re-triggering `enrich`/`video-digest` downstream. A per-frame vision failure (bad exit / timeout / empty output) is logged and keeps the frame's old caption without aborting the run; an unconfigured `[vision].command` aborts it (an operator error, not a per-frame one); and a run where every attempted frame fails raises instead of reporting a silent success. **`--dry-run` needs no `[vision].command` at all** and calls the model zero times — it previews the same described/failed split a real run would hit (a missing frame file previews as a failure) without describing a single pixel. With no selector set, every stale video in the corpus is targeted; `--ids a,b,c`, `--topic <t>`, `--source bookmarks\|tweets\|all` and `--limit N` narrow that scope (an unknown id in `--ids` is echoed as a warning, not silently dropped). Fixes translation, not an OCR misread — the stored frames are 640px wide and that resolution is not recoverable here. Destructive (rewrites `items.json`) → auto-snapshots, but only when at least one caption was actually re-described. See [`docs/digest-video.md`](docs/digest-video.md#fixing-stale-captions--redescribe-frames) — including the **required manual step** for already-described tweet photos, which this command does not touch. |
 | `vocab` | Induce the topic taxonomy. `--executor`, `--apply <file>`, `--regenerate`. |
@@ -1126,8 +1131,8 @@ pipeline, turning the once-unwatchable bookmark into a topic-linked note — see
 [digest module](https://github.com/VGonPa/xbrain/issues/44).
 
 ```bash
-# Opt-in visual layer for slide-heavy talks (needs [vision].command configured):
-xbrain digest-video --topic ai --frames    # describe + embed key slides where they carry content
+# Opt-in visual layer for slide-heavy talks and silent clips (needs [vision].command configured):
+xbrain digest-video --topic ai --frames    # describe + embed key frames where they carry content
 ```
 
 **When `--frames` pays off.** For a slide/screen/demo talk the visual carries as
@@ -1136,9 +1141,16 @@ with interval sampling so a long static tail is still covered), describes each v
 the **external** vision model you configure in `[vision].command` (like the
 transcriber, *not* bundled — no vision/ML dependency in core), records the
 descriptions on the `x_video` source, and embeds the slide images into the note
-exactly like downloaded photos. It is **content-aware**: a talking-head / interview
-video is detected and its visual layer is skipped (logged, never silently), so you
-don't spend vision calls on camera-cut noise. `--frames` is fully opt-in — a normal
+exactly like downloaded photos. It is **content-aware**: slides are described; a
+talking-head / interview video has its visual layer skipped (logged, never
+silently) only when it has speech — the transcript already carries it, so you don't
+spend vision calls on camera-cut noise; a silent non-slide video (a screen
+recording, a robot, a GIF) is described as footage, capped by
+`[frames].footage_max_frames` (default 6), because its frames are the only record
+of what it shows. A run prints `Huecos (sin voz ni frames): N` when an item still
+ends up with neither speech nor frames —
+[docs/digest-video.md](docs/digest-video.md#finding-and-re-digesting-hollow-items)
+shows how to find and re-digest them. `--frames` is fully opt-in — a normal
 `digest-video` run never touches ffmpeg or the vision model.
 
 ---

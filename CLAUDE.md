@@ -123,16 +123,21 @@ generates an Obsidian wiki.
   safe — so a persistently-failing transient link, re-fetched every run by
   `fetch_pending` (which keys on source state, not time), does not burn one identical
   LLM call per cycle.
-- Video digest — visual layer (PR4, `--frames`, opt-in): for slide-heavy talks,
-  `digest-video --frames` extracts key slides via **external** `ffmpeg`
-  (`video_frames.py`, scene detection + interval sampling so a static tail is still
-  covered; NO ML/vision lib, Pillow only for edge-density classify), describes each
-  via the **external** vision model (`vision.py`, `[vision].command`; mirrors
-  `transcribe.py`, no bundled default), records the descriptions on the `x_video`
-  source's optional `frames` list, and embeds the slide images into the note like
-  downloaded photos (`_media/` mirroring). Content-aware: talking-head/interview
-  videos are detected and the visual layer is skipped + logged (never a silent
-  drop). Default off — a normal `digest-video` run never touches ffmpeg/vision.
+- Video digest — visual layer (PR4, `--frames`, opt-in): `digest-video --frames`
+  extracts key frames via **external** `ffmpeg` (`video_frames.py`, scene detection
+  + interval sampling so a static tail is still covered; NO ML/vision lib, Pillow
+  only for edge-density classify), describes them via the **external** vision model
+  (`vision.py`, `[vision].command`; mirrors `transcribe.py`, no bundled default),
+  records the descriptions on the `x_video` source's optional `frames` list, and
+  embeds the images into the note like downloaded photos (`_media/` mirroring).
+  Content-aware, and the rule is exact: slides are described (cap
+  `[frames].max_frames`); a talking-head is skipped + logged ONLY when the video has
+  speech (the transcript carries it); a SILENT non-slide video (screen recording,
+  robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
+  6) — its frames are the only evidence, so dropping them left hollow entries. Any
+  run appends `Huecos (sin voz ni frames): N` to its summary when N > 0 items still
+  end with neither speech nor frames (never a silent drop). Default off — a normal
+  `digest-video` run never touches ffmpeg/vision.
 - Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
   channel through which on-screen text (slide labels, code, chart axes) reaches
   the digest, and translating a NON-COGNATE label broke that channel — measured:
