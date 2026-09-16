@@ -95,6 +95,7 @@ from xbrain.video_fetch import (
     format_fetch_summary,
 )
 from xbrain.video_frames import (
+    FOOTAGE_CAP_SETTING,
     KeyFrame,
     extract_key_frames,
     select_frames,
@@ -1506,11 +1507,13 @@ def _build_describe_frame_fn(
 
 
 def _build_visual_config(cfg: Config, vision_model: str | None = None) -> VisualConfig:
-    """Build the `--frames` visual-layer config from `[vision]` (#44 PR4).
+    """Build the `--frames` visual-layer config from `[vision]` + `[frames]` (#44 PR4).
 
-    Binds `extract_key_frames` (ffmpeg, threshold/max-frames defaults) and the
-    shared `_build_describe_frame_fn` seam so `digest_videos` calls them with just
-    a path. The vision guard, the model override and the rubric language all live
+    Binds `extract_key_frames` (ffmpeg, threshold/interval from `[frames]`), the two
+    reducers — slides capped by `[frames].max_frames`, SILENT non-slide footage by
+    `[frames].footage_max_frames`, both after the same dedup — and the shared
+    `_build_describe_frame_fn` seam so `digest_videos` calls them with just a
+    path. The vision guard, the model override and the rubric language all live
     in that shared helper, so `digest-video --frames` and `redescribe-frames`
     cannot drift apart on any of the three.
     """
@@ -1534,8 +1537,21 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
             max_frames=cfg.frames_max_frames,
         )
 
+    def _reduce_footage(frames: list[KeyFrame]) -> list[KeyFrame]:
+        return select_frames(
+            frames,
+            dedupe=cfg.frames_dedupe,
+            dedupe_distance=cfg.frames_dedupe_distance,
+            max_frames=cfg.frames_footage_max_frames,
+            cap_setting=FOOTAGE_CAP_SETTING,
+        )
+
     return VisualConfig(
-        media_root=cfg.media_dir, extract_fn=_extract, describe_fn=describe_fn, reduce_fn=_reduce
+        media_root=cfg.media_dir,
+        extract_fn=_extract,
+        describe_fn=describe_fn,
+        reduce_fn=_reduce,
+        footage_reduce_fn=_reduce_footage,
     )
 
 
@@ -1558,8 +1574,9 @@ def _run_digest_video(
     attach (dedup by video identity, in memory) → snapshot → persist. The
     transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
     config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
-    extracts slide key frames and describes them via the EXTERNAL `[vision]`
-    command, attaching them to slide-heavy videos. It is destructive (rewrites
+    extracts key frames and describes them via the EXTERNAL `[vision]` command,
+    attaching them to slide videos and to silent non-slide footage (a talking-head
+    with speech is skipped). It is destructive (rewrites
     `items.json`), so it auto-snapshots BEFORE the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
     takes no snapshot). A snapshot failure propagates and aborts before any write.
@@ -1609,9 +1626,11 @@ def digest_video(
     frames: bool = typer.Option(
         False,
         "--frames",
-        help="Capa visual (opt-in): extrae key-frames de slides, los describe con "
-        "el modelo de visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
-        "Solo para vídeos slide-heavy; los talking-head se saltan (se registra).",
+        help="Capa visual (opt-in): extrae key-frames, los describe con el modelo de "
+        "visión EXTERNO (`\\[vision].command`) y los embebe en la nota. "
+        "Las slides se describen; un talking-head CON voz se salta (el transcript ya lo "
+        "cubre; se registra); un vídeo mudo sin slides se describe como metraje, con "
+        "tope `\\[frames].footage_max_frames`.",
     ),
     vision_model: str | None = typer.Option(
         None,
@@ -1630,16 +1649,20 @@ def digest_video(
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
     URL firmada): N bookmarks del mismo vídeo se descargan y transcriben UNA vez y
     todos reciben el mismo transcript. Un vídeo sin voz/audio se adjunta con texto
-    vacío + `has_speech=False` (nunca es un fallo duro). Idempotente: salta items
-    que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
+    vacío + `has_speech=False` (nunca es un fallo duro); si además queda sin
+    frames, el resumen lo cuenta en `Huecos (sin voz ni frames): N`. Idempotente:
+    salta items que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
     `items.json`) → auto-snapshot antes de escribir. Nunca hay más de un vídeo en
     disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
 
-    `--frames` (opt-in, capa visual PR4): para vídeos slide-heavy extrae
-    key-frames con ffmpeg (EXTERNO), los describe con el modelo de visión EXTERNO
-    (`\\[vision].command`), adjunta las descripciones al source `x_video` y embebe
-    las slides en la nota como fotos. Los vídeos talking-head se saltan y se
-    registra el motivo. Sin `--frames` el flujo es idéntico al de PR2/PR3.
+    `--frames` (opt-in, capa visual PR4): extrae key-frames con ffmpeg (EXTERNO),
+    los describe con el modelo de visión EXTERNO (`\\[vision].command`), adjunta las
+    descripciones al source `x_video` y embebe los frames en la nota como fotos.
+    Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
+    (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
+    se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
+    `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
+    `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
     """
     cfg = _config()
     if vision_model and not frames:

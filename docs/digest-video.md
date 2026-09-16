@@ -140,26 +140,79 @@ and re-introduces the fabrication risk for every clip in it that isn't.
 uv run xbrain digest-video --all-pending
 
 # → Vídeos: transcritos 6, sin voz 2, ya digeridos 0, fallidos 0, sin vídeo 1, ...
-#   Dedup: 9 items ← 9 vídeos (6 transcritos este run).
+#   Dedup: 8 items ← 8 vídeos (8 transcritos este run). Huecos (sin voz ni frames): 2.
 ```
 
-Read the summary: **transcritos** = had speech, **sin voz** = silent (no audio
+Read the summary: **transcritos** = had speech (by the transcriber's flag: one
+flagged as speech but with blank text counts here, and also under **Huecos**
+unless `--frames` describes its frames), **sin voz** = silent (no audio
 track — GIFs, muted clips; attached as `has_speech=false`, not a failure),
 **fallidos** = a real transcribe failure, **sin vídeo** = the video couldn't be
-fetched (deleted / unavailable). Videos are **deduped by identity** — N bookmarks
-of the same clip are fetched + transcribed once.
+fetched (deleted / unavailable), **Huecos** = items that ended the run with
+neither speech nor frames (without `--frames`, every silent one — see
+[hollow items](#finding-and-re-digesting-hollow-items)). Videos are **deduped by
+identity** — N bookmarks of the same clip are fetched + transcribed once.
 
-Add `--frames` for slide-heavy talks:
+Add `--frames` for slide-heavy talks and silent clips:
 
 ```bash
 uv run xbrain digest-video --all-pending --frames
-# → ... Visual: 5 con slides, 4 talking-head (saltados).
+# → ... Visual: 5 con slides, 2 metraje mudo descrito, 4 talking-head (saltados).
 ```
 
-`--frames` extracts key frames (ffmpeg scene-detection + interval sampling),
-classifies the video as **slides** vs **talking-head** (talking-heads are skipped
-— no vision calls wasted), and describes each slide of a slide video. The slide
-images are embedded in the note like downloaded photos.
+`--frames` extracts key frames (ffmpeg scene-detection + interval sampling) and
+classifies the video as **slides** or not. What happens next depends on that and
+on whether the video has speech:
+
+- **Slides** are described, one caption per kept slide (capped by
+  `[frames].max_frames`).
+- A non-slide video **with speech** is a **talking-head** and is skipped — the
+  transcript already carries it, so no vision calls are wasted.
+- A non-slide video **without speech** (a screen recording, a robot, an
+  animation, a GIF) is described as **silent footage** (`metraje mudo`), capped
+  by `[frames].footage_max_frames` (default 6): its frames are the only record
+  of what it shows.
+
+The described frames are embedded in the note like downloaded photos. A run
+prints `Huecos (sin voz ni frames): N` when N items still end up with neither
+speech nor frames.
+
+### Finding and re-digesting hollow items
+
+A hollow item carries an `x_video` source with no words and no frames, so its
+note is a one-line "silent video". "No words" is `has_speech: false`, or a
+`true` flag with blank text (a transcriber can report speech and return only
+blank segments). The summary counts them without naming them; list their ids
+from the store:
+
+```bash
+jq -r 'to_entries[]
+  | select(any(.value.content.sources[]?;
+      .kind == "x_video" and (.frames | length) == 0
+      and (.has_speech != true or ((.text // "") | test("^\\s*$")))))
+  | .key' data/items.json | paste -sd, -
+```
+
+Then re-digest them with the visual layer. `--force` is needed because they
+already carry an `x_video` source (it re-transcribes them too):
+
+```bash
+uv run xbrain digest-video --ids <ids-from-above> --frames --force
+```
+
+Items digested without `--frames`, or before silent footage was described, come
+back with their frames. One that stays hollow had nothing describable, and the
+log says why: `frame extraction failed`, `no key frames extracted`, `unreadable`
+or `visual layer failed`.
+
+Two cases don't show up under `Huecos`, so run the `jq` recipe again after the
+re-digest; it is the only complete list:
+
+- A re-digest whose **fetch or transcription fails** attaches nothing. The item
+  keeps its OLD hollow source and is counted under `fallidos`, not `Huecos`.
+- `Huecos` counts only the items **this run attached**. Hollow items already in
+  the store (skipped as `ya digeridos` on a run without `--force`) are not
+  counted, so a summary without `Huecos` says nothing about that backlog.
 
 Then build the readable digest and render:
 
@@ -202,8 +255,8 @@ which only attaches the raw transcript + frames. **Before** you run it (or for a
 video with no digest yet) the section falls back to the **old inline layout**
 (transcript then frames, no `<details>`), so the render is safe either way. The
 transcript + slide descriptions are plain note text, so they feed `enrich` (summary
-+ topics) and are **searchable** in Obsidian. A silent video with no slides degrades
-gracefully to a one-line "silent video" note.
++ topics) and are **searchable** in Obsidian. A silent video with neither speech nor
+frames degrades gracefully to a one-line "silent video" note.
 
 ## Choosing the model, per run
 

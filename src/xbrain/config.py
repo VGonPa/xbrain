@@ -11,6 +11,7 @@ from xbrain.i18n import strings_for
 from xbrain.models import ExecutorName
 from xbrain.video_frames import (
     DEFAULT_DEDUPE_DISTANCE,
+    DEFAULT_FOOTAGE_MAX_FRAMES,
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_FRAMES,
     DEFAULT_SCENE_THRESHOLD,
@@ -65,7 +66,10 @@ class Config:
     vision_model: str | None
     # `[frames]` — the `digest-video --frames` visual layer. Defaults live in
     # `xbrain.video_frames`. Pipeline: extract → dedupe (perceptual hash) → cap.
+    # Two caps: `max_frames` for slides, `footage_max_frames` for SILENT non-slide
+    # footage (described because the frames are its only evidence).
     frames_max_frames: int
+    frames_footage_max_frames: int
     frames_scene_threshold: float
     frames_interval_seconds: float
     frames_dedupe: bool
@@ -197,6 +201,9 @@ def load_config(repo_root: Path) -> Config:
     frames_max_frames = int(frames.get("max_frames", DEFAULT_MAX_FRAMES))
     if frames_max_frames < 1:
         raise ValueError("config.toml: [frames].max_frames must be >= 1")
+    frames_footage_max_frames = int(frames.get("footage_max_frames", DEFAULT_FOOTAGE_MAX_FRAMES))
+    if frames_footage_max_frames < 1:
+        raise ValueError("config.toml: [frames].footage_max_frames must be >= 1")
     frames_dedupe_distance = int(frames.get("dedupe_distance", DEFAULT_DEDUPE_DISTANCE))
     if frames_dedupe_distance < 0:
         raise ValueError("config.toml: [frames].dedupe_distance must be >= 0")
@@ -229,6 +236,7 @@ def load_config(repo_root: Path) -> Config:
         vision_command=vision.get("command", ""),
         vision_model=vision.get("model"),
         frames_max_frames=frames_max_frames,
+        frames_footage_max_frames=frames_footage_max_frames,
         frames_scene_threshold=frames_scene_threshold,
         frames_interval_seconds=frames_interval_seconds,
         frames_dedupe=bool(frames.get("dedupe", True)),
