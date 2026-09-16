@@ -196,8 +196,9 @@ No generative LLM is called on any of the three paths.
 - **`vector` and `hybrid` need the opt-in vector plane** and a configured
   embedder; the degradation matrix is in
   [knowledge-index.md](knowledge-index.md#when-the-vector-channel-cannot-run).
-  A filtered `vector`/`hybrid` request is answered lexically, declared as
-  `vector_filters_unsupported`.
+  With both in place, a filtered `vector`/`hybrid` request is answered lexically,
+  declared as `vector_filters_unsupported`. Without them a filter changes nothing:
+  `vector` is an error and `hybrid` declares the missing piece.
 - **`graph_expand` refuses an index behind the store** (`search` only declares it):
   its edges may not be the current corpus's. Run `xbrain index update`.
 - **An unknown `item_id` in `graph_expand` returns a one-node expansion**, not an

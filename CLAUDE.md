@@ -610,11 +610,11 @@ generates an Obsidian wiki.
   `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
   loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
   store.** HISTORY since 04.2: those figures predate the graph plane. On the 2,495-item store of
-  the graph sweep (sha256 `2773310f…`, rebuilt 2026-09-16) `knowledge.db` is 53.6 MiB, 1.6 MiB of
+  the graph sweep (sha256 `2773310f…`, index rebuilt 2026-09-16) `knowledge.db` is 53.6 MiB, 1.6 MiB of
   it `graph_edges` WITH its three indexes (the table alone is 0.64 MiB; `dbstat`); timings were not re-taken (machine swapping). Re-derive it; it
   moves with the corpus. **Known limits, declared not discovered:** no
   stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
-  tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
+  tens for `agente` and `agentes` share **0 of 10** items, measured on the 2,474-item corpus, while
   `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
   (`unicode61 remove_diacritics 2`). And `xbrain eval` is **no longer a different filter surface** (PR #179):
   the harness stopped walking the corpus its own way and now builds through `index_build`'s
@@ -623,8 +623,8 @@ generates an Obsidian wiki.
   cannot apply is still **UNMEASURED, never 0.0** — a zero from a filter nobody applied reads as
   "retrieval failed at filtering" when the instrument was not there — and that rule has a live
   instance again: the vector plane has no filter columns, so under `--strategy vector|hybrid`
-  the two `filtros` cases are UNMEASURED, and `search` answers a filtered `vector`/`hybrid`
-  request lexically, declaring `vector_filters_unsupported`. The earlier
+  the two `filtros` cases are UNMEASURED, and `search`, with plane and command in place, answers
+  a filtered `vector`/`hybrid` request lexically, declaring `vector_filters_unsupported`. The earlier
   line here said the harness pushes only two; it was true until #179 and is now false.
   Operation: `docs/knowledge-index.md`.
 - **The vector plane and `hybrid` (Plan 03) are OPT-IN, and `lexical` is still the default.**
@@ -652,8 +652,9 @@ generates an Obsidian wiki.
   `vector_rank` (`None` for a channel that did not find it, never 0). **The line not crossed:** a
   response says `vector`/`hybrid` only when the vector channel ran; otherwise `hybrid` answers
   `lexical` naming the cause (`embeddings_not_configured` · `embedder_unavailable` ·
-  `no_embeddings` · `vector_filters_unsupported`) and `vector` is an ERROR — except a filtered
-  `vector` request, which answers lexically declaring `vector_filters_unsupported`. A declared
+  `no_embeddings` · `vector_filters_unsupported`) and `vector` is an ERROR, filters or not. Only
+  with plane AND command in place does a filtered `vector` request answer lexically, declaring
+  `vector_filters_unsupported` (the check order is `search_service._resolve_channel`). A declared
   plane the disk cannot serve, and a query vector of another dimension or another model, are
   errors under BOTH (`tests/test_knowledge_degradation.py`, one test per §5 row). Full matrix
   with the message each case prints: `docs/knowledge-index.md`. **The bake-off is INCOMPLETE and
@@ -696,8 +697,9 @@ generates an Obsidian wiki.
   **Backlog, written so it is not lost:** no CLI/MCP switch for `hybrid_graph`; `index status`
   silent when the sealed graph thresholds/version differ from config (`index_build.py`,
   `index_store.py`); `graph-expand` on an unknown id exits 0 with one node; the SQL `CHECK` has
-  no test; `resolve_locator` has no consumer; `max_hops`/node caps not in `config.toml`; the
-  disclaimer is inline in the CLI; stale strings (`implementadas hoy: lexical`, "no tiene
+  no test; `resolve_locator` has no consumer; `max_hops`/node caps not in `config.toml`;
+  `graph-expand`'s human view is printed inline in `cli.py`, not by `render.py` (the
+  disclaimer sentence itself lives in `i18n.Strings`); stale strings (`implementadas hoy: lexical`, "no tiene
   backend todavía", "frases exactas"). The unknown-id exit, `resolve_locator`, the caps and the
   inline disclaimer are PR #193's unlabelled backlog — the «F3–F6 of 04.3», a mapping no written
   record confirms.
