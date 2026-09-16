@@ -534,3 +534,98 @@ def test_mcp_serve_starts_the_stdio_server(workspace: Path, monkeypatch) -> None
     result = runner.invoke(app, ["mcp-serve"])
     assert result.exit_code == 0, result.output
     assert started == [True]
+
+
+# ---------------------------------------------------------------------------
+# §4.3: los esquemas se DERIVAN de los modelos del Plan 01, no se teclean
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tool", "model_name"),
+    [
+        ("xbrain.search", "SearchResponse"),
+        ("xbrain.get", "EvidenceBundle"),
+        ("xbrain.graph_expand", "GraphExpansionResponse"),
+    ],
+)
+def test_the_output_schema_is_the_plan01_model_itself(tool: str, model_name: str) -> None:
+    """§4.3: el esquema de salida ES el del modelo del contrato, no una copia suya.
+
+    Los dos lados vienen de sitios distintos: el izquierdo lo derivó el SDK del tipo de
+    retorno del handler, el derecho lo genera Pydantic del modelo del Plan 01. Un esquema
+    escrito a mano, o un handler que devolviera un dict «equivalente», rompen la igualdad.
+    """
+    from xbrain.knowledge import contracts
+
+    served = {tool.name: tool for tool in asyncio.run(build_server().list_tools())}
+    model = getattr(contracts, model_name)
+    assert served[tool].output_schema == model.model_json_schema()
+
+
+def test_the_search_input_embeds_the_whole_filter_contract() -> None:
+    """§4.3: los OCHO filtros llegan al esquema por el modelo, no re-tecleados.
+
+    `SearchFilters` entra entera como `$ref`, así que un noveno filtro añadido al contrato
+    aparece en la herramienta sin que nadie toque este módulo — y, si alguien los copiase a
+    mano, este test diría en cuál se quedó corta la copia.
+    """
+    from xbrain.knowledge.contracts import SearchFilters
+
+    served = {tool.name: tool for tool in asyncio.run(build_server().list_tools())}
+    schema = served["xbrain.search"].input_schema
+    assert set(schema["properties"]) == {"query", "filters", "limit", "strategy", "cursor"}
+    assert schema["required"] == ["query"]
+    embedded = schema["$defs"]["SearchFilters"]["properties"]
+    assert set(embedded) == set(SearchFilters.model_fields)
+
+
+# Cada handler con su servicio, y los parámetros que el handler nombra y el servicio NO.
+#
+# `search` y `get` no tienen ninguno: sus firmas son la del servicio menos `context`, que lo
+# pone el adaptador. `graph_expand` tiene dos, y las dos con razón escrita:
+#   · `item_id` — el servicio toma `seeds`; el handler toma un id y arma `item:<id>`,
+#     exactamente como `xbrain graph-expand --item`;
+#   · `max_neighbors` — se llama así en el CLI, y su `None` significa «el valor por defecto
+#     del grafo», igual que allí.
+# Lo que NO aparece en ninguna fila es `limits`: el handler de `get` no lo expone porque el
+# presupuesto sale de `[index].get_char_budget`, como en el CLI.
+_DEFAULT_BINDINGS = (
+    ("_search", "search_service", "search", set()),
+    ("_get", "get_service", "get", set()),
+    ("_graph_expand", "graph_service", "graph_expand", {"item_id", "max_neighbors"}),
+)
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "module_name", "service_name", "extra"),
+    _DEFAULT_BINDINGS,
+    ids=[row[0] for row in _DEFAULT_BINDINGS],
+)
+def test_the_tool_defaults_are_the_service_defaults(
+    handler_name: str, module_name: str, service_name: str, extra: set[str]
+) -> None:
+    """§4.1: «ni un límite distinto». Cada default compartido sale del servicio.
+
+    La equivalencia CLI↔MCP NO cubre esto: si la herramienta trajera `limit=5` donde el
+    servicio trae 10, una consulta con tres resultados daría el MISMO documento por las dos
+    puertas y el recorte sólo aparecería en un corpus grande — es decir, nunca en un test.
+    """
+    import inspect
+
+    from xbrain import mcp_server
+    from xbrain.knowledge import get_service, graph_service, search_service
+
+    modules = {
+        "search_service": search_service,
+        "get_service": get_service,
+        "graph_service": graph_service,
+    }
+    handler = inspect.signature(getattr(mcp_server, handler_name)).parameters
+    service = inspect.signature(getattr(modules[module_name], service_name)).parameters
+
+    shared = set(handler) & set(service)
+    assert shared, "ningún parámetro en común: la comparación sería vacía"
+    for name in sorted(shared):
+        assert handler[name].default == service[name].default, name
+    assert set(handler) - set(service) == extra
