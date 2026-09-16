@@ -30,27 +30,50 @@ impedir. Por eso hay dos mecanismos más, y así se justifican:
     `return`, saltarlo o reescribirlo para que lea otra cosa lo deja verde en algún mundo
     arreglado, y eso es rojo. Se puede porque el cierre sabe qué significa ARREGLAR cada
     criterio suyo; de un test de comportamiento ajeno no lo sabe.
+    Un mundo arreglado cambia SÓLO lo que cambiaría el arreglo. El primero de §13.1 era la
+    identidad, que cambiaba TODA consulta: ponía rojo a cualquier aserción sobre
+    `match_expression`, así que un testigo reescrito para leer `match_expression('harness')`
+    pasaba, 119 de 119, incluso con búsqueda por frase real en `src`. Ahora sólo cambia una
+    consulta entre comillas con más de un término, y un espécimen de ese testigo vigila que siga
+    así.
   · SUELO ESTÁTICO para cada test nombrado y cada test de este fichero (`_hollow_reasons`,
-    por `ast`). Es rojo en cinco casos: si no queda ninguna aserción viva (un `assert` que lee
-    algo, o un `pytest.raises`), si lleva skip/xfail, si tiene un `return` propio, si un `try`
-    se traga la aserción o si una condición constante la deja muerta. Medido al escribirlo:
-    los 62 tests distintos que cubre (53 nombrados por la tabla, 48 de ellos en otros ficheros,
-    más los 14 de éste) lo cumplen, sin excepciones.
+    por `ast`). Es rojo en cinco casos:
+      - no queda ninguna aserción viva. Cuenta como viva un `assert` que lee algo, un
+        `pytest.raises` (con `with` o llamado) y una llamada `assert…`, que es como se nombra el
+        helper en el que un test delega sus aserciones;
+      - se salta. Cuenta skip/skipif/xfail/importorskip en sus decoradores, en su clase, en el
+        `pytestmark` o en una llamada de su módulo, llamado o lanzado (`raise
+        pytest.skip.Exception`) en su cuerpo, y un `parametrize` sin ningún valor;
+      - tiene un `return` propio;
+      - un `try` o un `contextlib.suppress` se traga una aserción que guarda;
+      - una condición que no lee nada es falsa: `if False`, `if 1 == 2`, `if []`,
+        `if False and True`. Se evalúa sin builtins.
+    Medido al escribirlo: los 62 tests distintos que cubre (53 nombrados por la tabla, 48 de
+    ellos en otros ficheros, más los 14 de éste) lo cumplen, sin excepciones.
   · Las dos guardas se vigilan entre sí
     (`test_the_guards_of_this_file_see_the_defect_they_exist_for`). Cada una tiene que ver el
     defecto que existe para ver cuando se le da un espécimen de él, y el suelo se aplica a su
-    propio test desde fuera, porque un test vaciado no puede denunciarse a sí mismo.
+    propio test desde fuera, porque un test vaciado no puede denunciarse a sí mismo. Cada forma
+    que el suelo promete arriba tiene su espécimen en `HOLLOW_SHAPES`, y cada forma legítima que
+    NO debe frenar tiene el suyo en `LIVE_SHAPES`: un guardián que se dispara donde no debe
+    acaba desactivado por quien lo sufre.
 
 LO QUE NO PUEDE VER, declarado en vez de prometido:
 
   · un test de comportamiento DEBILITADO (una tautología, una aserción sobre otra cosa);
   · un test de comportamiento vaciado EN EJECUCIÓN, como un `for` sobre una colección que ha
-    quedado vacía. Los dos pasan el suelo.
+    quedado vacía, o una condición que lee algo y nunca se cumple (`if x is not x`). Los dos
+    pasan el suelo.
 
 Cerrarlos exigiría saber qué defecto persigue cada uno de los 50 tests de comportamiento
 nombrados, para mutarlo test a test, o contar las aserciones ejecutadas con un plugin de pytest
 en un subproceso. Es un aparato desproporcionado para lo que guarda, así que se DECLARA: es la
 misma decisión que convirtió la garantía de red de 04.7 en una declaración.
+
+Y FRENA en un caso legítimo, declarado: un test que delega sus aserciones en un helper que no
+se llama `assert…` da rojo. El mensaje dice cómo nombrarlo; seguir la llamada a cualquier
+helper que asierte algo dejaría pasar un test vaciado que todavía llama a un constructor que
+comprueba su propio resultado.
 
 Tampoco ve dos ediciones coordinadas: vaciar las dos guardas en el mismo cambio, o borrar un
 mundo arreglado junto con su cláusula. Eso es editar la tabla, y lo que lo para es que alguien
@@ -188,8 +211,18 @@ def _serve(
 
 
 def _a_phrase_operator_exists(patched: pytest.MonkeyPatch, root: Path) -> None:
-    """§13.1 arreglado: una consulta entre comillas llega a FTS5 como una frase, no como un OR."""
-    patched.setattr(sys.modules[__name__], "match_expression", lambda query: query)
+    """§13.1 arreglado: una consulta entre comillas llega a FTS5 como una frase, no como un OR.
+
+    Cambia SÓLO eso: cualquier otra consulta sigue pasando por el `match_expression` real. Un
+    mundo que lo cambiara todo (la identidad) pondría rojo a cualquier testigo que leyera
+    `match_expression`, leyera la frase o no, y ese rojo no certificaría nada.
+    """
+    real = match_expression
+    patched.setattr(
+        sys.modules[__name__],
+        "match_expression",
+        lambda query: query if query.startswith('"') and " " in query else real(query),
+    )
 
 
 def _the_bakeoff_result_is_complete(patched: pytest.MonkeyPatch, root: Path) -> None:
@@ -606,32 +639,77 @@ def test_criterion_5_stays_unmet_while_the_bakeoff_says_it_is_incomplete() -> No
 # ---------------------------------------------------------------------------
 
 _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+# `raise pytest.skip.Exception(…)` se lee por `skip`; `SkipTest` es el de `unittest`.
 _SKIPS = frozenset({"skip", "skipif", "xfail", "importorskip"})
+_SKIP_RAISES = _SKIPS | {"Skipped", "XFailed", "SkipTest"}
 _SWALLOWS = frozenset({"AssertionError", "Exception", "BaseException"})
+# Llamadas que SON una aserción. Un helper en el que el test delega cuenta si se llama `assert…`.
+_ASSERTING_CALLS = frozenset({"raises", "warns", "deprecated_call"})
 
 
-def _function_def(node_id: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
-    """La definición de `fichero::nombre` (o `::Clase::nombre`), por `ast`; `None` si no está."""
-    module, _, name = node_id.partition("::")
-    path = REPO_ROOT / module
-    if not path.is_file():
-        return None
-    scope: list[ast.stmt] = ast.parse(path.read_text(encoding="utf-8")).body
+@dataclass(frozen=True)
+class _Definition:
+    """Un test tal como pytest lo va a correr: su función y TODAS las marcas que le aplican."""
+
+    function: ast.FunctionDef | ast.AsyncFunctionDef
+    marks: tuple[ast.expr, ...]
+
+
+def _inherited_marks(scope: list[ast.stmt]) -> list[ast.expr]:
+    """Lo que un ámbito impone a cada test suyo: su `pytestmark` y sus llamadas a skip.
+
+    Una sola línea al principio del fichero —`pytestmark = pytest.mark.skip(…)`, o
+    `pytest.skip(…, allow_module_level=True)`— salta todos sus tests sin tocar ninguno.
+    """
+    marks: list[ast.expr] = []
+    for node in scope:
+        if isinstance(node, ast.Expr) and _tail_name(node.value) in _SKIPS:
+            marks.append(node.value)
+            continue
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets):
+            marks += value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+    return marks
+
+
+def _definition(tree: ast.Module, name: str) -> _Definition | None:
+    """`nombre` (o `Clase::nombre`) dentro de `tree`, con las marcas de su módulo y su clase."""
+    scope: list[ast.stmt] = tree.body
+    marks = _inherited_marks(scope)
     owner, _, name = name.rpartition("::")
     if owner:
         classes = [n for n in scope if isinstance(n, ast.ClassDef) and n.name == owner]
-        scope = classes[0].body if classes else []
+        if not classes:
+            return None
+        scope = classes[0].body
+        marks += classes[0].decorator_list + _inherited_marks(scope)
     found = [
         n
         for n in scope
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
     ]
-    return found[0] if found else None
+    if not found:
+        return None
+    return _Definition(found[0], tuple(marks + found[0].decorator_list))
 
 
-def _own_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:
-    """Lo que el test ejecuta él mismo: su cuerpo, sin entrar en funciones ni clases anidadas."""
-    stack: list[ast.AST] = [n for n in function.body if not isinstance(n, _NESTED)]
+def _function_def(node_id: str) -> _Definition | None:
+    """La definición de `fichero::nombre` (o `::Clase::nombre`), por `ast`; `None` si no está."""
+    module, _, name = node_id.partition("::")
+    path = REPO_ROOT / module
+    if not path.is_file():
+        return None
+    return _definition(ast.parse(path.read_text(encoding="utf-8")), name)
+
+
+def _own_nodes(body: list[ast.stmt]) -> Iterator[ast.AST]:
+    """Lo que ese código ejecuta él mismo, sin entrar en funciones ni clases anidadas."""
+    stack: list[ast.AST] = [n for n in body if not isinstance(n, _NESTED)]
     while stack:
         node = stack.pop()
         yield node
@@ -654,39 +732,95 @@ def _reads_something(expr: ast.AST) -> bool:
     )
 
 
+def _names(expr: ast.AST) -> set[str]:
+    """Todo nombre que aparece en `expr`: `contextlib.suppress(AssertionError)` → `suppress`, …"""
+    return {_tail_name(n) for n in ast.walk(expr)}
+
+
+def _checks_something(node: ast.AST) -> bool:
+    """Una aserción viva: un `assert` que lee algo, `pytest.raises`, o una llamada `assert…`."""
+    if isinstance(node, ast.Assert):
+        return _reads_something(node.test)
+    if isinstance(node, ast.Call):
+        name = _tail_name(node)
+        return name in _ASSERTING_CALLS or name.lstrip("_").startswith("assert")
+    return False
+
+
+def _guards_a_check(body: list[ast.stmt]) -> bool:
+    return any(_checks_something(n) for n in _own_nodes(body))
+
+
 def _never_true(test: ast.expr) -> bool:
-    """`if False:` / `while 0:` / `if not True:` — el bloque que guardan es código muerto."""
-    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        return isinstance(test.operand, ast.Constant) and bool(test.operand.value)
-    return isinstance(test, ast.Constant) and not test.value
+    """`if False:` / `while 0:` / `if 1 == 2:` / `if []:` — el bloque que guardan es código muerto.
+
+    Una condición que no lee nada no puede cambiar entre corridas, así que se evalúa aquí, sin
+    builtins. Una potencia no se evalúa: `if 9**9**9:` colgaría la guarda.
+    """
+    if _reads_something(test) or any(isinstance(n, (ast.Pow, ast.LShift)) for n in ast.walk(test)):
+        return False
+    try:
+        value = eval(  # noqa: S307 - sin nombres, sin atributos y sin builtins
+            compile(ast.Expression(test), "<condición>", "eval"), {"__builtins__": {}}
+        )
+    except Exception:  # noqa: BLE001 - lo que no se puede evaluar no se da por muerto
+        return False
+    return not value
 
 
-def _hollow_reasons(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+def _empty_parametrize(mark: ast.expr) -> bool:
+    """`@pytest.mark.parametrize("x", [])`: pytest no corre el test ninguna vez y lo da por saltado."""
+    if not (isinstance(mark, ast.Call) and _tail_name(mark) == "parametrize"):
+        return False
+    given = [k.value for k in mark.keywords if k.arg == "argvalues"]
+    values = mark.args[1] if len(mark.args) > 1 else (given[0] if given else None)
+    return isinstance(values, (ast.List, ast.Tuple, ast.Set)) and not values.elts
+
+
+def _suppresses_a_check(item: ast.withitem) -> bool:
+    call = item.context_expr
+    return (
+        isinstance(call, ast.Call)
+        and _tail_name(call) == "suppress"
+        and any(_names(arg) & _SWALLOWS for arg in call.args)
+    )
+
+
+def _hollow_reasons(definition: _Definition) -> list[str]:
     """El suelo estático: por qué este test, tal como está escrito, no puede ponerse rojo."""
-    own = list(_own_nodes(function))
+    own = list(_own_nodes(definition.function.body))
     reasons = []
-    if not any(
-        (isinstance(n, ast.Assert) and _reads_something(n.test))
-        or (isinstance(n, ast.withitem) and _tail_name(n.context_expr) == "raises")
-        for n in own
-    ):
-        reasons.append("no queda ninguna aserción viva")
-    reasons += [
-        f"`{_tail_name(d)}` en sus decoradores"
-        for d in function.decorator_list
-        if _tail_name(d) in _SKIPS
-    ]
+    if not any(_checks_something(n) for n in own):
+        reasons.append(
+            "no queda ninguna aserción viva (un `assert` que lee algo, `pytest.raises`, o la "
+            "llamada a un helper que se llame `assert…`)"
+        )
+    for mark in definition.marks:
+        if _tail_name(mark) in _SKIPS:
+            reasons.append(f"`{_tail_name(mark)}` entre sus marcas (decorador, clase o módulo)")
+        elif _empty_parametrize(mark):
+            reasons.append("`parametrize` sin ningún valor: pytest lo da por saltado")
     for node in own:
         if isinstance(node, ast.Call) and _tail_name(node) in _SKIPS:
             reasons.append(f"llama a `{_tail_name(node)}`")
+        elif isinstance(node, ast.Raise) and node.exc and _names(node.exc) & _SKIP_RAISES:
+            reasons.append(f"lanza un skip en la línea {node.lineno}")
         elif isinstance(node, ast.Return):
             reasons.append(f"`return` propio en la línea {node.lineno}")
         elif isinstance(node, (ast.If, ast.While)) and _never_true(node.test):
             reasons.append(f"condición que nunca se cumple en la línea {node.lineno}")
-        elif isinstance(node, ast.ExceptHandler) and (
-            node.type is None or {_tail_name(n) for n in ast.walk(node.type)} & _SWALLOWS
+        elif (
+            isinstance(node, (ast.Try, ast.TryStar))
+            and _guards_a_check(node.body)
+            and any(h.type is None or _names(h.type) & _SWALLOWS for h in node.handlers)
         ):
-            reasons.append(f"`except` que se traga la aserción en la línea {node.lineno}")
+            reasons.append(f"un `except` se traga la aserción del `try` de la línea {node.lineno}")
+        elif (
+            isinstance(node, (ast.With, ast.AsyncWith))
+            and _guards_a_check(node.body)
+            and any(_suppresses_a_check(item) for item in node.items)
+        ):
+            reasons.append(f"`suppress` se traga la aserción en la línea {node.lineno}")
     return reasons
 
 
@@ -729,8 +863,8 @@ def _witness_problems(witness: Witness, scratch: Path) -> list[str]:
             fired.add(line)
         else:
             problems.append(f"{name} sigue {verdict} en el mundo `{fix.__name__}`: está hueco")
-    function = _function_def(witness.node)
-    own = _own_nodes(function) if function is not None else iter(())
+    definition = _function_def(witness.node)
+    own = _own_nodes(definition.function.body) if definition is not None else iter(())
     clauses = {n.lineno for n in own if isinstance(n, ast.Assert)}
     if witness.fixes and fired != clauses:
         problems.append(
@@ -782,8 +916,8 @@ PROOF_NODES: tuple[str, ...] = tuple(
 @pytest.mark.parametrize("node", PROOF_NODES, ids=lambda node: node.rpartition("::")[2])
 def test_no_named_proof_and_no_test_of_this_file_is_hollow(node: str) -> None:
     """El suelo: un test nombrado —o una guarda de aquí— que ya no puede ponerse rojo."""
-    function = _function_def(node)
-    reasons = ["no existe"] if function is None else _hollow_reasons(function)
+    definition = _function_def(node)
+    reasons = ["no existe"] if definition is None else _hollow_reasons(definition)
     assert not reasons, f"{node} está hueco: {reasons}"
 
 
@@ -799,6 +933,11 @@ def _specimen_two_clause_witness() -> None:
     assert "b" not in _SPECIMEN
 
 
+def _specimen_witness_reading_something_else() -> None:
+    """El testigo de §13.1 reescrito para leer otra cosa: pasa hoy, y pasa también arreglado."""
+    assert match_expression("harness") == '"harness"'
+
+
 def _the_specimen_gains(text: str) -> Fix:
     def fix(patched: pytest.MonkeyPatch, root: Path) -> None:
         patched.setattr(sys.modules[__name__], "_SPECIMEN", text)
@@ -807,32 +946,76 @@ def _the_specimen_gains(text: str) -> Fix:
     return fix
 
 
+# Módulos enteros: el test se llama `test_x`, o `TestX::test_x` si vive en una clase.
 HOLLOW_SHAPES: dict[str, str] = {
     "sin aserción": "def test_x():\n    '''doc'''\n",
     "sólo `pass`": "def test_x():\n    pass\n",
     "assert constante": "def test_x():\n    assert 1 == 1\n",
     "skip decorado": "@pytest.mark.skip\ndef test_x():\n    assert f()\n",
     "skipif decorado": "@pytest.mark.skipif(True, reason='')\ndef test_x():\n    assert f()\n",
+    "skip en la clase": "@pytest.mark.skip\nclass TestX:\n    def test_x(self):\n        assert f()\n",
+    "`pytestmark` de módulo": "pytestmark = pytest.mark.skip(reason='')\n\ndef test_x():\n    assert f()\n",
+    "`pytestmark` en lista": (
+        "pytestmark = [pytest.mark.usefixtures('y'), pytest.mark.xfail]\n\n"
+        "def test_x():\n    assert f()\n"
+    ),
+    "skip de módulo llamado": (
+        "pytest.skip('', allow_module_level=True)\n\ndef test_x():\n    assert f()\n"
+    ),
+    "`parametrize` vacío": "@pytest.mark.parametrize('y', [])\ndef test_x(y):\n    assert f(y)\n",
     "pytest.skip()": "def test_x():\n    pytest.skip('')\n    assert f()\n",
+    "`raise pytest.skip.Exception`": (
+        "def test_x():\n    raise pytest.skip.Exception('')\n    assert f()\n"
+    ),
     "return delante": "def test_x():\n    return\n    assert f()\n",
     "if False": "def test_x():\n    if False:\n        assert f()\n",
+    "if 1 == 2": "def test_x():\n    if 1 == 2:\n        assert f()\n",
+    "if []": "def test_x():\n    if []:\n        assert f()\n",
+    "if False and True": "def test_x():\n    if False and True:\n        assert f()\n",
     "except que traga": (
         "def test_x():\n    try:\n        assert f()\n    except AssertionError:\n        pass\n"
     ),
+    "`suppress` que traga": (
+        "def test_x():\n    with contextlib.suppress(AssertionError):\n        assert f()\n"
+    ),
     "aserción sólo en una función anidada": "def test_x():\n    def g():\n        assert f()\n",
+}
+
+# Lo que el suelo NO debe frenar: cada una es una forma legítima de escribir un test vivo.
+LIVE_SHAPES: dict[str, str] = {
+    "assert que lee": "def test_x():\n    assert f()\n",
+    "helper `_assert_…`": "def test_x():\n    _assert_ok(f())\n",
+    "`pytest.raises` llamado": "def test_x():\n    pytest.raises(KeyError, f, 'k')\n",
+    "`mock.assert_called_once()`": "def test_x(m):\n    f(m)\n    m.assert_called_once()\n",
+    "`suppress` de otra cosa": (
+        "def test_x(p):\n    with contextlib.suppress(FileNotFoundError):\n"
+        "        p.unlink()\n    assert f(p)\n"
+    ),
+    "`try` que no guarda la aserción": (
+        "def test_x():\n    try:\n        v = f()\n    except Exception:\n        v = None\n"
+        "    assert v is None\n"
+    ),
+    "`pytestmark` que no salta": (
+        "pytestmark = pytest.mark.filterwarnings('ignore')\n\ndef test_x():\n    assert f()\n"
+    ),
+    "`parametrize` con valores": "@pytest.mark.parametrize('y', [1])\ndef test_x(y):\n    assert f(y)\n",
+    "condición que lee": "def test_x(y):\n    if y == 2:\n        assert f()\n    assert f(y)\n",
+    "`if True`": "def test_x():\n    if True:\n        assert f()\n",
 }
 
 
 def test_the_guards_of_this_file_see_the_defect_they_exist_for(tmp_path: Path) -> None:
     """Las dos guardas se vigilan entre sí, porque ninguna puede vigilarse sola.
 
-    El suelo tiene que ver cada forma de test hueco; el ejecutor de testigos, un testigo vaciado
-    y un testigo con una cláusula sin mundo. Y el suelo se aplica AQUÍ al test del propio suelo:
-    un test vaciado no se denuncia a sí mismo, y el ejecutor ya lo cubre el suelo.
+    El suelo tiene que ver cada forma de test hueco y NO frenar ninguna forma viva; el ejecutor
+    de testigos, un testigo vaciado, uno con una cláusula sin mundo y uno que lee otra cosa (que
+    sólo cae si el mundo arreglado cambia sólo la frase). Y el suelo se aplica AQUÍ al test del
+    propio suelo: un test vaciado no se denuncia a sí mismo, y el ejecutor ya lo cubre el suelo.
     """
     blind = [
         shape for shape, source in HOLLOW_SHAPES.items() if not _hollow_reasons(_parse(source))
     ]
+    braking = [shape for shape, source in LIVE_SHAPES.items() if _hollow_reasons(_parse(source))]
     specimens = {
         "testigo vaciado": Witness(
             f"{SELF}::_specimen_hollow_witness", fixes=(_the_specimen_gains("a"),)
@@ -841,18 +1024,25 @@ def test_the_guards_of_this_file_see_the_defect_they_exist_for(tmp_path: Path) -
             f"{SELF}::_specimen_two_clause_witness", fixes=(_the_specimen_gains("a"),)
         ),
         "testigo sin mundos": Witness(f"{SELF}::_specimen_two_clause_witness"),
+        "testigo que lee otra cosa": Witness(
+            f"{SELF}::_specimen_witness_reading_something_else",
+            fixes=(_a_phrase_operator_exists,),
+        ),
     }
     blind += [kind for kind, w in specimens.items() if not _witness_problems(w, tmp_path)]
     floor = _function_def(FLOOR)
     if floor is None or _hollow_reasons(floor):
         blind.append(f"{FLOOR} no existe o está hueco")
     assert not blind, f"guardas que ya no ven su defecto: {blind}"
+    assert not braking, f"el suelo frena tests vivos: {braking}"
 
 
-def _parse(source: str) -> ast.FunctionDef:
-    function = ast.parse(source).body[0]
-    assert isinstance(function, ast.FunctionDef)
-    return function
+def _parse(source: str) -> _Definition:
+    tree = ast.parse(source)
+    definition = _definition(tree, "test_x") or _definition(tree, "TestX::test_x")
+    if definition is None:
+        raise ValueError(f"el espécimen no define `test_x`: {source!r}")
+    return definition
 
 
 def test_query_and_retrieval_never_construct_a_generative_client(tmp_path, monkeypatch) -> None:
