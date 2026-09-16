@@ -35,8 +35,8 @@ check de CI · **Instrumento:** `xbrain eval --strategy vector|hybrid --embeddin
 
 | | |
 |---|---|
-| Corpus | `data/items.json` sha256 `4fed54a0…` — 2.474 items · 45 topics · 10.570 superficies · 22.933 chunks (chunker `v3`, `800/0`) · `vocab.yaml` sha256 `e73fbede…` · `topics.json` sha256 `7a40f4f1…` |
-| Golden set | `eval/golden-set.yaml` v3 tal como está versionado: 23 casos puntuables + 8 escenarios archivados; **los 23 resuelven** contra ese store |
+| Corpus | `store-2474` (`data/items.json` · `vocab.yaml` · `topics.json`; sus sha256, en la [tabla de versiones medidas](knowledge-index.md#measured-versions)) — 2.474 items · 45 topics · 10.570 superficies · 22.933 chunks (chunker `v3`, `800/0`) |
+| Golden set | `eval/golden-set.yaml` v3 tal como está versionado en `547a860` — `golden@427fea9` en la misma tabla: 23 casos puntuables + 8 escenarios archivados; **los 23 resuelven** contra ese store |
 | Profundidad | 20 owners por caso, `k ∈ {1, 5, 10, 20}` — la misma para las tres estrategias |
 | Índice vectorial | uno por modelo en `data/eval-index/<modelo>/`, escrito por `index_build.build(..., vectors=…)`: el mismo escritor y el mismo plano que `xbrain index build --embeddings` |
 | `vector` / `hybrid` | la ventana fusionada del propio `search_service` (`FUSED_CHUNK_WINDOW` = 1.000 chunks por canal) y RRF con las constantes de `fusion.py` en vigor (`RRF_K` = 60, pesos 1 / 1); se puntúa por OWNER sobre el ranking de chunks, igual que la línea base léxica |
@@ -276,8 +276,8 @@ checkout desde el que lees esto. Los bloques comparten variables; ejecútalos en
 | | Referencia | Estado |
 |---|---|---|
 | Código | xbrain `547a860` (su `src/` es el de `b3fdc8b`) | fijado |
-| Corpus | `data/items.json` sha256 `4fed54a0…` · `data/vocab.yaml` `e73fbede…` · `data/topics.json` `7a40f4f1…` | fijado **por prefijo** de 8 hex: distingue una versión del store de otra; no es una firma |
-| Golden set | `eval/golden-set.yaml` v3 en `547a860`; su id exacto es `git rev-parse 547a860:eval/golden-set.yaml` | fijado por commit |
+| Corpus | `store-2474` en la [tabla de versiones medidas](knowledge-index.md#measured-versions): `data/items.json` · `data/vocab.yaml` · `data/topics.json` | fijado **por prefijo** de 8 hex en `root()`, abajo: distingue una versión del store de otra; no es una firma. Los sha256 completos, en la tabla |
+| Golden set | `eval/golden-set.yaml` v3 en `547a860` (`golden@427fea9` en la misma tabla); su id exacto es `git rev-parse 547a860:eval/golden-set.yaml` | fijado por commit |
 | Entorno de xbrain | el `uv.lock` de `547a860` | referencia reproducible |
 | Embedder | Python 3.12 · sentence-transformers 6.0.1 · torch 2.14.0 · MPS · Apple M2 16 GB | fijado; las versiones de `transformers` y `huggingface_hub` **no se anotaron** |
 | Pesos | `safetensors` del repositorio HF de cada modelo | **revisión NO fijada**: una revisión posterior puede mover las cifras de `vector`/`hybrid` |
@@ -303,7 +303,8 @@ git -C "$CHECKOUT" rev-parse HEAD:eval/golden-set.yaml   # anota el id del golde
 **2. Una raíz `XBRAIN_REPO_ROOT` por candidato.** `xbrain` resuelve `config.toml` y `data/` contra esa
 raíz, así que cada candidato tiene su propio `config.toml` y su copia de sólo lectura del store; los índices
 de evaluación (`data/eval-index/<modelo>/`) se escriben dentro de la raíz, nunca en el store. La función
-comprueba los prefijos de la §1 y avisa si el corpus no es el publicado:
+comprueba los prefijos de `store-2474` ([tabla de versiones medidas](knowledge-index.md#measured-versions))
+y avisa si el corpus no es el publicado:
 
 ```bash
 root() {   # $1 = nombre del candidato
