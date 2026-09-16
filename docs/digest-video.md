@@ -194,16 +194,20 @@ jq -r 'to_entries[]
 ```
 
 Then re-digest them with the visual layer. `--force` is needed because they
-already carry an `x_video` source, and `--keep-transcript` reuses the stored
-transcript so only the visual layer is redone:
+already carry an `x_video` source. `--keep-transcript` makes each item reuse its
+own stored transcript instead of running the ASR again. The frames are redone,
+and, as on any forced re-digest, the item's long-form digest is cleared and the
+item goes back through `enrich` and `video-digest`:
 
 ```bash
 uv run xbrain digest-video --ids <ids-from-above> --frames --force --keep-transcript
 ```
 
-Leave out `--keep-transcript` and the ASR runs again: on music it can invent
-words, and a video with invented words is skipped as a talking-head and no
-longer counted as hollow.
+Leave out `--keep-transcript` and the ASR runs again. On music, or on audio
+with no usable speech, it can invent words ("you you"). A non-slide video with
+invented words is skipped as a talking-head, is no longer counted under
+`Huecos`, and no longer matches the `jq` recipe above either, so nothing lists
+it again.
 
 Items digested without `--frames`, or before silent footage was described, come
 back with their frames. One that stays hollow had nothing describable, and the
@@ -352,7 +356,9 @@ label. It cannot fix a label the model genuinely could not read: the stored
 frames are downscaled to 640px wide at extraction time, and that resolution
 is not recoverable from the PNGs on disk. If a caption is wrong because the
 frame itself is illegible, the fix is re-extracting the frame — `digest-video
---force --frames` — not `redescribe-frames`.
+--force --frames --keep-transcript`, which leaves the transcript alone — not
+`redescribe-frames`. That re-digest clears the video's long-form digest, so run
+`video-digest` again afterwards.
 
 It is destructive (rewrites `items.json`) → auto-snapshots first, but only
 when at least one frame was actually re-described. That is a lower bar than

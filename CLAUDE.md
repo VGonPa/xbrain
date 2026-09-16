@@ -134,12 +134,14 @@ generates an Obsidian wiki.
   `[frames].max_frames`); a talking-head is skipped + logged ONLY when the video has
   speech (the transcript carries it); a SILENT non-slide video (screen recording,
   robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
-  6) — its frames are the only evidence, so dropping them left hollow entries. Any
-  run appends `Huecos (sin voz ni frames): N` to its summary when N > 0 items still
-  end with neither speech nor frames (never a silent drop); recover them with
-  `--frames --force --keep-transcript`, which reuses the stored transcript because
-  re-running the ASR on music can invent words. Default off — a normal
-  `digest-video` run never touches ffmpeg/vision.
+  6) — its frames are the only evidence, so dropping them left hollow entries. The
+  visual layer is off by default — a normal `digest-video` run never touches
+  ffmpeg/vision. Any run appends `Huecos (sin voz ni frames): N` to its summary when
+  N > 0 items still end with neither speech nor frames (never a silent drop).
+  Recover them with `--frames --force --keep-transcript`: each item keeps its own
+  stored transcript (re-running the ASR can invent words), the frames are redone,
+  and the forced re-digest clears the long-form digest, so `enrich` and
+  `video-digest` run again for the item.
 - Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
   channel through which on-screen text (slide labels, code, chart axes) reaches
   the digest, and translating a NON-COGNATE label broke that channel — measured:
