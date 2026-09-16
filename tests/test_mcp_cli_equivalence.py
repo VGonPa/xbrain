@@ -16,31 +16,28 @@ divergir es el modelo, no el orden de las claves.
 prueban nada, así que cada caso declara de qué colección tiene que servir algo y la
 igualdad se comprueba DESPUÉS de haberlo verificado sobre el lado del CLI.
 
-**ENTRA POR LA SUPERFICIE PÚBLICA DE LAS DOS PUERTAS.** Por el CLI, `CliRunner` sobre la
-app real. Por MCP, un `mcp.Client` conectado en proceso al servidor — el cliente de verdad,
-con su handshake y su envelope, no la función del handler llamada a mano. En 04.4 probar la
-función y dejar el camino real descubierto costó seis rondas.
+**ENTRA POR LA SUPERFICIE PÚBLICA DE LAS DOS PUERTAS.** El arnés —el workspace de fixture,
+`run_cli`, el cliente MCP en proceso y el desempaquetado del envelope— vive en
+`tests/test_mcp_server.py` y se importa: tres copias serían tres cosas que divergen.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
-from typer.testing import CliRunner
 
-from xbrain.cli import app
+from tests.test_mcp_server import (
+    call_mcp_tool,
+    make_workspace,
+    run_cli,
+    unwrap_mcp_content,
+)
 from xbrain.knowledge.contracts import SearchFilters
-from xbrain.mcp_server import MCP_TOOLS, build_server
-
-FIXTURES = Path(__file__).parent / "fixtures"
-runner = CliRunner()
+from xbrain.mcp_server import MCP_TOOLS
 
 # Se fija pequeño A PROPÓSITO: con el presupuesto por defecto (40.000) ningún `get` de esta
 # fixture pagina, y la paginación es justo uno de los requisitos del §4.3 que las dos puertas
@@ -51,69 +48,12 @@ GET_CHAR_BUDGET = 400
 
 @pytest.fixture()
 def workspace(tmp_path: Path, monkeypatch) -> Path:
-    """Un directorio con forma de repo, con `data/` construido desde la fixture del corpus.
+    """El repo de mentira con el corpus de fixture, el presupuesto corto y el índice hecho."""
+    from tests.test_mcp_server import build_index
 
-    El corpus es una FIXTURE de población conocida (12 items, 2 topics), nunca `data/`: en
-    CI no hay store, y un test que fuese a buscarlo sería un test que deja de correr allí
-    sin decirlo.
-    """
-    raw = json.loads((FIXTURES / "knowledge_corpus.json").read_text(encoding="utf-8"))
-    data = tmp_path / "data"
-    data.mkdir()
-    (data / "items.json").write_text(json.dumps(raw["items"], indent=2), encoding="utf-8")
-    (data / "topics.json").write_text(json.dumps(raw["topics"], indent=2), encoding="utf-8")
-    (data / "vocab.yaml").write_text(
-        yaml.safe_dump({"topics": list(raw["vocab"].values())}, allow_unicode=True),
-        encoding="utf-8",
-    )
-    (tmp_path / "config.toml").write_text(
-        '[paths]\nvault = "vault"\noutput_subdir = "x-knowledge"\ndata_dir = "data"\n'
-        '[x]\nhandle = "vgonpa"\n'
-        f"[index]\nget_char_budget = {GET_CHAR_BUDGET}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["index", "build"])
-    assert result.exit_code == 0, result.output
-    return tmp_path
-
-
-# ---------------------------------------------------------------------------
-# Las dos puertas
-# ---------------------------------------------------------------------------
-
-
-def run_cli(argv: Sequence[str]) -> str:
-    """stdout de `xbrain <cmd> --json`, entero. Una línea de log suelta rompe el `json.loads`."""
-    result = runner.invoke(app, [*argv, "--json"])
-    assert result.exit_code == 0, result.output
-    return result.stdout
-
-
-def call_mcp_tool(tool: str, arguments: dict[str, Any]) -> Any:
-    """La herramienta, llamada por un cliente MCP real conectado en proceso al servidor."""
-
-    async def _call() -> Any:
-        from mcp import Client
-
-        async with Client(build_server()) as client:
-            return await client.call_tool(tool, arguments)
-
-    return asyncio.run(_call())
-
-
-def unwrap_mcp_content(result: Any) -> str:
-    """El payload de la tool, DESEMPAQUETADO de su envelope MCP.
-
-    Comprueba de paso que la llamada no fue un error y que el contenido es UN bloque de
-    texto: un segundo bloque, o un `is_error` silencioso, convertiría el resto del test en
-    una comparación contra lo que se le ocurriese al SDK.
-    """
-    assert result.is_error is False, result.content
-    blocks = [block for block in result.content if block.type == "text"]
-    assert len(blocks) == 1, [block.type for block in result.content]
-    return blocks[0].text
+    root = make_workspace(tmp_path, monkeypatch, get_char_budget=GET_CHAR_BUDGET)
+    build_index()
+    return root
 
 
 # ---------------------------------------------------------------------------

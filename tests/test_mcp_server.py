@@ -125,6 +125,18 @@ def cli_error(argv: Sequence[str]) -> str:
     return first.removeprefix("Error: ")
 
 
+def cli_stderr(argv: Sequence[str]) -> str:
+    """El stderr ENTERO del CLI cuando se niega. Para mensajes de varias líneas.
+
+    `cli_error` se queda con la primera porque compara el mensaje contra el de MCP; un error
+    de validación de Pydantic ocupa cuatro líneas y la enumeración de valores válidos está en
+    la tercera, así que quedarse con la primera sería mirar sólo el encabezado.
+    """
+    result = runner.invoke(app, [*argv, "--json"])
+    assert result.exit_code == 1, result.output
+    return result.stderr
+
+
 def call_mcp_tool(tool: str, arguments: dict[str, Any]) -> Any:
     """La herramienta, llamada por un cliente MCP real conectado en proceso al servidor."""
 
