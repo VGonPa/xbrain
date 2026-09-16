@@ -19,6 +19,7 @@ subprocess, no real downloads):
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from xbrain.digest import (
     group_items_by_video,
 )
 from xbrain.models import (
+    FRAME_CAPTION_CONTRACT,
     Author,
     ContentSourceSuccess,
     Item,
@@ -539,14 +541,29 @@ class _FakeVisual:
     `extract_fn` writes its frame files INTO the fetched video's parent (the
     ephemeral temp dir) — mirroring the real ffmpeg path — so the outer cleanup
     reclaims them. Records the calls so tests can assert extract/describe ran (or
-    did NOT, on the non-frames / talking-head paths)."""
+    did NOT, on the non-frames / talking-head paths).
 
-    def __init__(self, *, classification: str = "slides", n_frames: int = 2, describe=None):
+    The two reducers keep the FIRST `slides_keep` / `footage_keep` frames (`None`
+    = keep all) and record which one ran in `reduce_calls`, so a test can tell the
+    slide budget from the footage budget by the frames that come out."""
+
+    def __init__(
+        self,
+        *,
+        classification: str = "slides",
+        n_frames: int = 2,
+        describe=None,
+        slides_keep: int | None = None,
+        footage_keep: int | None = None,
+    ):
         self.classification = classification
         self.n_frames = n_frames
         self._describe = describe or (lambda path: f"description of {Path(path).name}")
+        self.slides_keep = slides_keep
+        self.footage_keep = footage_keep
         self.extract_calls: list[Path] = []
         self.describe_calls: list[Path] = []
+        self.reduce_calls: list[str] = []
         self.classify_calls = 0
 
     def extract(self, path: Path) -> list[KeyFrame]:
@@ -562,12 +579,22 @@ class _FakeVisual:
         self.describe_calls.append(Path(path))
         return self._describe(path)
 
+    def reduce_slides(self, frames: list[KeyFrame]) -> list[KeyFrame]:
+        self.reduce_calls.append("slides")
+        return frames if self.slides_keep is None else frames[: self.slides_keep]
+
+    def reduce_footage(self, frames: list[KeyFrame]) -> list[KeyFrame]:
+        self.reduce_calls.append("footage")
+        return frames if self.footage_keep is None else frames[: self.footage_keep]
+
     def config(self, media_root: Path) -> VisualConfig:
         return VisualConfig(
             media_root=media_root,
             extract_fn=self.extract,
             describe_fn=self.describe,
             classify_fn=self.classify,
+            reduce_fn=self.reduce_slides,
+            footage_reduce_fn=self.reduce_footage,
         )
 
 
@@ -866,6 +893,258 @@ def test_silent_slide_deck_keeps_frames(tmp_path: Path):
     assert report.visual_slides == 1
 
 
+# ------------------------------------------------------------ silent footage (non-slide, no speech)
+
+
+def _digest_messages(caplog) -> list[str]:
+    """The fully-formatted messages `xbrain.digest` logged — compared whole, never
+    searched for a fragment."""
+    return [r.getMessage() for r in caplog.records if r.name == "xbrain.digest"]
+
+
+def test_silent_non_slide_video_describes_its_frames_as_footage(tmp_path: Path, caplog):
+    """A SILENT video the classifier calls `talking_head` is not a talking head: with
+    no speech the frames are the only evidence, so they are kept, described and
+    embedded as `footage` — never attached as a hollow empty source."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    media_root = tmp_path / "media"
+    visual = _FakeVisual(classification="talking_head", n_frames=3, footage_keep=2)
+
+    with caplog.at_level(logging.INFO, logger="xbrain.digest"):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _silence(),
+            temp_root=tmp_path,
+            visual=visual.config(media_root),
+        )
+    src = store["a1"].content.sources[0]
+    assert src.kind == "x_video"
+    assert src.has_speech is False
+    assert src.text == ""
+    assert [(f.timestamp, f.local_path, f.description) for f in src.frames] == [
+        (0.0, "a1/frames/0.png", "description of frame-00000.png"),
+        (10.0, "a1/frames/1.png", "description of frame-00001.png"),
+    ]
+    assert src.caption_contract == FRAME_CAPTION_CONTRACT
+    assert sorted(p.name for p in (media_root / "a1" / "frames").iterdir()) == ["0.png", "1.png"]
+    assert [p.name for p in visual.describe_calls] == ["frame-00000.png", "frame-00001.png"]
+    assert (report.no_speech, report.visual_footage) == (1, 1)
+    assert (report.visual_slides, report.visual_skipped, report.hollow) == (0, 0, 0)
+    assert (
+        "digest-video: silent non-slide video — describing 2 frame(s) as footage for item a1"
+        in _digest_messages(caplog)
+    )
+    assert "digest-video: visual layer skipped (talking-head) for item a1" not in (
+        _digest_messages(caplog)
+    )
+
+
+def test_footage_is_capped_by_the_footage_reducer_not_the_slide_reducer(tmp_path: Path):
+    """Footage has its own, smaller budget: the slide reducer would keep 3 of 4
+    frames, the footage reducer keeps 1 — exactly 1 frame is described + attached,
+    and the slide reducer never runs."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="talking_head", n_frames=4, slides_keep=3, footage_keep=1)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == ["a1/frames/0.png"]
+    assert visual.reduce_calls == ["footage"]
+    assert len(visual.describe_calls) == 1
+    assert report.visual_footage == 1
+
+
+@pytest.mark.parametrize(
+    ("classification", "transcript"),
+    [
+        pytest.param("slides", _speech(), id="slides"),
+        pytest.param("talking_head", _silence(), id="footage"),
+    ],
+)
+def test_default_reducers_describe_every_extracted_frame(
+    tmp_path: Path, classification: str, transcript: Transcript
+):
+    """A `VisualConfig` built without reducers keeps every frame on BOTH kept paths
+    — the budgets are the CLI's to bind, never a hidden default cap."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    fake = _FakeVisual(classification=classification, n_frames=3)
+    visual = VisualConfig(
+        media_root=tmp_path / "media",
+        extract_fn=fake.extract,
+        describe_fn=fake.describe,
+        classify_fn=fake.classify,
+    )
+    digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: transcript,
+        temp_root=tmp_path,
+        visual=visual,
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == [
+        "a1/frames/0.png",
+        "a1/frames/1.png",
+        "a1/frames/2.png",
+    ]
+
+
+def test_talking_head_with_speech_still_skips_the_visual_layer(tmp_path: Path):
+    """With speech the transcript carries the content, so a `talking_head` video keeps
+    today's skip: no reducer, no vision call, no frame files, counted as a skipped
+    talking-head — and neither as footage nor as hollow."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    media_root = tmp_path / "media"
+    visual = _FakeVisual(classification="talking_head", n_frames=3, footage_keep=2)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech("an interview"),
+        temp_root=tmp_path,
+        visual=visual.config(media_root),
+    )
+    src = store["a1"].content.sources[0]
+    assert (src.text, src.has_speech, src.frames, src.caption_contract) == (
+        "an interview",
+        True,
+        [],
+        "",
+    )
+    assert visual.describe_calls == []
+    assert visual.reduce_calls == []
+    assert not (media_root / "a1" / "frames").exists()
+    assert (report.transcribed, report.visual_skipped) == (1, 1)
+    assert (report.visual_footage, report.visual_slides, report.hollow) == (0, 0, 0)
+
+
+def test_silent_footage_vision_failure_is_skipped_and_counted_hollow(tmp_path: Path, caplog):
+    """A `VisionFailed` while describing footage drops the visual layer exactly like
+    the slides path (`skipped`, warned) — and the item, now silent AND frameless, is
+    counted as hollow rather than as described footage."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+
+    def _boom(_path):
+        raise VisionFailed("model crashed")
+
+    visual = _FakeVisual(classification="talking_head", n_frames=2, describe=_boom)
+    with caplog.at_level(logging.INFO, logger="xbrain.digest"):
+        report = digest_videos(
+            store,
+            ["a1"],
+            fetch_fn=_FakeFetch(),
+            transcribe_fn=lambda _p: _silence(),
+            temp_root=tmp_path,
+            visual=visual.config(tmp_path / "media"),
+        )
+    src = store["a1"].content.sources[0]
+    assert (src.has_speech, src.frames, src.caption_contract) == (False, [], "")
+    assert (report.no_speech, report.hollow) == (1, 1)
+    assert (report.visual_footage, report.visual_slides, report.visual_skipped) == (0, 0, 0)
+    assert "digest-video: visual layer failed for item a1: model crashed" in (
+        _digest_messages(caplog)
+    )
+
+
+def _extraction_fails(_path: Path) -> list[KeyFrame]:
+    raise FrameExtractionFailed("Invalid data")
+
+
+@pytest.mark.parametrize(
+    ("extract", "classification"),
+    [
+        pytest.param(_extraction_fails, "talking_head", id="extraction-failed"),
+        pytest.param(lambda _p: [], "talking_head", id="zero-frames"),
+        pytest.param(None, "unreadable", id="all-unreadable"),
+    ],
+)
+def test_silent_video_non_content_drops_stay_skipped_and_hollow(
+    tmp_path: Path, extract, classification
+):
+    """Extraction failure, zero frames and all-unreadable frames stay `skipped` even
+    for a silent video — the footage path never describes what could not be read —
+    and each leaves the item hollow."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification=classification, n_frames=2)
+    config = visual.config(tmp_path / "media")
+    if extract is not None:
+        config = replace(config, extract_fn=extract)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=config,
+    )
+    assert store["a1"].content.sources[0].frames == []
+    assert visual.describe_calls == []
+    assert visual.reduce_calls == []
+    assert (report.no_speech, report.hollow) == (1, 1)
+    assert (report.visual_footage, report.visual_slides, report.visual_skipped) == (0, 0, 0)
+
+
+def test_silent_video_on_a_non_frames_run_is_counted_hollow_per_item(tmp_path: Path):
+    """Without `--frames` a silent video is attached with no text and no frames — a
+    hollow entry, counted per ITEM (two bookmarks of one video = 2), so the run
+    summary never hides it."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1), "a2": _item("a2", _VIDEO_A_URL_2)}
+    report = digest_videos(
+        store,
+        ["a1", "a2"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert (report.no_speech, report.videos_transcribed, report.hollow) == (2, 1, 2)
+    assert (report.visual_footage, report.visual_slides, report.visual_skipped) == (0, 0, 0)
+
+
+def test_speaking_video_on_a_non_frames_run_is_not_hollow(tmp_path: Path):
+    """A frameless video WITH speech is not hollow — its transcript is the content."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _speech(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert (report.transcribed, report.hollow) == (1, 0)
+
+
+def test_silent_slide_deck_uses_the_slide_reducer_not_the_footage_one(tmp_path: Path):
+    """A silent SLIDE deck keeps today's path: the slide reducer (keeps 2) decides the
+    set, the footage reducer (keeps 1) never runs, and it counts as slides — not as
+    footage, not as hollow."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="slides", n_frames=3, slides_keep=2, footage_keep=1)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    assert [f.local_path for f in store["a1"].content.sources[0].frames] == [
+        "a1/frames/0.png",
+        "a1/frames/1.png",
+    ]
+    assert visual.reduce_calls == ["slides"]
+    assert (report.no_speech, report.visual_slides) == (1, 1)
+    assert (report.visual_footage, report.visual_skipped, report.hollow) == (0, 0, 0)
+
+
 def test_redigest_with_fewer_slides_clears_stale_frame_files(tmp_path: Path):
     """A `--force` re-digest that yields FEWER slides must not leave stale
     higher-index PNGs orphaned on disk: `<id>/frames/` is cleared before the new
@@ -941,6 +1220,73 @@ def test_format_digest_summary_omits_visual_on_non_frames_run():
     Visual segment — the summary is byte-unchanged from the PR2/PR3 shape."""
     report = DigestReport(transcribed=1, groups={"amplify_video/1": ["a"]})
     assert "Visual:" not in format_digest_summary(report)
+
+
+# Today's summary line for the reports below, written out literally — never
+# rebuilt with `format_digest_summary`, which is the code under test.
+_BASE_SUMMARY = (
+    "Vídeos: transcritos 1, sin voz 2, ya digeridos 0, fallidos 0, "
+    "sin vídeo 0, desconocidos 0. "
+    "Dedup: 3 items ← 3 vídeos (3 transcritos este run)."
+)
+_THREE_GROUPS = {"amplify_video/1": ["a"], "amplify_video/2": ["b"], "amplify_video/3": ["c"]}
+
+
+def test_format_digest_summary_renders_the_full_visual_segment():
+    """Slides, silent footage and talking-head skips each get their own count, in
+    that order, as one exact segment right after the Dedup sentence."""
+    report = DigestReport(
+        transcribed=1,
+        no_speech=2,
+        videos_transcribed=3,
+        visual_slides=1,
+        visual_footage=1,
+        visual_skipped=1,
+        groups=_THREE_GROUPS,
+    )
+    assert format_digest_summary(report) == (
+        _BASE_SUMMARY + " Visual: 1 con slides, 1 metraje mudo descrito, 1 talking-head (saltados)."
+    )
+
+
+def test_format_digest_summary_shows_a_footage_only_visual_segment():
+    """A run whose only visual work was silent footage still prints the segment."""
+    report = DigestReport(
+        transcribed=1, no_speech=2, videos_transcribed=3, visual_footage=2, groups=_THREE_GROUPS
+    )
+    assert format_digest_summary(report) == (
+        _BASE_SUMMARY + " Visual: 0 con slides, 2 metraje mudo descrito, 0 talking-head (saltados)."
+    )
+
+
+def test_format_digest_summary_appends_hollow_to_todays_line():
+    """With no visual work, hollow items add exactly one sentence to today's line."""
+    report = DigestReport(
+        transcribed=1, no_speech=2, videos_transcribed=3, hollow=2, groups=_THREE_GROUPS
+    )
+    assert format_digest_summary(report) == (_BASE_SUMMARY + " Huecos (sin voz ni frames): 2.")
+
+
+def test_format_digest_summary_puts_hollow_after_the_visual_segment():
+    report = DigestReport(
+        transcribed=1,
+        no_speech=2,
+        videos_transcribed=3,
+        visual_slides=1,
+        visual_skipped=1,
+        hollow=1,
+        groups=_THREE_GROUPS,
+    )
+    assert format_digest_summary(report) == (
+        _BASE_SUMMARY
+        + " Visual: 1 con slides, 0 metraje mudo descrito, 1 talking-head (saltados)."
+        + " Huecos (sin voz ni frames): 1."
+    )
+
+
+def test_format_digest_summary_is_todays_line_without_hollow_or_visual_work():
+    report = DigestReport(transcribed=1, no_speech=2, videos_transcribed=3, groups=_THREE_GROUPS)
+    assert format_digest_summary(report) == _BASE_SUMMARY
 
 
 def test_digest_stamps_the_caption_contract_when_frames_were_described():
