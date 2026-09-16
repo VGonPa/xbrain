@@ -1093,8 +1093,8 @@ backend.
 
 **`numpy` is the `[embeddings]` extra, never a runtime dependency**, imported inside
 `vector_index._numpy()`. `import xbrain` works without it; a query that needs the matrix raises
-`VectorBackendUnavailable` naming `uv pip install 'xbrain[embeddings]'`; `index status` reports
-the plane `unreadable` instead of dying.
+`VectorBackendUnavailable` naming `uv pip install 'xbrain[embeddings]'`; `index status` records
+the plane as `unreadable` and prints that sentence on its `→` line instead of dying.
 
 ```
 data/index/
@@ -1106,7 +1106,7 @@ data/index/
 
 **The plane stores geometry and nothing else.** Rows are keyed by `sha256(text)`, so identical
 texts share one row, and the map runs `chunk_id → row`, **many-to-one**: each chunk keeps its
-own id, and therefore its own surface, owner, author and URL (spec §5.6, criterion §13.6). The
+own id, and therefore its own surface, owner, author and URL (spec §5.6, Plan 03 criterion 6). The
 plane holds no owner, author, URL or text — those have one home, the lexical `chunks` table — so
 a vector hit is hydrated through that row and passes the **same** resolvability and fingerprint
 gate as a lexical hit. The manifest's `embeddings` block IS `VectorSpec`, read off its dataclass
@@ -1134,7 +1134,7 @@ deeper window re-orders the head, so a window grown per page gave every page its
 and a cursor walk served one item twice. A channel that fills the window makes the response
 `truncated`.
 
-**The explanation is the product** (spec §5.3, criterion §13.7). Every fused match keeps
+**The explanation is the product** (spec §5.3, Plan 03 criterion 7). Every fused match keeps
 `matched_by`, `lexical_rank` and `vector_rank` — `None` exactly when that channel did not find
 the chunk, because `0` reads as a rank better than first — and the evidence is read off the SAME
 window the rank came from, so a chunk both channels found is explained by both. `score` is the

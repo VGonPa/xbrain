@@ -204,7 +204,7 @@ human view to judge a result; parse `--json` to consume one:
 ```bash
 uv run xbrain search "transformer attention" --limit 1 --json
 # → {"schema_version": "2", "query": …, "strategy": "lexical",
-#    "index": {"manifest_version": "4", "built_at": …,
+#    "index": {"manifest_version": "5", "built_at": …,
 #              "corrupt_chunks_excluded": 0, "degraded": ["no_embeddings"]},
 #    "results": [{"rank": 1, "item_id": …, "matches": [{"chunk_id": …,
 #       "origin": "asr", "trust_class": "machine_extracted",
@@ -312,8 +312,9 @@ never `0.0`. A zero from a filter nobody applied reads as "retrieval failed at
 filtering" when the truth is that the instrument was not there. `lexical` scores
 both `filtros` cases. The vector plane has **no filter columns**, so under
 `--strategy vector` and `--strategy hybrid` those two cases come back unmeasured —
-and `search` answers a filtered `vector`/`hybrid` request lexically, declaring it
-([below](#when-the-vector-channel-cannot-run)).
+and `search`, with the plane and the command in place, answers a filtered
+`vector`/`hybrid` request lexically, declaring it. Without them, `vector` is an
+error, filters or not ([below](#when-the-vector-channel-cannot-run)).
 
 ## Measuring it: the golden set
 
@@ -547,10 +548,10 @@ built. What keeps that from being silent:
 - `index update` reports the plane's debt (in `--json`: `vector_state`,
   `vector_missing` — chunks with no vector of their current text — and
   `vector_orphaned` — rows whose chunk is gone);
-- `index status` reports the plane's state: `absent` (none declared), `current`,
-  `behind`, `missing` (declared, files gone), `undeclared` (files the manifest does
-  not declare) or `unreadable` (a meta it cannot load, or `numpy` missing). When it is
-  not current, the `→` line gives the reason and the rebuild command;
+- `index status` names what is wrong with the plane on its `→` line, with the rebuild
+  command: declared files that are gone, files the manifest does not declare, a meta
+  it cannot load or `numpy` missing, chunks with no vector of their current text. It
+  prints the reason, not a state name;
 - a `vector`/`hybrid` query over a plane that is behind still runs the vector channel
   over the chunks it covers, **never serves a stale vector**, and declares
   `vector_plane_behind`.
@@ -646,14 +647,15 @@ population, its conditions and its re-derivation. What it decides:
 - **There is no winner.** `hybrid` is not promoted, `lexical` stays the default, and
   the fusion constants did not move. That is "the cheap floor does not beat lexical",
   not "no model beats lexical": the candidates that could have were never measured.
-- Closing §13.8 means running the remaining candidates on a machine without memory
+- Closing Plan 03's §13.8 means running the remaining candidates on a machine without memory
   pressure, with `xbrain eval --strategy vector|hybrid --embeddings-model <model>`,
   following the bake-off's §9.
 
 ### What the vector plane does not solve
 
-- **Filters.** The plane has no filter columns; a filtered request is answered
-  lexically, and `eval` leaves the `filtros` cases unmeasured under `vector`/`hybrid`.
+- **Filters.** The plane has no filter columns; with the plane and the command in
+  place, a filtered request is answered lexically, and `eval` leaves the `filtros`
+  cases unmeasured under `vector`/`hybrid`.
 - **Coverage after `update`.** There is no incremental re-embed and no vector-only
   rebuild: `index build --embeddings --force` rebuilds both planes.
 - **Query latency** with the reference embedder: a subprocess and a model load per query.
@@ -703,7 +705,8 @@ The manifest seals a `graph` block — `algorithm_version`, the three thresholds
 the edge count. `index update` rewrites the whole graph plane whenever any item,
 the vocabulary or the topic pages changed, and also when the thresholds or the
 algorithm version in force differ from the sealed ones — a change that, on its
-own, leaves the lexical planes untouched. A no-op update writes nothing. **`index status`
+own, leaves the lexical planes untouched. A no-op update leaves `knowledge.db` byte-identical
+and only reseals the manifest. **`index status`
 does not report that last case yet**: after editing a threshold it says nothing is
 behind, while `update` would rewrite the edges (backlog). Run `index update` after
 changing `[index].graph_*`.
@@ -719,8 +722,9 @@ item:2063609922667815064 → topic:ai-coding
 ```
 
 The human view prints the disclaimer (in `[output].language`) and one path per
-reached node. `--max-hops 2` reaches the co-occurring topics
-(`item → topic → topic`); `--max-neighbors N` keeps each node's N strongest edges
+reached node. `--max-hops 2` reaches the co-occurring topics and the other items
+of each topic (`item → topic → topic`, `item → topic → item`); `--max-neighbors N`
+keeps each node's N strongest edges
 (10 by default). `--json` returns the `GraphExpansionResponse`: nodes, edges and
 paths, each edge with `relation`, `method`, `weight`, `shared_items` and
 `supporting_item_ids`.
@@ -825,8 +829,8 @@ machinery to guard fifteen sentences, and each of three review rounds found
 another way to leave it green. The criteria's proofs are ordinary tests, and
 deleting one already leaves the suite a test short, which is visible without
 extra machinery. Nothing watches this table, so when a criterion changes state,
-edit its row. Two tests left with that file: the check of §13.12 through the
-CLI doors, and the `git check-ignore` check behind §13.13's personal paths. The
+edit its row. Two tests left with that file: the check of the spec's §13.12 through
+the CLI doors, and the `git check-ignore` check behind the spec's §13.13. The
 spot checks in those two rows replace them.
 
 ## Configuration

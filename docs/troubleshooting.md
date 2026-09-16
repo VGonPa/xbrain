@@ -24,12 +24,15 @@ Fix — re-import cookies from a browser you're logged in to:
 Google/SSO accounts — the automated browser gets blocked. Cookie import is the
 recommended path.
 
-## "Re-saw 0 known items on a non-empty store" — the run aborts without saving
+## `refresh-quoted` / `refresh-media`: "re-vio 0 de los N items ya conocidos" — the run aborts without saving
 
-A safety tripwire: extraction saw none of the items it already has, which almost
-always means an **expired session** or an X GraphQL change, not that your
-bookmarks vanished. It aborts rather than overwrite good data. Re-authenticate
-(above) and re-run. If you're sure the store is stale, `--force` overrides it.
+A safety tripwire on the two re-capture backfills (`refresh-quoted` without
+`--from-store`, and `refresh-media`; `extract` and `sync` do not run it): the
+re-capture saw none of the items the store already has, which almost always means
+an **expired session** or an X GraphQL change, not that your bookmarks vanished.
+The message reads `<command> re-vio 0 de los N items ya conocidos — …`, and the run
+aborts rather than overwrite good data. Re-authenticate (above) and re-run. If
+you're sure the store is stale, `--force` saves anyway.
 
 ## `extract` captured nothing — "0 respuestas de … en toda la timeline"
 
@@ -116,7 +119,8 @@ router.
 ## `digest-video` is slow or times out
 
 Local vision (`--frames`) is the bottleneck: a slide-heavy talk can have up to
-40 key-frames, and a local VLM reloads the model per frame. On a 16 GB Mac,
+60 key-frames (`[frames].max_frames`, applied after dedup), and a local VLM
+reloads the model per frame. On a 16 GB Mac,
 `qwen-7b` is ~2 min/frame → a long talk takes over an hour.
 
 - **First run of a large model** can exceed the 300 s per-frame timeout while it
@@ -185,11 +189,15 @@ loses data — just re-run it.
 
 ## Do I need an API key?
 
-No. The default execution mode (`vocab`/`enrich`/`topics`/`describe`) uses a
-**Claude Code session** — no key, no cost — and `video-digest`/`verify` run **only**
-on that keyless `claude-code` (or `manual`) track; they have no `api` track at all.
-`ANTHROPIC_API_KEY` is only for `--executor api` on the first four stages (unattended
-LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
+Not for `vocab`/`enrich`/`topics`: their default execution mode
+(`[enrich].executor`, default `claude-code`) uses a **Claude Code session** — no
+key, no cost — and `video-digest`/`verify` run **only** on that keyless
+`claude-code` (or `manual`) track; they have no `api` track at all. **`describe` is
+the exception:** it does not read `[enrich].executor`, and with no `--executor` it
+runs the `api` track, which needs the key. Pass `--executor claude-code` (or
+`manual`) to describe photos without one. `ANTHROPIC_API_KEY` is only for the `api`
+track of those four stages (unattended LLM runs, and `describe`'s default) and cloud
+vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
 fallback fetcher for JavaScript-heavy pages.
 
 ## `video-digest` / `verify` say "no pending" or "nothing to verify"
@@ -277,7 +285,7 @@ that checkout and `--golden-set` pointing at this one.
 
 No, and the distinction is the point. Three different things are NOT a score of 0.0:
 
-- **a stratum with no cases** (`expansion` has no mechanism until the graph exists);
+- **a stratum with no cases** (`expansion` was one until Plan 04 built the graph);
 - **a surface with no data** (`thread` and `user_note` have zero instances in the corpus, so
   no case can be written and none is invented);
 - **a case whose filters the strategy cannot apply** — it is reported under *casos NO
@@ -342,7 +350,7 @@ before it says which:
 
 | What the message says | What happened |
 |---|---|
-| `El índice fue construido con otra versión: schema_version '3' != '4'` — or a `surface_version`, `chunker_version` **or `chunker_params`** mismatch | you upgraded xbrain, or the chunker's parameters moved; the stored rows were cut and hashed by different code. **All four are checked, by every door**: a parameter change re-cuts every chunk under *identical* ids, so an index that only compared the version strings would answer over a corpus fingerprinted differently from the one it claims |
+| `El índice fue construido con otra versión: schema_version '4' != '5'` — or a `surface_version`, `chunker_version` **or `chunker_params`** mismatch | you upgraded xbrain, or the chunker's parameters moved; the stored rows were cut and hashed by different code. **All four are checked, by every door**: a parameter change re-cuts every chunk under *identical* ids, so an index that only compared the version strings would answer over a corpus fingerprinted differently from the one it claims |
 | `faltan las tablas …` / `faltan las columnas …` | the database is from an older schema, or was edited |
 | `El manifest no declara …` / `El manifest declara …, que este código no conoce` | `manifest.json` was hand-edited, or written by another version |
 | `El manifest no es un objeto JSON, es list` | `manifest.json` is corrupt |
@@ -399,8 +407,9 @@ Three causes, in the order they actually bite.
 the top ten for `agente` and for `agentes` shared **zero** items. Search for the
 form you expect to be written, or search for both.
 
-**It is lexical, not semantic.** It matches proper nouns, figures and exact
-phrases — not meaning. The response says so on every call
+**It is lexical, not semantic.** It matches proper nouns, figures and other
+literal terms — not meaning, and not phrases: a multi-word query matches any of
+its words. The response says so on every call
 (`degraded: ["no_embeddings"]` on an index without a vector plane). An optional
 vector plane exists (`--strategy hybrid`), but it is not the default and no
 candidate has been measured to beat lexical — [the bake-off](embeddings-bakeoff.md)
@@ -443,7 +452,9 @@ would be a lie about it. The message names what is missing:
 - an `embedder '…'` message — the backend is down; see the sections below.
 
 The one case where `vector` does answer lexically is a **filtered** request
-(`--topic`, `--from`, …): `degraded` carries `vector_filters_unsupported`.
+(`--topic`, `--from`, …) with the plane and the command both in place: `degraded`
+carries `vector_filters_unsupported`. Missing either, the filter does not save it
+from the errors above.
 
 ### `embedder '…' not found` / `could not be executed`
 
@@ -526,9 +537,9 @@ serving another model is not a backend that is down.
 
 The manifest declares a vector plane, and `vectors.f32` or `vectors.meta.json` is gone. A
 `vector` or `hybrid` query refuses rather than answering over half an index, and does not pay
-to embed the query first; `index status` reports the state as `missing`. The mirror case —
+to embed the query first; `index status` prints the second of those sentences on its `→` line. The mirror case —
 `Hay ficheros de plano vectorial … que el manifest no declara` — is files left beside a
-manifest that declares none (`undeclared`). Both are fixed by
+manifest that declares none. Both are fixed by
 `uv run xbrain index build --embeddings --force`.
 
 ### `El plano vectorial no cubre el corpus indexado: N fragmentos sin el vector de su texto actual…`
@@ -545,8 +556,7 @@ and declare `vector_plane_behind`. Restoring full coverage is a rebuild of both 
 checkout, install it with `uv sync --extra embeddings` (add `--extra dev` if you also run the
 quality gate). `uv sync` removes what its flags did not ask for, so a later `uv sync` without
 `--extra embeddings` uninstalls it again — the usual reason this error comes back. `index
-status` does not refuse over a missing `numpy`; it reports the plane as `unreadable` with this
-same sentence.
+status` does not refuse over a missing `numpy`; it prints this same sentence on its `→` line.
 
 ### `xbrain eval --strategy vector` refuses before measuring anything
 
@@ -594,7 +604,8 @@ Either the item has no topics (`enrich` never assigned any), or **the id does no
 exist**: today both come back as exit 0 with a single `item:<id>` node, and the two
 cannot be told apart from the output (backlog). Check the id with
 `uv run xbrain get <id>`, which refuses an unknown one. If the item exists and has
-topics, `--max-hops 2` is what reaches the co-occurring topics.
+topics, `--max-hops 2` is what reaches the co-occurring topics and the items that
+share a topic with it.
 
 ### I changed a `[index].graph_*` threshold and nothing happened
 
@@ -626,7 +637,7 @@ reach ([graph-threshold-sweep.md](graph-threshold-sweep.md)). The sentence says
 
 ### `xbrain mcp-serve` does not start, or the client sees no tools
 
-- **`Error: … necesita el extra opcional [mcp]`** — the SDK is not installed in
+- **``Error: … necesita el extra opcional `[mcp]`, que no está instalado…``** — the SDK is not installed in
   the environment the client launches. Launch through
   `uv run --directory /path/to/xbrain --extra mcp xbrain mcp-serve`, or install the
   extra ([docs/mcp.md](mcp.md#before-you-connect)).
@@ -640,7 +651,7 @@ reach ([graph-threshold-sweep.md](graph-threshold-sweep.md)). The sentence says
 - **Results from the wrong corpus** — same cause: check `--directory` and
   `XBRAIN_REPO_ROOT` in the client's configuration.
 
-### An MCP tool answers `Error executing tool xbrain.… : …`
+### An MCP tool answers `Error executing tool xbrain.…: …`
 
 That is an operator error, and the text after the colon is the same message the
 CLI prints for the same request — follow it as you would on the command line
