@@ -86,6 +86,12 @@ DEFAULT_MAX_FRAMES = 60
 # for long silent demos.
 DEFAULT_FOOTAGE_MAX_FRAMES = 6
 
+# The `[frames]` key behind the footage budget. `select_frames` logs a cap under it
+# at INFO — trimming silent footage to its small budget is the design, not a loss
+# the operator must act on — while any other cap (a slide deck losing distinct
+# slides) stays a WARNING.
+FOOTAGE_CAP_SETTING = "footage_max_frames"
+
 # Perceptual-hash (dHash) near-duplicate removal. Two frames whose 64-bit dHashes
 # differ by <= this Hamming distance are "the same slide" — the later one is
 # dropped. 6/64 tolerates JPEG/scale noise + a cursor/laser-pointer moving on a
@@ -368,8 +374,10 @@ def select_frames(
     covers DISTINCT slides; `max_frames` is a safety ceiling (a genuine deck with
     more distinct slides than the ceiling loses some to even subsampling — WARNED,
     not silent). `cap_setting` is the `[frames]` key that supplied `max_frames`,
-    named in that warning so it points at the knob that governs this video
-    (`footage_max_frames` for silent footage).
+    named in that log so it points at the knob that governs this video
+    (`FOOTAGE_CAP_SETTING` for silent footage). The cap is logged at WARNING,
+    except under `FOOTAGE_CAP_SETTING`, where trimming is the intended budget and
+    is logged at INFO.
     """
     if dedupe:
         before = len(frames)
@@ -377,7 +385,9 @@ def select_frames(
         logger.debug("digest-video: dedup kept %d/%d frames", len(frames), before)
     capped = _cap_evenly(frames, max_frames)
     if len(capped) < len(frames):
-        logger.warning(
+        level = logging.INFO if cap_setting == FOOTAGE_CAP_SETTING else logging.WARNING
+        logger.log(
+            level,
             "digest-video: capped %d distinct frames to %s=%d — raise "
             "[frames].%s to describe them all",
             len(frames),

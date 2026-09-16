@@ -95,6 +95,7 @@ from xbrain.video_fetch import (
     format_fetch_summary,
 )
 from xbrain.video_frames import (
+    FOOTAGE_CAP_SETTING,
     KeyFrame,
     extract_key_frames,
     select_frames,
@@ -1542,7 +1543,7 @@ def _build_visual_config(cfg: Config, vision_model: str | None = None) -> Visual
             dedupe=cfg.frames_dedupe,
             dedupe_distance=cfg.frames_dedupe_distance,
             max_frames=cfg.frames_footage_max_frames,
-            cap_setting="footage_max_frames",
+            cap_setting=FOOTAGE_CAP_SETTING,
         )
 
     return VisualConfig(

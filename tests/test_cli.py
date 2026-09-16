@@ -1,5 +1,6 @@
 # tests/test_cli.py
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2812,7 +2813,7 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
 
 
 @pytest.mark.parametrize(
-    ("writer", "transcript", "frames_toml", "kept", "summary", "cap_warning"),
+    ("writer", "transcript", "frames_toml", "kept", "summary", "cap_log"),
     [
         pytest.param(
             _write_photo_png,
@@ -2822,8 +2823,11 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
             "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
             "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
             "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
-            "digest-video: capped 5 distinct frames to footage_max_frames=2 — raise "
-            "[frames].footage_max_frames to describe them all",
+            (
+                "INFO",
+                "digest-video: capped 5 distinct frames to footage_max_frames=2 — raise "
+                "[frames].footage_max_frames to describe them all",
+            ),
             id="silent-footage-capped-by-footage_max_frames",
         ),
         pytest.param(
@@ -2834,8 +2838,11 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
             "Vídeos: transcritos 1, sin voz 0, ya digeridos 0, fallidos 0, sin vídeo 0, "
             "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
             "Visual: 1 con slides, 0 metraje mudo descrito, 0 talking-head (saltados).",
-            "digest-video: capped 5 distinct frames to max_frames=4 — raise "
-            "[frames].max_frames to describe them all",
+            (
+                "WARNING",
+                "digest-video: capped 5 distinct frames to max_frames=4 — raise "
+                "[frames].max_frames to describe them all",
+            ),
             id="slides-capped-by-max_frames",
         ),
         pytest.param(
@@ -2852,7 +2859,7 @@ _BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
     ],
 )
 def test_digest_video_frames_caps_footage_and_slides_with_their_own_budget(
-    tmp_path: Path, monkeypatch, caplog, writer, transcript, frames_toml, kept, summary, cap_warning
+    tmp_path: Path, monkeypatch, caplog, writer, transcript, frames_toml, kept, summary, cap_log
 ):
     """The CLI-built visual config gives each reducer its OWN `[frames]` budget.
 
@@ -2862,8 +2869,10 @@ def test_digest_video_frames_caps_footage_and_slides_with_their_own_budget(
     video would describe all 5; were the two swapped, the slide talk would keep 2.
     The third case leaves dedupe on: the five identical camera frames collapse to
     ONE before the cap, so the footage reducer honours `[frames].dedupe` too.
-    A capped run's warning names the setting that capped it, so an operator who
-    wants more frames raises the knob that governs THAT video.
+    A capped run's log names the setting that capped it, so an operator who
+    wants more frames raises the knob that governs THAT video — at WARNING for a
+    slide deck that lost slides, at INFO for footage, whose trim is intended. The
+    capture runs at INFO so the footage record is really seen.
     """
     from xbrain.store import load_store
 
@@ -2876,15 +2885,20 @@ def test_digest_video_frames_caps_footage_and_slides_with_their_own_budget(
     describe_calls: list = []
     _wire_frames(monkeypatch, describe_calls=describe_calls, writer=writer, n_frames=5)
 
-    result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    with caplog.at_level(logging.INFO, logger="xbrain.video_frames"):
+        result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
     assert result.exit_code == 0, result.output
     frames = load_store(items_path)["42"].content.sources[0].frames
     assert len(frames) == kept
     assert len(describe_calls) == kept  # the cap is a VISION budget, not just storage
     assert [frame.local_path for frame in frames] == [f"42/frames/{i}.png" for i in range(kept)]
     assert _summary_line(result.output) == summary
-    capped = [r.getMessage() for r in caplog.records if "distinct frames to" in r.getMessage()]
-    assert capped == ([cap_warning] if cap_warning else [])
+    capped = [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.name == "xbrain.video_frames" and "distinct frames to" in r.getMessage()
+    ]
+    assert capped == ([cap_log] if cap_log else [])
 
 
 def test_digest_video_frames_help_states_the_footage_rule():
