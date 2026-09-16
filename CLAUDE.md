@@ -136,7 +136,9 @@ generates an Obsidian wiki.
   robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
   6) — its frames are the only evidence, so dropping them left hollow entries. Any
   run appends `Huecos (sin voz ni frames): N` to its summary when N > 0 items still
-  end with neither speech nor frames (never a silent drop). Default off — a normal
+  end with neither speech nor frames (never a silent drop); recover them with
+  `--frames --force --keep-transcript`, which reuses the stored transcript because
+  re-running the ASR on music can invent words. Default off — a normal
   `digest-video` run never touches ffmpeg/vision.
 - Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
   channel through which on-screen text (slide labels, code, chart axes) reaches

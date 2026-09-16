@@ -194,11 +194,16 @@ jq -r 'to_entries[]
 ```
 
 Then re-digest them with the visual layer. `--force` is needed because they
-already carry an `x_video` source (it re-transcribes them too):
+already carry an `x_video` source, and `--keep-transcript` reuses the stored
+transcript so only the visual layer is redone:
 
 ```bash
-uv run xbrain digest-video --ids <ids-from-above> --frames --force
+uv run xbrain digest-video --ids <ids-from-above> --frames --force --keep-transcript
 ```
+
+Leave out `--keep-transcript` and the ASR runs again: on music it can invent
+words, and a video with invented words is skipped as a talking-head and no
+longer counted as hollow.
 
 Items digested without `--frames`, or before silent footage was described, come
 back with their frames. One that stays hollow had nothing describable, and the
