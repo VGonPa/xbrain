@@ -3442,6 +3442,26 @@ def graph_expand_command(
             typer.echo(" → ".join(path.nodes))
 
 
+@app.command("mcp-serve")
+@_handle_cli_errors
+def mcp_serve_command() -> None:
+    """Sirve el corpus por MCP (transporte stdio), para que lo consuma un agente externo.
+
+    Las tres herramientas —`xbrain.search`, `xbrain.get` y `xbrain.graph_expand`— son las
+    mismas consultas que este CLI, sobre los mismos servicios y con los mismos modelos de
+    respuesta: no hay una segunda semántica.
+
+    El decorador NO es decoración. Sin él, una máquina que instaló `xbrain` sin el extra
+    `[mcp]` recibe la excepción cruda y stderr VACÍO — medido: `assert 'xbrain[mcp]' in ''`.
+    `McpExtraMissing` hereda de `RuntimeError` precisamente para caer en `_OPERATOR_ERRORS` y
+    salir como `Error: … instálalo con: uv pip install 'xbrain[mcp]'` con código 1, que es el
+    mismo trato que recibe un `[vision].command` sin configurar (Plan 04 §4.5).
+    """
+    from xbrain.mcp_server import serve
+
+    serve()
+
+
 def _run_sweep(
     cfg,
     cases,
