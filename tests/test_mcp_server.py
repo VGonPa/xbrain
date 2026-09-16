@@ -270,3 +270,107 @@ def test_mcp_refuses_with_the_same_message_as_the_cli(case: ErrorCase, workspace
     assert case.tool in text
     assert text.endswith(message), text
     assert "Traceback" not in text
+
+
+# ---------------------------------------------------------------------------
+# Paso 26: read-only (§4.3)
+# ---------------------------------------------------------------------------
+
+# La escritura de prueba. Un `CREATE TABLE` es una escritura válida sea cual sea el esquema,
+# así que un fallo sólo puede venir de que la base esté abierta en sólo lectura — y no de un
+# `NOT NULL` o una columna que no existe, que es lo que un `INSERT` arriesgaría.
+WRITE_PROBE = "CREATE TABLE _mcp_write_probe (x)"
+
+
+def spy_on_index_writes(monkeypatch) -> list[BaseException | None]:
+    """Cada apertura del índice intenta escribir en ÉL, y anota qué pasó.
+
+    Se parchea el nombre en los módulos que lo USAN, no en `index_store`: los dos servicios
+    hacen `from … import open_for_query`, así que parchear el origen no los alcanzaría y el
+    espía se quedaría mirando una puerta por la que no pasa nadie.
+
+    La escritura se intenta DENTRO del espía a propósito: los servicios cierran la conexión
+    en un `finally`, así que intentarlo después daría «cannot operate on a closed database» —
+    un error que también se cumple con la base abierta en lectura y escritura, y que por
+    tanto no probaría nada.
+    """
+    from xbrain.knowledge import graph_service, index_store, search_service
+
+    attempts: list[BaseException | None] = []
+    real = index_store.open_for_query
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        index = real(*args, **kwargs)
+        try:
+            index.lexical.connection.execute(WRITE_PROBE)
+        except Exception as exc:  # noqa: BLE001 - se anota, se comprueba abajo
+            attempts.append(exc)
+        else:
+            attempts.append(None)
+        return index
+
+    for module in (search_service, graph_service):
+        monkeypatch.setattr(module, "open_for_query", spy)
+    return attempts
+
+
+def test_the_index_the_mcp_tools_open_refuses_a_write(indexed_workspace: Path, monkeypatch) -> None:
+    """Paso 26 / §4.3: la base que abren las tools RECHAZA una escritura.
+
+    «Comprobamos que no escribe» es una afirmación sobre el código; no poder escribir es una
+    propiedad del objeto. Lo que se interroga aquí es la conexión EXACTA que sirvió la
+    llamada MCP, no una que el test abra por su cuenta.
+    """
+    import sqlite3
+
+    attempts = spy_on_index_writes(monkeypatch)
+    call_mcp_tool("xbrain.search", {"query": "retrieval"})
+    call_mcp_tool("xbrain.graph_expand", {"item_id": "k03"})
+
+    assert len(attempts) == 2, "alguna tool no llegó a abrir el índice"
+    for attempt in attempts:
+        assert isinstance(attempt, sqlite3.OperationalError), attempt
+        assert "readonly" in str(attempt), attempt
+
+
+def _digest(root: Path) -> dict[str, str]:
+    """sha256 de las tres entradas del store Y de cada fichero del índice."""
+    import hashlib
+
+    files = [root / "data" / name for name in ("items.json", "vocab.yaml", "topics.json")]
+    files += sorted(p for p in (root / "data" / "index").rglob("*") if p.is_file())
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files
+    }
+
+
+def test_no_mcp_tool_writes_to_the_store_or_the_index(indexed_workspace: Path) -> None:
+    """Paso 26 / §4.3: después de las tres herramientas, ni un byte ha cambiado.
+
+    Las tres entradas y TODOS los ficheros del índice, no sólo `items.json`: una herramienta
+    que reescribiese `vocab.yaml` o compactase la base pasaría una comprobación de un fichero.
+    """
+    before = _digest(indexed_workspace)
+    assert len(before) > 3, "el índice no se construyó: la comprobación sería vacía"
+    for tool, arguments in (
+        ("xbrain.search", {"query": "retrieval"}),
+        ("xbrain.get", {"item_id": "k03"}),
+        ("xbrain.graph_expand", {"item_id": "k03"}),
+    ):
+        unwrap_mcp_content(call_mcp_tool(tool, arguments))
+    assert _digest(indexed_workspace) == before
+
+
+def test_mcp_get_answers_with_the_index_deleted(indexed_workspace: Path) -> None:
+    """Invariante 7 del spec §3.7, heredado: `get` lee el STORE, nunca el índice.
+
+    Vale la pena por MCP y no sólo por el servicio: si la herramienta hubiese añadido una
+    consulta al índice «para enriquecer», el invariante se rompería por la puerta nueva y el
+    test del servicio seguiría verde.
+    """
+    import shutil
+
+    shutil.rmtree(indexed_workspace / "data" / "index")
+    payload = json.loads(unwrap_mcp_content(call_mcp_tool("xbrain.get", {"item_id": "k03"})))
+    assert payload["item"]["item_id"] == "k03"
+    assert payload["surfaces"], "sin superficies la comprobación pasaría por vacío"
