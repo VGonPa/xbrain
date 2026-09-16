@@ -22,7 +22,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Iterator, Mapping, Sequence
+import socket
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -265,6 +266,23 @@ ERROR_CASES: tuple[ErrorCase, ...] = (
 )
 
 
+# El envoltorio que el SDK pone ALREDEDOR del mensaje, y lo ÚNICO que se le concede.
+#
+# Lo impone `mcp/server/mcpserver/tools/base.py`, que re-lanza todo fallo de una tool como
+# `ToolError(f"Error executing tool {self.name}: {exc}")`. No es negociable desde aquí: es el
+# texto que el agente lee, venga de donde venga. Por eso se fija ENTERO y se compara EXACTO.
+#
+# La comparación floja de antes —`case.tool in text` más `text.endswith(message)`— dejaba sin
+# atar todo lo que hubiera EN MEDIO, que es justo donde viviría un formato propio: medido,
+# cambiar `ToolError(str(exc))` por `ToolError(f"mutated error: {exc}")` dejaba los siete
+# casos en verde. Y eso es lo que el §4.1 («ni un formato propio») y el §4.3 («el MISMO error
+# estructurado que el CLI») niegan.
+#
+# Si un día el SDK cambia este envoltorio, este test se pone rojo, y debe: lo que cambia es
+# el texto que ve el agente.
+MCP_ERROR_FRAMING = "Error executing tool {tool}: {message}"
+
+
 @pytest.mark.parametrize("case", ERROR_CASES, ids=lambda case: case.id)
 def test_mcp_refuses_with_the_same_message_as_the_cli(case: ErrorCase, workspace: Path) -> None:
     """Paso 25 / §4.3: MCP da EL MISMO error estructurado que el CLI, no uno genérico.
@@ -273,6 +291,13 @@ def test_mcp_refuses_with_the_same_message_as_the_cli(case: ErrorCase, workspace
     en un `UnexpectedToolError` cuyo texto para el agente es literalmente `Error executing
     tool xbrain.search`: el operador recibe «constrúyelo con `xbrain index build`» y el
     agente, nada. Esa asimetría es lo que este test caza.
+
+    Se exige IGUALDAD EXACTA contra el envoltorio obligatorio del SDK con el mensaje del CLI
+    dentro. «Mismo error» significa el mismo, no uno que lo contenga: un prefijo propio, una
+    coletilla, un código inventado o un reformateo caben enteros dentro de un `in` y de un
+    `endswith`, y cualquiera de ellos es la puerta MCP hablando un idioma que el operador no
+    oye. La igualdad absorbe además el viejo `"Traceback" not in text`: un traceback en el
+    texto es, por construcción, un texto distinto del esperado.
     """
     if case.indexed:
         build_index()
@@ -280,9 +305,7 @@ def test_mcp_refuses_with_the_same_message_as_the_cli(case: ErrorCase, workspace
     assert case.names in message, message
 
     text = mcp_error(call_mcp_tool(case.tool, case.arguments))
-    assert case.tool in text
-    assert text.endswith(message), text
-    assert "Traceback" not in text
+    assert text == MCP_ERROR_FRAMING.format(tool=case.tool, message=message), text
 
 
 # ---------------------------------------------------------------------------
@@ -398,40 +421,104 @@ class NoNetworkAllowed(AssertionError):
     """Alguien intentó salir a la red durante una consulta."""
 
 
-def block_network(monkeypatch) -> None:
-    """Cierra la red: conectar, resolver un nombre o abrir una conexión LEVANTA.
+# El destino de todos los intentos: el puerto DISCARD (9) en loopback. Loopback para que un
+# control mal echado no mande nada fuera de la máquina, y el puerto 9 porque nadie escucha
+# ahí — un intento que atraviese el cerrojo se pierde, no se entrega.
+BLACKHOLE = ("127.0.0.1", 9)
 
-    Se corta en `connect`/`getaddrinfo`, NO en `socket.socket`. Crear un socket no es salir a
-    la red, y `asyncio.run` —que es quien conduce el cliente MCP en proceso— monta su
-    self-pipe con `socket.socketpair()`, que por dentro construye un `socket.socket`. Cortar
-    ahí mataría el bucle de eventos y el test «pasaría» por no haber llegado a ejecutar nada,
-    que es la forma más barata de fabricar un verde.
+
+def _udp() -> socket.socket:
+    """Un socket UDP SIN conectar: el que puede mandar sin haber pasado por `connect`."""
+    return socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+@dataclass(frozen=True)
+class Egress:
+    """Una salida a la red: dónde se corta, y la llamada EXACTA que lo demuestra.
+
+    El parche y su control salen de la MISMA fila a propósito. Una lista de cosas parcheadas
+    y otra de cosas comprobadas son dos definiciones de «qué es salir a la red» (regla 5), y
+    el día que divergen el cerrojo se queda con un agujero y su control verde al lado — que
+    es exactamente cómo `sendto` sobrevivió a la primera versión de este módulo. Aquí no se
+    puede añadir un parche sin añadir la llamada que lo ejerce, ni al revés.
     """
-    import socket
+
+    id: str
+    owner: Any
+    name: str
+    attempt: Callable[[], Any]
+
+
+_EGRESS: tuple[Egress, ...] = (
+    # CON conexión: el destino se fija antes, así que basta con cortar el `connect`. Es lo
+    # que hace cualquier cliente HTTP, y por tanto cualquier `requests`/`httpx` del futuro.
+    Egress("connect", socket.socket, "connect", lambda: _udp().connect(BLACKHOLE)),
+    Egress("connect_ex", socket.socket, "connect_ex", lambda: _udp().connect_ex(BLACKHOLE)),
+    Egress(
+        "create_connection",
+        socket,
+        "create_connection",
+        lambda: socket.create_connection(("example.invalid", 80)),
+    ),
+    # RESOLUCIÓN: un nombre resuelto es una consulta que YA salió, aunque después no se
+    # conecte nadie. `gethostbyname` no pasa por `getaddrinfo`: es otra entrada de la libc.
+    Egress("getaddrinfo", socket, "getaddrinfo", lambda: socket.getaddrinfo("example.invalid", 80)),
+    Egress(
+        "gethostbyname", socket, "gethostbyname", lambda: socket.gethostbyname("example.invalid")
+    ),
+    # SIN conexión: el datagrama lleva su destino DENTRO de la llamada, así que no pasa por
+    # `connect` y el cerrojo de arriba no lo ve. Este es el agujero que encontró la revisión:
+    # con sólo `connect`/`getaddrinfo` parcheados, un `sendto` real dentro de `_search` dejaba
+    # los dos tests del paso 27 en verde.
+    Egress("sendto", socket.socket, "sendto", lambda: _udp().sendto(b"x", BLACKHOLE)),
+    Egress("sendmsg", socket.socket, "sendmsg", lambda: _udp().sendmsg([b"x"], [], 0, BLACKHOLE)),
+)
+
+
+def block_network(monkeypatch) -> None:
+    """Cierra la red: conectar, resolver un nombre o MANDAR UN DATAGRAMA levanta.
+
+    Se corta en las filas de `_EGRESS`, y hay dos cosas que deliberadamente NO están ahí:
+
+    · `socket.socket` — crear un socket no es salir a la red, y `asyncio.run` —quien conduce
+      el cliente MCP en proceso— monta su self-pipe con `socket.socketpair()`, que por dentro
+      construye uno. Cortar ahí mataría el bucle de eventos y el test «pasaría» por no haber
+      llegado a ejecutar nada, que es la forma más barata de fabricar un verde.
+
+    · `send`/`sendall` — por lo mismo y por una razón más fuerte. Lo mismo: el self-pipe de
+      asyncio despierta el bucle con `csock.send(b"\\0")` (comprobado en
+      `asyncio.selector_events`), así que parchearlo rompe el servidor. Y la razón fuerte:
+      `send` NO lleva destino, lo saca del `connect` previo — que sí está cortado—, así que
+      un `send` a la red es inalcanzable con el cerrojo echado. `sendto` y `sendmsg` son las
+      dos que llevan el destino en la propia llamada, y por eso son las dos que hay que
+      cortar aparte.
+    """
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise NoNetworkAllowed(f"salida a la red durante una consulta: {args[:2]}")
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
-    monkeypatch.setattr(socket, "create_connection", refuse)
-    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    for egress in _EGRESS:
+        monkeypatch.setattr(egress.owner, egress.name, refuse)
 
 
-def test_the_network_block_actually_bites(indexed_workspace: Path, monkeypatch) -> None:
-    """El control del paso 27: sin esto, «las tools funcionaron» no prueba nada.
+@pytest.mark.parametrize("egress", _EGRESS, ids=lambda egress: egress.id)
+def test_the_network_block_actually_bites(egress: Egress, monkeypatch) -> None:
+    """El control del paso 27, UNA FILA POR SALIDA: sin esto, «las tools funcionaron» no
+    prueba nada.
 
     Un bloqueo mal puesto no rompe ningún test — deja pasar las tres herramientas
     exactamente igual que uno bien puesto. La única forma de que el verde de abajo signifique
     algo es demostrar aquí que el cerrojo está echado (regla 2).
-    """
-    import socket
 
+    Se comprueba fila a fila, y no con dos llamadas de muestra, porque una muestra sólo
+    habla de lo que muestrea: el cerrojo anterior cortaba `create_connection` y
+    `getaddrinfo`, su control probaba esas dos, y `sendto` pasaba por al lado con los dos
+    tests en verde. `NoNetworkAllowed` es una clase de este módulo, así que sólo puede
+    levantarla el parche: ninguna fila puede ponerse verde por un fallo del sistema.
+    """
     block_network(monkeypatch)
     with pytest.raises(NoNetworkAllowed):
-        socket.create_connection(("example.invalid", 80))
-    with pytest.raises(NoNetworkAllowed):
-        socket.getaddrinfo("example.invalid", 80)
+        egress.attempt()
 
 
 @pytest.mark.parametrize(
@@ -607,9 +694,21 @@ def test_the_tool_defaults_are_the_service_defaults(
 ) -> None:
     """§4.1: «ni un límite distinto». Cada default compartido sale del servicio.
 
-    La equivalencia CLI↔MCP NO cubre esto: si la herramienta trajera `limit=5` donde el
-    servicio trae 10, una consulta con tres resultados daría el MISMO documento por las dos
-    puertas y el recorte sólo aparecería en un corpus grande — es decir, nunca en un test.
+    Este test mira la FIRMA, no una respuesta, y por eso no depende de cuántos resultados
+    tenga el corpus.
+
+    La equivalencia CLI↔MCP sí depende, y hoy da la casualidad de que lo cubre: un
+    `limit=5` en el handler donde el servicio trae 10 también la pone roja —medido: UN
+    fallo, en `filter-author-and-dates`—. Pero eso es una propiedad de la FIXTURE, no del
+    test. Medidos los diez casos de `search` de su tabla por la puerta del CLI:
+    `filter-author-and-dates` sirve 10 items y es el ÚNICO por encima de cinco; los otros
+    siete con el límite por defecto sirven entre 1 y 3, y los dos restantes pasan un
+    `--limit 1` explícito, con lo que el default ni les llega. Es decir: la equivalencia
+    caza el recorte por UN caso de diez. El día que ese caso devuelva menos —un ítem que
+    cambia de autor, una fecha que se sale del rango— las dos puertas darán el MISMO
+    documento con defaults distintos y el recorte no aparecerá en ninguna parte. Un test
+    cuya cobertura depende de cuántas filas trae la fixture no es la defensa de un
+    contrato; éste lo es.
     """
     import inspect
 
