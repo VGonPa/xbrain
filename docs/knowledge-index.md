@@ -269,8 +269,13 @@ command to run, flags and all:
 ```
 
 `search` paginates the same way, for the same reason: its cursor (`s:<offset>`)
-is a position in the ranking that the query **and its filters** define, so the
-printed continuation repeats every filter and the page size beside `--cursor`.
+is a position in the ranking that the query, **its strategy and its filters**
+define. The printed continuation repeats every filter and the page size beside
+`--cursor`, but **not `--strategy`**. After a `--strategy hybrid` page, add it
+yourself: without it the next page comes from the `lexical` ranking, which
+repeats some results and never serves others that `hybrid` ranked. That
+page's heading names `lexical`, so the switch is visible. The printed line
+should carry the flag (backlog).
 
 ## The eight filters
 
@@ -331,9 +336,21 @@ stratum with no enumerated answers — is printed as **unmeasured**, never as `0
 The report goes under `data/`, which is not tracked, because it quotes the corpus.
 
 The lexical baseline to beat, as shipped (chunks of 800 characters, no overlap),
-is `recall@10` **0.7395** · MRR **0.7357**, measured on the 2,474-item store
-(sha256 `4fed54a0…`, 22,933 chunks). The two negative results built on it — the
-embeddings bake-off and the graph sweep — are summarised in their sections below.
+is `recall@10` **0.7391** · MRR **0.7357**, measured on the 2,474-item store
+(sha256 `4fed54a0…`, 22,933 chunks) against the tracked golden set
+(`eval/golden-set.yaml` sha256 `bf9aad8f…`), re-derived 2026-09-16 with
+`xbrain eval --sweep-chunker "target=800 overlap=0"`. Older documents quote
+**0.7395**: the same store and the same chunks against the golden set as it was
+before `d1423c8` (sha256 `ed6dd760…`), when case U3 listed 22 relevant items
+instead of 24. The MRR does not move. The recall moves with the golden set as
+well as with the corpus, so quote it with both hashes.
+
+The two negative results are summarised in their sections below, and each one
+states its own population. The embeddings bake-off was measured against that
+earlier golden set, on the same store: its lexical row reads 0.7395, at a
+depth of 20 rather than 10. The graph sweep used a later store (2,495 items), 18 cases and
+items served by `search` as its unit, and it says itself that its figures are not
+comparable with either number.
 
 ## Known limits of the lexical baseline
 
@@ -375,11 +392,14 @@ words to be adjacent. The human view's `frases exactas` wording overstates this.
 **A strategy you name is run or declared, never faked.** `hybrid` without a working
 vector channel answers `lexical` and names the cause; `vector` without one is an
 **error**, because you asked for vectors by name. `hybrid_graph` answers `lexical`
-labelled `hybrid_graph_not_implemented` from `search` and from MCP — **by default**:
-the graph re-ranking exists, behind a switch that only the Python API
-(`search(..., graph_enabled=True)`) and `xbrain eval --strategy hybrid_graph`
-turn on, and switching it on also opens the vector channel exactly as `hybrid`
-does ([below](#the-graph--opt-in-and-measured-negative)). A *typo*
+labelled `hybrid_graph_not_implemented` from `search`, from MCP and from
+`xbrain eval --strategy hybrid_graph` — **by default**: the graph re-ranking
+exists, behind a switch only the Python API turns on
+(`search(..., graph_enabled=True)`). The one command that reaches it is the
+threshold sweep, `xbrain eval --strategy hybrid_graph --sweep-graph …`; without
+`--sweep-graph` the report says `strategy: lexical`. Switching it on also opens
+the vector channel exactly as `hybrid` does
+([below](#the-graph--opt-in-and-measured-negative)). A *typo*
 (`--strategy vectro`) is refused: answering it with lexical results would turn a
 mistake into a measurement.
 
@@ -720,9 +740,14 @@ and then lets the graph re-order the page: items reachable from the best result
 through its topics get an extra RRF term. **The graph re-orders, it never
 admits**: a neighbour no channel scored is not a result.
 
-It is **off by default** (`GRAPH_ENABLED_BY_DEFAULT = False`) and neither
-`xbrain search` nor MCP can switch it on; only `search(..., graph_enabled=True)`
-and `xbrain eval --strategy hybrid_graph` do.
+It is **off by default** (`GRAPH_ENABLED_BY_DEFAULT = False`). Neither
+`xbrain search`, nor MCP, nor a plain `xbrain eval --strategy hybrid_graph` can
+switch it on: all three answer `lexical`, declaring
+`hybrid_graph_not_implemented`. Only `search(..., graph_enabled=True)` turns it
+on, and the only command that calls it that way is the sweep below,
+`xbrain eval --strategy hybrid_graph --sweep-graph …`. Measuring `hybrid_graph`
+at the applied threshold alone is therefore a one-cell sweep
+(`--sweep-graph "min_shared_items=5 min_weight=0.05"`).
 
 ### The threshold sweep: a negative result
 

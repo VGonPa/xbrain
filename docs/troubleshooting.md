@@ -612,10 +612,14 @@ $ uv run xbrain search "harness engineering" --strategy hybrid_graph
 ⚠ La estrategia `hybrid_graph` no tiene backend todavía: ha respondido `lexical`. Estos resultados NO son de `hybrid_graph`.
 ```
 
-Expected: the graph re-ranking is **off by default** and neither `xbrain search`
-nor MCP can switch it on. It is not missing — the Python API
-(`search(..., graph_enabled=True)`) and `xbrain eval --strategy hybrid_graph` run
-it — it is off because the measured result is negative: in all 16 threshold cells
+Expected: the graph re-ranking is **off by default**, and neither `xbrain search`
+nor MCP can switch it on — nor can `xbrain eval --strategy hybrid_graph`, which
+answers the same way (`strategy: lexical`, `hybrid_graph_not_implemented`). It is
+not missing: the Python API runs it (`search(..., graph_enabled=True)`), and so
+does the one command built on that call, the threshold sweep
+`xbrain eval --strategy hybrid_graph --sweep-graph …` — a single cell
+(`--sweep-graph "min_shared_items=5 min_weight=0.05"`) measures the applied
+threshold. It is off because the measured result is negative: in all 16 threshold cells
 it made `recall@10` worse and lifted none of the 33 results only the graph could
 reach ([graph-threshold-sweep.md](graph-threshold-sweep.md)). The sentence says
 "no tiene backend todavía", which is stale wording for "switched off" (backlog).

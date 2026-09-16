@@ -90,7 +90,10 @@ fields the CLI exposes as flags: `created_from`, `created_to`, `source`, `author
 before the index is touched, listing the valid ones. `strategy` accepts
 `lexical`, `vector`, `hybrid` and `hybrid_graph` — with the same outcomes as the
 CLI (see [Limits](#limits)). A truncated page carries a `cursor`; to continue,
-repeat the same `query`, `filters` and `limit` with that cursor.
+repeat the same `query`, `strategy`, `filters` and `limit` with that cursor. The
+cursor is only an offset and does not record the strategy. A continuation without
+`strategy` resumes in the `lexical` ranking, which repeats some results and skips
+others that `hybrid` had ranked.
 
 **`xbrain.get`.** Reads the **live store**, never the index, so it answers with
 `data/index/` deleted. Without `surfaces` it returns the index card: metadata,
@@ -183,9 +186,12 @@ No generative LLM is called on any of the three paths.
 ## Limits
 
 - **`hybrid_graph` cannot be switched on from here.** Asked for by name, it
-  answers `lexical` declaring `hybrid_graph_not_implemented` — as the CLI does.
-  The graph re-ranking exists behind a switch only the Python API and
-  `xbrain eval` pass, and the sweep that measured it found it helps no case
+  answers `lexical` declaring `hybrid_graph_not_implemented` — as `xbrain search`
+  and a plain `xbrain eval --strategy hybrid_graph` do. The graph re-ranking
+  exists behind a switch only the Python API passes
+  (`search(..., graph_enabled=True)`); the one command that reaches it is the
+  threshold sweep, `xbrain eval --strategy hybrid_graph --sweep-graph …`, and
+  that sweep found it helps no case
   ([graph-threshold-sweep.md](graph-threshold-sweep.md)).
 - **`vector` and `hybrid` need the opt-in vector plane** and a configured
   embedder; the degradation matrix is in

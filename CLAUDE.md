@@ -539,13 +539,18 @@ generates an Obsidian wiki.
   version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
   correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
   in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
-  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7395 · MRR 0.7357** — NOT the
+  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7391 · MRR 0.7357** — NOT the
   `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
   it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
-  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
+  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks)
+  against the TRACKED golden set, sha256 `bf9aad8f…` — re-derived 2026-09-16. It read
+  **0.7395** until then, and the documents that still quote 0.7395 (the bake-off among them)
+  are right about THEIR pair: the same store and chunks against the golden set before
+  `d1423c8` (sha256 `ed6dd760…`, U3 at 22 relevant instead of 24). A recall is a fact about the corpus
+  AND the case set; a figure that names only one of them is rule 2's missing population. Read
   `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
-  tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
-  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
+  tied at `recall@10` (0.7391; 0.7395 on the older set) and ahead on MRR at 0.7360, under
+  both, so pairing the winner's recall with this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
   has not beaten it (next bullet but one: incomplete, Plan 03 §13.8 NOT MET).
   Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
   **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
@@ -661,7 +666,9 @@ generates an Obsidian wiki.
   explicit paths whose support must resolve in the live store (else the whole expansion is
   refused) and REFUSES an index behind the store. `hybrid_graph` re-orders a `hybrid` page and
   never admits an unscored neighbour; `GRAPH_ENABLED_BY_DEFAULT = False` and only
-  `search(..., graph_enabled=True)` and `xbrain eval` switch it on. **Its sweep is NEGATIVE**
+  `search(..., graph_enabled=True)` switches it on — from the CLI, ONLY
+  `eval --strategy hybrid_graph --sweep-graph …`; a plain `eval --strategy hybrid_graph` answers
+  `lexical` + `hybrid_graph_not_implemented`, exactly like `search`. **Its sweep is NEGATIVE**
   (`docs/graph-threshold-sweep.md`, 2,495 items, 18 cases, 2026-09-15): all 16 cells lowered
   recall@10 and lifted **0 of 33** graph-only pairs — not promoted, `lexical` stays the default.
   `xbrain mcp-serve` (`mcp_server.py`, `[mcp]` extra, stdio) is a thin adapter over the three
@@ -671,7 +678,9 @@ generates an Obsidian wiki.
   `docs/mcp.md`, `docs/knowledge-for-agents.md`. **`tests/test_spec_closure.py` is spec §13 as an
   executable table**: 12 of 15 met; **§13.1** (no phrase search: terms are ORed), **§13.5** (the
   bake-off above) and **§13.14** (`docs/tutorial.md` stops at Plan 02) are NOT, each with a
-  witness that turns red when fixed. Three §13 lists exist (spec, Plan 03, Plan 04): name which.
+  witness that turns red when fixed. «§13.N» is ambiguous — the spec, Plan 01, Plan 02 and Plan 03
+  each have a §13 (criteria only in the spec and Plan 03; Plan 04's criteria are its **§11**):
+  name which.
   **Backlog, written so it is not lost:** no CLI/MCP switch for `hybrid_graph`; `index status`
   silent when the sealed graph thresholds/version differ from config (`index_build.py`,
   `index_store.py`); `graph-expand` on an unknown id exits 0 with one node; the SQL `CHECK` has

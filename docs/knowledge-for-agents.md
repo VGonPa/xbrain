@@ -37,7 +37,12 @@ Read three things on every response before reading any result:
   available. The full list is in
   [knowledge-index.md](knowledge-index.md#when-the-vector-channel-cannot-run).
 - **`truncated`** / **`cursor`**: the page is shorter than the ranking. Continue
-  with the same query, the same filters, the same `limit` and the cursor.
+  with the same query, the same `strategy`, the same filters, the same `limit`
+  and the cursor. The cursor is only a position in the ranking and does not
+  record which strategy produced it. Drop `strategy` and page 2 comes from the
+  default `lexical` ranking: results repeat, and some that `hybrid` ranked are
+  never served. The response still names the strategy that ran, so check that
+  `strategy` is the same on every page.
 
 Narrow with filters rather than with more words: dates (`created_from`,
 `created_to`), `source` (`bookmark` or `own_tweet`), `author`, `topics` (slugs of
@@ -87,10 +92,12 @@ uv run xbrain get 2063609922667815064 --surface external_article --query "tests"
 MCP: `xbrain.get` with `{"item_id": "…", "surfaces": ["external_article"]}`.
 
 `get` reads the **live store**, not the index, so what it returns is current even
-when `search` declared the index behind. A bare call is an index card — metadata,
-topics, the summary, `surfaces` listing what the item has, fetch `failures`,
-`unfetched_links` (with the reason the content is missing) and current
-`verification` verdicts. Ask for the bodies you need by name; asking for a surface
+when `search` declared the index behind. A bare call is an index card: metadata,
+topics, fetch `failures`, `unfetched_links` (with the reason the content is
+missing) and current `verification` verdicts. What the item has is listed in
+**`item.available_surfaces`**. The response's own `surfaces` field holds only
+what was delivered, which on a bare call is the `summary` alone, so do not read
+it as the list of what exists. Ask for the bodies you need by name; asking for a surface
 the item does not have is refused listing the ones it does.
 
 Long bodies are paginated, never cut silently: over the budget (40,000 characters

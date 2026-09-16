@@ -1291,8 +1291,11 @@ scored within `GRAPH_CANDIDATE_HORIZON` (the fused window) gets an extra RRF ter
 never admits**: a neighbour no channel scored is not a result. Because the channels score the
 whole candidate set, an item at lexical rank 40 can enter the top 10 — the delta is not zero by
 construction. With the index behind the store the graph does not run and the door answers as
-`hybrid`. The switch, `GRAPH_ENABLED_BY_DEFAULT`, is **`False`**, and only the Python API and
-`xbrain eval` pass `graph_enabled=True`.
+`hybrid`. The switch, `GRAPH_ENABLED_BY_DEFAULT`, is **`False`**. Only the Python API passes
+`graph_enabled=True`, and the one CLI path built on it is the sweep below
+(`evaluation.sweep_graph`). `evaluate()` — plain `xbrain eval --strategy hybrid_graph` — resolves
+the strategy through `resolve_strategy`, as `search` does with the switch off, so its report says
+`strategy: lexical`, `degraded: [hybrid_graph_not_implemented]`.
 
 **Measuring it** (`evaluation.py`, `xbrain eval --strategy hybrid_graph --sweep-graph …`). The
 sweep scores each threshold cell through `search_service.search` on its own index, orders the
@@ -1352,8 +1355,9 @@ test or renaming a cited heading turns it red, and each unmet criterion carries 
 turns red the day it is fixed. **Three are not met**: §13.1 (there is no phrase search — the
 query is a disjunction of terms), §13.5 (Plan 03's bake-off measured 1 of the ≥ 3 candidates its
 own §13.8 requires) and §13.14 (`docs/tutorial.md` was last updated with Plan 02). Watch the
-numbering: Plan 03 and Plan 04 each have a §13 of their own, and "§13.8" in the bake-off is
-Plan 03's.
+numbering. The spec, Plan 01, Plan 02 and Plan 03 each have a §13 of their own, and only the
+spec's and Plan 03's §13 list acceptance criteria (Plan 01's is its quality gates, Plan 02's its
+documentation). Plan 04 has no §13: its criteria are its §11. "§13.8" in the bake-off is Plan 03's.
 
 ---
 
