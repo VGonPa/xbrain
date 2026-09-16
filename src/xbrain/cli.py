@@ -1577,8 +1577,9 @@ def _run_digest_video(
     config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
     extracts key frames and describes them via the EXTERNAL `[vision]` command,
     attaching them to slide videos and to silent non-slide footage (a talking-head
-    with speech is skipped). `--keep-transcript` reuses each stored transcript
-    instead of re-running the transcriber. It is destructive (rewrites
+    with speech is skipped). `--keep-transcript` reuses each item's own stored
+    transcript instead of re-running the transcriber (the visual layer is still
+    redone, and the forced re-digest clears the long-form digest). It is destructive (rewrites
     `items.json`), so it auto-snapshots BEFORE the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
     takes no snapshot). A snapshot failure propagates and aborts before any write.
@@ -1624,7 +1625,10 @@ def digest_video(
         None, "--limit", help="Máximo número de items a procesar en esta ejecución."
     ),
     force: bool = typer.Option(
-        False, "--force", help="Re-transcribir items que ya tienen un source x_video."
+        False,
+        "--force",
+        help="Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
+        "con --keep-transcript.",
     ),
     language: str | None = typer.Option(
         None,
@@ -1651,8 +1655,9 @@ def digest_video(
     keep_transcript: bool = typer.Option(
         False,
         "--keep-transcript",
-        help="Con --frames --force: rehace solo la capa visual y reutiliza la transcripción "
-        "guardada (no vuelve a pasar el ASR). Úsalo para recuperar vídeos huecos.",
+        help="Con --frames --force: rehace la capa visual y reutiliza la transcripción "
+        "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
+        "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
     ),
 ) -> None:
     """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.

@@ -2999,23 +2999,74 @@ def test_digest_video_keep_transcript_recovers_a_hollow_item_without_the_asr(
     ]
     assert _summary_line(result.output) == (
         "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
-        "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+        "desconocidos 0. Dedup: 1 items ← 1 vídeos "
+        "(0 transcritos este run, 1 con transcripción guardada). "
         "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados)."
     )
 
 
-def test_digest_video_keep_transcript_help_names_the_recovery_use():
-    """The flag's help is the operator's contract, read from the option itself."""
+def test_digest_video_keep_transcript_gives_a_pending_sibling_its_own_transcript(
+    tmp_path: Path, monkeypatch
+):
+    """Item 7 (never digested) and item 42 (stored hollow) bookmark the same video,
+    and 7 is listed first. The ASR runs once, for 7 only: its invented words stay
+    on 7, and 42 keeps its empty transcript and gets its frame."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"7": _video_item("7", url=_AMPLIFY_URL_2), "42": _hollow_video_item()}, items_path)
+    calls: list = []
+    _wire_digest(monkeypatch, _speech_transcript("you you"), calls=calls)
+    _wire_frames(monkeypatch, writer=_write_photo_png)
+
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "7,42", "--frames", "--force", "--keep-transcript"]
+    )
+    assert result.exit_code == 0, result.output
+    assert [Path(call).name for call in calls] == ["7.mp4"]
+    store = load_store(items_path)
+    pending = store["7"].content.sources[0]
+    hollow = store["42"].content.sources[0]
+    assert (pending.text, pending.has_speech, pending.frames) == ("you you", True, [])
+    assert (hollow.text, hollow.has_speech) == ("", False)
+    assert [(f.local_path, f.description) for f in hollow.frames] == [
+        ("42/frames/0.png", "slide frame-00000")
+    ]
+    assert _summary_line(result.output) == (
+        "Vídeos: transcritos 1, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+        "desconocidos 0. Dedup: 2 items ← 1 vídeos "
+        "(1 transcritos este run, 1 con transcripción guardada). "
+        "Visual: 0 con slides, 1 metraje mudo descrito, 1 talking-head (saltados)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        pytest.param(
+            "keep_transcript",
+            "Con --frames --force: rehace la capa visual y reutiliza la transcripción "
+            "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
+            "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
+            id="keep-transcript",
+        ),
+        pytest.param(
+            "force",
+            "Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
+            "con --keep-transcript.",
+            id="force",
+        ),
+    ],
+)
+def test_digest_video_keep_transcript_help_names_the_recovery_use(option: str, expected: str):
+    """The help of `--keep-transcript` and of `--force` is the operator's contract,
+    read from the option itself: neither may claim what the other undoes."""
     from typer.main import get_command
 
     command = get_command(app).commands["digest-video"]
-    help_text = next(
-        (param.help for param in command.params if param.name == "keep_transcript"), None
-    )
-    assert help_text == (
-        "Con --frames --force: rehace solo la capa visual y reutiliza la transcripción "
-        "guardada (no vuelve a pasar el ASR). Úsalo para recuperar vídeos huecos."
-    )
+    help_text = next((param.help for param in command.params if param.name == option), None)
+    assert help_text == expected
 
 
 def test_frames_render_the_rubric_in_the_output_language(tmp_path: Path, monkeypatch):
