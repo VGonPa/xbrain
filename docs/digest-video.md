@@ -147,8 +147,11 @@ Read the summary: **transcritos** = had speech (by the transcriber's flag: one
 flagged as speech but with blank text counts here, and also under **Huecos**
 unless `--frames` describes its frames), **sin voz** = silent (no audio
 track — GIFs, muted clips; attached as `has_speech=false`, not a failure),
-**fallidos** = a real transcribe failure, **sin vídeo** = the video couldn't be
-fetched (deleted / unavailable), **Huecos** = items that ended the run with
+**fallidos** = the video was selected but nothing was attached — its fetch
+failed (a deleted or unavailable video lands here: a 404, a 5xx, a timeout) or
+its transcription failed, **sin vídeo** = the item is in the store but carries
+no downloadable mp4 (no video entry, or only an HLS / poster-era stream), so
+nothing was fetched, **Huecos** = items that ended the run with
 neither speech nor frames (without `--frames`, every silent one — see
 [hollow items](#finding-and-re-digesting-hollow-items)). Videos are **deduped by
 identity** — N bookmarks of the same clip are fetched + transcribed once.

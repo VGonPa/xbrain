@@ -378,12 +378,18 @@ uv run xbrain status     # see the counts
 | Chromium | — | Installed via `uv run playwright install chromium`. |
 | An Obsidian vault | — | Or any folder — XBrain just writes markdown. |
 | An X account | — | Yours. XBrain reads *your* bookmarks and tweets. |
-| `ANTHROPIC_API_KEY` | — | **Optional.** Only for the `api` execution mode. |
+| `ANTHROPIC_API_KEY` | — | **Optional** — except for a plain `xbrain describe` (see below). Used by the `api` execution mode and by cloud vision (`--vision-model opus`). |
 | `FIRECRAWL_API_KEY` | — | **Optional.** Fallback fetcher for JavaScript-heavy pages. |
 | ffmpeg, `parakeet-mlx`, `mlx-vlm` | — | **Optional — only for `digest-video`** (video → transcript/slide digests). External, not pulled by `uv pip install`. See [Local models for `digest-video`](#local-models-for-digest-video-apple-silicon). |
 
-Neither API key is required: the default execution mode uses a Claude Code
-session and costs nothing.
+`vocab`, `enrich`, `topics`, `video-digest` and `verify` need neither key: their
+default execution mode (`[enrich].executor`, default `claude-code`) uses a Claude
+Code session and costs nothing. **`describe` is the exception:** it does not read
+`[enrich].executor`, and with no `--executor` it calls the Anthropic API. Without
+`ANTHROPIC_API_KEY` it stops with a raw Python traceback (an authentication
+`TypeError` from the Anthropic SDK) as soon as there is a photo to describe. To
+describe photos without a key, run `xbrain describe --executor claude-code` (or
+`manual`). See [Do I need an API key?](docs/troubleshooting.md#do-i-need-an-api-key).
 
 ---
 
