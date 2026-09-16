@@ -41,14 +41,14 @@ medición local firmada (Plan 04 §1.3, §11.7 y §11.9), no un check de CI · *
 
 | | |
 |---|---|
-| Corpus | `data/items.json` sha256 `2773310f…` — 2.495 items · 45 topics · `vocab.yaml` sha256 `e73fbede…` · `topics.json` sha256 `d2f46a72…`. Los tres sha256 son idénticos antes y después de la corrida |
-| Fingerprints del índice | `store_fingerprint` `93f994d4…` · `vocab_fingerprint` `55da1032…` · `topics_fingerprint` `9af12df5…` (los que selló el manifest de la corrida) |
-| Golden set | `eval/golden-set.yaml` v3, sha256 `bf9aad8f…`: 23 casos, **18 medidos** (4 de ellos en el estrato `expansion`); 5 declarados no medibles (§3). U3 enumera 24 relevantes; en la firma anterior (golden set `ed590920…`) enumeraba 22 |
+| Corpus | `store-2495` (`data/items.json` · `vocab.yaml` · `topics.json`; sus sha256, en la [tabla de versiones medidas](knowledge-index.md#measured-versions)) — 2.495 items · 45 topics. Los tres sha256 son idénticos antes y después de la corrida |
+| Fingerprints del índice | `index-2495` en la misma tabla: `store_fingerprint` · `vocab_fingerprint` · `topics_fingerprint` (los que selló el manifest de la corrida) |
+| Golden set | `eval/golden-set.yaml` v3, `golden@d1423c8` en la misma tabla: 23 casos, **18 medidos** (4 de ellos en el estrato `expansion`); 5 declarados no medibles (§3). U3 enumera 24 relevantes; en la firma anterior (`golden@a88c753`) enumeraba 22 |
 | Código | xbrain `d1423c8`: el instrumento de `719954c`, la clasificación del estrato `expansion` de `92fd2d5` —que desde `ec162d3` lee la tabla `graph_edges` y no la salida de `graph_expand`— y sus etiquetas en el golden set. El umbral aplicado entró en `3beeea5`; este documento se re-firma en el commit siguiente |
 | Rejilla | `min_shared_items ∈ {2, 3, 5, 8}` × `min_weight ∈ {0.0, 0.02, 0.05, 0.10}` — la del Plan 04 §1.3, entera |
 | Profundidad | `k = 10` items por caso; un resultado directo expulsado de esa profundidad cuenta como puesto 11 |
 | Recuperación | `search_service.search` — la única puerta en la que existe `hybrid_graph` — sobre un índice propio en `data/eval-index/graph-sweep/`, construido con el escritor de `xbrain index build` y reescrito celda a celda con `index update`; cada celda comprueba contra su manifest que midió los umbrales que dice |
-| Máquina | Apple M2 · 16 GB · Python 3.13.7 · SQLite 3.50.4 · **317 s** de reloj para las 16 celdas más la clasificación del estrato `expansion` (ésta sola, 140 s leyendo `graph_expand` y 144 s leyendo `graph_edges`, en dos corridas aparte sobre el mismo store con el golden set `ed590920…`) |
+| Máquina | Apple M2 · 16 GB · Python 3.13.7 · SQLite 3.50.4 · **317 s** de reloj para las 16 celdas más la clasificación del estrato `expansion` (ésta sola, 140 s leyendo `graph_expand` y 144 s leyendo `graph_edges`, en dos corridas aparte sobre el mismo store con `golden@a88c753`) |
 
 **Lo que el instrumento NO mide, dicho antes de los números.**
 
@@ -123,7 +123,7 @@ preguntaba a `graph_expand` qué alcanzaba, y la ronda 2 del PR #198 lo reproduj
 mismos relevantes, omitir un nodo de la respuesta del servicio pasaba ese par de `graph_reachable` a
 `unreachable`. La población contra la que se lee «útiles» se movía con el servicio cuya ayuda esa columna
 mide. Ahora un test falsea esa respuesta de tres maneras y exige que no se mueva un solo par; y sobre este
-store la clasificación nueva y la antigua dieron los 58 pares del golden set `ed590920…` idénticos byte a
+store la clasificación nueva y la antigua dieron los 58 pares de `golden@a88c753` idénticos byte a
 byte: la definición no cambió, cambió de dónde se lee.
 
 **Re-firmado tras la ronda 2.** U3 enumeraba 22 relevantes y su criterio literal («harness engineering» en
@@ -242,12 +242,12 @@ WORK=$(mktemp -d)
 git clone --no-checkout "$SRC" "$WORK/xbrain"
 git -C "$WORK/xbrain" checkout --detach d1423c8
 (cd "$WORK/xbrain" && uv sync --locked)   # con el índice privado de pip de esta máquina: --index-url https://pypi.org/simple
-shasum -a 256 "$WORK/xbrain/eval/golden-set.yaml"                                   # compara con la §1
+shasum -a 256 "$WORK/xbrain/eval/golden-set.yaml"                                   # compara con golden@d1423c8 (tabla de versiones)
 
 ROOT=$WORK/root
 mkdir -p "$ROOT/data"
 for f in items.json vocab.yaml topics.json; do ln -s "$STORE/$f" "$ROOT/data/$f"; done
-shasum -a 256 "$ROOT"/data/items.json "$ROOT"/data/vocab.yaml "$ROOT"/data/topics.json   # compara con la §1
+shasum -a 256 "$ROOT"/data/items.json "$ROOT"/data/vocab.yaml "$ROOT"/data/topics.json   # compara con store-2495 (tabla de versiones)
 printf '[paths]\nvault = "vault"\noutput_subdir = ""\ndata_dir = "data"\n\n[x]\nhandle = "u"\n' > "$ROOT/config.toml"
 
 cd "$WORK/xbrain" && XBRAIN_REPO_ROOT="$ROOT" uv run xbrain eval --strategy hybrid_graph \

@@ -487,7 +487,8 @@ generates an Obsidian wiki.
   (The figure was **18,328 / 9,034** until `_absorb_scraps` merged the 9 chunks that sat below
   the floor; the commit that removed them said so and this line was not re-derived — rule 6 in
   miniature, in the file the repo says is read first and acted on. Re-derived 2026-08-31 on the
-  same 2,404-item corpus, md5 `5aaf62f4…`. **30,449 is NOT re-derivable**: it measured the
+  same 2,404-item corpus, `store-2404-0831` — no copy of it survives, so 18,319 cannot be re-derived
+  today either (docs/knowledge-index.md#measured-versions). **30,449 is NOT re-derivable**: it measured the
   pre-packing implementation, which no longer exists, so read it as history, never as a figure
   you could reproduce today.) The chunker's parameters are ARGUMENTS, so the Plan-02 sweep
   cannot move the ranking fixture that pins today's behaviour.
@@ -537,29 +538,31 @@ generates an Obsidian wiki.
   runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
   as a function word can still be rare to the index and go undiscounted — `el` is 1 of 49
   fixture chunks (2.0 %) and **6,070 of 22,286** real ones (**27.2 %**), re-derived 2026-09-01
-  on the then-shipped chunker (v2, `800/0`, store sha256 `f76341a3…`), which is why a fixture
+  on the then-shipped chunker (v2, `800/0`, `store-2404-0901`, not reproducible — see the versions
+  table in docs/knowledge-index.md#measured-versions), which is why a fixture
   query ranks it high and the real corpus does not. **`CHUNKER_VERSION` is `v3` since Plan
   02.9**, and this count still stands: v3 changed the FINGERPRINT projection (the served title
   joined the hashed tuple) and not the cut, proven by the version-stripped ranking fixture
   being byte-identical across the bump — so the chunk ids moved and the chunk COUNT did not.
   Do not re-stamp a measured figure to a new version without that proof: which of the two a
   version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
-  correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
-  in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
+  correct for the PROVISIONAL chunker v1 and for `store-2404-0831`; the chunker moved in this
+  branch, the store moved too (`store-2404-0901` is another file with the same 2,404 items), and
+  the derived figure did not — rule 6. Read the old pair as history.)*
   **The pair Plan 03's vector layer has to beat is `recall@10` 0.7391 · MRR 0.7357** — NOT the
   `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
   it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
-  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks)
-  against the TRACKED golden set, sha256 `bf9aad8f…` — re-derived 2026-09-16. It read
+  harness in `evaluation.sweep_chunker` (`store-2474`, 22,933 chunks) against the TRACKED
+  golden set, `golden@d1423c8` — re-derived 2026-09-16; every version named here is spelled
+  out, hash and check command, in docs/knowledge-index.md#measured-versions. It read
   **0.7395** until then, and the documents that still quote 0.7395 (the bake-off among them)
   are right about THEIR pair: the same store and chunks against a golden set from before
   `d1423c8`, with U3 at 22 relevant instead of 24. There are TWO such sets, and both score
-  0.7395: `d1423c8^` is sha256 `ed590920…`, and the bake-off's (`547a860`, before `a88c753`,
-  which only added `expansion` stratum labels and their notes) is sha256 `ed6dd760…` — `git show
-  <rev>:eval/golden-set.yaml | shasum -a 256`. A recall is a fact about the corpus
+  0.7395: `d1423c8^` is `golden@a88c753`, and the bake-off's (`547a860`, before `a88c753`,
+  which only added `expansion` stratum labels and their notes) is `golden@427fea9`. A recall is a fact about the corpus
   AND the case set; a figure that names only one of them is rule 2's missing population. Read
   `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
-  tied at `recall@10` (0.7391; 0.7395 on `ed6dd760…`) and ahead on MRR at 0.7360, under
+  tied at `recall@10` (0.7391; 0.7395 on `golden@427fea9`) and ahead on MRR at 0.7360, under
   both, so pairing the winner's recall with this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
   has not beaten it (next bullet but one: incomplete, Plan 03 §13.8 NOT MET).
   Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
@@ -608,11 +611,11 @@ generates an Obsidian wiki.
   measurement). *(This line said `--strategy vector` degrades labelled `vector_not_implemented`;
   true until Plan 03.6, false since — `vector` without vectors is now an error.)* `render.py` is the human view of the SAME
   response model `--json` serialises and reaches back into nothing. **Measured 2026-09-12 on the
-  live corpus (2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
+  live corpus (`store-2474`: 2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
   `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
   loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
   store.** HISTORY since 04.2: those figures predate the graph plane. On the 2,495-item store of
-  the graph sweep (sha256 `2773310f…`, index rebuilt 2026-09-16) `knowledge.db` is 53.6 MiB, 1.6 MiB of
+  the graph sweep (`store-2495`, index rebuilt 2026-09-16) `knowledge.db` is 53.6 MiB, 1.6 MiB of
   it `graph_edges` WITH its three indexes (the table alone is 0.64 MiB; `dbstat`); timings were not re-taken (machine swapping). Re-derive it; it
   moves with the corpus. **Known limits, declared not discovered:** no
   stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
