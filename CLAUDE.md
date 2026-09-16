@@ -539,14 +539,22 @@ generates an Obsidian wiki.
   version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
   correct for the PROVISIONAL chunker v1 and for the store md5 `5aaf62f4…`; the chunker moved
   in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
-  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7395 · MRR 0.7357** — NOT the
+  **The pair Plan 03's vector layer has to beat is `recall@10` 0.7391 · MRR 0.7357** — NOT the
   `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
   it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
-  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks). Read
+  harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks)
+  against the TRACKED golden set, sha256 `bf9aad8f…` — re-derived 2026-09-16. It read
+  **0.7395** until then, and the documents that still quote 0.7395 (the bake-off among them)
+  are right about THEIR pair: the same store and chunks against a golden set from before
+  `d1423c8`, with U3 at 22 relevant instead of 24. There are TWO such sets, and both score
+  0.7395: `d1423c8^` is sha256 `ed590920…`, and the bake-off's (`547a860`, before `a88c753`,
+  which only added `expansion` stratum labels and their notes) is sha256 `ed6dd760…` — `git show
+  <rev>:eval/golden-set.yaml | shasum -a 256`. A recall is a fact about the corpus
+  AND the case set; a figure that names only one of them is rule 2's missing population. Read
   `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
-  tied at `recall@10` 0.7395 and ahead on MRR at 0.7360, so pairing the winner's recall with
-  this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
-  has not beaten it (next bullet but one: incomplete, §13.8 NOT MET).
+  tied at `recall@10` (0.7391; 0.7395 on `ed6dd760…`) and ahead on MRR at 0.7360, under
+  both, so pairing the winner's recall with this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
+  has not beaten it (next bullet but one: incomplete, Plan 03 §13.8 NOT MET).
   Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
   **A threshold that reached no bucket is a FAILURE, not a pass**: `--min-recall`
   counts the comparisons it made and fails closed at zero, because `passed = not failures` let
@@ -587,7 +595,8 @@ generates an Obsidian wiki.
   Degradations are a fixed-order tuple, DECLARED not simulated: `no_embeddings` is read off the
   manifest's `embeddings` block (not hard-coded — an index built with `--embeddings` stops
   declaring it by itself), a requested vector channel that did not run is named by cause (next
-  bullet), `hybrid_graph` degrades to lexical labelled `hybrid_graph_not_implemented`, and a TYPO
+  bullet), `hybrid_graph` degrades to lexical labelled `hybrid_graph_not_implemented` while its
+  switch is off (the default, and the only state `search`/MCP reach — next bullet), and a TYPO
   raises (a typo is not a degradation; answering it with lexical results would turn it into a
   measurement). *(This line said `--strategy vector` degrades labelled `vector_not_implemented`;
   true until Plan 03.6, false since — `vector` without vectors is now an error.)* `render.py` is the human view of the SAME
@@ -595,7 +604,10 @@ generates an Obsidian wiki.
   live corpus (2,474 items · 45 topics): 10,570 surfaces · 22,933 chunks · 2,474 profiles,
   `build` 3.1 s, no-op `update` 0.8 s, `search --limit 10` 0.65 s wall (median of 5, dominated by
   loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
-  store.** Re-derive it; it moves with the corpus. **Known limits, declared not discovered:** no
+  store.** HISTORY since 04.2: those figures predate the graph plane. On the 2,495-item store of
+  the graph sweep (sha256 `2773310f…`, rebuilt 2026-09-16) `knowledge.db` is 53.6 MiB, 1.6 MiB of
+  it `graph_edges` WITH its three indexes (the table alone is 0.64 MiB; `dbstat`); timings were not re-taken (machine swapping). Re-derive it; it
+  moves with the corpus. **Known limits, declared not discovered:** no
   stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
   tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
   `transformer`/`transformers` share 7 — and IDF is relative to THIS corpus. Diacritics DO fold
@@ -640,13 +652,50 @@ generates an Obsidian wiki.
   plane the disk cannot serve, and a query vector of another dimension or another model, are
   errors under BOTH (`tests/test_knowledge_degradation.py`, one test per §5 row). Full matrix
   with the message each case prints: `docs/knowledge-index.md`. **The bake-off is INCOMPLETE and
-  criterion §13.8 does NOT PASS** (`docs/embeddings-bakeoff.md`, measured 2026-09-13): 1 of the
+  Plan 03's criterion §13.8 does NOT PASS** (`docs/embeddings-bakeoff.md`, measured 2026-09-13): 1 of the
   ≥ 3 candidates required — `paraphrase-multilingual-MiniLM-L12-v2`, measured and losing under
   both strategies; `multilingual-e5-small` interrupted by memory and disk pressure;
   `multilingual-e5-base`, `bge-m3` and `jina-embeddings-v3` never run. So `hybrid` is NOT promoted
   and the fusion constants did not move. Read it as "the cheap floor does not beat lexical",
   NEVER as "no model beats lexical". Quote none of its figures without its §1 (corpus sha256,
   golden-set version, one laptop already swapping); re-derive with its §9.
+- **The minimal graph, MCP, and the spec closure (Plan 04) — the corpus/world line is DATA.**
+  `index build` writes `graph_edges` beside the lexical planes: items and topics only,
+  `HAS_PRIMARY_TOPIC`/`HAS_TOPIC` per assignment and a Jaccard-weighted `CO_OCCURS_WITH` between
+  topics (thresholds `[index].graph_*`, applied `5 / 0.05`, cap 10; no item→item edge, a SQL
+  `CHECK` refuses one). An edge is **co-occurrence in this corpus, never a relationship in the
+  world**, and `GraphExpansionResponse` carries it as single-value `Literal`s (`semantics`,
+  `disclaimer_key`) so it survives an agent summarising the prose away. `graph-expand` serves
+  explicit paths whose support must resolve in the live store (else the whole expansion is
+  refused) and REFUSES an index behind the store. `hybrid_graph` re-orders a `hybrid` page and
+  never admits an unscored neighbour; `GRAPH_ENABLED_BY_DEFAULT = False` and only
+  `search(..., graph_enabled=True)` switches it on — from the CLI, ONLY
+  `eval --strategy hybrid_graph --sweep-graph …`; a plain `eval --strategy hybrid_graph` answers
+  `lexical` + `hybrid_graph_not_implemented`, exactly like `search`. **Its sweep is NEGATIVE**
+  (`docs/graph-threshold-sweep.md`, 2,495 items, 18 cases, 2026-09-15): all 16 cells lowered
+  recall@10 and lifted **0 of 33** graph-only pairs — not promoted, `lexical` stays the default.
+  `xbrain mcp-serve` (`mcp_server.py`, `[mcp]` extra, stdio) is a thin adapter over the three
+  services with the CLI's loaders, derived schemas, the CLI's operator errors as `ToolError`,
+  and `CORPUS_IS_DATA` on every tool; the trust boundary is DECLARED, not locked (no own network
+  call; the only external process is `[embeddings].command`, off by default). Operation:
+  `docs/mcp.md`, `docs/knowledge-for-agents.md`. **Spec §13 is a TABLE in
+  `docs/knowledge-index.md`** (criterion · what proves it · state): 12 of 15 met; **§13.1** (no
+  phrase search: terms are ORed), **§13.5** (the bake-off above) and **§13.14**
+  (`docs/tutorial.md` stops at Plan 02) are NOT. Nothing checks the table: edit the row when a
+  state changes. It was an executable test, `tests/test_spec_closure.py`, until 04.8 removed it
+  as a SCOPE decision, not a quality one. It was 1,127 lines guarding fifteen sentences, and
+  across three review rounds it produced six blockers of one family: each round found another
+  way to leave it green. Do not rebuild it without a different approach. «§13.N» is ambiguous —
+  the spec, Plan 01, Plan 02 and Plan 03 each have a §13 (criteria only in the spec and Plan 03; Plan 04's criteria are its **§11**):
+  name which.
+  **Backlog, written so it is not lost:** no CLI/MCP switch for `hybrid_graph`; `index status`
+  silent when the sealed graph thresholds/version differ from config (`index_build.py`,
+  `index_store.py`); `graph-expand` on an unknown id exits 0 with one node; the SQL `CHECK` has
+  no test; `resolve_locator` has no consumer; `max_hops`/node caps not in `config.toml`; the
+  disclaimer is inline in the CLI; stale strings (`implementadas hoy: lexical`, "no tiene
+  backend todavía", "frases exactas"). The unknown-id exit, `resolve_locator`, the caps and the
+  inline disclaimer are PR #193's unlabelled backlog — the «F3–F6 of 04.3», a mapping no written
+  record confirms.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 - `enrich` is the LLM stage that writes `Item.enriched` (`summary` · `topics` ·

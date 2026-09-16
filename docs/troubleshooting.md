@@ -571,6 +571,83 @@ filter columns — which is the rule working, not a bug. **Unmeasured is never
 filtering" when the instrument was not there. See
 [the stratum question above](#eval-reports-a-stratum-as-sin-cobertura--is-that-a-failure).
 
+### The graph: an index built before it existed is refused
+
+The graph plane (`graph_edges`) changed the database layout, so an index sealed by
+an earlier xbrain is not updated in place: `index update` and the query doors end
+with `xbrain index build --force` ([above](#reconstruye-el-índice-con-xbrain-index-build---force)).
+Rebuild once and the graph is there. `index status --json` shows it in the
+manifest's `graph` block (`algorithm_version`, the three thresholds, `edges`).
+
+### `graph-expand` refuses: `El índice va por detrás del store (index_behind_store)`
+
+`search` answers over an index behind the store and declares it; `graph-expand`
+refuses, because its edges may describe a corpus that no longer exists. Run
+`uv run xbrain index update`. The same fix applies to
+`La arista … se apoya en items que ya no están en el store`: an edge whose
+listed support left the store makes the whole expansion refuse rather than serve a
+path nothing supports.
+
+### `graph-expand` returns one node and no paths
+
+Either the item has no topics (`enrich` never assigned any), or **the id does not
+exist**: today both come back as exit 0 with a single `item:<id>` node, and the two
+cannot be told apart from the output (backlog). Check the id with
+`uv run xbrain get <id>`, which refuses an unknown one. If the item exists and has
+topics, `--max-hops 2` is what reaches the co-occurring topics.
+
+### I changed a `[index].graph_*` threshold and nothing happened
+
+The edges are written by `index build` / `index update`, not read from
+`config.toml` at query time. Run `uv run xbrain index update`: it rewrites the
+graph plane when the thresholds differ from the ones the manifest sealed, and
+leaves the rest alone. **`index status` does not flag this state yet** — it reports
+nothing behind while `update` would rewrite the edges (backlog).
+
+### I asked for `hybrid_graph` and the response says `lexical`
+
+```
+$ uv run xbrain search "harness engineering" --strategy hybrid_graph
+"harness engineering" · estrategia lexical
+⚠ La estrategia `hybrid_graph` no tiene backend todavía: ha respondido `lexical`. Estos resultados NO son de `hybrid_graph`.
+```
+
+Expected: the graph re-ranking is **off by default**, and neither `xbrain search`
+nor MCP can switch it on — nor can `xbrain eval --strategy hybrid_graph`, which
+answers the same way (`strategy: lexical`, `hybrid_graph_not_implemented`). It is
+not missing: the Python API runs it (`search(..., graph_enabled=True)`), and so
+does the one command built on that call, the threshold sweep
+`xbrain eval --strategy hybrid_graph --sweep-graph …` — a single cell
+(`--sweep-graph "min_shared_items=5 min_weight=0.05"`) measures the applied
+threshold. It is off because the measured result is negative: in all 16 threshold cells
+it made `recall@10` worse and lifted none of the 33 results only the graph could
+reach ([graph-threshold-sweep.md](graph-threshold-sweep.md)). The sentence says
+"no tiene backend todavía", which is stale wording for "switched off" (backlog).
+
+### `xbrain mcp-serve` does not start, or the client sees no tools
+
+- **`Error: … necesita el extra opcional [mcp]`** — the SDK is not installed in
+  the environment the client launches. Launch through
+  `uv run --directory /path/to/xbrain --extra mcp xbrain mcp-serve`, or install the
+  extra ([docs/mcp.md](mcp.md#before-you-connect)).
+- **The client reports the server failed or exited.** Run the exact command the
+  client runs in a terminal: it should start and wait silently on stdin (Ctrl-C to
+  stop). Anything printed before that is the cause.
+- **Tools listed, `search` and `graph_expand` error with `No hay índice en …`** —
+  the server is reading a checkout without an index (`get` still answers: it reads
+  the store, never the index). It reads `config.toml` and `data/` from the
+  checkout it runs from (or from `XBRAIN_REPO_ROOT`); build the index there.
+- **Results from the wrong corpus** — same cause: check `--directory` and
+  `XBRAIN_REPO_ROOT` in the client's configuration.
+
+### An MCP tool answers `Error executing tool xbrain.… : …`
+
+That is an operator error, and the text after the colon is the same message the
+CLI prints for the same request — follow it as you would on the command line
+(`xbrain index build`, `xbrain index update`, a valid item id, a declared
+strategy). A bare `Error executing tool xbrain.search` with nothing after it is a
+bug, not a configuration problem: report it with the arguments you sent.
+
 ### An index error prints a second, empty `Error:` line
 
 Cosmetic, and known. Both CLI error handlers fire on an index error, so the clean

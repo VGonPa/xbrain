@@ -1,23 +1,56 @@
-# The knowledge index — operating it
+# The knowledge index — what it does, how it works, how to use it
 
-`xbrain index build` turns the store into a persistent SQLite/FTS5 index under
-`data/index/`, and `xbrain search` reads it. `xbrain get` does not — it serves
-evidence from the live store, and keeps working with `data/index/` deleted.
-This page is the operational half: when to rebuild, what it costs, and what the
-lexical baseline cannot do. The shape of it — planes, manifest, invalidation — is in
-[ARCHITECTURE.md](../ARCHITECTURE.md#the-persistent-index).
+This is the page to read without opening the code. It goes from building the
+index to connecting an agent; the shape underneath — planes, manifest,
+invalidation — is in [ARCHITECTURE.md](../ARCHITECTURE.md#the-knowledge-layer).
 
-An optional **vector plane** and the `vector` / `hybrid` strategies sit beside the
-lexical index. They are opt-in, `lexical` stays the default, and the bake-off that
-would justify changing that is incomplete — see
-[The vector plane and `hybrid`](#the-vector-plane-and-hybrid--opt-in-and-not-the-default).
+## In plain words
 
-Everything here was measured on one corpus and re-derived on 2026-09-12: **2,474
-items, 45 topics**, macOS/APFS, a warm page cache. Your numbers will differ; the
-commands that produce them are printed beside each one, so read these as a shape
-rather than as a promise.
+Your saved posts live in `data/items.json`, with everything xbrain gathered around
+each one: the linked article, the thread, the quoted post, the video transcript,
+the image descriptions, and the summary and topics it generated. That store is the
+truth. The **knowledge index** is a search engine built next to it, so that you —
+or an agent — can ask a question and get back **the exact passages** that answer
+it, each labelled with where it came from.
 
-## The five commands
+| Piece | What it does | How it works |
+|---|---|---|
+| **The index** (`index build`) | Makes the corpus searchable | Cuts every text into passages of about 800 characters ("chunks"), keeps a fingerprint of each, and stores them in a SQLite file under `data/index/` with a full-text index (FTS5). A manifest records what was indexed and with which settings. |
+| **`search`** | Finds the posts that match a question | Scores passages by the words they share with the question, rare words counting more (bm25), then groups them by post, at most three passages per post. |
+| **`get`** | Hands over one post's evidence in full | Reads the live store, not the index, so it is never out of date. Long texts come in pages. |
+| **Provenance labels** | Tells you who wrote each passage | Every passage says whether it was captured from the source, heard by speech recognition, seen by a vision model, or written by xbrain itself (a summary). |
+| **`graph-expand`** | Shows which topics and posts sit around a post | A small graph of posts and topics, built from the topics xbrain assigned. Two topics are linked when enough posts carry both. |
+| **Vector search** (opt-in) | Finds passages by meaning, not only by words | An external program you configure turns passages into vectors; `hybrid` merges both rankings. Off by default, and not shown to beat word search yet. |
+| **`mcp-serve`** | Lets an agent use all of the above | A small server that offers `search`, `get` and `graph_expand` to Claude Code or Claude Desktop, with the same answers the CLI gives. |
+| **`eval`** | Measures whether retrieval finds the right posts | Runs the questions in `eval/golden-set.yaml`, whose right answers are known, and reports recall per kind of question. |
+
+Nothing on this path calls a generative model, nothing writes your store, and the
+index can be deleted and rebuilt at any time. The one outside program it may
+start is the embedder you configure for vector search — off by default.
+
+### End to end
+
+```bash
+uv run xbrain index build                           # 1. build it (once)
+uv run xbrain search "harness engineering"          # 2. ask
+uv run xbrain get 2063609922667815064 --surface external_article   # 3. read the source
+uv run xbrain graph-expand --item 2063609922667815064              # 4. look around
+uv run xbrain index update                          # 5. after enrich/topics/fetch: catch up
+claude mcp add xbrain -- uv run --directory "$PWD" --extra mcp xbrain mcp-serve   # 6. give it to an agent (run from the checkout)
+```
+
+Step 2 prints, for each post, the passages that matched, and a `verifica con:` line
+naming the source to read when a match landed on text xbrain wrote; step 3 is how
+you read it (a bare `get <id>` lists the surfaces an item has). Step 6 is
+[docs/mcp.md](mcp.md), and what the agent should do with the answers is
+[docs/knowledge-for-agents.md](knowledge-for-agents.md).
+
+Unless a section says otherwise, the figures below were measured on one corpus on
+2026-09-12: **2,474 items, 45 topics**, macOS/APFS, a warm page cache, **before the
+graph plane existed**. Your numbers will differ; the commands that produce them
+are printed beside each one, so read these as a shape rather than as a promise.
+
+## The seven commands
 
 ```bash
 uv run xbrain index build     # build data/index/ from scratch and seal it
@@ -25,20 +58,22 @@ uv run xbrain index update    # touch only what changed since the last build
 uv run xbrain index status    # what the index holds, and how far behind it is
 uv run xbrain search "…"      # ranked items with citable fragments
 uv run xbrain get <item-id>   # one item's evidence, from the STORE (never the index)
+uv run xbrain graph-expand --item <item-id>   # topics and items around one item
+uv run xbrain mcp-serve       # the same three queries, for an agent (stdio)
 ```
 
 `build`, `update` and `status` WRITE only `data/index/`, and none of them takes a
 snapshot, because there is nothing of yours to lose: **`data/index/` is derived
 and reconstructible**, it is never versioned, and deleting it costs one
-`build`. They do READ your store: all five commands load `items.json`,
+`build`. They do READ your store: every command above loads `items.json`,
 `vocab.yaml` and `topics.json` through the same loader, which is why the `build`
 below costs 9.5 s wall for 3.1 s of work. `status` goes further and WALKS what
 it read — a fingerprint per item, plus the topic records the three inputs imply
 — and that walk is what lets it answer *how many* items changed rather than
 merely *something moved*.
 
-`search` opens the database `mode=ro`, so a stray write is an error rather than
-a silent repair. `get` never opens `data/index/`: a bare `get` reads the live
+`search` and `graph-expand` open the database `mode=ro`, so a stray write is an
+error rather than a silent repair. `get` never opens `data/index/`: a bare `get` reads the live
 store and opens no database at all, and `get --query` opens one that exists
 nowhere on disk — a scratch `sqlite3(":memory:")` holding only that item's own
 chunks, built to rank them with the same scorer `search` uses, and closed before
@@ -55,6 +90,7 @@ index declares its own staleness instead of hoping you remember.
 | `extract`, `fetch`, `enrich`, `topics`, `vocab`, `digest-video`, `describe` | `index update` |
 | upgraded xbrain and `status` says the manifest is incompatible | `index build --force` |
 | deleted `data/index/` | `index build` |
+| edited `[index].graph_*` in `config.toml` | `index update` — it rewrites the graph plane |
 | nothing — you just want to know | `index status` |
 
 `update` is the normal path. It compares each item's fingerprint against the
@@ -92,6 +128,14 @@ On disk:
 So the index costs roughly **3× the store it indexes**. Most of that is FTS5's
 inverted index over two planes — chunk bodies and item profiles — plus the chunk
 rows themselves.
+
+**The graph plane came later and is small.** Re-measured on the 2,495-item store
+of the graph sweep (`items.json` sha256 `2773310f…`, index built on 2026-09-16
+with the default thresholds): `knowledge.db` is **53.6 MiB**, of which the
+`graph_edges` table and its three indexes take **1.6 MiB** (`dbstat`), for 5,783
+edges. The 52 MiB above predates that plane and that corpus. Timings were not
+re-taken: the machine was swapping hard (load average above 70) and a wall clock
+measured there describes the machine, not xbrain.
 
 What a build reports it skipped, on this corpus:
 
@@ -225,8 +269,13 @@ command to run, flags and all:
 ```
 
 `search` paginates the same way, for the same reason: its cursor (`s:<offset>`)
-is a position in the ranking that the query **and its filters** define, so the
-printed continuation repeats every filter and the page size beside `--cursor`.
+is a position in the ranking that the query, **its strategy and its filters**
+define. The printed continuation repeats every filter and the page size beside
+`--cursor`, but **not `--strategy`**. After a `--strategy hybrid` page, add it
+yourself: without it the next page comes from the `lexical` ranking, which
+repeats some results and never serves others that `hybrid` ranked. That
+page's heading names `lexical`, so the switch is visible. The printed line
+should carry the flag (backlog).
 
 ## The eight filters
 
@@ -266,6 +315,47 @@ both `filtros` cases. The vector plane has **no filter columns**, so under
 and `search` answers a filtered `vector`/`hybrid` request lexically, declaring it
 ([below](#when-the-vector-channel-cannot-run)).
 
+## Measuring it: the golden set
+
+`eval/golden-set.yaml` is a versioned list of questions whose right answers — item
+ids enumerated by hand from the real corpus — are known. It is tracked in Git on
+purpose (questions and ids, no corpus bodies), and CI validates its structure
+without a store. Each case belongs to one or more **strata** (`exacto`,
+`semantico`, `cruzado_idioma`, `filtros`, `enterrado`, `multimodal`, `expansion`,
+…), because one global number hides the question types that fail.
+
+```bash
+uv run xbrain eval                                  # lexical, report in data/eval-report.{json,md}
+uv run xbrain eval --strategy hybrid --embeddings-model <model>   # the bake-off
+uv run xbrain eval --min-recall 0.5                 # exit non-zero if a bucket falls below
+```
+
+The report gives recall@k, MRR and nDCG per strategy × stratum × provenance. A
+case the strategy cannot measure — a filter the vector plane cannot apply, a
+stratum with no enumerated answers — is printed as **unmeasured**, never as `0.0`.
+The report goes under `data/`, which is not tracked, because it quotes the corpus.
+
+The lexical baseline to beat, as shipped (chunks of 800 characters, no overlap),
+is `recall@10` **0.7391** · MRR **0.7357**, measured on the 2,474-item store
+(sha256 `4fed54a0…`, 22,933 chunks) against the tracked golden set
+(`eval/golden-set.yaml` sha256 `bf9aad8f…`), re-derived 2026-09-16 with
+`xbrain eval --sweep-chunker "target=800 overlap=0"`. Older documents quote
+**0.7395**: the same store and the same chunks against a golden set from before
+`d1423c8`, when case U3 listed 22 relevant items instead of 24. Two versions
+fit that description and both score 0.7395: `d1423c8^` (sha256 `ed590920…`) and
+the one before `a88c753` (sha256 `ed6dd760…`), which differs from it only in the
+`expansion` stratum (its labels and their notes). Check a hash with
+`git show <rev>:eval/golden-set.yaml | shasum -a 256`. The MRR does not move.
+The recall moves with the golden set as well as with the corpus, so quote it
+with both hashes.
+
+The two negative results are summarised in their sections below, and each one
+states its own population. The embeddings bake-off was measured against the
+`ed6dd760…` golden set (commit `547a860`), on the same store: its lexical row reads 0.7395, at a
+depth of 20 rather than 10. The graph sweep used a later store (2,495 items), 18 cases and
+items served by `search` as its unit, and it says itself that its figures are not
+comparable with either number.
+
 ## Known limits of the lexical baseline
 
 These are declared, not discovered later. The optional vector plane is designed
@@ -285,22 +375,37 @@ ranking. If an accent seems to change your results, the cause is elsewhere —
 usually a different word entirely.
 
 **IDF is relative to this corpus.** bm25 discounts a term by how common it is
-*here*, not in the language. `el` appears in 27.2 % of real chunks, so it is
-discounted heavily; a word that reads like a function word to you may be rare to
-the index and go undiscounted. This is also why a fixture-sized index ranks
-differently from the real one.
+*here*, not in the language. `el` appears in roughly 27–28 % of real chunks (6,070
+of 22,286 on the store of 2026-09-01; 28.0 % on the 2,474-item store above, per
+the umbrella audit of 2026-09-13), so it is discounted heavily; a word that reads
+like a function word to you may be rare to the index and go undiscounted. This is
+also why a fixture-sized index ranks differently from the real one.
 
-**Lexical means lexical.** It retrieves proper nouns, figures and exact phrases,
-not conceptual similarity. Every response over an index built without
-`--embeddings` says so: `degraded: ["no_embeddings"]`, read off the manifest's
-`embeddings` block rather than hard-coded, so an index built with `--embeddings`
-stops declaring it on its own.
+**Lexical means lexical.** It retrieves proper nouns, figures, handles and other
+literal terms, not conceptual similarity. Every response over an index built
+without `--embeddings` says so: `degraded: ["no_embeddings"]`, read off the
+manifest's `embeddings` block rather than hard-coded, so an index built with
+`--embeddings` stops declaring it on its own.
+
+**There is no phrase search.** The query is split into terms, each quoted so that
+punctuation stays literal (`@simonw`, `11.37%`), and the terms are joined with
+`OR`: `"harness engineering"`, quotes included, asks for chunks with *harness* or
+*engineering*, and bm25 usually ranks those with both higher. It does not require the two
+words to be adjacent. The human view's `frases exactas` wording overstates this.
 
 **A strategy you name is run or declared, never faked.** `hybrid` without a working
 vector channel answers `lexical` and names the cause; `vector` without one is an
-**error**, because you asked for vectors by name; `hybrid_graph` (Plan 04) answers
-`lexical` labelled `hybrid_graph_not_implemented`. A *typo* (`--strategy vectro`) is
-refused: answering it with lexical results would turn a mistake into a measurement.
+**error**, because you asked for vectors by name. `hybrid_graph` answers `lexical`
+labelled `hybrid_graph_not_implemented` from `search`, from MCP and from
+`xbrain eval --strategy hybrid_graph` — **by default**: the graph re-ranking
+exists, behind a switch only the Python API turns on
+(`search(..., graph_enabled=True)`). The one command that reaches it is the
+threshold sweep, `xbrain eval --strategy hybrid_graph --sweep-graph …`; without
+`--sweep-graph` the report says `strategy: lexical`. Switching it on also opens
+the vector channel exactly as `hybrid` does
+([below](#the-graph--opt-in-and-measured-negative)). A *typo*
+(`--strategy vectro`) is refused: answering it with lexical results would turn a
+mistake into a measurement.
 
 **The staleness signal is cheap and falible, in one known direction.**
 `index_behind_store` compares the `mtime_ns` and size of the three inputs against
@@ -559,6 +664,171 @@ population, its conditions and its re-derivation. What it decides:
 - **Verification.** `matched_by` says which channel found a chunk, not whether the
   chunk supports a claim. That is still `xbrain get` and the `verifica con` line.
 
+## The graph — opt-in, and measured negative
+
+`index build` also writes a small graph into `knowledge.db`, next to the lexical
+planes. It exists to **explain and explore** — which topics an item sits in, which
+topics travel together, which items support that — and not, as measured, to
+improve search.
+
+### What is in it
+
+- **Nodes:** items and topics. Nothing else.
+- **`HAS_PRIMARY_TOPIC` / `HAS_TOPIC`:** one edge per (item, topic) that `enrich`
+  assigned, primary kept apart from secondary. Never pruned.
+- **`CO_OCCURS_WITH`:** topic ↔ topic, in both directions with the same weight,
+  when at least `graph_min_shared_items` items carry both **and** their Jaccard
+  index (shared items ÷ items carrying either) reaches `graph_min_weight`. Jaccard
+  rather than a raw count, so a topic assigned to half the corpus does not
+  co-occur with everything. Each topic then keeps its
+  `graph_max_neighbors_per_node` strongest edges. Each edge keeps `shared_items`
+  (the full count), up to 20 `supporting_item_ids`, its `method`
+  (`topic-cooccurrence/v1`) and the fingerprints of what it was derived from.
+- **No item → item edge exists**, and a `CHECK` on the table refuses one: two
+  items are related only through a topic they share, so the path always shows
+  which assignment connects them.
+
+An edge means *xbrain assigned these topics together to these items of this
+corpus*. It never means the concepts are related in the world, and the response
+carries that in its data (`semantics: "co_occurrence_in_corpus"`), not only in
+this sentence.
+
+On the 2,495-item store of the sweep (sha256 `2773310f…`, default thresholds):
+**5,783 edges** — 2,495 `HAS_PRIMARY_TOPIC`, 3,128 `HAS_TOPIC`, 160
+`CO_OCCURS_WITH` among 41 topics — in **1.6 MiB** of the database.
+
+### Keeping it current
+
+The manifest seals a `graph` block — `algorithm_version`, the three thresholds and
+the edge count. `index update` rewrites the whole graph plane whenever any item,
+the vocabulary or the topic pages changed, and also when the thresholds or the
+algorithm version in force differ from the sealed ones — a change that, on its
+own, leaves the lexical planes untouched. A no-op update writes nothing. **`index status`
+does not report that last case yet**: after editing a threshold it says nothing is
+behind, while `update` would rewrite the edges (backlog). Run `index update` after
+changing `[index].graph_*`.
+
+### Reading it: `graph-expand`
+
+```bash
+$ uv run xbrain graph-expand --item 2063609922667815064
+This edge reflects co-occurrence in this corpus, not a relationship in the world.
+item:2063609922667815064 → topic:agentic-engineering
+item:2063609922667815064 → topic:ai-agents
+item:2063609922667815064 → topic:ai-coding
+```
+
+The human view prints the disclaimer (in `[output].language`) and one path per
+reached node. `--max-hops 2` reaches the co-occurring topics
+(`item → topic → topic`); `--max-neighbors N` keeps each node's N strongest edges
+(10 by default). `--json` returns the `GraphExpansionResponse`: nodes, edges and
+paths, each edge with `relation`, `method`, `weight`, `shared_items` and
+`supporting_item_ids`.
+
+Two guarantees, both enforced when the response is built:
+
+- **every path rests on ids that resolve in the live store** — an edge whose
+  listed support has left the store makes the whole expansion refuse, it is never
+  served half-true;
+- **an index behind the store is refused**, not expanded: its edges may belong to
+  a corpus that no longer exists. `search` only declares that state; `graph-expand`
+  stops (`Ejecuta xbrain index update`).
+
+One gap, in the backlog: an `--item` that does not exist returns exit 0 with a
+one-node expansion, indistinguishable from an item with no topics.
+
+### `hybrid_graph`, and why it is off
+
+`hybrid_graph` runs `hybrid` (lexical plus the vector channel when it can open)
+and then lets the graph re-order the page: items reachable from the best result
+through its topics get an extra RRF term. **The graph re-orders, it never
+admits**: a neighbour no channel scored is not a result.
+
+It is **off by default** (`GRAPH_ENABLED_BY_DEFAULT = False`). Neither
+`xbrain search`, nor MCP, nor a plain `xbrain eval --strategy hybrid_graph` can
+switch it on: all three answer `lexical`, declaring
+`hybrid_graph_not_implemented`. Only `search(..., graph_enabled=True)` turns it
+on, and the only command that calls it that way is the sweep below,
+`xbrain eval --strategy hybrid_graph --sweep-graph …`. Measuring `hybrid_graph`
+at the applied threshold alone is therefore a one-cell sweep
+(`--sweep-graph "min_shared_items=5 min_weight=0.05"`).
+
+### The threshold sweep: a negative result
+
+[graph-threshold-sweep.md](graph-threshold-sweep.md) measured all 16 cells of
+`min_shared_items ∈ {2, 3, 5, 8}` × `min_weight ∈ {0.0, 0.02, 0.05, 0.10}` on the
+golden set (18 measured cases, 2,495 items, 2026-09-15). The result:
+
+- **every cell made `recall@10` worse** than the ranking it re-orders (Δ between
+  −0.12 and −0.18 on a base of 0.63), and every cell lost more than 3 pp of
+  precision in at least one stratum;
+- the `expansion` stratum was populated first — **33** relevant results that only
+  a graph path could reach — and the graph lifted **0 of 33** into the top 10, in
+  all 16 cells;
+- so **`hybrid_graph` is not promoted** and `lexical` stays the default. The
+  applied threshold, `5 / 0.05`, is simply the least damaging cell, applied
+  because every build writes a graph.
+
+The sweep's §4 explains the mechanism (the graph term's weight and the fixed
+neighbour budget, not the threshold, decide the damage) and what was not swept.
+Its base was lexical (no embedder configured), so the effect over a real fused
+`hybrid` ranking is unmeasured.
+
+## Serving it to an agent
+
+`xbrain mcp-serve` offers `xbrain.search`, `xbrain.get` and `xbrain.graph_expand`
+over stdio, returning the same models as `--json`, read-only, with retrieved text
+labelled as untrusted data. Install and client configuration:
+[docs/mcp.md](mcp.md). How an agent should use the answers:
+[docs/knowledge-for-agents.md](knowledge-for-agents.md).
+
+## The spec's acceptance criteria: 12 of 15 met
+
+The design spec behind this page ends with fifteen acceptance criteria (its §13).
+This is their state, and where to check each one. Test paths are under `tests/`.
+
+| § | Criterion (spec §13, verbatim) | What proves it | State |
+|---|---|---|---|
+| 13.1 | un agente puede buscar por concepto, frase exacta, topic y filtros estructurados | Filters: `test_knowledge_lexical.py::test_every_declared_filter_is_actually_pushed_to_sql`. Topic: `test_knowledge_search_service.py::test_a_topic_note_match_returns_the_topics_supporting_items`. Concept: `test_knowledge_search_hybrid.py::test_vector_serves_only_what_the_vector_channel_found`. The gap: [There is no phrase search](#known-limits-of-the-lexical-baseline) | **NOT MET.** There is no exact-phrase search: `match_expression` (`lexical_fts.py`) joins the terms with `OR`, quotes included. Concept search exists only on the opt-in vector plane, and how good it is remains §13.5's open question. |
+| 13.2 | puede recuperar la fuente real sin depender del summary | `test_knowledge_get_service.py::test_get_returns_the_whole_article_body_untruncated`, `::test_get_works_with_the_index_directory_deleted`; `test_knowledge_search_service.py::test_a_summary_match_points_at_the_underlying_article` | Met |
+| 13.3 | cada fragmento expone procedencia, autoría y localizador | `test_knowledge_search_service.py::test_a_quoted_post_match_carries_the_quoted_author_not_the_poster`, `::test_a_match_locator_is_the_surface_locator_plus_the_character_range`; `test_mcp_prompt_injection.py::test_every_served_fragment_carries_its_three_labels` | Met |
+| 13.4 | summaries, digests y topic syntheses están disponibles pero etiquetados como derivados | `test_knowledge_provenance.py::test_is_derived_is_true_exactly_for_machine_produced_text`, `::test_unknown_fails_closed_to_llm_synthesis`; `test_knowledge_search_service.py::test_a_derived_match_with_no_primary_source_says_so` | Met |
+| 13.5 | la búsqueda textual y la vectorial se evalúan por separado y juntas | The instrument: `test_knowledge_evaluation.py::test_metrics_are_reported_per_stratum_and_provenance`, `::test_hybrid_fuses_both_channels_and_names_itself`. The evaluation: [`embeddings-bakeoff.md`](embeddings-bakeoff.md) §0 and §10 | **NOT MET.** The instrument exists; the evaluation does not. The bake-off Plan 03 owed this criterion (its own criterion 8: ≥ 3 candidates) measured **1 of 3** ([above](#the-bake-off-incomplete)). |
+| 13.6 | el índice incremental detecta cambios y nunca sirve chunks stale | `test_knowledge_index_invalidation.py::test_update_touches_only_the_changed_item`; `test_knowledge_search_service.py::test_a_chunk_with_a_manipulated_fingerprint_is_excluded_and_counted`, `::test_editing_the_store_without_reindexing_declares_the_index_behind`; `test_knowledge_search_hybrid.py::test_a_vector_left_stale_by_update_is_not_served_and_the_response_says_so` | Met, by the spec's own definitions: a stale chunk is excluded and counted, and an index behind the store is declared. The cheap signal's blind spot is in [Known limits](#known-limits-of-the-lexical-baseline). |
+| 13.7 | `search` agrupa matches sin ocultar la superficie que produjo cada uno | `test_knowledge_search_service.py::test_a_long_transcript_yields_one_result_with_at_most_three_matches`, `::test_a_primary_match_names_ITSELF_not_every_primary_surface_the_item_has`; `test_knowledge_search_hybrid.py::test_a_chunk_both_channels_found_is_explained_by_both` | Met |
+| 13.8 | `get` puede entregar fuentes largas de manera selectiva/paginada | `test_knowledge_get_service.py::test_a_body_over_the_budget_is_paginated_not_cut`, `::test_the_cursor_continues_where_the_previous_call_stopped`, `::test_asking_for_a_surface_the_item_does_not_have_lists_what_it_does` | Met (this is the **spec's** §13.8, not the bake-off's; see below). |
+| 13.9 | el grafo mínimo explica paths y conserva support ids | `test_knowledge_graph_service.py::test_every_path_carries_node_types_relation_method_weight_and_support`, `::test_every_served_path_rests_on_item_ids_that_resolve_in_the_live_store`; `test_knowledge_graph_build.py::test_no_item_to_item_edge_exists_in_the_schema` | Met |
+| 13.10 | la expansión por grafo puede activarse o desactivarse y tiene una métrica incremental | `test_knowledge_graph_strategy.py::test_hybrid_graph_existe_es_desactivable_y_el_default_no_cambia`; `test_knowledge_graph_sweep.py::test_the_graph_sweep_publishes_the_expansion_population_its_useful_column_counts_from`; [`graph-threshold-sweep.md`](graph-threshold-sweep.md) §0 | Met. The switch is `search(..., graph_enabled=True)`, which the CLI reaches only through `eval --strategy hybrid_graph --sweep-graph`. The metric is Δ recall@10 against `hybrid` plus the `expansion` stratum, and its result is negative. |
+| 13.11 | CLI JSON y MCP usan los mismos modelos y producen semántica equivalente | `test_mcp_cli_equivalence.py::test_mcp_and_cli_json_are_structurally_identical`; `test_mcp_server.py::test_the_output_schema_is_the_plan01_model_itself`, `::test_mcp_refuses_with_the_same_message_as_the_cli` | Met |
+| 13.12 | query y retrieval funcionan sin llamada a un LLM generativo | `test_mcp_server.py::test_the_mcp_server_imports_nothing_that_speaks_to_the_network` covers the MCP adapter only. No test covers the CLI doors (see below). Spot check: importing `xbrain.knowledge.search_service`, `get_service`, `graph_service` and `xbrain.mcp_server` leaves `anthropic` out of `sys.modules`, because every in-process generative call imports it lazily. The external vision command, a subprocess, is started by `digest-video --frames` and `redescribe-frames`, never by a query door | Met |
+| 13.13 | ningún artefacto personal o índice entra en Git | `test_knowledge_index_schema.py::test_the_index_directory_is_git_ignored`; `test_knowledge_goldenset.py::test_the_golden_set_is_tracked_and_the_reports_are_not`. For the rest: `git check-ignore --no-index config.toml auth/storage_state.json data/items.json` lists all three, and `git ls-files data auth` lists only the two `.gitkeep` | Met |
+| 13.14 | README, tutorial, arquitectura y troubleshooting se actualizan con el código de cada plan | README *Search & retrieval*; ARCHITECTURE *The minimal graph* and *The MCP server*; troubleshooting *The knowledge index* | **NOT MET.** `docs/tutorial.md` was last updated in Plan 02 (02.15). It teaches neither `vector`/`hybrid`, `graph-expand` nor MCP. |
+| 13.15 | los resultados negativos de evaluación se documentan en vez de ocultarse | [`embeddings-bakeoff.md`](embeddings-bakeoff.md) §0; [`graph-threshold-sweep.md`](graph-threshold-sweep.md) §0; [The graph — opt-in, and measured negative](#the-graph--opt-in-and-measured-negative) | Met |
+
+**Which §13.** «§13.N» is ambiguous. The spec, Plan 01, Plan 02 and Plan 03 each
+have a §13:
+
+- only the spec's and Plan 03's list acceptance criteria (Plan 01's §13 is its
+  quality gates, Plan 02's its documentation);
+- Plan 04 has no §13: its criteria are its §11.
+
+The table above is the **spec's** list. So «§13.8 — NO CUMPLE: 1 de 3» in the
+bake-off is criterion 8 of **Plan 03**, the ≥ 3-candidate bake-off. What it leaves
+unmet in the spec is §13.5. The spec's own §13.8 is `get`'s pagination, and it is
+met. Likewise, the «§13.12» in `test_knowledge_cli.py` and
+`test_knowledge_degradation.py` is Plan 03's criterion 12 (the `[embeddings]`
+extra), not the spec's «sin llamada a un LLM generativo».
+
+**A table, not a test.** Until Plan 04.8 this table was an executable test,
+`tests/test_spec_closure.py`. It was removed as a scope decision: 1,127 lines of
+machinery to guard fifteen sentences, and each of three review rounds found
+another way to leave it green. The criteria's proofs are ordinary tests, and
+deleting one already leaves the suite a test short, which is visible without
+extra machinery. Nothing watches this table, so when a criterion changes state,
+edit its row. Two tests left with that file: the check of §13.12 through the
+CLI doors, and the `git check-ignore` check behind §13.13's personal paths. The
+spot checks in those two rows replace them.
+
 ## Configuration
 
 Everything has a default; the whole `[index]` section is optional. The
@@ -571,6 +841,9 @@ Everything has a default; the whole `[index]` section is optional. The
 # dir = "index"                 # under data/ — must resolve INSIDE data/
 # max_matches_per_item = 3      # fragments one item may cite in a search
 # get_char_budget = 40000       # per-response ceiling before truncate + cursor
+# graph_min_shared_items = 5    # a CO_OCCURS_WITH edge needs this many shared items…
+# graph_min_weight = 0.05       # …and at least this Jaccard (both measured, see above)
+# graph_max_neighbors_per_node = 10   # strongest co-occurrence edges kept per topic (not swept)
 ```
 
 `max_matches_per_item` is what stops a long transcript filling the top ten with

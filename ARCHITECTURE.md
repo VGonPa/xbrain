@@ -757,8 +757,10 @@ takes a snapshot, because none of them can destroy anything a rebuild would not 
 It is built over four plans. The contract and the evaluation landed first; then the persistent
 index, `search` and `get`; then an **optional** vector plane with the `vector` and `hybrid`
 strategies ([The vector plane and hybrid retrieval](#the-vector-plane-and-hybrid-retrieval)),
-which did not change the default. The minimal graph and the MCP adapter come later and consume
-these names without renegotiating them.
+which did not change the default; then [the minimal graph](#the-minimal-graph) and
+[the MCP server](#the-mcp-server), which consume these names without renegotiating them.
+Which of the spec's fifteen acceptance criteria that meets is listed
+[below](#closing-the-spec-what-is-met-and-what-is-not).
 
 ### The four entities
 
@@ -1022,9 +1024,11 @@ byte-identical.
   plane. The first two belong to THIS machine's config and backend, which the manifest cannot
   know, so the query door adds them; see
   [below](#the-vector-plane-and-hybrid-retrieval).
-- **`<strategy>_not_implemented`** — a strategy declared in the contract with no backend; since
-  Plan 03 that is only `hybrid_graph`. It runs `lexical` and says which one it was asked for, in
-  the response *and* in a warning line. A **misspelled** strategy raises instead: a typo is not
+- **`<strategy>_not_implemented`** — a strategy the door will not run; since Plan 03 that is only
+  `hybrid_graph`, and only while its switch is off, which is the default and the only state
+  `xbrain search` and MCP can reach. It runs `lexical` and says which one it was asked for, in
+  the response *and* in a warning line. Switched on (`search(..., graph_enabled=True)`), the
+  response is `hybrid_graph` and declares the vector-channel causes `hybrid` would. A **misspelled** strategy raises instead: a typo is not
   a degradation, and answering it with lexical results would turn it into a measurement.
 
 #### One model, two renderings
@@ -1151,7 +1155,9 @@ failure path says `hybrid`.
 `xbrain eval --strategy vector|hybrid --embeddings-model <model>` builds each candidate's plane
 through the same `VectorBuild` `index build --embeddings` uses, under `data/eval-index/<model>/`,
 and refuses a plane written by another model. The run it produced, `docs/embeddings-bakeoff.md`,
-measured **1 of the ≥ 3 candidates criterion §13.8 requires — §13.8 does NOT PASS**. The one
+measured **1 of the ≥ 3 candidates Plan 03's criterion §13.8 requires — that §13.8 does NOT
+PASS** (it is Plan 03's numbering; in the spec's own list the failure lands on §13.5, see
+[below](#closing-the-spec-what-is-met-and-what-is-not)). The one
 candidate measured does not improve the `semantico` or `cruzado_idioma` strata over lexical,
 so `hybrid` is not promoted and the fusion constants did not move; the stronger candidates were
 never measured, so this is not evidence that no model would. Its figures carry their population
@@ -1226,6 +1232,133 @@ vector layer of Plan 03 had to beat; the bake-off that tried is incomplete and f
 naming the count — never a bucket, which would invent a verdict for a population nobody
 measured. Before that, `passed` was literally "no failures recorded", so a threshold of 1.0
 over a golden set the baseline could not score exited 0.
+
+### The minimal graph
+
+Plan 04 adds a graph of **items and topics only**, derived from the topics `enrich`
+assigned. Its purpose is to explain and explore, and an edge is always co-occurrence
+**in this corpus, never a relationship in the world** — the distinction travels in the data,
+not only in prose.
+
+**The contract** (`knowledge/contracts.py`, an additive migration: `schema_version` stayed
+`"1"` because no response had ever been emitted). `GraphEdge.relation` is a `Literal` of three
+values — `HAS_PRIMARY_TOPIC`, `HAS_TOPIC`, `CO_OCCURS_WITH` — and a `model_validator` refuses a
+`CO_OCCURS_WITH` without `input_fingerprints`, because a default of `()` would have made an
+unauditable edge legal in silence. `GraphExpansionResponse.semantics`
+(`"co_occurrence_in_corpus"`) and `disclaimer_key` (`"graph_edge_is_corpus_not_world"`) are
+`Literal`s with a single value: they cannot be omitted or overwritten, which is what makes the
+distinction survive an agent that summarises the prose away. The sentence itself lives in
+`i18n.Strings`, in both languages.
+
+**The derivation** (`knowledge/graph_build.py`, pure, never writes the store). One assignment
+edge per (item, topic), primary kept apart. One `CO_OCCURS_WITH` per ordered topic pair, both
+directions with the same weight, where the weight is **Jaccard**, `|A ∩ B| / |A ∪ B|`, so a
+topic assigned to half the corpus does not outrank a tight pair by overlapping everything.
+Pairs are pruned by `min_shared_items` and `min_weight`, then each SOURCE topic keeps its
+`max_neighbors_per_node` strongest edges. `supporting_item_ids` is capped at 20 while
+`shared_items` keeps the full count and the weight and the support fingerprint are computed over
+the whole support, so a truncated edge is distinguishable from a thin one. The fingerprint
+hashes the supporting items' **assignments**, not their ids, so re-assigning a topic moves it.
+**There is no item → item relation** — `RELATION_ENDPOINTS` says so for the builder, and a
+`CHECK` on the table says so for SQL. (The test reads the contract side; the SQL `CHECK` is
+defence in depth with no guard of its own, in the backlog.)
+
+**The storage** is one table, `graph_edges`, inside `knowledge.db`, keyed by
+`(source, target, relation)` with indexes on each endpoint. `build` writes it inside the same
+transaction as the lexical planes; the manifest seals a `graph` block (`algorithm_version` =
+`topic-cooccurrence/v1`, the three thresholds, `edges`), and a manifest without it is refused.
+`update` rewrites the whole plane when any item delta, the vocabulary or the topic pages moved,
+**or** when the sealed `graph` block disagrees with the options in force — the only trigger that
+leaves the lexical planes untouched. `status` compares the chunker parameters and not that
+block, so it reports nothing behind after a threshold edit (backlog, inherited from 04.2).
+
+**Reading it** (`knowledge/graph_service.py`). `graph_expand(seeds, context, max_hops,
+max_neighbors_per_node)` opens the index through the same query door as `search`, so an index
+the code cannot answer honestly is refused here too, and **an index behind the store is refused
+rather than expanded**. Each node's incident edges are served strongest first — weight, then
+primary before secondary, then id; that order is unswept — up to `max_neighbors_per_node`, for
+`max_hops` hops, with one explicit `GraphPath` per reached node. Before anything is returned,
+every support id and every assignment's item must resolve in the live store; one that does not
+fails the whole expansion (`100 %` of served paths resolvable is therefore a property, not a
+measurement). `resolve_locator` checks containment with `is_relative_to` on the resolved path,
+so a symlink cannot escape `output_dir`; it has no consumer yet.
+
+**Ranking with it** (`knowledge/graph_strategy.py`). `hybrid_graph` runs `hybrid` through the
+same door — the vector channel opens, or `degraded` names why — and then expands from the best
+item (`GRAPH_SEEDS = 1`, two hops: item → topic → item). Every reachable item that a channel
+scored within `GRAPH_CANDIDATE_HORIZON` (the fused window) gets an extra RRF term
+`GRAPH_WEIGHT / (RRF_K + rank_in_graph)` and `graph` in `matched_by`. **The graph re-orders, it
+never admits**: a neighbour no channel scored is not a result. Because the channels score the
+whole candidate set, an item at lexical rank 40 can enter the top 10 — the delta is not zero by
+construction. With the index behind the store the graph does not run and the door answers as
+`hybrid`. The switch, `GRAPH_ENABLED_BY_DEFAULT`, is **`False`**. Only the Python API passes
+`graph_enabled=True`, and the one CLI path built on it is the sweep below
+(`evaluation.sweep_graph`). `evaluate()` — plain `xbrain eval --strategy hybrid_graph` — resolves
+the strategy through `resolve_strategy`, as `search` does with the switch off, so its report says
+`strategy: lexical`, `degraded: [hybrid_graph_not_implemented]`.
+
+**Measuring it** (`evaluation.py`, `xbrain eval --strategy hybrid_graph --sweep-graph …`). The
+sweep scores each threshold cell through `search_service.search` on its own index, orders the
+cells by a rule fixed before measuring (`rank_graph_rows`: a cell losing more than 3 pp of
+precision in any stratum is discarded; then Δ recall@10, noise, degradation, sparsity), and
+classifies every relevant pair of the golden set against the persisted `graph_edges` — never
+against `graph_expand`, whose help is what the `expansion` stratum measures. **The result,
+published in `docs/graph-threshold-sweep.md`, is negative**: in all 16 cells recall@10 fell
+(Δ −0.12 to −0.18 on 0.63, 18 cases, 2,495 items) and the graph lifted 0 of the 33 pairs only it
+could reach. `5 / 0.05` is applied as the least damaging cell because every build writes a
+graph, `tests/test_knowledge_graph_sweep.py` derives that winner from the published numbers and
+binds the defaults, the example config and the manifest to it, and `hybrid_graph` is not
+promoted.
+
+### The MCP server
+
+`src/xbrain/mcp_server.py` is a **thin adapter**: three tools, `xbrain.search`, `xbrain.get` and
+`xbrain.graph_expand`, each calling exactly `search_service.search`, `get_service.get` and
+`graph_service.graph_expand` and returning their model. It adds no filter, no format and no
+limit. `xbrain mcp-serve` serves it over stdio; the `mcp` SDK is the optional `[mcp]` extra,
+imported inside `_mcp_server_class()` so `import xbrain` works without it and a missing extra
+is an actionable operator error.
+
+- **One semantics, bound in code.** The handlers load configuration and the `QueryContext`
+  through the CLI's own `cli._config()` / `cli._query_context()`. Input schemas are derived from
+  the annotations — `SearchFilters` enters whole — and output schemas from the return types.
+  `tests/test_mcp_cli_equivalence.py` runs one table of cases through `CliRunner` and through a
+  real in-process `mcp.Client`, and requires identical JSON; a second test requires the tool
+  set to equal the service set. Both were seen failing.
+- **Structured errors.** The SDK turns any non-`ToolError` into
+  `Error executing tool <name>` and drops the cause. `_structured_errors` re-raises the CLI's
+  operator errors (`cli._OPERATOR_ERRORS`, plus `IndexError_`, imported rather than listed) as
+  `ToolError(str(exc))`, so the agent reads the operator's sentence; anything else propagates as
+  a bug.
+- **Read-only.** No tool writes; the tests hash the three inputs and every index file around
+  all three calls. `get` still answers with the index deleted.
+- **Untrusted content.** `CORPUS_IS_DATA` is appended to every tool description and to the
+  server instructions; every fragment keeps `origin`, `trust_class` and `derived`, and a stored
+  prompt injection is transported verbatim, only in content fields, and changes nothing
+  (`tests/test_mcp_prompt_injection.py`).
+- **The trust boundary, declared rather than locked.** The server makes no network call of its
+  own (an `ast` walk over the adapter, lazy imports included, fails on a network module). During
+  a query xbrain may start one external process — the embedder of `[embeddings].command`, which
+  receives the query text — and not by default: the tool defaults to `lexical` and the command
+  ships empty. What that binary does is outside xbrain's scope. A runtime network lock existed
+  in 04.7 and was removed by scope decision: it depended on the platform's socket surface and
+  cost more than the adapter it guarded.
+
+Operation, client configuration and error texts: `docs/mcp.md`; how an agent should consume
+the answers: `docs/knowledge-for-agents.md`.
+
+### Closing the spec: what is met and what is not
+
+The spec's §13 is a table in
+[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria-12-of-15-met):
+each of the fifteen criteria, the tests (`file::test`) or document sections that prove it, and
+its state. It is a document, not a test. The executable version (`tests/test_spec_closure.py`)
+was removed in Plan 04.8 as a scope decision. **Three are not met**: §13.1 (there is no phrase
+search — the query is a disjunction of terms), §13.5 (Plan 03's bake-off measured 1 of the ≥ 3
+candidates its own §13.8 requires) and §13.14 (`docs/tutorial.md` was last updated with Plan 02). Watch the
+numbering. The spec, Plan 01, Plan 02 and Plan 03 each have a §13 of their own, and only the
+spec's and Plan 03's §13 list acceptance criteria (Plan 01's is its quality gates, Plan 02's its
+documentation). Plan 04 has no §13: its criteria are its §11. "§13.8" in the bake-off is Plan 03's.
 
 ---
 
