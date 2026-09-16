@@ -374,3 +374,73 @@ def test_mcp_get_answers_with_the_index_deleted(indexed_workspace: Path) -> None
     payload = json.loads(unwrap_mcp_content(call_mcp_tool("xbrain.get", {"item_id": "k03"})))
     assert payload["item"]["item_id"] == "k03"
     assert payload["surfaces"], "sin superficies la comprobación pasaría por vacío"
+
+
+# ---------------------------------------------------------------------------
+# Paso 27: sin red (§4.3, §10.5)
+# ---------------------------------------------------------------------------
+
+
+class NoNetworkAllowed(AssertionError):
+    """Alguien intentó salir a la red durante una consulta."""
+
+
+def block_network(monkeypatch) -> None:
+    """Cierra la red: conectar, resolver un nombre o abrir una conexión LEVANTA.
+
+    Se corta en `connect`/`getaddrinfo`, NO en `socket.socket`. Crear un socket no es salir a
+    la red, y `asyncio.run` —que es quien conduce el cliente MCP en proceso— monta su
+    self-pipe con `socket.socketpair()`, que por dentro construye un `socket.socket`. Cortar
+    ahí mataría el bucle de eventos y el test «pasaría» por no haber llegado a ejecutar nada,
+    que es la forma más barata de fabricar un verde.
+    """
+    import socket
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise NoNetworkAllowed(f"salida a la red durante una consulta: {args[:2]}")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+
+
+def test_the_network_block_actually_bites(indexed_workspace: Path, monkeypatch) -> None:
+    """El control del paso 27: sin esto, «las tools funcionaron» no prueba nada.
+
+    Un bloqueo mal puesto no rompe ningún test — deja pasar las tres herramientas
+    exactamente igual que uno bien puesto. La única forma de que el verde de abajo signifique
+    algo es demostrar aquí que el cerrojo está echado (regla 2).
+    """
+    import socket
+
+    block_network(monkeypatch)
+    with pytest.raises(NoNetworkAllowed):
+        socket.create_connection(("example.invalid", 80))
+    with pytest.raises(NoNetworkAllowed):
+        socket.getaddrinfo("example.invalid", 80)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "evidence"),
+    [
+        ("xbrain.search", {"query": "retrieval"}, "results"),
+        ("xbrain.get", {"item_id": "k03"}, "surfaces"),
+        ("xbrain.graph_expand", {"item_id": "k03"}, "nodes"),
+    ],
+    ids=["search", "get", "graph_expand"],
+)
+def test_every_tool_answers_with_the_network_blocked(
+    tool: str, arguments: dict[str, Any], evidence: str, indexed_workspace: Path, monkeypatch
+) -> None:
+    """Paso 27 / §4.3 · §4.4.3: las tres herramientas contestan sin tocar la red.
+
+    Es también lo que hace cierta la medida 3 del §4.4: ninguna URL del corpus se
+    dereferencia. Si alguna tool fuese a buscar el artículo enlazado, el corpus podría
+    dirigir a dónde va la petición, y eso es una superficie de inyección, no una consulta.
+
+    Se exige que la respuesta traiga algo: una respuesta vacía también «funciona» sin red.
+    """
+    block_network(monkeypatch)
+    payload = json.loads(unwrap_mcp_content(call_mcp_tool(tool, arguments)))
+    assert payload[evidence], f"{tool} no sirvió nada: el verde sería vacío"
