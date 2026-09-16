@@ -439,6 +439,23 @@ def test_describe_frame_rubric_asks_for_plain_text_not_json():
     assert "no JSON" in text
 
 
+def test_describe_frame_rubric_covers_footage_with_no_text():
+    """A silent non-slide video (a robot, an app being used, an animation) is now
+    described as footage, and its captions are the ONLY record of what it shows.
+    Before this bullet the list's only no-text case was "a face ... with no text:
+    say so in one short sentence", which licenses "no text" as a complete answer
+    for such a frame. Both bullets are pinned INSIDE the "What to describe"
+    section, so a bullet moved under "Output format" does not satisfy this."""
+    text = load_rubric("describe-frame", language="English")
+    section = text.split("## What to describe", 1)[1].split("## Output format", 1)[0]
+    assert (
+        "- **Footage with no text** (people, robots, products, animations, an app or site\n"
+        "  being used): what is shown and what is happening — subject, action, setting — in\n"
+        "  one or two sentences. In a silent video this is the only record of what it shows."
+    ) in section
+    assert "- **A face, a stage, a webcam or a title card with no text:**" in section
+
+
 def test_describe_frame_rubric_carries_the_shared_fragment():
     """The frame half of the anti-drift assertion: the rule reaches the rubric from
     the fragment file, not from a paragraph pasted into it. (The photo half lands

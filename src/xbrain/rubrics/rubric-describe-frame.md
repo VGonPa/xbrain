@@ -30,6 +30,9 @@ Nothing downstream ever sees the pixels. What you leave out is lost.
   the labels' own words.
 - **A chart:** the chart type, the axis labels, the legend entries and any
   headline number printed on it.
+- **Footage with no text** (people, robots, products, animations, an app or site
+  being used): what is shown and what is happening — subject, action, setting — in
+  one or two sentences. In a silent video this is the only record of what it shows.
 - **A face, a stage, a webcam or a title card with no text:** say so in one
   short sentence. There is nothing to transcribe, and saying so is a complete
   and correct answer.
