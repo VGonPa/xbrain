@@ -286,6 +286,31 @@ def _has_x_video_source(item: Item) -> bool:
     return any(_is_x_video_source(source) for source in item.content.sources)
 
 
+def _stored_transcript(item: Item) -> Transcript | None:
+    """The transcript already stored on `item`'s `x_video` source, else None.
+
+    `--keep-transcript` reuses it instead of re-running the ASR: on music or
+    ambient audio the ASR can invent words ("you you"), and a hollow video that
+    gains invented words can be skipped as a talking-head with no frames — and
+    is then no longer counted hollow. Only a success source carries a
+    transcript; with none (no content, no `x_video` source, or a failed one)
+    there is nothing to keep. The stored source has no segments, and a legacy
+    `has_speech=None` reads as no speech.
+    """
+    if item.content is None:
+        return None
+    source = next((s for s in item.content.sources if _is_x_video_source(s)), None)
+    if not isinstance(source, ContentSourceSuccess):
+        return None
+    return Transcript(
+        text=source.text,
+        segments=[],
+        language=source.language,
+        has_speech=bool(source.has_speech),
+        title=source.title,
+    )
+
+
 def _source_url_for(item: Item) -> str:
     """The URL to record on the `x_video` source: the item's mp4 stream, else its
     permalink (a hand-edited store might lack a resolvable entry)."""
@@ -512,9 +537,17 @@ def _carries_speech(transcript: Transcript) -> bool:
 
 
 def _analyze_media(
-    path: Path, transcribe_fn: TranscribeFn, visual: VisualConfig | None, *, item_id: str
+    path: Path,
+    transcribe_fn: TranscribeFn,
+    visual: VisualConfig | None,
+    *,
+    item_id: str,
+    kept: Transcript | None = None,
 ) -> _MediaAnalysis | None:
     """Transcribe (and optionally extract slides from) `path`, then discard the bytes.
+
+    A `kept` transcript (`--keep-transcript`) is used as-is and `transcribe_fn` is
+    not called; everything after the transcription step is the same.
 
     A per-video `TranscriberFailed` (malformed output for this one video) is logged
     and returns None so the batch continues; a missing-binary `TranscriberNotFound`
@@ -527,7 +560,7 @@ def _analyze_media(
     """
     try:
         try:
-            transcript = transcribe_fn(path)
+            transcript = transcribe_fn(path) if kept is None else kept
         except TranscriberFailed as exc:
             logger.warning("digest-video: transcription failed for item %s: %s", item_id, exc)
             return None
@@ -625,6 +658,7 @@ def _process_group(
     dest_dir: Path,
     *,
     force: bool,
+    keep_transcript: bool,
     fetch_fn: FetchFn,
     transcribe_fn: TranscribeFn,
     visual: VisualConfig | None,
@@ -638,19 +672,22 @@ def _process_group(
     stale/expired. On a fetch failure the needing items are `failed` (nothing
     attached). The visual layer (`--frames`) describes the frames ONCE and persists
     them PER item whenever it kept any — slides or silent footage alike; a
-    no-speech transcript is still attached (as the marker). Returns the counts;
-    the caller sums them.
+    no-speech transcript is still attached (as the marker). Under
+    `keep_transcript` the representative's stored transcript is reused
+    (`_stored_transcript`) and the ASR is not run; the video is still fetched,
+    because the frames need it. Returns the counts; the caller sums them.
     """
     needing = [item_id for item_id in ids if force or not _has_x_video_source(store[item_id])]
     already = len(ids) - len(needing)
     if not needing:
         return _GroupOutcome(already=already)
     representative = needing[0]
+    kept = _stored_transcript(store[representative]) if keep_transcript else None
     fetch_report = fetch_fn(store, [representative], dest_dir)
     fetched = _fetched_path(fetch_report, representative)
     if fetched is None:
         return _GroupOutcome(already=already, failed=len(needing))
-    analysis = _analyze_media(fetched, transcribe_fn, visual, item_id=representative)
+    analysis = _analyze_media(fetched, transcribe_fn, visual, item_id=representative, kept=kept)
     if analysis is None:
         return _GroupOutcome(already=already, failed=len(needing))
     frames_by_item = None
@@ -707,6 +744,7 @@ def digest_videos(
     item_ids: list[str],
     *,
     force: bool = False,
+    keep_transcript: bool = False,
     fetch_fn: FetchFn = fetch_videos,
     transcribe_fn: TranscribeFn = _default_transcribe,
     temp_root: Path | str | None = None,
@@ -729,6 +767,11 @@ def digest_videos(
     attached as footage instead, under `visual.footage_reduce_fn`'s budget.
     `visual=None` (the default) leaves the audio-only path unchanged; a silent
     video attached without frames is counted in `DigestReport.hollow` either way.
+
+    `keep_transcript` (`--frames --force --keep-transcript`) reuses each video's
+    stored transcript instead of re-running the ASR, so re-digesting an item only
+    redoes the visual layer; a video with no stored transcript is transcribed as
+    usual.
     """
     unique_ids = list(dict.fromkeys(item_ids))
     groups = group_items_by_video(store, unique_ids)
@@ -744,6 +787,7 @@ def digest_videos(
                 ids,
                 dest_dir,
                 force=force,
+                keep_transcript=keep_transcript,
                 fetch_fn=fetch_fn,
                 transcribe_fn=transcribe_fn,
                 visual=visual,
