@@ -79,6 +79,19 @@ DEFAULT_SCENE_THRESHOLD = 0.4
 # emitting hundreds of frames. Raise it (`[frames].max_frames`) for very long decks.
 DEFAULT_MAX_FRAMES = 60
 
+# The cap for SILENT non-slide footage (screen recordings, robots, GIFs), applied
+# after the same dedup. With no speech the frames are the only evidence, so they
+# are described rather than skipped — but a few frames carry what happens; a
+# 60-frame meme is not worth 60 vision calls. Raise it (`[frames].footage_max_frames`)
+# for long silent demos.
+DEFAULT_FOOTAGE_MAX_FRAMES = 6
+
+# The `[frames]` key behind the footage budget. `select_frames` logs a cap under it
+# at INFO — trimming silent footage to its small budget is the design, not a loss
+# the operator must act on — while any other cap (a slide deck losing distinct
+# slides) stays a WARNING.
+FOOTAGE_CAP_SETTING = "footage_max_frames"
+
 # Perceptual-hash (dHash) near-duplicate removal. Two frames whose 64-bit dHashes
 # differ by <= this Hamming distance are "the same slide" — the later one is
 # dropped. 6/64 tolerates JPEG/scale noise + a cursor/laser-pointer moving on a
@@ -351,6 +364,7 @@ def select_frames(
     dedupe: bool = True,
     dedupe_distance: int = DEFAULT_DEDUPE_DISTANCE,
     max_frames: int = DEFAULT_MAX_FRAMES,
+    cap_setting: str = "max_frames",
 ) -> list[KeyFrame]:
     """Reduce RAW key frames for the describe path: dedupe near-dups, then cap.
 
@@ -359,7 +373,11 @@ def select_frames(
     what the video *is*). `dedupe` drops near-identical held slides so the budget
     covers DISTINCT slides; `max_frames` is a safety ceiling (a genuine deck with
     more distinct slides than the ceiling loses some to even subsampling — WARNED,
-    not silent).
+    not silent). `cap_setting` is the `[frames]` key that supplied `max_frames`,
+    named in that log so it points at the knob that governs this video
+    (`FOOTAGE_CAP_SETTING` for silent footage). The cap is logged at WARNING,
+    except under `FOOTAGE_CAP_SETTING`, where trimming is the intended budget and
+    is logged at INFO.
     """
     if dedupe:
         before = len(frames)
@@ -367,11 +385,15 @@ def select_frames(
         logger.debug("digest-video: dedup kept %d/%d frames", len(frames), before)
     capped = _cap_evenly(frames, max_frames)
     if len(capped) < len(frames):
-        logger.warning(
-            "digest-video: capped %d distinct frames to max_frames=%d — raise "
-            "[frames].max_frames to describe them all",
+        level = logging.INFO if cap_setting == FOOTAGE_CAP_SETTING else logging.WARNING
+        logger.log(
+            level,
+            "digest-video: capped %d distinct frames to %s=%d — raise "
+            "[frames].%s to describe them all",
             len(frames),
+            cap_setting,
             max_frames,
+            cap_setting,
         )
     return capped
 

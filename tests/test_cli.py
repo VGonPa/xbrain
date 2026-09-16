@@ -1,9 +1,11 @@
 # tests/test_cli.py
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from xbrain.cli import app
@@ -2602,20 +2604,27 @@ def _write_photo_png(path: Path) -> None:
     img.convert("RGB").save(path)
 
 
-def _wire_frames(monkeypatch, *, describe_calls: list | None = None, writer=_write_slide_png):
+def _wire_frames(
+    monkeypatch,
+    *,
+    describe_calls: list | None = None,
+    writer=_write_slide_png,
+    n_frames: int = 2,
+):
     """Mock ffmpeg extraction (real PNGs) + the external vision subprocess.
 
     `writer` paints each fake frame — `_write_slide_png` (default, high-edge →
     'slides') or `_write_photo_png` (low-edge → 'talking_head'). The REAL
     `classify_visual` runs on the produced images, so the CLI's slide-vs-
-    talking-head decision is exercised end-to-end."""
+    talking-head decision is exercised end-to-end. `n_frames` is how many RAW
+    frames the fake extraction returns (enough to exceed a configured cap)."""
     from xbrain.video_frames import KeyFrame
 
     def _fake_extract(path, **_kwargs):
         frames_dir = Path(path).parent / "xbrain-frames-fake"
         frames_dir.mkdir(parents=True, exist_ok=True)
         frames = []
-        for index in range(2):
+        for index in range(n_frames):
             frame_path = frames_dir / f"frame-{index:05d}.png"
             writer(frame_path)
             frames.append(KeyFrame(timestamp=float(index * 10), path=frame_path))
@@ -2789,6 +2798,124 @@ def test_digest_video_frames_talking_head_skips_and_embeds_nothing(tmp_path: Pat
     assert "## Video digest" in note  # the transcript digest still renders
     assert "_media/42/frames" not in note  # but NO slide embed
     assert not (vault / "x-knowledge" / "_media" / "42" / "frames").exists()
+
+
+def _summary_line(output: str) -> str:
+    """The `digest-video` summary line the CLI echoed — for EQUALITY assertions, so a
+    count is pinned where it sits (`Visual: 0 con slides` is not `Visual: 10 con …`)."""
+    for line in _ANSI_RE.sub("", output).splitlines():
+        if line.startswith("Vídeos:"):
+            return line
+    raise AssertionError(f"no digest-video summary was echoed in: {output!r}")
+
+
+_BUDGETS = "[frames]\nmax_frames = 4\nfootage_max_frames = 2\n"
+
+
+@pytest.mark.parametrize(
+    ("writer", "transcript", "frames_toml", "kept", "summary", "cap_log"),
+    [
+        pytest.param(
+            _write_photo_png,
+            _silent_transcript,
+            _BUDGETS + "dedupe = false\n",
+            2,
+            "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+            "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
+            (
+                "INFO",
+                "digest-video: capped 5 distinct frames to footage_max_frames=2 — raise "
+                "[frames].footage_max_frames to describe them all",
+            ),
+            id="silent-footage-capped-by-footage_max_frames",
+        ),
+        pytest.param(
+            _write_slide_png,
+            _speech_transcript,
+            _BUDGETS + "dedupe = false\n",
+            4,
+            "Vídeos: transcritos 1, sin voz 0, ya digeridos 0, fallidos 0, sin vídeo 0, "
+            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+            "Visual: 1 con slides, 0 metraje mudo descrito, 0 talking-head (saltados).",
+            (
+                "WARNING",
+                "digest-video: capped 5 distinct frames to max_frames=4 — raise "
+                "[frames].max_frames to describe them all",
+            ),
+            id="slides-capped-by-max_frames",
+        ),
+        pytest.param(
+            _write_photo_png,
+            _silent_transcript,
+            _BUDGETS,  # dedupe left at its default (on)
+            1,
+            "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+            "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+            "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados).",
+            None,  # one distinct frame is under the cap: nothing was dropped to warn about
+            id="silent-footage-deduped-before-the-cap",
+        ),
+    ],
+)
+def test_digest_video_frames_caps_footage_and_slides_with_their_own_budget(
+    tmp_path: Path, monkeypatch, caplog, writer, transcript, frames_toml, kept, summary, cap_log
+):
+    """The CLI-built visual config gives each reducer its OWN `[frames]` budget.
+
+    Five raw frames, `max_frames = 4`, `footage_max_frames = 2`: a silent non-slide
+    video keeps (and pays vision for) exactly 2 — the footage cap — while a slide
+    talk keeps 4 — the slide cap. Were `footage_max_frames` unbound, the silent
+    video would describe all 5; were the two swapped, the slide talk would keep 2.
+    The third case leaves dedupe on: the five identical camera frames collapse to
+    ONE before the cap, so the footage reducer honours `[frames].dedupe` too.
+    A capped run's log names the setting that capped it, so an operator who
+    wants more frames raises the knob that governs THAT video — at WARNING for a
+    slide deck that lost slides, at INFO for footage, whose trim is intended. The
+    capture runs at INFO so the footage record is really seen.
+    """
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + frames_toml, encoding="utf-8")
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _video_item("42", url=_AMPLIFY_URL_1)}, items_path)
+    _wire_digest(monkeypatch, transcript())
+    describe_calls: list = []
+    _wire_frames(monkeypatch, describe_calls=describe_calls, writer=writer, n_frames=5)
+
+    with caplog.at_level(logging.INFO, logger="xbrain.video_frames"):
+        result = runner.invoke(app, ["digest-video", "--ids", "42", "--frames"])
+    assert result.exit_code == 0, result.output
+    frames = load_store(items_path)["42"].content.sources[0].frames
+    assert len(frames) == kept
+    assert len(describe_calls) == kept  # the cap is a VISION budget, not just storage
+    assert [frame.local_path for frame in frames] == [f"42/frames/{i}.png" for i in range(kept)]
+    assert _summary_line(result.output) == summary
+    capped = [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.name == "xbrain.video_frames" and "distinct frames to" in r.getMessage()
+    ]
+    assert capped == ([cap_log] if cap_log else [])
+
+
+def test_digest_video_frames_help_states_the_footage_rule():
+    """The `--frames` help is the operator's contract. It must say that a talking-
+    head is skipped only WITH speech and that a silent non-slide video is described
+    as footage under `[frames].footage_max_frames` — the old text promised an
+    unconditional skip. Read from the option itself, not from a rendered page."""
+    from typer.main import get_command
+
+    command = get_command(app).commands["digest-video"]
+    help_text = next(param.help for param in command.params if param.name == "frames")
+    assert "los talking-head se saltan (se registra)" not in help_text
+    assert help_text.endswith(
+        "Las slides se describen; un talking-head CON voz se salta (el transcript ya lo "
+        "cubre; se registra); un vídeo mudo sin slides se describe como metraje, con "
+        "tope `\\[frames].footage_max_frames`."
+    )
 
 
 def test_frames_render_the_rubric_in_the_output_language(tmp_path: Path, monkeypatch):

@@ -15,6 +15,7 @@ exactly as the real tool does.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -398,3 +399,43 @@ def test_select_frames_dedupes_then_caps(tmp_path: Path):
     assert kept[0].path.name == "a.png"  # front kept
     # dedupe=False → no dedup, cap 3 of the 5.
     assert len(select_frames(frames, dedupe=False, max_frames=3)) == 3
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "level", "message"),
+    [
+        pytest.param(
+            {"max_frames": 2},
+            logging.WARNING,
+            "digest-video: capped 3 distinct frames to max_frames=2 — raise "
+            "[frames].max_frames to describe them all",
+            id="slides-default-names-max_frames-at-warning",
+        ),
+        pytest.param(
+            {"max_frames": 2, "cap_setting": "footage_max_frames"},
+            logging.INFO,
+            "digest-video: capped 3 distinct frames to footage_max_frames=2 — raise "
+            "[frames].footage_max_frames to describe them all",
+            id="footage-names-footage_max_frames-at-info",
+        ),
+    ],
+)
+def test_select_frames_cap_log_names_the_setting_at_its_level(
+    tmp_path: Path, caplog, kwargs, level, message
+):
+    """The cap log tells the operator which knob to raise. Footage is capped by
+    `[frames].footage_max_frames`; naming `max_frames` there would send them to a
+    setting that changes nothing for a silent video. The default keeps the slide
+    wording byte-for-byte.
+
+    The level says whether the cap is a surprise: a slide deck losing distinct
+    slides is WARNED, while trimming silent footage to its small budget is the
+    intended behaviour, so it is only INFO — captured here at INFO, so the footage
+    record is really seen and its level really checked."""
+    frames = [KeyFrame(timestamp=float(i), path=tmp_path / f"{i}.png") for i in range(3)]
+    with caplog.at_level(logging.INFO, logger="xbrain.video_frames"):
+        kept = select_frames(frames, dedupe=False, **kwargs)
+    assert len(kept) == 2
+    assert [(record.levelno, record.getMessage()) for record in caplog.records] == [
+        (level, message)
+    ]
