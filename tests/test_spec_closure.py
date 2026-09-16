@@ -9,34 +9,82 @@ QUÉ LO HACE EJECUTABLE, y no una lista de afirmaciones:
 
   · borrar o renombrar un test nombrado aquí pone la suite ROJA (`ast`, sin importar nada);
   · renombrar una cabecera citada, o quitar de su sección la frase citada, también;
-  · cada criterio NO cumplido lleva un TESTIGO que deja de pasar el día que alguien lo
-    arregle, así que su estado no puede quedarse rancio en ninguna de las dos direcciones;
+  · cada criterio NO cumplido lleva un TESTIGO (`Witness`) que deja de pasar el día que alguien
+    lo arregle, y ningún criterio cumplido lleva uno: cambiar el veredicto sin mover el testigo,
+    o quitar el testigo sin cambiar el veredicto, pone rojo;
   · dos criterios no tenían prueba ninguna en el árbol —§13.12 y la mitad de §13.13— y la
     tienen AQUÍ, pasando por las puertas públicas, no por las funciones.
 
-LA TRAMPA DE NUMERACIÓN, escrita para que nadie vuelva a caer. El repositorio cita «§13.N» de
-TRES documentos distintos: el spec, el Plan 03 y el Plan 04. `docs/embeddings-bakeoff.md` §10
-dice «§13.8 — NO CUMPLE: 1 de 3», y ese §13.8 es el del PLAN 03 (bake-off con ≥ 3
-candidatos). El §13.8 del SPEC es la paginación de `get`, y ése se cumple. Lo que el bake-off
-incompleto deja sin cumplir en el spec es el §13.5, porque el Plan 04 §11 asigna al Plan 03 su
-parte de «textual y vectorial se evalúan por separado y juntas». Igual con §13.12: los tests
-que lo citan (`test_knowledge_cli.py`, `test_knowledge_degradation.py`) hablan del criterio 12
-del Plan 03 —el extra `[embeddings]`—, no de «sin llamada a un LLM generativo».
+QUE UNA PRUEBA EXISTA NO QUIERE DECIR QUE PRUEBE ALGO. Borrar SÓLO la aserción del testigo de
+§13.1 dejaba este fichero en 51 de 51 verde: el nombre seguía resolviendo, así que el «no
+cumple» podía quedarse rancio sin ruido, que es justo el defecto que este fichero existe para
+impedir. Por eso hay dos mecanismos más, y así se justifican:
 
-LO QUE NO PUEDE VER. Ve nombres y frases, no comportamiento: un test renombrado que además
-afloje su aserción pasa por aquí sin ruido (el mismo límite que `test_plan02_acceptance.py`
-declara). Lo concluyente es la dirección negativa: un node id que ya no resuelve no está
-guardando nada. La COPIA de los quince textos es a mano porque el spec vive en
-`zz-support-files/`, que no está versionado; `SPEC_13_COUNT` es lo que impide encogerla sin
-que un número se mueva en el diff.
+  · EL TESTIGO SE EJECUTA EN EL MUNDO ARREGLADO. Cada `Witness` trae `fixes`, un mundo por
+    cláusula en el que el criterio SÍ se cumple: un `match_expression` con operador de frase,
+    un tutorial que enseña `graph-expand`… Se simulan con `monkeypatch` sobre los nombres que
+    lee el testigo. El testigo tiene que pasar hoy y dar `AssertionError` en cada uno de esos
+    mundos, y entre todos tienen que disparar CADA `assert` suyo, por número de línea. Es la
+    regla 1 («míralo en rojo primero») ejecutada en cada corrida en vez de recordada una vez.
+    Cierra la clase entera para los testigos: vaciarlo, debilitarlo, cortarlo con un
+    `return`, saltarlo o reescribirlo para que lea otra cosa lo deja verde en algún mundo
+    arreglado, y eso es rojo. Se puede porque el cierre sabe qué significa ARREGLAR cada
+    criterio suyo; de un test de comportamiento ajeno no lo sabe.
+  · SUELO ESTÁTICO para cada test nombrado y cada test de este fichero (`_hollow_reasons`,
+    por `ast`). Es rojo en cinco casos: si no queda ninguna aserción viva (un `assert` que lee
+    algo, o un `pytest.raises`), si lleva skip/xfail, si tiene un `return` propio, si un `try`
+    se traga la aserción o si una condición constante la deja muerta. Medido al escribirlo:
+    los 62 tests distintos que cubre (53 nombrados por la tabla, 48 de ellos en otros ficheros,
+    más los 14 de éste) lo cumplen, sin excepciones.
+  · Las dos guardas se vigilan entre sí
+    (`test_the_guards_of_this_file_see_the_defect_they_exist_for`). Cada una tiene que ver el
+    defecto que existe para ver cuando se le da un espécimen de él, y el suelo se aplica a su
+    propio test desde fuera, porque un test vaciado no puede denunciarse a sí mismo.
+
+LO QUE NO PUEDE VER, declarado en vez de prometido:
+
+  · un test de comportamiento DEBILITADO (una tautología, una aserción sobre otra cosa);
+  · un test de comportamiento vaciado EN EJECUCIÓN, como un `for` sobre una colección que ha
+    quedado vacía. Los dos pasan el suelo.
+
+Cerrarlos exigiría saber qué defecto persigue cada uno de los 50 tests de comportamiento
+nombrados, para mutarlo test a test, o contar las aserciones ejecutadas con un plugin de pytest
+en un subproceso. Es un aparato desproporcionado para lo que guarda, así que se DECLARA: es la
+misma decisión que convirtió la garantía de red de 04.7 en una declaración.
+
+Tampoco ve dos ediciones coordinadas: vaciar las dos guardas en el mismo cambio, o borrar un
+mundo arreglado junto con su cláusula. Eso es editar la tabla, y lo que lo para es que alguien
+lea el diff (regla 13).
+
+La COPIA de los quince textos es a mano porque el spec vive en `zz-support-files/`, que no está
+versionado; `SPEC_13_COUNT` es lo que impide encogerla sin que un número se mueva en el diff.
+
+LA TRAMPA DE NUMERACIÓN, escrita para que nadie vuelva a caer. «§13.N» es ambiguo:
+
+  · el spec, el Plan 01, el Plan 02 y el Plan 03 tienen cada uno su §13;
+  · sólo los §13 del spec y del Plan 03 son criterios de aceptación (el del Plan 01 son sus
+    quality gates y el del Plan 02, su documentación);
+  · el Plan 04 NO tiene §13: sus criterios son su §11.
+
+`docs/embeddings-bakeoff.md` §10 dice «§13.8 — NO CUMPLE: 1 de 3», y ese §13.8 es el del
+PLAN 03 (bake-off con ≥ 3 candidatos). El §13.8 del SPEC es la paginación de `get`, y ése se
+cumple. Lo que el bake-off incompleto deja sin cumplir en el spec es el §13.5, porque el Plan 04
+§11 asigna al Plan 03 su parte de «textual y vectorial se evalúan por separado y juntas».
+
+Igual con §13.12: los tests que lo citan (`test_knowledge_cli.py`,
+`test_knowledge_degradation.py`) hablan del criterio 12 del Plan 03 —el extra
+`[embeddings]`—, no de «sin llamada a un LLM generativo».
 """
 
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import re
 import subprocess
+import sys
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,6 +117,21 @@ class Node:
     """Un test que existe en este árbol: `tests/fichero.py::nombre` (o `::Clase::nombre`)."""
 
     node: str
+
+
+Fix = Callable[[pytest.MonkeyPatch, Path], None]
+
+
+@dataclass(frozen=True)
+class Witness(Node):
+    """El test que mantiene honesto un «NO cumple»: pasa mientras el criterio no se cumple.
+
+    `fixes` son los mundos en que SÍ se cumple, uno por cláusula del testigo. Cada uno recibe un
+    `MonkeyPatch` de vida acotada y un directorio vacío, y simula el arreglo sobre los nombres
+    que el testigo lee. Un testigo vive en este fichero: es donde se sabe qué es arreglarlo.
+    """
+
+    fixes: tuple[Fix, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,6 +171,47 @@ INJECTION = "tests/test_mcp_prompt_injection.py"
 SCHEMA = "tests/test_knowledge_index_schema.py"
 GOLDEN = "tests/test_knowledge_goldenset.py"
 
+BAKEOFF_RESULT = "## 0. Resultado"
+BAKEOFF_GATES = "## 10. Puertas del spec §8.6 y criterios del Plan 03 §13"
+TUTORIAL = "docs/tutorial.md"
+
+
+def _serve(
+    patched: pytest.MonkeyPatch, root: Path, relpath: str, edit: Callable[[str], str]
+) -> None:
+    """Simula un arreglo documental: `REPO_ROOT` pasa a un árbol con `relpath` editado."""
+    real = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+    target = root / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(edit(real), encoding="utf-8")
+    patched.setattr(sys.modules[__name__], "REPO_ROOT", root)
+
+
+def _a_phrase_operator_exists(patched: pytest.MonkeyPatch, root: Path) -> None:
+    """§13.1 arreglado: una consulta entre comillas llega a FTS5 como una frase, no como un OR."""
+    patched.setattr(sys.modules[__name__], "match_expression", lambda query: query)
+
+
+def _the_bakeoff_result_is_complete(patched: pytest.MonkeyPatch, root: Path) -> None:
+    """§13.5 arreglado, primera cláusula: el resultado firmado deja de llamarse incompleto."""
+    _serve(patched, root, BAKEOFF, lambda text: text.replace("está INCOMPLETO", "está COMPLETO"))
+
+
+def _the_bakeoff_gate_is_met(patched: pytest.MonkeyPatch, root: Path) -> None:
+    """§13.5 arreglado, segunda cláusula: la puerta del Plan 03 §13.8 pasa a cumplirse."""
+    _serve(patched, root, BAKEOFF, lambda text: text.replace("NO CUMPLE: 1 de 3", "CUMPLE: 3 de 3"))
+
+
+def _the_tutorial_teaches(term: str) -> Fix:
+    """§13.14 arreglado para UNA cláusula: el tutorial enseña `term` y nada más cambia."""
+
+    def fix(patched: pytest.MonkeyPatch, root: Path) -> None:
+        _serve(patched, root, TUTORIAL, lambda text: f"{text}\n`xbrain {term}`\n")
+
+    fix.__name__ = f"_the_tutorial_teaches({term!r})"
+    return fix
+
+
 CLOSURE: tuple[Criterion, ...] = (
     Criterion(
         1,
@@ -125,7 +229,10 @@ CLOSURE: tuple[Criterion, ...] = (
             Node(f"{SEARCH}::test_a_topic_note_match_returns_the_topics_supporting_items"),
             Node(f"{LEXICAL}::test_every_declared_filter_is_actually_pushed_to_sql"),
             Node(f"{LEXICAL}::test_the_filter_is_applied_before_scoring_not_after"),
-            Node(f"{SELF}::test_criterion_1_stays_unmet_while_a_quoted_query_is_a_disjunction"),
+            Witness(
+                f"{SELF}::test_criterion_1_stays_unmet_while_a_quoted_query_is_a_disjunction",
+                fixes=(_a_phrase_operator_exists,),
+            ),
         ),
     ),
     Criterion(
@@ -182,11 +289,9 @@ CLOSURE: tuple[Criterion, ...] = (
                 f"{EVALUATION}::test_a_vector_evaluation_is_reported_per_stratum_and_provenance_by_the_vector_channel"
             ),
             Node(f"{EVALUATION}::test_hybrid_fuses_both_channels_and_names_itself"),
-            Section(BAKEOFF, "## 0. Resultado", "el bake-off está INCOMPLETO"),
-            Section(
-                BAKEOFF,
-                "## 10. Puertas del spec §8.6 y criterios del Plan 03 §13",
-                "NO CUMPLE: 1 de 3",
+            Witness(
+                f"{SELF}::test_criterion_5_stays_unmet_while_the_bakeoff_says_it_is_incomplete",
+                fixes=(_the_bakeoff_result_is_complete, _the_bakeoff_gate_is_met),
             ),
         ),
     ),
@@ -258,9 +363,12 @@ CLOSURE: tuple[Criterion, ...] = (
         "la expansión por grafo puede activarse o desactivarse y tiene una métrica incremental",
         met=True,
         note=(
-            "El interruptor es `search(..., graph_enabled=True)` y lo usa `xbrain eval --strategy "
-            "hybrid_graph`; `xbrain search` y MCP no pueden encenderlo (backlog). La métrica es el "
-            "Δ recall@10 frente a `hybrid` y el estrato `expansion`, y su resultado es NEGATIVO."
+            "El interruptor es `search(..., graph_enabled=True)`, y el único comando que lo usa "
+            "es el barrido `xbrain eval --strategy hybrid_graph --sweep-graph …`. Sin "
+            "`--sweep-graph`, `xbrain eval --strategy hybrid_graph` responde `lexical` declarando "
+            "`hybrid_graph_not_implemented`, igual que `xbrain search` y MCP, que no pueden "
+            "encenderlo (backlog). La métrica es el Δ recall@10 frente a `hybrid` y el estrato "
+            "`expansion`, y su resultado es NEGATIVO."
         ),
         proofs=(
             Node(f"{STRATEGY}::test_hybrid_graph_existe_es_desactivable_y_el_default_no_cambia"),
@@ -323,7 +431,14 @@ CLOSURE: tuple[Criterion, ...] = (
             ),
             Section("ARCHITECTURE.md", "### The MCP server", "thin adapter"),
             Section("docs/troubleshooting.md", "## The knowledge index", "hybrid_graph"),
-            Node(f"{SELF}::test_criterion_14_stays_unmet_while_the_tutorial_skips_plans_03_and_04"),
+            Witness(
+                f"{SELF}::test_criterion_14_stays_unmet_while_the_tutorial_skips_plans_03_and_04",
+                fixes=(
+                    _the_tutorial_teaches("graph-expand"),
+                    _the_tutorial_teaches("mcp-serve"),
+                    _the_tutorial_teaches("search --strategy hybrid"),
+                ),
+            ),
         ),
     ),
     Criterion(
@@ -472,6 +587,272 @@ def test_criterion_14_stays_unmet_while_the_tutorial_skips_plans_03_and_04() -> 
     assert "graph-expand" not in tutorial
     assert "mcp-serve" not in tutorial
     assert "--strategy hybrid" not in tutorial
+
+
+def test_criterion_5_stays_unmet_while_the_bakeoff_says_it_is_incomplete() -> None:
+    """El testigo de §13.5: el bake-off firmado sigue diciendo que está incompleto.
+
+    Completarlo —≥ 3 candidatos, con ganador y perdedores— obliga a re-firmar
+    `docs/embeddings-bakeoff.md`, y ese documento deja de decir estas dos frases: esto se pone
+    rojo y §13.5 tiene que revisarse.
+    """
+    bakeoff = (REPO_ROOT / BAKEOFF).read_text(encoding="utf-8")
+    assert "el bake-off está INCOMPLETO" in (_section_body(bakeoff, BAKEOFF_RESULT) or "")
+    assert "NO CUMPLE: 1 de 3" in (_section_body(bakeoff, BAKEOFF_GATES) or "")
+
+
+# ---------------------------------------------------------------------------
+# Que una prueba exista no quiere decir que pruebe algo (ver el docstring del módulo)
+# ---------------------------------------------------------------------------
+
+_NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_SKIPS = frozenset({"skip", "skipif", "xfail", "importorskip"})
+_SWALLOWS = frozenset({"AssertionError", "Exception", "BaseException"})
+
+
+def _function_def(node_id: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """La definición de `fichero::nombre` (o `::Clase::nombre`), por `ast`; `None` si no está."""
+    module, _, name = node_id.partition("::")
+    path = REPO_ROOT / module
+    if not path.is_file():
+        return None
+    scope: list[ast.stmt] = ast.parse(path.read_text(encoding="utf-8")).body
+    owner, _, name = name.rpartition("::")
+    if owner:
+        classes = [n for n in scope if isinstance(n, ast.ClassDef) and n.name == owner]
+        scope = classes[0].body if classes else []
+    found = [
+        n
+        for n in scope
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+    ]
+    return found[0] if found else None
+
+
+def _own_nodes(function: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:
+    """Lo que el test ejecuta él mismo: su cuerpo, sin entrar en funciones ni clases anidadas."""
+    stack: list[ast.AST] = [n for n in function.body if not isinstance(n, _NESTED)]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(c for c in ast.iter_child_nodes(node) if not isinstance(c, _NESTED))
+
+
+def _tail_name(node: ast.AST) -> str:
+    """`pytest.mark.skipif(…)` → `skipif`; `pytest.raises` → `raises`; `skip` → `skip`."""
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _reads_something(expr: ast.AST) -> bool:
+    """Falso para `True`, `1 == 1` o `"x"`: una aserción que no lee nada no puede fallar."""
+    return any(
+        isinstance(n, (ast.Name, ast.Attribute, ast.Call, ast.Subscript)) for n in ast.walk(expr)
+    )
+
+
+def _never_true(test: ast.expr) -> bool:
+    """`if False:` / `while 0:` / `if not True:` — el bloque que guardan es código muerto."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return isinstance(test.operand, ast.Constant) and bool(test.operand.value)
+    return isinstance(test, ast.Constant) and not test.value
+
+
+def _hollow_reasons(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    """El suelo estático: por qué este test, tal como está escrito, no puede ponerse rojo."""
+    own = list(_own_nodes(function))
+    reasons = []
+    if not any(
+        (isinstance(n, ast.Assert) and _reads_something(n.test))
+        or (isinstance(n, ast.withitem) and _tail_name(n.context_expr) == "raises")
+        for n in own
+    ):
+        reasons.append("no queda ninguna aserción viva")
+    reasons += [
+        f"`{_tail_name(d)}` en sus decoradores"
+        for d in function.decorator_list
+        if _tail_name(d) in _SKIPS
+    ]
+    for node in own:
+        if isinstance(node, ast.Call) and _tail_name(node) in _SKIPS:
+            reasons.append(f"llama a `{_tail_name(node)}`")
+        elif isinstance(node, ast.Return):
+            reasons.append(f"`return` propio en la línea {node.lineno}")
+        elif isinstance(node, (ast.If, ast.While)) and _never_true(node.test):
+            reasons.append(f"condición que nunca se cumple en la línea {node.lineno}")
+        elif isinstance(node, ast.ExceptHandler) and (
+            node.type is None or {_tail_name(n) for n in ast.walk(node.type)} & _SWALLOWS
+        ):
+            reasons.append(f"`except` que se traga la aserción en la línea {node.lineno}")
+    return reasons
+
+
+def _outcome(run: Callable[[], None]) -> tuple[str, int | None]:
+    """`("red", línea)` si `run` falla por una aserción suya; si no, qué pasó y `None`."""
+    try:
+        run()
+    except AssertionError as error:
+        traceback, line = error.__traceback__, None
+        while traceback is not None:
+            if traceback.tb_frame.f_code is run.__code__:
+                line = traceback.tb_lineno
+            traceback = traceback.tb_next
+        return "red", line
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as error:  # noqa: BLE001 - un skip o un fallo ajeno NO es «rojo»
+        return type(error).__name__, None
+    return "green", None
+
+
+def _witness_problems(witness: Witness, scratch: Path) -> list[str]:
+    """Todo lo que impide creer a este testigo: pasa hoy, falla arreglado, cláusula a cláusula."""
+    module, _, name = witness.node.partition("::")
+    run = globals().get(name) if module == SELF else None
+    if not callable(run) or inspect.signature(run).parameters:
+        return [f"{witness.node}: un testigo es una función sin argumentos de {SELF}"]
+    problems = []
+    today, _ = _outcome(run)
+    if today != "green":
+        problems.append(f"{name} no pasa hoy ({today})")
+    if not witness.fixes:
+        problems.append(f"{name} no trae ningún mundo arreglado: nada demuestra que pueda fallar")
+    fired: set[int | None] = set()
+    for index, fix in enumerate(witness.fixes):
+        with pytest.MonkeyPatch.context() as patched:
+            fix(patched, scratch / f"{name}-{index}")
+            verdict, line = _outcome(run)
+        if verdict == "red":
+            fired.add(line)
+        else:
+            problems.append(f"{name} sigue {verdict} en el mundo `{fix.__name__}`: está hueco")
+    function = _function_def(witness.node)
+    own = _own_nodes(function) if function is not None else iter(())
+    clauses = {n.lineno for n in own if isinstance(n, ast.Assert)}
+    if witness.fixes and fired != clauses:
+        problems.append(
+            f"{name}: sus mundos arreglados disparan {sorted(fired, key=str)} y sus cláusulas "
+            f"están en {sorted(clauses)}: cada `assert` necesita el mundo que lo pone rojo"
+        )
+    return problems
+
+
+WITNESSES: tuple[Witness, ...] = tuple(
+    p for c in CLOSURE for p in c.proofs if isinstance(p, Witness)
+)
+FLOOR = f"{SELF}::test_no_named_proof_and_no_test_of_this_file_is_hollow"
+
+
+def test_a_verdict_and_its_witness_travel_together() -> None:
+    """Cumplido ⇒ ningún testigo; NO cumplido ⇒ al menos uno.
+
+    Sin esto, pasar §13.1 a cumplido y sacarlo de `UNMET` —dos líneas del mismo fichero—
+    quedaba verde con el testigo del «no cumple» todavía listado como prueba del «cumple»; y
+    quitar el testigo de un criterio no cumplido, también.
+    """
+    wrong = [c.number for c in CLOSURE if c.met == any(isinstance(p, Witness) for p in c.proofs)]
+    assert not wrong, f"el veredicto y el testigo no van juntos en §13.{wrong}"
+
+
+@pytest.mark.parametrize("witness", WITNESSES, ids=lambda w: w.node.rpartition("::")[2])
+def test_every_witness_passes_today_and_fails_in_every_world_that_fixes_it(
+    witness: Witness, tmp_path: Path
+) -> None:
+    """La regla 1, ejecutada en cada corrida: el testigo se ve rojo en cada mundo arreglado.
+
+    Visto en rojo borrando SÓLO la aserción de
+    `test_criterion_1_stays_unmet_while_a_quoted_query_is_a_disjunction`, la mutación que
+    antes dejaba este fichero en 51 de 51 verde.
+    """
+    problems = _witness_problems(witness, tmp_path)
+    assert not problems, "; ".join(problems)
+
+
+PROOF_NODES: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        [p.node for c in CLOSURE for p in c.proofs if isinstance(p, Node)]
+        + [f"{SELF}::{name}" for name in sorted(_test_names(REPO_ROOT / SELF))]
+    )
+)
+
+
+@pytest.mark.parametrize("node", PROOF_NODES, ids=lambda node: node.rpartition("::")[2])
+def test_no_named_proof_and_no_test_of_this_file_is_hollow(node: str) -> None:
+    """El suelo: un test nombrado —o una guarda de aquí— que ya no puede ponerse rojo."""
+    function = _function_def(node)
+    reasons = ["no existe"] if function is None else _hollow_reasons(function)
+    assert not reasons, f"{node} está hueco: {reasons}"
+
+
+_SPECIMEN = ""
+
+
+def _specimen_hollow_witness() -> None:
+    """Un testigo al que le han borrado la aserción: el espécimen de la mutación reproducida."""
+
+
+def _specimen_two_clause_witness() -> None:
+    assert "a" not in _SPECIMEN
+    assert "b" not in _SPECIMEN
+
+
+def _the_specimen_gains(text: str) -> Fix:
+    def fix(patched: pytest.MonkeyPatch, root: Path) -> None:
+        patched.setattr(sys.modules[__name__], "_SPECIMEN", text)
+
+    fix.__name__ = f"_the_specimen_gains({text!r})"
+    return fix
+
+
+HOLLOW_SHAPES: dict[str, str] = {
+    "sin aserción": "def test_x():\n    '''doc'''\n",
+    "sólo `pass`": "def test_x():\n    pass\n",
+    "assert constante": "def test_x():\n    assert 1 == 1\n",
+    "skip decorado": "@pytest.mark.skip\ndef test_x():\n    assert f()\n",
+    "skipif decorado": "@pytest.mark.skipif(True, reason='')\ndef test_x():\n    assert f()\n",
+    "pytest.skip()": "def test_x():\n    pytest.skip('')\n    assert f()\n",
+    "return delante": "def test_x():\n    return\n    assert f()\n",
+    "if False": "def test_x():\n    if False:\n        assert f()\n",
+    "except que traga": (
+        "def test_x():\n    try:\n        assert f()\n    except AssertionError:\n        pass\n"
+    ),
+    "aserción sólo en una función anidada": "def test_x():\n    def g():\n        assert f()\n",
+}
+
+
+def test_the_guards_of_this_file_see_the_defect_they_exist_for(tmp_path: Path) -> None:
+    """Las dos guardas se vigilan entre sí, porque ninguna puede vigilarse sola.
+
+    El suelo tiene que ver cada forma de test hueco; el ejecutor de testigos, un testigo vaciado
+    y un testigo con una cláusula sin mundo. Y el suelo se aplica AQUÍ al test del propio suelo:
+    un test vaciado no se denuncia a sí mismo, y el ejecutor ya lo cubre el suelo.
+    """
+    blind = [
+        shape for shape, source in HOLLOW_SHAPES.items() if not _hollow_reasons(_parse(source))
+    ]
+    specimens = {
+        "testigo vaciado": Witness(
+            f"{SELF}::_specimen_hollow_witness", fixes=(_the_specimen_gains("a"),)
+        ),
+        "cláusula sin mundo": Witness(
+            f"{SELF}::_specimen_two_clause_witness", fixes=(_the_specimen_gains("a"),)
+        ),
+        "testigo sin mundos": Witness(f"{SELF}::_specimen_two_clause_witness"),
+    }
+    blind += [kind for kind, w in specimens.items() if not _witness_problems(w, tmp_path)]
+    floor = _function_def(FLOOR)
+    if floor is None or _hollow_reasons(floor):
+        blind.append(f"{FLOOR} no existe o está hueco")
+    assert not blind, f"guardas que ya no ven su defecto: {blind}"
+
+
+def _parse(source: str) -> ast.FunctionDef:
+    function = ast.parse(source).body[0]
+    assert isinstance(function, ast.FunctionDef)
+    return function
 
 
 def test_query_and_retrieval_never_construct_a_generative_client(tmp_path, monkeypatch) -> None:
