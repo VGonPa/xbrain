@@ -340,8 +340,10 @@ The report goes under `data/`, which is not tracked, because it quotes the corpu
 The lexical baseline to beat, as shipped (chunks of 800 characters, no overlap),
 is `recall@10` **0.7391** · MRR **0.7357**, measured on `store-2474` (22,933
 chunks) against `golden@d1423c8`, the tracked golden set, re-derived 2026-09-16
-with `xbrain eval --sweep-chunker "target=800 overlap=0"`. Both versions are
-spelled out in [Measured versions](#measured-versions). Older documents quote
+with `xbrain eval --sweep-chunker "target=800 overlap=0"` pointed at that
+snapshot. Run as printed, that line reads the live store and prints the same pair
+over another chunk count; [Measured versions](#measured-versions) spells out both
+versions and how to run it on the snapshot. Older documents quote
 **0.7395**: the same store and the same chunks against a golden set from before
 `d1423c8`, when case U3 listed 22 relevant items instead of 24. Two versions
 fit that description and both score 0.7395: `golden@a88c753` and
@@ -378,8 +380,8 @@ Every check below was run on 2026-09-16 at `b7aa992`.
 | `golden@427fea9` | `eval/golden-set.yaml` from `427fea9` up to `a88c753^`: U3 lists 22 relevant items, no `expansion` labels | Git, every commit in that range, the bake-off's `547a860` among them | `ed6dd760…` | `git show 547a860:eval/golden-set.yaml \| shasum -a 256` | reproduced |
 | `golden@a88c753` | the same file from `a88c753` up to `d1423c8^`: `expansion` labels and their notes added, U3 still at 22 | Git | `ed590920…` | `git show a88c753:eval/golden-set.yaml \| shasum -a 256` | reproduced |
 | `golden@d1423c8` | the same file from `d1423c8` on, U3 at 24. The tracked one today | Git, `d1423c8` to `b7aa992` | `bf9aad8f…` | `git show d1423c8:eval/golden-set.yaml \| shasum -a 256` | reproduced |
-| `store-2404` | `data/items.json`, 2,404 items, the live store of 2026-09-01 to 09-03, quoted by sha256 | nowhere | `f76341a3…` | none | **not reproducible** |
-| `store-2404` | `data/items.json`, 2,404 items, the live store of 2026-08-31, quoted by **md5** | nowhere | md5 `5aaf62f4…` | none | **not reproducible** |
+| `store-2404-0831` | `data/items.json`, 2,404 items, the live store of 2026-08-31, recorded only by **md5** | nowhere | md5 `5aaf62f4…` | none | **not reproducible** |
+| `store-2404-0901` | `data/items.json`, 2,404 items, the live store of 2026-09-01 to 09-03. **Not the same file** as `store-2404-0831`: on 2026-09-01 it was also hashed with md5, `a66d0c41…` | nowhere | `f76341a3…` | none | **not reproducible** |
 | `store-2474` | `items.json`, 2,474 items. Live from 2026-09-11 17:34 to 2026-09-14 09:43 (local time; the snapshot keeps the file's mtime) | `data/snapshots/2026-09-14T07-43-40-952Z-pre-full-pipeline-20260914/` | `4fed54a0…` | in that directory: `shasum -a 256 items.json vocab.yaml topics.json` | reproduced |
 | `store-2474` | its `topics.json` | the same snapshot, and every one up to `…08-47-12-722Z-pre-topics-resynth` | `7a40f4f1…` | the same command | reproduced |
 | `store-2474`, `store-2495` | `vocab.yaml`, the same file in both stores and in `data/` today | every snapshot | `e73fbede…` | either store's command | reproduced |
@@ -452,19 +454,58 @@ it, for the reason given.
 | `store-2495` × `golden@d1423c8` | the [graph sweep](graph-threshold-sweep.md): 16 cells, base 0.6296 on 18 cases, 33 `expansion` pairs, 0 of them lifted | graph sweep, this page | re-run with the sweep's §6 command, at `b7aa992` rather than the `d1423c8` it checks out: the 16 rows of its §3 table came out byte-identical, and so did the base, the `expansion` line and the verdict |
 | `store-2495` × `golden@a88c753` | the sweep's first signature (base 0.6301, 31 pairs), and its two `expansion` classification runs (140 s and 144 s) with their 58 identical pairs | graph sweep | recorded |
 | `store-2495` / `index-2495` | the graph plane at the default thresholds: 5,783 edges (2,495 `HAS_PRIMARY_TOPIC`, 3,128 `HAS_TOPIC`, 160 `CO_OCCURS_WITH` among 41 topics). `knowledge.db` 53.6 MiB, 1.6 MiB of it `graph_edges` with its three indexes (0.64 MiB the table alone) | this page, CLAUDE.md | recorded |
-| `store-2404` | with the **sha256**, on 2026-09-01: `el` in 6,070 of 22,286 chunks (27.2 %), chunker v2 `800/0`. With the **md5**, on 2026-08-31: 18,319 chunks (9,294 atomic + 9,025 splittable), and `el` in 5,748 of 18,319 (31.4 %), chunker v1 | this page, CLAUDE.md, ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
+| `store-2404-0831` | on 2026-08-31, chunker v1: 18,319 chunks (9,294 atomic + 9,025 splittable), and `el` in 5,748 of them (31.4 %) | CLAUDE.md, ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
+| `store-2404-0901` | on 2026-09-01: `el` in 6,070 of 22,286 chunks (27.2 %), chunker v2 `800/0`. Chunker v1 cuts this store into 18,320 chunks, one more than `store-2404-0831` | this page, CLAUDE.md, ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
 
 The live store today (2,519 items) carries none of these figures.
 
-**Why `store-2404` cannot be reproduced.** Both digests name a 2,404-item store
-that `data/` no longer holds. Snapshots begin on 2026-09-11, when the store
-already had 2,474 items; the older backups next to it hold 2,130, the live store
-2,519, and none of them hashes to either value. A search of the whole disk for
-`items.json` copies turned up nothing else. Whether the md5 and the sha256 even
-name the same bytes is beyond checking too, since there is no file left to hash
-with both. So the figures stay where they are, dated and read as history: none
-can be re-derived, and none may be re-stamped to a later store (CLAUDE.md,
-rule 6).
+**Why neither 2,404-item store can be reproduced.** The two labels name two
+different files. On 2026-09-01 the live `items.json` was hashed both ways in the
+same read-only sessions, unchanged from start to finish: sha256 `f76341a3…` and
+md5 `a66d0c41…`, which is not the `5aaf62f4…` of 2026-08-31. The record is in
+the Plan 02 execution report and its first independent review, under
+`zz-support-files/` (local, not in Git). Neither file is in `data/` any more.
+Snapshots begin on 2026-09-11, when the store already had 2,474 items; the older
+backups next to it hold 2,130, the live store 2,519, and none of them is either
+file. A search of the whole disk for `items.json` copies turned up nothing else.
+So the figures stay where they are, dated and read as history: none can be
+re-derived, and none may be re-stamped to a later store (CLAUDE.md, rule 6).
+
+**Re-running a figure on its store.** The store check above proves a snapshot is
+intact; it does not point any command at it. `xbrain` reads `config.toml` and
+`data/` from its checkout, or from `XBRAIN_REPO_ROOT` when that is set, so a
+command copied from this page measures the live store. **Getting the published
+figure back that way confirms nothing.** On 2026-09-16,
+`xbrain eval --sweep-chunker "target=800 overlap=0"` on the live store (2,519
+items) printed `recall@10` 0.7391 · MRR 0.7357, the headline pair to the fourth
+decimal, over **23,300** chunks. `store-2474` gives **22,933**. The pair does not
+tell the two stores apart and the chunk count does, so read the count before the
+recall. To measure on `store-2474`, set `SRC` to any clone with the history and
+`SNAP` to the snapshot the table names. The snapshot is only read, through
+symlinks, and everything is written under `$WORK`:
+
+```bash
+SRC=/path/to/a/clone/of/xbrain
+SNAP=/path/to/data/snapshots/2026-09-14T07-43-40-952Z-pre-full-pipeline-20260914
+WORK=$(mktemp -d)
+git clone --quiet --no-checkout "$SRC" "$WORK/xbrain"
+git -C "$WORK/xbrain" checkout --quiet --detach b7aa992
+(cd "$WORK/xbrain" && uv sync --locked --quiet)
+ROOT=$WORK/root
+mkdir -p "$ROOT/data"
+for f in items.json vocab.yaml topics.json; do ln -s "$SNAP/$f" "$ROOT/data/$f"; done
+shasum -a 256 "$ROOT"/data/items.json "$ROOT"/data/vocab.yaml "$ROOT"/data/topics.json   # 4fed54a0… e73fbede… 7a40f4f1…
+printf '[paths]\nvault = "vault"\noutput_subdir = ""\ndata_dir = "data"\n\n[x]\nhandle = "u"\n' > "$ROOT/config.toml"
+(cd "$WORK/xbrain" && XBRAIN_REPO_ROOT="$ROOT" uv run xbrain eval \
+  --sweep-chunker "target=800 overlap=0" \
+  --golden-set "$WORK/xbrain/eval/golden-set.yaml")
+# | 800 | 0 | 22933 | 0.7391 | 0.5163 | 0.7357 |
+```
+
+`--golden-set` must be an absolute path, because a relative one resolves against
+`$ROOT`, which has no `eval/`. That file is `golden@d1423c8`. For the two older
+golden sets, write `git -C "$WORK/xbrain" show a88c753:eval/golden-set.yaml`
+(or `547a860:`) to a file and pass that file instead: both give 0.7395 · 0.7357.
 
 **Keeping a measured store checkable.** These are ordinary `xbrain` snapshots,
 and `xbrain snapshot prune` removes the oldest. Run with its default
@@ -492,7 +533,7 @@ usually a different word entirely.
 
 **IDF is relative to this corpus.** bm25 discounts a term by how common it is
 *here*, not in the language. `el` appears in roughly 27–28 % of real chunks (6,070
-of 22,286 on `store-2404`, which [no copy kept](#measured-versions); 28.0 % on
+of 22,286 on `store-2404-0901`, which [no copy kept](#measured-versions); 28.0 % on
 `store-2474`, per the umbrella audit of 2026-09-13), so it is discounted heavily; a word that reads
 like a function word to you may be rare to the index and go undiscounted. This is
 also why a fixture-sized index ranks differently from the real one.

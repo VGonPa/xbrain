@@ -487,7 +487,7 @@ generates an Obsidian wiki.
   (The figure was **18,328 / 9,034** until `_absorb_scraps` merged the 9 chunks that sat below
   the floor; the commit that removed them said so and this line was not re-derived — rule 6 in
   miniature, in the file the repo says is read first and acted on. Re-derived 2026-08-31 on the
-  same 2,404-item corpus, `store-2404` — no copy of it survives, so 18,319 cannot be re-derived
+  same 2,404-item corpus, `store-2404-0831` — no copy of it survives, so 18,319 cannot be re-derived
   today either (docs/knowledge-index.md#measured-versions). **30,449 is NOT re-derivable**: it measured the
   pre-packing implementation, which no longer exists, so read it as history, never as a figure
   you could reproduce today.) The chunker's parameters are ARGUMENTS, so the Plan-02 sweep
@@ -538,7 +538,7 @@ generates an Obsidian wiki.
   runs. **The limit that remains is that IDF is relative to THIS corpus**, so a word that reads
   as a function word can still be rare to the index and go undiscounted — `el` is 1 of 49
   fixture chunks (2.0 %) and **6,070 of 22,286** real ones (**27.2 %**), re-derived 2026-09-01
-  on the then-shipped chunker (v2, `800/0`, `store-2404`, not reproducible — see the versions
+  on the then-shipped chunker (v2, `800/0`, `store-2404-0901`, not reproducible — see the versions
   table in docs/knowledge-index.md#measured-versions), which is why a fixture
   query ranks it high and the real corpus does not. **`CHUNKER_VERSION` is `v3` since Plan
   02.9**, and this count still stands: v3 changed the FINGERPRINT projection (the served title
@@ -546,8 +546,9 @@ generates an Obsidian wiki.
   being byte-identical across the bump — so the chunk ids moved and the chunk COUNT did not.
   Do not re-stamp a measured figure to a new version without that proof: which of the two a
   version bump touched is the whole question. *(It read `5,748 of 18,319 (31.4 %)`, which was
-  correct for the PROVISIONAL chunker v1 and for `store-2404` (quoted by md5); the chunker moved
-  in this branch and the derived figure did not — rule 6. Read the old pair as history.)*
+  correct for the PROVISIONAL chunker v1 and for `store-2404-0831`; the chunker moved in this
+  branch, the store moved too (`store-2404-0901` is another file with the same 2,404 items), and
+  the derived figure did not — rule 6. Read the old pair as history.)*
   **The pair Plan 03's vector layer has to beat is `recall@10` 0.7391 · MRR 0.7357** — NOT the
   `0.8099 / 0.7206` above, which measured the pre-#179 in-memory harness and is retired with
   it. Those are the SHIPPED `800/0` chunker's, scored through `index_build`'s writer by the
