@@ -1185,6 +1185,75 @@ def test_blank_transcript_flagged_as_speech_is_hollow_on_a_non_frames_run(
     assert (report.transcribed, report.no_speech) == (1, 0)
 
 
+def _hollow_store(tmp_path: Path) -> dict[str, Item]:
+    """One item already carrying a hollow source (silent, frameless), from a prior
+    non-`--frames` run."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    first = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert first.hollow == 1
+    return store
+
+
+def _transcription_fails(_path: Path) -> Transcript:
+    raise TranscriberFailed("garbage output")
+
+
+@pytest.mark.parametrize(
+    ("fetch_fn", "transcribe_fn"),
+    [
+        pytest.param(_FakeFetch(fail_ids={"a1"}), lambda _p: _silence(), id="fetch-failed"),
+        pytest.param(_FakeFetch(), _transcription_fails, id="transcription-failed"),
+    ],
+)
+def test_failed_forced_redigest_keeps_the_old_hollow_source_as_failed(
+    tmp_path: Path, fetch_fn, transcribe_fn
+):
+    """A `--force --frames` re-digest of a hollow item whose fetch or transcription
+    fails attaches nothing: the OLD hollow source stays, and the item is counted
+    under `fallidos` — not under `Huecos`, which counts only what this run
+    attached (docs/digest-video.md, hollow items)."""
+    store = _hollow_store(tmp_path)
+    old = store["a1"].content.sources[0]
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+    report = digest_videos(
+        store,
+        ["a1"],
+        force=True,
+        fetch_fn=fetch_fn,
+        transcribe_fn=transcribe_fn,
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    # Identity, not equality: a re-attached silent transcript compares EQUAL to the
+    # old hollow source, so only `is` proves nothing was attached.
+    assert len(store["a1"].content.sources) == 1
+    assert store["a1"].content.sources[0] is old
+    assert visual.describe_calls == []
+    assert (report.failed, report.hollow, report.visual_footage) == (1, 0, 0)
+
+
+def test_already_stored_hollow_item_is_not_counted_hollow_again(tmp_path: Path):
+    """Without `--force` a stored hollow item is `already` and is not re-counted, so
+    `Huecos` never reports the backlog — the documented jq recipe finds that."""
+    store = _hollow_store(tmp_path)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _silence(),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert (report.already, report.hollow, report.videos_transcribed) == (1, 0, 0)
+
+
 def test_silent_slide_deck_uses_the_slide_reducer_not_the_footage_one(tmp_path: Path):
     """A silent SLIDE deck keeps today's path: the slide reducer (keeps 2) decides the
     set, the footage reducer (keeps 1) never runs, and it counts as slides — not as
