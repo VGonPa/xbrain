@@ -340,14 +340,18 @@ is `recall@10` **0.7391** · MRR **0.7357**, measured on the 2,474-item store
 (sha256 `4fed54a0…`, 22,933 chunks) against the tracked golden set
 (`eval/golden-set.yaml` sha256 `bf9aad8f…`), re-derived 2026-09-16 with
 `xbrain eval --sweep-chunker "target=800 overlap=0"`. Older documents quote
-**0.7395**: the same store and the same chunks against the golden set as it was
-before `d1423c8` (sha256 `ed6dd760…`), when case U3 listed 22 relevant items
-instead of 24. The MRR does not move. The recall moves with the golden set as
-well as with the corpus, so quote it with both hashes.
+**0.7395**: the same store and the same chunks against a golden set from before
+`d1423c8`, when case U3 listed 22 relevant items instead of 24. Two versions
+fit that description and both score 0.7395: `d1423c8^` (sha256 `ed590920…`) and
+the one before `a88c753` (sha256 `ed6dd760…`), which differs from it only in the
+`expansion` stratum (its labels and their notes). Check a hash with
+`git show <rev>:eval/golden-set.yaml | shasum -a 256`. The MRR does not move.
+The recall moves with the golden set as well as with the corpus, so quote it
+with both hashes.
 
 The two negative results are summarised in their sections below, and each one
-states its own population. The embeddings bake-off was measured against that
-earlier golden set, on the same store: its lexical row reads 0.7395, at a
+states its own population. The embeddings bake-off was measured against the
+`ed6dd760…` golden set (commit `547a860`), on the same store: its lexical row reads 0.7395, at a
 depth of 20 rather than 10. The graph sweep used a later store (2,495 items), 18 cases and
 items served by `search` as its unit, and it says itself that its figures are not
 comparable with either number.

@@ -153,8 +153,8 @@ reached through it answers your question. Use expansion to find more items to
 And it does not improve search: measured on the golden set, re-ranking by graph
 neighbourhood lifted **0 of the 33** relevant results only the graph could reach,
 in every threshold tried ([graph-threshold-sweep.md](graph-threshold-sweep.md)).
-That is why `hybrid_graph` is not the default and cannot be switched on from the
-CLI or MCP.
+That is why `hybrid_graph` is not the default and cannot be switched on from
+`search` or MCP (only the `xbrain eval --sweep-graph` sweep runs it).
 
 ## Strategies, briefly
 

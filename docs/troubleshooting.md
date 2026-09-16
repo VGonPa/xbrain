@@ -633,8 +633,9 @@ reach ([graph-threshold-sweep.md](graph-threshold-sweep.md)). The sentence says
 - **The client reports the server failed or exited.** Run the exact command the
   client runs in a terminal: it should start and wait silently on stdin (Ctrl-C to
   stop). Anything printed before that is the cause.
-- **Tools listed, every call errors with `No hay índice en …`** — the server is
-  reading a checkout without an index. It reads `config.toml` and `data/` from the
+- **Tools listed, `search` and `graph_expand` error with `No hay índice en …`** —
+  the server is reading a checkout without an index (`get` still answers: it reads
+  the store, never the index). It reads `config.toml` and `data/` from the
   checkout it runs from (or from `XBRAIN_REPO_ROOT`); build the index there.
 - **Results from the wrong corpus** — same cause: check `--directory` and
   `XBRAIN_REPO_ROOT` in the client's configuration.

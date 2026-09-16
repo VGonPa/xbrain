@@ -545,11 +545,14 @@ generates an Obsidian wiki.
   harness in `evaluation.sweep_chunker` (2,474 items, sha256 `4fed54a0…`, 22,933 chunks)
   against the TRACKED golden set, sha256 `bf9aad8f…` — re-derived 2026-09-16. It read
   **0.7395** until then, and the documents that still quote 0.7395 (the bake-off among them)
-  are right about THEIR pair: the same store and chunks against the golden set before
-  `d1423c8` (sha256 `ed6dd760…`, U3 at 22 relevant instead of 24). A recall is a fact about the corpus
+  are right about THEIR pair: the same store and chunks against a golden set from before
+  `d1423c8`, with U3 at 22 relevant instead of 24. There are TWO such sets, and both score
+  0.7395: `d1423c8^` is sha256 `ed590920…`, and the bake-off's (`547a860`, before `a88c753`,
+  which only added `expansion` stratum labels and their notes) is sha256 `ed6dd760…` — `git show
+  <rev>:eval/golden-set.yaml | shasum -a 256`. A recall is a fact about the corpus
   AND the case set; a figure that names only one of them is rule 2's missing population. Read
   `0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
-  tied at `recall@10` (0.7391; 0.7395 on the older set) and ahead on MRR at 0.7360, under
+  tied at `recall@10` (0.7391; 0.7395 on `ed6dd760…`) and ahead on MRR at 0.7360, under
   both, so pairing the winner's recall with this MRR is rule 6 in one line. That, and no stemming, is what the vector layer has to beat — and the bake-off that tried
   has not beaten it (next bullet but one: incomplete, Plan 03 §13.8 NOT MET).
   Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
@@ -603,7 +606,7 @@ generates an Obsidian wiki.
   loading the 17.3 MiB `items.json` for verification hydration), `knowledge.db` 52 MiB ≈ 3× the
   store.** HISTORY since 04.2: those figures predate the graph plane. On the 2,495-item store of
   the graph sweep (sha256 `2773310f…`, rebuilt 2026-09-16) `knowledge.db` is 53.6 MiB, 1.6 MiB of
-  it `graph_edges` (`dbstat`); timings were not re-taken (machine swapping). Re-derive it; it
+  it `graph_edges` WITH its three indexes (the table alone is 0.64 MiB; `dbstat`); timings were not re-taken (machine swapping). Re-derive it; it
   moves with the corpus. **Known limits, declared not discovered:** no
   stemming (FTS5 has none multilingual and the English one would wreck the Spanish half) — top
   tens for `agente` and `agentes` share **0 of 10** items, measured on that corpus, while
