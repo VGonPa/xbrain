@@ -137,8 +137,16 @@ reloads the model per frame. On a 16 GB Mac,
   muted screencasts). This is expected — it attaches as `has_speech=false`
   ("silent video"), not an error. Verify with `yt-dlp -f bestaudio <tweet-url>`
   (errors = no audio exists).
-- `fallidos` (real failures): usually `parakeet-mlx` not found (see the PATH
-  section above) — the fix is almost always the environment, not the video.
+- `fallidos` (real failures) counts the videos whose download failed or whose
+  transcriber **ran** and failed, by exiting non-zero, timing out or leaving no
+  usable output. When every video fails, the usual cause is a wrapper such as
+  `scripts/xbrain-transcribe` that cannot find `parakeet-mlx` on its own `PATH`
+  (the `exited 1: FileNotFoundError` in the PATH section above), and the fix is
+  the environment, not the video.
+- A `[transcribe].command` that is **itself** missing never shows up in
+  `fallidos`: the run stops at the first video it tries to transcribe, with
+  `Error: transcriber '…' not found` and exit code 1, before printing a summary or
+  saving anything.
 
 ## A digest reads perfectly but says nothing that was said
 
