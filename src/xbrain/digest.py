@@ -449,7 +449,8 @@ def _extract_described_slides(
         `footage_reduce_fn` and describe them like slides. Skipping them would
         attach an empty, frameless source — a hollow entry.
     - `skipped` (a NON-content drop, whatever the speech) → logged with its
-      specific reason, counted as neither: a per-video `FrameExtractionFailed`
+      specific reason, counted as neither slides, footage nor talking-head: a
+      per-video `FrameExtractionFailed`
       (bad mp4), ZERO frames selected (ffmpeg found nothing — logged, not silently
       bucketed as talking-head), every frame `unreadable` (a systemic decode
       problem — surfaced, not degraded), or a `VisionFailed` describe failure.
@@ -492,14 +493,17 @@ def _carries_speech(transcript: Transcript) -> bool:
     `has_speech` alone is looser than every consumer's check:
     `transcribe._derive_has_speech` returns True for blank segments
     (`{"segments": [{"text": " "}]}`) and trusts `{"text": "", "has_speech": true}`,
-    both with empty text. Every consumer of the attached source treats "has a
-    transcript" as the flag AND non-empty text — `generate._video_digest_lines`,
-    `video_digest._has_digestible_content`, `worksheet._video_transcript`,
-    `executors.api._video_transcript_section` — so a wordless source is silent
-    there. Gating on the flag alone would skip such a video's frames as a
-    talking-head and never count it hollow: the exact silent, frameless entry the
-    footage path exists to prevent. Whitespace-only text counts as blank, so this
-    is never looser than those consumers.
+    both with empty text. Every consumer of the attached source requires
+    non-empty text on top of the flag, so a wordless source is silent there:
+    `video_digest._has_digestible_content`, `worksheet._video_transcript` and
+    `executors.api._video_transcript_section` require a truthy `has_speech`;
+    `generate._video_digest_lines` requires `has_speech is not False`, so a
+    `None` flag counts there — but `attach_transcript` always copies the
+    transcript's bool, so digest never writes `None`. Gating on the flag alone
+    would skip such a video's frames as a talking-head and never count it
+    hollow: the exact silent, frameless entry the footage path exists to
+    prevent. Whitespace-only text counts as blank, so this is never looser than
+    those consumers.
 
     It gates the footage decision and the `hollow` count only; the
     `transcribed` / `no_speech` counters keep reporting the transcriber's flag.

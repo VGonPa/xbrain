@@ -143,7 +143,9 @@ uv run xbrain digest-video --all-pending
 #   Dedup: 8 items ← 8 vídeos (8 transcritos este run). Huecos (sin voz ni frames): 2.
 ```
 
-Read the summary: **transcritos** = had speech, **sin voz** = silent (no audio
+Read the summary: **transcritos** = had speech (by the transcriber's flag: one
+flagged as speech but with blank text counts here, and also under **Huecos**
+unless `--frames` describes its frames), **sin voz** = silent (no audio
 track — GIFs, muted clips; attached as `has_speech=false`, not a failure),
 **fallidos** = a real transcribe failure, **sin vídeo** = the video couldn't be
 fetched (deleted / unavailable), **Huecos** = items that ended the run with
