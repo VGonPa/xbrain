@@ -2918,6 +2918,106 @@ def test_digest_video_frames_help_states_the_footage_rule():
     )
 
 
+# ------------------------------------------------------ digest-video --keep-transcript
+
+
+def _hollow_video_item(item_id: str = "42") -> Item:
+    """A video item already carrying a hollow `x_video` source (no words, no
+    frames): what `--frames --force --keep-transcript` exists to recover."""
+    item = _video_item(item_id, url=_AMPLIFY_URL_1)
+    item.content = Content(
+        fetched_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        sources=[
+            ContentSourceSuccess(kind="x_video", url=_AMPLIFY_URL_1, text="", has_speech=False)
+        ],
+    )
+    return item
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        pytest.param(
+            ["--force", "--keep-transcript"],
+            "--keep-transcript requires --frames (it only re-runs the visual layer)",
+            id="without-frames",
+        ),
+        pytest.param(
+            ["--frames", "--keep-transcript"],
+            "--keep-transcript requires --force (it re-digests already-digested videos)",
+            id="without-force",
+        ),
+    ],
+)
+def test_digest_video_keep_transcript_needs_frames_and_force(
+    tmp_path: Path, monkeypatch, flags, message
+):
+    """`--keep-transcript` only means something on a forced visual re-digest.
+    Anywhere else it is a usage error: nothing is transcribed or written."""
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _hollow_video_item()}, items_path)
+    before = items_path.read_bytes()
+    calls: list = []
+    _wire_digest(monkeypatch, _silent_transcript(), calls=calls)
+
+    result = runner.invoke(app, ["digest-video", "--ids", "42", *flags])
+    assert result.exit_code == 2  # click usage error (BadParameter)
+    assert message in _plain_output(result.output)
+    assert calls == []
+    assert items_path.read_bytes() == before
+
+
+def test_digest_video_keep_transcript_recovers_a_hollow_item_without_the_asr(
+    tmp_path: Path, monkeypatch
+):
+    """The hollow-recovery run end to end: the ASR never runs, the silent
+    non-slide video gets its frame as footage (two identical camera frames
+    dedupe to one), and the summary says so."""
+    from xbrain.store import load_store
+
+    _setup_repo_with_vision(tmp_path, monkeypatch)
+    items_path = tmp_path / "data" / "items.json"
+    save_store({"42": _hollow_video_item()}, items_path)
+    calls: list = []
+
+    def _asr_must_not_run(path):
+        raise AssertionError(f"the ASR ran on {path} under --keep-transcript")
+
+    _wire_digest(monkeypatch, _asr_must_not_run, calls=calls)
+    _wire_frames(monkeypatch, writer=_write_photo_png)
+
+    result = runner.invoke(
+        app, ["digest-video", "--ids", "42", "--frames", "--force", "--keep-transcript"]
+    )
+    assert calls == []
+    assert result.exit_code == 0, result.output
+    source = load_store(items_path)["42"].content.sources[0]
+    assert (source.text, source.has_speech) == ("", False)
+    assert [(f.local_path, f.description) for f in source.frames] == [
+        ("42/frames/0.png", "slide frame-00000")
+    ]
+    assert _summary_line(result.output) == (
+        "Vídeos: transcritos 0, sin voz 1, ya digeridos 0, fallidos 0, sin vídeo 0, "
+        "desconocidos 0. Dedup: 1 items ← 1 vídeos (1 transcritos este run). "
+        "Visual: 0 con slides, 1 metraje mudo descrito, 0 talking-head (saltados)."
+    )
+
+
+def test_digest_video_keep_transcript_help_names_the_recovery_use():
+    """The flag's help is the operator's contract, read from the option itself."""
+    from typer.main import get_command
+
+    command = get_command(app).commands["digest-video"]
+    help_text = next(
+        (param.help for param in command.params if param.name == "keep_transcript"), None
+    )
+    assert help_text == (
+        "Con --frames --force: rehace solo la capa visual y reutiliza la transcripción "
+        "guardada (no vuelve a pasar el ASR). Úsalo para recuperar vídeos huecos."
+    )
+
+
 def test_frames_render_the_rubric_in_the_output_language(tmp_path: Path, monkeypatch):
     """The frame rubric renders in the WIKI's language (`[output].language`).
     `digest-video --language` is the AUDIO language handed to the transcriber;

@@ -1567,6 +1567,7 @@ def _run_digest_video(
     language: str | None,
     frames: bool,
     vision_model: str | None = None,
+    keep_transcript: bool = False,
 ) -> None:
     """Digest selected videos into `x_video` transcript sources; persist + summarise.
 
@@ -1576,7 +1577,8 @@ def _run_digest_video(
     config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
     extracts key frames and describes them via the EXTERNAL `[vision]` command,
     attaching them to slide videos and to silent non-slide footage (a talking-head
-    with speech is skipped). It is destructive (rewrites
+    with speech is skipped). `--keep-transcript` reuses each stored transcript
+    instead of re-running the transcriber. It is destructive (rewrites
     `items.json`), so it auto-snapshots BEFORE the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
     takes no snapshot). A snapshot failure propagates and aborts before any write.
@@ -1593,7 +1595,14 @@ def _run_digest_video(
             language=language,
         )
 
-    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe, visual=visual)
+    report = digest_videos(
+        store,
+        id_list,
+        force=force,
+        keep_transcript=keep_transcript,
+        transcribe_fn=_transcribe,
+        visual=visual,
+    )
     if report.changed > 0:
         _auto_snapshot(cfg, "digest-video")
         save_store(store, cfg.items_path)
@@ -1639,6 +1648,12 @@ def digest_video(
         "--model al comando de visión. Con un wrapper multi-backend permite elegir "
         "modelo por run (p.ej. opus → nube, qwen-7b → local). Requiere --frames.",
     ),
+    keep_transcript: bool = typer.Option(
+        False,
+        "--keep-transcript",
+        help="Con --frames --force: rehace solo la capa visual y reutiliza la transcripción "
+        "guardada (no vuelve a pasar el ASR). Úsalo para recuperar vídeos huecos.",
+    ),
 ) -> None:
     """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
@@ -1667,6 +1682,14 @@ def digest_video(
     cfg = _config()
     if vision_model and not frames:
         raise typer.BadParameter("--vision-model requires --frames (the visual layer is off)")
+    if keep_transcript and not frames:
+        raise typer.BadParameter(
+            "--keep-transcript requires --frames (it only re-runs the visual layer)"
+        )
+    if keep_transcript and not force:
+        raise typer.BadParameter(
+            "--keep-transcript requires --force (it re-digests already-digested videos)"
+        )
     _run_digest_video(
         cfg,
         ids=ids,
@@ -1678,6 +1701,7 @@ def digest_video(
         language=language,
         frames=frames,
         vision_model=vision_model,
+        keep_transcript=keep_transcript,
     )
 
 
