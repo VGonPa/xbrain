@@ -263,7 +263,7 @@ finds proper nouns and figures, not conceptual similarity. Without a vector
 plane (below), every response says so (`degraded: ["no_embeddings"]`). Details,
 costs and the rest of the limits: [The knowledge index](knowledge-index.md).
 
-### Search by meaning (optional, and not better yet)
+### Search by meaning (optional, and not shown to beat word search)
 
 A second, **opt-in** plane ranks passages by meaning. `--strategy vector` uses
 it alone; `--strategy hybrid` fuses it with the word ranking. Without it, both
@@ -281,9 +281,17 @@ Know the result before you spend the time. The one embedding model measured did
 candidates ([bake-off](embeddings-bakeoff.md)). That is why `lexical` stays the
 default.
 
-The plane needs an embedder, a program xbrain runs as a subprocess. The
-reference one, `scripts/xbrain-embed`, needs `sentence-transformers` in a Python
-environment of its own: 793 MB installed, plus 458 MB of model on first use.
+The plane needs two things the Quick start did not install. First, `numpy`, in
+xbrain's own environment. Without it the build below fails only after it has
+deleted your index, and even word search refuses until a plain `index build`:
+
+```bash
+uv pip install -e ".[embeddings]" --index-url https://pypi.org/simple
+```
+
+Second, an embedder, a program xbrain runs as a subprocess. The reference one,
+`scripts/xbrain-embed`, needs `sentence-transformers` in a Python environment of
+its own: 793 MB installed, plus 458 MB of model on first use.
 
 ```bash
 EMBED=~/.xbrain-embed
@@ -325,15 +333,16 @@ uv run xbrain search "transformer attention" --strategy hybrid --limit 3
 ```
 
 `via` names the ranking that found each passage. Result 3 is about human
-attention, not transformers: meaning search does not rule out the wrong sense
-of a word.
+attention, not transformers, and both rankings found it: neither one rules out
+the wrong sense of a word.
 
-What it costs, on this corpus: the build took 260 s and 1.15 GB of memory, and
-each `vector` or `hybrid` query starts the embedder and loads the model (this
-one took 10 s). A filter (`--topic`, `--from`, …) sends the query back to
-`lexical`, declaring `vector_filters_unsupported`. And `index update` never
-re-embeds: after new content, queries declare `vector_plane_behind` until you
-run `index build --embeddings --force` again. Every failure and its message:
+It costs minutes to build and seconds per query, because every batch and every
+query starts the embedder and loads the model again. Here the build took 260 s
+and 1.15 GB of memory on a 16 GB laptop that was already swapping; the
+bake-off's figures and conditions are in its
+[§6](embeddings-bakeoff.md#6-coste-indexación-disco-latencia-y-memoria). A
+filter (`--topic`, `--from`, …) sends the query back to `lexical`, declaring
+`vector_filters_unsupported`. Every failure and its message:
 [The vector plane](knowledge-index.md#the-vector-plane-and-hybrid--opt-in-and-not-the-default).
 
 ### Look around a post: `graph-expand`
@@ -405,12 +414,14 @@ uv run xbrain enrich        # enrich only the new posts
 uv run xbrain topics        # refresh topic pages
 uv run xbrain generate
 uv run xbrain index update  # put the search index back in step with the store
-uv run xbrain index build --embeddings --force   # only with a vector plane: update does not re-embed
 ```
 
 `index update` is last because every command above it writes the store. Skip it
 and nothing breaks — `search` detects it and warns — but you will be searching
-yesterday's corpus.
+yesterday's corpus. If you built the vector plane, run
+`uv run xbrain index build --embeddings --force` instead: `update` never
+re-embeds, so new passages have no vector and `vector`/`hybrid` answers declare
+`vector_plane_behind` until you rebuild.
 
 The markdown is **derived and disposable** — delete and regenerate any time. The
 source of truth is `data/items.json` (snapshotted before every destructive op;

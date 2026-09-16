@@ -1,8 +1,8 @@
 # AGENTS.md — xbrain
 
 Instructions for coding agents working in this repository. **Claude Code reads `CLAUDE.md`; Codex
-reads this file.** They must not diverge: everything below is either a pointer into `CLAUDE.md` or
-the delivery topology, which both agents apply identically.
+reads this file.** They must not diverge: everything below is a pointer into `CLAUDE.md` or another
+document, or the delivery topology, which both agents apply identically.
 
 ## Read `CLAUDE.md` first, in full
 
@@ -44,10 +44,9 @@ Read the **conclusion the script prints** (`ALL CRITICAL CHECKS PASSED`), not `$
 that printed it. Coverage minimum is 78% globally and **90% for `src/xbrain/knowledge/`**. Radon
 D/E/F fails; C warns.
 
-The two optional extras are not optional for the gate. With only `dev` installed, pytest stops at
-collection (`No module named 'numpy'`), and forced past that error 128 tests fail. That is on
-purpose: a missing extra is a broken environment, and a skip would report green having exercised
-neither. A later `uv sync` without those flags uninstalls them.
+Install all three extras. Without `embeddings` and `mcp` the suite is red by design, because a
+missing extra is a broken environment, not a skip; what fails is in `CONTRIBUTING.md`
+§ *Development setup*. A later `uv sync` without those flags uninstalls them.
 
 ## The knowledge layer has its own contract
 
@@ -69,7 +68,8 @@ The lines a change there must not cross, each written out in full in those docum
 - **`data/index/` is derived.** `index build` and `update` write only there and take no snapshot.
   Do not add them to the auto-snapshot set, and never version the directory.
 - **Degradation is declared, never simulated.** A response names `vector` or `hybrid` only when
-  the vector channel ran; otherwise `index.degraded` says why.
+  the vector channel ran. Otherwise `hybrid` answers `lexical` with `index.degraded` saying why,
+  and `vector` asked for by name is an error.
 - **Provenance fails closed.** An unknown origin is classed `llm_synthesis`.
 - **`lexical` is the default because it was measured.** `hybrid` (bake-off: 1 of 3 candidates
   run) and `hybrid_graph` (sweep: 0 of 33 graph-only results lifted into the top 10) were not
@@ -185,8 +185,8 @@ discounted: they are exactly where rule 1 lives.
 
 First establish what you are reviewing. `gh pr view <n> --json baseRefName` names the base; a base
 of `VGonPa/umbrella-*` makes the PR a child. Run it merged onto that umbrella's tip, which already
-holds its predecessors (rule 4), not onto `develop`. `git branch -r --list 'origin/VGonPa/umbrella-*'`
-lists the umbrellas on the remote, merged ones included.
+holds its predecessors (rule 4), not onto `develop`. To ask the remote which umbrellas exist,
+merged ones included: `git ls-remote --heads origin 'VGonPa/umbrella-*'`.
 
 Scale the panel to the PR: 3–4 lenses for XS purely-additive, 5 for S, 6–7 for M/L. **Reviewers
 execute** — run `check.sh`, run each acceptance criterion, and **mutate**: break what a test claims

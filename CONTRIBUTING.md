@@ -14,8 +14,8 @@ That is the environment CI builds. `dev` brings the quality-gate tools (`poe`,
 `ruff`, `mypy`, and the rest). `embeddings` (numpy) and `mcp` (the MCP SDK) are
 optional for someone who only uses the CLI, but not for a contributor: without
 them the suite is red. pytest stops at collection (`No module named 'numpy'`),
-and forced past that error 128 tests fail. A later `uv sync` without these flags
-uninstalls both extras.
+and forced past that error the vector-plane and MCP tests fail. A later `uv sync`
+without these flags uninstalls both extras.
 
 Copy `config.toml.example` to `config.toml` and fill in your own values. That
 file is not tracked by git.
@@ -176,25 +176,22 @@ this `<cmd> <image> → stdout description` contract.
 
 This is the read side, in `src/xbrain/knowledge/` and `src/xbrain/mcp_server.py`.
 Read [ARCHITECTURE.md § The knowledge layer](ARCHITECTURE.md#the-knowledge-layer)
-before changing it. The lines a change there must not cross are listed once, in
-`AGENTS.md` § *The knowledge layer has its own contract*. Four facts reach
-contributors working anywhere else:
+before changing it, and the lines a change there must not cross in `AGENTS.md`
+§ *The knowledge layer has its own contract*. Three facts reach contributors
+working anywhere else:
 
 - **Writing the store leaves the index behind.** Indexing is manual by design
   ([When to rebuild](docs/knowledge-index.md#when-to-rebuild-and-when-to-update)).
   Once a command has written `items.json`, `vocab.yaml` or `topics.json`,
   `search` still answers but declares `index_behind_store`, and `graph-expand`
   refuses until `xbrain index update` runs.
-- **`index build` and `index update` take no snapshot.** They write only
-  `data/index/`, which is derived: one `index build` recreates it. Keep them out
-  of the auto-snapshot set.
 - **The embedder is external, like the transcriber and the vision model.**
   `[embeddings].command` reads one JSON request on stdin and writes one JSON
   response on stdout. The contract is in
   [What you need](docs/knowledge-index.md#what-you-need).
 - **`--json` and the MCP tools return the same models.** A change to a response
   model changes both doors, and `tests/test_mcp_cli_equivalence.py` requires the
-  two to produce identical JSON.
+  two to return the same JSON document.
 
 ## Pull requests written with AI agents
 

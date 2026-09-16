@@ -29,15 +29,19 @@ read the exit code, which is 0 in every state, missing index included.
 
 | `index status --json` | `search` | `graph_expand` | Command in `advice` |
 |---|---|---|---|
-| `incomplete: true` | refused: ``No hay índice en …/data/index. Constrúyelo con `xbrain index build`.`` | refused, same message | `xbrain index build` |
+| `incomplete: true` | refused, naming the same command | refused, same command | `xbrain index build` when there is no index; `xbrain index build --force` when a manifest exists but cannot be used (another version, say). Plain `build` refuses over an existing manifest |
 | `behind: true` | answers, declaring `index_behind_store` | refused: ``El índice va por detrás del store (`index_behind_store`): … Ejecuta `xbrain index update`.`` | `xbrain index update` |
 | both `false`, `advice` not empty | `vector`/`hybrid` answer, declaring `vector_plane_behind` | answers | `xbrain index build --embeddings --force` |
 
 The third row is the vector plane falling behind: `index update` never
 re-embeds, so the booleans stay `false` while `advice` asks for a full rebuild.
-That rebuild re-embeds every chunk, and took 260 s on 2,495 items with the
-reference embedder. A plain `build` or `update` takes seconds (2.2 s and 0.8 s of
-work on the same corpus), writes only `data/index/` and starts no other process.
+That rebuild is not cheap and not safe to interrupt. It re-embeds every chunk:
+minutes, not seconds (MiniLM with `batch_size = 1024` on 2,495 items took 260 s
+here and 440 s in the [bake-off](embeddings-bakeoff.md#6-coste-indexación-disco-latencia-y-memoria)).
+And, as `advice` itself says, if the embedder fails midway no index answers, not
+even lexically, until a plain `xbrain index build`. A plain `build` or `update`
+takes seconds (2.2 s and 0.8 s of work on the same corpus), writes only
+`data/index/` and starts no other process.
 
 Over MCP there is no status or build tool. An agent that only has MCP gets the
 same refusals and the same `degraded` flags, cannot fix them, and has to tell
@@ -172,12 +176,11 @@ an item **has** a primary topic, an item **has** a secondary topic, and two topi
 **co-occur** when enough items carry both. There is no item-to-item edge: two items
 are related only through a topic they share, and the path shows which.
 
-`max_hops: 1` (the default) returns the item's own topics. `max_hops: 2` adds the
-topics that co-occur with them (`item → topic → topic`) and the other items of
-each topic (`item → topic → item`). `max_neighbors` keeps each node's strongest
-edges, 10 by default. On `2063609922667815064` in the 2,495-item corpus,
-`max_hops: 1` returns 3 paths and `max_hops: 2` returns 33, 20 of which end at an
-item.
+`max_hops: 1` (the default) returns the item's own topics; `max_hops: 2` also
+reaches the co-occurring topics and the other items of each topic
+([Reading it](knowledge-index.md#reading-it-graph-expand)). On
+`2063609922667815064` in the 2,495-item corpus that is 33 paths instead of 3, 20
+of them ending at an item.
 
 Every path is explicit, and every co-occurrence edge carries its `weight`
 (Jaccard: shared items over the union), `shared_items` and up to 20
