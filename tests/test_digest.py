@@ -1122,6 +1122,69 @@ def test_speaking_video_on_a_non_frames_run_is_not_hollow(tmp_path: Path):
     assert (report.transcribed, report.hollow) == (1, 0)
 
 
+# `transcribe._derive_has_speech` trusts an explicit `has_speech` and infers it from a
+# non-empty segment list, so the ASR can hand back `has_speech=True` with no words:
+# `{"text": "", "has_speech": true}`, or `{"segments": [{"text": " "}]}` (text
+# backfilled to ""). Every consumer (generate, video_digest, worksheet, the api
+# executor) reads such a source as having NO transcript, so the digest must too.
+_BLANK_SPEECH = [
+    pytest.param("", id="empty-text"),
+    pytest.param("   ", id="whitespace-text"),
+]
+
+
+def _blank_speech(text: str) -> Transcript:
+    return Transcript(text=text, segments=[Segment(0.0, 1.0, " ")], language="en", has_speech=True)
+
+
+@pytest.mark.parametrize("text", _BLANK_SPEECH)
+def test_blank_transcript_flagged_as_speech_describes_its_frames_as_footage(
+    tmp_path: Path, text: str
+):
+    """`has_speech=True` with blank text carries no words, so a non-slide verdict is
+    footage — frames described + attached — not a talking-head skip that would
+    leave a frameless, wordless (hollow) source."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    visual = _FakeVisual(classification="talking_head", n_frames=2)
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _blank_speech(text),
+        temp_root=tmp_path,
+        visual=visual.config(tmp_path / "media"),
+    )
+    src = store["a1"].content.sources[0]
+    assert [(f.timestamp, f.local_path) for f in src.frames] == [
+        (0.0, "a1/frames/0.png"),
+        (10.0, "a1/frames/1.png"),
+    ]
+    assert visual.reduce_calls == ["footage"]
+    assert (report.visual_footage, report.visual_skipped, report.hollow) == (1, 0, 0)
+    # The transcript counters keep reading the raw flag — only the gate changed.
+    assert (report.transcribed, report.no_speech) == (1, 0)
+
+
+@pytest.mark.parametrize("text", _BLANK_SPEECH)
+def test_blank_transcript_flagged_as_speech_is_hollow_on_a_non_frames_run(
+    tmp_path: Path, text: str
+):
+    """Without `--frames` the same blank-but-flagged transcript attaches a source
+    with no words and no frames — counted as hollow, never silent."""
+    store = {"a1": _item("a1", _VIDEO_A_URL_1)}
+    report = digest_videos(
+        store,
+        ["a1"],
+        fetch_fn=_FakeFetch(),
+        transcribe_fn=lambda _p: _blank_speech(text),
+        temp_root=tmp_path,
+        visual=None,
+    )
+    assert store["a1"].content.sources[0].frames == []
+    assert report.hollow == 1
+    assert (report.transcribed, report.no_speech) == (1, 0)
+
+
 def test_silent_slide_deck_uses_the_slide_reducer_not_the_footage_one(tmp_path: Path):
     """A silent SLIDE deck keeps today's path: the slide reducer (keeps 2) decides the
     set, the footage reducer (keeps 1) never runs, and it counts as slides — not as

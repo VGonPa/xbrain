@@ -83,7 +83,8 @@ ReduceFn = Callable[[list[KeyFrame]], list[KeyFrame]]
 
 
 def _no_reduce(frames: list[KeyFrame]) -> list[KeyFrame]:
-    """Default `reduce_fn` — identity (describe every frame `extract_fn` returned)."""
+    """Default `reduce_fn` AND `footage_reduce_fn` — identity (describe every frame
+    `extract_fn` returned); the CLI binds the real `[frames]` budgets."""
     return frames
 
 
@@ -95,8 +96,9 @@ def _no_reduce(frames: list[KeyFrame]) -> list[KeyFrame]:
 # `talking_head` = the same non-slide verdict on a video WITH speech, whose
 # transcript already carries the content (counts as a skipped talking-head);
 # `skipped` = a non-content drop (extraction/vision failed, zero frames selected,
-# or every frame unreadable) — logged with its reason, counted as NEITHER, so the
-# talking-head tally never conflates failures with real content decisions.
+# or every frame unreadable) — logged with its reason, counted as NONE of slides,
+# footage or talking-head, so no visual tally conflates failures with real content
+# decisions (a silent `skipped` video is counted `hollow` instead).
 Classification = Literal["disabled", "slides", "footage", "talking_head", "skipped"]
 
 
@@ -142,8 +144,8 @@ class _VisualResult:
     described + embedded like slides), `talking_head` (a non-slide video WITH
     speech — skipped + logged, the transcript carries it), or `skipped` (a
     non-content drop: extraction / vision failed, ZERO frames selected, or every
-    frame unreadable — logged with its reason, counted as neither slides nor
-    talking-head). `slides` holds the described frames and is non-empty only for
+    frame unreadable — logged with its reason, counted as none of slides, footage
+    or talking-head). `slides` holds the described frames and is non-empty only for
     `classification` `slides` or `footage`.
     """
 
@@ -167,9 +169,11 @@ class DigestReport:
     (got a `has_speech=False` marker), `already` (skipped — already carried an
     `x_video` source), `failed` (its video's fetch/transcribe failed),
     `skipped_no_video` (in the store but no fetchable mp4), `skipped_unknown` (id
-    absent from the store). `videos_transcribed` is the distinct videos that
-    actually produced a transcript this run; `groups` is the dedup grouping so the
-    summary can report "N items ← M videos".
+    absent from the store), `hollow` (attached with no words AND no frames — it
+    overlaps `transcribed` / `no_speech`, it is not a separate bucket of the
+    total). `videos_transcribed` is the distinct videos that actually produced a
+    transcript this run; `groups` is the dedup grouping so the summary can report
+    "N items ← M videos".
     """
 
     transcribed: int = 0
@@ -186,11 +190,11 @@ class DigestReport:
     visual_slides: int = 0
     visual_skipped: int = 0
     visual_footage: int = 0
-    # Items attached with neither speech nor frames — an x_video source that
-    # carries no content at all. Item-granular like `no_speech`, and counted on
-    # EVERY run, whatever the reason the frames are missing (no `--frames`,
-    # extraction failed, unreadable frames, vision failed), so a hollow entry is
-    # never silent.
+    # Items attached with neither words (`_carries_speech`) nor frames — an
+    # x_video source that carries no content at all. Item-granular like
+    # `no_speech`, and counted on EVERY run, whatever the reason the frames are
+    # missing (no `--frames`, extraction failed, unreadable frames, vision
+    # failed), so a hollow entry is never silent.
     hollow: int = 0
     groups: dict[VideoKey, list[str]] = field(default_factory=dict)
 
@@ -435,7 +439,8 @@ def _extract_described_slides(
     - `slides` → reduce with `reduce_fn`, then describe every kept frame via the
       EXTERNAL vision step — with or without speech.
     - a non-slide verdict (`classify_fn` says `talking_head`) depends on
-      `has_speech`, the transcript `_analyze_media` already produced:
+      `has_speech` — whether the transcript `_analyze_media` already produced
+      carries words (`_carries_speech`, not the bare flag):
       - WITH speech → `talking_head`: SKIP + `info` log; the transcript carries
         the content, so describing camera cuts would be wasted vision calls.
       - WITHOUT speech → `footage`: the frames are the only evidence left (screen
@@ -481,6 +486,27 @@ def _extract_described_slides(
     return _describe_frames(slides, visual, item_id=item_id, classification="slides")
 
 
+def _carries_speech(transcript: Transcript) -> bool:
+    """Whether the transcript carries words a reader gets — the digest's ONE speech test.
+
+    `has_speech` alone is looser than every consumer's check:
+    `transcribe._derive_has_speech` returns True for blank segments
+    (`{"segments": [{"text": " "}]}`) and trusts `{"text": "", "has_speech": true}`,
+    both with empty text. Every consumer of the attached source treats "has a
+    transcript" as the flag AND non-empty text — `generate._video_digest_lines`,
+    `video_digest._has_digestible_content`, `worksheet._video_transcript`,
+    `executors.api._video_transcript_section` — so a wordless source is silent
+    there. Gating on the flag alone would skip such a video's frames as a
+    talking-head and never count it hollow: the exact silent, frameless entry the
+    footage path exists to prevent. Whitespace-only text counts as blank, so this
+    is never looser than those consumers.
+
+    It gates the footage decision and the `hollow` count only; the
+    `transcribed` / `no_speech` counters keep reporting the transcriber's flag.
+    """
+    return transcript.has_speech and bool(transcript.text.strip())
+
+
 def _analyze_media(
     path: Path, transcribe_fn: TranscribeFn, visual: VisualConfig | None, *, item_id: str
 ) -> _MediaAnalysis | None:
@@ -489,11 +515,11 @@ def _analyze_media(
     A per-video `TranscriberFailed` (malformed output for this one video) is logged
     and returns None so the batch continues; a missing-binary `TranscriberNotFound`
     is NOT caught — it aborts the whole run. The visual layer runs BEFORE the mp4 is
-    discarded (it needs the bytes) and AFTER transcription, whose `has_speech`
-    decides whether a non-slide video is skipped or described as footage. The mp4
-    is unlinked in every case, so at most one video is on disk at a time; the
-    extracted frame images live in a sibling temp dir reclaimed by the enclosing
-    ephemeral `TemporaryDirectory`.
+    discarded (it needs the bytes) and AFTER transcription, whose words
+    (`_carries_speech`) decide whether a non-slide video is skipped or described
+    as footage. The mp4 is unlinked in every case, so at most one video is on
+    disk at a time; the extracted frame images live in a sibling temp dir
+    reclaimed by the enclosing ephemeral `TemporaryDirectory`.
     """
     try:
         try:
@@ -504,7 +530,7 @@ def _analyze_media(
         result = _VisualResult()
         if visual is not None:
             result = _extract_described_slides(
-                path, visual, item_id=item_id, has_speech=transcript.has_speech
+                path, visual, item_id=item_id, has_speech=_carries_speech(transcript)
             )
         return _MediaAnalysis(transcript=transcript, visual=result)
     finally:
@@ -569,8 +595,10 @@ def _group_outcome(analysis: _MediaAnalysis, needing: list[str], already: int) -
     (both `did_transcribe`). Orthogonally, the visual layer counts `visual_slides`
     (kept + embedded), `visual_footage` (silent non-slide frames described) or
     `visual_skipped` (talking-head) — a silent slide deck is both `no_speech` and
-    `visual_slides`. A no-speech group that ends up with NO described frames — for
-    any reason, `--frames` or not — counts its items as `hollow`.
+    `visual_slides`. A group whose transcript carries no words (`_carries_speech`
+    — stricter than the flag the two transcript counters read) and that ends up
+    with NO described frames — for any reason, `--frames` or not — counts its
+    items as `hollow`.
     """
     count = len(needing)
     has_speech = analysis.transcript.has_speech
@@ -583,7 +611,7 @@ def _group_outcome(analysis: _MediaAnalysis, needing: list[str], already: int) -
         visual_slides=visual.classification == "slides",
         visual_skipped=visual.classification == "talking_head",
         visual_footage=visual.classification == "footage",
-        hollow=0 if has_speech or visual.slides else count,
+        hollow=0 if _carries_speech(analysis.transcript) or visual.slides else count,
     )
 
 
