@@ -665,12 +665,6 @@ CLI prints for the same request — follow it as you would on the command line
 strategy). A bare `Error executing tool xbrain.search` with nothing after it is a
 bug, not a configuration problem: report it with the arguments you sent.
 
-### An index error prints a second, empty `Error:` line
-
-Cosmetic, and known. Both CLI error handlers fire on an index error, so the clean
-message is followed by a blank one. The exit code is still `1` and the first line
-is the real one.
-
 ---
 
 ## Where's the source of truth? Can I delete the vault notes?

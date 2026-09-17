@@ -637,6 +637,23 @@ def test_download_videos_command_aborts_when_declined(tmp_path: Path, monkeypatc
     )
 
 
+def test_declining_the_download_gate_prints_no_empty_error_line(tmp_path: Path, monkeypatch):
+    """Backlog #26 of PR #206: `n` at the gate printed `Error: ` with nothing after it.
+
+    `typer.Abort` is a `RuntimeError`, so `_handle_cli_errors` took it for an operator error
+    and printed its empty text. The decline still exits 1, with click's own abort line.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos"], input="n\n")
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" not in result.output, result.output
+    assert "Abort" in result.output, result.output
+
+
 def test_download_videos_command_proceeds_when_confirmed(tmp_path: Path, monkeypatch):
     """Confirming the gate with `y` proceeds to download."""
     from xbrain.models import MediaVideoDownloaded

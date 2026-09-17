@@ -135,13 +135,7 @@ def run_cli(argv: Sequence[str]) -> str:
 
 
 def cli_error(argv: Sequence[str]) -> str:
-    """El mensaje del CLI cuando se niega: código 1 y la PRIMERA línea `Error: …`.
-
-    La primera, y no el stderr entero, porque en esta rama `_handle_cli_errors` envuelve a
-    `_handle_index_errors` y `typer.Exit` hereda de `RuntimeError`, así que el de fuera
-    vuelve a atrapar la salida del de dentro y añade un `Error:` vacío detrás. Es un defecto
-    cosmético anterior a este PR y ajeno a MCP; aquí sólo se esquiva, no se toca.
-    """
+    """El mensaje del CLI cuando se niega: código 1 y la PRIMERA línea `Error: …`."""
     result = runner.invoke(app, [*argv, "--json"])
     assert result.exit_code == 1, result.output
     first = result.stderr.strip().splitlines()[0]

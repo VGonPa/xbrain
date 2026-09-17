@@ -214,6 +214,23 @@ def test_index_update_dry_run_leaves_the_index_where_it_was(workspace: Path) -> 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("argv", [["search", "retrieval"], ["graph-expand", "--item", "k01"]])
+def test_an_index_refusal_prints_one_error_line_not_a_second_empty_one(
+    workspace: Path, argv: list[str]
+) -> None:
+    """Backlog #11 of PR #206: both CLI error layers fired on an index error.
+
+    `_handle_index_errors` printed the message and raised `typer.Exit`, which is a
+    `RuntimeError`, so `_handle_cli_errors` above it printed `Error: ` + `str(Exit)` — empty.
+    """
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 1, result.output
+    errors = [line for line in result.stderr.splitlines() if line.startswith("Error:")]
+    assert len(errors) == 1, result.stderr
+    assert "xbrain index build" in errors[0], result.stderr
+
+
 def test_search_json_is_the_response_model_and_nothing_else(workspace: Path) -> None:
     """Step 26 + spec §3.7.9: stdout is the document, diagnostics never mix into it.
 

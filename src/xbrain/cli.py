@@ -265,6 +265,10 @@ def _handle_cli_errors(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except (typer.Exit, typer.Abort):
+            # Click's own control flow, not an operator error. Both are `RuntimeError`, so the
+            # clause below printed their empty text as a second `Error: ` line (06.4).
+            raise
         except _OPERATOR_ERRORS as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
