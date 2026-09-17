@@ -911,8 +911,10 @@ def digest_videos(
     long-form `digest` is cleared and `content.fetched_at` is bumped, so
     `video-digest` and `enrich` pick the item up again. A visual failure or a
     talking-head reclassification consequently drops prior frames. The CLI's
-    `pre-digest-video` snapshot restores `items.json` metadata only: each
-    selected item's `data/media/<id>/frames/` has already been deleted or
+    `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+    `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+    removes a live one absent there), but never contains `data/media/` or frame PNGs.
+    Each selected item's `data/media/<id>/frames/` has already been deleted or
     overwritten by the time it is taken. Before re-digesting items that currently
     have frames, copy those directories aside and restore them with the snapshot
     if needed; otherwise restored metadata can point to missing files or different

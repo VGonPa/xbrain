@@ -148,10 +148,12 @@ generates an Obsidian wiki.
   `enrich` and `video-digest` run again for the item. Once the fetch succeeds,
   frame extraction/vision failure or a talking-head reclassification completes
   with NO frames and also clears the prior digest. The automatic
-  `pre-digest-video` snapshot restores `items.json` metadata only; the selected
-  items' `data/media/<id>/frames/` directories have already been deleted or
-  overwritten by then. Before re-digesting items that currently have frames,
-  copy those directories aside and restore them with the snapshot if needed;
+  `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+  `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+  removes a live one absent there), but never contains `data/media/` or frame PNGs.
+  The selected items' `data/media/<id>/frames/` directories have already been
+  deleted or overwritten by then. Before re-digesting items that currently have
+  frames, copy those directories aside and restore them with the snapshot if needed;
   without the copy, restored metadata can point to missing files or different
   pixels. Hollow items have no prior frames and are not exposed to this loss.
 - Frame captions — verbatim on-screen text (#90): frame captions are the ONLY

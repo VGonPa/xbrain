@@ -1584,10 +1584,12 @@ def _run_digest_video(
     transcript instead of re-running the transcriber. The visual layer is still
     redone; a completed forced re-digest replaces old frames and clears the
     long-form digest even if vision fails or the video is reclassified. The
-    `pre-digest-video` snapshot restores `items.json` metadata only: the selected
-    items' `data/media/<id>/frames/` directories have already been deleted or
-    overwritten by the time it is taken. Before re-digesting items that currently
-    have frames, copy those directories aside and restore them with the snapshot
+    `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+    `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+    removes a live one absent there), but never contains `data/media/` or frame PNGs.
+    The selected items' `data/media/<id>/frames/` directories have already been
+    deleted or overwritten by the time it is taken. Before re-digesting items that
+    currently have frames, copy those directories aside and restore them with the snapshot
     if needed; otherwise restored metadata can point to missing files or different
     pixels. Hollow items have no prior frames and are not exposed to this loss. The
     command is destructive (rewrites `items.json`), so it auto-snapshots BEFORE

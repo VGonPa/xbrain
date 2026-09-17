@@ -222,8 +222,10 @@ or `visual layer failed`.
 This is a destructive rebuild, not a transaction over the old frames. Once the
 video fetch succeeds, a frame-extraction/vision failure or a reclassification as
 talking-head completes with **no frames** and clears the old long-form digest.
-The command later creates a `pre-digest-video` snapshot before saving, but it
-restores **`items.json` metadata only**. By then, each selected item's
+The command later creates a `pre-digest-video` snapshot before saving. It manages
+the store files **`items.json`, `state.json`, `vocab.yaml`, and `topics.json`**:
+it restores those present in the snapshot (and removes a live one absent there),
+but never contains `data/media/` or frame PNGs. By then, each selected item's
 `data/media/<id>/frames/` has already been deleted or overwritten. Before
 re-digesting an item that currently has frames, copy that directory aside; if
 you restore the snapshot, restore the saved directory too. Without that copy,
@@ -378,8 +380,10 @@ frame itself is illegible, the fix is re-extracting the frame — `digest-video
 `redescribe-frames`. That re-digest can also remove the old frames if extraction
 or vision fails, or if the video is reclassified as talking-head; it clears the
 video's long-form digest either way. The automatic `pre-digest-video` snapshot
-restores **`items.json` metadata only**; the selected item's
-`data/media/<id>/frames/` has already been deleted or overwritten by then.
+manages the store files **`items.json`, `state.json`, `vocab.yaml`, and
+`topics.json`**: it restores those present in the snapshot (and removes a live
+one absent there), but never contains `data/media/` or frame PNGs. The selected
+item's `data/media/<id>/frames/` has already been deleted or overwritten by then.
 Before re-digesting an item that currently has frames, copy that directory aside
 and restore it with the snapshot if needed. Without that copy, restored captions
 can point to missing files or different pixels. Hollow items have no prior frames
