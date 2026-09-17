@@ -1093,7 +1093,7 @@ backend.
 
 **`numpy` is the `[embeddings]` extra, never a runtime dependency**, imported inside
 `vector_index._numpy()`. `import xbrain` works without it; a query that needs the matrix raises
-`VectorBackendUnavailable` naming `uv pip install 'xbrain[embeddings]'`; `index status` records
+`VectorBackendUnavailable` naming `uv pip install -e '.[embeddings]'`; `index status` records
 the plane as `unreadable` and prints that sentence on its `→` line instead of dying.
 
 ```

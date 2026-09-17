@@ -24,7 +24,7 @@ pays for it. Without it the command refuses with an instruction, exit code 1:
 
 ```
 $ uv run xbrain mcp-serve
-Error: `xbrain mcp-serve` necesita el extra opcional `[mcp]`, que no está instalado: instálalo con: uv pip install 'xbrain[mcp]'
+Error: `xbrain mcp-serve` necesita el extra opcional `[mcp]`, que no está instalado: instálalo desde la raíz del checkout con: uv pip install -e '.[mcp]'
 ```
 
 From a checkout, the simplest way is to let `uv run` add it on launch (below).

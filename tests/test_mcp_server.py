@@ -613,7 +613,8 @@ def test_mcp_serve_without_the_extra_is_actionable_not_a_traceback(workspace: Pa
         result = runner.invoke(app, ["mcp-serve"])
     assert not isinstance(result.exception, ImportError), result.exception
     assert result.exit_code == 1, result.output
-    assert "xbrain[mcp]" in result.stderr, result.stderr
+    assert "uv pip install -e '.[mcp]'" in result.stderr, result.stderr
+    assert "xbrain[" not in result.stderr, "names a package this repo does not publish"
 
 
 def test_mcp_serve_starts_the_stdio_server(workspace: Path, monkeypatch) -> None:

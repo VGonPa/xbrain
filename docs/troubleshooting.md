@@ -558,13 +558,12 @@ moved and **never re-embeds** them, so the plane is `behind`. Lexical search is 
 and declare `vector_plane_behind`. Restoring full coverage is a rebuild of both planes:
 `uv run xbrain index build --embeddings --force`.
 
-### A query needing vectors names `uv pip install 'xbrain[embeddings]'`
+### A query needing vectors names `uv pip install -e '.[embeddings]'`
 
-`numpy` is not installed: it is the optional `[embeddings]` extra, not a dependency. From a
-checkout, install it with `uv sync --extra embeddings` (add `--extra dev` if you also run the
-quality gate). `uv sync` removes what its flags did not ask for, so a later `uv sync` without
-`--extra embeddings` uninstalls it again — the usual reason this error comes back. `index
-status` does not refuse over a missing `numpy`; it prints this same sentence on its `→` line.
+`numpy` is not installed: it is the optional `[embeddings]` extra, not a dependency. `uv sync`
+removes what its flags did not ask for, so a later `uv sync` without `--extra embeddings`
+uninstalls it again — the usual reason this error comes back. `index status` does not refuse
+over a missing `numpy`; it prints this same sentence on its `→` line.
 
 ### `xbrain eval --strategy vector` refuses before measuring anything
 

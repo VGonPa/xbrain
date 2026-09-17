@@ -446,7 +446,7 @@ claude mcp get xbrain
 ```
 
 `--extra mcp` installs the MCP SDK when the client starts the server; without
-it, `mcp-serve` exits naming `uv pip install 'xbrain[mcp]'`. The server is
+it, `mcp-serve` exits naming `uv pip install -e '.[mcp]'`. The server is
 registered for the directory you ran `claude mcp add` in. Claude Desktop, the
 error messages and what the server can reach: [xbrain over MCP](mcp.md). What
 the agent should do with the answers:

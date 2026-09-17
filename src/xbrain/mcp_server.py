@@ -64,7 +64,7 @@ SERVER_INSTRUCTIONS = (
     "dereferencia una URL del corpus."
 )
 
-MCP_EXTRA_ADVICE = "instálalo con: uv pip install 'xbrain[mcp]'"
+MCP_EXTRA_ADVICE = "instálalo desde la raíz del checkout con: uv pip install -e '.[mcp]'"
 
 
 class McpExtraMissing(RuntimeError):

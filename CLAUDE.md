@@ -640,7 +640,7 @@ generates an Obsidian wiki.
   reference backend. **The backend's stderr is never relayed**: a crashing embedder's traceback
   quotes the chunk it failed on, i.e. the corpus. `numpy` is the `[embeddings]` extra, imported
   lazily, so `import xbrain` works without it and a query that needs the matrix names
-  `uv pip install 'xbrain[embeddings]'`. `xbrain index build --embeddings` writes
+  `uv pip install -e '.[embeddings]'`. `xbrain index build --embeddings` writes
   `data/index/vectors.f32` + `vectors.meta.json` and a manifest `embeddings` block that IS
   `VectorSpec` (model · dimension · normalized · both prefixes), as DECLARED by a probe batch; a
   query reads model and query prefix **off the manifest**, never off `config.toml`. The plane

@@ -117,7 +117,8 @@ def test_a_missing_numpy_names_the_install_command_instead_of_an_import_error(mo
     monkeypatch.setitem(sys.modules, "numpy", None)
     with pytest.raises(VectorBackendUnavailable) as excinfo:
         vector_index._numpy()
-    assert "xbrain[embeddings]" in str(excinfo.value)
+    assert "uv pip install -e '.[embeddings]'" in str(excinfo.value)
+    assert "xbrain[" not in str(excinfo.value), "names a package this repo does not publish"
     assert isinstance(excinfo.value, RuntimeError)
 
 
@@ -127,7 +128,7 @@ def test_a_search_without_numpy_names_the_install_command(tmp_path: Path, monkey
     monkeypatch.setitem(sys.modules, "numpy", None)
     with pytest.raises(VectorBackendUnavailable) as excinfo:
         loaded.search(EAST, limit=1)
-    assert "xbrain[embeddings]" in str(excinfo.value)
+    assert "uv pip install -e '.[embeddings]'" in str(excinfo.value)
 
 
 # ------------------------------------------------------------------------ dedupe (§13.6, 9)

@@ -1029,7 +1029,8 @@ def test_search_needing_vectors_without_the_extra_names_the_install_command(
     result = runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", strategy, "--json"])
 
     assert result.exit_code == 1, result.output
-    assert "uv pip install 'xbrain[embeddings]'" in result.output
+    assert "uv pip install -e '.[embeddings]'" in result.output
+    assert "xbrain[" not in result.output, "names a package this repo does not publish"
     assert not isinstance(result.exception, ImportError)
     assert "Traceback" not in result.output
 

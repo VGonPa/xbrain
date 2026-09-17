@@ -3504,9 +3504,10 @@ def mcp_serve_command() -> None:
     respuesta: no hay una segunda semántica.
 
     El decorador NO es decoración. Sin él, una máquina que instaló `xbrain` sin el extra
-    `[mcp]` recibe la excepción cruda y stderr VACÍO — medido: `assert 'xbrain[mcp]' in ''`.
+    `[mcp]` recibe la excepción cruda y stderr VACÍO — medido: `assert 'xbrain[mcp]' in ''`
+    (la aserción de entonces, cuando el mensaje nombraba un paquete que el repo no publica).
     `McpExtraMissing` hereda de `RuntimeError` precisamente para caer en `_OPERATOR_ERRORS` y
-    salir como `Error: … instálalo con: uv pip install 'xbrain[mcp]'` con código 1, que es el
+    salir como `Error: … uv pip install -e '.[mcp]'` con código 1, que es el
     mismo trato que recibe un `[vision].command` sin configurar (Plan 04 §4.5).
     """
     from xbrain.mcp_server import serve

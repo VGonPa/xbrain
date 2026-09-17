@@ -36,7 +36,7 @@ carries the `chunk_id` and nothing else the index already knows how to resolve.
 **`numpy` arrives through the `[embeddings]` extra, and the import is DEFERRED** (Plan 03
 §2.1, m11). `import xbrain` must keep working for someone who only runs the CLI, so the import
 lives inside `_numpy()` and its absence raises `VectorBackendUnavailable` naming
-`uv pip install 'xbrain[embeddings]'` — never a raw `ImportError` out of a command.
+`uv pip install -e '.[embeddings]'` — never a raw `ImportError` out of a command.
 
 **Two error families, because they are two situations.** `VectorBackendUnavailable` is an
 ENVIRONMENT problem and a sibling of `embeddings.EmbeddingError` (a `RuntimeError`, which the
@@ -244,8 +244,8 @@ def _numpy() -> ModuleType:
     except ImportError as exc:
         raise VectorBackendUnavailable(
             "el plano vectorial necesita `numpy`, que viaja en el extra opcional "
-            "`[embeddings]`: instálalo con `uv pip install 'xbrain[embeddings]'` "
-            f"(o `uv sync --extra embeddings`) y repite el comando ({exc})"
+            "`[embeddings]`: instálalo desde la raíz del checkout con "
+            f"`uv pip install -e '.[embeddings]'` y repite el comando ({exc})"
         ) from exc
     return numpy
 
