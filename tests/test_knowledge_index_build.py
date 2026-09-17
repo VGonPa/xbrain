@@ -2503,7 +2503,9 @@ def test_building_over_an_existing_index_refuses_and_names_both_commands(
     assert "index build --force" in str(caught.value)
 
 
-@pytest.mark.parametrize("breakage", ["another_schema_version", "database_deleted"])
+@pytest.mark.parametrize(
+    "breakage", ["another_schema_version", "database_deleted", "counts_disagree_with_base"]
+)
 def test_building_over_an_index_update_cannot_open_names_only_the_forced_rebuild(
     tmp_path: Path, three_inputs: Path, breakage: str
 ) -> None:
@@ -2516,8 +2518,12 @@ def test_building_over_an_index_update_cannot_open_names_only_the_forced_rebuild
     _built(index_dir, three_inputs)
     if breakage == "another_schema_version":
         _rewrite_manifest(index_dir, lambda raw: raw.update(schema_version="4"))
-    else:
+    elif breakage == "database_deleted":
         index_schema.db_path(index_dir).unlink()
+    else:
+        _rewrite_manifest(
+            index_dir, lambda raw: raw["counts"].update(items=raw["counts"]["items"] + 5)
+        )
     inputs = index_build.load_index_inputs(*_paths(three_inputs))
     with pytest.raises(index_schema.IndexError_):
         index_build.update(index_dir, inputs, dry_run=True)

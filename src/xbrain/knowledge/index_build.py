@@ -2009,6 +2009,22 @@ def connection_closed(connection: sqlite3.Connection) -> bool:
     return False
 
 
+def _require_updatable(index_dir: Path, options: IndexOptions) -> None:
+    """Raise what `update` would raise over this index, in its order, writing nothing (06.4).
+
+    `build` names `update` only over an index `update` can open. Each of these refusals already
+    names `--force`, the one command that works over the rest. The base is opened read-only
+    and judged with `whole_file=True`, as `status` does.
+    """
+    manifest = load_compatible_manifest(index_dir, params=options.params)
+    database = require_database(index_dir)
+    connection = open_index(database, read_only=True)
+    try:
+        require_consistent(connection, manifest, database, whole_file=True)
+    finally:
+        connection.close()
+
+
 def build(
     index_dir: Path,
     inputs: IndexInputs,
@@ -2043,7 +2059,7 @@ def build(
     `xbrain index build` again. Rebuilding over an existing index REQUIRES `force`, because a
     rebuild throws away something that may have taken minutes and the incremental path usually
     wants `index update` instead. The error names both commands — `update` only over an index
-    `update` can open.
+    `update` can open (`_require_updatable`).
 
     TWO THINGS FOUND BY MEASURING, NOT BY READING:
 
@@ -2075,10 +2091,7 @@ def build(
     """
     options = options or IndexOptions()
     if manifest_path(index_dir).exists() and not force and not dry_run:
-        # `update` is named only over an index it can open (06.4): its own two first checks
-        # run here, and their refusals already name `--force`, the one command that works.
-        load_compatible_manifest(index_dir, params=options.params)
-        require_database(index_dir)
+        _require_updatable(index_dir, options)
         raise ValueError(
             f"Ya existe un índice en {index_dir}. {UPDATE_ADVICE} "
             "Si de verdad quieres reconstruirlo desde cero, usa `xbrain index build --force`."

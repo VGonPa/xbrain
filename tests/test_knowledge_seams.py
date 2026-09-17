@@ -27,7 +27,7 @@ is red unless it lies inside a declared consumer:
 
 * seam (a): `sqlite3.connect`/`sqlite3.Connection` are used by `open_index` and
   `open_memory_index` and by nothing else; `sqlite3` is imported by three named modules and
-  no other; `open_index` is used by the four declared DOORS and by nothing else; every door
+  no other; `open_index` is used by the five declared DOORS and by nothing else; every door
   but the creator asks both halves of the question; a `describe_base` verdict is never
   discarded; `getattr` over `sqlite3` or over a watched module, and `__import__`/
   `import_module` of one, are red anywhere;
@@ -109,6 +109,7 @@ DOORS = frozenset(
         "xbrain.knowledge.index_build::build",
         "xbrain.knowledge.index_build::update",
         "xbrain.knowledge.index_build::_index_contents",  # `status`
+        "xbrain.knowledge.index_build::_require_updatable",  # `build`'s refusal (06.4)
         "xbrain.knowledge.index_store::open_for_query",  # `search`
     }
 )

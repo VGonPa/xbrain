@@ -1134,6 +1134,7 @@ def test_enrich_manual_without_vocab_fails(tmp_path, monkeypatch):
     result = runner.invoke(app, ["enrich", "--executor", "manual"])
     assert result.exit_code == 1
     assert "vocabulario" in result.output
+    assert "vocab --apply" not in result.output, "no worksheet was exported to apply"
 
 
 def test_enrich_apply_without_vocab_fails(tmp_path, monkeypatch):
@@ -1305,6 +1306,7 @@ def test_topics_without_vocab_fails(tmp_path, monkeypatch):
     result = runner.invoke(app, ["topics"])
     assert result.exit_code == 1
     assert "vocabulario" in result.output
+    assert "vocab --apply" not in result.output, "no worksheet was exported to apply"
 
 
 def test_topics_run_with_no_stale_overviews(tmp_path, monkeypatch):

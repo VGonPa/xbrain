@@ -19,7 +19,7 @@ paid `api` executor.
 1. **Export the worksheet.** Run `xbrain enrich --executor claude-code`. It writes
    `data/enrich-worksheet.json` with the pending items, the topic vocabulary and
    the rubrics. If it reports 0 pending items, stop. If it reports there is no
-   vocabulary, run `xbrain vocab` first, then retry.
+   vocabulary, run the command it names, then retry.
 
 2. **Read `data/enrich-worksheet.json`.** It has `rubrics` (summary + topics),
    `vocab` (the allowed topic slugs) and `items`.
