@@ -1,11 +1,28 @@
 # Tutorial — from zero to a searchable wiki
 
 A worked, end-to-end walkthrough: install XBrain, turn *your* X bookmarks into an
-Obsidian knowledge base, and digest a bookmarked talk into readable notes. Every
-command is copy-paste; the → lines show what you should see.
+Obsidian knowledge base, digest a bookmarked talk into readable notes, then
+search the corpus and hand it to an agent. Every command is copy-paste; the →
+lines show what you should see.
 
 New here? Do the [Quick start](../README.md#quick-start) first (install +
 authenticate), then come back — this tutorial picks up from a logged-in install.
+
+**What you need, before you start rather than when a step fails:**
+
+- **A real, logged-in X session** (`auth/storage_state.json`, from the Quick
+  start) for §2's `sync`, and at the end for `refetch-truncated --apply` and
+  the full `refresh-quoted`, which re-fetch from X. Every other section runs
+  on a store you already have, with no session.
+- **A Claude Code session or an Anthropic API key** for every LLM stage:
+  `vocab`, `enrich` and `topics` (§3), `describe` (§4), `video-digest` (§5),
+  `verify` (§6). By default each stage writes a worksheet for a Claude Code
+  session to fill. An API key replaces that session only where a stage takes
+  `--executor api`, and `video-digest` and `verify` do not.
+- **ffmpeg and a speech-to-text backend** for §5.
+- **Nothing more** for §7's word search, `get` and the graph. The optional
+  vector plane needs about 1.25 GB of disk, and the MCP section needs an MCP
+  client such as Claude Code.
 
 ---
 
@@ -18,10 +35,22 @@ uv run xbrain status
 # →   ...
 ```
 
-An empty store with no error means config + auth are good. If `status` complains
-about config, copy `config.toml.example` to `config.toml` and set your vault path
-+ X handle. If it can't authenticate, re-run the cookie import (see
-[Troubleshooting](troubleshooting.md#x-session-expired--auth-fails)).
+An empty store with no error means the config loads. If `status` fails with
+`No such file or directory: '…/config.toml'`, copy `config.toml.example` to
+`config.toml` and set your vault path + X handle.
+
+`status` says nothing about your login. It never reads
+`auth/storage_state.json` and prints the same counts with or without it. The
+session is first used by `sync`, in the next step. If there is no saved session,
+`sync` stops with exit code 1 before it opens a browser or writes anything:
+
+```
+Error: No hay sesión guardada en …/auth/storage_state.json. Ejecuta `xbrain login`.
+```
+
+Re-run the cookie import from the Quick start. A session that exists but has
+expired is a different failure: see
+[Troubleshooting](troubleshooting.md#x-session-expired--auth-fails).
 
 ## 2. Pull your posts and build the mechanical wiki
 
@@ -44,19 +73,48 @@ Open the vault in Obsidian — you already have `items/*.md` and `_index.md`.
 ## 3. Add the topic layer (the LLM stages)
 
 The mechanical layers need no LLM. The *understanding* layers — a topic
-vocabulary, per-post summaries + topics, and topic-page overviews — do:
+vocabulary, per-post summaries + topics, and topic-page overviews — do.
+
+By default they use the **claude-code execution mode** (no API key, no cost).
+Each stage **writes a worksheet and stops**. Nothing is induced or enriched
+until you fill the worksheet in a Claude Code session and `--apply` it. Open
+that session in this checkout: its `enriching-x-knowledge` skill
+(`.claude/skills/`) knows how to fill all three. Every stage reads what the
+previous `--apply` wrote, so the order is export, fill, apply, and then the
+next stage:
 
 ```bash
-uv run xbrain vocab       # induce ~45 topics from the corpus
-uv run xbrain enrich      # summary + topics for each post
-uv run xbrain topics      # write a topic page per cluster
+uv run xbrain vocab       # → Corpus exportado a …/data/vocab-worksheet.json
+# fill it (the skill induces the topic vocabulary), then:
+uv run xbrain vocab --apply data/vocab-worksheet.json
+# → Vocabulario aplicado: 45 topics → …/data/vocab.yaml
+
+uv run xbrain enrich      # → 2495 items exportados a …/data/enrich-worksheet.json
+# fill it (a summary + topics per post), then:
+uv run xbrain enrich --apply data/enrich-worksheet.json
+# → Worksheet aplicada: 2495 items enriquecidos
+
+uv run xbrain topics      # → 45 topics exportados a …/data/topic-worksheet.json · 45 páginas escritas
+# fill it (an overview per topic), then:
+uv run xbrain topics --apply data/topic-worksheet.json
+# → Worksheet aplicada: 45 overviews · 45 páginas escritas
+
 uv run xbrain generate    # re-render the vault with the new layers
 ```
 
-By default these use the **claude-code execution mode** (no API key, no cost):
-each stage exports a worksheet you fill in a Claude Code session, then
-`--apply`. To run them unattended with the API instead, add `--executor api`
-(needs `ANTHROPIC_API_KEY`). See [Execution modes](../README.md#execution-modes).
+The counts are from the 2,495-post corpus that §7's outputs also come from.
+Yours will differ.
+
+Skip an `--apply` and the next stage stops. After a `vocab` whose worksheet
+was never applied, `enrich` and `topics` both answer
+``Error: No hay vocabulario — ejecuta `xbrain vocab` antes.``, even though you
+did run it. What they are missing is `vocab.yaml`, and only
+`vocab --apply` writes it.
+
+To run the three unattended instead, add `--executor api` to each export
+command. There is no worksheet and no `--apply`, but it needs an Anthropic API
+key (`ANTHROPIC_API_KEY`) and costs money per token. See
+[Execution modes](../README.md#execution-modes).
 
 Now your vault has three layers: `items/` (posts), `topics/` (thematic pages),
 and `_index.md` (the map). Open `_index.md` in Obsidian and click into a topic.
@@ -194,10 +252,13 @@ from the store, so it costs nothing you cannot rebuild:
 
 ```bash
 uv run xbrain index build
-# → 2474 items · 45 topics · 10570 superficies · 22933 chunks · 2474 perfiles
+# → 2495 items · 45 topics · 10686 superficies · 23145 chunks · 2495 perfiles
 # →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
-# →   3.1s
+# →   2.2s
 ```
+
+The outputs in this section come from one corpus of 2,495 posts (`store-2495` in
+[Measured versions](knowledge-index.md#measured-versions)).
 
 Now query it. Results come back grouped by item, each with the fragments that
 matched and where they came from:
@@ -239,12 +300,158 @@ uv run xbrain index status    # what it holds, how far behind it is
 uv run xbrain index update    # touch only what changed (0.8s when nothing did)
 ```
 
-Two limits to know before you judge the results. There is **no stemming** —
+Three limits to know before you judge the results. There is **no stemming**:
 `agente` and `agentes` are different words, and on this corpus their top tens
-shared zero items — and it is **lexical, not semantic**: it finds proper nouns,
-figures and exact phrases, not conceptual similarity. Every response declares the
-second one (`degraded: ["no_embeddings"]`). Details, costs and the rest of the
-limits: [The knowledge index](knowledge-index.md).
+share zero items. There is **no phrase search**: a query of several words
+matches any of them, quoted or not. And it is **lexical, not semantic**: it
+finds proper nouns and figures, not conceptual similarity. Without a vector
+plane (below), every response says so (`degraded: ["no_embeddings"]`). Details,
+costs and the rest of the limits: [The knowledge index](knowledge-index.md).
+
+### Search by meaning (optional, and not shown to beat word search)
+
+A second, **opt-in** plane ranks passages by meaning. `--strategy vector` uses
+it alone; `--strategy hybrid` fuses it with the word ranking. Without it, both
+tell you so:
+
+```bash
+uv run xbrain search "transformer attention" --strategy hybrid
+# → "transformer attention" · estrategia lexical
+uv run xbrain search "transformer attention" --strategy vector
+# → Error: `--strategy vector` necesita vectores y este índice no tiene plano vectorial: …
+```
+
+Know the result before you spend the time. The one embedding model measured did
+**not** beat word search, and the comparison stopped after one of three
+candidates ([bake-off](embeddings-bakeoff.md)). That is why `lexical` stays the
+default.
+
+The plane needs two things the Quick start did not install. First, `numpy`, in
+xbrain's own environment. Without it the build below fails only after it has
+deleted your index, and even word search refuses until a plain `index build`:
+
+```bash
+uv pip install -e ".[embeddings]" --index-url https://pypi.org/simple
+```
+
+Second, an embedder, a program xbrain runs as a subprocess. The reference one,
+`scripts/xbrain-embed`, needs `sentence-transformers` in a Python environment of
+its own: 793 MB installed, plus 458 MB of model on first use.
+
+```bash
+EMBED=~/.xbrain-embed
+uv venv --python 3.12 $EMBED
+VIRTUAL_ENV=$EMBED uv pip install --index-url https://pypi.org/simple sentence-transformers
+```
+
+Your `config.toml` already has an `[embeddings]` section if you copied it from
+`config.toml.example`: it is the last section, with every key commented out.
+Add the three keys below under that header. **Do not paste a second
+`[embeddings]` line.** TOML refuses a section declared twice, and then every
+command stops, `get` included, with
+`Error: Cannot declare ('embeddings',) twice`. Only a `config.toml` copied
+before the section existed lacks the header, and there you add it too.
+
+In `command`, name that environment's Python before the script. The script's
+shebang runs the first `python3` on your `PATH`, which does not have the
+library. Use absolute paths: the command runs without a shell, so `~` is not
+expanded.
+
+```toml
+# under the existing [embeddings] header, the last section of config.toml:
+command = "/Users/you/.xbrain-embed/bin/python /path/to/xbrain/scripts/xbrain-embed"
+model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+batch_size = 1024
+```
+
+Check it before building. The first command must print `1`, and the second
+must print the index state, not an error:
+
+```bash
+grep -c '^\[embeddings\]' config.toml   # → 1
+uv run xbrain index status
+```
+
+MiniLM is the model the bake-off measured, and it needs no query or passage
+prefix. Each batch is one process that loads the model again, so the default
+`batch_size` of 64 would load it about 350 times on this corpus.
+
+Build both planes (the word index is rebuilt too), then query:
+
+```bash
+uv run xbrain index build --embeddings --force
+# → 2495 items · 45 topics · 10686 superficies · 23145 chunks · 2495 perfiles
+# →   omitidos: decorative 14 · empty_text 0 · failed_sources 65 · no_speech 111
+# →   259.8s
+uv run xbrain search "transformer attention" --strategy hybrid --limit 3
+# → "transformer attention" · estrategia hybrid
+# → 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
+# →    · [video_transcript] origin=asr trust=machine_extracted · via lexical+vector
+# → …
+# → 3. 2063758059307175994  @kylejeong (Kyle Jeong) · 2026-06-07
+# →    · [x_article] origin=source trust=primary_source · via lexical+vector
+# →      Human attention is still roughly the same (attention spans may have gotten worse), …
+```
+
+`via` names the ranking that found each passage. Result 3 is about human
+attention, not transformers, and both rankings found it: neither one rules out
+the wrong sense of a word.
+
+It costs minutes to build and seconds per query, because every batch and every
+query starts the embedder and loads the model again. Here the build took 260 s
+and 1.15 GB of memory on a 16 GB laptop that was already swapping; the
+bake-off's figures and conditions are in its
+[§6](embeddings-bakeoff.md#6-coste-indexación-disco-latencia-y-memoria). A
+filter (`--topic`, `--from`, …) sends the query back to `lexical`, declaring
+`vector_filters_unsupported`. Every failure and its message:
+[The vector plane](knowledge-index.md#the-vector-plane-and-hybrid--opt-in-and-not-the-default).
+
+### Look around a post: `graph-expand`
+
+`index build` also writes a small graph of posts and topics. From any post:
+
+```bash
+uv run xbrain graph-expand --item 2063609922667815064
+# → This edge reflects co-occurrence in this corpus, not a relationship in the world.
+# → item:2063609922667815064 → topic:agentic-engineering
+# → item:2063609922667815064 → topic:ai-agents
+# → item:2063609922667815064 → topic:ai-coding
+uv run xbrain graph-expand --item 2063609922667815064 --max-hops 2
+# → …
+# → item:2063609922667815064 → topic:agentic-engineering → topic:claude-code
+# → …
+# → item:2063609922667815064 → topic:agentic-engineering → item:1934807329989623905
+```
+
+Believe the first line. Two topics are linked because xbrain assigned both to
+enough of *your* posts, and for no other reason. Use the graph to pick what to
+read next, then `get` those posts. It does not improve search either: used to
+re-rank results, it lifted 0 of the 33 that only it could reach
+([graph sweep](graph-threshold-sweep.md)).
+
+Unlike `search`, it will not answer from an index that is behind the store. It
+stops with ``Ejecuta `xbrain index update`.``
+
+### Hand it to an agent: MCP
+
+`xbrain mcp-serve` offers `search`, `get` and `graph_expand` to Claude Code or
+any other MCP client, with the same answers as `--json`. From your xbrain
+checkout:
+
+```bash
+claude mcp add xbrain -- uv run --directory "$PWD" --extra mcp xbrain mcp-serve
+claude mcp get xbrain
+# → xbrain:
+# →   Scope: Local config (private to you in this project)
+# →   Status: ✔ Connected
+```
+
+`--extra mcp` installs the MCP SDK when the client starts the server; without
+it, `mcp-serve` exits naming `uv pip install 'xbrain[mcp]'`. The server is
+registered for the directory you ran `claude mcp add` in. Claude Desktop, the
+error messages and what the server can reach: [xbrain over MCP](mcp.md). What
+the agent should do with the answers:
+[Consuming xbrain from an agent](knowledge-for-agents.md).
 
 ## 8. See the whole corpus at a glance
 
@@ -263,16 +470,25 @@ open ~/Documents/Vault/vault/learnings/x-knowledge/dashboard.html
 Re-run periodically — everything is **incremental and idempotent**:
 
 ```bash
-uv run xbrain sync          # pull new bookmarks/tweets, re-render
-uv run xbrain enrich        # enrich only the new posts
-uv run xbrain topics        # refresh topic pages
+uv run xbrain sync          # pull new bookmarks/tweets, re-render (needs the X session)
+uv run xbrain enrich        # exports only the new posts; if it exported, fill, then:
+uv run xbrain enrich --apply data/enrich-worksheet.json
+uv run xbrain topics        # refreshes topic pages; if it exported, fill, then:
+uv run xbrain topics --apply data/topic-worksheet.json
 uv run xbrain generate
 uv run xbrain index update  # put the search index back in step with the store
 ```
 
+Apply only a worksheet the command just exported. When nothing is pending,
+`enrich` says `No hay items pendientes de enriquecer.` and exports nothing, and
+the old file still in `data/` would re-apply old judgments.
+
 `index update` is last because every command above it writes the store. Skip it
 and nothing breaks — `search` detects it and warns — but you will be searching
-yesterday's corpus.
+yesterday's corpus. If you built the vector plane, run
+`uv run xbrain index build --embeddings --force` instead: `update` never
+re-embeds, so new passages have no vector and `vector`/`hybrid` answers declare
+`vector_plane_behind` until you rebuild.
 
 The markdown is **derived and disposable** — delete and regenerate any time. The
 source of truth is `data/items.json` (snapshotted before every destructive op;
