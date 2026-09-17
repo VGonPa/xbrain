@@ -151,7 +151,12 @@ track — GIFs, muted clips; attached as `has_speech=false`, not a failure),
 fetched (deleted / unavailable), **Huecos** = items that ended the run with
 neither speech nor frames (without `--frames`, every silent one — see
 [hollow items](#finding-and-re-digesting-hollow-items)). Videos are **deduped by
-identity** — N bookmarks of the same clip are fetched + transcribed once.
+identity**. On the default path, N bookmarks of the same clip are fetched +
+transcribed once. `--keep-transcript` is deliberately different: it partitions
+one video by each item's stored `(text, has_speech, language, title)` plus one
+batch for items with no stored transcript. Each batch fetches once; stored
+batches make zero ASR calls and the missing batch makes one. That extra fetch is
+what prevents a stored transcript from crossing into another item.
 
 Add `--frames` for slide-heavy talks and silent clips:
 
@@ -213,6 +218,14 @@ Items digested without `--frames`, or before silent footage was described, come
 back with their frames. One that stays hollow had nothing describable, and the
 log says why: `frame extraction failed`, `no key frames extracted`, `unreadable`
 or `visual layer failed`.
+
+This is a destructive rebuild, not a transaction over the old frames. Once the
+video fetch succeeds, a frame-extraction/vision failure or a reclassification as
+talking-head completes with **no frames** and clears the old long-form digest.
+The command auto-creates a `pre-digest-video` snapshot before saving; if the new
+visual result is worse, undo it with `uv run xbrain snapshot restore <name>`.
+A fetch or ASR failure is different: it attaches nothing and leaves the old
+source, frames, digest and `fetched_at` untouched.
 
 Two cases don't show up under `Huecos`, so run the `jq` recipe again after the
 re-digest; it is the only complete list:
@@ -357,8 +370,10 @@ frames are downscaled to 640px wide at extraction time, and that resolution
 is not recoverable from the PNGs on disk. If a caption is wrong because the
 frame itself is illegible, the fix is re-extracting the frame — `digest-video
 --force --frames --keep-transcript`, which leaves the transcript alone — not
-`redescribe-frames`. That re-digest clears the video's long-form digest, so run
-`video-digest` again afterwards.
+`redescribe-frames`. That re-digest can also remove the old frames if extraction
+or vision fails, or if the video is reclassified as talking-head; it clears the
+video's long-form digest either way. Restore the automatic `pre-digest-video`
+snapshot if the rebuild is worse, otherwise run `video-digest` again afterwards.
 
 It is destructive (rewrites `items.json`) → auto-snapshots first, but only
 when at least one frame was actually re-described. That is a lower bar than

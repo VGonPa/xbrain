@@ -12,9 +12,13 @@ Two invariants carry the design:
 
 - **Dedup by video identity.** The full mp4 URL is unstable (`?tag=` + rotating
   signing/filename), so we key on the stable id parsed from the URL *path*
-  (`amplify_video/<id>` / `ext_tw_video/<id>` / `tweet_video/<id>`). N bookmarks
-  of the same video are fetched + transcribed **once**; every referencing item
-  gets the same transcript source.
+  (`amplify_video/<id>` / `ext_tw_video/<id>` / `tweet_video/<id>`). On the
+  default path, N bookmarks of the same video are fetched + transcribed **once**;
+  every referencing item gets the same transcript source. `keep_transcript`
+  instead partitions that video by each item's stored transcript (plus one
+  missing-transcript batch): one fetch per batch, zero ASR for stored batches,
+  and one ASR for the missing batch. That extra fetch is what prevents one
+  item's stored transcript from moving to another.
 - **Ephemeral, one video at a time.** Each video is fetched into a temp dir,
   transcribed, then its bytes are deleted immediately — and the whole temp dir is
   removed even if transcription raises. Never more than one video on disk; the
@@ -286,8 +290,10 @@ def group_items_by_video(store: dict[str, Item], item_ids: list[str]) -> dict[Vi
 
     Only items with a fetchable **mp4** entry are grouped — unknown ids and
     HLS / poster-era / no-video items are dropped (the caller reports them). Each
-    group preserves first-seen order and is de-duplicated, so the same video is
-    fetched + transcribed once and every referencing item gets the transcript.
+    group preserves first-seen order and is de-duplicated. On the default path
+    the group is fetched + transcribed once and every referencing item gets the
+    transcript; `keep_transcript` may later split it into transcript-specific
+    fetch batches so each item keeps its own stored metadata.
     """
     groups: dict[VideoKey, list[str]] = {}
     for item_id in item_ids:
@@ -879,12 +885,12 @@ def digest_videos(
 ) -> DigestReport:
     """Digest each selected video into an `x_video` transcript source.
 
-    Groups `item_ids` by video identity (dedup), then for each group fetches the
-    video ONCE into an ephemeral temp dir, transcribes it, attaches the transcript
-    to every referencing item that needs it, and discards the bytes. Idempotent
-    (already-digested items are skipped unless `force`); no video byte survives the
-    call (the temp dir is removed even if transcription raises). Mutates `store` in
-    place and returns a `DigestReport`; the caller persists.
+    Groups `item_ids` by video identity (dedup). On the default path each group
+    is fetched once into an ephemeral temp dir, transcribed once, attached to
+    every referencing item that needs it, and discarded. Idempotent
+    (already-digested items are skipped unless `force`); no video byte survives
+    the call (the temp dir is removed even if transcription raises). Mutates
+    `store` in place and returns a `DigestReport`; the caller persists.
 
     When `visual` is provided (`--frames`, #44 PR4), each slide-classified video
     also has its key frames extracted, described via the EXTERNAL vision step, and
@@ -898,11 +904,15 @@ def digest_videos(
     `keep_transcript` (`--frames --force --keep-transcript`) reuses each item's
     own stored transcript instead of re-running the ASR, and never gives one
     item's transcript to another (`_transcript_batches`); an item with no stored
-    transcript is transcribed as usual. The visual layer is redone, and, as on
-    any forced re-digest, the source is replaced: its long-form `digest` is
-    cleared and `content.fetched_at` is bumped, so `video-digest` and `enrich`
-    pick the item up again. It requires `visual` and `force` (`ValueError`
-    otherwise).
+    transcript is transcribed as usual. One `VideoKey` may therefore cost one
+    fetch per distinct stored transcript plus one for the missing-transcript
+    batch, while stored batches cost zero ASR. The visual layer is redone, and,
+    as on any forced re-digest, a completed batch replaces the source: its
+    long-form `digest` is cleared and `content.fetched_at` is bumped, so
+    `video-digest` and `enrich` pick the item up again. A visual failure or a
+    talking-head reclassification consequently drops prior frames; the CLI's
+    pre-write snapshot is the undo boundary. It requires `visual` and `force`
+    (`ValueError` otherwise).
     """
     _check_keep_transcript(keep_transcript, force=force, visual=visual)
     unique_ids = list(dict.fromkeys(item_ids))

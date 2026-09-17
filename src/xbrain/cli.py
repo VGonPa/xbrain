@@ -1572,15 +1572,20 @@ def _run_digest_video(
     """Digest selected videos into `x_video` transcript sources; persist + summarise.
 
     Flow: load → resolve selection → ephemeral fetch + EXTERNAL transcribe +
-    attach (dedup by video identity, in memory) → snapshot → persist. The
+    attach (dedup by video identity, in memory) → snapshot → persist. The default
+    path fetches + transcribes once per video identity. `--keep-transcript`
+    partitions one identity by stored transcript: one fetch per distinct stored
+    value (plus a missing-transcript batch), zero ASR for stored batches. The
     transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
     config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
     extracts key frames and describes them via the EXTERNAL `[vision]` command,
     attaching them to slide videos and to silent non-slide footage (a talking-head
     with speech is skipped). `--keep-transcript` reuses each item's own stored
-    transcript instead of re-running the transcriber (the visual layer is still
-    redone, and the forced re-digest clears the long-form digest). It is destructive (rewrites
-    `items.json`), so it auto-snapshots BEFORE the save — but only when something
+    transcript instead of re-running the transcriber. The visual layer is still
+    redone; a completed forced re-digest replaces old frames and clears the
+    long-form digest even if vision fails or the video is reclassified, so the
+    snapshot is the undo. It is destructive (rewrites `items.json`), so it
+    auto-snapshots BEFORE the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
     takes no snapshot). A snapshot failure propagates and aborts before any write.
     """
@@ -1667,8 +1672,11 @@ def digest_video(
     por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
     item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
-    URL firmada): N bookmarks del mismo vídeo se descargan y transcriben UNA vez y
-    todos reciben el mismo transcript. Un vídeo sin voz/audio se adjunta con texto
+    URL firmada): en el flujo por defecto, N bookmarks del mismo vídeo se
+    descargan y transcriben UNA vez y todos reciben el mismo transcript. Con
+    `--keep-transcript`, los items se separan por su transcript guardado: una
+    descarga por valor distinto (más el lote sin transcript), cero ASR para los
+    lotes guardados. Un vídeo sin voz/audio se adjunta con texto
     vacío + `has_speech=False` (nunca es un fallo duro); si además queda sin
     frames, el resumen lo cuenta en `Huecos (sin voz ni frames): N`. Idempotente:
     salta items que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe

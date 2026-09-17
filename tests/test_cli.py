@@ -2979,6 +2979,7 @@ def test_digest_video_keep_transcript_recovers_a_hollow_item_without_the_asr(
     _setup_repo_with_vision(tmp_path, monkeypatch)
     items_path = tmp_path / "data" / "items.json"
     save_store({"42": _hollow_video_item()}, items_path)
+    before = items_path.read_bytes()
     calls: list = []
 
     def _asr_must_not_run(path):
@@ -2992,6 +2993,9 @@ def test_digest_video_keep_transcript_recovers_a_hollow_item_without_the_asr(
     )
     assert calls == []
     assert result.exit_code == 0, result.output
+    snapshots = list((tmp_path / "data" / "snapshots").glob("*-pre-digest-video"))
+    assert len(snapshots) == 1
+    assert (snapshots[0] / "items.json").read_bytes() == before
     source = load_store(items_path)["42"].content.sources[0]
     assert (source.text, source.has_speech) == ("", False)
     assert [(f.local_path, f.description) for f in source.frames] == [
