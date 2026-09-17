@@ -2010,11 +2010,12 @@ def connection_closed(connection: sqlite3.Connection) -> bool:
 
 
 def _require_updatable(index_dir: Path, options: IndexOptions) -> None:
-    """Raise what `update` would raise over this index, in its order, writing nothing (06.4).
+    """`update`'s three refusals, in its order, judged read-only as `status` does (06.4).
 
-    `build` names `update` only over an index `update` can open. Each of these refusals already
-    names `--force`, the one command that works over the rest. The base is opened read-only
-    and judged with `whole_file=True`, as `status` does.
+    `build` names `update` only over an index these checks accept. Each refusal already names
+    `--force`, the one command that works over the rest. Read-only is where this differs from
+    `update`: a hot journal left by a killed writer is rolled back by `update`'s read-write
+    open and refused here — the same `--force` that `status` and `search` name for it.
     """
     manifest = load_compatible_manifest(index_dir, params=options.params)
     database = require_database(index_dir)
@@ -2914,10 +2915,10 @@ def _index_contents(
     """`(counts, {item_id: fingerprint}, {slug: topic row}, {chunk_id: text}, unusable)`.
 
     THE CHUNK TEXTS COME BACK FROM HERE AND NOT FROM A SECOND OPEN (03.4). `status` needs them
-    to judge the vector plane's coverage, and this is one of the four functions declared as a
-    door onto `knowledge.db` (`tests/test_knowledge_seams.py`). A fifth opener would be a
-    fifth place to remember the existence check, the consistency check and the read-only mode,
-    which is exactly the seam that test exists to keep at four.
+    to judge the vector plane's coverage, and this is one of the five functions declared as a
+    door onto `knowledge.db` (`tests/test_knowledge_seams.py`). A sixth opener would be a
+    sixth place to remember the existence check, the consistency check and the read-only mode,
+    which is exactly the seam that test exists to keep closed.
 
     THE BASE'S EXISTENCE IS ASKED OF `require_database`, LIKE EVERY OTHER DOOR (U-2). This
     function used to test `exists()` by itself and return three empties, "the truthful reading

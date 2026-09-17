@@ -986,6 +986,10 @@ def test_status_search_and_update_ask_one_function_whether_the_manifest_describe
         index_store.open_for_query(built / "index", *_paths(built))
     assert str(caught.value) == sentinel
     assert _status(built).advice == sentinel
+    # Plain `build` over the index asks it too before naming `update` (06.4).
+    with pytest.raises(IndexIncompatibleError) as caught:
+        index_build.build(built / "index", _inputs(built))
+    assert str(caught.value) == sentinel
 
 
 def test_status_search_and_update_ask_one_function_whether_the_base_exists(
@@ -1022,6 +1026,10 @@ def test_status_search_and_update_ask_one_function_whether_the_base_exists(
     assert str(caught.value) == sentinel
     report = _status(built)
     assert report.incomplete is True and report.advice == sentinel
+    # Plain `build` over the index asks it too before naming `update` (06.4).
+    with pytest.raises(IndexMissingError) as caught:
+        index_build.build(built / "index", _inputs(built))
+    assert str(caught.value) == sentinel
 
 
 @pytest.mark.parametrize("read", ["_stored_fingerprints", "stored_topic_rows"])

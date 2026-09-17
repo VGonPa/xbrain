@@ -1994,8 +1994,8 @@ def _require_vocab(cfg: Config) -> list[Topic]:
     worksheet = cfg.data_dir / "vocab-worksheet.json"
     if worksheet.exists():
         raise RuntimeError(
-            f"No hay vocabulario: falta `vocab.yaml`, y solo lo escribe "
-            f"`xbrain vocab --apply {worksheet}`, con esa worksheet ya rellena."
+            f"No hay vocabulario: falta `vocab.yaml`. Rellena la worksheet que exportó "
+            f"`xbrain vocab` y aplícala: `xbrain vocab --apply {worksheet}`."
         )
     raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
 
