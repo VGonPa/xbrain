@@ -340,8 +340,7 @@ uv run xbrain index build
 
 If the message instead says **`No hay base de datos en … pero su manifest sigue en
 pie: el índice quedó incompleto`**, the database was removed and the manifest was
-left behind — plain `build` would refuse (*Ya existe un índice*), so the command
-it names is the forced one:
+left behind. Rebuild with the command it names:
 
 ```bash
 uv run xbrain index build --force

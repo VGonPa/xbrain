@@ -29,7 +29,7 @@ read the exit code, which is 0 in every state, missing index included.
 
 | `index status --json` | `search` | `graph_expand` | Command in `advice` |
 |---|---|---|---|
-| `incomplete: true` | refused, naming the same command | refused, same command | `xbrain index build` when there is no index; `xbrain index build --force` when a manifest exists but cannot be used (another version, say). Plain `build` refuses over an existing manifest |
+| `incomplete: true` | refused, naming the same command | refused, same command | `xbrain index build` when there is no index; `xbrain index build --force` when a manifest exists but cannot be used (another version, say) |
 | `behind: true` | answers, declaring `index_behind_store` | refused: ``El índice va por detrás del store (`index_behind_store`): … Ejecuta `xbrain index update`.`` | `xbrain index update` |
 | both `false`, `advice` not empty | `vector`/`hybrid` answer, declaring `vector_plane_behind` | answers | `xbrain index build --embeddings --force` |
 

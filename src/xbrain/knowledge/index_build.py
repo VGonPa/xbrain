@@ -2042,7 +2042,8 @@ def build(
     both gone before the first row is written, and recovering from an interruption is
     `xbrain index build` again. Rebuilding over an existing index REQUIRES `force`, because a
     rebuild throws away something that may have taken minutes and the incremental path usually
-    wants `index update` instead. The error names both commands.
+    wants `index update` instead. The error names both commands — `update` only over an index
+    `update` can open.
 
     TWO THINGS FOUND BY MEASURING, NOT BY READING:
 
@@ -2074,6 +2075,10 @@ def build(
     """
     options = options or IndexOptions()
     if manifest_path(index_dir).exists() and not force and not dry_run:
+        # `update` is named only over an index it can open (06.4): its own two first checks
+        # run here, and their refusals already name `--force`, the one command that works.
+        load_compatible_manifest(index_dir, params=options.params)
+        require_database(index_dir)
         raise ValueError(
             f"Ya existe un índice en {index_dir}. {UPDATE_ADVICE} "
             "Si de verdad quieres reconstruirlo desde cero, usa `xbrain index build --force`."
