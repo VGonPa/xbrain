@@ -910,9 +910,14 @@ def digest_videos(
     as on any forced re-digest, a completed batch replaces the source: its
     long-form `digest` is cleared and `content.fetched_at` is bumped, so
     `video-digest` and `enrich` pick the item up again. A visual failure or a
-    talking-head reclassification consequently drops prior frames; the CLI's
-    pre-write snapshot is the undo boundary. It requires `visual` and `force`
-    (`ValueError` otherwise).
+    talking-head reclassification consequently drops prior frames. The CLI's
+    `pre-digest-video` snapshot restores `items.json` metadata only: each
+    selected item's `data/media/<id>/frames/` has already been deleted or
+    overwritten by the time it is taken. Before re-digesting items that currently
+    have frames, copy those directories aside and restore them with the snapshot
+    if needed; otherwise restored metadata can point to missing files or different
+    pixels. Hollow items have no prior frames and are not exposed to this loss.
+    `keep_transcript` requires `visual` and `force` (`ValueError` otherwise).
     """
     _check_keep_transcript(keep_transcript, force=force, visual=visual)
     unique_ids = list(dict.fromkeys(item_ids))

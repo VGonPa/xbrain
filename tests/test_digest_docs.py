@@ -8,15 +8,79 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SHELL_LANGUAGES = {"", "bash", "sh", "shell"}
 
 
 def _section(markdown: str, heading: str) -> str:
-    """Return one level-3 markdown section, excluding the next peer section."""
-    match = re.search(rf"^### {re.escape(heading)}\s*$", markdown, flags=re.MULTILINE)
-    assert match is not None, f"missing documentation section: {heading}"
-    tail = markdown[match.end() :]
-    next_heading = re.search(r"^#{1,3} ", tail, flags=re.MULTILINE)
-    return tail if next_heading is None else tail[: next_heading.start()]
+    """Return one level-3 section; headings inside code fences are content."""
+    in_section = False
+    fence: tuple[str, int] | None = None
+    lines: list[str] = []
+
+    for line in markdown.splitlines():
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if fence_match is not None:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1]:
+                fence = None
+            if in_section:
+                lines.append(line)
+            continue
+
+        if fence is None and re.match(r"^#{1,3} ", line):
+            if in_section:
+                break
+            in_section = line.strip() == f"### {heading}"
+            continue
+
+        if in_section:
+            lines.append(line)
+
+    assert in_section, f"missing documentation section: {heading}"
+    return "\n".join(lines)
+
+
+def _shell_blocks(markdown: str) -> list[str]:
+    """Return shell-like fenced blocks, preserving their command text."""
+    blocks: list[str] = []
+    block: list[str] | None = None
+    fence: tuple[str, int] | None = None
+
+    for line in markdown.splitlines():
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if fence_match is not None:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = (marker[0], len(marker))
+                language = fence_match.group(2).strip().split(maxsplit=1)
+                block = [] if (not language or language[0].lower() in SHELL_LANGUAGES) else None
+            elif marker[0] == fence[0] and len(marker) >= fence[1]:
+                if block is not None:
+                    blocks.append("\n".join(block))
+                block = None
+                fence = None
+            continue
+
+        if block is not None:
+            block.append(line)
+
+    return blocks
+
+
+def _digest_video_commands(markdown: str) -> list[list[str]]:
+    """Tokenise every digest-video command, honouring shell comments/continuations."""
+    commands: list[list[str]] = []
+    for block in _shell_blocks(markdown):
+        logical_lines = block.replace("\\\n", " ").splitlines()
+        for line in logical_lines:
+            if "digest-video" not in line:
+                continue
+            tokens = shlex.split(line, comments=True)
+            if "digest-video" in tokens:
+                commands.append(tokens)
+    return commands
 
 
 def test_hollow_recovery_recipe_keeps_the_three_safety_flags_indivisible():
@@ -28,13 +92,7 @@ def test_hollow_recovery_recipe_keeps_the_three_safety_flags_indivisible():
     """
     markdown = (ROOT / "docs" / "digest-video.md").read_text(encoding="utf-8")
     section = _section(markdown, "Finding and re-digesting hollow items")
-    bash_blocks = re.findall(r"```bash\n(.*?)```", section, flags=re.DOTALL)
-    commands = [
-        shlex.split(line)
-        for block in bash_blocks
-        for line in block.splitlines()
-        if "digest-video" in line and not line.lstrip().startswith("#")
-    ]
+    commands = _digest_video_commands(section)
 
     assert len(commands) == 1, "the hollow-recovery section must expose one canonical command"
     command = commands[0]

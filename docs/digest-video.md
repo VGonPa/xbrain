@@ -222,8 +222,13 @@ or `visual layer failed`.
 This is a destructive rebuild, not a transaction over the old frames. Once the
 video fetch succeeds, a frame-extraction/vision failure or a reclassification as
 talking-head completes with **no frames** and clears the old long-form digest.
-The command auto-creates a `pre-digest-video` snapshot before saving; if the new
-visual result is worse, undo it with `uv run xbrain snapshot restore <name>`.
+The command later creates a `pre-digest-video` snapshot before saving, but it
+restores **`items.json` metadata only**. By then, each selected item's
+`data/media/<id>/frames/` has already been deleted or overwritten. Before
+re-digesting an item that currently has frames, copy that directory aside; if
+you restore the snapshot, restore the saved directory too. Without that copy,
+the restored captions can point to missing files or different pixels. Hollow
+items have no prior frames and are not exposed to this loss.
 A fetch or ASR failure is different: it attaches nothing and leaves the old
 source, frames, digest and `fetched_at` untouched.
 
@@ -372,8 +377,14 @@ frame itself is illegible, the fix is re-extracting the frame — `digest-video
 --force --frames --keep-transcript`, which leaves the transcript alone — not
 `redescribe-frames`. That re-digest can also remove the old frames if extraction
 or vision fails, or if the video is reclassified as talking-head; it clears the
-video's long-form digest either way. Restore the automatic `pre-digest-video`
-snapshot if the rebuild is worse, otherwise run `video-digest` again afterwards.
+video's long-form digest either way. The automatic `pre-digest-video` snapshot
+restores **`items.json` metadata only**; the selected item's
+`data/media/<id>/frames/` has already been deleted or overwritten by then.
+Before re-digesting an item that currently has frames, copy that directory aside
+and restore it with the snapshot if needed. Without that copy, restored captions
+can point to missing files or different pixels. Hollow items have no prior frames
+and are not exposed to this loss. If the rebuild is good, run `video-digest`
+again afterwards.
 
 It is destructive (rewrites `items.json`) → auto-snapshots first, but only
 when at least one frame was actually re-described. That is a lower bar than

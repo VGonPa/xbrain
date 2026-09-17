@@ -2440,7 +2440,13 @@ def test_keep_transcript_completed_redigest_drops_old_visuals_and_digest(
 
     This deliberately differs from T3's fetch-failure contract. A visual failure
     or reclassification completes the re-digest with no frames and clears the old
-    long-form digest; the command's pre-write snapshot is the undo boundary.
+    long-form digest. The `pre-digest-video` snapshot restores `items.json`
+    metadata only: frame PNGs have already been deleted or overwritten when it is
+    taken. Before re-digesting items that currently have frames, copy their
+    `data/media/<id>/frames/` directories aside and restore them with the snapshot
+    if needed; without that copy, restored metadata can point to missing files or
+    different pixels. Hollow items have no prior frames and are not exposed to
+    this loss.
     """
     media = tmp_path / "media"
     store = {"a1": _item("a1", _VIDEO_A_URL_1)}

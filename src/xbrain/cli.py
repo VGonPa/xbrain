@@ -1583,11 +1583,18 @@ def _run_digest_video(
     with speech is skipped). `--keep-transcript` reuses each item's own stored
     transcript instead of re-running the transcriber. The visual layer is still
     redone; a completed forced re-digest replaces old frames and clears the
-    long-form digest even if vision fails or the video is reclassified, so the
-    snapshot is the undo. It is destructive (rewrites `items.json`), so it
-    auto-snapshots BEFORE the save — but only when something
+    long-form digest even if vision fails or the video is reclassified. The
+    `pre-digest-video` snapshot restores `items.json` metadata only: the selected
+    items' `data/media/<id>/frames/` directories have already been deleted or
+    overwritten by the time it is taken. Before re-digesting items that currently
+    have frames, copy those directories aside and restore them with the snapshot
+    if needed; otherwise restored metadata can point to missing files or different
+    pixels. Hollow items have no prior frames and are not exposed to this loss. The
+    command is destructive (rewrites `items.json`), so it auto-snapshots BEFORE
+    the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
-    takes no snapshot). A snapshot failure propagates and aborts before any write.
+    takes no snapshot). A snapshot failure propagates and aborts before any
+    `items.json` write.
     """
     store = load_store(cfg.items_path)
     id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
