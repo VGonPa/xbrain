@@ -1205,6 +1205,10 @@ vector of another dimension or another model — a matching width does not prove
 `tests/test_knowledge_degradation.py` holds one test per row of Plan 03 §5 and the test that no
 failure path says `hybrid`.
 
+Only
+with plane AND command in place does a filtered `vector` request answer lexically, declaring
+`vector_filters_unsupported` (the check order is `search_service._resolve_channel`).
+
 **The model was supposed to be chosen by measurement, and it has not been.**
 `xbrain eval --strategy vector|hybrid --embeddings-model <model>` builds each candidate's plane
 through the same `VectorBuild` `index build --embeddings` uses, under `data/eval-index/<model>/`,
@@ -1220,21 +1224,34 @@ and conditions there and are not repeated here.
 ### The evaluation, and where its gate really reaches
 
 `eval/golden-set.yaml` is **tracked in Git** — the one exception to "nothing personal is
-versioned" — because it is the ground truth of a merge gate. Untracked, the migration would
+versioned" — because it is the ground truth of a merge gate. Untracked (it lived under `data/*`), the migration would
 appear in no diff, `xbrain eval` could never run in CI (there is no `data/` there), and a
 case edited to turn a gate green would leave no history. It carries questions, ids and short
 identifying fragments; a 300-char ceiling on `expected_text`, checked in CI against the real
 file, keeps a corpus body from arriving through the back door.
 
 The loader has **two stages** for exactly that reason: `load_cases(path)` validates structure
-without opening the store, and `resolve_cases(cases, store)` checks the ids. Fused, the very
+without opening the store, and `resolve_cases(cases, store)` checks the ids (local, or CI against fixtures). Fused, the very
 test proving the evaluation runs in CI could not run.
 
 Only a case whose ground truth is ENUMERATED scores. With `relevant_items: []` the recall@k
 is 0/0, which comes out as 1.0 or 0.0 depending on the implementation and measures nothing
 either way; those are archived as `scenarios` with their reason. And a case whose filters the
-strategy cannot apply is reported as UNMEASURED, not as 0.0 — scoring those cases would say
+strategy cannot apply is reported as UNMEASURED, not as 0.0 (under Plan 01 the first real run reported `filtros: recall@10 = 0.0`, spec §8.6.8) — scoring those cases would say
 retrieval failed where the instrument does not exist yet.
+
+Migration measured 2026-08-31 against 2,404 items: D1c/U2 enumerates to **exactly 12** (so the
+Plan-03 bake-off keeps its deciding stratum), P1 to **6** where the file said 5, U3 to **22**
+where it said 20 — the two moved because the corpus grew, which is why the figures are notes
+and never asserts.
+
+**`video_digest` still has NO case, and now the reason is measured**: of
+the 36 proper nouns appearing only in a digest, **22 LEAK** (a fuzzy variant sits in the
+transcript, sometimes ASR-mangled — "Johannes Trithemius" vs "johannes tritemius", ratio 0.97)
+and the other **14 have no support on any surface**, i.e. candidates for invention. The first
+group fails the anexo-A.3 leak rule; founding a case on the second would enshrine a possible
+hallucination as ground truth. Zero usable candidates — and the population measured is proper
+nouns, not all facts.
 
 **The lexical baseline no longer lacks those columns, and the rule is what survives the
 repair** (PR #179). Under Plan 01 the harness walked the corpus its own way and wrote chunks
@@ -1257,16 +1274,18 @@ scores, and the fixture pins one scorer against itself over time.
 **The query terms are joined by a DISJUNCTION, and that is a retrieval decision.** FTS5's
 default is a conjunction, which requires every word of a question to appear inside ONE chunk;
 measured on the real corpus it returned not one row for 18 of the 21 scorable golden-set
-cases, so the published `semantico: 0.0` measured the query builder rather than the corpus.
+cases, and the only three that retrieved anything were single-term `exacto` queries, so the published `semantico: 0.0` / `cruzado_idioma: 0.0` / `topic: 0.0` measured the query builder rather than the corpus, while the execution report read them as an absence of vocabulary overlap.
 A conjunction in front of `bm25()` is two retrieval models stacked on each other: bm25 is a
 ranking function over a bag of words, it wants a wide candidate set and discriminates inside
 it by inverse document frequency, and requiring every term does that discrimination by brute
 force before the scorer ever runs. With the disjunction, empty result sets went 18/21 → 0/21
-and mean `recall@10` 0.1429 → 0.8099 with no stratum regressing, at a latency cost of p50
-0.23 → 9.75 ms. The connective is exported as `FTS_CONNECTIVE` and recorded in the ranking
+and mean `recall@10` 0.1429 → 0.8099, MRR 0.1429 → 0.7206, `exacto` unchanged, with no stratum regressing, at a latency cost of p50
+0.23 → 9.75 ms. The `0.8099 / 0.7206` pair measured the pre-#179 in-memory harness and is retired with it. The connective is exported as `FTS_CONNECTIVE` and recorded in the ranking
 fixture beside the tokenizer, because it decides the candidate set and therefore every recall
 number downstream — and because the six original fixture queries could not tell the two
 connectives apart, so the change would otherwise have passed the fixture in silence.
+
+Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
 
 The remaining known limits, both declared rather than discovered later: there is **no
 stemming**, and **IDF is relative to this corpus**, so a word that reads as a function word
@@ -1280,6 +1299,9 @@ chunker v1 and `store-2404-0831`, a different file from `store-2404-0901` — co
 the chunker moved; F-4 corrected the other three sites and missed this one.)* Those are what the
 vector layer of Plan 03 had to beat; the bake-off that tried is incomplete and found no winner
 ([above](#the-vector-plane-and-hybrid-retrieval)).
+
+Do not re-stamp a measured figure to a new version without that proof: which of the two a
+version bump touched is the whole question.
 
 **A threshold that reached no bucket fails closed.** `--min-recall` counts the
 `(bucket, metric)` comparisons it actually made; at zero it reports an explicit failure
@@ -1363,6 +1385,16 @@ could reach. `5 / 0.05` is applied as the least damaging cell because every buil
 graph, `tests/test_knowledge_graph_sweep.py` derives that winner from the published numbers and
 binds the defaults, the example config and the manifest to it, and `hybrid_graph` is not
 promoted.
+
+**Backlog, written so it is not lost:** no CLI/MCP switch for `hybrid_graph`; `index status`
+silent when the sealed graph thresholds/version differ from config (`index_build.py`,
+`index_store.py`); `graph-expand` on an unknown id exits 0 with one node; the SQL `CHECK` has
+no test; `resolve_locator` has no consumer; `max_hops`/node caps not in `config.toml`;
+`graph-expand`'s human view is printed inline in `cli.py`, not by `render.py` (the
+disclaimer sentence itself lives in `i18n.Strings`); stale strings (`implementadas hoy: lexical`, "no tiene
+backend todavía"). The unknown-id exit, `resolve_locator`, the caps and the
+inline disclaimer are PR #193's unlabelled backlog — the «F3–F6 of 04.3», a mapping no written
+record confirms.
 
 ### The MCP server
 

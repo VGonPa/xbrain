@@ -351,6 +351,11 @@ fit that description and both score 0.7395: `golden@a88c753` and
 labels and their notes). The MRR does not move. The recall moves with the
 golden set as well as with the corpus, so quote it with both versions.
 
+Read
+`0.7357` as `800/0`'s OWN MRR and never as the winner's: the same sweep reports `800/150`
+tied at `recall@10` (0.7391; 0.7395 on `golden@427fea9`) and ahead on MRR at 0.7360, under
+both, so pairing the winner's recall with this MRR is rule 6 in one line.
+
 The two negative results are summarised in their sections below, and each one
 states its own population. The embeddings bake-off was measured on `store-2474`
 against `golden@427fea9` (commit `547a860`): its lexical row reads 0.7395, at a
@@ -360,7 +365,7 @@ comparable with either number.
 
 ## Measured versions
 
-Every figure on this page, in [CLAUDE.md](../CLAUDE.md), in
+Every figure on this page, in
 [ARCHITECTURE.md](../ARCHITECTURE.md), in the [bake-off](embeddings-bakeoff.md)
 and in the [graph sweep](graph-threshold-sweep.md) was measured on some version
 of the golden set and some version of the store, and this section is the only
@@ -447,15 +452,15 @@ it, for the reason given.
 
 | Population | Figures | Quoted in | 2026-09-16 |
 |---|---|---|---|
-| `store-2474` × `golden@d1423c8` | lexical `800/0`: `recall@10` 0.7391 · MRR 0.7357, depth 10, 22,933 chunks. `800/150`: 0.7391 · 0.7360 | this page, CLAUDE.md | re-run |
-| `store-2474` × `golden@a88c753` | lexical `800/0`: 0.7395 · 0.7357 | this page, CLAUDE.md | re-run |
-| `store-2474` × `golden@427fea9` | lexical `800/0`: 0.7395 · 0.7357. `800/150`: 0.7395 · 0.7360. The whole [bake-off](embeddings-bakeoff.md) | bake-off, this page, CLAUDE.md | lexical re-run, including the bake-off's lexical row at depth 20 (0.7395, uncut MRR 0.7366). Its per-stratum MRR is now printed as `mrr@10`, as the bake-off's §9 warns. Recorded: every MiniLM figure (it needs the embedder and weights the bake-off deleted) |
-| `store-2474` alone | 10,570 surfaces · 22,933 chunks · 2,474 profiles. The costs in [What it costs](#what-it-costs), taken 2026-09-12, while this was the live store. `agente` and `agentes` share 0 of 10, and `transformer` and `transformers` share 7. `el` in 28.0 % of chunks (2026-09-13) | this page, CLAUDE.md | 22,933 chunks re-run. Recorded: wall-clock timings (they describe the machine) |
+| `store-2474` × `golden@d1423c8` | lexical `800/0`: `recall@10` 0.7391 · MRR 0.7357, depth 10, 22,933 chunks. `800/150`: 0.7391 · 0.7360 | this page | re-run |
+| `store-2474` × `golden@a88c753` | lexical `800/0`: 0.7395 · 0.7357 | this page | re-run |
+| `store-2474` × `golden@427fea9` | lexical `800/0`: 0.7395 · 0.7357. `800/150`: 0.7395 · 0.7360. The whole [bake-off](embeddings-bakeoff.md) | bake-off, this page | lexical re-run, including the bake-off's lexical row at depth 20 (0.7395, uncut MRR 0.7366). Its per-stratum MRR is now printed as `mrr@10`, as the bake-off's §9 warns. Recorded: every MiniLM figure (it needs the embedder and weights the bake-off deleted) |
+| `store-2474` alone | 10,570 surfaces · 22,933 chunks · 2,474 profiles. The costs in [What it costs](#what-it-costs), taken 2026-09-12, while this was the live store. `agente` and `agentes` share 0 of 10, and `transformer` and `transformers` share 7. `el` in 28.0 % of chunks (2026-09-13) | this page | 22,933 chunks re-run. Recorded: wall-clock timings (they describe the machine) |
 | `store-2495` × `golden@d1423c8` | the [graph sweep](graph-threshold-sweep.md): 16 cells, base 0.6296 on 18 cases, 33 `expansion` pairs, 0 of them lifted | graph sweep, this page | re-run with the sweep's §6 command, at `b7aa992` rather than the `d1423c8` it checks out: the 16 rows of its §3 table came out byte-identical, and so did the base, the `expansion` line and the verdict |
 | `store-2495` × `golden@a88c753` | the sweep's first signature (base 0.6301, 31 pairs), and its two `expansion` classification runs (140 s and 144 s) with their 58 identical pairs | graph sweep | recorded |
-| `store-2495` / `index-2495` | the graph plane at the default thresholds: 5,783 edges (2,495 `HAS_PRIMARY_TOPIC`, 3,128 `HAS_TOPIC`, 160 `CO_OCCURS_WITH` among 41 topics). `knowledge.db` 53.6 MiB, 1.6 MiB of it `graph_edges` with its three indexes (0.64 MiB the table alone) | this page, CLAUDE.md | recorded |
-| `store-2404-0831` | on 2026-08-31, chunker v1: 18,319 chunks (9,294 atomic + 9,025 splittable), and `el` in 5,748 of them (31.4 %) | CLAUDE.md, ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
-| `store-2404-0901` | on 2026-09-01: `el` in 6,070 of 22,286 chunks (27.2 %), chunker v2 `800/0`. Chunker v1 cuts this store into 18,320 chunks, one more than `store-2404-0831` | this page, CLAUDE.md, ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
+| `store-2495` / `index-2495` | the graph plane at the default thresholds: 5,783 edges (2,495 `HAS_PRIMARY_TOPIC`, 3,128 `HAS_TOPIC`, 160 `CO_OCCURS_WITH` among 41 topics). `knowledge.db` 53.6 MiB, 1.6 MiB of it `graph_edges` with its three indexes (0.64 MiB the table alone) | this page | recorded |
+| `store-2404-0831` | on 2026-08-31, chunker v1: 18,319 chunks (9,294 atomic + 9,025 splittable), and `el` in 5,748 of them (31.4 %) | ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
+| `store-2404-0901` | on 2026-09-01: `el` in 6,070 of 22,286 chunks (27.2 %), chunker v2 `800/0`. Chunker v1 cuts this store into 18,320 chunks, one more than `store-2404-0831` | this page, ARCHITECTURE.md, and comments in `src/` and `tests/` | cannot be re-run |
 
 The live store today (2,519 items) carries none of these figures.
 
@@ -986,8 +991,8 @@ extra), not the spec's «sin llamada a un LLM generativo».
 
 **A table, not a test.** Until Plan 04.8 this table was an executable test,
 `tests/test_spec_closure.py`. It was removed as a scope decision: 1,127 lines of
-machinery to guard fifteen sentences, and each of three review rounds found
-another way to leave it green. The criteria's proofs are ordinary tests, and
+machinery to guard fifteen sentences, and across three review rounds it produced six blockers of one family: each round found
+another way to leave it green. Do not rebuild it without a different approach. The criteria's proofs are ordinary tests, and
 deleting one already leaves the suite a test short, which is visible without
 extra machinery. Nothing watches this table, so when a criterion changes state,
 edit its row. Two tests left with that file: the check of the spec's §13.12 through
