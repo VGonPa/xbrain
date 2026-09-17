@@ -105,12 +105,6 @@ uv run xbrain generate    # re-render the vault with the new layers
 The counts are from the 2,495-post corpus that §7's outputs also come from.
 Yours will differ.
 
-Skip an `--apply` and the next stage stops. After a `vocab` whose worksheet
-was never applied, `enrich` and `topics` both answer
-``Error: No hay vocabulario — ejecuta `xbrain vocab` antes.``, even though you
-did run it. What they are missing is `vocab.yaml`, and only
-`vocab --apply` writes it.
-
 To run the three unattended instead, add `--executor api` to each export
 command. There is no worksheet and no `--apply`, but it needs an Anthropic API
 key (`ANTHROPIC_API_KEY`) and costs money per token. See
@@ -327,8 +321,7 @@ candidates ([bake-off](embeddings-bakeoff.md)). That is why `lexical` stays the
 default.
 
 The plane needs two things the Quick start did not install. First, `numpy`, in
-xbrain's own environment. Without it the build below fails only after it has
-deleted your index, and even word search refuses until a plain `index build`:
+xbrain's own environment:
 
 ```bash
 uv pip install -e ".[embeddings]" --index-url https://pypi.org/simple
@@ -447,7 +440,7 @@ claude mcp get xbrain
 ```
 
 `--extra mcp` installs the MCP SDK when the client starts the server; without
-it, `mcp-serve` exits naming `uv pip install 'xbrain[mcp]'`. The server is
+it, `mcp-serve` exits naming `uv pip install -e '.[mcp]'`. The server is
 registered for the directory you ran `claude mcp add` in. Claude Desktop, the
 error messages and what the server can reach: [xbrain over MCP](mcp.md). What
 the agent should do with the answers:

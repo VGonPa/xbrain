@@ -59,8 +59,8 @@ DEGRADED_TEXT: dict[str, str] = {
         "`xbrain index update`."
     ),
     "no_embeddings": (
-        "· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases "
-        "exactas, no similitud conceptual."
+        "· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y otros "
+        "términos literales, no similitud conceptual."
     ),
     # The two causes the manifest cannot declare (Plan 03 §5): they belong to THIS machine's
     # config and backend, so the sentence names the setting, not an index command.

@@ -340,8 +340,7 @@ uv run xbrain index build
 
 If the message instead says **`No hay base de datos en … pero su manifest sigue en
 pie: el índice quedó incompleto`**, the database was removed and the manifest was
-left behind — plain `build` would refuse (*Ya existe un índice*), so the command
-it names is the forced one:
+left behind. Rebuild with the command it names:
 
 ```bash
 uv run xbrain index build --force
@@ -558,13 +557,12 @@ moved and **never re-embeds** them, so the plane is `behind`. Lexical search is 
 and declare `vector_plane_behind`. Restoring full coverage is a rebuild of both planes:
 `uv run xbrain index build --embeddings --force`.
 
-### A query needing vectors names `uv pip install 'xbrain[embeddings]'`
+### A query needing vectors names `uv pip install -e '.[embeddings]'`
 
-`numpy` is not installed: it is the optional `[embeddings]` extra, not a dependency. From a
-checkout, install it with `uv sync --extra embeddings` (add `--extra dev` if you also run the
-quality gate). `uv sync` removes what its flags did not ask for, so a later `uv sync` without
-`--extra embeddings` uninstalls it again — the usual reason this error comes back. `index
-status` does not refuse over a missing `numpy`; it prints this same sentence on its `→` line.
+`numpy` is not installed: it is the optional `[embeddings]` extra, not a dependency. `uv sync`
+removes what its flags did not ask for, so a later `uv sync` without `--extra embeddings`
+uninstalls it again — the usual reason this error comes back. `index status` does not refuse
+over a missing `numpy`; it prints this same sentence on its `→` line.
 
 ### `xbrain eval --strategy vector` refuses before measuring anything
 
@@ -666,12 +664,6 @@ CLI prints for the same request — follow it as you would on the command line
 (`xbrain index build`, `xbrain index update`, a valid item id, a declared
 strategy). A bare `Error executing tool xbrain.search` with nothing after it is a
 bug, not a configuration problem: report it with the arguments you sent.
-
-### An index error prints a second, empty `Error:` line
-
-Cosmetic, and known. Both CLI error handlers fire on an index error, so the clean
-message is followed by a blank one. The exit code is still `1` and the first line
-is the real one.
 
 ---
 

@@ -153,8 +153,8 @@ rows in front of a scorer.
 ```bash
 $ uv run xbrain search "transformer attention" --limit 2
 "transformer attention" · estrategia lexical
-· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases
-  exactas, no similitud conceptual.
+· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y otros
+  términos literales, no similitud conceptual.
 
 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
    https://x.com/xiathis/status/2051242195298968041
@@ -548,7 +548,7 @@ manifest's `embeddings` block rather than hard-coded, so an index built with
 punctuation stays literal (`@simonw`, `11.37%`), and the terms are joined with
 `OR`: `"harness engineering"`, quotes included, asks for chunks with *harness* or
 *engineering*, and bm25 usually ranks those with both higher. It does not require the two
-words to be adjacent. The human view's `frases exactas` wording overstates this.
+words to be adjacent.
 
 **A strategy you name is run or declared, never faked.** `hybrid` without a working
 vector channel answers `lexical` and names the cause; `vector` without one is an
@@ -597,7 +597,7 @@ dependency. From a checkout of this repo the extra is installed with
 `uv sync` removes packages its flags did not ask for, so a later plain `uv sync`
 uninstalls `numpy` again. Without it, `import xbrain` and lexical `search` keep
 working, and a query that needs the matrix fails naming
-`uv pip install 'xbrain[embeddings]'` instead of raising an `ImportError`.
+`uv pip install -e '.[embeddings]'` instead of raising an `ImportError`.
 
 **2 · An embedder: any program that honours the contract.** xbrain carries no model
 library. It runs `[embeddings].command` as a subprocess — split with `shlex`, never
@@ -766,7 +766,7 @@ Rows 1–6 are Plan 03 §5; the last three are what the code added.
 | **6** · the index has no plane (built without `--embeddings`) | — | `lexical` · `no_embeddings` (plus `embeddings_not_configured` if the command is empty too); the embedder is not called | **error**: `…este índice no tiene plano vectorial: configura [embeddings].command … y ejecuta xbrain index build --embeddings --force…` |
 | any filter (`--topic`, `--from`, `--kind`, …), plane and command in place | — | `lexical` · `vector_filters_unsupported` | `lexical` · `vector_filters_unsupported` |
 | the plane is behind the lexical base | — | `hybrid` runs · `vector_plane_behind` | `vector` runs · `vector_plane_behind` |
-| `numpy` not installed, plane in place | — | **error** naming `uv pip install 'xbrain[embeddings]'` | **error**: same |
+| `numpy` not installed | refused before anything is deleted, naming `uv pip install -e '.[embeddings]'` | **error** naming the same command (plane in place) | **error**: same |
 
 Rows 3 and 5 of the build are where the code **diverges from the plan on purpose and
 says so**: nothing is queried half-built, and nothing is rolled back either. The

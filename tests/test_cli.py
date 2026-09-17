@@ -637,6 +637,23 @@ def test_download_videos_command_aborts_when_declined(tmp_path: Path, monkeypatc
     )
 
 
+def test_declining_the_download_gate_prints_no_empty_error_line(tmp_path: Path, monkeypatch):
+    """Backlog #26 of PR #206: `n` at the gate printed `Error: ` with nothing after it.
+
+    `typer.Abort` is a `RuntimeError`, so `_handle_cli_errors` took it for an operator error
+    and printed its empty text. The decline still exits 1, with click's own abort line.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"42": _video_item("42")}, tmp_path / "data" / "items.json")
+    monkeypatch.setattr("xbrain.video_media.requests.Session", _FakeVideoSession)
+
+    result = runner.invoke(app, ["download-videos"], input="n\n")
+
+    assert result.exit_code == 1, result.output
+    assert "Error:" not in result.output, result.output
+    assert "Abort" in result.output, result.output
+
+
 def test_download_videos_command_proceeds_when_confirmed(tmp_path: Path, monkeypatch):
     """Confirming the gate with `y` proceeds to download."""
     from xbrain.models import MediaVideoDownloaded
@@ -940,6 +957,25 @@ def test_enrich_manual_exports_a_worksheet(tmp_path, monkeypatch):
     assert (tmp_path / "data" / "enrich-worksheet.json").exists()
 
 
+@pytest.mark.parametrize("command", ["enrich", "topics"])
+def test_a_vocab_export_never_applied_names_vocab_apply(tmp_path, monkeypatch, command):
+    """Backlog #24 of PR #206: after a `vocab` whose worksheet nobody applied, `enrich` and
+    `topics` told the reader to run `vocab` — the command they had just run. What is missing
+    is `vocab.yaml`, and only `vocab --apply` writes it, so that is the command to name.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    exported = runner.invoke(app, ["vocab", "--executor", "manual"])
+    assert exported.exit_code == 0, exported.output
+    worksheet = tmp_path / "data" / "vocab-worksheet.json"
+    assert worksheet.exists() and not (tmp_path / "data" / "vocab.yaml").exists()
+
+    result = runner.invoke(app, [command])
+
+    assert result.exit_code == 1, result.output
+    assert f"xbrain vocab --apply {worksheet}" in _plain_output(result.output)
+
+
 def test_enrich_apply_imports_a_filled_worksheet(tmp_path, monkeypatch):
     import json
 
@@ -1098,6 +1134,7 @@ def test_enrich_manual_without_vocab_fails(tmp_path, monkeypatch):
     result = runner.invoke(app, ["enrich", "--executor", "manual"])
     assert result.exit_code == 1
     assert "vocabulario" in result.output
+    assert "vocab --apply" not in result.output, "no worksheet was exported to apply"
 
 
 def test_enrich_apply_without_vocab_fails(tmp_path, monkeypatch):
@@ -1269,6 +1306,7 @@ def test_topics_without_vocab_fails(tmp_path, monkeypatch):
     result = runner.invoke(app, ["topics"])
     assert result.exit_code == 1
     assert "vocabulario" in result.output
+    assert "vocab --apply" not in result.output, "no worksheet was exported to apply"
 
 
 def test_topics_run_with_no_stale_overviews(tmp_path, monkeypatch):

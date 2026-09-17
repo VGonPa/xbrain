@@ -640,7 +640,7 @@ generates an Obsidian wiki.
   reference backend. **The backend's stderr is never relayed**: a crashing embedder's traceback
   quotes the chunk it failed on, i.e. the corpus. `numpy` is the `[embeddings]` extra, imported
   lazily, so `import xbrain` works without it and a query that needs the matrix names
-  `uv pip install 'xbrain[embeddings]'`. `xbrain index build --embeddings` writes
+  `uv pip install -e '.[embeddings]'`. `xbrain index build --embeddings` writes
   `data/index/vectors.f32` + `vectors.meta.json` and a manifest `embeddings` block that IS
   `VectorSpec` (model · dimension · normalized · both prefixes), as DECLARED by a probe batch; a
   query reads model and query prefix **off the manifest**, never off `config.toml`. The plane
@@ -706,7 +706,7 @@ generates an Obsidian wiki.
   no test; `resolve_locator` has no consumer; `max_hops`/node caps not in `config.toml`;
   `graph-expand`'s human view is printed inline in `cli.py`, not by `render.py` (the
   disclaimer sentence itself lives in `i18n.Strings`); stale strings (`implementadas hoy: lexical`, "no tiene
-  backend todavía", "frases exactas"). The unknown-id exit, `resolve_locator`, the caps and the
+  backend todavía"). The unknown-id exit, `resolve_locator`, the caps and the
   inline disclaimer are PR #193's unlabelled backlog — the «F3–F6 of 04.3», a mapping no written
   record confirms.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown

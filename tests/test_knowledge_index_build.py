@@ -2503,6 +2503,38 @@ def test_building_over_an_existing_index_refuses_and_names_both_commands(
     assert "index build --force" in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "breakage", ["another_schema_version", "database_deleted", "counts_disagree_with_base"]
+)
+def test_building_over_an_index_update_cannot_open_names_only_the_forced_rebuild(
+    tmp_path: Path, three_inputs: Path, breakage: str
+) -> None:
+    """Backlog #20 of PR #206: `update` cannot work here, and plain `build` sent the operator
+    there first — two hops to the one command that does. The refusal names only that one.
+
+    The premise is asserted, not assumed: `update` itself refuses this index.
+    """
+    index_dir = tmp_path / "index"
+    _built(index_dir, three_inputs)
+    if breakage == "another_schema_version":
+        _rewrite_manifest(index_dir, lambda raw: raw.update(schema_version="4"))
+    elif breakage == "database_deleted":
+        index_schema.db_path(index_dir).unlink()
+    else:
+        _rewrite_manifest(
+            index_dir, lambda raw: raw["counts"].update(items=raw["counts"]["items"] + 5)
+        )
+    inputs = index_build.load_index_inputs(*_paths(three_inputs))
+    with pytest.raises(index_schema.IndexError_):
+        index_build.update(index_dir, inputs, dry_run=True)
+
+    with pytest.raises((ValueError, index_schema.IndexError_)) as caught:
+        _built(index_dir, three_inputs)
+    assert "index build --force" in str(caught.value)
+    assert "index update" not in str(caught.value)
+    assert index_schema.manifest_path(index_dir).exists(), "a refusal deletes nothing"
+
+
 def test_a_forced_rebuild_removes_the_manifest_BEFORE_the_database(
     tmp_path: Path, three_inputs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -51,7 +51,7 @@ from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
-from xbrain.models import ArchiveImport, Author, Item, SourceName
+from xbrain.models import ArchiveImport, Author, Item, SourceName, Topic
 from xbrain.redescribe import (
     RedescribeReport,
     format_redescribe_summary,
@@ -265,6 +265,10 @@ def _handle_cli_errors(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except (typer.Exit, typer.Abort):
+            # Click's own control flow, not an operator error. Both are `RuntimeError`, so the
+            # clause below printed their empty text as a second `Error: ` line (06.4).
+            raise
         except _OPERATOR_ERRORS as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
@@ -1978,6 +1982,24 @@ def _finish_redescribe_run(
         )
 
 
+def _require_vocab(cfg: Config) -> list[Topic]:
+    """The topic vocabulary, or the command that writes it (06.4).
+
+    A `vocab` worksheet still on disk means the reader already ran `vocab`: what is missing
+    is its `--apply`, the only step that writes `vocab.yaml`.
+    """
+    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    if vocab:
+        return vocab
+    worksheet = cfg.data_dir / "vocab-worksheet.json"
+    if worksheet.exists():
+        raise RuntimeError(
+            f"No hay vocabulario: falta `vocab.yaml`. Rellena la worksheet que exportó "
+            f"`xbrain vocab` y aplícala: `xbrain vocab --apply {worksheet}`."
+        )
+    raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+
+
 @app.command()
 @_handle_cli_errors
 def enrich(
@@ -1993,9 +2015,7 @@ def enrich(
     """Enriquece los items con resumen + topics."""
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab_topics = load_vocab(cfg.data_dir / "vocab.yaml")
-    if not vocab_topics:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+    vocab_topics = _require_vocab(cfg)
 
     if apply is not None:
         executor_name, judgments = import_worksheet(apply)
@@ -2490,9 +2510,7 @@ def topics(
     """Genera las páginas de topic: listas de posts + overviews sintetizados."""
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
-    if not vocab:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+    vocab = _require_vocab(cfg)
     if apply is not None:
         _topics_apply(cfg, store, vocab, apply)
     else:
@@ -3504,9 +3522,10 @@ def mcp_serve_command() -> None:
     respuesta: no hay una segunda semántica.
 
     El decorador NO es decoración. Sin él, una máquina que instaló `xbrain` sin el extra
-    `[mcp]` recibe la excepción cruda y stderr VACÍO — medido: `assert 'xbrain[mcp]' in ''`.
+    `[mcp]` recibe la excepción cruda y stderr VACÍO — medido: `assert 'xbrain[mcp]' in ''`
+    (la aserción de entonces, cuando el mensaje nombraba un paquete que el repo no publica).
     `McpExtraMissing` hereda de `RuntimeError` precisamente para caer en `_OPERATOR_ERRORS` y
-    salir como `Error: … instálalo con: uv pip install 'xbrain[mcp]'` con código 1, que es el
+    salir como `Error: … uv pip install -e '.[mcp]'` con código 1, que es el
     mismo trato que recibe un `[vision].command` sin configurar (Plan 04 §4.5).
     """
     from xbrain.mcp_server import serve

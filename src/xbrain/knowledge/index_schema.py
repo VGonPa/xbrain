@@ -391,8 +391,8 @@ def require_database(index_dir: Path) -> Path:
     The advice depends on what is left beside the missing file. With no manifest the index
     was simply never built, and plain `xbrain index build` builds it. With a manifest still
     standing — the operator deleted the 52 MB database by hand and kept the 1 KB document —
-    plain `build` REFUSES (*Ya existe un índice*), so naming it would send the operator into
-    a dead end in two hops; the honest command is the forced rebuild. One function, called by
+    plain `build` REFUSES (since 06.4 with this very error), so naming it would cost the
+    operator a hop for nothing; the honest command is the forced rebuild. One function, called by
     every door — `open_index`, `update`, `open_for_query` and, since round 07 (U-2),
     `status` (`index_build._index_contents`), which used to test `exists()` by itself and
     read a standing manifest over a missing base as an index never built — so the doors

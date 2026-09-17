@@ -1029,7 +1029,8 @@ def test_search_needing_vectors_without_the_extra_names_the_install_command(
     result = runner.invoke(app, ["search", SEARCH_QUERY, "--strategy", strategy, "--json"])
 
     assert result.exit_code == 1, result.output
-    assert "uv pip install 'xbrain[embeddings]'" in result.output
+    assert "uv pip install -e '.[embeddings]'" in result.output
+    assert "xbrain[" not in result.output, "names a package this repo does not publish"
     assert not isinstance(result.exception, ImportError)
     assert "Traceback" not in result.output
 
@@ -1039,6 +1040,31 @@ def _manifest_exists(workspace: Path) -> bool:
     from xbrain.knowledge.index_build import manifest_path
 
     return manifest_path(load_config(workspace).index_dir).exists()
+
+
+def test_index_build_embeddings_force_without_numpy_refuses_and_leaves_the_index_standing(
+    workspace: Path, monkeypatch
+) -> None:
+    """Backlog #6 of PR #206, reproduced in Plan 06.3: the missing extra used to cost the index.
+
+    `build` discarded manifest, base and plane first and imported `numpy` only when the matrix
+    was written, so the refusal arrived over an index that was already gone and even a lexical
+    `search` answered «no hay manifest». The refusal must come BEFORE anything is deleted.
+    """
+    import sys
+
+    assert runner.invoke(app, ["index", "build"]).exit_code == 0
+    _a_working_embedder(workspace, monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+    result = runner.invoke(app, ["index", "build", "--embeddings", "--force"])
+
+    assert result.exit_code == 1, result.output
+    assert "numpy" in result.output
+    assert _manifest_exists(workspace), "the good index was discarded before the refusal"
+    searched = runner.invoke(app, ["search", SEARCH_QUERY, "--json"])
+    assert searched.exit_code == 0, searched.output
+    assert _json_stdout(searched)["results"], "lexical search no longer answers"
 
 
 def test_index_build_embeddings_without_a_command_names_the_setting_and_builds_nothing(

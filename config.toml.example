@@ -192,7 +192,7 @@ command = "parakeet-mlx"
 #                                   a lexical answer: you asked for vectors by name
 #   a query vector of another dimension than the manifest's → an ERROR (models never mix)
 #   the `[embeddings]` extra not installed → an ERROR naming
-#                                   `uv pip install 'xbrain[embeddings]'`
+#                                   `uv pip install -e '.[embeddings]'` (from the checkout root)
 #
 # The bundled `scripts/xbrain-embed` is the reference backend (sentence-transformers,
 # local, nothing leaves the machine). Install its dependency separately — it is
