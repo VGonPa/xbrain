@@ -153,8 +153,8 @@ rows in front of a scorer.
 ```bash
 $ uv run xbrain search "transformer attention" --limit 2
 "transformer attention" · estrategia lexical
-· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y frases
-  exactas, no similitud conceptual.
+· Estrategia léxica (sin embeddings): recupera nombres propios, cifras y otros
+  términos literales, no similitud conceptual.
 
 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
    https://x.com/xiathis/status/2051242195298968041
@@ -548,7 +548,7 @@ manifest's `embeddings` block rather than hard-coded, so an index built with
 punctuation stays literal (`@simonw`, `11.37%`), and the terms are joined with
 `OR`: `"harness engineering"`, quotes included, asks for chunks with *harness* or
 *engineering*, and bm25 usually ranks those with both higher. It does not require the two
-words to be adjacent. The human view's `frases exactas` wording overstates this.
+words to be adjacent.
 
 **A strategy you name is run or declared, never faked.** `hybrid` without a working
 vector channel answers `lexical` and names the cause; `vector` without one is an

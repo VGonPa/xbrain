@@ -204,6 +204,25 @@ def test_an_unimplemented_strategy_is_a_sentence_naming_what_did_NOT_run() -> No
     assert "NO son de `vector`" in text
 
 
+def test_the_lexical_line_does_not_promise_the_phrase_search_the_query_never_runs() -> None:
+    """Backlog #10 of PR #206: the `no_embeddings` line promised «frases exactas».
+
+    There is no phrase search — spec §13.1 is declared NOT MET for exactly this —
+    because `match_expression` joins the terms with `OR`, quotes included. The premise is
+    asserted on the expression itself, so the day phrase search exists this test goes red
+    and has to be rewritten along with the sentence, instead of passing on a stale claim.
+    """
+    from xbrain.knowledge.lexical_fts import match_expression
+
+    assert match_expression('"harness engineering"') == '"harness" OR "engineering"'
+    response = _response(
+        index=IndexStatusRef(manifest_version="1", built_at=WHEN, degraded=("no_embeddings",))
+    )
+    line = next(line for line in render_search(response).splitlines() if "léxica" in line)
+    assert "frase" not in line, line
+    assert "no similitud conceptual" in line, line
+
+
 def test_the_degradation_warning_comes_before_the_results() -> None:
     """A warning under the fold is a warning nobody read.
 

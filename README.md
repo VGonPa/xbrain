@@ -788,7 +788,7 @@ uv run xbrain index build
 uv run xbrain search "transformer attention" --limit 2
 # → "transformer attention" · estrategia lexical
 # → · Estrategia léxica (sin embeddings): recupera nombres propios, cifras y
-# →   frases exactas, no similitud conceptual.
+# →   otros términos literales, no similitud conceptual.
 # →
 # → 1. 2051242195298968041  @xiathis (xIA) · 2026-05-04
 # →    https://x.com/xiathis/status/2051242195298968041
@@ -855,7 +855,7 @@ top tens shared **zero** items. And it is **lexical, not semantic**: proper
 nouns, figures, handles and other literal terms, not conceptual similarity.
 Every response over an index without a vector plane declares the second (`degraded: ["no_embeddings"]`). A multi-word
 query is a set of alternative terms joined with `OR`, **not a phrase** — quotes
-do not change that, and the human view's "frases exactas" overstates it.
+do not change that.
 Diacritics, on the other hand, fold — `atencion` and `atención` rank identically.
 
 **Optional: `vector` and `hybrid`.** An embedding plane can be built beside the

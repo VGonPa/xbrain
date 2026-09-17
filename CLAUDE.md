@@ -706,7 +706,7 @@ generates an Obsidian wiki.
   no test; `resolve_locator` has no consumer; `max_hops`/node caps not in `config.toml`;
   `graph-expand`'s human view is printed inline in `cli.py`, not by `render.py` (the
   disclaimer sentence itself lives in `i18n.Strings`); stale strings (`implementadas hoy: lexical`, "no tiene
-  backend todavía", "frases exactas"). The unknown-id exit, `resolve_locator`, the caps and the
+  backend todavía"). The unknown-id exit, `resolve_locator`, the caps and the
   inline disclaimer are PR #193's unlabelled backlog — the «F3–F6 of 04.3», a mapping no written
   record confirms.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
