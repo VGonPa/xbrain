@@ -327,8 +327,7 @@ candidates ([bake-off](embeddings-bakeoff.md)). That is why `lexical` stays the
 default.
 
 The plane needs two things the Quick start did not install. First, `numpy`, in
-xbrain's own environment. Without it the build below fails only after it has
-deleted your index, and even word search refuses until a plain `index build`:
+xbrain's own environment:
 
 ```bash
 uv pip install -e ".[embeddings]" --index-url https://pypi.org/simple

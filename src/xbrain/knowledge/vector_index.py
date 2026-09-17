@@ -250,6 +250,16 @@ def _numpy() -> ModuleType:
     return numpy
 
 
+def require_numpy() -> None:
+    """Raise `_numpy()`'s refusal now, for a caller that must not act before knowing (06.4).
+
+    `index_build.build` discards the previous index before it writes a matrix, and writing the
+    matrix is the first thing that imports `numpy` — so without this check a missing extra
+    failed over an index that was already gone.
+    """
+    _numpy()
+
+
 def _validated_unit_vector(
     vector: Sequence[float], dimension: int, subject: str
 ) -> tuple[float, ...]:

@@ -106,6 +106,7 @@ from xbrain.knowledge.vector_index import (
     VectorSpec,
     VectorWriteReport,
     load_vector_plane,
+    require_numpy,
     text_fingerprint,
     vector_plane_exists,
     write_vector_plane,
@@ -2077,6 +2078,10 @@ def build(
             f"Ya existe un índice en {index_dir}. {UPDATE_ADVICE} "
             "Si de verdad quieres reconstruirlo desde cero, usa `xbrain index build --force`."
         )
+    if vectors is not None and not dry_run:
+        # BEFORE THE UNLINKS BELOW (06.4): the matrix is the first thing that imports `numpy`,
+        # so a missing extra used to be discovered over an index this call had already deleted.
+        require_numpy()
     started = time.perf_counter()
     counters = WriteCounters()
     failed: list[dict[str, str]] = []
