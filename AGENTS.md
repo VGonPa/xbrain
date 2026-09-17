@@ -83,7 +83,7 @@ thresholds `5 / 0.05` are the least damaging cell of a negative sweep
 
 The spec and the plans live in `zz-support-files/`, which is gitignored and not in your clone. The
 spec's fifteen acceptance criteria are quoted verbatim, each with its state, in
-[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria-12-of-15-met).
+[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria).
 
 ## Delivering a large initiative: `develop` → umbrella → child PRs
 

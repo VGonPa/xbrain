@@ -8,6 +8,22 @@ lines show what you should see.
 New here? Do the [Quick start](../README.md#quick-start) first (install +
 authenticate), then come back — this tutorial picks up from a logged-in install.
 
+**What you need, before you start rather than when a step fails:**
+
+- **A real, logged-in X session** (`auth/storage_state.json`, from the Quick
+  start) for §2's `sync`, and at the end for `refetch-truncated --apply` and
+  the full `refresh-quoted`, which re-fetch from X. Every other section runs
+  on a store you already have, with no session.
+- **A Claude Code session or an Anthropic API key** for every LLM stage:
+  `vocab`, `enrich` and `topics` (§3), `describe` (§4), `video-digest` (§5),
+  `verify` (§6). By default each stage writes a worksheet for a Claude Code
+  session to fill. An API key replaces that session only where a stage takes
+  `--executor api`, and `video-digest` and `verify` do not.
+- **ffmpeg and a speech-to-text backend** for §5.
+- **Nothing more** for §7's word search, `get` and the graph. The optional
+  vector plane needs about 1.25 GB of disk, and the MCP section needs an MCP
+  client such as Claude Code.
+
 ---
 
 ## 1. Confirm you're set up
@@ -57,19 +73,48 @@ Open the vault in Obsidian — you already have `items/*.md` and `_index.md`.
 ## 3. Add the topic layer (the LLM stages)
 
 The mechanical layers need no LLM. The *understanding* layers — a topic
-vocabulary, per-post summaries + topics, and topic-page overviews — do:
+vocabulary, per-post summaries + topics, and topic-page overviews — do.
+
+By default they use the **claude-code execution mode** (no API key, no cost).
+Each stage **writes a worksheet and stops**. Nothing is induced or enriched
+until you fill the worksheet in a Claude Code session and `--apply` it. Open
+that session in this checkout: its `enriching-x-knowledge` skill
+(`.claude/skills/`) knows how to fill all three. Every stage reads what the
+previous `--apply` wrote, so the order is export, fill, apply, and then the
+next stage:
 
 ```bash
-uv run xbrain vocab       # induce ~45 topics from the corpus
-uv run xbrain enrich      # summary + topics for each post
-uv run xbrain topics      # write a topic page per cluster
+uv run xbrain vocab       # → Corpus exportado a …/data/vocab-worksheet.json
+# fill it (the skill induces the topic vocabulary), then:
+uv run xbrain vocab --apply data/vocab-worksheet.json
+# → Vocabulario aplicado: 45 topics → …/data/vocab.yaml
+
+uv run xbrain enrich      # → 2495 items exportados a …/data/enrich-worksheet.json
+# fill it (a summary + topics per post), then:
+uv run xbrain enrich --apply data/enrich-worksheet.json
+# → Worksheet aplicada: 2495 items enriquecidos
+
+uv run xbrain topics      # → 45 topics exportados a …/data/topic-worksheet.json · 45 páginas escritas
+# fill it (an overview per topic), then:
+uv run xbrain topics --apply data/topic-worksheet.json
+# → Worksheet aplicada: 45 overviews · 45 páginas escritas
+
 uv run xbrain generate    # re-render the vault with the new layers
 ```
 
-By default these use the **claude-code execution mode** (no API key, no cost):
-each stage exports a worksheet you fill in a Claude Code session, then
-`--apply`. To run them unattended with the API instead, add `--executor api`
-(needs `ANTHROPIC_API_KEY`). See [Execution modes](../README.md#execution-modes).
+The counts are from the 2,495-post corpus that §7's outputs also come from.
+Yours will differ.
+
+Skip an `--apply` and the next stage stops. After a `vocab` whose worksheet
+was never applied, `enrich` and `topics` both answer
+``Error: No hay vocabulario — ejecuta `xbrain vocab` antes.``, even though you
+did run it. What they are missing is `vocab.yaml`, and only
+`vocab --apply` writes it.
+
+To run the three unattended instead, add `--executor api` to each export
+command. There is no worksheet and no `--apply`, but it needs an Anthropic API
+key (`ANTHROPIC_API_KEY`) and costs money per token. See
+[Execution modes](../README.md#execution-modes).
 
 Now your vault has three layers: `items/` (posts), `topics/` (thematic pages),
 and `_index.md` (the map). Open `_index.md` in Obsidian and click into a topic.
@@ -299,16 +344,32 @@ uv venv --python 3.12 $EMBED
 VIRTUAL_ENV=$EMBED uv pip install --index-url https://pypi.org/simple sentence-transformers
 ```
 
-In `config.toml`, name that environment's Python before the script. The
-script's shebang runs the first `python3` on your `PATH`, which does not have
-the library. Use absolute paths: the command runs without a shell, so `~` is not
+Your `config.toml` already has an `[embeddings]` section if you copied it from
+`config.toml.example`: it is the last section, with every key commented out.
+Add the three keys below under that header. **Do not paste a second
+`[embeddings]` line.** TOML refuses a section declared twice, and then every
+command stops, `get` included, with
+`Error: Cannot declare ('embeddings',) twice`. Only a `config.toml` copied
+before the section existed lacks the header, and there you add it too.
+
+In `command`, name that environment's Python before the script. The script's
+shebang runs the first `python3` on your `PATH`, which does not have the
+library. Use absolute paths: the command runs without a shell, so `~` is not
 expanded.
 
 ```toml
-[embeddings]
+# under the existing [embeddings] header, the last section of config.toml:
 command = "/Users/you/.xbrain-embed/bin/python /path/to/xbrain/scripts/xbrain-embed"
 model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 batch_size = 1024
+```
+
+Check it before building. The first command must print `1`, and the second
+must print the index state, not an error:
+
+```bash
+grep -c '^\[embeddings\]' config.toml   # → 1
+uv run xbrain index status
 ```
 
 MiniLM is the model the bake-off measured, and it needs no query or passage
@@ -409,12 +470,18 @@ open ~/Documents/Vault/vault/learnings/x-knowledge/dashboard.html
 Re-run periodically — everything is **incremental and idempotent**:
 
 ```bash
-uv run xbrain sync          # pull new bookmarks/tweets, re-render
-uv run xbrain enrich        # enrich only the new posts
-uv run xbrain topics        # refresh topic pages
+uv run xbrain sync          # pull new bookmarks/tweets, re-render (needs the X session)
+uv run xbrain enrich        # exports only the new posts; if it exported, fill, then:
+uv run xbrain enrich --apply data/enrich-worksheet.json
+uv run xbrain topics        # refreshes topic pages; if it exported, fill, then:
+uv run xbrain topics --apply data/topic-worksheet.json
 uv run xbrain generate
 uv run xbrain index update  # put the search index back in step with the store
 ```
+
+Apply only a worksheet the command just exported. When nothing is pending,
+`enrich` says `No hay items pendientes de enriquecer.` and exports nothing, and
+the old file still in `data/` would re-apply old judgments.
 
 `index update` is last because every command above it writes the store. Skip it
 and nothing breaks — `search` detects it and warns — but you will be searching

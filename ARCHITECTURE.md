@@ -1355,12 +1355,13 @@ the answers: `docs/knowledge-for-agents.md`.
 ### Closing the spec: what is met and what is not
 
 The spec's §13 is a table in
-[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria-12-of-15-met):
+[docs/knowledge-index.md](docs/knowledge-index.md#the-specs-acceptance-criteria):
 each of the fifteen criteria, the tests (`file::test`) or document sections that prove it, and
 its state. It is a document, not a test. The executable version (`tests/test_spec_closure.py`)
-was removed in Plan 04.8 as a scope decision. **Three are not met**: §13.1 (there is no phrase
-search — the query is a disjunction of terms), §13.5 (Plan 03's bake-off measured 1 of the ≥ 3
-candidates its own §13.8 requires) and §13.14 (`docs/tutorial.md` was last updated with Plan 02). Watch the
+was removed in Plan 04.8 as a scope decision. **Two are not met**: §13.1 (there is no phrase
+search — the query is a disjunction of terms) and §13.5 (Plan 03's bake-off measured 1 of the
+≥ 3 candidates its own §13.8 requires). §13.14 has been met since Plan 06.3, when
+`docs/tutorial.md` caught up with Plans 03 and 04. Watch the
 numbering. The spec, Plan 01, Plan 02 and Plan 03 each have a §13 of their own, and only the
 spec's and Plan 03's §13 list acceptance criteria (Plan 01's is its quality gates, Plan 02's its
 documentation). Plan 04 has no §13: its criteria are its §11. "§13.8" in the bake-off is Plan 03's.
