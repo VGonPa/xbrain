@@ -19,13 +19,14 @@ generates an Obsidian wiki.
 - `data/items.json` (dict keyed by tweet id) is the source of truth; markdown
   is derived. All stages are idempotent and incremental.
 
-Everything else about a subsystem lives in exactly one document. Read its row
-before you touch it:
+Subsystem detail is not repeated here. Read the row for what you are about to
+touch:
 
 | Subsystem | Read |
 |---|---|
 | Install, configure, run it end to end | [README.md](README.md) · [docs/tutorial.md](docs/tutorial.md) |
-| Stages, artifacts, rubrics, executors, invariants | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Stages, artifacts, rubrics, executors | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| The invariants the architecture rests on | [ARCHITECTURE.md § Invariants](ARCHITECTURE.md#invariants) |
 | `extract` and quoted posts; the raw payloads (`reextract`, `payload-stats`); `refetch-truncated` | [extract](ARCHITECTURE.md#extract) · [payloads](ARCHITECTURE.md#payloads) · [refetch-truncated](ARCHITECTURE.md#refetch-truncated) |
 | `fetch`, `validate_body`, `fetch --retry-failed` / `--revalidate` | [fetch](ARCHITECTURE.md#fetch) · [retry-failed and revalidate](ARCHITECTURE.md#fetch-retry-failed-and-revalidate) |
 | X Articles: the `blocks` body, structured fetch, inline images and videos, blogpost render | [invariant 12](ARCHITECTURE.md#invariants) · [fetch](ARCHITECTURE.md#fetch) · [media](ARCHITECTURE.md#media) · [generate](ARCHITECTURE.md#generate) |

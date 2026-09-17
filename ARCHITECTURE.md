@@ -924,7 +924,7 @@ instead of one strong one.
 
 (The figure was **18,328 / 9,034** until `_absorb_scraps` merged the 9 chunks that sat below
 the floor; the commit that removed them said so and this line was not re-derived — rule 6 in
-miniature, in the file the repo says is read first and acted on. Re-derived 2026-08-31 on the
+miniature. Re-derived 2026-08-31 on the
 same 2,404-item corpus, `store-2404-0831` — no copy of it survives, so 18,319 cannot be re-derived
 today either (docs/knowledge-index.md#measured-versions). **30,449 is NOT re-derivable**: it measured the
 pre-packing implementation, which no longer exists, so read it as history, never as a figure
@@ -1198,16 +1198,12 @@ already in hand. The embedder is called last, after every reason not to run is r
 Short of that, `hybrid` answers `lexical` naming the cause (`embeddings_not_configured`,
 `embedder_unavailable`, the manifest's own `no_embeddings`, or `vector_filters_unsupported`,
 because the plane has no filter columns and a filter applied after scoring is not a filter),
-and `vector` raises `VectorStrategyUnavailable` or the backend's own error. Two situations
+and `vector` raises `VectorStrategyUnavailable` or the backend's own error. Only with plane AND command in place does a filtered `vector` request answer lexically, declaring `vector_filters_unsupported` (the check order is `search_service._resolve_channel`). Two situations
 raise under **both**, because degrading would hide a misconfiguration that makes every later
 vector answer wrong: a plane the manifest declares and the disk cannot serve, and a query
 vector of another dimension or another model — a matching width does not prove the same model.
 `tests/test_knowledge_degradation.py` holds one test per row of Plan 03 §5 and the test that no
 failure path says `hybrid`.
-
-Only
-with plane AND command in place does a filtered `vector` request answer lexically, declaring
-`vector_filters_unsupported` (the check order is `search_service._resolve_channel`).
 
 **The model was supposed to be chosen by measurement, and it has not been.**
 `xbrain eval --strategy vector|hybrid --embeddings-model <model>` builds each candidate's plane
@@ -1280,12 +1276,10 @@ ranking function over a bag of words, it wants a wide candidate set and discrimi
 it by inverse document frequency, and requiring every term does that discrimination by brute
 force before the scorer ever runs. With the disjunction, empty result sets went 18/21 → 0/21
 and mean `recall@10` 0.1429 → 0.8099, MRR 0.1429 → 0.7206, `exacto` unchanged, with no stratum regressing, at a latency cost of p50
-0.23 → 9.75 ms. The `0.8099 / 0.7206` pair measured the pre-#179 in-memory harness and is retired with it. The connective is exported as `FTS_CONNECTIVE` and recorded in the ranking
+0.23 → 9.75 ms. The `0.8099 / 0.7206` pair measured the pre-#179 in-memory harness and is retired with it; the pair to beat is in [docs/knowledge-index.md](docs/knowledge-index.md#measuring-it-the-golden-set). The connective is exported as `FTS_CONNECTIVE` and recorded in the ranking
 fixture beside the tokenizer, because it decides the candidate set and therefore every recall
 number downstream — and because the six original fixture queries could not tell the two
 connectives apart, so the change would otherwise have passed the fixture in silence.
-
-Picking between `OR`, minimum-should-match and per-term weighting is Plan 02's sweep.
 
 The remaining known limits, both declared rather than discovered later: there is **no
 stemming**, and **IDF is relative to this corpus**, so a word that reads as a function word
@@ -1294,14 +1288,11 @@ can still be rare to the index and go undiscounted: `el` is 1 of 49 fixture chun
 `store-2404-0901`, which [no copy kept](docs/knowledge-index.md#measured-versions)). **`CHUNKER_VERSION` is `v3` since Plan 02.9**, and this count still stands:
 v3 changed the FINGERPRINT projection (the served title joined the hashed tuple) and not the cut,
 proven by the version-stripped ranking fixture being byte-identical across the bump — the chunk
-ids moved and the chunk COUNT did not. *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
+ids moved and the chunk COUNT did not. Do not re-stamp a measured figure to a new version without that proof: which of the two a version bump touched is the whole question. *(This line read `1 of 43 … 5,748 of 18,319`, the pair for the PROVISIONAL
 chunker v1 and `store-2404-0831`, a different file from `store-2404-0901` — correct for that population, and left undated after
 the chunker moved; F-4 corrected the other three sites and missed this one.)* Those are what the
 vector layer of Plan 03 had to beat; the bake-off that tried is incomplete and found no winner
 ([above](#the-vector-plane-and-hybrid-retrieval)).
-
-Do not re-stamp a measured figure to a new version without that proof: which of the two a
-version bump touched is the whole question.
 
 **A threshold that reached no bucket fails closed.** `--min-recall` counts the
 `(bucket, metric)` comparisons it actually made; at zero it reports an explicit failure
@@ -1489,7 +1480,9 @@ The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain
 | Raw payloads | `*.json.gz` under `data/payloads/` | 3,423, covering 2,360 of the 2,404 items |
 | Text truncated at ingest | items `items_needing_refetch` flags (a length heuristic) | 707 flagged, triaged against the payloads as **214** repairable offline, **358** already complete, **122** undetermined, 8 changed-not-lengthened, 5 with no payload |
 
-The 79 that do not ARE how a different answer comes out — they were
+Measured 2026-08-30 on the live `data/items.json` with
+`sum(1 for i in store.values() if i.enriched is not None)`: **2,325 of 2,404 items carry an
+`enriched` block.** The 79 that do not ARE how a different answer comes out — they were
 extracted since the last `enrich` run, so read the number as "the corpus is enriched to the
 last run", never as an invariant. An earlier reading the same day was 2,325 of 2,325: the
 enriched count did not move, `extract` did.
