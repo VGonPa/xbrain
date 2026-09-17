@@ -940,6 +940,25 @@ def test_enrich_manual_exports_a_worksheet(tmp_path, monkeypatch):
     assert (tmp_path / "data" / "enrich-worksheet.json").exists()
 
 
+@pytest.mark.parametrize("command", ["enrich", "topics"])
+def test_a_vocab_export_never_applied_names_vocab_apply(tmp_path, monkeypatch, command):
+    """Backlog #24 of PR #206: after a `vocab` whose worksheet nobody applied, `enrich` and
+    `topics` told the reader to run `vocab` — the command they had just run. What is missing
+    is `vocab.yaml`, and only `vocab --apply` writes it, so that is the command to name.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    exported = runner.invoke(app, ["vocab", "--executor", "manual"])
+    assert exported.exit_code == 0, exported.output
+    worksheet = tmp_path / "data" / "vocab-worksheet.json"
+    assert worksheet.exists() and not (tmp_path / "data" / "vocab.yaml").exists()
+
+    result = runner.invoke(app, [command])
+
+    assert result.exit_code == 1, result.output
+    assert f"xbrain vocab --apply {worksheet}" in _plain_output(result.output)
+
+
 def test_enrich_apply_imports_a_filled_worksheet(tmp_path, monkeypatch):
     import json
 

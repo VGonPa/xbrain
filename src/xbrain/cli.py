@@ -51,7 +51,7 @@ from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
-from xbrain.models import ArchiveImport, Author, Item, SourceName
+from xbrain.models import ArchiveImport, Author, Item, SourceName, Topic
 from xbrain.redescribe import (
     RedescribeReport,
     format_redescribe_summary,
@@ -1978,6 +1978,24 @@ def _finish_redescribe_run(
         )
 
 
+def _require_vocab(cfg: Config) -> list[Topic]:
+    """The topic vocabulary, or the command that writes it (06.4).
+
+    A `vocab` worksheet still on disk means the reader already ran `vocab`: what is missing
+    is its `--apply`, the only step that writes `vocab.yaml`.
+    """
+    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    if vocab:
+        return vocab
+    worksheet = cfg.data_dir / "vocab-worksheet.json"
+    if worksheet.exists():
+        raise RuntimeError(
+            f"No hay vocabulario: la worksheet {worksheet} no se ha aplicado — rellénala y "
+            f"ejecuta `xbrain vocab --apply {worksheet}`."
+        )
+    raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+
+
 @app.command()
 @_handle_cli_errors
 def enrich(
@@ -1993,9 +2011,7 @@ def enrich(
     """Enriquece los items con resumen + topics."""
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab_topics = load_vocab(cfg.data_dir / "vocab.yaml")
-    if not vocab_topics:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+    vocab_topics = _require_vocab(cfg)
 
     if apply is not None:
         executor_name, judgments = import_worksheet(apply)
@@ -2490,9 +2506,7 @@ def topics(
     """Genera las páginas de topic: listas de posts + overviews sintetizados."""
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
-    if not vocab:
-        raise RuntimeError("No hay vocabulario — ejecuta `xbrain vocab` antes.")
+    vocab = _require_vocab(cfg)
     if apply is not None:
         _topics_apply(cfg, store, vocab, apply)
     else:

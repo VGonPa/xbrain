@@ -105,12 +105,6 @@ uv run xbrain generate    # re-render the vault with the new layers
 The counts are from the 2,495-post corpus that §7's outputs also come from.
 Yours will differ.
 
-Skip an `--apply` and the next stage stops. After a `vocab` whose worksheet
-was never applied, `enrich` and `topics` both answer
-``Error: No hay vocabulario — ejecuta `xbrain vocab` antes.``, even though you
-did run it. What they are missing is `vocab.yaml`, and only
-`vocab --apply` writes it.
-
 To run the three unattended instead, add `--executor api` to each export
 command. There is no worksheet and no `--apply`, but it needs an Anthropic API
 key (`ANTHROPIC_API_KEY`) and costs money per token. See
