@@ -1567,19 +1567,36 @@ def _run_digest_video(
     language: str | None,
     frames: bool,
     vision_model: str | None = None,
+    keep_transcript: bool = False,
 ) -> None:
     """Digest selected videos into `x_video` transcript sources; persist + summarise.
 
     Flow: load → resolve selection → ephemeral fetch + EXTERNAL transcribe +
-    attach (dedup by video identity, in memory) → snapshot → persist. The
+    attach (dedup by video identity, in memory) → snapshot → persist. The default
+    path fetches + transcribes once per video identity. `--keep-transcript`
+    partitions one identity by stored transcript: one fetch per distinct stored
+    value (plus a missing-transcript batch), zero ASR for stored batches. The
     transcriber is invoked via `transcribe_media` bound to the `[transcribe]`
     config (command / model) + `--language`. `--frames` (opt-in, #44 PR4) also
     extracts key frames and describes them via the EXTERNAL `[vision]` command,
     attaching them to slide videos and to silent non-slide footage (a talking-head
-    with speech is skipped). It is destructive (rewrites
-    `items.json`), so it auto-snapshots BEFORE the save — but only when something
+    with speech is skipped). `--keep-transcript` reuses each item's own stored
+    transcript instead of re-running the transcriber. The visual layer is still
+    redone; a completed forced re-digest replaces old frames and clears the
+    long-form digest even if vision fails or the video is reclassified. The
+    `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+    `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+    removes a live one absent there), but never contains `data/media/` or frame PNGs.
+    The selected items' `data/media/<id>/frames/` directories have already been
+    deleted or overwritten by the time it is taken. Before re-digesting items that
+    currently have frames, copy those directories aside and restore them with the snapshot
+    if needed; otherwise restored metadata can point to missing files or different
+    pixels. Hollow items have no prior frames and are not exposed to this loss. The
+    command is destructive (rewrites `items.json`), so it auto-snapshots BEFORE
+    the save — but only when something
     was attached (a pure already-digested / no-video run writes nothing, so it
-    takes no snapshot). A snapshot failure propagates and aborts before any write.
+    takes no snapshot). A snapshot failure propagates and aborts before any
+    `items.json` write.
     """
     store = load_store(cfg.items_path)
     id_list = _resolve_digest_ids(store, ids, topic, all_pending, source, limit)
@@ -1593,7 +1610,14 @@ def _run_digest_video(
             language=language,
         )
 
-    report = digest_videos(store, id_list, force=force, transcribe_fn=_transcribe, visual=visual)
+    report = digest_videos(
+        store,
+        id_list,
+        force=force,
+        keep_transcript=keep_transcript,
+        transcribe_fn=_transcribe,
+        visual=visual,
+    )
     if report.changed > 0:
         _auto_snapshot(cfg, "digest-video")
         save_store(store, cfg.items_path)
@@ -1615,7 +1639,10 @@ def digest_video(
         None, "--limit", help="Máximo número de items a procesar en esta ejecución."
     ),
     force: bool = typer.Option(
-        False, "--force", help="Re-transcribir items que ya tienen un source x_video."
+        False,
+        "--force",
+        help="Re-procesar items que ya tienen un source x_video; se re-transcriben salvo "
+        "con --keep-transcript.",
     ),
     language: str | None = typer.Option(
         None,
@@ -1639,6 +1666,13 @@ def digest_video(
         "--model al comando de visión. Con un wrapper multi-backend permite elegir "
         "modelo por run (p.ej. opus → nube, qwen-7b → local). Requiere --frames.",
     ),
+    keep_transcript: bool = typer.Option(
+        False,
+        "--keep-transcript",
+        help="Con --frames --force: rehace la capa visual y reutiliza la transcripción "
+        "guardada (no vuelve a pasar el ASR). Como todo --force, borra el digest largo "
+        "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
+    ),
 ) -> None:
     """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
@@ -1647,8 +1681,11 @@ def digest_video(
     por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
     item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
-    URL firmada): N bookmarks del mismo vídeo se descargan y transcriben UNA vez y
-    todos reciben el mismo transcript. Un vídeo sin voz/audio se adjunta con texto
+    URL firmada): en el flujo por defecto, N bookmarks del mismo vídeo se
+    descargan y transcriben UNA vez y todos reciben el mismo transcript. Con
+    `--keep-transcript`, los items se separan por su transcript guardado: una
+    descarga por valor distinto (más el lote sin transcript), cero ASR para los
+    lotes guardados. Un vídeo sin voz/audio se adjunta con texto
     vacío + `has_speech=False` (nunca es un fallo duro); si además queda sin
     frames, el resumen lo cuenta en `Huecos (sin voz ni frames): N`. Idempotente:
     salta items que ya tienen un source x_video salvo `--force`. Es destructivo (reescribe
@@ -1667,6 +1704,14 @@ def digest_video(
     cfg = _config()
     if vision_model and not frames:
         raise typer.BadParameter("--vision-model requires --frames (the visual layer is off)")
+    if keep_transcript and not frames:
+        raise typer.BadParameter(
+            "--keep-transcript requires --frames (it only re-runs the visual layer)"
+        )
+    if keep_transcript and not force:
+        raise typer.BadParameter(
+            "--keep-transcript requires --force (it re-digests already-digested videos)"
+        )
     _run_digest_video(
         cfg,
         ids=ids,
@@ -1678,6 +1723,7 @@ def digest_video(
         language=language,
         frames=frames,
         vision_model=vision_model,
+        keep_transcript=keep_transcript,
     )
 
 

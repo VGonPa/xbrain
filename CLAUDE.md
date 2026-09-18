@@ -61,8 +61,12 @@ generates an Obsidian wiki.
   `parakeet-mlx`; NO MLX/ML in xbrain core) → attach the transcript to the item
   as a `ContentSourceSuccess(kind="x_video")` → discard the bytes. **Dedup by
   video identity** (the stable `amplify_video`/`ext_tw_video`/`tweet_video` id
-  from the mp4 URL path, not the signed URL): N bookmarks of one video → one
-  fetch+transcribe, all get the source. No-speech videos attach with empty text +
+  from the mp4 URL path, not the signed URL): on the DEFAULT path, N bookmarks
+  of one video → one fetch+transcribe, all get the source. `--keep-transcript`
+  instead partitions that identity by each item's stored `(text, has_speech,
+  language, title)` plus a missing-transcript batch: one fetch per batch, zero
+  ASR for stored batches, one ASR for the missing batch. That is what prevents
+  transcript cross-contamination. No-speech videos attach with empty text +
   `has_speech=False` (never a hard failure). Idempotent (skips items with a fresh
   `x_video` source unless `--force`); destructive → auto-snapshot. **On a multilingual
   corpus point `[transcribe].command` at `scripts/xbrain-transcribe-auto` (#133), never
@@ -134,10 +138,24 @@ generates an Obsidian wiki.
   `[frames].max_frames`); a talking-head is skipped + logged ONLY when the video has
   speech (the transcript carries it); a SILENT non-slide video (screen recording,
   robot, GIF) is described as `footage` (cap `[frames].footage_max_frames`, default
-  6) — its frames are the only evidence, so dropping them left hollow entries. Any
-  run appends `Huecos (sin voz ni frames): N` to its summary when N > 0 items still
-  end with neither speech nor frames (never a silent drop). Default off — a normal
-  `digest-video` run never touches ffmpeg/vision.
+  6) — its frames are the only evidence, so dropping them left hollow entries. The
+  visual layer is off by default — a normal `digest-video` run never touches
+  ffmpeg/vision. Any run appends `Huecos (sin voz ni frames): N` to its summary when
+  N > 0 items still end with neither speech nor frames (never a silent drop).
+  Recover them with the indivisible `--frames --force --keep-transcript`: each
+  item keeps its own stored transcript (re-running the ASR can invent words), the
+  frames are redone, and the forced re-digest clears the long-form digest, so
+  `enrich` and `video-digest` run again for the item. Once the fetch succeeds,
+  frame extraction/vision failure or a talking-head reclassification completes
+  with NO frames and also clears the prior digest. The automatic
+  `pre-digest-video` snapshot manages the store files `items.json`, `state.json`,
+  `vocab.yaml`, and `topics.json`: it restores those present in the snapshot (and
+  removes a live one absent there), but never contains `data/media/` or frame PNGs.
+  The selected items' `data/media/<id>/frames/` directories have already been
+  deleted or overwritten by then. Before re-digesting items that currently have
+  frames, copy those directories aside and restore them with the snapshot if needed;
+  without the copy, restored metadata can point to missing files or different
+  pixels. Hollow items have no prior frames and are not exposed to this loss.
 - Frame captions — verbatim on-screen text (#90): frame captions are the ONLY
   channel through which on-screen text (slide labels, code, chart axes) reaches
   the digest, and translating a NON-COGNATE label broke that channel — measured:

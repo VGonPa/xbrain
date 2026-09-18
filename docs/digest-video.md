@@ -151,7 +151,12 @@ track — GIFs, muted clips; attached as `has_speech=false`, not a failure),
 fetched (deleted / unavailable), **Huecos** = items that ended the run with
 neither speech nor frames (without `--frames`, every silent one — see
 [hollow items](#finding-and-re-digesting-hollow-items)). Videos are **deduped by
-identity** — N bookmarks of the same clip are fetched + transcribed once.
+identity**. On the default path, N bookmarks of the same clip are fetched +
+transcribed once. `--keep-transcript` is deliberately different: it partitions
+one video by each item's stored `(text, has_speech, language, title)` plus one
+batch for items with no stored transcript. Each batch fetches once; stored
+batches make zero ASR calls and the missing batch makes one. That extra fetch is
+what prevents a stored transcript from crossing into another item.
 
 Add `--frames` for slide-heavy talks and silent clips:
 
@@ -194,16 +199,40 @@ jq -r 'to_entries[]
 ```
 
 Then re-digest them with the visual layer. `--force` is needed because they
-already carry an `x_video` source (it re-transcribes them too):
+already carry an `x_video` source. `--keep-transcript` makes each item reuse its
+own stored transcript instead of running the ASR again. The frames are redone,
+and, as on any forced re-digest, the item's long-form digest is cleared and the
+item goes back through `enrich` and `video-digest`:
 
 ```bash
-uv run xbrain digest-video --ids <ids-from-above> --frames --force
+uv run xbrain digest-video --ids <ids-from-above> --frames --force --keep-transcript
 ```
+
+Leave out `--keep-transcript` and the ASR runs again. On music, or on audio
+with no usable speech, it can invent words ("you you"). A non-slide video with
+invented words is skipped as a talking-head, is no longer counted under
+`Huecos`, and no longer matches the `jq` recipe above either, so nothing lists
+it again.
 
 Items digested without `--frames`, or before silent footage was described, come
 back with their frames. One that stays hollow had nothing describable, and the
 log says why: `frame extraction failed`, `no key frames extracted`, `unreadable`
 or `visual layer failed`.
+
+This is a destructive rebuild, not a transaction over the old frames. Once the
+video fetch succeeds, a frame-extraction/vision failure or a reclassification as
+talking-head completes with **no frames** and clears the old long-form digest.
+The command later creates a `pre-digest-video` snapshot before saving. It manages
+the store files **`items.json`, `state.json`, `vocab.yaml`, and `topics.json`**:
+it restores those present in the snapshot (and removes a live one absent there),
+but never contains `data/media/` or frame PNGs. By then, each selected item's
+`data/media/<id>/frames/` has already been deleted or overwritten. Before
+re-digesting an item that currently has frames, copy that directory aside; if
+you restore the snapshot, restore the saved directory too. Without that copy,
+the restored captions can point to missing files or different pixels. Hollow
+items have no prior frames and are not exposed to this loss.
+A fetch or ASR failure is different: it attaches nothing and leaves the old
+source, frames, digest and `fetched_at` untouched.
 
 Two cases don't show up under `Huecos`, so run the `jq` recipe again after the
 re-digest; it is the only complete list:
@@ -347,7 +376,19 @@ label. It cannot fix a label the model genuinely could not read: the stored
 frames are downscaled to 640px wide at extraction time, and that resolution
 is not recoverable from the PNGs on disk. If a caption is wrong because the
 frame itself is illegible, the fix is re-extracting the frame — `digest-video
---force --frames` — not `redescribe-frames`.
+--force --frames --keep-transcript`, which leaves the transcript alone — not
+`redescribe-frames`. That re-digest can also remove the old frames if extraction
+or vision fails, or if the video is reclassified as talking-head; it clears the
+video's long-form digest either way. The automatic `pre-digest-video` snapshot
+manages the store files **`items.json`, `state.json`, `vocab.yaml`, and
+`topics.json`**: it restores those present in the snapshot (and removes a live
+one absent there), but never contains `data/media/` or frame PNGs. The selected
+item's `data/media/<id>/frames/` has already been deleted or overwritten by then.
+Before re-digesting an item that currently has frames, copy that directory aside
+and restore it with the snapshot if needed. Without that copy, restored captions
+can point to missing files or different pixels. Hollow items have no prior frames
+and are not exposed to this loss. If the rebuild is good, run `video-digest`
+again afterwards.
 
 It is destructive (rewrites `items.json`) → auto-snapshots first, but only
 when at least one frame was actually re-described. That is a lower bar than
