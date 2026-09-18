@@ -20,6 +20,8 @@ Silencio: si whisper no produce texto y ffprobe confirma que no hay pista de
 audio → JSON de empty-speech (has_speech=false), igual que el wrapper parakeet.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
