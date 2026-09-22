@@ -22,8 +22,13 @@ class JevError(RuntimeError):
     """An operator-facing Jev failure, in the language the CLI prints.
 
     Raised for an unusable key or client configuration, a question we refuse to send, a
-    provider error, and an answer set that does not match the questions asked. It is the
-    ONLY exception type the seam emits: no provider exception reaches a caller.
+    provider error, an answer set that does not match the questions asked, and the operator
+    errors of the assessment side (an unknown `--id`, a `--limit` below 1). It is the ONLY
+    exception type the seam emits: no provider exception reaches a caller.
+
+    It is not the only one the PACKAGE raises. A malformed vocabulary is a `ValueError` from
+    `questions.build_topic_questions` — a configuration fault, caught before any call — so a
+    CLI over this package must handle both.
     """
 
 
@@ -80,6 +85,11 @@ class JevResult:
 
 
 class JevClient(Protocol):
-    """One call: a `state` and a map of typed questions, all answered against that state."""
+    """One call: a `state` and a map of typed questions, all answered against that state.
+
+    `ask` MUST be safe to call concurrently from several threads with one client instance:
+    `assess.run_assessments` shares a single client across a pool of `[jev].concurrency`
+    workers. An implementation that mutates per-call state on `self` has to guard it.
+    """
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult: ...

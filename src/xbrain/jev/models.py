@@ -77,10 +77,12 @@ class TopicAssessment(BaseModel):
     # this is the staleness key, and a malformed stamp can never equal a fresh digest, so
     # the "this assessment is stale" signal would silently never fire.
     output_fingerprint: str | None = Field(default=None, pattern=_SHA256)
-    # `assess.topic_contract(...)` = sha256(version ∥ state ∥ canonical JSON of the
-    # questions asked). A stored assessment stays valid while all three are unchanged:
-    # re-enriching the item does NOT invalidate it, while rewording a question, changing a
-    # topic description or the fallback option, or new evidence text does.
+    # `assess.topic_contract(...)` = sha256(version ∥ state ∥ questions_digest), where the
+    # digest is `assess.questions_digest(questions)`: the canonical JSON of every question
+    # asked — each one's TYPE, instructions and criteria. A stored assessment stays valid
+    # while the state and that digest are unchanged: re-enriching the item does NOT
+    # invalidate it, while rewording a question, changing a topic description or the
+    # fallback option, adding or removing a topic, or new evidence text does.
     contract: str = Field(pattern=_SHA256)
     # Length of the evidence BEFORE the cut, so a reader can tell how much was dropped;
     # `truncated` says whether the cut happened. Task 2 computes both.
