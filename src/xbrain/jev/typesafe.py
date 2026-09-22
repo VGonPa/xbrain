@@ -7,7 +7,6 @@ type. A second provider answering the same questions is a second module like thi
 
 from __future__ import annotations
 
-from types import TracebackType
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -178,26 +177,28 @@ class TypeSafeJevClient:
         return result
 
     def close(self) -> None:
-        """Close the SDK's HTTP pool, but only if we opened it.
+        """Close the SDK's HTTP pool, but only if we opened it, and only once.
 
         An injected `sdk_client` belongs to whoever injected it; closing it here would be a
         surprise. A run at `[jev].concurrency` holds a pool worth releasing.
+
+        Idempotent and `JevError`-only, as `JevClient.close` requires — and this is the one
+        method where that matters most, not least. It runs from a `finally` in the CLI, on a
+        path where an interrupt or an all-failed run is already propagating; a raw vendor
+        exception escaping here would replace the outcome of a run that has already been
+        paid for. The module docstring's promise ("it converts every SDK exception into
+        `JevError`") has no exceptions, and `close` used to be one.
         """
-        if self._owns_client:
+        if not self._owns_client:
+            return
+        # Flipped BEFORE the call, not after: a teardown that raises has still spent this
+        # client, and retrying the same failing close on a second release would report the
+        # same fault twice.
+        self._owns_client = False
+        try:
             self._client.close()
-
-    def __enter__(self) -> TypeSafeJevClient:
-        return self
-
-    def __exit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        _exc: BaseException | None,
-        _tb: TracebackType | None,
-    ) -> None:
-        # The three are the context-manager protocol's, unused: an error on the way out
-        # still has to release the pool, and it is not ours to swallow (we return None).
-        self.close()
+        except TypeSafeError as exc:
+            raise JevError(f"Jev: cerrar el cliente falló ({exc})") from exc
 
 
 if TYPE_CHECKING:

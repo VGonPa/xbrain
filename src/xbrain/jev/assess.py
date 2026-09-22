@@ -310,11 +310,28 @@ class Selection:
     The counts are not decoration: without them an empty selection caused by a regression in
     the evidence layer is indistinguishable from a clean "everything is up to date", and the
     run exits 0 either way.
+
+    THEY PARTITION THE CANDIDATE SET: `len(items) + skipped_current + skipped_no_evidence +
+    remaining` is every item considered. `forced` is a SUB-count of `items`, not a fifth
+    bucket — the items in it are being asked about, they are just being asked again.
     """
 
     items: tuple[Item, ...]
     skipped_current: int
     skipped_no_evidence: int
+    #: Selected items whose stored assessment was STILL CURRENT and is being re-asked anyway
+    #: because `force` is set. Under `force`, `skipped_current` is structurally 0 — it means
+    #: "we did not look", not "nothing was current" — so without this the operator cannot
+    #: tell "I just re-paid for 2,998 perfectly current assessments" from "2,998 contracts
+    #: had genuinely expired". That is the counter failing at the one moment it is worth
+    #: money. Counts only items that SURVIVED `limit`: a forced item that was cut is not
+    #: going to be re-asked, and reporting it would promise a re-bill that never happens.
+    forced: int = 0
+    #: Evaluable items left out by `limit`. The two skips above cost nothing; this is the one
+    #: that means "there is more backlog still to pay for". Without it `--limit 200` run
+    #: nightly cannot say whether the backlog is draining, stalled or growing, and `--dry-run`
+    #: reports the same truncated number so it cannot be used to find out either.
+    remaining: int = 0
 
 
 def select_items(
@@ -336,6 +353,10 @@ def select_items(
     "nothing to do". `limit=None` means no limit; a limit below 1 is an operator error, not
     an empty success.
 
+    Every candidate ends in exactly one of four places — selected, current, evidence-free, or
+    cut by `limit` — and `Selection` reports all four, so the operator's line accounts for the
+    whole corpus rather than for the part that happened to survive.
+
     The questions and their digest are built ONCE for the whole selection: they do not depend
     on the item, so doing it per item would redo identical work for every post in the corpus.
     """
@@ -343,6 +364,10 @@ def select_items(
         raise JevError("--limit debe ser >= 1")
     digest = questions_digest(build_topic_questions(vocab, fallback))
     selected: list[Item] = []
+    # Parallel to `selected`: was this item's stored assessment still current when we took
+    # it anyway? Recorded per item rather than counted on the spot so `limit` can cut both
+    # lists together — `forced` must describe the items that will actually be re-asked.
+    was_current: list[bool] = []
     skipped_current = 0
     skipped_no_evidence = 0
     for item in _candidates(store, ids):
@@ -352,14 +377,22 @@ def select_items(
         if state_chars == 0:
             skipped_no_evidence += 1
             continue
-        if not force and _contract_matches(assessments.get(item.id), state[STATE_KEY], digest):
+        # Computed even under `force`, which costs nothing and is the whole point: the
+        # answer is what tells a forced re-bill of a current corpus apart from a corpus
+        # whose contracts had expired. Skipping the check would make the two identical.
+        current = _contract_matches(assessments.get(item.id), state[STATE_KEY], digest)
+        if current and not force:
             skipped_current += 1
             continue
         selected.append(item)
+        was_current.append(current)
+    cut = len(selected) if limit is None else min(limit, len(selected))
     return Selection(
-        items=tuple(selected if limit is None else selected[:limit]),
+        items=tuple(selected[:cut]),
         skipped_current=skipped_current,
         skipped_no_evidence=skipped_no_evidence,
+        forced=sum(was_current[:cut]),
+        remaining=len(selected) - cut,
     )
 
 

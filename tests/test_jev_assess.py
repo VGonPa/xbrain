@@ -411,12 +411,59 @@ def test_select_items_skips_current_unless_forced_and_counts_what_it_skipped():
     # The counts are the whole point: a silent funnel (evidence regressed, everything skips)
     # would otherwise be indistinguishable from a clean "nothing to do".
     assert (picked.skipped_current, picked.skipped_no_evidence) == (1, 1)
+    assert (picked.forced, picked.remaining) == (0, 0)
     forced = select_items(store, assessments, vocab, ids=None, limit=None, force=True, **kw)
     assert [item.id for item in forced.items] == ["1", "2"]
     # `force` does NOT override the evidence skip — there is nothing to ask about.
     assert (forced.skipped_current, forced.skipped_no_evidence) == (0, 1)
+    # …and the item that WAS current is counted as forced rather than vanishing. Under
+    # `--force` `skipped_current` is structurally 0 — it means "we did not look", not
+    # "nothing was current" — so without this the operator cannot tell a full re-bill of a
+    # current corpus from a corpus whose contracts had genuinely expired.
+    assert forced.forced == 1
     limited = select_items(store, assessments, vocab, ids=None, limit=1, force=True, **kw)
     assert [item.id for item in limited.items] == ["1"]
+    # The backlog `--limit` left behind is the one skip that costs money later.
+    assert limited.remaining == 1
+
+
+def test_forced_and_remaining_describe_the_items_actually_selected():
+    """`forced` counts what will be RE-ASKED, so a forced item cut by `--limit` is not one.
+
+    Counting it would report a re-bill that never happens; `forced` is read as "you are
+    about to pay for these again", and it has to be true of the items in `items`.
+    """
+    vocab, store = _vocab(), _store()
+    kw = {"fallback": "otro", "char_limit": 100}
+    client = FakeJevClient()
+    assessments = {
+        item_id: assess_topics(store[item_id], _questions(), client, char_limit=100)
+        for item_id in ("1", "2")
+    }
+    both = select_items(store, assessments, vocab, ids=None, limit=None, force=True, **kw)
+    assert [item.id for item in both.items] == ["1", "2"]
+    assert (both.forced, both.remaining) == (2, 0)
+    cut = select_items(store, assessments, vocab, ids=None, limit=1, force=True, **kw)
+    assert [item.id for item in cut.items] == ["1"]
+    # Two were current; only the ONE that survived the limit is being re-asked.
+    assert (cut.forced, cut.remaining) == (1, 1)
+
+
+def test_the_counts_partition_every_candidate():
+    """items + vigentes + sin evidencia + fuera del límite == the whole candidate set.
+
+    The echo is the operator's only view of the funnel. If the four numbers do not add up
+    to the corpus, a regression that silently drops items reads as a smaller corpus.
+    """
+    vocab, store = _vocab(), _store()
+    kw = {"fallback": "otro", "char_limit": 100}
+    current = assess_topics(store["1"], _questions(), FakeJevClient(), char_limit=100)
+    for limit in (None, 1, 2, 50):
+        sel = select_items(store, {"1": current}, vocab, ids=None, limit=limit, force=False, **kw)
+        total = len(sel.items) + sel.skipped_current + sel.skipped_no_evidence + sel.remaining
+        assert total == len(store), (limit, sel)
+        # `forced` is a SUB-count of `items`, never a fourth bucket.
+        assert sel.forced <= len(sel.items)
 
 
 def test_select_items_honours_the_order_asked_and_dedupes_repeats():
