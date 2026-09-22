@@ -2967,7 +2967,7 @@ def _jev_pairs(cfg: Config) -> JevPairs:
     )
 
 
-def _refuse_empty_report(jev: JevPairs, cfg: Config) -> None:
+def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
     """Refuse BEFORE writing when there is nothing to compare, NAMING the missing input.
 
     A report over nothing is not a report of zero — it is a plausible-looking file of zeros
@@ -2979,11 +2979,19 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config) -> None:
     loop never runs, so the behaviour used to FLIP on the contents of an unrelated file. The
     silent branch was the one where the operator had no other signal.
 
-    Each message names the file and the command that fixes it, and says the previous report
+    Each message names the file and the command that fixes it, and says the previous artifact
     was left alone — the operator's next question after "why did it stop" is "did it eat my
     report".
+
+    `artifact` IS THAT FILE, passed in rather than assumed, because more than one command
+    refuses through here and they protect different things in different directories:
+    `jev report` guards `data/jev/topics-report.json`, `jev dashboard` guards
+    `<output_dir>/jev.html`. Hard-coding the report's path sent an operator who ran the
+    dashboard to look at a file that command was never going to write — true, and about the
+    wrong artifact, which in a message whose whole job is "did it eat my work" is the same
+    failure as being wrong. A full path, not a bare filename: where it is, is half the answer.
     """
-    kept = f"No se sobrescribe {cfg.jev_dir / 'topics-report.json'}"
+    kept = f"No se sobrescribe {artifact}"
     if not jev.vocab:
         raise JevError(
             f"el vocabulario está vacío o falta {cfg.data_dir / 'vocab.yaml'}: "
@@ -3063,7 +3071,7 @@ def jev_report_cmd(
         # written over the last good one. `nan` fails the chain and is refused here too.
         raise ValueError("--threshold debe estar en [0.0, 1.0]")
     jev = _jev_pairs(cfg)
-    _refuse_empty_report(jev, cfg)
+    _refuse_empty_report(jev, cfg, cfg.jev_dir / "topics-report.json")
     # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
     # carry the rows, and a second pass would be a second place the threshold has to match.
     summary, comparisons = build_report(
@@ -3109,9 +3117,11 @@ def jev_dashboard_cmd(
         # is plausible-looking noise written over the last good one.
         raise ValueError("--threshold debe estar en [0.0, 1.0]")
     jev = _jev_pairs(cfg)
+    page = cfg.output_dir / "jev.html"
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
-    # names the missing input and the command that fixes it — and nothing is written.
-    _refuse_empty_report(jev, cfg)
+    # names the missing input, the command that fixes it, and the artifact left alone, which
+    # for THIS command is the page and not the report it never touches.
+    _refuse_empty_report(jev, cfg, page)
     items = list(jev.store.values())
     now = datetime.now(timezone.utc)
     data = compute_jev_dashboard_data(
@@ -3125,7 +3135,6 @@ def jev_dashboard_cmd(
         updated=f"{now:%b} {now.day}, {now.year}".upper(),
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    page = cfg.output_dir / "jev.html"
     page.write_text(render_jev_dashboard_html(data), encoding="utf-8")
     # The SAME line `jev report` prints, from the same summary: the two commands recap one
     # side-car, and an operator who runs both must not have to reconcile two sets of numbers.

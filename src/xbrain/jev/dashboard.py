@@ -131,6 +131,11 @@ def compute_jev_dashboard_data(
     the counts it drops travel into `totals` rather than being discarded. Stale records are
     EXCLUDED from `items`: a comparison against a question Jev is no longer asked is not a
     weaker signal, it is a wrong one.
+
+    Each row's `m` ships the membership UNROUNDED — the page costs a few hundred KB more for
+    it, and rounding to three decimals would let a `0.8496` render as `0.85` and then clear a
+    `0.85` slider, so the browser would call backed what `report.py` calls doubtful and the
+    template's consistency banner would report a divergence in the DATA as one in the logic.
     """
     current = current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit)
     pairs = list(current.pairs)

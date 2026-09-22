@@ -820,6 +820,10 @@ def test_jev_report_without_assessments_refuses_and_names_the_command_that_fixes
     assert result.exit_code == 1
     assert "no hay evaluaciones guardadas" in result.stderr
     assert "xbrain jev topics" in result.stderr
+    # It names the artifact IT protects, with the path — "did it eat my report" is the
+    # operator's next question, and `jev.html` would be an answer about another command.
+    assert f"No se sobrescribe {_report_paths(tmp_path)[0]}" in result.stderr
+    assert "jev.html" not in result.stderr
     assert not _report_paths(tmp_path)[0].exists()
 
 
@@ -1177,6 +1181,10 @@ def test_jev_dashboard_over_nothing_refuses_and_writes_no_page(tmp_path: Path, m
     assert result.exit_code == 1
     assert "no hay evaluaciones guardadas" in result.stderr
     assert "xbrain jev topics" in result.stderr
+    # The refusal names the page, NOT `topics-report.json`: a message about a file this
+    # command was never going to write sends the operator to look at the wrong artifact.
+    assert f"No se sobrescribe {_page(vault)}" in result.stderr
+    assert "topics-report.json" not in result.stderr
     assert not _page(vault).exists()
 
 
