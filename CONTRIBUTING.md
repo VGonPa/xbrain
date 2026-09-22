@@ -67,6 +67,16 @@ failure must propagate and abort the destructive op; never `try/except`-swallow
 it. Manual snapshots are available via `xbrain snapshot create`; restore via
 `xbrain snapshot restore <name>`.
 
+**The Jev side-car sits outside the snapshot boundary.** `data/jev/topics.json` is one
+level below the four flat store files a snapshot copies, so `snapshot create` does not back
+it up and `snapshot restore` neither restores nor deletes it. `xbrain jev topics` therefore
+takes no snapshot of its own — it writes nothing a snapshot covers, and never touches
+`items.json`. The protection is a different one: a restore that moves an item's evidence or
+`vocab.yaml` retires the affected assessments, which are then **re-asked and re-paid for**
+rather than silently compared against the wrong corpus. If you add a command that writes
+under `data/jev/`, keep that property — the file costs money and has no undo. See
+[docs/jev.md](docs/jev.md).
+
 `digest-video` is destructive because it attaches each video's transcript to the
 item as an `x_video` content source and rewrites `items.json`. It snapshots *only
 when it is about to write* (a pure already-digested / no-fetchable-video run

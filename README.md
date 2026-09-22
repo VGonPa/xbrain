@@ -344,8 +344,9 @@ which of your vocabulary topics does this post belong to? — and puts the two
 answers side by side, with a probability on every one. **It is a second opinion
 and it never changes the wiki:** the answers live in their own side-car, no topic
 assignment moves, no note is re-rendered, and you can run it or ignore it without
-touching the corpus. It is the one command in XBrain that bills per run, and the only
-one needing a TypeSafe key. See [docs/jev.md](docs/jev.md).
+touching the corpus. It needs a TypeSafe key, and it is the only command that bills per
+run on XBrain's default keyless setup — `--executor api` and the Firecrawl fallback also
+cost money, but both are opt-in paths you have to turn on. See [docs/jev.md](docs/jev.md).
 
 ---
 
@@ -396,8 +397,8 @@ uv run xbrain status     # see the counts
 **No API key is required to run the pipeline.** The default execution mode uses a
 Claude Code session and costs nothing; each key above unlocks one optional path —
 `ANTHROPIC_API_KEY` the `api` executor, `FIRECRAWL_API_KEY` the fallback fetcher, and
-`TYPESAFE_API_KEY` the `xbrain jev` second opinion, which is the only one that bills
-per run.
+`TYPESAFE_API_KEY` the `xbrain jev` second opinion. Only `xbrain jev topics` bills per
+run on the default setup; the other two keys enable paths you opt into.
 
 ---
 
@@ -459,7 +460,7 @@ executor = "claude-code"                  # claude-code | api | manual
 model = "claude-haiku-4-5-20251001"        # used only by the `api` executor
 
 [vocab]
-target_count = 45                         # how many topics to induce
+target_count = 45                         # how many topics to induce (default 30)
 
 [topics]
 resynth_threshold = 25                    # re-synthesise an overview after N new posts
@@ -480,6 +481,13 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 # dir = "index"                           # under data/; must resolve INSIDE data/
 # max_matches_per_item = 3                # fragments one item may cite in a search
 # get_char_budget = 40000                 # per-response ceiling before truncate + cursor
+
+[jev]                                     # optional; see docs/jev.md
+# model = "jev-latest"                    # moving alias; each record stores the model that answered
+# threshold = 0.85                        # "backed by Jev" = probability >= threshold
+# fallback_option = "otro"                # escape option of the primary question
+# concurrency = 8                         # requests in flight
+# state_char_limit = 100000               # evidence is cut here (pre-cut length is recorded)
 ```
 
 | Section | Key | Default | Purpose |
@@ -490,7 +498,7 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[x]` | `handle` | — | Your X handle, no `@`. |
 | `[enrich]` | `executor` | `claude-code` | Default [execution mode](#execution-modes) for the LLM stages. |
 | `[enrich]` | `model` | `claude-haiku-4-5` | Model for the `api` executor. |
-| `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. |
+| `[vocab]` | `target_count` | `30` | Number of topics the `vocab` stage induces. The snippet above shows `45`, which is what this repo's own corpus runs — it is an example, not the default. It is also what drives the cost of `xbrain jev topics`, which asks one question per topic per item. |
 | `[topics]` | `resynth_threshold` | `25` | Post growth that marks a topic overview stale. |
 | `[output]` | `language` | `English` | Output language for LLM summaries/overviews AND wiki section headers. `English` or `Spanish`. |
 | `[output]` | `topic_style` | `wikilink` | How the in-body `**Topics:**` line is rendered: `wikilink` (`[[slug]] · [[slug]]`) or `hashtag` (`#slug #slug`). Frontmatter `tags:` are unaffected. |
@@ -503,6 +511,11 @@ command = "parakeet-mlx"                  # external transcriber for `digest-vid
 | `[index]` | `dir` | `index` | Where `data/index/` lives, relative to `data_dir`. Validated on load: an absolute path, a `..` or an escaping symlink is refused, because `index build --force` deletes and recreates whatever it finds there. |
 | `[index]` | `max_matches_per_item` | `3` | How many fragments of one item `search` may cite. What stops a long transcript filling the top ten with ten adjacent windows of itself. |
 | `[index]` | `get_char_budget` | `40000` | Per-response character ceiling for `get`. Above it the bundle truncates **declaring it** and returns a cursor, never silently. |
+| `[jev]` | `model` | `jev-latest` | Jev model for `xbrain jev topics`. A moving alias on purpose — TypeSafe's updates are allowed through, and every stored assessment records the concrete version that answered. See [docs/jev.md](docs/jev.md). |
+| `[jev]` | `threshold` | `0.85` | Probability at or above which a topic counts as "backed by Jev". The CLI default for `jev report`, and where the dashboard's slider opens; both accept `--threshold` to override per run without re-asking anything. |
+| `[jev]` | `fallback_option` | `otro` | The escape option of the primary-topic question ("a topic not in the vocabulary"). Must not collide with a vocabulary slug — `jev topics` refuses the run if it does, before spending anything. |
+| `[jev]` | `concurrency` | `8` | Requests in flight. Raise it only against an observed `429`. |
+| `[jev]` | `state_char_limit` | `100000` | Where the evidence sent to Jev is cut (with a visible marker; the pre-cut length is recorded). **Not the cost lever** — the questions are ~89% of what a pass sends, so `[vocab].target_count` is. |
 
 Switching `[output].language` after the corpus is already enriched is supported
 — but does not retroactively translate existing summaries. To convert the

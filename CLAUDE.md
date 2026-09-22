@@ -656,7 +656,10 @@ generates an Obsidian wiki.
   changed `fallback_option` retires it; retired records are excluded from every reader and
   COUNTED, because a side-car a `vocab` edit just retired must never read like one nobody
   wrote. The file is PAID, gitignored and outside `snapshot._ARTIFACTS`, so `snapshot restore`
-  leaves it behind and `--force` overwrites a paid record with no recovery. `jev topics` is the
+  leaves it behind — and because a restore reverts `vocab.yaml` as well as `items.json`, one
+  from before a `vocab --regenerate` moves the questions digest and retires EVERY record at
+  once (a full re-bill); only a restore leaving both the evidence and the vocabulary
+  untouched leaves an assessment current. `--force` overwrites a paid record with no recovery. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
@@ -679,8 +682,9 @@ generates an Obsidian wiki.
   is the committed template and carries no value.
 - **`git add` BEFORE `uv run poe check`.** The gate's `detect-secrets scan src/xbrain tests
   scripts` only sees files git TRACKS, so a new, unstaged file is invisible to it. Probed on
-  2026-09-22: an untracked `src/xbrain/_probe_secret.py` holding a real AWS-shaped key is not
-  in the scan's results; `git add` it and the same scan reports it. So a secrets gate that went
+  2026-09-22 with a DUMMY value in AWS's format (what detect-secrets' `AWSKeyDetector` matches
+  on — not a credential): untracked, `src/xbrain/_probe_secret.py` is absent from the scan's
+  results; `git add` it and the same scan reports it. The probe file was deleted afterwards. So a secrets gate that went
   green over a new file did not look at it. (Only this check resolves its files through git —
   ruff, mypy and pytest walk the directories — which is exactly why it is the one to remember.)
 

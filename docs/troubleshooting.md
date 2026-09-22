@@ -468,7 +468,11 @@ Three that send people here first, because the symptom does not name Jev:
   and that is a re-bill. [Why](jev.md#staleness-when-an-assessment-stops-counting).
 - **`xbrain snapshot restore` did not roll back my assessments.** It cannot: the
   side-car lives at `data/jev/topics.json`, one level below the four flat files a
-  snapshot covers. Items whose evidence the restore moved simply report as `caducadas`
+  snapshot covers. A restore reverts **`vocab.yaml` as well as `items.json`**, and the
+  contract hashes the vocabulary-derived questions digest — so a restore from before a
+  `vocab --regenerate` moves the digest and retires **every record at once**, a full
+  re-bill; only a restore that leaves both the item's evidence and the vocabulary
+  untouched leaves an assessment current. Retired records report as `caducadas` on the
   next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
 - **A red banner on `jev.html`.** The page's own arithmetic disagrees with the report
   embedded in it. Trust `xbrain jev report`, not the page, and report it as a bug.

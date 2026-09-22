@@ -28,6 +28,14 @@ read it, and throw it away without touching the corpus.
 
 ## Setup
 
+**Before anything else:** `xbrain jev` compares Jev against `enrich`, so it needs a
+vocabulary and an enriched corpus to compare against. Run the normal pipeline
+(`extract → fetch → vocab → enrich`) first — if XBrain is not set up at all, start with
+[the tutorial](tutorial.md). Provisioning a paid credential before that is wasted: nothing
+here can run until the corpus is enriched.
+
+With that in place:
+
 1. Create an API key at <https://console.typesafe.ai/>.
 2. Put it where XBrain looks — the environment first, then `<repo>/.env`:
 
@@ -53,8 +61,8 @@ read it, and throw it away without touching the corpus.
    state_char_limit = 100000   # evidence is cut here; assessments record the pre-cut length
    ```
 
-You need `vocab.yaml` and an enriched corpus first — the whole point is the comparison, so
-run the normal pipeline (`extract → fetch → vocab → enrich`) before any of this.
+Every `[jev]` key is also documented inline in
+[`config.toml.example`](../config.toml.example), next to the defaults.
 
 ## Daily use
 
@@ -64,7 +72,7 @@ uv run xbrain jev topics --limit 20         # a small paid smoke run
 uv run xbrain jev topics                    # the whole backlog
 uv run xbrain jev report                    # data/jev/topics-report.{json,md} at [jev].threshold
 uv run xbrain jev report --threshold 0.95   # the same side-car, read more strictly
-uv run xbrain jev dashboard                 # <vault>/<output_subdir>/jev.html — open the printed URI
+uv run xbrain jev dashboard                 # <output_dir>/jev.html — open the printed URI
 ```
 
 `jev topics` is the only command that spends money. `report` and `dashboard` re-read the
@@ -92,7 +100,7 @@ it is about to ask:
 20 items por evaluar · 1169 vigentes · 8 sin evidencia · 1412 fuera del límite (1169 evaluaciones guardadas)
 ```
 
-The four counts partition the **candidate set** — `20 + 1169 + 8 + 1412 = 2609` here,
+Four of the five counts partition the **candidate set** — `20 + 1169 + 8 + 1412 = 2609` here,
 which is the whole corpus because no `--id` was given — so an empty selection caused by a
 regression in the evidence layer can never look like a clean "everything is up to date".
 With `--id a --id b` the candidate set is those two items and the line sums to 2.
@@ -100,9 +108,10 @@ With `--id a --id b` the candidate set is those two items and the line sums to 2
 - **por evaluar** — items this run will ask about.
 - **vigentes** — items whose stored assessment still describes today's question (skipped).
 - **sin evidencia** — items with nothing to send. `evidence_surfaces` found no text.
-- **forzados** — appears only under `--force`: selected items whose assessment was *still
-  current* and is being re-asked anyway. This is the segment that says "you are about to
-  re-pay for work you already had".
+- **forzados** *(a sub-count of `por evaluar`, not a fifth segment)* — appears only under
+  `--force`: selected items whose assessment was *still current* and is being re-asked
+  anyway. This is the segment that says "you are about to re-pay for work you already had",
+  and it is why a `--force` line can look like it sums to more than the corpus.
 - **fuera del límite** — evaluable items `--limit` left for a later run. Without it a
   nightly `--limit 200` cannot tell you whether the backlog is draining or growing.
 
@@ -145,11 +154,15 @@ items and at the end:
   written, and the command exits **130**:
 
   ```
-  Interrumpido: 43 evaluaciones nuevas guardadas (2624 en total) en data/jev/topics.json
+  Interrumpido: 43 evaluaciones nuevas guardadas (1212 en total) en data/jev/topics.json
     258000 tokens de entrada (~0.0108 $)
   ```
 
-  **43 is this run's new records; 2624 is the file total.** An interrupt that rescued
+  Under `--force` the noun changes — `Interrumpido: 43 evaluaciones re-evaluadas
+  guardadas (1212 en total) …` — because those records are re-bills of work you already
+  had, not new work. It is the run most likely to be interrupted, for the same reason.
+
+  **43 is this run's new records; 1212 is the file total.** An interrupt that rescued
   nothing writes nothing at all (`Interrumpido: nada nuevo que guardar`) — saving there
   would write the unchanged map over the side-car, which on a first run is `{}`.
 - **A save failure names the path and the paid count**, because `[Errno 28] No space left
@@ -158,7 +171,7 @@ items and at the end:
 ### It closes with the bill
 
 ```
-2591 evaluadas · 18 fallidas · 15546000 tokens de entrada (~0.6529 $) · modelo jev-1.13.0 → data/jev/topics.json
+2583 evaluadas · 18 fallidas · 15498000 tokens de entrada (~0.6509 $) · modelo jev-1.13.0 → data/jev/topics.json
 ```
 
 The cost sentence is formatted with a decimal point and no digit grouping — the page's
@@ -170,8 +183,10 @@ cannot say which zero it is:
 
 - `(+K sin recuento)` — K records whose provider reported no token usage. They contribute
   nothing they cannot prove, so without this a fully paid run reports itself as free.
-- `· proveedor sin tarifa: X` — a provider absent from the price table. It contributes
-  `0.0` rather than borrowing another vendor's rate, and is **named** rather than counted.
+- `· proveedor sin tarifa: X` — **inside** the cost parentheses, after the figure
+  (`N tokens de entrada (~X $ · proveedor sin tarifa: a, b)`): a provider absent from the
+  price table. It contributes `0.0` rather than borrowing another vendor's rate, and is
+  **named** rather than counted. `proveedores sin tarifa` for more than one.
 
 The figure is an **estimate**, not an invoice: the rate is a list price for a concrete
 model version while `[jev].model` defaults to a moving alias. See [Vendor facts](#vendor-facts-with-their-dates).
@@ -189,12 +204,13 @@ Measured on this repo's corpus on 2026-09-22 — 2,609 items, 45 topics, `state_
 | Items cut at the limit | 7 of 2,609 |
 | **One full pass** | **59.4 M** (≈ 15–17 M input tokens, ≈ 6k per item) |
 
-At `0.042 $/MTok` that is roughly **0.62–0.71 $** for the whole corpus, in a few minutes at
+At `0.042 $/MTok` that is roughly **0.63–0.71 $** for the whole corpus, in a few minutes at
 8 concurrent requests. The token figure is a character-count conversion; the authoritative
 number is the one the run itself reports from the provider's usage.
 
 The sample outputs above are built on that ≈ 6k-tokens-per-item figure, so they can be
-re-derived rather than taken on trust: 2,591 records × ≈ 6k ≈ 15.5 M tokens ≈ 0.65 $.
+re-derived rather than taken on trust: 2,583 assessed + 18 failed + 8 without evidence =
+2,609, and 2,583 × ≈ 6k ≈ 15.5 M tokens ≈ 0.65 $.
 
 **The questions are 89% of that bill, not the evidence.** They are constant per call and
 scale with `[vocab].target_count`, so the cost lever is the size of the vocabulary —
@@ -207,7 +223,10 @@ Writes two files under `<data_dir>/jev/` (default `data/jev/`), overwritten on e
 - `topics-report.md` — what a person reads. Headline numbers, then the tables. `Por topic`
   carries **every** vocabulary row, worst-backed first; the four queue tables (doubtful,
   missing candidates, unjudged, primary mismatches) are **deliberately cut** at 20 rows
-  each, and every cut table says so (`… y N filas más (el JSON las lleva todas).`).
+  each — the primary mismatches at 20 **per reason**, so that section can carry up to 100
+  rows across its five sub-tables, as its own heading says (`top 20 por motivo`). Every cut
+  table announces the cut (`_… y N filas más (el JSON las lleva todas)._`, italicised in
+  the raw file).
 - `topics-report.json` — what a program reads: `{"summary": {…}, "items": [{…}]}`, one
   record per compared item, no post text (join on `item_id`).
 
@@ -217,12 +236,12 @@ see a mismatched pair, a person reading a stale markdown cannot.
 stdout is one line, the same one `jev dashboard` prints:
 
 ```
-Umbral 0.85 · 0 caducadas · items comparados 2573/2591 · enrich respaldado 78.4 % · Jev respaldado 61.2 % · dudosas 1204 · sin juzgar 0 · candidatas 3310 · primario coincide 64.1 % · 15546000 tokens de entrada (~0.6529 $)
+Umbral 0.85 · 0 caducadas · items comparados 2565/2583 · enrich respaldado 78.4 % · Jev respaldado 61.2 % · dudosas 1204 · sin juzgar 0 · candidatas 3310 · primario coincide 64.1 % · 15498000 tokens de entrada (~0.6509 $)
 → data/jev/topics-report.md
 → data/jev/topics-report.json
 ```
 
-### `items comparados 2573/2591` — two different populations
+### `items comparados 2565/2583` — two different populations
 
 The second number is how many stored assessments are **current**. The first is how many of
 those had something to compare against: `compare_item` returns nothing for an item with no
@@ -327,8 +346,14 @@ topics` yet" apart from "a vocabulary edit just retired every paid record you ha
 
 ## `xbrain jev dashboard` — reading the page
 
-Writes `<output_subdir>/jev.html` in the vault, next to `dashboard.html`, and prints the
-report line plus the page's `file://` URI. Open it with `open <uri>`.
+Writes `jev.html` into the vault's output directory, next to `dashboard.html`. It prints
+the same line `jev report` prints, then how many items reached the page and where it is:
+
+```text
+2565 items en el dashboard → file:///…/x-knowledge/jev.html
+```
+
+Open it with `open <uri>`.
 
 It is **one self-contained file**: the data as a JSON blob, ECharts vendored into the page.
 Nothing is fetched at runtime except the Google Fonts stylesheet, so it renders offline in
@@ -411,7 +436,11 @@ assessment the moment the item was re-enriched.
 |---|---|
 | `data/jev/topics.json` | the side-car: one `TopicAssessment` per item id |
 | `data/jev/topics-report.json` · `.md` | the comparison, rewritten on every `jev report` |
-| `<vault>/<output_subdir>/jev.html` | the page, rewritten on every `jev dashboard` |
+| `<output_dir>/jev.html` | the page, rewritten on every `jev dashboard` |
+
+`<output_dir>` is the path the CLI prints: your vault root joined with
+`[paths].output_subdir` from `config.toml` (`learnings/x-knowledge/` in the examples here).
+The config key is the subdirectory; `<output_dir>` is the absolute path it resolves to.
 
 > **`data/topics.json` and `data/jev/topics.json` are different files.** The first holds the
 > synthesised topic pages and is part of the store. The second holds Jev's assessments and
@@ -421,12 +450,14 @@ assessment the moment the item was re-enriched.
 
 - **It is not snapshotted.** `xbrain snapshot create` copies the four flat store artifacts
   from `data/`; `data/jev/topics.json` is one level down and is not among them. `xbrain
-  snapshot restore` therefore rolls `items.json` back and leaves the side-car at its newer
-  state. That is safe but not always free: every item whose **evidence** the restore moved
-  now has a contract that no longer matches, so those records are reported as `caducadas`
-  and `xbrain jev topics` re-asks — and re-pays for — them. Items the restore did not
-  change keep their assessments. Either way staleness is **detected, never consumed**: a
-  reverted item is never compared against an answer about its newer text.
+  snapshot restore` therefore rolls the store back and leaves the side-car at its newer
+  state. A restore reverts **`vocab.yaml` as well as `items.json`**, and the contract hashes
+  the vocabulary-derived questions digest — so a restore from before a `vocab --regenerate`
+  moves the digest and retires **every record at once**, a full re-bill; only a restore that
+  leaves both the item's evidence and the vocabulary untouched leaves an assessment current.
+  Retired records are reported as `caducadas`, and `xbrain jev topics` re-asks — and re-pays
+  for — them. Either way staleness is **detected, never consumed**: a reverted item is never
+  compared against an answer about its newer text.
 - **It is not in git.** `data/` is gitignored in full, so there is no `git checkout` back to
   a good copy. `--force` overwrites a paid record with no recovery, and a corrupt file is
   repaired by hand or paid for again — which is why a malformed side-car raises instead of
@@ -508,8 +539,10 @@ Interrumpido: N evaluaciones nuevas guardadas (M en total) en <path>     (exit 1
 ```
 
 Ctrl-C. N is this run's new records, M is the file total. Re-run to continue; the banked
-records count as `vigentes` and are not re-billed. `Interrumpido: nada nuevo que guardar`
-means the interrupt arrived before the first answer and nothing was written.
+records count as `vigentes` and are not re-billed. Under `--force` the noun is
+`evaluaciones re-evaluadas` instead of `evaluaciones nuevas`, because those records are
+re-bills rather than new work. `Interrumpido: nada nuevo que guardar` means the interrupt
+arrived before the first answer and nothing was written.
 
 ```text
 Error: no se pudo guardar <path> (N evaluaciones pagadas sin guardar): …
@@ -565,3 +598,13 @@ report` and report it as a bug — see [the dashboard](#xbrain-jev-dashboard--re
 
 **The dashboard numbers look old**
 It is a static page. Re-run `xbrain jev dashboard`.
+
+---
+
+## See also
+
+- [ARCHITECTURE.md § jev](../ARCHITECTURE.md#jev) — how the layer is built: the call shape,
+  the contract, the seams, and why the side-car is not the store.
+- [docs/troubleshooting.md](troubleshooting.md) — everything in XBrain that is not Jev.
+- [docs/tutorial.md](tutorial.md) — the pipeline this compares against, end to end.
+- [`config.toml.example`](../config.toml.example) — the `[jev]` block, annotated.
