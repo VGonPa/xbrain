@@ -51,12 +51,29 @@ jobs:
       # Pin the Python hash seed so the gate is byte-reproducible run-to-run
       # (determinism; check.sh pins the same default for local runs).
       PYTHONHASHSEED: "0"
+      # The 19 tests that execute `jev.template.html`'s pure half under node are the ONLY
+      # real check that the page and `jev/report.py` agree on a number; everything else is
+      # substring pins over a 1,100-line template. They carry a `skipif` so a laptop without
+      # node can still run the suite — which on a RUNNER is fail-open: no node, 19 silent
+      # skips, gate still green, and nothing tells you the mirror went unchecked. This flag
+      # says "this machine is a gate": the skip turns into a failure
+      # (tests/test_jev_dashboard.py::test_node_is_available_where_the_mirror_is_required
+      # names the cause). `ubuntu-latest` ships node, so it costs nothing until the day the
+      # image, or the runner, changes under us — which is the day it has to speak.
+      XBRAIN_REQUIRE_NODE: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
       - name: Set up Python
         run: uv python install 3.12
+      # Fails the job BEFORE the 20-odd minutes of dependency install and gate, and prints
+      # the version into the log so "which node did the mirror run under?" is answerable
+      # after the fact. Inherited from the runner image on purpose: nothing in this repo
+      # depends on a node VERSION — the template's pure half is ES2020 — so pinning one
+      # would be a dependency to maintain in exchange for nothing.
+      - name: Check node is present (the jev mirror tests execute it)
+        run: node --version
       # `uv pip install` is uv's pip-COMPATIBILITY mode: it resolves fresh from
       # pyproject.toml and never reads uv.lock. With `ruff>=0.5` declared, every run
       # installed whatever ruff had shipped that morning, and the lockfile committed in

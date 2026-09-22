@@ -11,11 +11,20 @@ defences, in order of strength:
 * `test_the_template_compares_with_ge_and_keeps_an_unjudged_bucket` pins the two rules a
   drift would break as TEXT. It is the weaker check, and it is here for the machine that
   has no node.
+
+THE SKIP IS FAIL-CLOSED WHERE IT MATTERS. A developer laptop without node may skip the
+node-executed half; a runner may not. `_NODE_IS_REQUIRED` reads `CI` and
+`XBRAIN_REQUIRE_NODE` (quality.yml sets the second), and where either is set
+`_requires_node` stops skipping — so a missing node goes RED instead of quietly removing
+the only real check the page has. `test_node_is_available_where_the_mirror_is_required`
+is the one that says so in words; without it the 19 failures below would all read as
+`FileNotFoundError: node` and none of them would name the cause.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -56,6 +65,19 @@ FALLBACK = "otro"
 CHAR_LIMIT = 100_000
 #: The one provider `jev.defaults.INPUT_USD_PER_MTOK` prices, so `cost_usd` is a real number.
 PRICED_PROVIDER = "typesafe"
+
+#: Is node a REQUIREMENT here, or a convenience? `CI` is set by GitHub Actions itself and
+#: `XBRAIN_REQUIRE_NODE` is set explicitly by `quality.yml`, so both mean "this machine is a
+#: gate, not a laptop". Two variables rather than one: `CI` covers any runner that forgets
+#: the explicit flag, and the explicit flag lets a developer reproduce the gate's behaviour
+#: locally (`XBRAIN_REQUIRE_NODE=1 uv run pytest tests/test_jev_dashboard.py`).
+_NODE_IS_REQUIRED = bool(os.environ.get("CI") or os.environ.get("XBRAIN_REQUIRE_NODE"))
+#: ONE mark for the 19 node-executed tests, so the skip rule has one definition. Nineteen
+#: copies of a condition is nineteen places for a future edit to restore the fail-open one.
+_requires_node = pytest.mark.skipif(
+    shutil.which("node") is None and not _NODE_IS_REQUIRED,
+    reason="no JS engine on this machine (set XBRAIN_REQUIRE_NODE=1 to make this fail instead)",
+)
 
 
 def _item(item_id: str = "1", text: str = "Claude Code hooks", topics=("ai-coding",)) -> Item:
@@ -537,7 +559,30 @@ def _self_check_in_node(
     )
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_node_is_available_where_the_mirror_is_required():
+    """On a GATE, a missing node is a failure; on a laptop it is a skip.
+
+    This is the whole fail-open fix in one assertion. The 19 tests below carry the page's
+    only real correctness guarantee — that the browser's `derive` and `jev/report.py` agree
+    — and a `skipif` hands that guarantee to whatever happens to be installed. `node` is
+    present on `ubuntu-latest` because the image ships it, not because anything asked for
+    it; the day the image drops it, or the day the gate moves to a leaner runner, all 19
+    disappear and the gate still reports green. A check that cannot tell you whether it
+    checked is the failure mode this repo has already paid for (`quality.yml`'s #103
+    comment block, and the skipped-required-check battery in `tests/test_ci_workflow.py`).
+
+    Kept separate from the 19 rather than folded into them: when node is genuinely missing
+    on a runner, those 19 fail with `FileNotFoundError: node` and none of them says why it
+    matters. This one names the cause once.
+    """
+    if not _NODE_IS_REQUIRED:
+        pytest.skip("node is optional on a developer machine; CI sets CI/XBRAIN_REQUIRE_NODE")
+    assert shutil.which("node") is not None, (
+        "node is required in CI: the template's derive/selfCheck tests would silently skip"
+    )
+
+
+@_requires_node
 def test_the_browser_derives_the_same_buckets_as_the_report():
     """The page and `xbrain jev report` must never quote different numbers.
 
@@ -566,7 +611,7 @@ def test_the_browser_derives_the_same_buckets_as_the_report():
     }
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_the_browser_recomputes_the_buckets_when_the_threshold_moves():
     """At another threshold the page must still agree with what the report WOULD print.
 
@@ -600,13 +645,13 @@ def _every_bucket_fixture() -> dict[str, Any]:
     )
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_self_check_is_silent_when_the_page_agrees_with_the_report():
     """The net must not cry wolf: over its own summary it reports nothing at all."""
     assert _self_check_in_node(_every_bucket_fixture()) == []
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 @pytest.mark.parametrize(
     "key",
     [
@@ -636,7 +681,7 @@ def test_self_check_names_the_bucket_the_report_disagrees_about(key: str):
     assert [p for p in problems if p.startswith(f"{key}:")], problems
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_self_check_compares_the_per_topic_rows_not_just_the_totals():
     """Chart 01 is a per-topic number, so it is checked per topic.
 
@@ -653,7 +698,7 @@ def test_self_check_compares_the_per_topic_rows_not_just_the_totals():
     assert [p for p in problems if p.startswith(f"per_topic[{target['slug']}].backed:")], problems
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_self_check_reports_a_key_that_changed_sides_in_the_report():
     """The key split is itself a contract.
 
@@ -672,7 +717,7 @@ def test_self_check_reports_a_key_that_changed_sides_in_the_report():
     assert [p for p in problems if "jev_backed" in p], problems
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_the_browser_recomputes_against_a_summary_built_at_another_threshold():
     """The slider is the page's whole reason to exist, and it was certified by a test that
     could not fail: every node case built the summary at the threshold it then derived at, so
@@ -701,7 +746,7 @@ def test_the_browser_recomputes_against_a_summary_built_at_another_threshold():
     assert at_report["missing"] == data["summary"]["missing_pairs"]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_self_check_is_silent_when_only_the_slider_moved():
     """Moving the slider changes the threshold-dependent buckets BY DESIGN.
 
@@ -711,7 +756,7 @@ def test_self_check_is_silent_when_only_the_slider_moved():
     assert _self_check_in_node(_every_bucket_fixture(), at=0.10) == []
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 @pytest.mark.parametrize(
     "key",
     ["assigned_unjudged", "primary_agree", "primary_fallback", "assigned_pairs", "items_compared"],
@@ -729,7 +774,7 @@ def test_the_threshold_free_net_still_fires_after_the_slider_moves(key: str):
     assert [p for p in problems if p.startswith(f"{key}:")], problems
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_a_mismatch_found_on_load_is_never_withdrawn_when_the_slider_moves():
     """THE BANNER DOES NOT RETRACT.
 
@@ -749,7 +794,7 @@ def test_a_mismatch_found_on_load_is_never_withdrawn_when_the_slider_moves():
     assert [p for p in after_moving if p.startswith("assigned_backed:")], after_moving
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 @pytest.mark.parametrize("field", ["assigned", "backed", "doubtful", "unjudged", "missing"])
 def test_self_check_compares_every_per_topic_field(field: str):
     """All five, one case each. The suite's own rule, one level down: mutating only `backed`
@@ -764,7 +809,7 @@ def test_self_check_compares_every_per_topic_field(field: str):
     assert [p for p in problems if p.startswith(f"per_topic[{target['slug']}].{field}:")], problems
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_chart_one_orders_its_rows_the_way_the_report_orders_its_table():
     """Chart 01's ROW ORDER mirrors `report._backing_order`, so it is executed like the rest.
 
@@ -779,7 +824,7 @@ def test_chart_one_orders_its_rows_the_way_the_report_orders_its_table():
     assert order == [row["slug"] for row in data["summary"]["per_topic"]]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 @pytest.mark.parametrize(
     ("part", "whole"), [(1, 16), (5, 16), (2, 32), (9, 16), (1, 3), (2, 3), (0, 0), (1, 1)]
 )
@@ -797,7 +842,7 @@ def test_the_page_rounds_percentages_the_way_python_does(part: int, whole: int):
     assert _run_in_node(data, f"return pct1({part}, {whole});") == expected
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_the_partition_invariant_is_observable():
     """Belt-and-braces over checks that would already fire — but by the suite's own standard a
     check never observed failing is indistinguishable from one that cannot.
@@ -817,7 +862,7 @@ def test_the_partition_invariant_is_observable():
     ]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_the_histograms_assigned_half_is_checked_against_the_report():
     """Panel 02 derives 40 bin counts. The `asignados` half has a counterpart in the summary —
     every assigned pair Jev answered — so it is checked rather than merely drawn."""
@@ -832,7 +877,7 @@ def test_the_histograms_assigned_half_is_checked_against_the_report():
     assert [p for p in corrupted if p.startswith("histograma:")], corrupted
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_chart_one_orders_by_backing_not_by_slug_or_vocabulary_order():
     """A fixture where all three orders differ, so the sort is pinned and not coincidence.
 
@@ -850,7 +895,7 @@ def test_chart_one_orders_by_backing_not_by_slug_or_vocabulary_order():
     assert order == [row["slug"] for row in data["summary"]["per_topic"]]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_the_histogram_counts_assigned_pairs_as_a_multiset_like_the_report():
     """`report._pair_totals` counts every assigned SLOT, duplicates included.
 
@@ -865,7 +910,7 @@ def test_the_histogram_counts_assigned_pairs_as_a_multiset_like_the_report():
     assert _self_check_in_node(data) == []
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_the_page_and_python_round_every_percentage_in_the_corpus_the_same_way():
     """A sweep, not a handful: every (part, whole) with whole <= 120, against Python's `round`.
 
@@ -903,7 +948,7 @@ console.log(JSON.stringify({hidden: painted.hidden, html: painted.innerHTML}));
 """
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@_requires_node
 def test_a_throw_during_boot_paints_the_banner_instead_of_a_blank_page():
     """The guard, executed — with a `boot()` that does what a missing ECharts would do.
 

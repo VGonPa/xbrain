@@ -246,6 +246,11 @@ _REQUIRED_CHECK = "quality"
 # nothing is worse than no check at all — it reports green.
 _GATE_SCRIPT = "scripts/check.sh"
 
+# The variable that turns the jev mirror's `skipif` from fail-open into fail-closed. Read by
+# tests/test_jev_dashboard.py; set by the gate job so a runner without node goes RED instead
+# of silently dropping the 19 tests that check the page against `jev/report.py`.
+_NODE_REQUIRED_VAR = "XBRAIN_REQUIRE_NODE"
+
 # Events that must be able to produce the `quality` check run.
 _GATING_EVENTS = ("push", "pull_request")
 
@@ -821,6 +826,51 @@ def test_gate_step_actually_runs_and_is_not_conditional() -> None:
         f"reports GREEN having run none of the quality checks. Branch protection would "
         f"then be waving through completely unverified code."
     )
+
+
+def test_gate_requires_node_so_the_jev_mirror_tests_cannot_skip() -> None:
+    """The gate job must export `XBRAIN_REQUIRE_NODE`, or 19 tests can vanish in silence.
+
+    Same threat model as the gate step's `if: false`, one layer down: nothing here goes
+    red, the job still succeeds, and the required `quality` check reports GREEN having
+    skipped the ONLY check that the `jev.html` page and `jev/report.py` agree on a number.
+    The 19 tests carry a `skipif(shutil.which("node") is None)` so a laptop without node
+    can still run the suite; this variable is what makes the same code fail-closed on a
+    runner (`tests/test_jev_dashboard.py::_NODE_IS_REQUIRED`).
+
+    `ubuntu-latest` ships node today, so the variable changes nothing today. It exists for
+    the day the image drops it or the gate moves to a leaner runner — the day the skips
+    would otherwise arrive silently.
+    """
+    env = _gate_job().get("env") or {}
+    assert str(env.get(_NODE_REQUIRED_VAR, "")).strip() not in ("", "0", "false", "False"), (
+        f"The `{_REQUIRED_CHECK}` job does not export `{_NODE_REQUIRED_VAR}` "
+        f"(env: {env!r}). Without it, a runner with no node SKIPS the 19 tests that "
+        f"execute `jev.template.html`'s pure half — the page's only real correctness "
+        f"check — and the gate still reports green, having verified the mirror not at all."
+    )
+
+
+def test_gate_checks_node_up_front_and_the_check_is_not_skippable() -> None:
+    """A step must run `node --version`, and it must not be conditional.
+
+    Belt to `XBRAIN_REQUIRE_NODE`'s braces, and it buys two things the variable does not:
+    the job dies before the dependency install rather than 20 minutes into the gate, and
+    the log RECORDS which node the mirror ran under, which is the question asked after a
+    divergence, not before it. `if:` on this step puts the fail-open hole straight back.
+    """
+    steps = _gate_job().get("steps") or []
+    node_steps = [step for step in steps if "node --version" in str(step.get("run", ""))]
+    assert node_steps, (
+        f"No step in the `{_REQUIRED_CHECK}` job runs `node --version`. The jev mirror "
+        f"tests execute node; without this the job discovers a missing engine deep inside "
+        f"pytest, if `{_NODE_REQUIRED_VAR}` is set, and not at all if it is not."
+    )
+    for step in node_steps:
+        assert "if" not in step, (
+            f"The `node --version` step declares `if: {step.get('if')!r}`. A skipped "
+            f"prerequisite check is a prerequisite that is not checked."
+        )
 
 
 def test_gate_declares_no_continue_on_error() -> None:

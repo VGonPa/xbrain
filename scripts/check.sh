@@ -253,6 +253,30 @@ print_github_summary() {
 }
 
 # ============================================================================
+# 0. PREREQUISITES - what this gate needs on the machine besides Python
+# ============================================================================
+# node is a REAL prerequisite and was an undeclared one. 19 tests in
+# tests/test_jev_dashboard.py execute the pure half of jev.template.html under
+# node and compare its buckets with the ones jev/report.py produced from the
+# same fixture -- the only check that the page and the report never quote
+# different numbers; everything else on that template is substring pins. They
+# carry a `skipif`, so a machine without node runs the suite and the gate still
+# says ALL CRITICAL CHECKS PASSED having checked the mirror not at all.
+#
+# Locally that trade is fine and this banner just says which half you are
+# running. On a runner it is not: quality.yml sets XBRAIN_REQUIRE_NODE=1, which
+# turns those skips into failures (see the same test file's
+# test_node_is_available_where_the_mirror_is_required).
+if command -v node > /dev/null 2>&1; then
+    print_success "node $(node --version) - the jev dashboard mirror tests will RUN"
+else
+    print_warning "node not found - the 19 jev dashboard mirror tests will SKIP"
+    echo "     They are the only check that jev.html and jev/report.py agree on a number."
+    echo "     Install node, or run with XBRAIN_REQUIRE_NODE=1 to make the skips fail."
+fi
+echo ""
+
+# ============================================================================
 # 1. RUFF CHECK - Code linting  (CRITICAL)
 # ============================================================================
 # Delegates to the `lint` poe task rather than re-spelling `ruff check <dirs>`
