@@ -1,4 +1,5 @@
 # tests/test_jev_cli.py
+import json
 import logging
 import sys
 from collections.abc import Callable
@@ -406,7 +407,7 @@ def test_jev_topics_prices_the_run_from_the_table_at_the_listed_rate(tmp_path: P
     result = runner.invoke(app, ["jev", "topics"])
 
     assert result.exit_code == 0, result.output
-    assert "12000000 tokens de entrada (~0.504 $)" in result.stdout
+    assert "12000000 tokens de entrada (~0.5040 $)" in result.stdout
     # Nothing unaccounted and nothing unpriced: neither marker appears.
     assert "sin recuento" not in result.stdout
     assert "sin tarifa" not in result.stdout
@@ -430,7 +431,7 @@ def test_jev_topics_prices_each_record_by_the_provider_that_answered_it(tmp_path
 
     assert result.exit_code == 0, result.output
     assert (
-        "12000000 tokens de entrada (~0.252 $ · proveedor sin tarifa: otro-juez)" in result.stdout
+        "12000000 tokens de entrada (~0.2520 $ · proveedor sin tarifa: otro-juez)" in result.stdout
     )
     # Two models in one run is what `sorted({...})` exists for — `[jev].model` defaults to a
     # moving alias, so a long run legitimately straddles a version bump.
@@ -448,13 +449,13 @@ def test_jev_topics_says_how_much_of_the_run_it_could_not_measure(tmp_path, monk
     result = runner.invoke(app, ["jev", "topics"])
 
     assert result.exit_code == 0, result.output
-    assert "0 tokens de entrada (+2 sin recuento) (~0.000 $)" in result.stdout
+    assert "0 tokens de entrada (+2 sin recuento) (~0.0000 $)" in result.stdout
 
 
 def test_jev_topics_costs_nothing_when_no_provider_in_the_run_is_priced(tmp_path, monkeypatch):
     """An unpriced provider costs 0.0 — it must not raise, and must not borrow a rate.
 
-    `~0.000 $` alone is indistinguishable from a genuinely free run, so the provider is
+    `~0.0000 $` alone is indistinguishable from a genuinely free run, so the provider is
     named beside it.
     """
     _setup_repo(tmp_path, monkeypatch)
@@ -465,7 +466,7 @@ def test_jev_topics_costs_nothing_when_no_provider_in_the_run_is_priced(tmp_path
     result = runner.invoke(app, ["jev", "topics"])
 
     assert result.exit_code == 0, result.output
-    assert "12000000 tokens de entrada (~0.000 $ · proveedor sin tarifa: fake)" in result.stdout
+    assert "12000000 tokens de entrada (~0.0000 $ · proveedor sin tarifa: fake)" in result.stdout
 
 
 # --------------------------------------------------------------------------- failures
@@ -709,7 +710,7 @@ def test_the_sidecar_is_flushed_during_a_long_run_not_only_at_the_end(tmp_path, 
 def test_an_interrupt_that_rescued_nothing_writes_nothing(tmp_path: Path, monkeypatch):
     """A Ctrl-C before the first answer lands has nothing to save, and must say so.
 
-    Reporting `0 evaluaciones nuevas guardadas · 0 tokens de entrada (~0.000 $)` describes a
+    Reporting `0 evaluaciones nuevas guardadas · 0 tokens de entrada (~0.0000 $)` describes a
     save that did not happen and a bill that was never incurred. Worse, the save DID happen:
     it wrote `{}` over the side-car, so an operator who hit Ctrl-C a second too early
     destroyed every assessment they had ever paid for.
@@ -742,3 +743,324 @@ def test_an_interrupt_that_rescued_nothing_leaves_an_existing_sidecar_alone(
     assert result.exit_code == 130, result.output
     assert "Interrumpido: nada nuevo que guardar" in result.stderr
     assert _topics_path(tmp_path).read_bytes() == before
+
+
+# ------------------------------------------------------------------- `xbrain jev report`
+
+
+def _report_paths(tmp_path: Path) -> tuple[Path, Path]:
+    jev_dir = tmp_path / "data" / "jev"
+    return jev_dir / "topics-report.json", jev_dir / "topics-report.md"
+
+
+def _assess_corpus(monkeypatch) -> None:
+    """Fill the side-car with a judge that backs `ai-coding` (0.93) and little else (0.05).
+
+    The seeded corpus assigns `ai-coding` to item 1 and `startups` to item 2, so this one
+    fake produces one agreement and one disagreement in BOTH directions — item 2's
+    `startups` is doubtful and its `ai-coding` is a missing candidate.
+
+    That holds at any threshold AT OR BELOW 0.93. Above it (the `0.95` config test) the judge
+    backs nothing at all and item 1's `ai-coding` turns doubtful too, which is exactly what
+    that test reads.
+    """
+    monkeypatch.setattr(
+        cli,
+        "_jev_client",
+        lambda cfg: FakeJevClient(nouls={"ai-coding": 0.93}, primary="ai-coding"),
+    )
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+
+def test_jev_report_writes_json_and_markdown(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report", "--threshold", "0.5"])
+
+    assert result.exit_code == 0, result.output
+    assert "Umbral 0.5" in result.stdout
+    assert "items comparados 2/2" in result.stdout
+    # `sin juzgar` sits next to `dudosas`: without it, `enrich respaldado 50 %` beside
+    # `dudosas 0` is a riddle rather than a summary.
+    assert "dudosas 1 · sin juzgar 0 · candidatas 1" in result.stdout
+    # Nothing was dropped, and the line says so rather than leaving it to be assumed.
+    assert "0 caducadas" in result.stdout
+    # The recap of what the side-car cost names the judge nobody prices, exactly as the run
+    # itself does: `~0.0000 $` alone cannot say whether the work was free or merely unpriced.
+    assert "proveedor sin tarifa: fake" in result.stdout
+    json_path, md_path = _report_paths(tmp_path)
+    # The paths are how an operator finds the files.
+    assert f"→ {md_path}" in result.stdout and f"→ {json_path}" in result.stdout
+    assert md_path.read_text(encoding="utf-8").startswith("# Jev · topics")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    # Item 2 is assigned `startups`, which this judge scores 0.05 — doubtful at 0.5 — while
+    # backing `ai-coding` at 0.93, which enrich did not assign to it.
+    assert payload["summary"]["doubtful_pairs"] == 1
+    assert payload["summary"]["missing_pairs"] == 1
+    assert payload["summary"]["items_compared"] == 2
+
+
+def test_jev_report_without_assessments_refuses_and_names_the_command_that_fixes_it(
+    tmp_path: Path, monkeypatch
+):
+    """A report over nothing is not a report of zero.
+
+    It is a plausible-looking file of zeros written over the last good one, atomically —
+    and `data/` is gitignored, the side-car is not snapshotted, and it costs money to
+    regenerate. There is no copy to fall back to.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert "no hay evaluaciones guardadas" in result.stderr
+    assert "xbrain jev topics" in result.stderr
+    assert not _report_paths(tmp_path)[0].exists()
+
+
+def test_jev_report_defaults_to_the_configured_threshold(tmp_path: Path, monkeypatch):
+    """No `--threshold` reads `[jev].threshold`, so the report and the config agree."""
+    _setup_repo(tmp_path, monkeypatch, jev="threshold = 0.95\n")
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "Umbral 0.95" in result.stdout
+
+
+def test_jev_report_refuses_a_threshold_above_one(tmp_path: Path, monkeypatch):
+    """A probability cannot be 1.5, and above 1.0 nothing is ever backed: every assignment
+    becomes doubtful and the report is a plausible-looking file of pure noise.
+
+    The opposite half of the guard has its own test — the two failures are opposites, so one
+    case cannot stand for both.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+    result = runner.invoke(app, ["jev", "report", "--threshold", "1.5"])
+
+    assert result.exit_code == 1
+    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
+    assert not _report_paths(tmp_path)[0].exists()
+
+
+def test_jev_report_excludes_assessments_a_vocabulary_change_retired(tmp_path: Path, monkeypatch):
+    """A stale assessment is left OUT, never compared as if it were current.
+
+    The contract binds a stored record to the questions Jev was ACTUALLY asked. Adding a
+    topic rewrites the question set, so every stored record now describes an ask that no
+    longer exists — and comparing against a question Jev was never shown is not a weaker
+    signal, it is a wrong one. The report must drop to zero rather than keep quoting numbers
+    off retired records.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    before = runner.invoke(app, ["jev", "report"])
+    assert "items comparados 2/2" in before.stdout
+    json_path, md_path = _report_paths(tmp_path)
+    good_json, good_md = json_path.read_bytes(), md_path.read_bytes()
+
+    save_vocab(
+        [
+            Topic(slug="ai-coding", description="Construir software con IA."),
+            Topic(slug="startups", description="Fundar empresas."),
+            Topic(slug="devtools", description="Herramientas para programar."),
+        ],
+        tmp_path / "data" / "vocab.yaml",
+    )
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    # The two retired records are NAMED. `0 items evaluados` was byte-identical to "nobody
+    # has ever run `jev topics`", and the two readings differ by the price of the corpus.
+    assert "0 evaluaciones vigentes de 2 guardadas (2 caducadas, 0 huérfanas)" in result.stderr
+    assert "xbrain jev topics" in result.stderr
+    # And the last good report is still there, untouched.
+    assert json_path.read_bytes() == good_json and md_path.read_bytes() == good_md
+
+
+def _good_report(tmp_path: Path, monkeypatch) -> tuple[bytes, bytes]:
+    """Write one real report, and hand back the bytes of both files.
+
+    Every refusal test below asserts these EXACT bytes survive: "it printed an error" is not
+    the property that matters, "it did not eat the last good report" is.
+    """
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "report"]).exit_code == 0
+    json_path, md_path = _report_paths(tmp_path)
+    return json_path.read_bytes(), md_path.read_bytes()
+
+
+def _assert_report_untouched(tmp_path: Path, before: tuple[bytes, bytes]) -> None:
+    json_path, md_path = _report_paths(tmp_path)
+    assert (json_path.read_bytes(), md_path.read_bytes()) == before
+
+
+def test_jev_report_refuses_an_empty_vocabulary_and_keeps_the_last_report(
+    tmp_path: Path, monkeypatch
+):
+    """The sharpest of the four: `build_topic_questions` refuses an empty vocabulary loudly,
+    but only from INSIDE the comparison loop.
+
+    With an empty side-car the loop never runs, so the behaviour used to flip on the contents
+    of an unrelated file — and the silent branch was the one where the operator had no other
+    signal.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    before = _good_report(tmp_path, monkeypatch)
+    (tmp_path / "data" / "vocab.yaml").unlink()
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert "el vocabulario está vacío o falta" in result.stderr
+    assert "xbrain vocab" in result.stderr
+    _assert_report_untouched(tmp_path, before)
+
+
+def test_jev_report_refuses_an_empty_store_and_keeps_the_last_report(tmp_path: Path, monkeypatch):
+    """A side-car full of paid records and no items to compare them against is an operator
+    error, not a corpus with nothing to say."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    before = _good_report(tmp_path, monkeypatch)
+    (tmp_path / "data" / "items.json").unlink()
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert "no hay items que comparar" in result.stderr
+    assert "xbrain extract" in result.stderr
+    _assert_report_untouched(tmp_path, before)
+
+
+def test_jev_report_refuses_when_the_side_car_disappears_and_keeps_the_last_report(
+    tmp_path: Path, monkeypatch
+):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    before = _good_report(tmp_path, monkeypatch)
+    _topics_path(tmp_path).unlink()
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert "no hay evaluaciones guardadas" in result.stderr
+    _assert_report_untouched(tmp_path, before)
+
+
+def test_jev_report_accepts_the_closed_interval_and_never_calls_jev(tmp_path: Path, monkeypatch):
+    """`t = 0` backs everything and `t = 1` backs only certainty — both legal, both meaningful.
+
+    The same test holds the command to its own docstring ("No llama a Jev ni gasta nada") by
+    making the call impossible rather than counting calls afterwards.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("report must never call Jev"))
+
+    for value, shown in (("0", "Umbral 0.0"), ("1", "Umbral 1.0")):
+        result = runner.invoke(app, ["jev", "report", "--threshold", value])
+        assert result.exit_code == 0, result.output
+        assert shown in result.stdout
+
+
+def test_jev_report_refuses_a_negative_threshold_too(tmp_path: Path, monkeypatch):
+    """Below 0.0 the failure is the OPPOSITE of above 1.0 and just as silent: `noul >= t`
+    holds for every pair, so everything is backed and every topic becomes a candidate — a
+    report that reads as near-perfect agreement."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    before = _good_report(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report", "--threshold", "-0.5"])
+
+    assert result.exit_code == 1
+    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
+    _assert_report_untouched(tmp_path, before)
+
+
+def test_jev_report_agrees_with_one_orphaned_record(tmp_path: Path, monkeypatch):
+    """A record whose ITEM is gone from the store is an orphan, not a stale one.
+
+    Two different events with the same symptom — the record leaves the comparison — and two
+    counters, so the operator can tell "the vocabulary moved" from "that post is no longer in
+    `items.json`". Spanish agrees at 1 only, and each segment agrees with its own number.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _item("1", "Claude Code hooks")}, tmp_path / "data" / "items.json")
+    _seed_vocab(tmp_path)
+    _assess_corpus(monkeypatch)
+    stored = load_assessments(_topics_path(tmp_path))
+    # Id `2` is not in the store, so this record is an ORPHAN. Its contract is untouched:
+    # currency never enters into it — `current_pairs` iterates the store, not the side-car.
+    save_assessments(
+        {"1": stored["1"], "2": stored["1"].model_copy(update={"item_id": "2"})},
+        _topics_path(tmp_path),
+    )
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 huérfana" in result.stdout
+    assert "0 caducadas" in result.stdout
+
+
+def test_jev_report_agrees_with_one_stale_record(tmp_path: Path, monkeypatch):
+    """The orphan's twin: the item is still there, the CONTRACT no longer describes it.
+
+    The all-stale case is a refusal, so this is the only place the singular `1 caducada`
+    is reachable — one record survives the edit and one does not.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    stored = load_assessments(_topics_path(tmp_path))
+    # Item `2` is in the store and its stored ask no longer matches today's questions.
+    save_assessments(
+        {"1": stored["1"], "2": stored["2"].model_copy(update={"contract": "f" * 64})},
+        _topics_path(tmp_path),
+    )
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 caducada" in result.stdout and "1 caducadas" not in result.stdout
+    assert "huérfana" not in result.stdout
+    assert "items comparados 1/1" in result.stdout
+
+
+def test_the_three_places_that_quote_the_bill_print_the_same_fragment(tmp_path: Path, monkeypatch):
+    """`jev topics`, `jev report` and `topics-report.md` recap ONE side-car.
+
+    They used to render it `~0.000 $` / `~0.0001 $` and `proveedor sin tarifa:` / `sin
+    tarifa:` — a recap that prints a different figure from the bill it recaps.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "_jev_client",
+        lambda cfg: FakeJevClient(nouls={"ai-coding": 0.93}, primary="ai-coding"),
+    )
+    topics = runner.invoke(app, ["jev", "topics"])
+    report = runner.invoke(app, ["jev", "report"])
+
+    assert topics.exit_code == 0 and report.exit_code == 0, report.output
+    stored = tuple(load_assessments(_topics_path(tmp_path)).values())
+    fragment = cli._jev_cost_line(stored)
+
+    assert fragment == "200 tokens de entrada (~0.0000 $ · proveedor sin tarifa: fake)"
+    assert fragment in topics.stdout
+    assert fragment in report.stdout
+    assert fragment in _report_paths(tmp_path)[1].read_text(encoding="utf-8")
