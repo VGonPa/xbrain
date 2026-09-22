@@ -9,6 +9,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from tests.conftest import plain_output
 from xbrain import cli
 from xbrain.cli import app
 from xbrain.models import (
@@ -31,18 +32,9 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _BOX_RE = re.compile("[─-╿]")
 
 
-def _plain_output(output: str) -> str:
-    """Normalize CliRunner output for substring assertions on Rich/Typer error boxes.
-
-    When color is enabled (as in CI, but not in pytest's captured output), Rich styles
-    each flag with the leading dash in its own ANSI span (``-`` + ``-apply``), so the
-    literal ``--apply`` never appears contiguously; the narrow box also wraps the message
-    onto several lines, with box borders (``│``) landing between words. Stripping the ANSI
-    escapes rejoins the split flag, dropping the box-drawing chrome and collapsing
-    whitespace rejoins words wrapped across lines — making the assertion fully
-    terminal-width independent.
-    """
-    return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
+#: ONE normaliser, in `tests/conftest.py`, shared with `tests/test_jev_cli.py`. Re-exported
+#: under the old private name so the call sites in this file stay as they were.
+_plain_output = plain_output
 
 
 def _write_tally(output: str) -> str:
@@ -4951,48 +4943,57 @@ def test_redescribe_frames_missing_vision_command_names_the_operation(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
-def test_redescribe_frames_help_renders_vision_config_key_literally():
-    """M3: `redescribe-frames --help` must show `[vision].command` literally.
-
-    Unescaped, Rich's markup parser treats `[vision]` as a (bogus) style tag,
-    strips it, and renders `.command` on its own — the operator loses the one
-    clue telling them which config section to set."""
-    result = runner.invoke(app, ["redescribe-frames", "--help"])
-    assert result.exit_code == 0, result.output
-    assert "[vision].command" in _plain_output(result.output)
-
-
-def test_digest_video_help_renders_vision_config_keys_literally():
-    """M3, the sibling surface: `digest-video --help` mentions `[vision]` twice
-    — once in `--frames`'s help (`[vision].command`) and once in
-    `--vision-model`'s (`[vision].model`) — and both must survive rendering."""
-    result = runner.invoke(app, ["digest-video", "--help"])
-    assert result.exit_code == 0, result.output
-    out = _plain_output(result.output)
-    assert "[vision].command" in out
-    assert "[vision].model" in out
-
-
 @pytest.mark.parametrize(
     ("command", "key"),
-    [("describe", "[describe].version"), ("get", "[index].get_char_budget")],
+    [
+        (["redescribe-frames"], "[vision].command"),
+        (["digest-video"], "[vision].command"),
+        (["digest-video"], "[vision].model"),
+        (["digest-video"], "[transcribe].command"),
+        (["digest-video"], "[frames].footage_max_frames"),
+        (["describe"], "[describe].version"),
+        (["describe"], "[describe].model"),
+        (["get"], "[index].get_char_budget"),
+        (["jev", "report"], "[jev].threshold"),
+        (["jev", "dashboard"], "[jev].threshold"),
+    ],
+    ids=lambda v: " ".join(v) if isinstance(v, list) else v,
 )
-def test_command_help_renders_its_config_key_literally(command: str, key: str):
-    """The same eaten-markup defect as `[vision]` above, on two more surfaces.
+def test_command_help_renders_its_config_key_literally(command: list[str], key: str):
+    """Every `[section].key` a command's help names must survive Rich's markup parser.
 
-    `describe`'s docstring tells the operator that bumping `[describe].version` forces a
-    re-describe without `--force`, and `get`'s says the per-response budget comes from
-    `[index].get_char_budget`. Rich read each bracket as a style tag and ate it, so both
-    rendered a bare `.version` / `.get_char_budget` — naming a key that exists in no
-    `config.toml`, in the one sentence whose whole job is to say which key to set.
+    ONE test for the whole class. The repo has been bitten by this five times — `[vision]`
+    twice in #90, then `[jev]`, `[describe]`/`[index]` and `[transcribe]` in #211 — and had
+    the assertion in three variants across two files, the weakest of which could not see a
+    half-fix. Typer renders help through Rich, Rich reads `[section]` as a style tag and
+    eats it, and the result names a key that exists in no config file.
 
-    Asserted on the RENDERED output for the reason the comment above gives: the escaping
-    backslash lives in the source either way, so a source-text assertion stays green after
-    someone deletes it.
+    Three assertions, each catching what the others cannot:
+
+    * the key appears — the escape is there at all;
+    * NO occurrence of the bare `.key` is unprefixed — a second, unescaped occurrence
+      beside an escaped one would otherwise pass, which is exactly how a half-fix survives.
+      Expressed as "every `.key` is preceded by `]`" rather than as a count of the two
+      spellings, because two sections may legitimately share a suffix: `digest-video` names
+      both `[vision].command` and `[transcribe].command`, and a count assertion reads the
+      second as a half-fix of the first;
+    * no backslash is visible — the escape is Rich's, so a build whose markup mode is not
+      `"rich"` would render `\[vision]` literally and the first two would still pass. It
+      also catches a `\\[` that a docstring turned raw carries over from its non-raw life,
+      which is a mistake made while writing this very test.
+
+    Asserted on the RENDERED output, never the source: the backslash is in the source
+    either way, so a source assertion stays green after someone deletes it.
     """
-    result = runner.invoke(app, [command, "--help"])
+    bare = key.split("]", 1)[1]
+
+    result = runner.invoke(app, [*command, "--help"])
+
     assert result.exit_code == 0, result.output
-    assert key in _plain_output(result.output)
+    out = plain_output(result.output)
+    assert key in out
+    assert re.search(rf"(?<!\]){re.escape(bare)}", out) is None
+    assert "\\[" not in out
 
 
 def test_redescribe_frames_limit_help_says_items_not_videos():

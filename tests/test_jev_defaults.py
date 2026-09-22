@@ -1,6 +1,8 @@
 # tests/test_jev_defaults.py — the ONE place a Jev run's input cost is computed.
 from datetime import datetime, timezone
 
+import pytest
+
 from xbrain.jev.defaults import (
     INPUT_USD_PER_MTOK,
     input_cost_usd,
@@ -130,3 +132,34 @@ def test_input_cost_is_a_float_even_when_there_is_nothing_to_price():
     every caller would have to remember the cast."""
     assert isinstance(input_cost_usd([]), float)
     assert input_cost_usd([]) == 0.0
+
+
+def test_the_documented_corpus_bill_is_computed_from_the_rate_not_asserted_beside_it():
+    """The ~0.65 $ figure the docs and `jev_cost_fragment`'s docstring quote, RE-DERIVED.
+
+    `jev_cost_fragment` receives the cost as an argument, so every test around it pins
+    FORMATTING only: if `INPUT_USD_PER_MTOK` moved, the arithmetic in those docstrings
+    would rot with nothing going red. This test goes through `input_cost_usd`, which is the
+    function that actually applies the rate, so a rate change fails HERE — next to the
+    number that has to be updated with it.
+
+    The inputs are the measured corpus (`docs/jev.md` § What a pass actually costs):
+    2,591 records at ~6,000 input tokens each. The expected value is computed from the rate
+    rather than written as `0.6529`, so this asserts the PIPELINE from rate to bill, not a
+    constant someone copied.
+    """
+    records = 2_591
+    tokens_each = 6_000
+    assessments = [_assessment(str(i), "typesafe", tokens_each) for i in range(records)]
+
+    cost = input_cost_usd(assessments)
+
+    # `approx`: `input_cost_usd` prices PER RECORD (each record may have its own provider),
+    # so 2,591 additions accumulate a different last bit than one multiplication. The bill is
+    # printed at four decimals, which is far above that.
+    expected = records * tokens_each / 1e6 * INPUT_USD_PER_MTOK["typesafe"]
+    assert cost == pytest.approx(expected)
+    # And the figure the docs quote, to the four decimals the bill is printed with.
+    assert jev_cost_fragment(records * tokens_each, 0, round(cost, 4), ()) == (
+        "15546000 tokens de entrada (~0.6529 $)"
+    )

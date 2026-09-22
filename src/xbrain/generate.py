@@ -954,7 +954,8 @@ def _browser_page_lines(dashboard_href: str, jev_href: str | None) -> list[str]:
     NO row at all rather than a disabled one.
     """
     lines = [
-        f"- [📊 Dashboard interactivo]({dashboard_href}) — métricas, drill-down y enlaces (se abre en el navegador)",
+        f"- [📊 Dashboard interactivo]({dashboard_href}) — métricas, drill-down y enlaces "
+        "(se abre en el navegador)",
     ]
     if jev_href is not None:
         lines.append(
@@ -965,7 +966,7 @@ def _browser_page_lines(dashboard_href: str, jev_href: str | None) -> list[str]:
 
 
 def _render_index(
-    items: list[Item], strings: Strings, dashboard_href: str, jev_href: str | None = None
+    items: list[Item], strings: Strings, dashboard_href: str, jev_href: str | None
 ) -> str:
     """Render the top-level index note: corpus stats and the topic list.
 
@@ -975,8 +976,11 @@ def _render_index(
 
     `jev_href` is the same URI for ``jev.html`` — the Jev-vs-`enrich` page written by
     `xbrain jev dashboard` — or ``None`` when that page is not on disk, which is the normal
-    state: the Jev layer is optional and paid. See `_browser_page_lines` for why the two
-    rows are not conditioned alike. Nothing here imports ``xbrain.jev``; this module needs
+    state: the Jev layer is optional and paid. It carries NO default, though `None` is a
+    valid value: `generate` is the only caller and always passes it, so a default could
+    only ever let a future caller drop the row silently — the same silent-absence failure
+    the conditional row exists to avoid. See `_browser_page_lines` for why the two rows are
+    not conditioned alike. Nothing here imports ``xbrain.jev``; this module needs
     the page's NAME, not its layer, and `tests/test_generate.py` pins that the import never
     appears.
     """

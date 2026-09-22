@@ -1310,27 +1310,51 @@ def test_jev_dashboard_leaves_the_last_good_page_alone_when_the_rename_dies(
     assert not list(_page(vault).parent.glob("*.tmp"))
 
 
-# ---------------------------------------------------------- help text survives Rich markup
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (1, "el 1 item evaluado no está enriquecido"),
+        (2, "los 2 items evaluados no están enriquecidos"),
+    ],
+)
+def test_the_un_enriched_refusal_agrees_in_number(
+    count: int, expected: str, tmp_path: Path, monkeypatch
+):
+    """The whole phrase agrees, not just the noun.
 
+    `plural()` agreed `item evaluado` while the article and the verb around it stayed
+    hard-coded plural, so a one-item corpus refused with `los 1 item evaluado no están
+    enriquecidos` — which reads as a bug in the counting, the exact failure `defaults.plural`
+    exists to prevent ("1 filas más reads as a bug in the counting, not in the grammar").
 
-@pytest.mark.parametrize("command", ["report", "dashboard"])
-def test_threshold_help_names_the_config_key_literally(command: str) -> None:
-    """`--threshold`'s help must SAY `[jev].threshold`, not `.threshold`.
-
-    Typer renders help through Rich whenever rich is installed, and Rich reads `[jev]` as a
-    style tag and CONSUMES it: the shipped help read `(por defecto .threshold)`, naming a
-    key that does not exist in any config file. The literal is restored by escaping the
-    bracket for Rich (`\\[`), which is why the source string is a raw string.
-
-    The second assertion is the one that catches a half-fix. Asserting only that
-    `[jev].threshold` appears would still pass if some other `.threshold` in the same help
-    were left bare, so every occurrence of `.threshold` must be one that carries its
-    `[jev]` prefix.
+    Parametrised at 1 and 2 because a single case cannot tell agreement from a coincidence:
+    the plural branch was always right, and it is the singular that was broken.
     """
-    # A wide terminal: Rich wraps the options table to the width it is given, and a help
-    # string broken across two lines would fail this on formatting rather than on content.
-    result = CliRunner(env={"COLUMNS": "200"}).invoke(app, ["jev", command, "--help"])
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {str(i): _item(str(i), f"Post {i}") for i in range(1, count + 1)},
+        tmp_path / "data" / "items.json",
+    )
+    _seed_vocab(tmp_path)
+    _assess_corpus(monkeypatch)
+    # Strip every enrichment AFTER assessing: the side-car stays full and current, and the
+    # comparison has nothing to compare against — the fifth refusal.
+    store = load_store(tmp_path / "data" / "items.json")
+    save_store(
+        {k: v.model_copy(update={"enriched": None}) for k, v in store.items()},
+        tmp_path / "data" / "items.json",
+    )
 
-    assert result.exit_code == 0
-    assert "[jev].threshold" in result.output
-    assert result.output.count(".threshold") == result.output.count("[jev].threshold")
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert expected in result.stderr
+
+
+# ---------------------------------------------------------- help text survives Rich markup
+#
+# `xbrain jev report|dashboard --help` must render `[jev].threshold` literally — Rich reads
+# `[jev]` as a style tag and eats it. That is asserted, together with every other command
+# whose help names a config key, by the ONE parametrized test for the whole class:
+# `tests/test_cli.py::test_command_help_renders_its_config_key_literally`. It lived here
+# first; it was moved rather than copied so the repo has a single place to strengthen.

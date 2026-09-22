@@ -1106,7 +1106,7 @@ def describe(
     model: str | None = typer.Option(
         None,
         "--model",
-        help="Modelo de visión a usar. Si no se pasa, se usa el del config (`describe.model`).",
+        help=r"Modelo de visión a usar. Si no se pasa, se usa el del config (`\[describe].model`).",
     ),
     batch_size: int = typer.Option(
         5,
@@ -1725,10 +1725,10 @@ def digest_video(
         "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
     ),
 ) -> None:
-    """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
+    r"""Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
     Para cada vídeo seleccionado: descarga efímera (reutiliza `fetch-video`) →
-    transcribe con un transcriptor EXTERNO local (config `transcribe.command`,
+    transcribe con un transcriptor EXTERNO local (config `\[transcribe].command`,
     por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
     item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
@@ -1744,11 +1744,11 @@ def digest_video(
     disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
 
     `--frames` (opt-in, capa visual PR4): extrae key-frames con ffmpeg (EXTERNO),
-    los describe con el modelo de visión EXTERNO (`\\[vision].command`), adjunta las
+    los describe con el modelo de visión EXTERNO (`\[vision].command`), adjunta las
     descripciones al source `x_video` y embebe los frames en la nota como fotos.
     Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
     (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
-    se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
+    se describe como metraje, con tope `\[frames].footage_max_frames`. Sin
     `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
     `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
     """
@@ -3028,10 +3028,19 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
         # `report.compare_item` returns None for every record because no item carries an
         # enrichment. Every bucket is 0, the self-check agrees with a summary of zeros, and
         # the artifact renders clean — the one empty state that produces no signal at all.
+        # THE WHOLE PHRASE AGREES, not just the noun. `plural` agreed `item evaluado` while
+        # the article and the verb around it stayed hard-coded plural, so a one-item corpus
+        # refused with `los 1 item evaluado no están enriquecidos` — which reads as a bug in
+        # the counting, the exact failure `defaults.plural`'s own docstring says it exists
+        # to prevent. Spanish agrees at 1 ONLY, so each part is a two-way choice on the
+        # same count.
+        count = len(jev.pairs)
+        article = "el" if count == 1 else "los"
+        predicate = "no está enriquecido" if count == 1 else "no están enriquecidos"
         raise JevError(
-            f"ninguna evaluación vigente tiene con qué compararse: los "
-            f"{plural(len(jev.pairs), 'item evaluado', 'items evaluados')} no están "
-            f"enriquecidos. Ejecuta `xbrain enrich`. {kept}"
+            f"ninguna evaluación vigente tiene con qué compararse: {article} "
+            f"{plural(count, 'item evaluado', 'items evaluados')} {predicate}. "
+            f"Ejecuta `xbrain enrich`. {kept}"
         )
 
 
