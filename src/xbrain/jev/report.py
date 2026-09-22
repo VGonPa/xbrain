@@ -327,7 +327,7 @@ def _slug_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
 
 
 def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
-    """One `per_topic` row. The row's own three buckets PARTITION its `assigned`.
+    """One `per_topic` row: `assigned`, the three buckets that PARTITION it, and `missing`.
 
     `backed = assigned - doubtful - unjudged`, the same arithmetic as the corpus-wide total in
     `_pair_totals`, and not because a vocabulary row can carry an unjudged pair today. It
@@ -340,12 +340,20 @@ def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
     `_pair_totals` exists to prevent one altitude up.
     """
     assigned = counts["assigned"][slug]
-    backed = assigned - counts["doubtful"][slug] - counts["unjudged"][slug]
+    doubtful = counts["doubtful"][slug]
+    unjudged = counts["unjudged"][slug]
     return {
         "slug": slug,
         "assigned": assigned,
-        "backed": backed,
-        "backed_pct": _pct(backed, assigned),
+        "backed": assigned - doubtful - unjudged,
+        # The other two terms of the partition ride WITH the row. They cost nothing —
+        # `_slug_counts` already built both Counters — and a consumer that shows them per
+        # topic (Task 5's chart-01 tooltip does) otherwise displays a per-topic number whose
+        # only counterpart in this report is a corpus-wide sum. A number nothing can be
+        # checked against is a number free to be wrong.
+        "doubtful": doubtful,
+        "unjudged": unjudged,
+        "backed_pct": _pct(assigned - doubtful - unjudged, assigned),
         "missing": counts["missing"][slug],
     }
 
