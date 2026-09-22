@@ -5019,3 +5019,23 @@ def test_the_error_wrapper_still_converts_a_real_operator_error():
     with pytest.raises(typer.Exit) as excinfo:
         _command()
     assert excinfo.value.exit_code == 1
+
+
+def test_an_abort_reaches_click_instead_of_the_operator_error_wrapper():
+    """`click.Abort` subclasses `RuntimeError` exactly as `Exit` does, so the wrapper ate it.
+
+    Live call site: `download-videos` asks `typer.confirm(..., abort=True)` before a large
+    download. Answering "n" must print Click's own "Aborted!" — not a bare "Error: ", which
+    is what `str(Abort())` renders as once `_OPERATOR_ERRORS` catches it.
+    """
+    probe = typer.Typer()
+
+    @probe.command()
+    @cli._handle_cli_errors
+    def _cmd() -> None:
+        raise typer.Abort()
+
+    result = CliRunner().invoke(probe, [])
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert "Error:" not in result.output

@@ -101,4 +101,9 @@ class JevClient(Protocol):
         builds a client is the one that has to release it, and it only ever holds a
         `JevClient`. A provider with nothing to release implements it as a no-op — which
         is why it is cheaper to require than to make every caller probe for it.
+
+        The body is `...`, like `ask`'s: a docstring alone is a working no-op `close`, so a
+        class that explicitly inherits this Protocol would silently get one and leak exactly
+        the way the method exists to prevent.
         """
+        ...

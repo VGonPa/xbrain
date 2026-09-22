@@ -1,16 +1,19 @@
 # tests/test_jev_cli.py
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from tests.jev_fakes import FakeJevClient
 from xbrain import cli
 from xbrain.cli import app
 from xbrain.config import Config
-from xbrain.jev.client import JevClient
-from xbrain.jev.store import load_assessments
+from xbrain.jev.client import JevClient, JevResult, Question
+from xbrain.jev.models import PrimaryChoice, TopicAssessment
+from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.rubrics import save_vocab
 from xbrain.store import save_store
@@ -30,6 +33,35 @@ def _refusing_client(reason: str) -> Callable[[Config], JevClient]:
         raise AssertionError(reason)
 
     return _build
+
+
+class _PerItemProviderClient(FakeJevClient):
+    """A `FakeJevClient` that attributes each answer to a different provider.
+
+    `INPUT_USD_PER_MTOK` prices `typesafe` and nothing else. A run that priced the WHOLE
+    batch at one rate — say the first record's — instead of pricing each record by the
+    provider that answered it would bill the unpriced half too, and no single-provider
+    test can see that: with one provider both formulas agree.
+    """
+
+    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
+        answered = super().ask(state, questions)
+        provider = "typesafe" if "Claude" in state["post"] else "otro-juez"
+        return replace(answered, provider=provider)
+
+
+def _stored_assessment(item_id: str) -> TopicAssessment:
+    """A record from some EARLIER run, for an item the current corpus no longer holds."""
+    return TopicAssessment(
+        item_id=item_id,
+        provider="typesafe",
+        model="jev-1.13.0",
+        asked_at=DT,
+        contract="b" * 64,
+        state_chars=3,
+        membership={"ai-coding": 0.9},
+        primary=PrimaryChoice(choice="ai-coding", confidence=0.8, probabilities={"ai-coding": 0.8}),
+    )
 
 
 def _setup_repo(tmp_path: Path, monkeypatch, jev: str = "") -> Path:
@@ -184,17 +216,24 @@ def test_jev_topics_never_touches_items_json(tmp_path: Path, monkeypatch):
     assert not list((tmp_path / "data").glob("snapshots/*"))
 
 
-def test_jev_topics_truncates_a_long_failure_list(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize(
+    ("total", "failures", "tail"),
+    # 12 items → 11 failures → 1 over the limit, the case that exposes a hard-coded plural.
+    [(12, 11, "… y 1 fallo más"), (13, 12, "… y 2 fallos más")],
+)
+def test_jev_topics_truncates_a_long_failure_list(
+    tmp_path: Path, monkeypatch, total: int, failures: int, tail: str
+):
     """Only the first ten failures are printed; the rest are COUNTED, never dropped.
 
     A dead key or a bad vocabulary fails nearly every item. One line each would bury the
     summary under thousands of identical lines, and dropping the overflow silently would
-    understate the damage — so the tail is reported as a number.
+    understate the damage — so the tail is reported as a number, and agrees with itself.
     """
     _setup_repo(tmp_path, monkeypatch)
     _seed_vocab(tmp_path)
     store = {"01": _item("01", "El unico que pasa")}
-    store.update({f"{n:02d}": _item(f"{n:02d}", f"Fallo numero {n}") for n in range(2, 13)})
+    store.update({f"{n:02d}": _item(f"{n:02d}", f"Fallo numero {n}") for n in range(2, total + 1)})
     save_store(store, tmp_path / "data" / "items.json")
     fake = FakeJevClient(fail_when=lambda state: "unico" not in state["post"])
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
@@ -202,10 +241,10 @@ def test_jev_topics_truncates_a_long_failure_list(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["jev", "topics"])
 
     assert result.exit_code == 0, result.output
-    assert "1 evaluadas · 11 fallidas" in result.output
-    # Ten shown, one accounted for — 11 failures, not 10 and a shrug.
+    assert f"1 evaluadas · {failures} fallidas" in result.output
+    # Ten shown, the rest accounted for — never 10 and a shrug.
     assert result.output.count("  FALLO ") == 10
-    assert "… y 1 fallos más" in result.output
+    assert tail in result.output
     # The one record that succeeded is still saved: a noisy failure list never costs work
     # that was already paid for.
     assert list(load_assessments(tmp_path / "data" / "jev" / "topics.json")) == ["01"]
@@ -220,6 +259,10 @@ def test_jev_topics_checkpoints_what_it_paid_for_when_interrupted(tmp_path: Path
     """
     _setup_repo(tmp_path, monkeypatch, jev="concurrency = 1\n")
     _seed(tmp_path)
+    # An earlier run's record for an item the corpus no longer holds. It makes the two
+    # numbers in the message DIFFER (1 rescued, 2 on disk), so a message that reported the
+    # file total for both — the reading an operator hears as "503 rescued" — goes red.
+    save_assessments({"99": _stored_assessment("99")}, tmp_path / "data" / "jev" / "topics.json")
     fake = FakeJevClient(interrupt_after=1)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
 
@@ -231,7 +274,69 @@ def test_jev_topics_checkpoints_what_it_paid_for_when_interrupted(tmp_path: Path
     # re-raised, so this pins a regression the side-car assertions below cannot see.
     assert result.exit_code == 130, result.output
     topics_path = tmp_path / "data" / "jev" / "topics.json"
-    assert list(load_assessments(topics_path)) == ["1"]
-    assert f"Interrumpido: 1 evaluaciones guardadas en {topics_path}" in result.output
+    # The record answered before the interrupt is kept, and the earlier run's is not lost.
+    assert list(load_assessments(topics_path)) == ["1", "99"]
+    assert (
+        f"Interrumpido: 1 evaluaciones nuevas guardadas (2 en total) en {topics_path}"
+        in result.output
+    )
     # The pool is still released on the way out.
     assert fake.closed is True
+
+
+def test_jev_topics_prices_the_run_from_the_table_at_the_listed_rate(tmp_path: Path, monkeypatch):
+    """The cost line is the one number an operator maps to a bill, so it is pinned exactly.
+
+    `INPUT_USD_PER_MTOK["typesafe"]` is 0.042 $/Mtok, so 2 × 6,000,000 input tokens is
+    12,000,000 × 0.042 / 1e6 = 0.504 $. Swapping `/1e6` for `/1e3` prints 504.000, summing
+    `output_tokens` prints 20 tokens and 0.000 — every plausible slip moves this string.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    fake = FakeJevClient(provider="typesafe", input_tokens=6_000_000, output_tokens=10)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    assert "12000000 tokens de entrada (~0.504 $)" in result.output
+
+
+def test_jev_topics_prices_each_record_by_the_provider_that_answered_it(
+    tmp_path: Path, monkeypatch
+):
+    """Per RECORD, not one rate for the run — and an unlisted provider contributes 0.0.
+
+    Half the batch is answered by `typesafe` (priced) and half by `otro-juez` (absent from
+    the table), so only 6,000,000 of the 12,000,000 tokens are billable: 0.252 $. A run
+    priced at one flat rate would print 0.504 $ here and stay green in every
+    single-provider test, which is exactly why this one mixes them.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    fake = _PerItemProviderClient(input_tokens=6_000_000)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    assert "12000000 tokens de entrada (~0.252 $)" in result.output
+
+
+def test_jev_topics_costs_nothing_when_no_provider_in_the_run_is_priced(
+    tmp_path: Path, monkeypatch
+):
+    """An unpriced provider costs 0.0 — it must not raise, and must not borrow a rate.
+
+    `.get(provider, 0.0)` is what makes this a number instead of a `KeyError` in the middle
+    of reporting a run that has already been paid for.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    fake = FakeJevClient(provider="fake", input_tokens=6_000_000)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    assert "12000000 tokens de entrada (~0.000 $)" in result.output

@@ -13,6 +13,7 @@ from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import typer
@@ -51,7 +52,6 @@ from xbrain.jev.assess import RunResult, run_assessments, select_items
 from xbrain.jev.client import JevClient, JevError
 from xbrain.jev.defaults import INPUT_USD_PER_MTOK
 from xbrain.jev.env import typesafe_api_key
-from xbrain.jev.models import TopicAssessment
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -165,6 +165,11 @@ from xbrain.video_digest import (
 )
 from xbrain.worksheet import export_worksheet, import_worksheet
 
+if TYPE_CHECKING:
+    # `_checkpoint`'s annotation only. Kept out of the RUNTIME imports so the module-top
+    # `xbrain.jev` surface stays the agreed five — client, env, defaults, assess, store.
+    from xbrain.jev.models import TopicAssessment
+
 app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
 
 _BOOKMARKS_URL = "https://x.com/i/bookmarks"
@@ -271,13 +276,15 @@ def _handle_cli_errors(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except typer.Exit:
-            # `click.exceptions.Exit` IS a `RuntimeError`, which `_OPERATOR_ERRORS` lists.
-            # Without this re-raise the clause below catches a command's own deliberate
-            # `typer.Exit(code=N)`, prints a bare "Error: " (its `str` is empty) and exits
-            # 1 — silently replacing the code the command chose. `xbrain jev topics` exits
-            # 130 on an interrupt, and the stacked `_handle_index_errors` raises its own
-            # Exit too, which is why this is a re-raise and not a special case for 130.
+        except (typer.Exit, typer.Abort):
+            # BOTH subclass `RuntimeError`, which `_OPERATOR_ERRORS` lists, so without this
+            # re-raise the clause below catches click's own control flow and rewrites it.
+            # `typer.Exit(code=N)` became a bare "Error: " (its `str` is empty) plus exit 1,
+            # silently replacing the code the command chose — `xbrain jev topics` exits 130
+            # on an interrupt, and the stacked `_handle_index_errors` raises its own Exit.
+            # `typer.Abort` is what `typer.confirm(..., abort=True)` raises when the operator
+            # answers "n" (`download-videos`); it became "Error: " instead of "Aborted!".
+            # `typer.Abort is click.Abort`, so naming it through typer adds no import.
             raise
         except _OPERATOR_ERRORS as exc:
             typer.echo(f"Error: {exc}", err=True)
@@ -2608,15 +2615,19 @@ def _jev_client(cfg: Config) -> JevClient:
     `xbrain` invocation — `--help` included — pay for the SDK's import, for a command most
     runs never reach.
 
+    The key is checked BEFORE that import, so the one path a first-run operator is most
+    likely to take — no key configured — does not pay for the vendor's HTTP stack to be
+    told it is missing.
+
     Built only AFTER selection, so `--dry-run` and an empty backlog never need a key.
     """
-    from xbrain.jev.typesafe import TypeSafeJevClient
-
     key = typesafe_api_key(cfg.repo_root)
     if not key:
         raise JevError(
             "TYPESAFE_API_KEY no encontrada: expórtala o pégala en <repo>/.env (ver .env.example)"
         )
+    from xbrain.jev.typesafe import TypeSafeJevClient
+
     return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
 
 
@@ -2649,7 +2660,9 @@ def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
         typer.echo(f"  FALLO {item_id}: {reason}", err=True)
     if len(result.failed) > _JEV_FAILURES_SHOWN:
         remaining = len(result.failed) - _JEV_FAILURES_SHOWN
-        typer.echo(f"  … y {remaining} fallos más", err=True)
+        # The eleventh failure of eleven is "1 fallo más", not "1 fallos más".
+        noun = "fallo" if remaining == 1 else "fallos"
+        typer.echo(f"  … y {remaining} {noun} más", err=True)
 
 
 @jev_app.command("topics")
@@ -2693,9 +2706,15 @@ def jev_topics_cmd(
         if done % 50 == 0 or done == total:
             typer.echo(f"  {done}/{total}")
 
+    # The ids banked by THIS run. `assessments` also holds every earlier run's work, so
+    # without this the interrupt message could only report the file total — and an operator
+    # asking "did I lose what I just paid for?" would read 503 as 503 rescued.
+    banked: set[str] = set()
+
     def _checkpoint(assessment: TopicAssessment) -> None:
         """Bank each record as it lands, so an interrupt has something to save."""
         assessments[assessment.item_id] = assessment
+        banked.add(assessment.item_id)
 
     client = _jev_client(cfg)
     try:
@@ -2716,7 +2735,8 @@ def jev_topics_cmd(
         # a second time for posts that already came back.
         save_assessments(assessments, cfg.jev_topics_path)
         typer.echo(
-            f"Interrumpido: {len(assessments)} evaluaciones guardadas en {cfg.jev_topics_path}",
+            f"Interrumpido: {len(banked)} evaluaciones nuevas guardadas "
+            f"({len(assessments)} en total) en {cfg.jev_topics_path}",
             err=True,
         )
         # 130 is what an uncaught SIGINT already exits with; catching the interrupt in
@@ -2726,6 +2746,11 @@ def jev_topics_cmd(
     finally:
         # `finally`, not the next line: a run where every item failed raises out of
         # `run_assessments`, and that is exactly the path that would leak the pool.
+        #
+        # On the interrupt path this can close the transport while a worker is still in
+        # flight — `run_assessments` shuts the pool down with `wait=False`. That worker's
+        # exception lands in a future nobody reads, so it is noise, not a lost record:
+        # every record that completed was already handed to `_checkpoint` and saved above.
         client.close()
     # `_checkpoint` has already put every one of these in `assessments`; the merge stays
     # here so the NORMAL path does not depend on a hook whose failures are swallowed.
