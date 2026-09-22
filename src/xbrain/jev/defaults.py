@@ -39,11 +39,12 @@ DEFAULT_CONCURRENCY = 8
 #: Evidence text is cut here; assessments record the pre-cut length and `truncated`.
 DEFAULT_STATE_CHAR_LIMIT = 100_000
 
-#: USD per million INPUT tokens, per provider. TypeSafe's list price for `jev-1.13.0` on
-#: 2026-09-22 (docs.typesafe.ai/models): charged per input token, output tokens are free.
-#: This is a PER-VERSION price while `[jev].model` defaults to the moving `jev-latest`
-#: alias, so any figure derived from it is an ESTIMATE, not a bill — re-check it when the
-#: alias advances. Assessments record the concrete model, so a report can say what it priced.
+#: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model
+#: version it is quoted for, its source and its date live once in `docs/jev.md` § Vendor
+#: facts — update that table and this literal together, and restate neither anywhere else.
+#: It is a PER-VERSION list price while `[jev].model` defaults to the moving `jev-latest`
+#: alias, so any figure derived from it is an ESTIMATE, not a bill. Assessments record the
+#: concrete model that answered, so a report can always say what it priced.
 INPUT_USD_PER_MTOK: dict[str, float] = {"typesafe": 0.042}
 
 

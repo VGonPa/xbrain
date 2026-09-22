@@ -33,6 +33,23 @@ file is not tracked by git.
   the wrong reason. See *Rules paid for in blood* in `CLAUDE.md`.
 - **Run the suite on the merge result, not just on your branch.** Two PRs, each green
   alone, have already merged into a red `develop`.
+- **`git add` your new files before the gate.** The secrets check inside `poe check` scans
+  what git tracks, so an unstaged file is invisible to it (see `CLAUDE.md` § Conventions).
+
+## Test doubles: shared fakes live in a non-`test_*` module
+
+A fake used by more than one test module goes in its own helper file under `tests/`, named
+so pytest does **not** collect it — `tests/jev_fakes.py` is the pattern — and is imported as
+`tests.jev_fakes`. A `test_*.py` name would make pytest collect the helper as a test module,
+and importing a fake across two `test_*` modules couples their collection order.
+
+The rule that matters more than the filename: **a fake must be able to fail the way reality
+fails.** `FakeJevClient` refuses an empty question map exactly as the real adapter does,
+answers a primary that is *not* among the offered options (so the "the primary must be a
+vocabulary slug or the fallback" guard is testable at all), reports `None` token counts
+because the real provider sometimes does, records whether `close()` was called, and can raise
+`KeyboardInterrupt` after N answers so the Ctrl-C checkpoint path is exercised. A double that
+can only succeed tests only the happy path, and the paths that cost money are the others.
 
 ## Safety: destructive operations auto-snapshot
 

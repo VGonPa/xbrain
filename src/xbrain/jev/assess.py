@@ -82,11 +82,11 @@ def _state_text(item: Item) -> str:
 def build_topic_state(item: Item, char_limit: int) -> tuple[dict[str, str], int]:
     """`{"post": evidence}` cut to `char_limit`, plus the evidence length BEFORE the cut.
 
-    Jev's budgets (docs.typesafe.ai/models, 2026-09-22): 64k tokens per request for `state`
-    plus ALL questions, and 32k for `state` plus the single longest question. This call sends
-    one Noul per vocabulary topic plus the Choice, so the 64k budget is the one that tightens
-    as `[vocab].target_count` grows — and cutting the state only shrinks the state half of
-    it. `[jev].state_char_limit` is a bound on the evidence, not a defence of the budget.
+    Jev's request budget covers `state` plus ALL the questions, and this call sends one Noul
+    per vocabulary topic plus the Choice — so the budget tightens as `[vocab].target_count`
+    grows, and cutting the state only shrinks the state half of it. `[jev].state_char_limit`
+    is a bound on the EVIDENCE, not a defence of the budget. The budget's two figures, their
+    source and their date live once in `docs/jev.md` § Vendor facts; do not restate them here.
 
     A cut is SIGNPOSTED with `[… evidencia recortada: N caracteres omitidos …]`, following
     `rubrics.truncate_transcript`: an unmarked slice tells the model the cut point is the end

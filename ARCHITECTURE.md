@@ -32,6 +32,7 @@
   - [evidence](#evidence)
   - [verify](#verify)
   - [verify-entities](#verify-entities)
+  - [jev](#jev)
 - [The knowledge layer](#the-knowledge-layer)
 - [Artifacts: the data layer](#artifacts-the-data-layer)
 - [Rubrics: the prompt layer](#rubrics-the-prompt-layer)
@@ -123,6 +124,15 @@ fan out from `items.json` to almost every later stage; see the Step-by-step
 below for the per-stage read/write detail.
 
 Each stage is a separate command (`xbrain extract`, `xbrain fetch`, …). You can run them individually or chain them. The pipeline is intentionally idempotent at every step: re-running a stage on a corpus that already has its outputs is a cheap no-op except where you explicitly ask for regeneration.
+
+**How a command reports failure.** Every command is wrapped in `cli._handle_cli_errors`, which turns an expected operator error (`_OPERATOR_ERRORS`: `FileNotFoundError`, `ValueError`, `KeyError`, `RuntimeError`, `NotImplementedError`, `OSError`) into one `Error: <message>` line on stderr and exit 1, instead of a traceback. `MemoryError` is deliberately not in that tuple — an OOM keeps its stack.
+
+The decorator **re-raises `typer.Exit` and `typer.Abort` before that clause runs**, and it must, because both subclass `RuntimeError`: without the re-raise the wrapper catches Click's own control flow and rewrites it. `typer.Exit(code=N)` has an empty `str`, so it used to print a bare `Error:` and exit 1, silently replacing the code the command had chosen. Two user-visible consequences beyond the jev commands that exposed it:
+
+- **`xbrain index …` / `xbrain search …`** (everything wrapped by `_handle_index_errors`) printed their real message and then a **second, empty `Error:` line**, because the inner wrapper's deliberate `typer.Exit(code=1)` was caught by the outer one. They now print exactly one. The exit code was 1 before and after, which is why no test caught it; it is pinned now.
+- **`xbrain download-videos`** printed a bare `Error:` when you answered `n` to its size-gate confirmation. It now prints Click's `Aborted!`. Exit code 1 either way.
+
+This is also what lets a command choose a code that is not 1: `xbrain jev topics` exits **130** on Ctrl-C after saving what it had banked.
 
 ---
 
@@ -649,7 +659,7 @@ You can annotate, link, and write below the marker — `generate` never touches 
 
 ### dashboard
 
-**What it does.** `generate` writes a self-contained interactive `dashboard.html` into the vault alongside the notes, and `_index.md` links it. Everything is inlined — the data as a JSON blob, ECharts vendored from `src/xbrain/resources/echarts.min.js` (1.0 MB) into the page. **No network, no CDN, no build step:** the file opens in a browser with the machine offline. Measured on the current vault render: 1,825,197 bytes, about 1.8 MB.
+**What it does.** `generate` writes a self-contained interactive `dashboard.html` into the vault alongside the notes, and `_index.md` links it. Everything is inlined — the data as a JSON blob, ECharts vendored from `src/xbrain/resources/echarts.min.js` (1.0 MB) into the page. **No network, no CDN, no build step:** the file opens in a browser with the machine offline. Measured on the current vault render: 1,825,197 bytes, about 1.8 MB. Its sibling `jev.html` ([§ jev](#jev)) is built by the same mechanism and measures **4,531,327 bytes, about 4.53 MB**, on a 2,609-item / 45-topic corpus — the two figures are from different renders of different corpora, so read them as orders of magnitude and not as a delta.
 
 **The split is pure computation vs IO.** `compute_dashboard_data` is pure — store, topic overviews and an id→note map in, JSON blob out, no file or network access. `collect_thumbnails` does the photo IO. `render_dashboard_html` injects the blob and the vendored library into the template. `generate` wires the three together; nothing here touches a browser.
 
@@ -744,6 +754,31 @@ So the count is not a floor on the ensemble's false negatives, and an earlier dr
 **Writes.** `data/entity-report.json` + `data/entity-report.md`. **Read-only with respect to the store:** it never mutates `items.json`, nothing reads the report back, and it takes no snapshot.
 
 **Measured on the live store, 2026-08-30.** `summary`: 2,325 outputs, **140** with at least one confident ungrounded candidate (160 entities), plus 1,475 whose only candidates are in the uncertain tier. `digest`: 205 outputs, **51** flagged (64 entities), plus 116 uncertain-only. These are **candidates to verify, not confirmed hallucinations**: the one precision measurement in the repo (`data/entity-precision.md`, 13-ago-2026, a 70-flag sample) puts the confident tier at ~30% and the uncertain tier at ~0%, which is why the two are never added together and why no share of the corpus should be quoted as "hallucination-free" off the back of either.
+
+### jev
+
+**What it does.** A second opinion on topic assignment, from a different model family. For each item, ONE call to Jev (TypeSafe AI) carries one Noul (a yes/no question answered with a probability) per vocabulary topic — `topic__<slug>`, in **slug-sorted order**, the instruction in English and the vocabulary's own Spanish description as the `true` criterion — plus one Choice (`primary`) over every slug with `[jev].fallback_option` appended **last**, so the escape option never competes for position with a real topic. The question set is canonical: one vocabulary produces one wire form, whatever order `vocab.yaml` lists its topics in. Operator surface: `xbrain jev topics|report|dashboard`; the user-facing guide is [`docs/jev.md`](docs/jev.md).
+
+**The state.** `evidence_surfaces(item, "topics")` — the same evidence definition the generator, the rubric, the judge and the entity checker resolve (invariant 14) — projected to its atomic **values**, with the post's own words moved to the front. Not `evidence_text` and not the judge's `_source_text`: same surfaces, no `[Author]` labels and none of the not-fetched markers. The post leads because `evidence_surfaces` returns `tweet` last and the unbounded video transcript third, so cutting the canonical order at `[jev].state_char_limit` ate the post itself — measured, 7 of 7 items over the 100k default lost their own tweet, and Jev was then asked whether "the post in `post`" was about a topic with the post no longer in it. A cut is signposted (`[… evidencia recortada: N caracteres omitidos …]`), the marker rides on top of the limit, and the **pre-cut** length is what the record stores, because the post-cut one saturates and cannot say how much went.
+
+**Side-car, never the store.** Assessments live in `data/jev/topics.json` (`jev.models.TopicAssessment`: `membership` = slug→probability, `primary` = the Choice with its full distribution, `provider` and `model` as the API reported them, `contract`, `state_chars`, `truncated`, token counts). Nothing under `xbrain.jev` opens `items.json` for writing, no verdict is derived, no assignment changes, and the command takes no snapshot — both pinned by `test_jev_topics_never_touches_items_json`. The record is frozen and `extra="forbid"`, because the file is rewritten wholesale on every save and a record a newer writer added a field to would otherwise be silently narrowed by an older one.
+
+**Currency is a contract, and it is the whole staleness story.** `contract` = sha256 over the contract version, the state **as sent**, and `questions_digest` — the canonical JSON of every question's type, instructions and criteria. Hashing the questions rather than the vocabulary they were built from is what removes the hand-maintained list of "things that ought to invalidate": a reworded instruction, an edited description, a new or removed topic and a different fallback all move the digest on their own. Two things are deliberately outside it — option **order**, because the question set is canonical, and the **judge**, because `provider`/`model` are recorded but never hashed, so re-pointing `[jev].model` does not retire stored work. So: re-enriching an item keeps its assessment current (the comparison is recomputed at report time — that is the event this layer exists to look at); new evidence, a moved vocabulary or a changed fallback retire it. `output_fingerprint` records which `enrich` assignment existed at ask time and is **informational only**; consulting it for currency would retire an assessment the moment the item was re-enriched. Retired records are excluded from every reader and **counted** (`assessments_stale`, `assessments_orphaned`), because a full side-car a vocabulary edit just retired must never render identically to one nobody ever wrote — the second reading sends an operator to re-pay for the corpus.
+
+**Two files are called `topics.json`.** `data/topics.json` (`Config.topics_path`) holds the synthesised `TopicPage` overviews and is part of the store. `data/jev/topics.json` (`Config.jev_topics_path`) holds the assessments and is not.
+
+**Reads.** `data/items.json`, `data/vocab.yaml`, `data/jev/topics.json`. **Writes.** `data/jev/topics.json`, `data/jev/topics-report.{json,md}`, `<output_subdir>/jev.html`.
+
+**Invariant 1, qualified.** `jev.html` is derivable from `data/` like the rest of the wiki, but **not by `xbrain generate`** — `xbrain jev dashboard` is the only command that writes it, from a side-car `generate` never reads. So "drop the wiki, run `generate`, get the same wiki back" returns everything except this page, and `generate` links it from `_index.md` (absolute `file://`, like `dashboard.html`) **only when the file already exists**, without importing `xbrain.jev`. Deleting the wiki therefore costs one extra `xbrain jev dashboard`, never a paid record; deleting the side-car costs a re-assessment.
+
+**Seams.** `jev.client` is the vendor-free contract — `JevClient.ask(state, questions)` plus a `close()` that is idempotent and may not raise a vendor type — and `jev.typesafe` is the only module in `src/` that imports `typesafe-sdk`, converting every SDK exception into `JevError`. A second provider is a second module like it, answering the same questions into the same record (hence `provider` is required and never defaulted). `jev.report` is the ONE place the comparison with `enrich` is computed: the CLI report and the dashboard blob both read through it, and the page's client-side recompute is checked against the summary it ships rather than trusted. `jev.defaults` is the one place a run is priced **and** the one place the bill is worded, after three call sites formatted the same side-car as `~0.000 $` and `~0.0001 $`.
+
+**Failure.** Per-item failures are recorded with their reason and echoed, the rest of the run is saved, and a run where **every** item failed raises rather than report an empty success. A missing key and a malformed vocabulary are operator errors raised before the first call — the key is checked before the SDK is even imported, so `xbrain --help` never loads the vendor's HTTP stack. A partial answer set (a missing Noul, a choice outside the offered options, a winner absent from or beaten inside its own distribution) is rejected, never stored. Records are checkpointed to disk every 25; Ctrl-C saves what was banked and exits 130, and an interrupt that rescued nothing writes nothing — saving there would put the unchanged map over the side-car, which on a first run is `{}`.
+
+**Exception languages.** The dividing line is the **audience**, and the exception type follows it. `JevError` (a `RuntimeError`) is the only type the seam emits and always carries an operator-facing **Spanish** sentence: an unusable key or client configuration, a provider error, an answer set this repo refuses, an unknown `--id`, a `--limit` below 1. `ValueError` is what the package raises for faults that are not the provider's — a malformed vocabulary (`el vocabulario está vacío: ejecuta \`xbrain vocab\`…`, a duplicate slug, a fallback colliding with a slug, a topic with no description) and an out-of-range `--threshold` — and those are operator-facing too, so they are **Spanish as well**. English survives in exactly one place: a `config.toml` schema fault, raised by the shared loader and worded like the rest of `config.py` (`config.toml: [jev].threshold must be a number in [0.0, 1.0]`). One `ValueError` is genuinely programmer-only — a question map carrying no `primary` Choice — and it is a `ValueError` rather than a `JevError` precisely because the provider did nothing wrong: dressing a caller bug as a Jev failure would send whoever reads the failure table looking at the API. Both types reach the terminal through `_handle_cli_errors` as `Error: …` with exit 1, so the split is about who the message is for, never about how it is surfaced.
+
+**Page size.** Measured on the live corpus, 2026-09-22, 2,609 items × 45 topics: `jev.html` is **4,531,327 bytes, about 4.53 MB** — ECharts 1.03 MB and the JSON blob 3.43 MB, of which the memberships are 1.16 MB, the `obsidian://` deep links 0.45 MB and the post text 0.42 MB. Rendered with synthetic six-decimal probabilities, so the membership term is an **upper bound**: a provider answering in two or three decimals ships less. The memberships ship unrounded on purpose — `0.8496` rounded to `0.85` would clear a `0.85` slider and make the page call *backed* what the report calls *doubtful*, so the consistency banner would fire on the data instead of on the logic it exists to police.
+
 
 ---
 
@@ -1144,6 +1179,8 @@ Everything XBrain knows lives in a handful of files inside `data/` (gitignored).
 | `media/<id>/<n>.mp4` | binary (mp4) | Downloaded video bytes for each `MediaVideoDownloaded` entry in `items.json` | `download-videos` |
 | `verify-report.{json,md}` | JSON + Markdown | The LLM-as-judge verification report — one aggregated verdict (PASS/REVIEW/FAIL + faithfulness + adherence) per `(item, target)`, with flagged claims, the judged `output_fingerprint` and the `contract_fingerprint` the verdict was reached under. **Report only** (never part of the store), but it IS read back — by `verify --audit`, which re-verdicts on top of it and, with `--write-verdicts`, persists the merged result; and by `verify-entities --verdicts` | `verify` |
 | `entity-report.{json,md}` | JSON + Markdown | The deterministic entity-grounding sweep — per output, the proper nouns no evidence surface supports, split into a confident and an uncertain tier. **Report only, and nothing reads it back** | `verify-entities` |
+| `jev/topics.json` | JSON dict of `TopicAssessment` | The **Jev side-car**: one topic assessment per item id — the membership probability per vocabulary slug, the primary Choice with its distribution, the provider and model that answered, and the `contract` that says whether it still describes today's question. **Not part of the store, and not snapshotted** (see invariant 8): `xbrain jev` never writes `items.json`. Rewritten wholesale on every save, atomically, sorted. It costs money to regenerate and there is no undo, so a malformed file raises rather than reading as empty | `jev topics` |
+| `jev/topics-report.{json,md}` | JSON + Markdown | The comparison of that side-car against `enrich` at one threshold — both directions of agreement, the doubtful pairs, the missing candidates, the never-asked slugs, the primary ranking, and the bill. **Report only, and nothing reads it back**; the dashboard recomputes through `jev/report.py`, not through this file. The markdown is truncated to the worst 20 rows per table and says so; the JSON carries every compared item | `jev report` |
 | `truncated-items.json` | JSON | The items whose tweet text was truncated at ingest (id, url, current text) — the work list `refetch-truncated` writes on every run, dry or not | `refetch-truncated` |
 
 The shapes are defined as pydantic models in [`src/xbrain/models.py`](src/xbrain/models.py). Reading those is the fastest way to understand the data layer in full.
@@ -1291,14 +1328,14 @@ The report has four sections, each pinning a different axis of change:
 
 These are the rules the rest of the architecture rests on. Breaking any of them produces silent data corruption or makes the system unreproducible.
 
-1. **`data/items.json` is the source of truth.** The wiki is derivable. Drop the wiki, run `xbrain generate`, get the same wiki back.
+1. **`data/items.json` is the source of truth.** The wiki is derivable. Drop the wiki, run `xbrain generate`, get the same wiki back. One qualification, and only one: `<output_subdir>/jev.html` is derivable from `data/` too, but by its own command — `xbrain jev dashboard` writes it, `generate` never does, and `generate` only *links* it once it exists. See [§ jev](#jev).
 2. **Each stage reads from the previous ones and writes to its own artifact.** No hidden state, no inter-stage globals. The CLI verbs are the only seams.
 3. **The LLM emits only judgment.** No identifiers, no filenames, no wikilinks. The code adds those, post-hoc. The validator enforces it.
 4. **User content below `<!-- xbrain:generated:end -->` is preserved across regeneration.** `generate` only rewrites the block above the marker.
 5. **Failed fetches are recorded as structured evidence**, not silently dropped. A broken link is demonstrable (`http_status`, `failure_reason`), not assumed.
 6. **`fetch` is cached per item id.** Re-runs do not re-hit the network without `--force`, or `--retry-failed`, which re-hits only the recorded failures a retry could repair (issue #19, shipped).
 7. **Operation names, not query ids.** The extractor anchors to X GraphQL operation names because X rotates the ids. Anything that hardcodes an id will break. X renames the *names* too, so each source holds a **tuple of aliases** (newest first, old names kept) and an empty capture fails closed rather than reporting zero new items — see invariant 15.
-8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/` via `_auto_snapshot`. The full set today: `vocab --regenerate`, `topics --resynth`, `fetch --force`, `fetch --retry-failed`, `fetch --revalidate --write`, `media`, `describe`, `describe --apply`, `refresh-quoted` (both modes, under distinct labels), `refresh-media`, `download-videos`, `digest-video`, `video-digest --apply`, `redescribe-frames`, `verify --write-verdicts`, `reextract --apply` and `refetch-truncated --apply`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op (never `try/except`-swallowed). `download-videos` takes its snapshot *after* the interactive size-gate confirmation — a declined run writes nothing and leaves no snapshot — but always before the first byte lands; `digest-video` snapshots *only when it is about to write* the transcript (a pure already-digested / no-fetchable-video run attaches nothing and takes no snapshot) — but always before the first store write; `video-digest` snapshots on the **`--apply`** branch (the one that writes each `source.digest`), never on plain worksheet export; `redescribe-frames` snapshots *only when at least one caption was actually re-described* — a run over an already-current corpus, or a real run that failed every attempted frame, writes nothing and takes no snapshot. The read-only commands take none, because there is nothing to protect: `payload-stats`, `list-videos`, `fetch-video`, `verify` on its default report-only path, `verify-entities`, `diff`, `status`, `generate`, and the dry-run branch of every command that has one.
+8. **Destructive ops are reversible.** Every command that overwrites a `data/` artifact snapshots `data/` first to `data/snapshots/<ts>-pre-<command>/` via `_auto_snapshot`. The full set today: `vocab --regenerate`, `topics --resynth`, `fetch --force`, `fetch --retry-failed`, `fetch --revalidate --write`, `media`, `describe`, `describe --apply`, `refresh-quoted` (both modes, under distinct labels), `refresh-media`, `download-videos`, `digest-video`, `video-digest --apply`, `redescribe-frames`, `verify --write-verdicts`, `reextract --apply` and `refetch-truncated --apply`. `xbrain snapshot restore <name>` is the recovery path. A snapshot failure aborts the destructive op (never `try/except`-swallowed). **The Jev side-car sits outside this boundary and that has a consequence worth stating.** `snapshot._ARTIFACTS` is the four flat store files in `data/` (`items.json`, `state.json`, `vocab.yaml`, `topics.json`); `data/jev/topics.json` is one level down, so `snapshot create` does not copy it and `snapshot restore` neither restores nor deletes it. A restore therefore rolls `items.json` back and leaves the side-car at its newer state — after which every record whose item's EVIDENCE the restore moved has a contract that no longer matches, is reported as `caducada`, and is re-asked and **re-paid for** by the next `xbrain jev topics`; records whose items the restore did not change stay current. Staleness is always detected, never consumed — a reverted item is never compared against an answer about its newer text — so this is safe rather than free. `xbrain jev topics` takes no snapshot of its own, because it writes nothing the snapshot covers. `download-videos` takes its snapshot *after* the interactive size-gate confirmation — a declined run writes nothing and leaves no snapshot — but always before the first byte lands; `digest-video` snapshots *only when it is about to write* the transcript (a pure already-digested / no-fetchable-video run attaches nothing and takes no snapshot) — but always before the first store write; `video-digest` snapshots on the **`--apply`** branch (the one that writes each `source.digest`), never on plain worksheet export; `redescribe-frames` snapshots *only when at least one caption was actually re-described* — a run over an already-current corpus, or a real run that failed every attempted frame, writes nothing and takes no snapshot. The read-only commands take none, because there is nothing to protect: `payload-stats`, `list-videos`, `fetch-video`, `verify` on its default report-only path, `verify-entities`, `diff`, `status`, `generate`, and the dry-run branch of every command that has one.
 9. **Fetch records are tagged unions.** A `ContentSource` on `items.json` is either a `Success` (with required `text`) or a `Failure` (with required `failure_reason`). Mixed shapes are not representable — pydantic rejects them at construction, and mypy rejects them statically (via the `pydantic.mypy` plugin). Legacy records with `ok: bool` (pre-#20) are normalised on read by a `BeforeValidator` on the union, so existing `data/items.json` files keep working without a manual migration. The static contract is pinned by `tests/type_probes/illegal_states.py`.
 10. **The heavy ML lives outside xbrain core.** xbrain stays **mechanical**: it carries **no** MLX / CoreML / torch / vision-model dependency. The transcriber (`digest-video`), the frame extractor (`digest-video --frames` → `ffmpeg`) and the vision model (`digest-video --frames` → `[vision].command`) are all invoked as **external subprocesses** (argv `shlex`-split, run without a shell), located via config/PATH. `transcribe.py`, `video_frames.py` and `vision.py` each import no ML/vision library — tests assert it (`video_frames.py` uses Pillow only for classic edge-density image processing, not a model). A missing/unconfigured external tool is a clear operator error that aborts the run; a per-video tool failure is recorded and the batch continues. This is the locked #44 architecture — the `--frames` visual layer is **fully opt-in** and never runs on the default path.
 
@@ -1337,6 +1374,7 @@ xbrain/
 │   ├── tutorial.md
 │   ├── troubleshooting.md
 │   ├── knowledge-index.md   ← operating the persistent index: cost, staleness, limits
+│   ├── jev.md               ← operating the Jev second opinion: setup, cost, staleness
 │   └── digest-video.md
 │
 ├── src/xbrain/              ← the package
@@ -1384,6 +1422,17 @@ xbrain/
 │   ├── topic_synth.py       ← topic overview synthesis (api + worksheet)
 │   ├── generate.py          ← wiki rendering
 │   ├── dashboard.py         ← the self-contained interactive dashboard.html
+│   ├── jev/                 ← `xbrain jev`: the Jev topic assessment side-car
+│   │   ├── client.py        ←   the vendor-free seam: Question/Answer types + JevClient
+│   │   ├── typesafe.py      ←   the ONLY importer of typesafe-sdk; every SDK error → JevError
+│   │   ├── models.py        ←   TopicAssessment / PrimaryChoice — frozen, extra-forbid
+│   │   ├── defaults.py      ←   the [jev] defaults, the price table, the ONE cost sentence
+│   │   ├── env.py           ←   TYPESAFE_API_KEY from the environment, else <repo>/.env
+│   │   ├── questions.py     ←   one Noul per slug + the primary Choice, canonically ordered
+│   │   ├── assess.py        ←   state, contract, parse, select, the concurrent run
+│   │   ├── store.py         ←   data/jev/topics.json (atomic, sorted, never items.json)
+│   │   ├── report.py        ←   THE comparison with enrich at a threshold (+ the markdown)
+│   │   └── dashboard.py     ←   the jev.html blob (pure; same template mechanism)
 │   ├── i18n.py              ← per-language wiki strings
 │   ├── notes_io.py          ← per-note read/write + user-tail preservation
 │   ├── store.py             ← items.json / topics.json / state.json I/O
@@ -1421,6 +1470,7 @@ xbrain/
 │   │
 │   ├── resources/           ← vendored dashboard assets (no CDN, no build step)
 │   │   ├── dashboard.template.html
+│   │   ├── jev.template.html
 │   │   └── echarts.min.js
 │   │
 │   └── executors/           ← LLM-call backends
@@ -1435,6 +1485,9 @@ xbrain/
 │   ├── state.json
 │   ├── vocab.yaml
 │   ├── topics.json
+│   ├── jev/                 ← the Jev side-car — PAID, NOT snapshotted (invariant 8)
+│   │   ├── topics.json      ←   one TopicAssessment per item (≠ ../topics.json)
+│   │   └── topics-report.{json,md}
 │   ├── index/               ← the persistent index — DERIVED, rebuildable, never versioned
 │   │   ├── knowledge.db     ← SQLite + FTS5 (two planes: chunks, profiles)
 │   │   └── manifest.json    ← the seal: versions, fingerprints, counts, cheap signal
@@ -1463,4 +1516,5 @@ xbrain/
 
 - **README.md** — install, configure, run the pipeline end-to-end.
 - **CONTRIBUTING.md** — local setup, the quality gate (`uv run poe check`), PR workflow.
+- **[docs/jev.md](docs/jev.md)** — operating the Jev second opinion: setup, the daily loop, reading the report and the page, staleness, cost, troubleshooting.
 - **Open issues** ([github.com/VGonPa/xbrain/issues](https://github.com/VGonPa/xbrain/issues)) — planned work: scheduled runs, eval harness, snapshots, drift comparison, configurable output language.

@@ -645,12 +645,44 @@ generates an Obsidian wiki.
   LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
   life of the corpus it described, and it is the worst kind of wrong in this file, because
   this file is read first and acted on.
+- Jev topic assessment (`xbrain jev topics|report|dashboard`, `src/xbrain/jev/`) — a SIDE-CAR,
+  not a pipeline stage. One TypeSafe call per item carries one Noul per vocabulary slug plus a
+  primary Choice with an escape option; the probabilities land in `data/jev/topics.json` and
+  `jev report` compares them with `enrich` at `[jev].threshold` (default `0.85`), both
+  directions. **It never writes `items.json`, never issues a verdict, never re-renders a note,
+  and takes no snapshot** — a second opinion you can run, read or throw away. Currency is a
+  `contract` hash over the state and the QUESTIONS: re-enriching an item keeps its assessment
+  (that is the event the report exists to look at), while new evidence, a moved vocabulary or a
+  changed `fallback_option` retires it; retired records are excluded from every reader and
+  COUNTED, because a side-car a `vocab` edit just retired must never read like one nobody
+  wrote. The file is PAID, gitignored and outside `snapshot._ARTIFACTS`, so `snapshot restore`
+  leaves it behind and `--force` overwrites a paid record with no recovery. `jev topics` is the
+  only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
+  `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
+  never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
+  collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:
+  `docs/jev.md`, ARCHITECTURE.md § jev.
+- Error messages pick their language by AUDIENCE, not by exception type. `JevError` and the
+  operator-facing `ValueError`s are Spanish sentences (`el vocabulario está vacío: ejecuta
+  \`xbrain vocab\`…`); only a `config.toml` schema fault stays English, because `config.py`
+  is. `_handle_cli_errors` surfaces both as one `Error: …` line and exit 1 — and **re-raises
+  `typer.Exit` / `typer.Abort` first**, since both subclass `RuntimeError`: without that, a
+  command's chosen exit code became a bare `Error:` and exit 1. That is what lets
+  `xbrain jev topics` exit 130 on Ctrl-C, and it is why `xbrain index …` no longer prints a
+  second empty `Error:` line and `download-videos` prints `Aborted!` on `n`.
 
 ## Conventions
 - TDD: every module has a `tests/test_*.py`. Run `uv run pytest -v`.
 - The X GraphQL parser anchors on key names, not paths — X's private API drifts.
-- Never commit personal data: `auth/storage_state.json`, `data/`, `config.toml`.
-  All are gitignored.
+- Never commit personal data or secrets: `auth/storage_state.json`, `data/`, `config.toml`,
+  `.env`. All are gitignored. `.env` holds `TYPESAFE_API_KEY` (`xbrain jev`); `.env.example`
+  is the committed template and carries no value.
+- **`git add` BEFORE `uv run poe check`.** The gate's `detect-secrets scan src/xbrain tests
+  scripts` only sees files git TRACKS, so a new, unstaged file is invisible to it. Probed on
+  2026-09-22: an untracked `src/xbrain/_probe_secret.py` holding a real AWS-shaped key is not
+  in the scan's results; `git add` it and the same scan reports it. So a secrets gate that went
+  green over a new file did not look at it. (Only this check resolves its files through git —
+  ruff, mypy and pytest walk the directories — which is exactly why it is the one to remember.)
 
 ## Git workflow
 - `develop` is the integration branch: `feature-branch → PR → develop`. Branch
