@@ -4973,6 +4973,28 @@ def test_digest_video_help_renders_vision_config_keys_literally():
     assert "[vision].model" in out
 
 
+@pytest.mark.parametrize(
+    ("command", "key"),
+    [("describe", "[describe].version"), ("get", "[index].get_char_budget")],
+)
+def test_command_help_renders_its_config_key_literally(command: str, key: str):
+    """The same eaten-markup defect as `[vision]` above, on two more surfaces.
+
+    `describe`'s docstring tells the operator that bumping `[describe].version` forces a
+    re-describe without `--force`, and `get`'s says the per-response budget comes from
+    `[index].get_char_budget`. Rich read each bracket as a style tag and ate it, so both
+    rendered a bare `.version` / `.get_char_budget` — naming a key that exists in no
+    `config.toml`, in the one sentence whose whole job is to say which key to set.
+
+    Asserted on the RENDERED output for the reason the comment above gives: the escaping
+    backslash lives in the source either way, so a source-text assertion stays green after
+    someone deletes it.
+    """
+    result = runner.invoke(app, [command, "--help"])
+    assert result.exit_code == 0, result.output
+    assert key in _plain_output(result.output)
+
+
 def test_redescribe_frames_limit_help_says_items_not_videos():
     """M6: one bookmark can carry two frame-bearing `x_video` sources, so
     `--limit` capping ITEMS is a materially different promise than capping
