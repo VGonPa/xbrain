@@ -34,6 +34,8 @@ from xbrain.jev.assess import (
 from xbrain.jev.dashboard import (
     DERIVE_END,
     DERIVE_START,
+    GUARD_END,
+    GUARD_START,
     compute_jev_dashboard_data,
     render_jev_dashboard_html,
 )
@@ -457,6 +459,29 @@ def test_the_template_compares_with_ge_and_keeps_an_unjudged_bucket():
     assert "noul > t" not in template
     assert "unjudged" in template
     assert DERIVE_START in template and DERIVE_END in template
+    # ONE `topicRows`, and it is the one inside the region. A second declaration later in the
+    # script silently wins (function declarations hoist, the last one binds), so the page ran
+    # an unpinned copy while the node test pinned a dead one — the mirror was there and not
+    # connected to anything.
+    assert template.count("function topicRows") == 1
+
+
+def test_the_boot_guard_is_registered_before_anything_that_can_throw():
+    """A guard installed after the work it guards is not a guard.
+
+    `echarts.init`, the histogram and the load-time latch all run at script evaluation, and an
+    uncaught throw in any of them aborts the script — leaving the full masthead, five titled
+    panels and zero rows, with the banner element still `hidden`. That page reads as "the
+    corpus is empty", which is wrong and sends an operator to re-pay for the side-car.
+    """
+    template = _resource("jev.template.html")
+    guard = template.index("addEventListener('error'")
+
+    # Before the payload, before the mirror, before ECharts, before any rendering.
+    for later in ("const DATA = ", DERIVE_START, "echarts.init(", "function boot("):
+        assert guard < template.index(later), later
+    # And the eager work is inside `boot()`, whose single call is the wrapped one.
+    assert template.count("boot();") == 1
 
 
 # --------------------------------------------------------------------------- browser vs report
@@ -805,3 +830,101 @@ def test_the_histograms_assigned_half_is_checked_against_the_report():
 
     assert clean == []
     assert [p for p in corrupted if p.startswith("histograma:")], corrupted
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_chart_one_orders_by_backing_not_by_slug_or_vocabulary_order():
+    """A fixture where all three orders differ, so the sort is pinned and not coincidence.
+
+    Vocabulary order is `ai-coding, startups`; alphabetical is the same; `report._backing_order`
+    puts the WORST backing first, which here is `startups` (0 of 1) ahead of `ai-coding`
+    (1 of 1). A `topicRows` that forgot to sort would answer with the vocabulary order.
+    """
+    item = _item("1", topics=("ai-coding", "startups"))
+    data = _data([item], {"1": _assessment(item, membership={"ai-coding": 0.9, "startups": 0.1})})
+
+    order = _run_in_node(data, "return topicRows(derive(DATA.threshold)).map(r => r.slug);")
+
+    assert order == ["startups", "ai-coding"]
+    assert order != [topic["slug"] for topic in data["topics"]]  # not the vocabulary order
+    assert order == [row["slug"] for row in data["summary"]["per_topic"]]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_the_histogram_counts_assigned_pairs_as_a_multiset_like_the_report():
+    """`report._pair_totals` counts every assigned SLOT, duplicates included.
+
+    Binning through a `Set` dropped the duplicate, so the histogram total came up one short of
+    `assigned_pairs - assigned_unjudged` and the page latched a red banner over a corpus that
+    is perfectly fine — a false alarm from the check that exists to prevent false calm.
+    """
+    item = _item("1", topics=("ai-coding", "ai-coding"))
+    data = _data([item], {"1": _assessment(item)})
+
+    assert data["summary"]["assigned_pairs"] == 2
+    assert _self_check_in_node(data) == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_the_page_and_python_round_every_percentage_in_the_corpus_the_same_way():
+    """A sweep, not a handful: every (part, whole) with whole <= 120, against Python's `round`.
+
+    `x * 10` is not exact for most x, so the earlier half-even helper decided "is this a tie"
+    on a value the multiplication had already moved. The rule now is Python's: an EXACT binary
+    tie (x is a quarter and x*20 is odd) rounds half-to-even; everything else goes through
+    `toFixed`, which — like `round` — reads the exact binary value.
+    """
+    pairs = [(part, whole) for whole in range(0, 121) for part in range(0, whole + 1)]
+    expected = [
+        f"{round(part / whole * 100, 1) if whole else 0.0:.1f}".replace(".", ",") + " %"
+        for part, whole in pairs
+    ]
+
+    got = _run_in_node(
+        _every_bucket_fixture(),
+        "return " + json.dumps(pairs) + ".map(([a, b]) => pct1(a, b));",
+    )
+
+    first_bad = next((i for i, (g, e) in enumerate(zip(got, expected)) if g != e), None)
+    assert first_bad is None, f"{pairs[first_bad]}: {got[first_bad]} != {expected[first_bad]}"
+
+
+_GUARD_HARNESS = """
+const painted = {hidden: true, innerHTML: '', appendChild(n) { this.innerHTML += n.textContent; }};
+globalThis.document = {
+  getElementById: (id) => (id === 'banner' ? painted : null),
+  createTextNode: (text) => ({textContent: text}),
+};
+globalThis.addEventListener = () => {};
+%s
+function boot() { throw new Error('echarts no está: la librería no se inyectó'); }
+try { boot(); } catch (err) { paintBootFailure(err.message); }
+console.log(JSON.stringify({hidden: painted.hidden, html: painted.innerHTML}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_a_throw_during_boot_paints_the_banner_instead_of_a_blank_page():
+    """The guard, executed — with a `boot()` that does what a missing ECharts would do.
+
+    Registering the listener is not the same as it working: `paintBootFailure` runs before most
+    of the file exists, so anything it reached for (`esc`, `$`, `f3`) would be a second failure
+    on the failure path. The stub below provides only `document.getElementById` and
+    `createTextNode`, which is the whole of what it may use.
+    """
+    template = _resource("jev.template.html")
+    guard = template.split(GUARD_START, 1)[1].split(GUARD_END, 1)[0]
+
+    out = subprocess.run(
+        ["node", "-e", _GUARD_HARNESS % guard],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+
+    result = json.loads(out.stdout)
+    assert result["hidden"] is False
+    assert "La página no pudo dibujarse" in result["html"]
+    assert "echarts no está" in result["html"]
+    assert "xbrain jev report" in result["html"]

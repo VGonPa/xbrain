@@ -66,6 +66,13 @@ _TOP_CHOICES = 5
 DERIVE_START = "/* ===== derive: mirrors jev/report.py ===== */"
 DERIVE_END = "/* ===== end derive ===== */"
 
+#: The delimiters around the template's BOOT GUARD — the first statements the script runs, and
+#: the only ones that may not depend on anything declared later. Extracted the same way, so the
+#: guard is exercised rather than merely read: a guard installed after the work it guards is not
+#: a guard, and one that calls a helper declared below it has the same hole again.
+GUARD_START = "/* ===== boot guard ===== */"
+GUARD_END = "/* ===== end boot guard ===== */"
+
 
 def _snippet(text: str, width: int = _TEXT_CHARS) -> str:
     """The post on one line, cut to `width` — `width - 1` characters plus an ellipsis.

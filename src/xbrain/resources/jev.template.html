@@ -285,6 +285,27 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
 
 <script>/*__ECHARTS__*/</script>
 <script>
+/* THE GUARD IS THE FIRST THING THE SCRIPT DOES, and everything that can throw is inside
+   `boot()` below — because a guard installed after the work it guards is not a guard. An
+   uncaught throw at script-evaluation time aborts the rest of the file and leaves the full
+   masthead, five titled panels and zero rows, with the banner element still `hidden`: a page
+   that reads as "the corpus is empty" or "nobody ran `xbrain jev topics`", both wrong and both
+   actionable in the direction of re-paying for the whole side-car.
+
+   The message goes in as a TEXT NODE, so this needs neither `esc` nor anything else declared
+   further down — a guard that depends on the code it is guarding has the same hole again. */
+/* ===== boot guard ===== */
+function paintBootFailure(message) {
+  const banner = document.getElementById('banner');
+  if (!banner) return;
+  banner.hidden = false;
+  banner.innerHTML = '<b>La página no pudo dibujarse</b>';
+  banner.appendChild(document.createTextNode(
+    String(message) + '. No hay números que leer aquí: usa `xbrain jev report`.'));
+}
+addEventListener('error', (e) => paintBootFailure(e.message));
+/* ===== end boot guard ===== */
+
 const DATA = /*__DATA__*/;
 
 /* ===== derive: mirrors jev/report.py ===== */
@@ -403,13 +424,25 @@ const BINS = 20;
     no assignment to be on either side of. The panel's sub-line says so when any were dropped. */
 function histogram() {
   const assigned = new Array(BINS).fill(0), other = new Array(BINS).fill(0);
+  const bin = (noul) => Math.min(BINS - 1, Math.floor(noul * BINS));
   for (const it of DATA.items) {
     if (!it.cmp) continue;  // no enrichment: `report.compare_item` returns None for it
+    // enrich's side is a MULTISET, walked the way `report._pair_totals` walks it: an item that
+    // assigned a topic twice contributes two pairs. Binning through a `Set` dropped the
+    // duplicate, so the total came up short of `assigned_pairs - assigned_unjudged` and the
+    // page latched a red banner over a corpus that was fine — a false alarm from the check
+    // that exists to prevent false calm.
+    for (const slug of it.assigned) {
+      const i = slugAt[slug];
+      const noul = i === undefined ? null : it.m[i];
+      if (noul === null || noul === undefined) continue;  // never asked: nothing to bin
+      assigned[bin(noul)]++;
+    }
+    // Jev's side is the complement, and there a set is right: `m` has one slot per slug.
     const set = new Set(it.assigned);
     it.m.forEach(function (noul, i) {
-      if (noul === null || noul === undefined) return;  // never asked: nothing to bin
-      const b = Math.min(BINS - 1, Math.floor(noul * BINS));
-      (set.has(slugs[i]) ? assigned : other)[b]++;
+      if (noul === null || noul === undefined) return;
+      if (!set.has(slugs[i])) other[bin(noul)]++;
     });
   }
   return {assigned: assigned, other: other};
@@ -425,10 +458,18 @@ const sum = (xs) => xs.reduce((a, b) => a + b, 0);
     — `report._backing_order` keys on the exact ratio for that reason — but one side-car must
     not quote two numbers. */
 function round1(x) {
-  const scaled = x * 10, floor = Math.floor(scaled), frac = scaled - floor;
-  if (frac > 0.5) return (floor + 1) / 10;
-  if (frac < 0.5) return floor / 10;
-  return (floor % 2 === 0 ? floor : floor + 1) / 10;
+  // A TIE ONLY WHEN THE BINARY VALUE IS EXACTLY ONE: x must be a quarter (so `x * 20` is
+  // computed without error) and `x * 20` must be odd — that is exactly the set {…, 0.25, 0.75,
+  // 6.25, …} where the digit after the first decimal is a true 5. Deciding it on `x * 10`, as
+  // this first did, asks a multiplication that has already moved the value.
+  const twentieths = x * 20;
+  if (x * 4 === Math.floor(x * 4) && Math.abs(twentieths % 2) === 1) {
+    const tenths = Math.floor(x * 10);
+    return (tenths % 2 === 0 ? tenths : tenths + 1) / 10;
+  }
+  // Not a tie: `toFixed` rounds the EXACT binary value to nearest, which is what Python's
+  // `round` does too once the tie case is out of the way.
+  return Number(x.toFixed(1));
 }
 /** A percentage the SUMMARY already rounded, rendered es-ES. */
 const pctText = (x) => x.toFixed(1).replace('.', ',') + ' %';
@@ -568,12 +609,19 @@ function selfCheck(summary, d) {
    load and then withdrew it the moment the reader touched the slider — the page's entire
    reason to exist — leaving the numbers just as wrong and the warning gone. Latched here,
    unioned into every later render.                                                          */
-const LOAD_MISMATCHES = selfCheck(DATA.summary, derive(DATA.threshold));
+let LOAD_MISMATCHES = null;
+
+/** The load verdict, computed at the REPORT's umbral, once, on first use. */
+function loadMismatches() {
+  if (LOAD_MISMATCHES === null) LOAD_MISMATCHES = selfCheck(DATA.summary, derive(DATA.threshold));
+  return LOAD_MISMATCHES;
+}
 
 /** What the banner must say right now: what was found on load, plus anything found since. */
 function currentMismatches(d) {
+  const latched = loadMismatches();
   const now = selfCheck(DATA.summary, d);
-  return LOAD_MISMATCHES.concat(now.filter(p => LOAD_MISMATCHES.indexOf(p) === -1));
+  return latched.concat(now.filter(p => latched.indexOf(p) === -1));
 }
 /* ===== end derive ===== */
 
@@ -677,19 +725,11 @@ function renderSidecar() {
 }
 
 /* ----------------------------------------------------------------- charts */
-const chartTopics = echarts.init($('chart-topics'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
-const chartHist = echarts.init($('chart-hist'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
-
-/** `report._backing_order`: never-assigned rows last, then the EXACT ratio (never the %). */
-function topicRows(d) {
-  return slugs.map(function (slug, i) {
-    const row = d.perTopic[i];
-    return {slug: slug, label: name(slug), assigned: row.assigned, backed: row.backed,
-            doubtful: row.doubtful, unjudged: row.unjudged, missing: row.missing,
-            ratio: row.assigned ? row.backed / row.assigned : 0};
-  }).sort((a, b) => (a.assigned === 0) - (b.assigned === 0) || a.ratio - b.ratio ||
-                    (a.slug < b.slug ? -1 : 1));
-}
+/* The two ECharts instances are built in `boot()`, not here: `echarts.init` throws if the
+   library failed to inline, and anything that throws at script-evaluation time has to sit
+   inside the guard. `topicRows` is NOT redeclared here — it lives in the derive region, which
+   is the copy the node harness pins. */
+let chartTopics = null, chartHist = null;
 
 const NARROW = 640;
 
@@ -707,8 +747,11 @@ function renderTopics(d) {
     // 24, not 10: `containLabel` reserves for the CATEGORY labels, not for the last x tick,
     //  and `100 %` was clipping against the panel edge.
     grid: {left: 4, right: narrow ? 24 : 56, top: 6, bottom: 26, containLabel: true},
+    // No `%` on the narrow axis: the last tick is flush with the panel edge and the suffix
+    // clipped to `100`. The panel's own sub-line already says the scale is a percentage.
     xAxis: {type: 'value', max: 100, splitNumber: narrow ? 2 : 5,
-            axisLabel: {formatter: '{value} %', color: C.faint, fontFamily: MONO, fontSize: 11},
+            axisLabel: {formatter: narrow ? '{value}' : '{value} %',
+                        color: C.faint, fontFamily: MONO, fontSize: 11},
             axisLine: {show: false}, axisTick: {show: false}, splitLine: {lineStyle: {color: C.hair}}},
     yAxis: {type: 'category', inverse: true, data: rows.map(r => name(r.slug)),
             axisLine: {show: false}, axisTick: {show: false},
@@ -740,8 +783,8 @@ function renderTopics(d) {
 
 // The bins are a fact about the corpus, not about the slider: only the umbral MARK moves.
 // Recomputing 100k+ pairs on every input event is the difference between a slider that
-// drags and one that stutters.
-const HIST = histogram();
+// drags and one that stutters. Filled by `boot()`, like the charts.
+let HIST = null;
 
 function renderHist(t) {
   const h = HIST;
@@ -1021,21 +1064,15 @@ function setThreshold(value) {
   scheduleRender();
 }
 
-/* EVERY FAILURE PATH ENDS IN THE BANNER, never in "beautiful and blank". `echarts.init` and
-   the wiring below run before the first `render()`, so a throw in any of them used to abort
-   the script and leave the full masthead, five titled panels and zero rows — which reads as
-   "the corpus is empty" or "nobody ran `jev topics`", both wrong and both actionable in the
-   direction of re-paying for the corpus. */
-function paintBootFailure(message) {
-  const banner = document.getElementById('banner');
-  if (!banner) return;
-  banner.hidden = false;
-  banner.innerHTML = '<b>La página no pudo dibujarse</b>' + esc(String(message)) +
-    '. No hay números que leer aquí: usa <code>xbrain jev report</code>.';
-}
-addEventListener('error', (e) => paintBootFailure(e.message));
+/** Everything eager: the charts, the binned corpus, the wiring, the first paint.
 
-try {
+    Nothing above this line touches the DOM, ECharts or `DATA.items`, so `boot()` is the only
+    place a throw can come from — and its single call site is wrapped. */
+function boot() {
+
+chartTopics = echarts.init($('chart-topics'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
+chartHist = echarts.init($('chart-hist'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
+HIST = histogram();
 
 $('stamp').innerHTML = 'ACTUALIZADO ' + esc(DATA.updated) + ' · <b>' +
   pl(DATA.totals.current, 'EVALUACIÓN', 'EVALUACIONES') + '</b>';
@@ -1067,6 +1104,12 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(
 addEventListener('resize', () => { chartHist.resize(); scheduleRender(); });
 render();
 
+}
+
+// The ONLY top-level call. The `error` listener above already covers an async throw; this
+// catches the synchronous one and still re-raises, so the failure reaches the console too.
+try {
+  boot();
 } catch (err) {
   paintBootFailure(err && err.message ? err.message : err);
   throw err;
