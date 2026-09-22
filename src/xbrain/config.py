@@ -177,25 +177,71 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
     return index_dir, max_matches, char_budget
 
 
+def _jev_number(jev: dict, key: str, default: float, message: str) -> float:
+    """A `[jev]` numeric setting, type-checked BEFORE coercion.
+
+    `float(...)`/`int(...)` would accept a bool and a numeric string: `threshold = true`
+    coerces to 1.0, passes every range check, and silently makes the bar "probability
+    exactly 1.0" so nothing is ever backed by Jev. A bool is not a number here.
+    """
+    value = jev.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"config.toml: {message}")
+    return float(value)
+
+
+def _jev_text(jev: dict, key: str, default: str) -> str:
+    """A `[jev]` string setting: present, a string, and not blank."""
+    value = jev.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"config.toml: [jev].{key} must be a non-empty string")
+    return value.strip()
+
+
 def _jev_settings(settings: dict) -> tuple[str, float, str, int, int]:
     """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit)`.
 
-    Range-checked here so a bad value fails when the config loads, not mid-run.
+    THE DEFAULTS ARE IMPORTED FROM `xbrain.jev.defaults`, NEVER RETYPED (rule 5) — the same
+    rule `_index_settings` above shouts about, and the import is LOCAL for the same reason:
+    `config.py` is loaded on every `xbrain` invocation.
+
+    Range-checked here so a bad value fails when the config loads, not mid-run, and unknown
+    keys are REFUSED: a silently ignored `threshhold = 0.99` would leave the operator
+    reading a report computed at the default while the file says otherwise.
     """
+    from xbrain.jev.defaults import (
+        DEFAULT_CONCURRENCY,
+        DEFAULT_FALLBACK_OPTION,
+        DEFAULT_MODEL,
+        DEFAULT_STATE_CHAR_LIMIT,
+        DEFAULT_THRESHOLD,
+    )
+
     jev = settings.get("jev", {})
-    threshold = float(jev.get("threshold", 0.85))
+    if not isinstance(jev, dict):
+        raise ValueError(f"config.toml: [jev] must be a table, got {jev!r}")
+    allowed = ("concurrency", "fallback_option", "model", "state_char_limit", "threshold")
+    unknown = sorted(jev.keys() - set(allowed))
+    if unknown:
+        raise ValueError(
+            f"config.toml: [jev] unknown key {unknown[0]!r} (allowed: {', '.join(allowed)})"
+        )
+    threshold_message = "[jev].threshold must be a number in [0.0, 1.0]"
+    threshold = _jev_number(jev, "threshold", DEFAULT_THRESHOLD, threshold_message)
     if not 0.0 <= threshold <= 1.0:
-        raise ValueError("config.toml: [jev].threshold must be in [0.0, 1.0]")
-    concurrency = int(jev.get("concurrency", 8))
-    if concurrency < 1:
-        raise ValueError("config.toml: [jev].concurrency must be >= 1")
-    char_limit = int(jev.get("state_char_limit", 100_000))
-    if char_limit < 1:
-        raise ValueError("config.toml: [jev].state_char_limit must be >= 1")
-    fallback = str(jev.get("fallback_option", "otro")).strip()
-    if not fallback:
-        raise ValueError("config.toml: [jev].fallback_option is empty")
-    return str(jev.get("model", "jev-latest")), threshold, fallback, concurrency, char_limit
+        raise ValueError(f"config.toml: {threshold_message}")
+    counts = []
+    for key, default in (
+        ("concurrency", DEFAULT_CONCURRENCY),
+        ("state_char_limit", DEFAULT_STATE_CHAR_LIMIT),
+    ):
+        message = f"[jev].{key} must be an integer >= 1"
+        value = jev.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"config.toml: {message}")
+        counts.append(value)
+    fallback = _jev_text(jev, "fallback_option", DEFAULT_FALLBACK_OPTION)
+    return _jev_text(jev, "model", DEFAULT_MODEL), threshold, fallback, counts[0], counts[1]
 
 
 def load_config(repo_root: Path) -> Config:

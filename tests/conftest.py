@@ -37,6 +37,24 @@ def _isolate_firecrawl_credentials(monkeypatch, tmp_path):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_typesafe_credentials(monkeypatch, tmp_path):
+    """No test may see a real TYPESAFE_API_KEY or a real `.env`, for EVERY test.
+
+    Same reasoning as the Firecrawl fixture above, with money attached: `xbrain.jev` calls
+    the paid TypeSafe API, and the key it uses comes from the environment or from
+    `<repo>/.env`. Without this, a suite run on a machine that has a key configured could
+    reach the live API — and "no key configured" would mean "no key on the machine RUNNING
+    the tests", so the same test would pass in CI and fail on a developer laptop.
+    Autouse because the risk is exactly in the tests that do not think about Jev at all.
+
+    `tests/test_jev_env.py` restores the real lookup, since it tests the lookup itself.
+    """
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    empty = Path(tmp_path) / "no-such-dotenv" / ".env"
+    monkeypatch.setattr("xbrain.jev.env.dotenv_path", lambda repo_root: empty)
+
+
 class FakeBlock:
     """One Anthropic content block — a text block holding a JSON payload."""
 

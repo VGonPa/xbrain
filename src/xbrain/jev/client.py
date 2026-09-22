@@ -1,43 +1,47 @@
-"""The Jev client seam: xbrain's own question/answer types on one side, `typesafe-sdk` on
-the other. Nothing above this module imports the SDK, so a second provider answering the
-same questions is a second class with the same `ask`.
+"""The Jev seam, vendor-free: the question and answer types xbrain itself speaks.
+
+Nothing here imports a provider SDK. `JevClient` is the whole contract — a provider is a
+class with an `ask`, and `typesafe.py` is the first one. Keeping the protocol and the
+adapter apart is what lets the rest of the package (questions, assessment, store, report)
+import this module without paying for, or depending on, anybody's HTTP stack. Mirrors
+`executors/base.py` vs `executors/api.py`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
-from typesafe_sdk import (
-    Choice,
-    Noul,
-    NoulCriteria,
-    RetryPolicy,
-    SystemOneResponse,
-    TypeSafeClient,
-    TypeSafeError,
-)
-from typesafe_sdk import ChoiceAnswer as SdkChoiceAnswer
-from typesafe_sdk import NoulAnswer as SdkNoulAnswer
-
-# TypeSafe's list price on 2026-09-22 (docs.typesafe.ai/models): input only, output is free.
-USD_PER_MTOK_INPUT = 0.042
+#: The two sides of a Noul's criteria. A `Literal` key type, not a bare `str`, because a
+#: misspelt side is not a typo the wire can report: the provider accepts `None` as
+#: "undescribed", so `{"tru": …}` would ship a question with its description silently gone.
+NoulSide = Literal["true", "false"]
 
 
 class JevError(RuntimeError):
-    """An operator-facing Jev failure: missing key, API error, or an answer set we cannot use."""
+    """An operator-facing Jev failure, in the language the CLI prints.
+
+    Raised for an unusable key or client configuration, a question we refuse to send, a
+    provider error, and an answer set that does not match the questions asked. It is the
+    ONLY exception type the seam emits: no provider exception reaches a caller.
+    """
 
 
 @dataclass(frozen=True)
 class NoulQuestion:
+    """A yes/no question. `criteria` describes the two outcomes; either side may be left
+    out, which asks the question with that outcome undescribed."""
+
     instructions: str
-    criteria: dict[str, str] | None = None  # keys "true" / "false"
+    criteria: dict[NoulSide, str] | None = None
 
 
 @dataclass(frozen=True)
 class ChoiceQuestion:
+    """A pick-one question: `criteria` maps each option to its description."""
+
     instructions: str
-    criteria: dict[str, str]  # option -> description
+    criteria: dict[str, str | None]
 
 
 Question = NoulQuestion | ChoiceQuestion
@@ -45,11 +49,15 @@ Question = NoulQuestion | ChoiceQuestion
 
 @dataclass(frozen=True)
 class NoulAnswer:
+    """A probability in [0, 1] that the answer to a `NoulQuestion` is yes."""
+
     noul: float
 
 
 @dataclass(frozen=True)
 class ChoiceAnswer:
+    """The option a `ChoiceQuestion` picked, with its confidence and the distribution."""
+
     choice: str
     confidence: float
     probabilities: dict[str, float]
@@ -60,6 +68,11 @@ Answer = NoulAnswer | ChoiceAnswer
 
 @dataclass(frozen=True)
 class JevResult:
+    """One answered call. `provider` and `model` travel WITH the answers, so a record built
+    from this result can never be attributed to the wrong judge; token counts are `None`
+    when the provider did not report usage."""
+
+    provider: str
     model: str
     answers: dict[str, Answer]
     input_tokens: int | None = None
@@ -70,84 +83,3 @@ class JevClient(Protocol):
     """One call: a `state` and a map of typed questions, all answered against that state."""
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult: ...
-
-
-def _to_sdk(question: Question) -> Noul | Choice:
-    if isinstance(question, NoulQuestion):
-        # `NoulCriteria` is a `total=False` TypedDict: describing only one outcome is
-        # legal on the wire, so a missing side is `None`, not a `KeyError` in the seam.
-        criteria = (
-            NoulCriteria(true=question.criteria.get("true"), false=question.criteria.get("false"))
-            if question.criteria is not None
-            else None
-        )
-        return Noul(instructions=question.instructions, criteria=criteria)
-    return Choice(instructions=question.instructions, criteria=dict(question.criteria))
-
-
-def _from_sdk(response: SystemOneResponse) -> JevResult:
-    answers: dict[str, Answer] = {}
-    for key, answer in response.answers.items():
-        if isinstance(answer, SdkNoulAnswer):
-            answers[key] = NoulAnswer(noul=answer.noul)
-        elif isinstance(answer, SdkChoiceAnswer):
-            answers[key] = ChoiceAnswer(
-                choice=answer.choice,
-                confidence=answer.confidence,
-                probabilities=dict(answer.probabilities),
-            )
-        else:
-            raise JevError(
-                f"Jev devolvió una respuesta de tipo {answer.type!r} para {key!r}, que no se pidió"
-            )
-    return JevResult(
-        model=response.model,
-        answers=answers,
-        input_tokens=response.usage.input_tokens,
-        output_tokens=response.usage.output_tokens,
-    )
-
-
-class TypeSafeJevClient:
-    """`JevClient` over the official SDK. `sdk_client` is the injection seam for tests,
-    mirroring `executors.api.ApiExecutor(client=...)`."""
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        *,
-        timeout: float = 60.0,
-        sdk_client: TypeSafeClient | None = None,
-    ) -> None:
-        self._model = model
-        self._client = (
-            sdk_client
-            if sdk_client is not None
-            else TypeSafeClient(
-                api_key=api_key,
-                model=model,
-                # TWO CLOCKS, AND ONLY ONE MAY GOVERN. `timeout` is per HTTP attempt;
-                # `RetryPolicy.timeout` is the TOTAL budget across attempts and defaults to
-                # 30 s — shorter than one attempt here, so it would cancel the retries of
-                # exactly the slow calls retries exist for. `None` disables it and leaves
-                # the attempt count as the only stop.
-                retry=RetryPolicy(max_retries=3, timeout=None),
-                timeout=timeout,
-            )
-        )
-
-    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
-        sdk_questions = {key: _to_sdk(question) for key, question in questions.items()}
-        try:
-            response = self._client.system_one(state, sdk_questions, model=self._model)
-        except TypeSafeError as exc:
-            raise JevError(f"Jev API: {exc}") from exc
-        result = _from_sdk(response)
-        # The SDK drops answers whose `type` it does not model (forward-compat) with only a
-        # log line, and the API may omit one. Unasked-for silence would be stored downstream
-        # as "this topic scored nothing" instead of "this topic was never answered".
-        missing = questions.keys() - result.answers.keys()
-        if missing:
-            raise JevError(f"Jev no respondió a {sorted(missing)!r}")
-        return result
