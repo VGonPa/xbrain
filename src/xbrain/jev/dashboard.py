@@ -34,18 +34,17 @@ the data instead of on the logic it exists to police. Display rounding is the te
 
 from __future__ import annotations
 
-from typing import Any
-
 from datetime import datetime
+from typing import Any
 
 from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.jev.assess import CurrentPairs, current_pairs
 from xbrain.jev.models import TopicAssessment
 from xbrain.jev.report import (
     THRESHOLD_DEPENDENT_KEYS,
-    _primary_rank,
     build_report,
     cost_fragment,
+    primary_rank,
 )
 from xbrain.models import Item, Topic
 
@@ -106,7 +105,7 @@ def _row(
     fabricated zero would put a topic Jev was never asked about at the top of the "most
     doubtful" queue as the strongest disagreement in the corpus.
 
-    `_primary_rank` is IMPORTED rather than re-derived from `ranked` above, even though the
+    `primary_rank` is IMPORTED rather than re-derived from `ranked` above, even though the
     sort is already in hand: the rank rule (descending probability, ties by option name, so two
     runs of one distribution can never report different ranks) is `report`'s, and a second copy
     is the one that drifts.
@@ -137,13 +136,13 @@ def _row(
         # enrich's primary, even when the cut left it out: its probability and its 1-based
         # rank. Without them the section answers Jev's question and not the reader's — the
         # bars show Jev's five favourites and nothing says whether enrich's pick came sixth
-        # or last, which is the distinction `report._primary_rank` exists to draw.
+        # or last, which is the distinction `report.primary_rank` exists to draw.
         "pp": (
             None
             if enriched is None or enriched.primary_topic is None
             else assessment.primary.probabilities.get(enriched.primary_topic)
         ),
-        "pr": _primary_rank(
+        "pr": primary_rank(
             None if enriched is None else enriched.primary_topic,
             assessment.primary.probabilities,
         ),
@@ -203,9 +202,14 @@ def compute_jev_dashboard_data(
     `current` is that decision, HANDED IN. A caller that already holds it — `cli._jev_pairs`
     computes it to decide whether to refuse at all — would otherwise pay a second
     `build_topic_state` and sha256 over the whole corpus for an answer it has. Omitted, it is
-    computed here, which is what keeps this function callable with nothing but its arguments
-    (`fallback` and `char_limit` are the inputs to that computation and are unused when
-    `current` is supplied). Both paths must produce the same blob, and a test asserts it.
+    computed here, which is what keeps this function callable with nothing but its arguments.
+    Both paths must produce the same blob, and a test asserts it.
+
+    `char_limit` is then unused — it is an input to that computation and to nothing else —
+    but `fallback` is NOT: it ships into the blob, where the page names it. A hand-in
+    computed under other options is REFUSED rather than trusted, because the counts look
+    identical whatever they were decided with, so the swap has no symptom: the page would
+    show one fallback and a currency verdict reached under another.
 
     `now` is the clock, threaded from the caller rather than read here: `_summarize` stamps
     `generated_at`, and a function that reads the clock inside itself is not a pure function of
@@ -228,6 +232,12 @@ def compute_jev_dashboard_data(
     """
     if current is None:
         current = current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit)
+    elif (current.fallback, current.char_limit) != (fallback, char_limit):
+        raise ValueError(
+            f"`current` se calculó con fallback={current.fallback!r} y "
+            f"char_limit={current.char_limit}, pero el blob se construye con "
+            f"fallback={fallback!r} y char_limit={char_limit}"
+        )
     pairs = list(current.pairs)
     # `build_report` is the entry point, and the summary is the half this page needs: the rows
     # a reader clicks are rebuilt in the browser at whatever threshold the slider is on, so the

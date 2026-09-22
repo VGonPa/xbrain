@@ -173,6 +173,12 @@ jobs:
       # Match quality.yml exactly. A gate run under a different hash seed is not the same gate,
       # and a spurious difference would read as a lie.
       PYTHONHASHSEED: "0"
+      # Same rule, and the divergence it prevents is this job's whole failure mode: without
+      # it a runner with no node SKIPS the 19 jev mirror tests here while the gate RAN them,
+      # so the honest control and the published result differ for a reason that is not a
+      # disarmed gate — and the auditor files a public issue saying the repo ships unverified
+      # code. tests/test_gate_audit_workflow.py fails the build if the two env blocks drift.
+      XBRAIN_REQUIRE_NODE: "1"
     steps:
       - name: Check out the exact commit under audit
         uses: actions/checkout@v4
@@ -184,6 +190,11 @@ jobs:
 
       - name: Set up Python
         run: uv python install 3.12
+      # Byte-identical to quality.yml's, for the reason the install step below spells out:
+      # the jev mirror tests execute node, and a control that discovers a missing engine
+      # differently from the gate is not a control.
+      - name: Check node is present (the jev mirror tests execute it)
+        run: node --version
 
       # MUST be byte-identical to the install step in `quality.yml`, and
       # `tests/test_gate_audit_workflow.py` fails the build if it drifts. An honest re-run in

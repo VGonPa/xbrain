@@ -960,7 +960,7 @@ function choiceLabel(it) {
 
     Without it the section answers Jev's question and not the reader's: the bars show Jev's
     five favourites, the sentence below says enrich picked X, and nothing says whether X came
-    sixth or last. `report._primary_rank` exists to separate a close call from a real conflict,
+    sixth or last. `report.primary_rank` exists to separate a close call from a real conflict,
     and this drawer is the surface where that distinction is worth the most. */
 function choiceRows(it) {
   const shown = it.top.map(pair => choiceRow(it, pair[0], pair[1], null));

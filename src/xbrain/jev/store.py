@@ -10,12 +10,27 @@ The file is rewritten WHOLESALE on every save, which is why `TopicAssessment` fo
 unknown fields: a record a newer writer added a field to would otherwise be silently
 narrowed by an older one on the next run.
 
-THIS FILE COSTS MONEY TO REGENERATE and has no undo. It is NOT snapshotted with the rest
-of `data/` (`snapshot create` covers the corpus, not the side-car) and `data/` is
-gitignored in full, so there is no `git checkout` back to a good copy either. Two
-consequences worth knowing before touching it: `--force` overwrites a paid record with no
-recovery, and a corrupt file is repaired by hand or paid for again — which is why
-`load_assessments` refuses one instead of quietly starting from `{}`.
+ONE ASSESSMENT PER ITEM. The key is the `item_id` and nothing else, so a run by a SECOND
+judge — another provider, another model — does not sit beside the first, it OVERWRITES it,
+paid record for paid record. `TopicAssessment` carries `provider`/`model` so a stored record
+says who answered it, not so two answers can be held at once; and because the contract
+excludes the judge, re-pointing `[jev].model` leaves every record current, so only `--force`
+re-asks — which is the path that destroys the old work. Holding a panel means re-keying this
+file by `(item_id, provider, model)`, and that is a follow-up, not something the current
+shape supports.
+
+THIS FILE COSTS MONEY TO REGENERATE and the usual undo does not reach it. It is NOT
+snapshotted with the rest of `data/` (`snapshot create` covers the corpus, not the
+side-car) and `data/` is gitignored in full, so there is no `git checkout` and no
+`snapshot restore` back to a good copy. Two consequences worth knowing before touching it:
+
+* `--force` overwrites paid records, so the CLI copies this file to
+  `topics.<UTC stamp>.bak` beside it before a run that re-asks a current one — the
+  side-car's OWN reversibility, standing in for the snapshot it does not get. Those copies
+  are never pruned, and nothing in THIS module writes them: the backup belongs to the
+  command that decided to overwrite (`cli._back_up_before_forced_overwrite`), not to the writer.
+* A corrupt file is repaired by hand or paid for again — which is why `load_assessments`
+  refuses one instead of quietly starting from `{}`.
 """
 
 from __future__ import annotations

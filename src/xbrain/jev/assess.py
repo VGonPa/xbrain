@@ -30,6 +30,7 @@ from xbrain.jev.client import (
     NoulQuestion,
     Question,
 )
+from xbrain.jev.defaults import plural
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import PRIMARY_KEY, STATE_KEY, TOPIC_PREFIX, build_topic_questions
 from xbrain.models import Item, Topic, VerifyTarget
@@ -297,11 +298,20 @@ class CurrentPairs:
     `stale` is a record whose contract no longer describes today's ask. `orphans` is a record
     whose item is no longer in the store — a different event with the same symptom, so it gets
     its own number rather than hiding inside the first.
+
+    `fallback` and `char_limit` are PROVENANCE, not parameters: they are the two inputs the
+    verdict was computed from, and they travel with it so a consumer that accepts a hand-in
+    (`dashboard.compute_jev_dashboard_data`) can refuse one decided under other options. The
+    counts look identical whatever they were computed with, so nothing in the shape of this
+    object could catch the swap — the same argument `TopicAssessment.contract` answers for a
+    stored record.
     """
 
     pairs: tuple[tuple[Item, TopicAssessment], ...]
     stale: int
     orphans: int
+    fallback: str
+    char_limit: int
 
 
 def current_pairs(
@@ -342,6 +352,8 @@ def current_pairs(
         pairs=tuple(pairs),
         stale=stale,
         orphans=sum(1 for item_id in assessments if item_id not in known),
+        fallback=fallback,
+        char_limit=char_limit,
     )
 
 
@@ -420,6 +432,15 @@ def select_items(
 
     The questions and their digest are built ONCE for the whole selection: they do not depend
     on the item, so doing it per item would redo identical work for every post in the corpus.
+
+    `build_topic_state` deliberately is NOT hoisted the same way, and the asymmetry is the
+    point. The digest is one value for the whole run, so building it per item is pure waste;
+    the state is per ITEM, and threading it from here to `assess_topics` would mean the
+    function that SENDS a state receives it from elsewhere — the one place a future edit to
+    the cut or the evidence set could make the state that was judged for currency differ from
+    the state that was billed. Measured rather than assumed: a full pass over 2,609 items is
+    0.011 s (2026-09-22, this machine), against a command whose unit of work is a network
+    call. Paying it twice buys `assess_topics` the property that it computes what it sends.
     """
     if limit is not None and limit < 1:
         raise JevError("--limit debe ser >= 1")
@@ -584,7 +605,15 @@ def run_assessments(
     assessed.sort(key=lambda assessment: assessment.item_id)
     failed.sort(key=lambda failure: failure[0])
     if not assessed:
+        # The DISTINCT reason count is the diagnosis, and one quoted reason cannot carry it:
+        # N failures with one reason is a key, a quota or an outage — fix one thing and
+        # re-run — while N failures with forty is the corpus, and every one has to be read.
+        # Showing `failed[0][1]` alone reads as the first case whichever it is.
+        reasons = {reason for _, reason in failed}
         raise JevError(
-            f"ninguna de las {len(items)} evaluaciones terminó; primer error: {failed[0][1]}"
+            f"ninguna de las {len(items)} evaluaciones terminó: "
+            f"{plural(len(failed), 'fallo', 'fallos')}, "
+            f"{plural(len(reasons), 'motivo distinto', 'motivos distintos')}; "
+            f"primero: {failed[0][1]}"
         )
     return RunResult(assessed=tuple(assessed), failed=tuple(failed))

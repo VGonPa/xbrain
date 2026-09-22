@@ -1376,6 +1376,109 @@ def test_vocab_apply_regenerate_marks_items(tmp_path, monkeypatch):
     assert _ls(tmp_path / "data" / "items.json")["1"].enriched is None
 
 
+def _seed_jev_sidecar(tmp_path, count: int = 3) -> None:
+    """`count` assessments in `data/jev/topics.json`, so a vocab edit has something to retire."""
+    from datetime import datetime, timezone
+
+    from xbrain.jev.models import PrimaryChoice, TopicAssessment
+    from xbrain.jev.store import save_assessments
+
+    save_assessments(
+        {
+            str(n): TopicAssessment(
+                item_id=str(n),
+                provider="typesafe",
+                model="jev-1.13.0",
+                asked_at=datetime(2026, 9, 22, tzinfo=timezone.utc),
+                contract="a" * 64,
+                state_chars=10,
+                membership={"misc": 0.9},
+                primary=PrimaryChoice(choice="misc", confidence=0.9, probabilities={"misc": 0.9}),
+            )
+            for n in range(1, count + 1)
+        },
+        tmp_path / "data" / "jev" / "topics.json",
+    )
+
+
+def test_vocab_apply_says_how_many_jev_assessments_it_retires(tmp_path, monkeypatch):
+    """Rewriting `vocab.yaml` retires EVERY Jev record, and it did so in silence.
+
+    The side-car's contract hashes the questions, and the questions are built from the
+    vocabulary — so any vocab write, however cosmetic, expires all of it. The next
+    `xbrain jev report` then says `0 vigentes` over a full file and the operator reads it as
+    "nobody ever ran this", which is a re-bill of the whole corpus to discover otherwise.
+    No contract arithmetic is needed to say so: the count is the number of records, because
+    the answer is always "all of them".
+    """
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _seed_jev_sidecar(tmp_path, count=3)
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps({"topics": [{"slug": "misc", "description": "Ruido."}]}), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["vocab", "--apply", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "3 evaluaciones de Jev quedan caducadas" in result.stdout
+    # And the remedy is a PLAIN re-run. A retired record is not current, so `select_items`
+    # picks it up on its own; pointing the operator at `--force` would teach them to reach
+    # for the one flag that ALSO re-bills every record that is still current.
+    assert "--force" not in result.stdout, result.stdout
+    assert "`xbrain jev topics` las vuelve a pedir" in result.stdout
+
+
+def test_vocab_regenerate_says_it_too_and_agrees_in_number(tmp_path, monkeypatch):
+    """`1 evaluaciones` reads as a bug in the counting — `defaults.plural` is the repo rule."""
+    from xbrain.models import Topic as _Topic
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _seed_jev_sidecar(tmp_path, count=1)
+    monkeypatch.setattr(cli, "induce_vocab", lambda *a, **k: [_Topic(slug="misc", description="d")])
+
+    result = runner.invoke(app, ["vocab", "--executor", "api", "--regenerate"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 evaluación de Jev queda caducada" in result.stdout
+
+
+def test_vocab_says_nothing_about_jev_when_there_is_no_side_car(tmp_path, monkeypatch):
+    """The overwhelming case is a vault that has never run `jev topics`. A line about a file
+    that does not exist sends the reader looking for it."""
+    import json
+
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    ws = tmp_path / "ws.json"
+    ws.write_text(
+        json.dumps({"topics": [{"slug": "misc", "description": "Ruido."}]}), encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["vocab", "--apply", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "Jev" not in result.stdout
+
+
+def test_a_worksheet_export_retires_nothing_and_says_nothing(tmp_path, monkeypatch):
+    """`xbrain vocab --executor claude-code` EXPORTS; it does not write `vocab.yaml`. Warning
+    about retired assessments there would be false, and the operator who believes it re-bills
+    a corpus whose side-car is untouched."""
+    _setup_repo(tmp_path, monkeypatch)
+    save_store({"1": _linked_item("1")}, tmp_path / "data" / "items.json")
+    _seed_jev_sidecar(tmp_path, count=3)
+
+    result = runner.invoke(app, ["vocab", "--executor", "claude-code"])
+
+    assert result.exit_code == 0, result.output
+    assert "caducada" not in result.stdout
+
+
 def test_vocab_apply_with_no_valid_topics_fails(tmp_path, monkeypatch):
     import json
 

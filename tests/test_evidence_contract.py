@@ -1,12 +1,13 @@
 # tests/test_evidence_contract.py
-"""The cross-component guard: four components, ONE definition of evidence.
+"""The cross-component guard: five components, ONE definition of evidence.
 
-Four components each need to know what counts as evidence for a generated output:
+Five components each need to know what counts as evidence for a generated output:
 
   1. the GENERATOR  — what the worksheet actually hands the agent
   2. the RUBRIC     — what the judge is told may support a claim
   3. the JUDGE      — what `_source_text` actually puts in front of it
   4. the CHECKER    — what the deterministic entity check searches for a name
+  5. JEV            — what `assess.build_topic_state` sends the topic judge
 
 Before `xbrain.evidence`, each maintained its own hand-written list, and 1,306 tests
 passed while the four contradicted one another — because every PR tested only its own
@@ -14,7 +15,7 @@ side. The contradictions were not theoretical: the judge was handed the linked a
 for a DIGEST whose generator never saw it (so it excused inventions it could not have
 sourced), and neither generator shipped the author display name its rubric promised.
 
-This file binds THREE of them. It asserts, per target and PER GENERATOR:
+This file binds the first THREE of them. It asserts, per target and PER GENERATOR:
 
     generator fields  ⊇  evidence_surfaces(item, target)   [each generator, on its own]
     judge source      ==  evidence_surfaces(item, target)
@@ -24,15 +25,19 @@ Identity against the shared function — never a substring, and never a hand-wri
 repeated here (a list repeated in the test is a fifth copy of the bug). Add a surface to
 one component and forget the others, and this file goes red.
 
-THE CHECKER'S LEG IS NOT HERE, AND THIS FILE DOES NOT PRETEND OTHERWISE. The deterministic
-entity check lives in #89, stacked ON this branch, so nothing here can import it. A test
-comparing `evidence_text` to `evidence_surfaces` — both from `xbrain.evidence` — would
-assert the module against itself: green forever, binding nothing. That is exactly the
-"passes for the wrong reason" test this PR exists to end, and an earlier draft of this file
-shipped it. What lives here instead is the CONTRACT #89 consumes
-(`test_evidence_text_is_a_faithful_label_free_projection_of_the_surfaces`); the binding
-itself — `entity_grounding` calls `evidence_text` and keeps no private list — is asserted
-in #89, where it can actually run.
+LEGS FOUR AND FIVE ARE BOUND ELSEWHERE, AND THIS FILE DOES NOT PRETEND OTHERWISE.
+
+* The CHECKER: `tests/test_checker_evidence_binding.py`, through the checker's public scan.
+  A test comparing `evidence_text` to `evidence_surfaces` — both from `xbrain.evidence` —
+  would assert the module against itself: green forever, binding nothing. That is exactly
+  the "passes for the wrong reason" test this file exists to end, and an earlier draft
+  shipped it. What lives here instead is the CONTRACT that binding consumes
+  (`test_evidence_text_is_a_faithful_label_free_projection_of_the_surfaces`); the binding
+  itself — `entity_grounding` calls `evidence_text` and keeps no private list — is asserted
+  there, where it can actually run.
+* JEV: `tests/test_jev_assess.py`, which pins the surface set by identity
+  (`== ["author", "tweet"]`) before asserting the post leads, so renaming a surface key goes
+  red rather than silently restoring the measured failure.
 """
 
 import json

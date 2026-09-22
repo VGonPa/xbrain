@@ -449,6 +449,16 @@ nothing failed while it was wrong. Pinned by
 The same change makes `download-videos` print Click's `Aborted!` when you answer `n`
 to its size gate, where it used to print a bare `Error:`.
 
+### `--help` used to print `.version` where the config key is `[describe].version`
+
+**Fixed — if you still see this, you are on an old build.** Rich reads `[section]` in
+help text as a style tag and swallowed it, so `xbrain describe --help`, `get --help`,
+`digest-video --help` and `describe --model` printed a bare `.version`,
+`.get_char_budget` and the like — a key that does not exist in `config.toml`. The
+brackets are now escaped, so the help prints `[describe].version` and
+`[index].get_char_budget` as written. `README.md`'s config table always had them
+right, so nobody was stranded; the help was the copy that lied.
+
 ---
 
 ## `xbrain jev` — the second opinion on topics
@@ -478,8 +488,9 @@ Three that send people here first, because the symptom does not name Jev:
   embedded in it. Trust `xbrain jev report`, not the page, and report it as a bug.
 
 `data/jev/topics.json` is **paid, gitignored and never snapshotted**. There is no
-`git checkout` and no `snapshot restore` back to a good copy — `--force` overwrites a
-paid record with no recovery, and a corrupt file is repaired by hand or paid for again.
+`git checkout` and no `snapshot restore` back to a good copy. The one automatic copy is the
+`data/jev/topics.<UTC stamp>.bak` a `--force` run writes before it re-asks a current record
+(never pruned — delete them by hand). A corrupt file is repaired by hand or paid for again.
 
 ---
 
