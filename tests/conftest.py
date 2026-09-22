@@ -33,8 +33,10 @@ def plain_output(output: str) -> str:
     escapes rejoins the flag, dropping the chrome and collapsing whitespace rejoins wrapped
     words — which makes an assertion terminal-width AND colour independent.
 
-    It lives here because two test modules assert on rendered help; a `COLUMNS` env crutch
-    in one of them was width-lucky rather than width-proof, and did nothing about ANSI.
+    It lives here rather than in a test module so any of them can assert on rendered output
+    without a second copy; `tests/test_cli.py`'s help battery is today's only caller. It
+    replaced a `COLUMNS` env crutch that was width-lucky rather than width-proof and did
+    nothing about ANSI.
     """
     return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
 

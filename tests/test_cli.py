@@ -28,12 +28,11 @@ from xbrain.verification import VerdictWriteResult
 runner = CliRunner()
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-# Rich panel/box-drawing chrome (Unicode block U+2500–U+257F): ╭ ╮ ╰ ╯ ─ │ etc.
-_BOX_RE = re.compile("[─-╿]")
 
 
-#: ONE normaliser, in `tests/conftest.py`, shared with `tests/test_jev_cli.py`. Re-exported
-#: under the old private name so the call sites in this file stay as they were.
+#: The shared CliRunner-output normaliser lives in `tests/conftest.py`, where any test
+#: module can reach it; today this file's help battery is its only caller. Re-exported under
+#: the old private name so the call sites below stay as they were.
 _plain_output = plain_output
 
 

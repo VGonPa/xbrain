@@ -328,10 +328,15 @@ Error: no hay items que comparar en <items.json>: ejecuta `xbrain extract`. No s
 Error: no hay evaluaciones guardadas en <topics.json>: ejecuta `xbrain jev topics`. No se sobrescribe <artefacto>
 Error: 0 evaluaciones vigentes de N guardadas (S caducadas, H huérfanas): ejecuta `xbrain jev topics` (o revisa <vocab.yaml> si acabas de cambiarlo). No se sobrescribe <artefacto>
 Error: ninguna evaluación vigente tiene con qué compararse: los N items evaluados no están enriquecidos. Ejecuta `xbrain enrich`. No se sobrescribe <artefacto>
+Error: ninguna evaluación vigente tiene con qué compararse: el 1 item evaluado no está enriquecido. Ejecuta `xbrain enrich`. No se sobrescribe <artefacto>
 ```
 
 `<artefacto>` is a full path, and it is the one the command being run would have written:
 `data/jev/topics-report.json` for `jev report`, `<output_dir>/jev.html` for `jev dashboard`.
+
+The fifth refusal is shown twice because the whole phrase agrees in number — article, noun
+and verb — so at one item it reads `el 1 item evaluado no está enriquecido`, not `los 1
+item evaluado no están enriquecidos`.
 
 The fourth is the one that costs money to misread, which is why `caducadas` is printed even
 at zero in every summary line: it is the number that tells "nobody has run `xbrain jev
@@ -350,10 +355,17 @@ Writes `jev.html` into the vault's output directory, next to `dashboard.html`. I
 the same line `jev report` prints, then how many items reached the page and where it is:
 
 ```text
-2565 items en el dashboard → file:///…/x-knowledge/jev.html
+2583 items en el dashboard → file:///…/x-knowledge/jev.html
 ```
 
 Open it with `open <uri>`.
+
+**That count is not the `2565` in the line above it, and the difference is the same one
+[§ items comparados](#items-comparados-25652583--two-different-populations) explains.** The
+page carries a row for every **current assessment** — 2,583 — because an item Jev has an
+opinion about is worth showing whether or not `enrich` has reached it. The report's ratio
+counts the **comparable** ones, the 2,565 that carry an enrichment. Same side-car, two
+questions.
 
 It is **one self-contained file**: the data as a JSON blob, ECharts vendored into the page.
 Nothing is fetched at runtime except the Google Fonts stylesheet, so it renders offline in

@@ -155,7 +155,7 @@ def test_the_documented_corpus_bill_is_computed_from_the_rate_not_asserted_besid
     cost = input_cost_usd(assessments)
 
     # `approx`: `input_cost_usd` prices PER RECORD (each record may have its own provider),
-    # so 2,591 additions accumulate a different last bit than one multiplication. The bill is
+    # so 2,583 additions accumulate a different last bit than one multiplication. The bill is
     # printed at four decimals, which is far above that.
     expected = records * tokens_each / 1e6 * INPUT_USD_PER_MTOK["typesafe"]
     assert cost == pytest.approx(expected)
