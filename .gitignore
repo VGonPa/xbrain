@@ -17,3 +17,6 @@ config.toml
 
 # Working docs (not tracked)
 zz-support-files/
+
+# Local secrets (TYPESAFE_API_KEY); see .env.example
+.env

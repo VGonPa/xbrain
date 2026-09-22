@@ -152,3 +152,31 @@ command = "parakeet-mlx"
 #   Character ceiling per `xbrain get` response. Above it the response is truncated
 #   DECLARING SO and returns a cursor to continue — never silently. ~40k is a long
 #   article with its metadata: the common case does not paginate.
+
+[jev]
+# Jev (TypeSafe AI) topic assessment — `xbrain jev topics|report|dashboard` (landing across #211).
+# Key: TYPESAFE_API_KEY in the environment or in <repo>/.env (see .env.example).
+# Model alias; "jev-latest" follows TypeSafe's updates. Each stored assessment
+# records the concrete model version the API answered with.
+model = "jev-latest"
+# A topic counts as "backed by Jev" when its probability is >= threshold.
+# The dashboard (landing across #211) has a slider; this is the CLI default and the
+# slider's start.
+threshold = 0.85
+# The escape option of the primary-topic Choice ("a topic not in the vocabulary").
+# Must not collide with a vocabulary slug; `xbrain jev topics` refuses the run if it does
+# (the config loader cannot check it — it never sees the vocabulary).
+fallback_option = "otro"
+# Concurrent requests in flight. TypeSafe's published limits (docs.typesafe.ai/models,
+# 2026-09-22) are 250k tokens/second and 1,200 requests/minute, returning 429 over either;
+# at ~25k tokens per call the token rate is the one that binds first. 8 is where the
+# independent PriorBench benchmark (2026-09-20) measured throughput saturating; it is not
+# a TypeSafe figure. Raise it only against an observed 429 rate.
+concurrency = 8
+# Evidence text is cut here. Jev's budgets (docs.typesafe.ai/models, 2026-09-22): 64k tokens
+# per request for `state` plus ALL questions combined, and 32k for `state` plus the single
+# longest question. One call asks one Noul per vocabulary topic plus the primary Choice, so
+# the 64k budget is the one that tightens as `[vocab].target_count` grows — truncating the
+# state does not shrink the question half. 100k chars is ~25k tokens. Assessments record the
+# pre-cut length and `truncated`.
+state_char_limit = 100000
