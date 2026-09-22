@@ -1,6 +1,7 @@
 # tests/jev_fakes.py — the JevClient test double shared by the jev test modules.
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 
 from xbrain.jev.client import (
@@ -58,10 +59,11 @@ class FakeJevClient:
         self.calls: list[tuple[dict[str, str], dict[str, Question]]] = []
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
-        # Snapshots, not references: a caller that builds `questions` in a loop and reuses
-        # the dict would otherwise see the final state in every recorded call, and an
-        # assertion about the first call would pass while the real call was different.
-        self.calls.append((dict(state), dict(questions)))
+        # Deep snapshots, not references: a caller that builds `questions` in a loop and
+        # reuses the dict would otherwise see the final state in every recorded call, and a
+        # shallow copy still shares each question's `criteria`, so editing one in place
+        # would rewrite history the log had already recorded.
+        self.calls.append((copy.deepcopy(state), copy.deepcopy(questions)))
         if not questions:
             raise JevError("Jev: llamada sin preguntas")
         if self.fail_when is not None and self.fail_when(state):
@@ -71,16 +73,20 @@ class FakeJevClient:
             if isinstance(question, NoulQuestion):
                 slug = key.removeprefix("topic__")
                 answers[key] = NoulAnswer(noul=self.nouls.get(slug, self.default_noul))
-            else:
-                assert isinstance(question, ChoiceQuestion)
+            elif isinstance(question, ChoiceQuestion):
                 probabilities = {option: 0.0 for option in question.criteria}
                 probabilities[self.primary] = 1.0
                 answers[key] = ChoiceAnswer(
                     choice=self.primary, confidence=self.confidence, probabilities=probabilities
                 )
+            else:
+                raise JevError(f"tipo de pregunta no modelado para {key!r}: {type(question)}")
         # The same completeness the adapter enforces, so a test can never assert against an
-        # answer set the real client would have refused.
-        assert answers.keys() == questions.keys()
+        # answer set the real client would have refused. `raise`, not `assert`: `python -O`
+        # strips an assert, and this double is what every later task asserts against.
+        if answers.keys() != questions.keys():
+            unanswered = sorted(questions.keys() - answers.keys())
+            raise JevError(f"la doble no respondió a {unanswered!r}")
         return JevResult(
             provider=self.provider,
             model=self.model,

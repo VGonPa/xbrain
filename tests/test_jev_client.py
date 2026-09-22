@@ -245,3 +245,20 @@ def test_the_suite_cannot_reach_a_real_key(tmp_path):
         encoding="utf-8",
     )
     assert typesafe_api_key(tmp_path) is None
+
+
+def test_fake_jev_client_snapshots_deeply_enough_to_survive_a_mutated_question():
+    """A shallow `dict(questions)` still shares each question's `criteria` dict, so a caller
+    that edits one in place would rewrite history the log already recorded."""
+    client = FakeJevClient()
+    question = NoulQuestion("Is it about ai?", {"true": "sobre IA"})
+    client.ask({"post": "first"}, {"topic__ai": question})
+    question.criteria["true"] = "MUTATED"
+    assert client.calls[0][1]["topic__ai"].criteria == {"true": "sobre IA"}
+
+
+def test_fake_jev_client_refuses_a_question_type_it_does_not_model():
+    """`assert` is stripped under `python -O`; an unmodelled variant has to raise the same
+    error the real adapter would, not vanish into a silently wrong answer set."""
+    with pytest.raises(JevError, match="tipo de pregunta"):
+        FakeJevClient().ask({"post": "x"}, {"q": object()})  # type: ignore[dict-item]

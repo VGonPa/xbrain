@@ -325,3 +325,42 @@ def test_no_criteria_omits_the_key_while_an_empty_dict_sends_both_sides_undescri
     _, questions, _ = sdk.calls[0]
     assert questions["topic__ai"].criteria == expected
     assert json.loads(questions["topic__ai"].model_dump_json()).get("criteria") == expected
+
+
+def _ask_expecting_error(answers: dict) -> str:
+    sdk = _FakeSdk(_response(**answers))
+    with pytest.raises(JevError) as excinfo:
+        _client(sdk).ask({"post": "x"}, _QUESTIONS)
+    return str(excinfo.value)
+
+
+_PRIMARY = SdkChoiceAnswer(choice="ai", confidence=0.8, probabilities={"ai": 1.0})
+
+
+def test_a_missing_answer_is_reported_on_its_own():
+    """Only one thing went wrong, so only one sentence — an empty `[]` for the other half
+    reads as a second fault that did not happen."""
+    message = _ask_expecting_error({"topic__ai": SdkNoulAnswer(noul=0.9)})
+    assert "Jev no respondió a ['primary']" in message
+    assert "contestó" not in message
+    assert "[]" not in message
+
+
+def test_an_unasked_answer_is_reported_on_its_own():
+    message = _ask_expecting_error(
+        {
+            "topic__ai": SdkNoulAnswer(noul=0.9),
+            "primary": _PRIMARY,
+            "ghost": SdkNoulAnswer(noul=0.1),
+        }
+    )
+    assert "Jev contestó preguntas no formuladas: ['ghost']" in message
+    assert "no respondió" not in message
+
+
+def test_both_halves_are_reported_when_both_happen():
+    message = _ask_expecting_error(
+        {"topic__ai": SdkNoulAnswer(noul=0.9), "ghost": SdkNoulAnswer(noul=0.1)}
+    )
+    assert "Jev no respondió a ['primary']" in message
+    assert "Jev contestó preguntas no formuladas: ['ghost']" in message

@@ -160,7 +160,8 @@ command = "parakeet-mlx"
 # records the concrete model version the API answered with.
 model = "jev-latest"
 # A topic counts as "backed by Jev" when its probability is >= threshold.
-# The dashboard has a slider; this is the CLI default and the slider's start.
+# The dashboard (landing across #211) has a slider; this is the CLI default and the
+# slider's start.
 threshold = 0.85
 # The escape option of the primary-topic Choice ("a topic not in the vocabulary").
 # Must not collide with a vocabulary slug; `xbrain jev topics` refuses the run if it does

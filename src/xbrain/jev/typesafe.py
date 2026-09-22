@@ -158,11 +158,16 @@ class TypeSafeJevClient:
             raise JevError(f"Jev API: {exc}") from exc
         result = _from_sdk(response)
         if result.answers.keys() != questions.keys():
+            # One sentence per fault: a combined message would report an empty `[]` for the
+            # half that did not happen, which reads as a second failure to chase.
+            faults = []
             missing = sorted(questions.keys() - result.answers.keys())
+            if missing:
+                faults.append(f"Jev no respondió a {missing!r}")
             extra = sorted(result.answers.keys() - questions.keys())
-            raise JevError(
-                f"Jev no respondió a {missing!r} y contestó {extra!r}, que no se preguntó"
-            )
+            if extra:
+                faults.append(f"Jev contestó preguntas no formuladas: {extra!r}")
+            raise JevError(". ".join(faults))
         return result
 
     def close(self) -> None:
