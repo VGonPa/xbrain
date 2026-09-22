@@ -47,6 +47,11 @@ from xbrain.fetch import (
 )
 from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
+from xbrain.jev.assess import RunResult, run_assessments, select_items
+from xbrain.jev.client import JevClient, JevError
+from xbrain.jev.defaults import INPUT_USD_PER_MTOK
+from xbrain.jev.env import typesafe_api_key
+from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -2580,6 +2585,124 @@ def status() -> None:
     typer.echo(f"  enriquecidos: {sum(1 for i in store.values() if i.enriched)}")
     typer.echo(f"  última extracción bookmarks: {state.bookmarks.last_run}")
     typer.echo(f"  última extracción tweets: {state.own_tweets.last_run}")
+
+
+jev_app = typer.Typer(help="Jev (TypeSafe AI): asignación y verificación de topics por item")
+app.add_typer(jev_app, name="jev")
+
+
+def _jev_client(cfg: Config) -> JevClient:
+    """The TypeSafe client for this run — the seam tests monkeypatch.
+
+    The adapter is imported INSIDE the function on purpose. `jev/typesafe.py` is the only
+    module that imports the vendor SDK, and importing it at module top would make every
+    `xbrain` invocation — `--help` included — pay for the SDK's import, for a command most
+    runs never reach.
+
+    Built only AFTER selection, so `--dry-run` and an empty backlog never need a key.
+    """
+    from xbrain.jev.typesafe import TypeSafeJevClient
+
+    key = typesafe_api_key(cfg.repo_root)
+    if not key:
+        raise JevError(
+            "TYPESAFE_API_KEY no encontrada: expórtala o pégala en <repo>/.env (ver .env.example)"
+        )
+    return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
+
+
+#: Failures echoed in full before the rest are summarised. A run of 3,000 items with a dead
+#: key would otherwise print 3,000 identical lines and bury the summary above them.
+_JEV_FAILURES_SHOWN = 10
+
+
+def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
+    """The run's one-line summary on stdout, then its per-item failures on stderr.
+
+    The cost is priced per RECORD, by the provider that ANSWERED it, never by one rate for
+    the whole run: `assessed` may mix providers, and each record carries its own. A provider
+    with no listed price contributes 0.0 rather than borrowing another vendor's rate — a
+    missing number reads as missing, an invented one reads as a bill. The figure is an
+    ESTIMATE either way (see `jev.defaults.INPUT_USD_PER_MTOK`), which is what `~` says.
+    """
+    tokens = sum(assessment.input_tokens or 0 for assessment in result.assessed)
+    usd = sum(
+        (assessment.input_tokens or 0) / 1e6 * INPUT_USD_PER_MTOK.get(assessment.provider, 0.0)
+        for assessment in result.assessed
+    )
+    models = sorted({assessment.model for assessment in result.assessed})
+    typer.echo(
+        f"{len(result.assessed)} evaluadas · {len(result.failed)} fallidas · "
+        f"{tokens} tokens de entrada (~{usd:.3f} $) · "
+        f"modelo {', '.join(models)} → {topics_path}"
+    )
+    for item_id, reason in result.failed[:_JEV_FAILURES_SHOWN]:
+        typer.echo(f"  FALLO {item_id}: {reason}", err=True)
+    if len(result.failed) > _JEV_FAILURES_SHOWN:
+        remaining = len(result.failed) - _JEV_FAILURES_SHOWN
+        typer.echo(f"  … y {remaining} fallos más", err=True)
+
+
+@jev_app.command("topics")
+@_handle_cli_errors
+def jev_topics_cmd(
+    ids: list[str] = typer.Option([], "--id", help="Solo estos items (repetible)"),
+    limit: int | None = typer.Option(None, help="Máximo de items a evaluar"),
+    force: bool = typer.Option(False, help="Re-evaluar aunque la evaluación esté vigente"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Solo cuenta; no llama a Jev"),
+) -> None:
+    """Pregunta a Jev, por item, a qué topics pertenece el post (un noul por topic + el primario).
+
+    Escribe data/jev/topics.json. Nunca toca items.json.
+    """
+    cfg = _config()
+    store = load_store(cfg.items_path)
+    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    assessments = load_assessments(cfg.jev_topics_path)
+    selection = select_items(
+        store,
+        assessments,
+        vocab,
+        ids=ids,
+        limit=limit,
+        force=force,
+        fallback=cfg.jev_fallback_option,
+        char_limit=cfg.jev_state_char_limit,
+    )
+    # The two skip counts are printed even when they are 0: an empty selection caused by a
+    # regression in the evidence layer and a clean "everything is up to date" both exit 0
+    # with nothing assessed, and only these numbers tell them apart.
+    typer.echo(
+        f"{len(selection.items)} items por evaluar · {selection.skipped_current} vigentes · "
+        f"{selection.skipped_no_evidence} sin evidencia "
+        f"({len(assessments)} evaluaciones guardadas)"
+    )
+    if dry_run or not selection.items:
+        return
+
+    def _progress(done: int, total: int) -> None:
+        if done % 50 == 0 or done == total:
+            typer.echo(f"  {done}/{total}")
+
+    client = _jev_client(cfg)
+    try:
+        result = run_assessments(
+            list(selection.items),
+            vocab,
+            client,
+            fallback=cfg.jev_fallback_option,
+            char_limit=cfg.jev_state_char_limit,
+            concurrency=cfg.jev_concurrency,
+            on_progress=_progress,
+        )
+    finally:
+        # `finally`, not the next line: a run where every item failed raises out of
+        # `run_assessments`, and that is exactly the path that would leak the pool.
+        client.close()
+    for assessment in result.assessed:
+        assessments[assessment.item_id] = assessment
+    save_assessments(assessments, cfg.jev_topics_path)
+    _echo_jev_outcome(result, cfg.jev_topics_path)
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")

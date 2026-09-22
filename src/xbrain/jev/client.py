@@ -93,3 +93,12 @@ class JevClient(Protocol):
     """
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult: ...
+
+    def close(self) -> None:
+        """Release whatever the client holds. Idempotent, and never raises.
+
+        Part of the protocol rather than the adapter's own extra, because the CALLER that
+        builds a client is the one that has to release it, and it only ever holds a
+        `JevClient`. A provider with nothing to release implements it as a no-op — which
+        is why it is cheaper to require than to make every caller probe for it.
+        """

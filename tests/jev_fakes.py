@@ -32,6 +32,9 @@ class FakeJevClient:
 
     `input_tokens`/`output_tokens` are configurable and may be `None`, because the real
     provider reports no usage sometimes and cost code must be able to meet that path.
+
+    `close()` is a no-op that sets `closed`, so a caller that builds a client and never
+    releases it is a test failure rather than a leaked pool nobody notices.
     """
 
     def __init__(
@@ -57,6 +60,7 @@ class FakeJevClient:
         self.output_tokens = output_tokens
         self.fail_when = fail_when
         self.calls: list[tuple[dict[str, str], dict[str, Question]]] = []
+        self.closed = False
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
         # Deep snapshots, not references: a caller that builds `questions` in a loop and
@@ -91,3 +95,12 @@ class FakeJevClient:
             input_tokens=self.input_tokens,
             output_tokens=self.output_tokens,
         )
+
+    def close(self) -> None:
+        """The protocol's `close`, as a no-op that REMEMBERS it was called.
+
+        A fake that simply did nothing would let a caller forgetting to release its client
+        pass every test: the leak is a socket, not a wrong answer. Recording it is what
+        makes "the CLI closes what it built" an assertable fact.
+        """
+        self.closed = True
