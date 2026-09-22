@@ -663,8 +663,8 @@ generates an Obsidian wiki.
   collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:
   `docs/jev.md`, ARCHITECTURE.md § jev.
 - Error messages pick their language by AUDIENCE, not by exception type. `JevError` and the
-  operator-facing `ValueError`s are Spanish sentences (`el vocabulario está vacío: ejecuta
-  \`xbrain vocab\`…`); only a `config.toml` schema fault stays English, because `config.py`
+  operator-facing `ValueError`s are Spanish sentences (``el vocabulario está vacío: ejecuta
+  `xbrain vocab`…``); only a `config.toml` schema fault stays English, because `config.py`
   is. `_handle_cli_errors` surfaces both as one `Error: …` line and exit 1 — and **re-raises
   `typer.Exit` / `typer.Abort` first**, since both subclass `RuntimeError`: without that, a
   command's chosen exit code became a bare `Error:` and exit 1. That is what lets

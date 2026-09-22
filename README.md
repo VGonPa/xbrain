@@ -344,8 +344,8 @@ which of your vocabulary topics does this post belong to? — and puts the two
 answers side by side, with a probability on every one. **It is a second opinion
 and it never changes the wiki:** the answers live in their own side-car, no topic
 assignment moves, no note is re-rendered, and you can run it or ignore it without
-touching the corpus. It needs a TypeSafe API key; everything else in XBrain does
-not. See [docs/jev.md](docs/jev.md).
+touching the corpus. It is the one command in XBrain that bills per run, and the only
+one needing a TypeSafe key. See [docs/jev.md](docs/jev.md).
 
 ---
 
@@ -390,10 +390,14 @@ uv run xbrain status     # see the counts
 | An X account | — | Yours. XBrain reads *your* bookmarks and tweets. |
 | `ANTHROPIC_API_KEY` | — | **Optional.** Only for the `api` execution mode. |
 | `FIRECRAWL_API_KEY` | — | **Optional.** Fallback fetcher for JavaScript-heavy pages. |
+| `TYPESAFE_API_KEY` | — | **Optional.** Only for `xbrain jev topics`, the second opinion on topics. Read from the environment or from `<repo>/.env` (gitignored). See [docs/jev.md](docs/jev.md). |
 | ffmpeg, `parakeet-mlx`, `mlx-vlm` | — | **Optional — only for `digest-video`** (video → transcript/slide digests). External, not pulled by `uv pip install`. See [Local models for `digest-video`](#local-models-for-digest-video-apple-silicon). |
 
-Neither API key is required: the default execution mode uses a Claude Code
-session and costs nothing.
+**No API key is required to run the pipeline.** The default execution mode uses a
+Claude Code session and costs nothing; each key above unlocks one optional path —
+`ANTHROPIC_API_KEY` the `api` executor, `FIRECRAWL_API_KEY` the fallback fetcher, and
+`TYPESAFE_API_KEY` the `xbrain jev` second opinion, which is the only one that bills
+per run.
 
 ---
 
@@ -508,8 +512,12 @@ every enrichment; the next `xbrain enrich` re-enriches in the new language) and
 [Snapshots & safety](#snapshots--safety)). Otherwise new items get the new
 language while old summaries stay as they were.
 
-Secrets (`ANTHROPIC_API_KEY`, `FIRECRAWL_API_KEY`) live in the **environment
-only** — never in `config.toml`, never in the repo.
+Secrets never go in `config.toml` and are never committed. `ANTHROPIC_API_KEY` and
+`FIRECRAWL_API_KEY` are read from the **environment only**. `TYPESAFE_API_KEY` is read
+from the environment too, and — because `xbrain jev` is a long-running paid command you
+do not want to re-export every session — also from `<repo>/.env`, which is **gitignored**
+and whose committed template `.env.example` carries no value. That file is the one
+exception to "secrets are not files in the repo", and it stays out of git.
 
 ### Local models for `digest-video` (Apple Silicon)
 
@@ -1437,6 +1445,9 @@ xbrain/
 │   ├── jev/              # `xbrain jev`: the Jev (TypeSafe) second opinion on topics
 │   │   ├── client.py     #   the vendor-free seam: questions, answers, JevClient
 │   │   ├── typesafe.py   #   the ONLY module that imports the TypeSafe SDK
+│   │   ├── models.py     #   TopicAssessment / PrimaryChoice — frozen, extra-forbid
+│   │   ├── defaults.py   #   the [jev] defaults, the price table, the ONE cost sentence
+│   │   ├── env.py        #   TYPESAFE_API_KEY from the environment, else <repo>/.env
 │   │   ├── questions.py  #   one Noul per topic + the primary Choice, canonically ordered
 │   │   ├── assess.py     #   item → state → ask → parse → stamp the contract
 │   │   ├── store.py      #   data/jev/topics.json (a side-car; items.json is never written)

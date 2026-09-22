@@ -85,16 +85,17 @@ Exit codes: **0** normal · **1** operator error (no key, a refusal, every item 
 
 ### It tells you what it selected, before it spends anything
 
-Every run opens with one line that accounts for the **whole** corpus, not just the part it
-is about to ask:
+Every run opens with one line that accounts for every item it considered, not just the part
+it is about to ask:
 
 ```
 20 items por evaluar · 1169 vigentes · 8 sin evidencia · 1412 fuera del límite (1169 evaluaciones guardadas)
 ```
 
-The four counts partition the whole corpus — `20 + 1169 + 8 + 1412 = 2609` here — so an
-empty selection caused by a regression in the evidence layer can never look like a clean
-"everything is up to date".
+The four counts partition the **candidate set** — `20 + 1169 + 8 + 1412 = 2609` here,
+which is the whole corpus because no `--id` was given — so an empty selection caused by a
+regression in the evidence layer can never look like a clean "everything is up to date".
+With `--id a --id b` the candidate set is those two items and the line sums to 2.
 
 - **por evaluar** — items this run will ask about.
 - **vigentes** — items whose stored assessment still describes today's question (skipped).
@@ -145,10 +146,10 @@ items and at the end:
 
   ```
   Interrumpido: 43 evaluaciones nuevas guardadas (2624 en total) en data/jev/topics.json
-    1075320 tokens de entrada (~0.0452 $)
+    258000 tokens de entrada (~0.0108 $)
   ```
 
-  **43 is this run's new records; 2.624 is the file total.** An interrupt that rescued
+  **43 is this run's new records; 2624 is the file total.** An interrupt that rescued
   nothing writes nothing at all (`Interrumpido: nada nuevo que guardar`) — saving there
   would write the unchanged map over the side-car, which on a first run is `{}`.
 - **A save failure names the path and the paid count**, because `[Errno 28] No space left
@@ -157,7 +158,7 @@ items and at the end:
 ### It closes with the bill
 
 ```
-2591 evaluadas · 18 fallidas · 42318905 tokens de entrada (~1.7774 $) · modelo jev-1.13.0 → data/jev/topics.json
+2591 evaluadas · 18 fallidas · 15546000 tokens de entrada (~0.6529 $) · modelo jev-1.13.0 → data/jev/topics.json
 ```
 
 The cost sentence is formatted with a decimal point and no digit grouping — the page's
@@ -186,11 +187,14 @@ Measured on this repo's corpus on 2026-09-22 — 2,609 items, 45 topics, `state_
 | Evidence per item — median | 788 |
 | Evidence per item — mean / p95 / max | 2,476 / 4,944 / 100,054 |
 | Items cut at the limit | 7 of 2,609 |
-| **One full pass** | **59.4 M** (≈ 15–17 M input tokens) |
+| **One full pass** | **59.4 M** (≈ 15–17 M input tokens, ≈ 6k per item) |
 
 At `0.042 $/MTok` that is roughly **0.62–0.71 $** for the whole corpus, in a few minutes at
 8 concurrent requests. The token figure is a character-count conversion; the authoritative
 number is the one the run itself reports from the provider's usage.
+
+The sample outputs above are built on that ≈ 6k-tokens-per-item figure, so they can be
+re-derived rather than taken on trust: 2,591 records × ≈ 6k ≈ 15.5 M tokens ≈ 0.65 $.
 
 **The questions are 89% of that bill, not the evidence.** They are constant per call and
 scale with `[vocab].target_count`, so the cost lever is the size of the vocabulary —
@@ -200,9 +204,10 @@ lowering `state_char_limit` barely moves it, and would cost evidence.
 
 Writes two files under `<data_dir>/jev/` (default `data/jev/`), overwritten on every run:
 
-- `topics-report.md` — what a person reads. Headline numbers, then the worst rows of each
-  table. **Deliberately truncated** at 20 rows per section; every cut table says so
-  (`… y N filas más (el JSON las lleva todas).`).
+- `topics-report.md` — what a person reads. Headline numbers, then the tables. `Por topic`
+  carries **every** vocabulary row, worst-backed first; the four queue tables (doubtful,
+  missing candidates, unjudged, primary mismatches) are **deliberately cut** at 20 rows
+  each, and every cut table says so (`… y N filas más (el JSON las lleva todas).`).
 - `topics-report.json` — what a program reads: `{"summary": {…}, "items": [{…}]}`, one
   record per compared item, no post text (join on `item_id`).
 
@@ -212,10 +217,26 @@ see a mismatched pair, a person reading a stale markdown cannot.
 stdout is one line, the same one `jev dashboard` prints:
 
 ```
-Umbral 0.85 · 0 caducadas · items comparados 2591/2591 · enrich respaldado 78.4 % · Jev respaldado 61.2 % · dudosas 1204 · sin juzgar 0 · candidatas 3310 · primario coincide 64.1 % · 42318905 tokens de entrada (~1.7774 $)
+Umbral 0.85 · 0 caducadas · items comparados 2573/2591 · enrich respaldado 78.4 % · Jev respaldado 61.2 % · dudosas 1204 · sin juzgar 0 · candidatas 3310 · primario coincide 64.1 % · 15546000 tokens de entrada (~0.6529 $)
 → data/jev/topics-report.md
 → data/jev/topics-report.json
 ```
+
+### `items comparados 2573/2591` — two different populations
+
+The second number is how many stored assessments are **current**. The first is how many of
+those had something to compare against: `compare_item` returns nothing for an item with no
+`Enrichment`, so it is counted as assessed and not as compared.
+
+The gap is therefore the population **Jev has an opinion about that `enrich` has not
+enriched** — normally items extracted since the last `xbrain enrich` run. It is not an
+error and nothing is lost: those items have no JSON record in the report and contribute to
+no bucket. Run `xbrain enrich` and the gap closes on the next report.
+
+Collapsing the two into one number would hide that population entirely, which is why the
+line prints both. A gap that keeps growing across runs means `enrich` is falling behind
+`extract`; a gap that appears suddenly usually means a `vocab --regenerate` cleared the
+enrichments.
 
 ### The signals
 
@@ -324,8 +345,16 @@ page would call *backed* what the report calls *doubtful*.
 What it shows: the KPI band and the side-car line (`N vigentes de M guardadas` — the
 number that says whether a vocabulary edit just retired paid work), a per-topic backing
 chart worst-first, a noul histogram on a log axis, three queues (doubtful, missing
-candidates, primary mismatches) capped at 200 rows with a cut note, and a per-item drawer
-with every membership as a bar and the five most probable options of the Choice.
+candidates, primary mismatches) and a per-item drawer with every membership as a bar and
+the five most probable options of the Choice.
+
+**The page applies two cuts, and only one of them is visible.** The queues stop at **200
+rows** and say so with a cut note. The **post text is cut at 240 characters** in the blob
+itself and says nothing — it is enough to recognise a post in a queue row, and carrying the
+whole corpus of full texts would add megabytes to a page that is already large (the 240
+characters are the 0.42 MB above). Open the item's own note or its `X ↗` link for the full
+post; neither the drawer nor the queue has it. The Choice distribution is cut too, to the
+five most probable options, but the drawer labels that one (`5 más probables de 46`).
 
 **The threshold slider recomputes in the browser.** `jev report` prints one threshold; the
 page lets you move it, so every threshold-dependent number is re-derived client-side from

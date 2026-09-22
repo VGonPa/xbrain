@@ -192,6 +192,13 @@ on that keyless `claude-code` (or `manual`) track; they have no `api` track at a
 LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
 fallback fetcher for JavaScript-heavy pages.
 
+`TYPESAFE_API_KEY` is the third, and the only one attached to a command that bills
+per run: `xbrain jev topics`, the second opinion on topic assignment. Nothing in the
+pipeline needs it — `jev` is a side-car you can ignore entirely — and unlike the other
+two it may also be read from `<repo>/.env` (gitignored; `.env.example` is the committed
+template). `xbrain jev report` and `xbrain jev dashboard` need no key at all: they
+re-read what `jev topics` already paid for. See [jev.md](jev.md).
+
 ## `video-digest` / `verify` say "no pending" or "nothing to verify"
 
 Both are **worksheet** stages (like `enrich`): the first run *exports* a worksheet,
@@ -432,9 +439,43 @@ filtering" when the instrument was not there. See
 
 ### An index error prints a second, empty `Error:` line
 
-Cosmetic, and known. Both CLI error handlers fire on an index error, so the clean
-message is followed by a blank one. The exit code is still `1` and the first line
-is the real one.
+**Fixed — if you still see this, you are on an old build.** Both CLI error handlers
+used to fire on an index error, so the real message was followed by a blank
+`Error:`. `_handle_cli_errors` now re-raises `typer.Exit` instead of catching it, so
+exactly one line is printed; the exit code was `1` before and after, which is why
+nothing failed while it was wrong. Pinned by
+`test_an_index_error_prints_exactly_one_error_line`.
+
+The same change makes `download-videos` print Click's `Aborted!` when you answer `n`
+to its size gate, where it used to print a bare `Error:`.
+
+---
+
+## `xbrain jev` — the second opinion on topics
+
+Every failure of `xbrain jev topics|report|dashboard` is covered, message by message,
+in **[jev.md § Troubleshooting](jev.md#troubleshooting)** — a missing or empty
+`TYPESAFE_API_KEY`, an unimportable SDK, per-item `FALLO` lines, a run where every call
+failed, the Ctrl-C checkpoint, a failed save that names what it cost you, an unreadable
+side-car, and the five refusals that protect an existing report or page from being
+overwritten with zeros.
+
+Three that send people here first, because the symptom does not name Jev:
+
+- **`0 evaluaciones vigentes de N guardadas` with a full side-car.** The vocabulary or
+  the evidence moved, so the stored contracts no longer describe today's question. The
+  records are not lost, they are retired; re-running `xbrain jev topics` re-asks them,
+  and that is a re-bill. [Why](jev.md#staleness-when-an-assessment-stops-counting).
+- **`xbrain snapshot restore` did not roll back my assessments.** It cannot: the
+  side-car lives at `data/jev/topics.json`, one level below the four flat files a
+  snapshot covers. Items whose evidence the restore moved simply report as `caducadas`
+  next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
+- **A red banner on `jev.html`.** The page's own arithmetic disagrees with the report
+  embedded in it. Trust `xbrain jev report`, not the page, and report it as a bug.
+
+`data/jev/topics.json` is **paid, gitignored and never snapshotted**. There is no
+`git checkout` and no `snapshot restore` back to a good copy — `--force` overwrites a
+paid record with no recovery, and a corrupt file is repaired by hand or paid for again.
 
 ---
 
