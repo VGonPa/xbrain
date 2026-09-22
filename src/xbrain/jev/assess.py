@@ -128,7 +128,7 @@ def questions_digest(questions: dict[str, Question]) -> str:
     return _sha256(_nfc(payload))
 
 
-def topic_contract(state_text: str, questions_digest: str) -> str:
+def topic_contract(state_text: str, digest: str) -> str:
     """sha256 binding an assessment to what Jev was ACTUALLY asked: the state as sent (the
     truncation marker included) and the digest of the questions that went with it.
 
@@ -140,10 +140,22 @@ def topic_contract(state_text: str, questions_digest: str) -> str:
     and `model` are recorded on the assessment but never hashed, so re-pointing `[jev].model`
     does not retire stored work. The contract binds what Jev was ASKED, never who answered.
 
-    The digest is a parameter rather than the question map so a run serialises the canonical
-    JSON once instead of once per item.
+    `digest` is `questions_digest(questions)`, taken as a parameter rather than the question
+    map so a run serialises the canonical JSON once instead of once per item.
     """
-    return _sha256("\x1f".join((_CONTRACT_VERSION, _nfc(state_text), questions_digest)))
+    return _sha256("\x1f".join((_CONTRACT_VERSION, _nfc(state_text), digest)))
+
+
+def _record_refusal(exc: ValidationError) -> JevError:
+    """The seam's Spanish message for an answer this repo's own validators refuse.
+
+    Both records built from a Jev answer — `PrimaryChoice` here and `TopicAssessment` in
+    `assess_topics` — go through it, so a refusal reads the same wherever it happens: one
+    line naming the field, never pydantic's four-line English banner in a failure table.
+    """
+    first = exc.errors()[0]
+    field = ".".join(str(part) for part in first["loc"]) or "<registro>"
+    return JevError(f"Jev devolvió una respuesta que el registro rechaza: {field}: {first['msg']}")
 
 
 def parse_topic_result(
@@ -156,8 +168,10 @@ def parse_topic_result(
     describing different asks. An answer to a question nobody asked is ignored.
 
     `JevError` when an answer is missing, is the wrong answer type, is outside the offered
-    options, is absent from its own distribution, or is not an argmax of it — a partial or
-    self-contradictory answer set is never stored as if it were complete.
+    options, is absent from its own distribution, is not an argmax of it, or carries a value
+    `PrimaryChoice` refuses — a partial or self-contradictory answer set is never stored as
+    if it were complete. A `questions` map with no `primary` Choice is a caller bug and
+    raises `ValueError` instead: nothing about it is the provider's fault.
     """
     membership: dict[str, float] = {}
     for key, question in questions.items():
@@ -170,7 +184,10 @@ def parse_topic_result(
         membership[slug] = answer.noul
     offered = questions.get(PRIMARY_KEY)
     if not isinstance(offered, ChoiceQuestion):
-        raise JevError("el juego de preguntas no incluye la Choice 'primary'")
+        # `ValueError`, not `JevError`: the provider did nothing wrong. `build_topic_questions`
+        # cannot produce this map, so reaching here is a caller bug, and dressing it as an
+        # operator-facing Jev failure would send whoever reads `failed` looking at the API.
+        raise ValueError("el juego de preguntas no incluye la Choice 'primary'")
     primary = result.answers.get(PRIMARY_KEY)
     if not isinstance(primary, ChoiceAnswer):
         raise JevError("Jev no contestó la pregunta 'primary'")
@@ -187,11 +204,18 @@ def parse_topic_result(
             f"Jev eligió {primary.choice!r} con p={probability}, por debajo del máximo de su "
             f"propia distribución"
         )
-    return membership, PrimaryChoice(
-        choice=primary.choice,
-        confidence=primary.confidence,
-        probabilities=dict(primary.probabilities),
-    )
+    try:
+        choice = PrimaryChoice(
+            choice=primary.choice,
+            confidence=primary.confidence,
+            probabilities=dict(primary.probabilities),
+        )
+    except ValidationError as exc:
+        # The guards above cover the answer's SHAPE; the model still owns its own bounds (a
+        # confidence outside [0, 1], a probability that is not one). Wrapped here so this
+        # function is total with respect to `JevError` for a direct caller too.
+        raise _record_refusal(exc) from exc
+    return membership, choice
 
 
 def assess_topics(
@@ -237,11 +261,7 @@ def assess_topics(
             output_tokens=result.output_tokens,
         )
     except ValidationError as exc:
-        first = exc.errors()[0]
-        field = ".".join(str(part) for part in first["loc"]) or "<registro>"
-        raise JevError(
-            f"Jev devolvió una respuesta que el registro rechaza: {field}: {first['msg']}"
-        ) from exc
+        raise _record_refusal(exc) from exc
 
 
 def _contract_matches(assessment: TopicAssessment | None, state_text: str, digest: str) -> bool:
@@ -362,8 +382,14 @@ def _report_progress(on_progress: Callable[[int, int], None] | None, done: int, 
         return
     try:
         on_progress(done, total)
-    except Exception:
-        logger.warning("on_progress falló en %d/%d; la evaluación continúa", done, total)
+    except Exception as exc:
+        logger.warning(
+            "on_progress falló en %d/%d (%s: %s); la evaluación continúa",
+            done,
+            total,
+            type(exc).__name__,
+            exc,
+        )
 
 
 def run_assessments(

@@ -320,6 +320,40 @@ def test_parse_accepts_a_tie_for_the_argmax():
 # --------------------------------------------------------------------------- currency
 
 
+def test_an_out_of_range_confidence_is_wrapped_like_any_other_refusal():
+    """`PrimaryChoice` is built inside `parse_topic_result`, not inside `assess_topics`' try.
+
+    A confidence above 1 therefore escaped as a raw pydantic banner and landed in
+    `RunResult.failed` as four lines of English — the exact shape the Spanish wrapper exists
+    to keep out of the operator's failure table.
+    """
+
+    class _OverConfident(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            choice = result.answers["primary"]
+            result.answers["primary"] = replace(choice, confidence=1.7)
+            return result
+
+    with pytest.raises(JevError, match="el registro rechaza: confidence") as caught:
+        assess_topics(_item(), _questions(), _OverConfident(), char_limit=100)
+    assert "\n" not in str(caught.value)
+    # `parse_topic_result` is public and promises `JevError`; a direct caller gets it too.
+    with pytest.raises(JevError, match="el registro rechaza: confidence"):
+        parse_topic_result(_OverConfident().ask({"post": "x"}, _questions()), _questions())
+
+
+def test_a_question_map_without_the_primary_choice_is_a_programmer_error():
+    """`ValueError`, not `JevError`: the provider did nothing wrong. The caller handed over a
+    question map `build_topic_questions` could not have produced, and an operator-facing Jev
+    message would send whoever reads `failed` looking at the API."""
+    questions = _questions()
+    result = FakeJevClient().ask({"post": "x"}, questions)
+    noul_only = {key: q for key, q in questions.items() if key != PRIMARY_KEY}
+    with pytest.raises(ValueError, match="no incluye la Choice 'primary'"):
+        parse_topic_result(result, noul_only)
+
+
 def test_currency_tracks_vocab_and_evidence_but_not_re_enrichment():
     item, vocab = _item(), _vocab()
     assessment = assess_topics(item, _questions(), FakeJevClient(), char_limit=100)
@@ -558,7 +592,9 @@ def test_a_failing_progress_callback_never_costs_a_record(caplog):
             on_progress=_broken,
         )
     assert [a.item_id for a in result.assessed] == ["1", "2"]
-    assert "on_progress" in caplog.text
+    # The warning has to say WHAT broke: "on_progress falló" alone sends nobody anywhere.
+    assert "BrokenPipeError" in caplog.text
+    assert "head cerró el pipe" in caplog.text
 
 
 def test_an_interrupt_cancels_the_queued_calls_instead_of_paying_for_them():

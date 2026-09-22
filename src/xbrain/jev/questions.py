@@ -7,10 +7,11 @@ travel verbatim in the vocabulary's language — they are the criteria, i.e. dat
 
 THE QUESTION SET IS CANONICAL: Nouls in slug-sorted order, the Choice's options in slug-sorted
 order with the fallback last. One vocabulary always produces ONE wire form, whatever order
-`vocab.yaml` happens to list its topics in. That is what lets `assess.topic_contract` hash the
-questions with sorted keys and still claim to describe the ask: option order reaches the model
-and biases a pick-one answer, so a hash that ignored order while the wire did not would call an
-assessment current after the question had visibly changed.
+`vocab.yaml` happens to list its topics in. That is what lets `assess.questions_digest` — the
+canonical JSON of every question's type, instructions and criteria, which `assess.topic_contract`
+hashes alongside the state — serialise with sorted keys and still describe the ask: option order
+reaches the model and biases a pick-one answer, so a digest that ignored order while the wire did
+not would call an assessment current after the question had visibly changed.
 """
 
 from __future__ import annotations
