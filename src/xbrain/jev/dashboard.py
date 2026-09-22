@@ -1,7 +1,9 @@
 """The `jev.html` page: a self-contained HTML report of Jev against `enrich`.
 
 Rendered through the same mechanism as `dashboard.html` — `render_dashboard_html` with a
-second template, the vendored ECharts injected through the same sentinels, no network.
+second template, the vendored ECharts injected through the same sentinels. Nothing is fetched
+at runtime except the Google Fonts stylesheet, exactly as `dashboard.html`: the data and the
+library are in the file.
 
 THE SLIDER IS THE REASON THIS MODULE SHIPS FACTS AND NOT VERDICTS. `jev report` prints one
 threshold; this page lets a reader move it, so every threshold-dependent number is recomputed
@@ -19,6 +21,10 @@ TWO THINGS ARE DELIBERATELY NOT RE-IMPLEMENTED HERE.
   against the summary rather than trusted.
 * The bill is `report.cost_fragment`, the same Spanish sentence `jev topics`, `jev report` and
   `topics-report.md` print. A KPI that formats it itself is a fourth definition of the bill.
+  The price is therefore a LOCALE SEAM: the fragment is formatted in Python with a decimal
+  point and no grouping, while every number the template formats goes through its own es-ES
+  `nf` (decimal comma, thousands point). One definition of the bill beats one separator, and
+  the next reader should not "fix" it by re-formatting the fragment in the template.
 
 MEMBERSHIP IS SHIPPED UNROUNDED. Rounding `m` for size would be a genuine divergence and not
 a cosmetic one: a noul of 0.8496 renders as 0.85 and then clears a 0.85 slider, so the page
@@ -30,14 +36,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from datetime import datetime
+
 from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
-from xbrain.jev.assess import current_pairs
+from xbrain.jev.assess import CurrentPairs, current_pairs
 from xbrain.jev.models import TopicAssessment
-from xbrain.jev.report import THRESHOLD_DEPENDENT_KEYS, build_report, cost_fragment
+from xbrain.jev.report import (
+    THRESHOLD_DEPENDENT_KEYS,
+    _primary_rank,
+    build_report,
+    cost_fragment,
+)
 from xbrain.models import Item, Topic
 
 #: The post text carried into the blob, in characters. Long enough to recognise the post in a
-#: queue row, short enough that ~3,000 of them do not double the page.
+#: queue row, short enough that the whole corpus of them stays a fraction of the page: measured
+#: at 0.42 MB of the 4.05 MB page for 2,609 items (see `compute_jev_dashboard_data`).
 _TEXT_CHARS = 240
 #: How much of the Choice distribution the drawer shows. `PrimaryChoice.probabilities` can
 #: carry one entry per vocabulary topic plus the fallback; the tail is noise.
@@ -58,8 +72,12 @@ def _snippet(text: str, width: int = _TEXT_CHARS) -> str:
 
     A post that simply stops mid-word reads as a BROKEN record rather than as a cut one, and
     the drawer is the "see the whole item" surface, which makes the silent version worse here
-    than in a queue row. The cut rule is `report._snippet`'s, so the same post is cut at the
-    same place in the markdown report and on the page.
+    than in a queue row.
+
+    THE RULE is `report._snippet`'s — cut to `width - 1`, then an ellipsis — applied at this
+    surface's OWN width: 80 characters in a markdown table cell, 240 in a queue row. A cell is
+    scanned, a row is read to recognise the post, so the budgets differ on purpose; what must
+    not differ is that both say when they cut.
 
     MIRRORED RATHER THAN CALLED, and the reason is the half that does not travel:
     `report._snippet` finishes by running `_escape_cell` over the result, doubling backslashes
@@ -81,6 +99,11 @@ def _row(
     fabricated zero would put a topic Jev was never asked about at the top of the "most
     doubtful" queue as the strongest disagreement in the corpus.
 
+    `_primary_rank` is IMPORTED rather than re-derived from `ranked` above, even though the
+    sort is already in hand: the rank rule (descending probability, ties by option name, so two
+    runs of one distribution can never report different ranks) is `report`'s, and a second copy
+    is the one that drifts.
+
     `cmp` is whether the item can be compared at all (`report.compare_item` returns None
     without an enrichment). It is shipped rather than inferred from `primary`, because an item
     enrich left WITHOUT a primary topic is still compared — its assigned topics still have
@@ -101,13 +124,31 @@ def _row(
         "jp": assessment.primary.choice,
         "jc": round(assessment.primary.confidence, 3),
         "top": [[option, round(p, 3)] for option, p in ranked[:_TOP_CHOICES]],
+        # How many options the Choice actually offered, so the drawer can say `5 de 46`
+        # instead of presenting a cut as the whole distribution.
+        "options": len(assessment.primary.probabilities),
+        # enrich's primary, even when the cut left it out: its probability and its 1-based
+        # rank. Without them the section answers Jev's question and not the reader's — the
+        # bars show Jev's five favourites and nothing says whether enrich's pick came sixth
+        # or last, which is the distinction `report._primary_rank` exists to draw.
+        "pp": (
+            None
+            if enriched is None or enriched.primary_topic is None
+            else assessment.primary.probabilities.get(enriched.primary_topic)
+        ),
+        "pr": _primary_rank(
+            None if enriched is None else enriched.primary_topic,
+            assessment.primary.probabilities,
+        ),
         "truncated": assessment.truncated,
         "model": assessment.model,
         "provider": assessment.provider,
     }
 
 
-def _totals(summary: dict[str, Any], items: int, assessed: int, current: Any) -> dict[str, Any]:
+def _totals(
+    summary: dict[str, Any], items: int, assessed: int, current: CurrentPairs
+) -> dict[str, Any]:
     """The header facts: how much of the side-car this page is about, and what it cost.
 
     `assessed`, `current`, `stale` and `orphans` are a real partition (`assessed == current +
@@ -142,6 +183,8 @@ def compute_jev_dashboard_data(
     char_limit: int,
     id2note: dict[str, str],
     updated: str,
+    now: datetime | None = None,
+    current: CurrentPairs | None = None,
 ) -> dict[str, Any]:
     """Pure: items + side-car + vocabulary in, the JSON blob the template consumes out.
 
@@ -150,18 +193,37 @@ def compute_jev_dashboard_data(
     EXCLUDED from `items`: a comparison against a question Jev is no longer asked is not a
     weaker signal, it is a wrong one.
 
+    `current` is that decision, HANDED IN. A caller that already holds it — `cli._jev_pairs`
+    computes it to decide whether to refuse at all — would otherwise pay a second
+    `build_topic_state` and sha256 over the whole corpus for an answer it has. Omitted, it is
+    computed here, which is what keeps this function callable with nothing but its arguments
+    (`fallback` and `char_limit` are the inputs to that computation and are unused when
+    `current` is supplied). Both paths must produce the same blob, and a test asserts it.
+
+    `now` is the clock, threaded from the caller rather than read here: `_summarize` stamps
+    `generated_at`, and a function that reads the clock inside itself is not a pure function of
+    its arguments and cannot be asserted against.
+
+    SIZE, measured rather than asserted: 4.05 MB for 2,609 items × 45 topics — ECharts 1.03 MB,
+    the JSON blob 2.95 MB, of which the unrounded memberships are 1.15 MB and the post text
+    0.42 MB. (Measured with synthetic six-decimal nouls, so the membership figure is an upper
+    bound; a provider that answers in two or three decimals ships less.) The memberships are
+    the deliberate cost and the module docstring says why; `_TEXT_CHARS` is the cheap lever if
+    the page ever has to shrink.
+
     Each row's `m` ships the membership UNROUNDED — the page costs a few hundred KB more for
     it, and rounding to three decimals would let a `0.8496` render as `0.85` and then clear a
     `0.85` slider, so the browser would call backed what `report.py` calls doubtful and the
     template's consistency banner would report a divergence in the DATA as one in the logic.
     """
-    current = current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit)
+    if current is None:
+        current = current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit)
     pairs = list(current.pairs)
     # `build_report` is the entry point, and the summary is the half this page needs: the rows
     # a reader clicks are rebuilt in the browser at whatever threshold the slider is on, so the
     # server-side comparisons would only be the default threshold's, redone.
     summary, _comparisons = build_report(
-        pairs, vocab, threshold, stale=current.stale, orphans=current.orphans
+        pairs, vocab, threshold, now=now, stale=current.stale, orphans=current.orphans
     )
     slugs = [topic.slug for topic in vocab]
     return {

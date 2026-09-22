@@ -154,7 +154,9 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
 .mini .row .track{height:7px;border-radius:4px;background:var(--surface-2);position:relative}
 .mini .row .bar{height:7px;border-radius:4px;background:var(--accent);opacity:.82;display:block}
 .mini .row.off .bar{background:var(--slate);opacity:.6}
-.mini .row .ct{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right;
+/* `--ink-muted` (6.9:1), not `--ink-faint` (3.2:1, below AA): this is the single number the
+   drawer exists to show, at 11px. The faint token stays on the furniture around it. */
+.mini .row .ct{font-family:var(--mono);font-size:11px;color:var(--ink-muted);text-align:right;
   font-variant-numeric:tabular-nums}
 .mini .row .mark{color:var(--accent)}
 .cut-line{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--sienna);
@@ -212,6 +214,11 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <span class="hint" id="reset-hint"></span>
   </section>
 
+  <noscript><section class="banner">
+    <b>Esta página necesita JavaScript</b>Todos los números se calculan en el navegador a
+    partir del JSON incrustado más abajo. Sin JavaScript no falta nada del corpus: falta el
+    cálculo. Ábrela en un navegador con JS, o usa <code>xbrain jev report</code>.
+  </section></noscript>
   <section class="banner" id="banner" hidden></section>
 
   <section class="kpis" id="kpis"></section>
@@ -229,7 +236,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div class="panel span2">
       <div class="phead">
         <div><span class="kick">02 · Distribución</span><h3>Distribución de nouls</h3></div>
-        <div class="sub">eje log · bins de 0,05 · la línea marca el umbral</div>
+        <div class="sub" id="sub-hist">eje log · bins de 0,05 · la línea marca el umbral</div>
       </div>
       <div class="chart" id="chart-hist" style="height:320px"></div>
     </div>
@@ -260,13 +267,13 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   </section>
 
   <footer>
-    <span>XBRAIN · JEV vs ENRICH · TYPESAFE AI</span>
-    <span id="foot-note">SIN RED · ECHARTS EMPOTRADO</span>
+    <span>XBRAIN · JEV vs ENRICH · <span id="foot-providers">—</span></span>
+    <span id="foot-note">—</span>
   </footer>
 </main>
 
 <div class="scrim" id="scrim"></div>
-<aside class="drawer" id="drawer">
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dw-title">
   <button class="dwclose" id="dw-close" aria-label="Cerrar">✕</button>
   <div class="dwtop">
     <span class="kick">item</span>
@@ -318,7 +325,11 @@ function enrichSide(it, t, acc) {
 function jevSide(it, t, acc) {
   const assigned = new Set(it.assigned);
   it.m.forEach(function (noul, i) {
-    if (noul === null || !(noul >= t)) return;
+    // The SAME guard `enrichSide` uses, spelled the same way: `null >= t` evaluates `null` as
+    // 0, so at `--threshold 0` (legal, and tested) an unanswered topic would silently become
+    // one of Jev's own assignments.
+    if (noul === null || noul === undefined) return;
+    if (!(noul >= t)) return;
     acc.jevPairs++;
     if (assigned.has(slugs[i])) {
       acc.jevBacked++;
@@ -329,8 +340,15 @@ function jevSide(it, t, acc) {
   });
 }
 
+/** True when Jev answered something outside the vocabulary — `report._primary_totals`' rule. */
+const choseFallback = (it) => slugAt[it.jp] === undefined;
+
 /** The primary axis. No primary at all is not agreement — there is nothing to agree with. */
 function primarySide(it, acc) {
+  // `report._primary_totals`' rule: Jev answering outside the vocabulary is the fallback, and
+  // it is counted INDEPENDENTLY of agreement (an item can be both). `renderQueues` filters the
+  // queue on the same predicate, so this counter is what puts that filter under the net.
+  if (choseFallback(it)) acc.fallback++;
   if (it.primary !== null && it.jp === it.primary) acc.primaryAgree++;
   else acc.primary.push(it);
 }
@@ -343,7 +361,7 @@ function derive(t) {
     perTopic: slugs.map(function () { return {assigned: 0, backed: 0, doubtful: 0, unjudged: 0, missing: 0}; }),
     doubtful: [], missing: [], primary: [],
     assignedPairs: 0, backed: 0, unjudged: 0, jevPairs: 0, jevBacked: 0,
-    primaryAgree: 0, compared: 0,
+    primaryAgree: 0, fallback: 0, compared: 0,
   };
   for (const it of DATA.items) {
     if (!it.cmp) continue;  // no enrichment: `report.compare_item` returns None for it
@@ -362,12 +380,68 @@ function derive(t) {
   return acc;
 }
 
+/** `report._backing_order`: never-assigned rows last, then the EXACT ratio (never the %).
+
+    In the region because chart 01's row ORDER is a mirror of `report._per_topic` just as much
+    as its numbers are, and a mirror nothing executes is a mirror that drifts. No label here:
+    `labelOf` is display, and this has to stay callable with nothing but `DATA`. */
+function topicRows(d) {
+  return slugs.map(function (slug, i) {
+    const row = d.perTopic[i];
+    return {slug: slug, assigned: row.assigned, backed: row.backed, doubtful: row.doubtful,
+            unjudged: row.unjudged, missing: row.missing,
+            ratio: row.assigned ? row.backed / row.assigned : 0};
+  }).sort((a, b) => (a.assigned === 0) - (b.assigned === 0) || a.ratio - b.ratio ||
+                    (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+}
+
+const BINS = 20;
+
+/** Every judged (item, topic) noul, binned, split by whether enrich assigned that topic.
+
+    Only COMPARABLE items, like every other count on the page: an item with no enrichment has
+    no assignment to be on either side of. The panel's sub-line says so when any were dropped. */
+function histogram() {
+  const assigned = new Array(BINS).fill(0), other = new Array(BINS).fill(0);
+  for (const it of DATA.items) {
+    if (!it.cmp) continue;  // no enrichment: `report.compare_item` returns None for it
+    const set = new Set(it.assigned);
+    it.m.forEach(function (noul, i) {
+      if (noul === null || noul === undefined) return;  // never asked: nothing to bin
+      const b = Math.min(BINS - 1, Math.floor(noul * BINS));
+      (set.has(slugs[i]) ? assigned : other)[b]++;
+    });
+  }
+  return {assigned: assigned, other: other};
+}
+
+const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+
+/** `report._pct`'s rule, to the digit — one decimal, HALF TO EVEN, and 0.0 on an empty whole.
+
+    `toFixed` rounds half AWAY from zero, so one backed assignment out of sixteen printed
+    `6,3 %` here while `topics-report.md` printed `6.2 %` from the same side-car. 152 of the
+    80,199 (part, whole) pairs under whole<=400 diverge that way. Nothing sorts on a percentage
+    — `report._backing_order` keys on the exact ratio for that reason — but one side-car must
+    not quote two numbers. */
+function round1(x) {
+  const scaled = x * 10, floor = Math.floor(scaled), frac = scaled - floor;
+  if (frac > 0.5) return (floor + 1) / 10;
+  if (frac < 0.5) return floor / 10;
+  return (floor % 2 === 0 ? floor : floor + 1) / 10;
+}
+/** A percentage the SUMMARY already rounded, rendered es-ES. */
+const pctText = (x) => x.toFixed(1).replace('.', ',') + ' %';
+/** A percentage the PAGE computes. `_pct` scores an empty whole as 0.0, and so does this. */
+const pct1 = (part, whole) => pctText(round1(whole ? part / whole * 100 : 0));
+
 /** The counters `selfCheck` holds against the summary. Named as `_summarize` names them. */
 function buckets(d) {
   return {
     backed: d.backed, doubtful: d.doubtful.length, missing: d.missing.length,
     unjudged: d.unjudged, jev_pairs: d.jevPairs, jev_backed: d.jevBacked,
-    primary_agree: d.primaryAgree, assigned_pairs: d.assignedPairs, items_compared: d.compared,
+    primary_agree: d.primaryAgree, primary_fallback: d.fallback,
+    assigned_pairs: d.assignedPairs, items_compared: d.compared,
   };
 }
 
@@ -375,32 +449,53 @@ function buckets(d) {
    a dashboard quietly showing numbers `xbrain jev report` would not print is worse than no
    dashboard.
 
-   EVERY NUMBER THE PAGE DISPLAYS IS IN ONE OF THESE TABLES. A displayed number that nothing
-   compares is a number free to be wrong — `jev_backed` ("Jev respaldado por enrich"),
-   `items_compared` ("items comparados", and the denominator of "primario coincide") and the
-   whole `per_topic` list (chart 01) were outside the net and are now inside it.
+   EVERY NUMBER THE PAGE DERIVES FROM `DATA.items` IS IN ONE OF THESE TABLES — including the
+   three percentages in the KPI band, which are compared as the STRINGS they are rendered as,
+   and the per-topic rows behind chart 01, field by field. Two derived numbers are display-only
+   and say so here rather than pretending otherwise: the histogram's `no asignados` bins (the
+   summary has no counterpart for them; its `asignados` half IS checked) and the length of the
+   primary queue after the fallback toggle filters it (`primary_fallback` covers the predicate
+   the filter uses, which is the part that can be wrong). Numbers quoted VERBATIM from
+   `summary` — `truncated`, `cost_text`, the side-car counts — are not recomputed here, so
+   there is nothing for them to disagree with.
 
-   The split is `report.THRESHOLD_DEPENDENT_KEYS`': the threshold-FREE buckets must match at
+   The split is `report.THRESHOLD_DEPENDENT_KEYS`: the threshold-FREE buckets must match at
    EVERY threshold (report.py says they do not move), the dependent ones only at the threshold
-   the summary was built at.                                                                 */
+   the summary was built at — but see LOAD_MISMATCHES: a divergence found there is never
+   withdrawn afterwards.                                                                     */
 const DEPENDENT_CHECKS = [['assigned_backed','backed'], ['doubtful_pairs','doubtful'],
                           ['missing_pairs','missing'], ['jev_pairs','jev_pairs'],
                           ['jev_backed','jev_backed']];
 const FREE_CHECKS = [['assigned_unjudged','unjudged'], ['primary_agree','primary_agree'],
+                     ['primary_fallback','primary_fallback'],
                      ['assigned_pairs','assigned_pairs'], ['items_compared','items_compared']];
+/* The KPI percentages, compared as rendered STRINGS: `pct1` must agree with `_pct` to the
+   DIGIT, not merely to within a float epsilon — half-to-even against half-away-from-zero is
+   exactly a last-digit disagreement. Split by the same rule as the counters, and the split is
+   `report.py`'s: the two backing rates move with the umbral, the primary agreement does not. */
+const PCT_DEPENDENT = [
+  ['enrich_backed_pct', (d) => pct1(d.backed, d.assignedPairs)],
+  ['jev_backed_pct', (d) => pct1(d.jevBacked, d.jevPairs)],
+];
+const PCT_FREE = [['primary_agree_pct', (d) => pct1(d.primaryAgree, d.compared)]];
 /** Summary keys that are whole LISTS rather than counters; checked row by row below. */
 const DEPENDENT_LISTS = ['per_topic'];
-/** The per-topic fields that must agree. `backed_pct` is derived from these and rounded. */
-const TOPIC_FIELDS = ['assigned', 'backed', 'missing'];
+/** Every field `report._topic_row` emits bar the derived `backed_pct`, which is a function of
+    three of them. Chart 01's tooltip displays `doubtful` and `unjudged` per topic, so matching
+    only `assigned`/`backed` would pin their SUM and let the split be wrong on screen. */
+const TOPIC_FIELDS = ['assigned', 'backed', 'doubtful', 'unjudged', 'missing'];
 
 /** The key split is itself a contract: a bucket that changed sides makes a table meaningless. */
 function keyContractProblems() {
   const dependent = new Set(DATA.threshold_dependent_keys);
   const bad = [];
-  for (const [key] of DEPENDENT_CHECKS.concat(DEPENDENT_LISTS.map(k => [k]))) {
+  const dependentKeys = DEPENDENT_CHECKS.concat(PCT_DEPENDENT, DEPENDENT_LISTS.map(k => [k]));
+  for (const [key] of dependentKeys) {
     if (!dependent.has(key)) bad.push(key + ' ya no depende del umbral');
   }
-  for (const [key] of FREE_CHECKS) if (dependent.has(key)) bad.push(key + ' ahora depende del umbral');
+  for (const [key] of FREE_CHECKS.concat(PCT_FREE)) {
+    if (dependent.has(key)) bad.push(key + ' ahora depende del umbral');
+  }
   return bad;
 }
 
@@ -422,6 +517,26 @@ function perTopicProblems(summary, d) {
   return bad;
 }
 
+/** The histogram's `asignados` half against the summary: every assigned pair Jev answered. */
+function histogramProblems(summary) {
+  const counted = sum(histogram().assigned);
+  const judged = summary.assigned_pairs - summary.assigned_unjudged;
+  return counted === judged
+    ? []
+    : ['histograma: ' + counted + ' asignaciones con noul aquí, ' + judged + ' en el informe'];
+}
+
+/** `report._pair_totals`: assigned = backed + doubtful + unjudged, with nothing left over.
+
+    Its own function rather than a line inside `selfCheck` because it reads only the page's OWN
+    buckets — no summary can make it fire, so corrupting one cannot observe it, and a check that
+    cannot be observed failing is indistinguishable from one that cannot fail. */
+function partitionProblems(mine) {
+  return mine.backed === mine.assigned_pairs - mine.doubtful - mine.unjudged
+    ? []
+    : ['las asignaciones no se reparten entre respaldadas, dudosas y sin juzgar'];
+}
+
 /** Every way the page can disagree with `summary`, NAMED. Empty means they agree. PURE. */
 function selfCheck(summary, d) {
   const mine = buckets(d);
@@ -433,21 +548,50 @@ function selfCheck(summary, d) {
       bad.push(key + ': ' + mine[bucket] + ' aquí, ' + summary[key] + ' en el informe');
     }
   }
-  if (atReportThreshold) bad.push.apply(bad, perTopicProblems(summary, d));
-  // `report._pair_totals`: assigned = backed + doubtful + unjudged, with nothing left over.
-  if (mine.backed !== mine.assigned_pairs - mine.doubtful - mine.unjudged) {
-    bad.push('las asignaciones no se reparten entre respaldadas, dudosas y sin juzgar');
+  for (const [key, compute] of atReportThreshold ? PCT_DEPENDENT.concat(PCT_FREE) : PCT_FREE) {
+    const here = compute(d), there = pctText(summary[key]);
+    if (here !== there) bad.push(key + ': ' + here + ' aquí, ' + there + ' en el informe');
   }
+  if (atReportThreshold) bad.push.apply(bad, perTopicProblems(summary, d));
+  // Threshold-free, so it runs at every umbral: the bins do not move with the slider.
+  bad.push.apply(bad, histogramProblems(summary));
+  bad.push.apply(bad, partitionProblems(mine));
   return bad;
+}
+
+/* THE VERDICT AT THE REPORT'S UMBRAL, COMPUTED ONCE AND NEVER WITHDRAWN.
+
+   `selfCheck` is right that it may only compare the threshold-dependent keys at the threshold
+   the summary was built at. But a divergence found there is a fact about the PAGE, not about
+   `t`: the same arithmetic runs at every umbral. Re-running the check per render and showing
+   only its current output meant the banner said "no te fíes de los números de esta página" on
+   load and then withdrew it the moment the reader touched the slider — the page's entire
+   reason to exist — leaving the numbers just as wrong and the warning gone. Latched here,
+   unioned into every later render.                                                          */
+const LOAD_MISMATCHES = selfCheck(DATA.summary, derive(DATA.threshold));
+
+/** What the banner must say right now: what was found on load, plus anything found since. */
+function currentMismatches(d) {
+  const now = selfCheck(DATA.summary, d);
+  return LOAD_MISMATCHES.concat(now.filter(p => LOAD_MISMATCHES.indexOf(p) === -1));
 }
 /* ===== end derive ===== */
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+/* ONE number formatter for the page, es-ES: decimal comma, thousands point. The exception is
+   `totals.cost_text`, which arrives already formatted from `defaults.jev_cost_fragment` (C
+   locale, decimal point) and is rendered as-is — one definition of the bill beats one decimal
+   separator, and `dashboard.py`'s module docstring records the seam. */
 const nf = (n) => n.toLocaleString('es-ES');
+/** `defaults.plural`, in the browser: the label agrees with the number in front of it. */
+const pl = (n, one, many) => nf(n) + ' ' + (n === 1 ? one : many);
 const f2 = (x) => x.toFixed(2).replace('.', ',');
-// `report._pct`: one decimal, and an em dash when there is no whole to be a part of.
-const pct = (a, b) => b ? (a / b * 100).toFixed(1).replace('.', ',') + ' %' : '—';
+/* THREE decimals wherever a noul is read against the umbral — the queue column, the drawer and
+   the umbral itself. At two, a pair at 0.8496 renders `0,85` under a heading that says
+   `noul < umbral` beside an umbral rendering `0,85`: 331 such rows on the real corpus. The
+   comparison was always exact (`m` ships unrounded); it was the DISPLAY that contradicted it. */
+const f3 = (x) => x.toFixed(3).replace('.', ',');
 const labelOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
 const descOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
 const name = (slug) => labelOf[slug] || slug;
@@ -471,15 +615,22 @@ const BANNER_TOP = 6;
 function renderBanner(mismatches) {
   const shown = mismatches.slice(0, BANNER_TOP).join(' · ');
   const rest = mismatches.length - Math.min(mismatches.length, BANNER_TOP);
+  const moved = threshold !== DATA.threshold
+    ? ' Detectada con el umbral del informe (' + f3(DATA.threshold) + '); en otro umbral las ' +
+      'cifras que dependen de él no se pueden verificar contra el informe.'
+    : '';
   $('banner').hidden = mismatches.length === 0;
   $('banner').innerHTML = mismatches.length
     ? '<b>Inconsistencia entre el informe y el dashboard</b>' + esc(shown) +
       (rest ? esc(' · … y ' + rest + ' más') : '') +
-      '. No te fíes de los números de esta página: manda <code>xbrain jev report</code>.'
+      '. No te fíes de los números de esta página: manda <code>xbrain jev report</code>.' +
+      esc(moved)
     : '';
 }
 
 /* ----------------------------------------------------------------- kpis + side-car line */
+/** `lab` is escaped; `num` and `ctx` are RAW HTML — every call site below is a literal in
+    this file (`<b>`, `&lt;`). Nothing from `DATA` reaches them without `esc`. */
 function kpi(lab, num, ctx, accent) {
   return '<div class="kpi"><div class="lab">' + esc(lab) + '</div><div class="num' +
     (accent ? ' accent' : '') + '">' + num + '</div><div class="ctx">' + ctx + '</div></div>';
@@ -488,10 +639,15 @@ function kpi(lab, num, ctx, accent) {
 function renderKpis(d) {
   const tot = DATA.totals;
   $('kpis').innerHTML = [
-    kpi('items comparados', nf(d.compared), 'de <b>' + nf(tot.current) + '</b> evaluaciones vigentes', true),
-    kpi('enrich respaldado por Jev', pct(d.backed, d.assignedPairs), nf(d.backed) + ' de ' + nf(d.assignedPairs) + ' asignaciones'),
-    kpi('Jev respaldado por enrich', pct(d.jevBacked, d.jevPairs), nf(d.jevBacked) + ' de ' + nf(d.jevPairs) + ' pares de Jev'),
-    kpi('primario coincide', pct(d.primaryAgree, d.compared), nf(d.primaryAgree) + ' de ' + nf(d.compared) + ' items'),
+    kpi('items comparados', nf(d.compared),
+        'de <b>' + nf(tot.current) + '</b> ' +
+        (tot.current === 1 ? 'evaluación vigente' : 'evaluaciones vigentes'), true),
+    kpi('enrich respaldado por Jev', pct1(d.backed, d.assignedPairs),
+        nf(d.backed) + ' de ' + pl(d.assignedPairs, 'asignación', 'asignaciones')),
+    kpi('Jev respaldado por enrich', pct1(d.jevBacked, d.jevPairs),
+        nf(d.jevBacked) + ' de ' + pl(d.jevPairs, 'par de Jev', 'pares de Jev')),
+    kpi('primario coincide', pct1(d.primaryAgree, d.compared),
+        nf(d.primaryAgree) + ' de ' + pl(d.compared, 'item', 'items')),
     kpi('dudosas', nf(d.doubtful.length), 'asignadas, noul &lt; umbral'),
     kpi('sin juzgar', nf(d.unjudged), 'el topic salió del vocabulario'),
     kpi('candidatas que faltan', nf(d.missing.length), 'no asignadas, noul ≥ umbral'),
@@ -512,8 +668,10 @@ function renderSidecar() {
   const orphans = tot.orphans ? ' · <span class="stale">' + nf(tot.orphans) +
     (tot.orphans === 1 ? ' huérfana' : ' huérfanas') + '</span>' : '';
   $('sidecar').innerHTML =
-    'Evaluaciones: <b>' + nf(tot.current) + '</b> vigentes de ' + nf(tot.assessed) + ' guardadas ·' +
-    stale + orphans + ' · ' + nf(tot.items) + ' items en el corpus · ' +
+    'Evaluaciones: <b>' + nf(tot.current) + '</b> ' +
+    (tot.current === 1 ? 'vigente' : 'vigentes') + ' de ' + nf(tot.assessed) +
+    (tot.assessed === 1 ? ' guardada ·' : ' guardadas ·') +
+    stale + orphans + ' · ' + pl(tot.items, 'item en el corpus', 'items en el corpus') + ' · ' +
     tally(tot.models, 'modelo', 'modelos') + ' · ' + tally(tot.providers, 'proveedor', 'proveedores') +
     ' · Coste: ' + esc(tot.cost_text) + '.';
 }
@@ -533,50 +691,51 @@ function topicRows(d) {
                     (a.slug < b.slug ? -1 : 1));
 }
 
+const NARROW = 640;
+
+/* Chart 01 is the headline panel, and a 45-topic category axis does not fit a phone: the labels
+   claimed ~170 px and the right-hand value labels another ~40, leaving ~120 px of plot for a
+   fixed 0-100 % scale — every bar a stub, and the five x-axis ticks run together into
+   `0 %20 %40 %60 %80 %`. Below 640 px the labels truncate (the tooltip still carries the full
+   one), the value labels go, and the axis keeps three ticks. */
 function renderTopics(d) {
   const rows = topicRows(d);
+  const narrow = window.innerWidth <= NARROW;
   $('chart-topics').style.height = Math.max(320, rows.length * 22 + 40) + 'px';
   chartTopics.resize();
   chartTopics.setOption({
-    grid: {left: 4, right: 56, top: 6, bottom: 26, containLabel: true},
-    xAxis: {type: 'value', max: 100, axisLabel: {formatter: '{value} %', color: C.faint, fontFamily: MONO, fontSize: 11},
+    // 24, not 10: `containLabel` reserves for the CATEGORY labels, not for the last x tick,
+    //  and `100 %` was clipping against the panel edge.
+    grid: {left: 4, right: narrow ? 24 : 56, top: 6, bottom: 26, containLabel: true},
+    xAxis: {type: 'value', max: 100, splitNumber: narrow ? 2 : 5,
+            axisLabel: {formatter: '{value} %', color: C.faint, fontFamily: MONO, fontSize: 11},
             axisLine: {show: false}, axisTick: {show: false}, splitLine: {lineStyle: {color: C.hair}}},
-    yAxis: {type: 'category', inverse: true, data: rows.map(r => r.label), axisLine: {show: false},
-            axisTick: {show: false}, axisLabel: {color: C.muted, fontFamily: UI, fontSize: 12}},
+    yAxis: {type: 'category', inverse: true, data: rows.map(r => name(r.slug)),
+            axisLine: {show: false}, axisTick: {show: false},
+            axisLabel: {color: C.muted, fontFamily: UI, fontSize: narrow ? 11 : 12,
+                        width: narrow ? 92 : null, overflow: narrow ? 'truncate' : 'none'}},
     tooltip: Object.assign({}, TIP, {formatter: function (p) {
       const r = rows[p.dataIndex];
       // The vocabulary's own description: a slug says what the topic is CALLED, not what it
       // covers, and "which topic is enrich over-assigning" is unanswerable without the second.
+      // It also carries the full label back when the narrow axis truncated it.
       const desc = descOf[r.slug] ? '<br><i>' + esc(descOf[r.slug]) + '</i>' : '';
-      if (!r.assigned) return esc(r.label) + desc + '<br>enrich no lo asignó nunca';
-      return esc(r.label) + desc + '<br>' + nf(r.backed) + ' de ' + nf(r.assigned) + ' respaldadas · ' +
+      if (!r.assigned) return esc(name(r.slug)) + desc + '<br>enrich no lo asignó nunca';
+      return esc(name(r.slug)) + desc + '<br>' + nf(r.backed) + ' de ' +
+             pl(r.assigned, 'asignación', 'asignaciones') + ' respaldadas · ' +
              nf(r.doubtful) + ' dudosas · ' + nf(r.unjudged) + ' sin juzgar<br>faltan ' + nf(r.missing);
     }}),
     series: [{
       type: 'bar', barMaxWidth: 13,
-      data: rows.map(r => ({value: r.assigned ? +(r.ratio * 100).toFixed(1) : 0,
+      // `round1`, not `toFixed`: the bar label and `topics-report.md` quote one side-car.
+      data: rows.map(r => ({value: r.assigned ? round1(r.ratio * 100) : 0,
                             itemStyle: {color: r.assigned ? C.accent : C.faint, opacity: r.assigned ? .88 : .35}})),
-      label: {show: true, position: 'right', formatter: p => rows[p.dataIndex].assigned ? p.value + ' %' : 'sin asignar',
+      label: {show: !narrow, position: 'right',
+              formatter: p => rows[p.dataIndex].assigned
+                ? String(p.value).replace('.', ',') + ' %' : 'sin asignar',
               color: C.faint, fontFamily: MONO, fontSize: 10},
     }],
   });
-}
-
-const BINS = 20;
-
-/** Every (item, topic) noul in the corpus, split by whether enrich assigned that topic. */
-function histogram() {
-  const assigned = new Array(BINS).fill(0), other = new Array(BINS).fill(0);
-  for (const it of DATA.items) {
-    if (!it.cmp) continue;
-    const set = new Set(it.assigned);
-    it.m.forEach(function (noul, i) {
-      if (noul === null) return;  // never asked: it has no probability to bin
-      const b = Math.min(BINS - 1, Math.floor(noul * BINS));
-      (set.has(slugs[i]) ? assigned : other)[b]++;
-    });
-  }
-  return {assigned: assigned, other: other};
 }
 
 // The bins are a fact about the corpus, not about the slider: only the umbral MARK moves.
@@ -586,6 +745,12 @@ const HIST = histogram();
 
 function renderHist(t) {
   const h = HIST;
+  // Panel 02 reads as a fact about the side-car; it is a fact about the COMPARABLE subset, the
+  // same population every other count on the page uses. Say so when they differ.
+  const dropped = DATA.totals.current - DATA.summary.items_compared;
+  $('sub-hist').textContent = 'eje log · bins de 0,05 · la línea marca el umbral' +
+    (dropped ? ' · ' + pl(dropped, 'item sin enriquecer queda fuera',
+                          'items sin enriquecer quedan fuera') : '');
   const labels = Array.from({length: BINS}, (_, i) => f2(i / BINS));
   // A zero bin is shipped as null, not as 1: on a log axis `Math.max(v, 1)` would draw a bar
   // where the corpus has nothing, which is a count the page invented.
@@ -646,35 +811,44 @@ function queue(el, rows, columns) {
     // `data-h` is the column header, repeated per cell: at phone width the header row is
     // dropped and each cell re-states its own name, so "0,77" is never a bare number.
     const cells = columns.map(c => '<td data-h="' + esc(c.h) + '">' + c.f(r) + '</td>').join('');
-    // The row opens the drawer, so it is a control: reachable by tab, announced as a button.
-    return '<tr data-id="' + esc(r.it.id) + '" tabindex="0" role="button">' + cells + '</tr>';
+    // Reachable by tab, and still a ROW: `role="button"` would make the cells invalid owned
+    // elements, so the topic/noul/post structure — the thing a screen reader needs here —
+    // would be announced as one run-together string. The table says it is a grid, the row
+    // carries its own action hint, and the cells stay cells.
+    return '<tr data-id="' + esc(r.it.id) + '" tabindex="0" aria-label="Abrir el detalle del item ' +
+      esc(r.it.id) + '">' + cells + '</tr>';
   }).join('');
   const dropped = rows.length - Math.min(rows.length, QUEUE_TOP);
-  el.innerHTML = '<div class="qwrap"><table class="q"><thead><tr>' + head + '</tr></thead><tbody>' +
-    body + '</tbody></table></div>' +
-    // `report._cut_note`'s words, to the letter: one table, cut in two places, said twice.
-    (dropped ? '<div class="cut">… y ' + nf(dropped) + (dropped === 1 ? ' fila más' : ' filas más') +
-               ' (el JSON las lleva todas)</div>' : '');
+  el.innerHTML = '<div class="qwrap"><table class="q" role="grid"><thead><tr>' + head +
+    '</tr></thead><tbody>' + body + '</tbody></table></div>' +
+    // `report._cut_note`'s RULE, reworded for this surface: the markdown points at
+    // `topics-report.json`, and `jev dashboard` writes no JSON — the rows are all in the
+    // `DATA` blob inlined above, and "el JSON" is not how a reader names what they are
+    // already reading. A cut that does not say it cut is the failure `_cut_note` prevents.
+    (dropped ? '<div class="cut">… y ' + pl(dropped, 'fila más', 'filas más') +
+               ' (están todas en los datos de esta página)</div>' : '');
 }
 
 /** ONE delegated listener per queue, wired once — not 200 re-attached on every slider event. */
 function wireQueue(el) {
   const open = (e) => {
+    // A LINK INSIDE THE ROW IS ITS OWN CONTROL. Without this guard the delegation swallowed
+    // both anchors: Enter on `X ↗` was `preventDefault`ed and opened the drawer instead of
+    // the post — the link was unreachable by keyboard — and a mouse click fired both.
+    if (e.target.closest('a')) return;
     const row = e.target.closest('tr[data-id]');
     if (row) openDrawer(row.dataset.id);
   };
   el.addEventListener('click', open);
   el.addEventListener('keydown', function (e) {
+    if (e.target.closest('a')) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
   });
 }
 
-/** True when Jev answered something outside the vocabulary — `report._primary_totals`' rule. */
-const choseFallback = (it) => slugAt[it.jp] === undefined;
-
 function renderQueues(d) {
   const topic = {h: 'topic', f: r => '<span class="tp">' + esc(name(r.slug)) + '</span>'};
-  const noul = {h: 'noul', f: r => '<span class="nn">' + f2(r.noul) + '</span>'};
+  const noul = {h: 'noul', f: r => '<span class="nn">' + f3(r.noul) + '</span>'};
   const post = {h: 'post', f: r => postCell(r.it)};
   queue($('q-doubtful'), d.doubtful, [topic, noul, post]);
   queue($('q-missing'), d.missing, [topic, noul, post]);
@@ -685,18 +859,33 @@ function renderQueues(d) {
     {h: 'conf.', f: r => '<span class="nn">' + f2(r.it.jc) + '</span>'},
     post,
   ]);
-  $('sub-doubtful').textContent = nf(d.doubtful.length) + ' pares · asignadas por enrich, noul < umbral';
-  $('sub-missing').textContent = nf(d.missing.length) + ' pares · no asignadas, noul ≥ umbral';
-  $('sub-primary').textContent = nf(primary.length) + ' items · de ' + nf(d.primary.length) + ' sin coincidencia';
+  $('sub-doubtful').textContent = pl(d.doubtful.length, 'par', 'pares') +
+    ' · asignadas por enrich, noul < umbral';
+  $('sub-missing').textContent = pl(d.missing.length, 'par', 'pares') +
+    ' · no asignadas, noul ≥ umbral';
+  $('sub-primary').textContent = 'se muestran ' + nf(primary.length) + ' de ' +
+    pl(d.primary.length, 'item sin coincidencia', 'items sin coincidencia');
 }
 
 /* ----------------------------------------------------------------- drawer */
 const drawer = $('drawer'), scrim = $('scrim');
 
+/** Assigned topics with no noul to show: out of today's vocabulary, or in it and unanswered.
+
+    ONE list, because they are one fact to a reader — "Jev was never asked about this" — and
+    the drawer used to show a `sin juzgar` count it could not explain: `membershipRows` drops
+    a null noul and `unjudgedRows` listed only the out-of-vocabulary half. */
+function unjudgedSlugs(it) {
+  return it.assigned.filter(function (slug) {
+    const i = slugAt[slug];
+    return i === undefined || it.m[i] === null || it.m[i] === undefined;
+  });
+}
+
 function membershipRows(it) {
   const assigned = new Set(it.assigned);
   const ranked = slugs.map((slug, i) => ({slug: slug, noul: it.m[i]}))
-    .filter(r => r.noul !== null)
+    .filter(r => r.noul !== null && r.noul !== undefined)
     .sort((a, b) => b.noul - a.noul || (a.slug < b.slug ? -1 : 1));
   return ranked.map(function (r) {
     const on = assigned.has(r.slug);
@@ -704,16 +893,50 @@ function membershipRows(it) {
     return '<div class="row ' + (on ? 'on' : 'off') + '"><span class="nm">' + esc(name(r.slug)) + marks +
       '</span><span class="track"><span class="bar" style="width:' + (r.noul * 100).toFixed(1) + '%"></span>' +
       '<span class="cut-line" style="left:' + (threshold * 100).toFixed(1) + '%"></span></span>' +
-      '<span class="ct">' + f2(r.noul) + '</span></div>';
+      '<span class="ct">' + f3(r.noul) + '</span></div>';
   }).join('');
 }
 
 function unjudgedRows(it) {
-  const missing = it.assigned.filter(slug => slugAt[slug] === undefined);
+  const missing = unjudgedSlugs(it);
   if (!missing.length) return '';
-  return '<div class="dwsec">Sin juzgar · fuera del vocabulario</div><p class="ov">' +
-    missing.map(esc).join(' · ') + ' — enrich los asignó bajo un <code>vocab.yaml</code> anterior, ' +
-    'así que Jev nunca fue preguntado por ellos. Ni respaldados ni dudosos.</p>';
+  return '<div class="dwsec">Sin juzgar · sin respuesta de Jev</div><p class="ov">' +
+    missing.map(esc).join(' · ') + ' — enrich las asignó, pero la evaluación guardada no ' +
+    'contiene respuesta para ellas (salieron del <code>vocab.yaml</code>, o nunca se ' +
+    'preguntó por ellas): esas asignaciones no son ni respaldadas ni dudosas.</p>';
+}
+
+/** `5 más probables de 46` — every other cut on this page says it cut, and so does this one. */
+function choiceLabel(it) {
+  return it.options > it.top.length
+    ? '(' + it.top.length + ' más probables de ' + it.options + ')'
+    : '(' + pl(it.options, 'opción', 'opciones') + ')';
+}
+
+/** The top options, PLUS enrich's primary when the cut left it out — with its rank.
+
+    Without it the section answers Jev's question and not the reader's: the bars show Jev's
+    five favourites, the sentence below says enrich picked X, and nothing says whether X came
+    sixth or last. `report._primary_rank` exists to separate a close call from a real conflict,
+    and this drawer is the surface where that distinction is worth the most. */
+function choiceRows(it) {
+  const shown = it.top.map(pair => choiceRow(it, pair[0], pair[1], null));
+  const inTop = it.top.some(pair => pair[0] === it.primary);
+  if (it.primary !== null && !inTop) {
+    shown.push(choiceRow(it, it.primary, it.pp, it.pr));
+  }
+  return shown.join('');
+}
+
+function choiceRow(it, option, probability, rank) {
+  const tail = rank === null ? '' : ' <span class="ct">#' + rank + '</span>';
+  const bar = probability === null || probability === undefined
+    ? '<span class="track"></span><span class="ct">sin rango</span>'
+    : '<span class="track"><span class="bar" style="width:' + (probability * 100).toFixed(1) +
+      '%"></span></span><span class="ct">' + f2(probability) + '</span>';
+  return '<div class="row ' + (option === it.jp ? 'on' : 'off') + '"><span class="nm">' +
+    esc(name(option)) + (option === it.primary ? ' <span class="mark">★</span>' : '') + tail +
+    '</span>' + bar + '</div>';
 }
 
 /** Where focus was when the drawer opened, so closing it does not dump the reader at the top. */
@@ -721,28 +944,33 @@ let focusBeforeDrawer = null;
 
 function openDrawer(id) {
   const it = DATA.items.find(x => x.id === id);
-  if (!it) return;
+  if (!it) {
+    // The id came OFF a row that was built from `DATA.items`, so a miss means the blob is
+    // internally inconsistent — precisely what the banner exists to announce. Returning in
+    // silence made the row simply not respond, with nothing on screen and nothing in the log.
+    renderBanner(currentMismatches(derive(threshold)).concat(
+      ['no encuentro el item ' + id + ' en los datos de la página']));
+    return;
+  }
   focusBeforeDrawer = document.activeElement;
   $('dw-title').textContent = '@' + it.handle;
-  $('dw-meta').textContent = 'ITEM ' + it.id + ' · ' + it.model + ' (' + it.provider + ')' +
+  $('dw-meta').textContent = 'ITEM ' + it.id + ' · modelo ' + it.model + ' (' + it.provider + ')' +
     (it.truncated ? ' · TRUNCADO' : '');
   $('dw-body').innerHTML =
     '<p class="ov">' + esc(it.text) + '</p><div class="sm-links">' + links(it) + '</div>' +
     '<div class="dwsec">Pertenencia (noul) · ✓ asignado por enrich · ★ primario</div>' +
     '<div class="mini">' + membershipRows(it) + '</div>' +
     unjudgedRows(it) +
-    '<div class="dwsec">Primario · distribución del Choice</div>' +
-    '<div class="mini">' + it.top.map(function (pair) {
-      return '<div class="row ' + (pair[0] === it.jp ? 'on' : 'off') + '"><span class="nm">' + esc(name(pair[0])) +
-        (pair[0] === it.primary ? ' <span class="mark">★</span>' : '') + '</span>' +
-        '<span class="track"><span class="bar" style="width:' + (pair[1] * 100).toFixed(1) + '%"></span></span>' +
-        '<span class="ct">' + f2(pair[1]) + '</span></div>';
-    }).join('') + '</div>' +
+    '<div class="dwsec">Primario · distribución del Choice ' + choiceLabel(it) + '</div>' +
+    '<div class="mini">' + choiceRows(it) + '</div>' +
     '<p class="ov" style="margin-top:14px">Jev eligió <b>' + esc(name(it.jp)) + '</b> con ' + f2(it.jc) +
     ' de confianza; enrich dice <b>' + esc(it.primary === null ? 'nada' : name(it.primary)) + '</b>.</p>';
   $('dw-body').scrollTop = 0;
   drawer.classList.add('open');
   scrim.classList.add('open');
+  // `inert` on the page behind: without it, Tab from the last drawer link walks back into the
+  // content the scrim is covering, which is the half of "modal" that CSS cannot express.
+  document.querySelector('main').inert = true;
   // The reflow is load-bearing: `.drawer` is `visibility:hidden` until `.open` lands, and an
   // invisible element cannot take focus. Reading a layout property forces the style recalc
   // before the focus call, so the keyboard really does land inside the drawer it just opened.
@@ -754,6 +982,7 @@ function closeDrawer() {
   if (!drawer.classList.contains('open')) return;  // Escape with nothing open must not steal focus
   drawer.classList.remove('open');
   scrim.classList.remove('open');
+  document.querySelector('main').inert = false;
   if (focusBeforeDrawer && focusBeforeDrawer.focus) focusBeforeDrawer.focus();
   focusBeforeDrawer = null;
 }
@@ -761,15 +990,24 @@ function closeDrawer() {
 /* ----------------------------------------------------------------- wiring */
 function render() {
   const d = derive(threshold);
-  $('threshold-value').textContent = f2(threshold);
+  // The EXACT umbral, three decimals like the noul column: at two, a slider on 0,850 sits
+  // beside rows rendering 0,850 and the reader can compare them without guessing.
+  $('threshold-value').textContent = f3(threshold);
   $('presets').querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.t === threshold));
-  $('reset-hint').textContent = threshold === DATA.threshold ? 'umbral del informe' : 'informe: ' + f2(DATA.threshold);
-  renderBanner(selfCheck(DATA.summary, d));
+  $('reset-hint').textContent = threshold === DATA.threshold ? 'umbral del informe' : 'informe: ' + f3(DATA.threshold);
+  renderBanner(currentMismatches(d));
   renderKpis(d);
   renderSidecar();
   renderTopics(d);
   renderHist(threshold);
   renderQueues(d);
+}
+
+/** One render per FRAME. `input` fires per pixel of drag; `derive` walks ~117k pairs. */
+let frame = null;
+function scheduleRender() {
+  if (frame !== null) return;
+  frame = requestAnimationFrame(function () { frame = null; render(); });
 }
 
 function setThreshold(value) {
@@ -780,14 +1018,35 @@ function setThreshold(value) {
   // handler rounds its own reading; a preset carries an exact value and keeps it.
   threshold = value;
   $('threshold').value = threshold;
-  render();
+  scheduleRender();
 }
 
-$('stamp').innerHTML = 'ACTUALIZADO ' + esc(DATA.updated) + ' · <b>' + nf(DATA.totals.current) + ' EVALUACIONES</b>';
+/* EVERY FAILURE PATH ENDS IN THE BANNER, never in "beautiful and blank". `echarts.init` and
+   the wiring below run before the first `render()`, so a throw in any of them used to abort
+   the script and leave the full masthead, five titled panels and zero rows — which reads as
+   "the corpus is empty" or "nobody ran `jev topics`", both wrong and both actionable in the
+   direction of re-paying for the corpus. */
+function paintBootFailure(message) {
+  const banner = document.getElementById('banner');
+  if (!banner) return;
+  banner.hidden = false;
+  banner.innerHTML = '<b>La página no pudo dibujarse</b>' + esc(String(message)) +
+    '. No hay números que leer aquí: usa <code>xbrain jev report</code>.';
+}
+addEventListener('error', (e) => paintBootFailure(e.message));
+
+try {
+
+$('stamp').innerHTML = 'ACTUALIZADO ' + esc(DATA.updated) + ' · <b>' +
+  pl(DATA.totals.current, 'EVALUACIÓN', 'EVALUACIONES') + '</b>';
+$('foot-note').textContent = 'DATOS Y ECHARTS EMPOTRADOS · TIPOGRAFÍAS DE GOOGLE FONTS';
+// The provenance line is DATA: the side-car records which judge answered each record, and a
+// hardcoded vendor name goes stale the first time a second one does.
+$('foot-providers').textContent = Object.keys(DATA.totals.providers).sort().join(' · ').toUpperCase();
 $('presets').innerHTML = [0.5, 0.7, DATA.threshold, 0.95]
   .filter((v, i, a) => a.indexOf(v) === i)
   .sort((a, b) => a - b)
-  .map(v => '<button data-t="' + v + '">' + f2(v) + '</button>').join('');
+  .map(v => '<button data-t="' + v + '">' + f3(v) + '</button>').join('');
 $('presets').addEventListener('click', e => { if (e.target.dataset.t) setThreshold(+e.target.dataset.t); });
 $('threshold').value = threshold;
 // The range reads back as 0.8500000000000001 often enough to matter: rounded to its own
@@ -803,8 +1062,15 @@ $('show-fallback').addEventListener('click', function () {
 $('dw-close').addEventListener('click', closeDrawer);
 scrim.addEventListener('click', closeDrawer);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
-addEventListener('resize', () => { chartTopics.resize(); chartHist.resize(); });
+// `renderTopics` re-reads `window.innerWidth`, so crossing the phone breakpoint re-lays the
+// category axis rather than merely rescaling a chart built for the other width.
+addEventListener('resize', () => { chartHist.resize(); scheduleRender(); });
 render();
+
+} catch (err) {
+  paintBootFailure(err && err.message ? err.message : err);
+  throw err;
+}
 </script>
 </body>
 </html>

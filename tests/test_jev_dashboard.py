@@ -25,7 +25,12 @@ from typing import Any
 import pytest
 
 from xbrain.dashboard import _resource
-from xbrain.jev.assess import build_topic_state, questions_digest, topic_contract
+from xbrain.jev.assess import (
+    build_topic_state,
+    current_pairs,
+    questions_digest,
+    topic_contract,
+)
 from xbrain.jev.dashboard import (
     DERIVE_END,
     DERIVE_START,
@@ -38,6 +43,9 @@ from xbrain.jev.report import THRESHOLD_DEPENDENT_KEYS
 from xbrain.models import Author, Enrichment, Item, Topic
 
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
+#: A fixed clock. The blob carries `summary["generated_at"]`, so a function that reads the
+#: clock itself cannot be asserted against — and is not the pure function it claims to be.
+NOW = datetime(2026, 9, 22, 18, 30, 5, tzinfo=timezone.utc)
 VOCAB = [
     Topic(slug="ai-coding", description="IA."),
     Topic(slug="startups", description="Empresas."),
@@ -72,6 +80,7 @@ def _assessment(
     contract: str | None = None,
     membership: dict[str, float] | None = None,
     provider: str = PRICED_PROVIDER,
+    vocab: list[Topic] | None = None,
 ) -> TopicAssessment:
     """A record whose contract is the one TODAY'S ask would stamp, so it reads as current.
 
@@ -80,7 +89,10 @@ def _assessment(
     fixture instead of a test passing over a contract nobody computes any more.
     """
     state, state_chars = build_topic_state(item, CHAR_LIMIT)
-    digest = questions_digest(build_topic_questions(VOCAB, FALLBACK))
+    # The digest is over the vocabulary the ask ACTUALLY used: a description is part of a
+    # question, so a fixture built against one vocabulary and compared against another reads
+    # as stale — correctly, and confusingly if it is not the subject of the test.
+    digest = questions_digest(build_topic_questions(vocab or VOCAB, FALLBACK))
     return TopicAssessment(
         item_id=item.id,
         provider=provider,
@@ -105,6 +117,7 @@ def _data(items: list[Item], assessments: dict[str, TopicAssessment], **kwargs) 
         "char_limit": CHAR_LIMIT,
         "id2note": {},
         "updated": "SEP 22, 2026",
+        "now": NOW,
     }
     options.update(kwargs)
     return compute_jev_dashboard_data(items, assessments, VOCAB, **options)
@@ -117,7 +130,12 @@ def test_blob_aligns_membership_with_topics_and_drops_stale():
     fresh, stale = _item("1"), _item("2", text="old")
     data = _data(
         [fresh, stale],
-        {"1": _assessment(fresh), "2": _assessment(stale, contract="e" * 64)},
+        # Two providers, so `providers` and `unpriced_providers` are pinned by more than one
+        # value: with one, the assertion cannot fail while the fixture supplies both sides.
+        {
+            "1": _assessment(fresh),
+            "2": _assessment(stale, contract="e" * 64, provider="otro-juez"),
+        },
         id2note={"1": "/v/items/1.md"},
     )
 
@@ -134,6 +152,10 @@ def test_blob_aligns_membership_with_topics_and_drops_stale():
     assert row["jp"] == "ai-coding" and row["jc"] == 0.77
     assert row["top"] == [["ai-coding", 0.7], ["startups", 0.2], ["otro", 0.1]]
     assert row["note"] == "/v/items/1.md" and row["handle"] == "alice"
+    # Against the SOURCE, not a constant: blanked, every `X` link on the page would point
+    # at the page itself, and the row would look identical either way.
+    assert row["url"] == fresh.url
+    assert row["truncated"] is False
     assert row["model"] == "jev-1.13.0" and row["provider"] == PRICED_PROVIDER
     assert data["threshold"] == 0.85 and data["fallback"] == FALLBACK
     assert data["totals"] == {
@@ -224,6 +246,145 @@ def test_a_post_past_the_budget_is_cut_with_an_ellipsis_like_the_markdown_report
     assert whole == short_post
 
 
+@pytest.mark.parametrize(
+    ("length", "expected"),
+    [(239, "x" * 239), (240, "x" * 240), (241, "x" * 239 + "\u2026")],
+)
+def test_the_cut_is_tested_at_the_boundary_not_four_hundred_characters_away(length, expected):
+    """240 exactly must NOT be decorated: off by one here claims a cut that never happened."""
+    item = _item("1", text="x" * length)
+
+    assert _data([item], {"1": _assessment(item)})["items"][0]["text"] == expected
+
+
+def test_the_summary_carries_the_clock_it_was_handed_and_never_reads_one():
+    """A function that reads the clock inside itself is not pure, and `generated_at` is the
+    one blob field that would silently differ between two runs of the same inputs."""
+    item = _item()
+
+    data = _data([item], {"1": _assessment(item)})
+
+    assert data["summary"]["generated_at"] == NOW.isoformat()
+
+
+def test_the_caller_may_hand_in_the_currency_it_already_computed():
+    """`_jev_pairs` has already run `current_pairs` before the CLI gets here.
+
+    Recomputing it is a second `build_topic_state` + sha256 over the whole corpus for an
+    answer the caller is holding. Handing it in must produce a byte-identical blob: if the
+    two paths could differ, passing it in would be a way to make the page disagree with the
+    refusal that just let it through.
+    """
+    fresh, stale = _item("1"), _item("2", text="old")
+    assessments = {"1": _assessment(fresh), "2": _assessment(stale, contract="e" * 64)}
+    current = current_pairs(
+        [fresh, stale], assessments, VOCAB, fallback=FALLBACK, char_limit=CHAR_LIMIT
+    )
+
+    handed_in = _data([fresh, stale], assessments, current=current)
+
+    assert handed_in == _data([fresh, stale], assessments)
+    assert handed_in["totals"]["stale"] == 1
+
+
+def test_a_side_car_record_whose_item_left_the_corpus_is_an_orphan_not_a_stale_one():
+    """`assessed == current + stale + orphans`, asserted as the equation `_totals` claims.
+
+    The two ways of losing a record differ: a vocabulary edit RETIRES an assessment and
+    re-running `jev topics` buys it back; a deleted item ORPHANS one and nothing does.
+    """
+    fresh, gone = _item("1"), _item("2")
+
+    data = _data([fresh], {"1": _assessment(fresh), "2": _assessment(gone)})
+
+    totals = data["totals"]
+    assert (totals["items"], totals["assessed"]) == (1, 2)
+    assert (totals["current"], totals["stale"], totals["orphans"]) == (1, 0, 1)
+    assert totals["assessed"] == totals["current"] + totals["stale"] + totals["orphans"]
+
+
+def test_an_item_enrich_left_without_a_primary_is_still_compared():
+    """No primary is not "nothing to compare": its assigned topics still have nouls to back.
+
+    `_row`'s docstring names this hazard — reading a null primary as "skip" would drop the
+    item from the browser's side while `report.compare_item` keeps it, so the banner would
+    fire on a corpus that is fine.
+    """
+    item = _item("1", topics=("ai-coding",))
+    item.enriched.primary_topic = None
+
+    data = _data([item], {"1": _assessment(item)})
+
+    assert data["items"][0]["cmp"] is True and data["items"][0]["primary"] is None
+    assert data["summary"]["items_compared"] == 1
+    assert data["summary"]["assigned_pairs"] == 1
+
+
+def test_a_vocabulary_slug_the_assessment_never_answered_is_null_not_zero():
+    """A fabricated 0.0 is the strongest possible disagreement, invented out of silence.
+
+    Different from a RETIRED slug, which has no slot in `m` at all: this one is in today's
+    vocabulary and the stored answer simply has no entry for it.
+    """
+    item = _item("1", topics=("ai-coding", "startups"))
+
+    data = _data([item], {"1": _assessment(item, membership={"ai-coding": 0.9})})
+
+    assert data["items"][0]["m"] == [0.9, None]
+    assert data["summary"]["assigned_unjudged"] == 1
+
+
+def test_a_truncated_assessment_is_flagged_on_its_own_row():
+    """The `TRUNCADO` badge is the only per-item sign Jev judged a CUT post — which is
+    exactly the item whose verdict a reviewer should distrust."""
+    item = _item()
+    assessment = _assessment(item).model_copy(update={"truncated": True})
+
+    data = _data([item], {"1": assessment})
+
+    assert data["items"][0]["truncated"] is True
+    assert data["totals"]["truncated"] == 1
+
+
+def test_the_choice_distribution_is_cut_to_five_and_ties_break_by_name():
+    """`report._primary_rank` breaks ties by option name so two runs of one distribution can
+    never report different ranks; the drawer sorts the same list and must not disagree."""
+    item = _item()
+    assessment = _assessment(item).model_copy(
+        update={
+            "primary": PrimaryChoice(
+                choice="ai-coding",
+                confidence=0.77,
+                probabilities={
+                    "startups": 0.3,
+                    "ai-coding": 0.3,
+                    "otro": 0.2,
+                    "web3": 0.1,
+                    "ml": 0.05,
+                    "zzz": 0.05,
+                },
+            )
+        }
+    )
+
+    top = _data([item], {"1": assessment})["items"][0]["top"]
+
+    assert len(top) == 5  # six options offered, five shown
+    assert [option for option, _ in top] == ["ai-coding", "startups", "otro", "web3", "ml"]
+
+
+def test_a_topic_assigned_twice_is_counted_twice_on_both_sides():
+    """`report._pair_totals` counts every assigned slot, duplicates included, while
+    `jev_backed` intersects SETS. Four independent choices line up; this pins the alignment."""
+    item = _item("1", topics=("ai-coding", "ai-coding"))
+
+    data = _data([item], {"1": _assessment(item)})
+
+    assert data["items"][0]["assigned"] == ["ai-coding", "ai-coding"]
+    assert data["summary"]["assigned_pairs"] == 2 and data["summary"]["assigned_backed"] == 2
+    assert data["summary"]["jev_backed"] == 1  # the set intersection, not the multiset
+
+
 # --------------------------------------------------------------------------- the page
 
 
@@ -246,6 +407,41 @@ def test_render_inlines_data_and_library_without_leaving_sentinels():
     assert fetched and all(url.startswith("https://fonts.g") for url in fetched)
 
 
+def test_scraped_text_cannot_close_the_script_tag_or_break_the_parse():
+    """This is the page that inlines raw scraped X text into `const DATA = ...`.
+
+    Two different failures, one escaper: an un-escaped `</script>` closes the tag at HTML-parse
+    time (stored XSS), and an un-escaped U+2028 is a hard `SyntaxError` — a blank page, not a
+    degraded one. `render_dashboard_html` delegates both to `dashboard._escape_for_script`;
+    what is new here is the exposure, so the round-trip is pinned on this surface too.
+    """
+    vocab = [
+        Topic(slug="ai-coding", description="IA.\u2028Fin.</script><img src=x>"),
+        Topic(slug="startups", description="Empresas."),
+    ]
+    item = _item("1", text="cierra aquí </script><img src=x onerror=alert(1)>")
+    data = compute_jev_dashboard_data(
+        [item],
+        {"1": _assessment(item, vocab=vocab)},
+        vocab,
+        threshold=0.85,
+        fallback=FALLBACK,
+        char_limit=CHAR_LIMIT,
+        id2note={},
+        updated="SEP 22, 2026",
+        now=NOW,
+    )
+
+    html = render_jev_dashboard_html(data)
+
+    # The vendored library's tag and the data tag. A third one is a break-out.
+    assert html.count("</script>") == 2
+    assert "\u2028" not in html
+    assert "<img src=x" not in html
+    # …and the text is not mangled: it round-trips through `JSON.parse` unchanged.
+    assert data["items"][0]["text"] == "cierra aquí </script><img src=x onerror=alert(1)>"
+
+
 def test_the_template_compares_with_ge_and_keeps_an_unjudged_bucket():
     """The WEAKER check, for a machine with no node: the two rules pinned as text.
 
@@ -254,7 +450,11 @@ def test_the_template_compares_with_ge_and_keeps_an_unjudged_bucket():
     """
     template = _resource("jev.template.html")
 
-    assert "noul >= t" in template
+    # TWICE, once per side of the mirror (`enrichSide` and `jevSide`). Asserting mere presence
+    # let either one be flipped alone while the other kept the pin satisfied — and a
+    # one-function edit is exactly what drift looks like.
+    assert template.count("noul >= t") == 2
+    assert "noul > t" not in template
     assert "unjudged" in template
     assert DERIVE_START in template and DERIVE_END in template
 
@@ -290,17 +490,25 @@ def _derive_in_node(data: dict[str, Any]) -> dict[str, int]:
     return _run_in_node(data, "return buckets(derive(DATA.threshold));")
 
 
-def _self_check_in_node(data: dict[str, Any], patch: dict[str, Any] | None = None) -> list[str]:
+def _self_check_in_node(
+    data: dict[str, Any], patch: dict[str, Any] | None = None, *, at: float | None = None
+) -> list[str]:
     """The template's own `selfCheck` against `data["summary"]`, optionally corrupted.
 
     `patch` is merged over the summary BEFORE the call, which is how the safety net is shown
     to fire: a check that is never observed failing is indistinguishable from one that cannot.
+
+    `at` is where the SLIDER is; the summary stays at the threshold it was built at. Without
+    it every call had `d.t === summary.threshold`, so `atReportThreshold` was always true and
+    the entire key split — the reason `THRESHOLD_DEPENDENT_KEYS` is shipped at all — was never
+    executed in the state it exists for.
     """
     overrides = json.dumps(patch or {}, ensure_ascii=False)
+    derived_at = "s.threshold" if at is None else repr(float(at))
     return _run_in_node(
         data,
         f"const s = Object.assign({{}}, DATA.summary, {overrides});"
-        " return selfCheck(s, derive(s.threshold));",
+        f" return selfCheck(s, derive({derived_at}));",
     )
 
 
@@ -312,17 +520,7 @@ def test_the_browser_derives_the_same_buckets_as_the_report():
     missing candidate, a retired topic and a primary that does not coincide. A `derive` that
     mirrors only the easy half still passes an all-agreeing corpus.
     """
-    backed = _item("1", topics=("ai-coding", "web3"))
-    doubtful = _item("2", text="Seed round", topics=("startups",))
-    data = _data(
-        [backed, doubtful],
-        {
-            "1": _assessment(backed),  # ai-coding 0.9 backed · startups 0.12 missing? no: <t
-            "2": _assessment(
-                doubtful, membership={"ai-coding": 0.91, "startups": 0.4}
-            ),  # startups doubtful, ai-coding a missing candidate, primary disagrees
-        },
-    )
+    data = _every_bucket_fixture()
 
     assert _derive_in_node(data) == {
         "backed": data["summary"]["assigned_backed"],
@@ -335,6 +533,9 @@ def test_the_browser_derives_the_same_buckets_as_the_report():
         # rest: a number on screen that nothing compares is a number free to be wrong.
         "jev_backed": data["summary"]["jev_backed"],
         "primary_agree": data["summary"]["primary_agree"],
+        # `primary_fallback` is what the queue's own toggle filters on, so the predicate
+        # behind a filtered count is checked even though the count itself is display-only.
+        "primary_fallback": data["summary"]["primary_fallback"],
         "assigned_pairs": data["summary"]["assigned_pairs"],
         "items_compared": data["summary"]["items_compared"],
     }
@@ -355,13 +556,20 @@ def test_the_browser_recomputes_the_buckets_when_the_threshold_moves():
 
 
 def _every_bucket_fixture() -> dict[str, Any]:
-    """A corpus carrying every bucket at once: backed, doubtful, missing, unjudged, mismatch."""
+    """A corpus carrying every bucket at once: backed, doubtful, missing, unjudged, mismatch.
+
+    `ai-coding` sits EXACTLY ON THE THRESHOLD (0.85 against an umbral of 0.85), which is the
+    one value that tells `>=` from `>`. `report._doubtful` uses `membership[slug] < threshold`,
+    so at equality the report says BACKED — and a page spelling it `>` says doubtful, while
+    `assigned_backed` is threshold-dependent and therefore only checked at one slider
+    position. A probability of exactly 0.85 is not exotic for an LLM asked for a confidence.
+    """
     backed = _item("1", topics=("ai-coding", "web3"))
     doubtful = _item("2", text="Seed round", topics=("startups",))
     return _data(
         [backed, doubtful],
         {
-            "1": _assessment(backed),
+            "1": _assessment(backed, membership={"ai-coding": 0.85, "startups": 0.123456}),
             "2": _assessment(doubtful, membership={"ai-coding": 0.91, "startups": 0.4}),
         },
     )
@@ -437,3 +645,163 @@ def test_self_check_reports_a_key_that_changed_sides_in_the_report():
     problems = _self_check_in_node(data)
 
     assert [p for p in problems if "jev_backed" in p], problems
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_the_browser_recomputes_against_a_summary_built_at_another_threshold():
+    """The slider is the page's whole reason to exist, and it was certified by a test that
+    could not fail: every node case built the summary at the threshold it then derived at, so
+    `function derive(t) { t = DATA.threshold; ... }` passed them all.
+
+    Here the summary is built at 0,85 and the browser derives at 0,95, against numbers
+    computed by hand from the fixture:
+
+      ai-coding 0,90 assigned  -> backed at 0,85 · DOUBTFUL at 0,95
+      startups  0,91 unassigned -> missing at 0,85 · NOTHING at 0,95 (0,91 < 0,95)
+
+    so every bucket in the pair differs between the two thresholds and a `derive` that ignores
+    its argument answers with the 0,85 column.
+    """
+    item = _item("1", topics=("ai-coding",))
+    data = _data([item], {"1": _assessment(item, membership={"ai-coding": 0.9, "startups": 0.91})})
+
+    at_report = _run_in_node(data, "return buckets(derive(0.85));")
+    moved = _run_in_node(data, "return buckets(derive(0.95));")
+
+    assert (at_report["backed"], at_report["doubtful"], at_report["missing"]) == (1, 0, 1)
+    assert (moved["backed"], moved["doubtful"], moved["missing"]) == (0, 1, 0)
+    assert (at_report["jev_pairs"], moved["jev_pairs"]) == (2, 0)
+    # And the 0,85 column is what the report prints for the same pairs.
+    assert at_report["backed"] == data["summary"]["assigned_backed"]
+    assert at_report["missing"] == data["summary"]["missing_pairs"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_self_check_is_silent_when_only_the_slider_moved():
+    """Moving the slider changes the threshold-dependent buckets BY DESIGN.
+
+    A banner there would be the page crying wolf on its own feature, and a reader who learns
+    to ignore the banner has lost the one signal that matters.
+    """
+    assert _self_check_in_node(_every_bucket_fixture(), at=0.10) == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@pytest.mark.parametrize(
+    "key",
+    ["assigned_unjudged", "primary_agree", "primary_fallback", "assigned_pairs", "items_compared"],
+)
+def test_the_threshold_free_net_still_fires_after_the_slider_moves(key: str):
+    """These do not move with the threshold, so they are checked at EVERY one.
+
+    This is the branch that goes dark if `: FREE_CHECKS` ever becomes `: []` — the net would
+    switch itself off at exactly the moment nothing else is checking.
+    """
+    data = _every_bucket_fixture()
+
+    problems = _self_check_in_node(data, {key: data["summary"][key] + 1}, at=0.10)
+
+    assert [p for p in problems if p.startswith(f"{key}:")], problems
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_a_mismatch_found_on_load_is_never_withdrawn_when_the_slider_moves():
+    """THE BANNER DOES NOT RETRACT.
+
+    `selfCheck` is right that it may only compare the threshold-dependent keys at the umbral
+    the summary was built at. But a divergence found there is a fact about the PAGE — the same
+    arithmetic runs at every umbral — so showing only the current check's output meant the
+    page said "no te fíes de los números de esta página" on load and then withdrew it the
+    moment the reader touched the slider. The numbers stayed wrong; only the warning left.
+    """
+    data = _every_bucket_fixture()
+    data["summary"]["assigned_backed"] += 1000  # a divergence visible only at 0,85
+
+    on_load = _run_in_node(data, "return currentMismatches(derive(DATA.threshold));")
+    after_moving = _run_in_node(data, "return currentMismatches(derive(0.10));")
+
+    assert [p for p in on_load if p.startswith("assigned_backed:")], on_load
+    assert [p for p in after_moving if p.startswith("assigned_backed:")], after_moving
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@pytest.mark.parametrize("field", ["assigned", "backed", "doubtful", "unjudged", "missing"])
+def test_self_check_compares_every_per_topic_field(field: str):
+    """All five, one case each. The suite's own rule, one level down: mutating only `backed`
+    left `TOPIC_FIELDS = ['backed']` passing, and chart 01's tooltip displays four of them."""
+    data = _every_bucket_fixture()
+    rows = [dict(row) for row in data["summary"]["per_topic"]]
+    target = next(row for row in rows if row["assigned"])
+    target[field] += 1
+
+    problems = _self_check_in_node(data, {"per_topic": rows})
+
+    assert [p for p in problems if p.startswith(f"per_topic[{target['slug']}].{field}:")], problems
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_chart_one_orders_its_rows_the_way_the_report_orders_its_table():
+    """Chart 01's ROW ORDER mirrors `report._backing_order`, so it is executed like the rest.
+
+    Worst backing first, never-assigned last, keyed on the EXACT ratio — `_pct` rounds to one
+    decimal, so ordering on the rendered percentage puts the one topic with a real
+    disagreement below every perfect topic whose slug sorts earlier.
+    """
+    data = _every_bucket_fixture()
+
+    order = _run_in_node(data, "return topicRows(derive(DATA.threshold)).map(r => r.slug);")
+
+    assert order == [row["slug"] for row in data["summary"]["per_topic"]]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@pytest.mark.parametrize(
+    ("part", "whole"), [(1, 16), (5, 16), (2, 32), (9, 16), (1, 3), (2, 3), (0, 0), (1, 1)]
+)
+def test_the_page_rounds_percentages_the_way_python_does(part: int, whole: int):
+    """One side-car, one number. `toFixed` rounds half AWAY from zero and Python's `round` is
+    half-to-EVEN, so one backed assignment of sixteen printed `6,3 %` in the KPI band and
+    `6.2 %` in `topics-report.md`. 152 of the 80,199 pairs under whole<=400 diverge that way.
+
+    `(0, 0)` is the other half of the mirror: `report._pct` scores an empty whole as `0.0` and
+    the markdown prints `0.0 %`, so the page may not print an em dash there.
+    """
+    data = _every_bucket_fixture()
+    expected = f"{round(part / whole * 100, 1) if whole else 0.0:.1f}".replace(".", ",") + " %"
+
+    assert _run_in_node(data, f"return pct1({part}, {whole});") == expected
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_the_partition_invariant_is_observable():
+    """Belt-and-braces over checks that would already fire — but by the suite's own standard a
+    check never observed failing is indistinguishable from one that cannot.
+
+    It reads only the page's own buckets, so no corrupted summary reaches it; the rule is its
+    own function precisely so a hand-made bucket can.
+    """
+    data = _every_bucket_fixture()
+    whole = "{backed: 3, assigned_pairs: 5, doubtful: 1, unjudged: 1}"
+    broken = "{backed: 1, assigned_pairs: 5, doubtful: 1, unjudged: 1}"
+
+    assert _run_in_node(data, f"return partitionProblems({whole});") == []
+    assert [
+        p
+        for p in _run_in_node(data, f"return partitionProblems({broken});")
+        if "no se reparten" in p
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_the_histograms_assigned_half_is_checked_against_the_report():
+    """Panel 02 derives 40 bin counts. The `asignados` half has a counterpart in the summary —
+    every assigned pair Jev answered — so it is checked rather than merely drawn."""
+    data = _every_bucket_fixture()
+
+    clean = _self_check_in_node(data)
+    corrupted = _self_check_in_node(
+        data, {"assigned_unjudged": data["summary"]["assigned_unjudged"] + 1}
+    )
+
+    assert clean == []
+    assert [p for p in corrupted if p.startswith("histograma:")], corrupted

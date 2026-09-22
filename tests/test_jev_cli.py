@@ -20,6 +20,7 @@ from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.notes_io import note_filename
 from xbrain.rubrics import save_vocab
+from xbrain import store as store_module
 from xbrain.store import load_store, save_store
 
 runner = CliRunner()
@@ -1079,9 +1080,14 @@ def _page(vault: Path) -> Path:
 
 
 def _blob(page: Path) -> dict:
-    """The JSON the page hands the browser, read back out of the rendered HTML."""
+    """The JSON the page hands the browser, read back out of the rendered HTML.
+
+    `rsplit`, not `split`: the vendored ECharts is injected BEFORE the payload, so the same
+    literal occurring anywhere in a megabyte of minified library would make this helper read
+    the library instead of the blob — a failing test about a page that is perfectly fine.
+    """
     html = page.read_text(encoding="utf-8")
-    payload = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+    payload = html.rsplit("const DATA = ", 1)[1].split(";\n", 1)[0]
     return json.loads(payload)
 
 
@@ -1210,3 +1216,95 @@ def test_jev_dashboard_links_the_notes_that_exist_and_not_the_ones_that_do_not(
 
     notes = {row["id"]: row["note"] for row in _blob(_page(vault))["items"]}
     assert notes == {"1": str(note.resolve()), "2": None}
+
+
+def test_jev_dashboard_refuses_a_negative_threshold_too(tmp_path: Path, monkeypatch):
+    """Below 0.0 every pair clears `noul >= t`: a page that reads as perfect agreement.
+
+    The opposite half of the guard has its own test — the two failures are opposites, so one
+    case cannot stand for both.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "-0.5"])
+
+    assert result.exit_code == 1
+    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
+    assert not _page(vault).exists()
+
+
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_jev_dashboard_accepts_the_closed_interval(tmp_path: Path, monkeypatch, value: str):
+    """`t = 0` backs everything and `t = 1` backs only certainty. Both are legal.
+
+    A guard written `0.0 < t < 1.0` refuses two thresholds an operator may legitimately ask
+    for, and nothing else in the suite would notice.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    result = runner.invoke(app, ["jev", "dashboard", "--threshold", value])
+
+    assert result.exit_code == 0, result.output
+    assert _blob(_page(vault))["summary"]["threshold"] == float(value)
+
+
+def test_jev_dashboard_refuses_a_corpus_where_nothing_is_comparable(tmp_path: Path, monkeypatch):
+    """The fifth empty state: current assessments whose items have no enrichment at all.
+
+    `report.compare_item` returns None for every one of them, so every bucket is 0 and
+    `selfCheck` agrees with a summary of zeros — a page that renders clean and says nothing.
+    It is the same shape as the four states that already refuse, and it needs the same answer.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    store = load_store(tmp_path / "data" / "items.json")
+    for item in store.values():
+        item.enriched = None
+    save_store(store, tmp_path / "data" / "items.json")
+
+    result = runner.invoke(app, ["jev", "dashboard"])
+
+    assert result.exit_code == 1
+    assert "ninguna evaluación vigente" in result.stderr
+    assert "xbrain enrich" in result.stderr
+    assert not _page(vault).exists()
+
+
+def test_jev_dashboard_leaves_the_last_good_page_alone_when_the_rename_dies(
+    tmp_path: Path, monkeypatch
+):
+    """The page is written atomically, so a dying write cannot truncate the last good one.
+
+    `_refuse_empty_report`'s whole argument is that a plausible-looking file must never land
+    on top of the last good one; a page half-written by a full disk is the same failure
+    arriving through the write instead of through the data.
+
+    The probe is `os.replace` — the final step of `store._atomic_write` and the step a plain
+    `write_text` does not have. A non-atomic write would never reach the patch, would succeed,
+    and would leave the SECOND page's bytes here.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+    good = _page(vault).read_bytes()
+
+    def _explode(src, dst):
+        raise OSError("[Errno 28] No space left on device")
+
+    monkeypatch.setattr(store_module.os, "replace", _explode)
+    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "0.5"])
+
+    assert result.exit_code != 0
+    # Byte-identical: not merely "a page exists", but the one that was there before.
+    assert _page(vault).read_bytes() == good
+    assert not list(_page(vault).parent.glob("*.tmp"))

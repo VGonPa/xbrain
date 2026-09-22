@@ -225,10 +225,16 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
     assert summary["input_tokens"] == 1500 and summary["cost_usd"] == 0.0001
     assert summary["models"] == {"jev-1.13.0": 2}
     by_slug = {row["slug"]: row for row in summary["per_topic"]}
+    # `doubtful` and `unjudged` ride WITH the row, not only in the corpus total: they are
+    # already counted by `_slug_counts`, the dashboard's chart-01 tooltip displays them per
+    # topic, and a number displayed per topic that only exists as a corpus sum is a number
+    # nothing can check. `assigned = backed + doubtful + unjudged`, row by row.
     assert by_slug["misc"] == {
         "slug": "misc",
         "assigned": 1,
         "backed": 0,
+        "doubtful": 1,
+        "unjudged": 0,
         "backed_pct": 0.0,
         "missing": 0,
     }
@@ -236,6 +242,8 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "slug": "startups",
         "assigned": 1,
         "backed": 1,
+        "doubtful": 0,
+        "unjudged": 0,
         "backed_pct": 100.0,
         "missing": 1,
     }
@@ -685,6 +693,11 @@ def test_a_per_topic_row_partitions_its_own_assigned_pairs():
     assert sum(row["assigned"] for row in summary["per_topic"]) == (
         summary["assigned_pairs"] - summary["assigned_unjudged"]
     )
+    # And each row's own three buckets partition it, which is what lets a consumer show
+    # `dudosas` / `sin juzgar` per topic against a number the report also emits.
+    for row in summary["per_topic"]:
+        assert row["backed"] + row["doubtful"] + row["unjudged"] == row["assigned"]
+    assert sum(row["doubtful"] for row in summary["per_topic"]) == summary["doubtful_pairs"]
 
 
 # ------------------------------------------------------- markdown: sections, order, cuts

@@ -50,6 +50,7 @@ from xbrain.fetch import (
 from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
 from xbrain.jev.assess import (
+    CurrentPairs,
     RunResult,
     Selection,
     current_pairs,
@@ -88,6 +89,7 @@ from xbrain.refresh import (
 )
 from xbrain.rubrics import load_vocab, save_vocab
 from xbrain.store import (
+    _atomic_write,
     load_state,
     load_store,
     load_topic_pages,
@@ -2933,8 +2935,9 @@ def _jev_pairs(cfg: Config) -> JevPairs:
     `vocab.yaml` would silently compare a different set.
 
     It LOADS and COUNTS; it does not judge. Whether an empty result is an error belongs to the
-    command (`_refuse_empty_report`), because a dashboard may legitimately want to render the
-    empty state that `jev report` refuses to write.
+    command (`_refuse_empty_report`), and today BOTH commands say yes: `jev report` and
+    `jev dashboard` refuse over an empty side-car, each naming the artifact it protects. A
+    future reader that genuinely wants to render the empty state simply does not call it.
 
     THE ONE EXCEPTION is an empty vocabulary, and it is not a judgement: there is nothing to
     compare WITH, so no comparison is attempted and `stale`/`orphans` stay 0 because nothing
@@ -2970,9 +2973,11 @@ def _jev_pairs(cfg: Config) -> JevPairs:
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
     """Refuse BEFORE writing when there is nothing to compare, NAMING the missing input.
 
-    A report over nothing is not a report of zero — it is a plausible-looking file of zeros
-    written over the last good one, atomically. `data/` is gitignored, the side-car is not
-    snapshotted and it costs money to regenerate, so there is no copy to fall back to.
+    A comparison over nothing is not a comparison of zeros — it is a plausible-looking file of
+    zeros written over the last good one, atomically. `data/` is gitignored, the side-car is
+    not snapshotted and it costs money to regenerate, so there is no copy to fall back to.
+    (The name says "report" because that was the only caller when it was written; it guards
+    `jev.html` on exactly the same argument.)
 
     The empty-vocabulary case is the sharpest: `build_topic_questions` refuses an empty
     vocabulary loudly, but only from inside the comparison loop — with an empty side-car the
@@ -3012,6 +3017,32 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
             f"({jev.stale} caducadas, {jev.orphans} huérfanas): ejecuta `xbrain jev topics` "
             f"(o revisa {cfg.data_dir / 'vocab.yaml'} si acabas de cambiarlo). {kept}"
         )
+    if not any(item.enriched is not None for item, _ in jev.pairs):
+        # The fifth state, and the quietest: the side-car is full and current, and
+        # `report.compare_item` returns None for every record because no item carries an
+        # enrichment. Every bucket is 0, the self-check agrees with a summary of zeros, and
+        # the artifact renders clean — the one empty state that produces no signal at all.
+        raise JevError(
+            f"ninguna evaluación vigente tiene con qué compararse: los "
+            f"{plural(len(jev.pairs), 'item evaluado', 'items evaluados')} no están "
+            f"enriquecidos. Ejecuta `xbrain enrich`. {kept}"
+        )
+
+
+def _jev_threshold(cfg: Config, threshold: float | None) -> float:
+    """The umbral to compare at: the flag when given, `[jev].threshold` otherwise.
+
+    ONE guard and ONE message for both commands. BOTH bounds earn their place, and they fail
+    in opposite directions: above 1.0 nothing is ever backed and every assignment is doubtful;
+    below 0.0 `noul >= t` holds for every pair, so EVERYTHING is backed and every topic Jev was
+    asked about becomes a missing candidate — an artifact that reads as near-perfect agreement.
+    `nan` fails the chain and is refused here too. Either way the result is a plausible-looking
+    file of pure noise written over the last good one, which is why this runs before any write.
+    """
+    resolved = cfg.jev_threshold if threshold is None else threshold
+    if not 0.0 <= resolved <= 1.0:
+        raise ValueError("--threshold debe estar en [0.0, 1.0]")
+    return resolved
 
 
 def _jev_report_line(summary: dict[str, Any]) -> str:
@@ -3061,21 +3092,20 @@ def jev_report_cmd(
     vigentes.
     """
     cfg = _config()
-    t = cfg.jev_threshold if threshold is None else threshold
-    if not 0.0 <= t <= 1.0:
-        # Refused BEFORE anything is written, and BOTH bounds earn their place. Above 1.0
-        # nothing is ever backed and every assignment is doubtful; below 0.0 the failure is
-        # the exact opposite — `noul >= t` holds for every pair, so EVERYTHING is backed and
-        # every topic Jev was asked about becomes a missing candidate, a report that reads as
-        # near-perfect agreement. Either way it is a plausible-looking file of pure noise,
-        # written over the last good one. `nan` fails the chain and is refused here too.
-        raise ValueError("--threshold debe estar en [0.0, 1.0]")
+    t = _jev_threshold(cfg, threshold)
     jev = _jev_pairs(cfg)
     _refuse_empty_report(jev, cfg, cfg.jev_dir / "topics-report.json")
     # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
     # carry the rows, and a second pass would be a second place the threshold has to match.
+    # The clock is read HERE and handed down, so `build_report` stays a pure function of its
+    # arguments and a caller can pin `generated_at`.
     summary, comparisons = build_report(
-        jev.pairs, jev.vocab, t, stale=jev.stale, orphans=jev.orphans
+        jev.pairs,
+        jev.vocab,
+        t,
+        now=datetime.now(timezone.utc),
+        stale=jev.stale,
+        orphans=jev.orphans,
     )
     json_path, md_path = write_reports(summary, comparisons, jev.store, cfg.jev_dir)
     typer.echo(_jev_report_line(summary))
@@ -3110,12 +3140,7 @@ def jev_dashboard_cmd(
     separa de él. Las evaluaciones caducadas se excluyen, igual que en el informe.
     """
     cfg = _config()
-    t = cfg.jev_threshold if threshold is None else threshold
-    if not 0.0 <= t <= 1.0:
-        # The same guard as `jev report`, for the same reasons and BEFORE anything is written:
-        # above 1.0 nothing is ever backed, below 0.0 everything is, and either way the page
-        # is plausible-looking noise written over the last good one.
-        raise ValueError("--threshold debe estar en [0.0, 1.0]")
+    t = _jev_threshold(cfg, threshold)
     jev = _jev_pairs(cfg)
     page = cfg.output_dir / "jev.html"
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
@@ -3133,9 +3158,17 @@ def jev_dashboard_cmd(
         char_limit=cfg.jev_state_char_limit,
         id2note=_jev_note_links(items, cfg.output_dir / "items"),
         updated=f"{now:%b} {now.day}, {now.year}".upper(),
+        now=now,
+        # `_jev_pairs` already decided currency to get here; recomputing it would be a second
+        # `build_topic_state` and sha256 over the whole corpus, and a second chance for the
+        # page to disagree with the refusal that just let it through.
+        current=CurrentPairs(pairs=tuple(jev.pairs), stale=jev.stale, orphans=jev.orphans),
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
-    page.write_text(render_jev_dashboard_html(data), encoding="utf-8")
+    # Atomically, like the reports: a page half-written by a full disk or a Ctrl-C would
+    # truncate the last good one into unparseable HTML, which is the failure
+    # `_refuse_empty_report` spends four branches preventing, arriving through the write.
+    _atomic_write(page, render_jev_dashboard_html(data))
     # The SAME line `jev report` prints, from the same summary: the two commands recap one
     # side-car, and an operator who runs both must not have to reconcile two sets of numbers.
     typer.echo(_jev_report_line(data["summary"]))
