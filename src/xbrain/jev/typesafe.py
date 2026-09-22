@@ -96,7 +96,14 @@ def _from_sdk(response: SystemOneResponse) -> JevResult:
 
 class TypeSafeJevClient:
     """`JevClient` over the official SDK. `sdk_client` is the injection seam for tests,
-    mirroring `executors.api.ApiExecutor(client=...)`."""
+    mirroring `executors.api.ApiExecutor(client=...)`.
+
+    THREAD-SAFE, as the `JevClient` protocol requires. `ask` reads `self._client` and
+    `self._model`, both set in `__init__` and never reassigned, and holds no per-call state
+    on the instance. Underneath, the SDK copies the retry policy per call rather than
+    mutating a shared one, and its httpx client is itself safe to share across threads — so
+    one instance serves the whole `run_assessments` pool without a lock.
+    """
 
     def __init__(
         self,
