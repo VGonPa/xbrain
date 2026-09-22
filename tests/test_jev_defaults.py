@@ -99,10 +99,14 @@ def test_plural_agrees_at_one_only():
 
 
 def test_the_cost_fragment_prints_four_decimals_so_a_real_bill_is_never_rounded_away():
-    """At 0.042 $/MTok a whole corpus costs under 0.50 $, so three decimals round most real
-    runs to `~0.000 $` — a bill that reports itself as free."""
+    """At 0.042 $/MTok the numbers are small, so three decimals round a partial run away.
+
+    The two cases are the two ends of a real corpus, measured (`docs/jev.md`): a handful of
+    items, whose bill THREE decimals would render `~0.000 $` — free, for work that was paid
+    for — and a whole ~2,600-item pass at ~15.5 M input tokens.
+    """
     assert jev_cost_fragment(1_500, 0, 0.0001, ()) == "1500 tokens de entrada (~0.0001 $)"
-    assert jev_cost_fragment(12_000_000, 0, 0.504, ()) == "12000000 tokens de entrada (~0.5040 $)"
+    assert jev_cost_fragment(15_546_000, 0, 0.6529, ()) == "15546000 tokens de entrada (~0.6529 $)"
 
 
 def test_the_cost_fragment_names_both_kinds_of_zero():

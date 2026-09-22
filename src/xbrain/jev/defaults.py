@@ -122,8 +122,10 @@ def jev_cost_fragment(tokens: int, unknown: int, cost_usd: float, unpriced: Iter
     different figure from the bill it recaps is the one thing a recap must not do. Formatting
     it at each call site produced exactly that — `~0.000 $` against `~0.0001 $` for one run.
 
-    FOUR decimals, never three. At `0.042 $/MTok` a whole corpus costs under `0.50 $`, so three
-    decimals round most real runs to `~0.000 $`: a bill that reports itself as free.
+    FOUR decimals, never three. At `0.042 $/MTok` the numbers are small — measured, a whole
+    corpus is ~0.65 $ and a single item ~0.00025 $ (`docs/jev.md`, the one place the rate and
+    the measurement live) — so three decimals round a partial run to `~0.000 $`: a bill that
+    reports itself as free. A smoke run of twenty items is exactly that shape.
 
     The two parenthetical markers exist because a bare `~0.0000 $` cannot say which zero it is.
     A record whose provider reported no usage (`input_tokens is None`, a documented real
