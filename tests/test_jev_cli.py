@@ -1078,6 +1078,13 @@ def _page(vault: Path) -> Path:
     return vault / "x-knowledge" / "jev.html"
 
 
+def _blob(page: Path) -> dict:
+    """The JSON the page hands the browser, read back out of the rendered HTML."""
+    html = page.read_text(encoding="utf-8")
+    payload = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+    return json.loads(payload)
+
+
 def test_jev_dashboard_writes_a_self_contained_page_without_asking_jev_anything(
     tmp_path: Path, monkeypatch
 ):
@@ -1126,13 +1133,6 @@ def test_jev_dashboard_ships_the_same_numbers_jev_report_prints(tmp_path: Path, 
     assert {k: v for k, v in blob["summary"].items() if k != "generated_at"} == {
         k: v for k, v in report.items() if k != "generated_at"
     }
-
-
-def _blob(page: Path) -> dict:
-    """The JSON the page hands the browser, read back out of the rendered HTML."""
-    html = page.read_text(encoding="utf-8")
-    payload = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
-    return json.loads(payload)
 
 
 def test_jev_dashboard_threshold_moves_the_pages_default(tmp_path: Path, monkeypatch):

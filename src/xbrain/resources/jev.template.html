@@ -84,7 +84,10 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
   background:transparent;color:var(--ink-muted);border:0;padding:7px 13px;cursor:pointer;border-right:1px solid var(--hairline)}
 .seg button:last-child{border-right:0}
 .seg button.on{background:var(--accent-soft);color:var(--accent)}
-.toggle{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:12.5px;color:var(--ink-muted);user-select:none}
+/* A `<button>`, so it is focusable and Enter/Space work without a keydown handler. */
+.toggle{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:12.5px;color:var(--ink-muted);
+  user-select:none;background:none;border:0;padding:0;font-family:inherit;text-align:left}
+.toggle:focus-visible,.q tr[data-id]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .toggle .sw{width:34px;height:19px;border-radius:20px;background:#2a251c;border:1px solid var(--hairline);position:relative;transition:.22s;flex:none}
 .toggle .sw::after{content:"";position:absolute;top:1.5px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink-faint);transition:.22s}
 .toggle.on .sw{background:var(--accent-soft);border-color:rgba(224,162,51,.5)}
@@ -118,11 +121,18 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
 /* drill-down drawer */
 .scrim{position:fixed;inset:0;background:rgba(6,5,4,.62);backdrop-filter:blur(2px);z-index:40;opacity:0;visibility:hidden;transition:.28s}
 .scrim.open{opacity:1;visibility:visible}
+/* `visibility:hidden` as well as the transform: parked off-screen alone, the drawer's close
+   button stayed in the tab order and in the accessibility tree while the drawer was shut. */
 .drawer{position:fixed;top:0;right:0;height:100vh;width:520px;max-width:94vw;z-index:41;
   background:linear-gradient(180deg,var(--surface-2),var(--surface));border-left:1px solid var(--hairline);
-  box-shadow:-30px 0 80px -40px rgba(0,0,0,.9);transform:translateX(100%);transition:transform .34s cubic-bezier(.2,.7,.2,1);
+  box-shadow:-30px 0 80px -40px rgba(0,0,0,.9);transform:translateX(100%);visibility:hidden;
+  /* `visibility` is switched, never interpolated: 0s DELAYED to the end on the way out, so the
+     slide-out is still seen, and 0s immediate on the way in — transitioning it left the
+     computed value `hidden` on the opening frame, and an invisible button cannot take focus. */
+  transition:transform .34s cubic-bezier(.2,.7,.2,1),visibility 0s linear .34s;
   display:flex;flex-direction:column;overflow:hidden}
-.drawer.open{transform:none}
+.drawer.open{transform:none;visibility:visible;
+  transition:transform .34s cubic-bezier(.2,.7,.2,1),visibility 0s}
 .dwtop{padding:30px 32px 22px;border-bottom:1px solid var(--hairline);position:relative}
 .dwtop .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent)}
 .dwtop h2{font-family:var(--display);font-weight:600;font-size:28px;line-height:1.05;margin-top:10px;letter-spacing:-.01em;overflow-wrap:anywhere}
@@ -139,7 +149,9 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
 .mini .row{display:grid;grid-template-columns:1fr 120px 46px;align-items:center;gap:11px;font-size:12.5px;min-width:0}
 .mini .row .nm{color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .mini .row.on .nm{color:var(--ink)}
-.mini .row .track{height:7px;border-radius:4px;background:var(--surface-2);position:relative;overflow:hidden}
+/* NO `overflow:hidden`: it clipped the `top/bottom:-3px` overhang `.cut-line` adds so the
+   umbral tick clears a filled bar. `.bar` carries its own radius, so nothing needs clipping. */
+.mini .row .track{height:7px;border-radius:4px;background:var(--surface-2);position:relative}
 .mini .row .bar{height:7px;border-radius:4px;background:var(--accent);opacity:.82;display:block}
 .mini .row.off .bar{background:var(--slate);opacity:.6}
 .mini .row .ct{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right;
@@ -194,7 +206,9 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <input type="range" id="threshold" min="0" max="1" step="0.01" aria-label="Umbral de pertenencia">
     <span class="tval" id="threshold-value">—</span>
     <div class="seg" id="presets"></div>
-    <div class="toggle" id="show-fallback"><span class="sw"></span><span>Incluir «Jev eligió el fallback»</span></div>
+    <button type="button" class="toggle on" id="show-fallback" role="switch" aria-checked="true">
+      <span class="sw"></span><span>Incluir «Jev eligió el fallback»</span>
+    </button>
     <span class="hint" id="reset-hint"></span>
   </section>
 
@@ -323,6 +337,9 @@ function primarySide(it, acc) {
 
 function derive(t) {
   const acc = {
+    // `t` travels WITH the result so `selfCheck(summary, d)` can tell whether `d` was derived
+    // at the threshold the summary was built at, without a second argument to keep in sync.
+    t: t,
     perTopic: slugs.map(function () { return {assigned: 0, backed: 0, doubtful: 0, unjudged: 0, missing: 0}; }),
     doubtful: [], missing: [], primary: [],
     assignedPairs: 0, backed: 0, unjudged: 0, jevPairs: 0, jevBacked: 0,
@@ -335,9 +352,13 @@ function derive(t) {
     jevSide(it, t, acc);
     primarySide(it, acc);
   }
-  // Worst first, ties broken by item id, exactly as `_sorted_doubtful` / `_sorted_missing`.
-  acc.doubtful.sort((a, b) => a.noul - b.noul || (a.it.id < b.it.id ? -1 : 1));
-  acc.missing.sort((a, b) => b.noul - a.noul || (a.it.id < b.it.id ? -1 : 1));
+  // Worst first, then item id, then SLUG. `_sorted_doubtful` keys on `(noul, item_id)` over
+  // a list `_doubtful` already ordered by `(noul, slug)` per item, and Python's sort is
+  // stable — so the effective rule is all three, and two pairs of the SAME item at the SAME
+  // noul would otherwise order differently here than in the markdown.
+  const bySlug = (a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
+  acc.doubtful.sort((a, b) => a.noul - b.noul || (a.it.id < b.it.id ? -1 : a.it.id > b.it.id ? 1 : 0) || bySlug(a, b));
+  acc.missing.sort((a, b) => b.noul - a.noul || (a.it.id < b.it.id ? -1 : a.it.id > b.it.id ? 1 : 0) || bySlug(a, b));
   return acc;
 }
 
@@ -345,9 +366,79 @@ function derive(t) {
 function buckets(d) {
   return {
     backed: d.backed, doubtful: d.doubtful.length, missing: d.missing.length,
-    unjudged: d.unjudged, jev_pairs: d.jevPairs, primary_agree: d.primaryAgree,
-    assigned_pairs: d.assignedPairs,
+    unjudged: d.unjudged, jev_pairs: d.jevPairs, jev_backed: d.jevBacked,
+    primary_agree: d.primaryAgree, assigned_pairs: d.assignedPairs, items_compared: d.compared,
   };
+}
+
+/* The page recomputes what the report computed. If the two ever disagree, say so ON SCREEN:
+   a dashboard quietly showing numbers `xbrain jev report` would not print is worse than no
+   dashboard.
+
+   EVERY NUMBER THE PAGE DISPLAYS IS IN ONE OF THESE TABLES. A displayed number that nothing
+   compares is a number free to be wrong — `jev_backed` ("Jev respaldado por enrich"),
+   `items_compared` ("items comparados", and the denominator of "primario coincide") and the
+   whole `per_topic` list (chart 01) were outside the net and are now inside it.
+
+   The split is `report.THRESHOLD_DEPENDENT_KEYS`': the threshold-FREE buckets must match at
+   EVERY threshold (report.py says they do not move), the dependent ones only at the threshold
+   the summary was built at.                                                                 */
+const DEPENDENT_CHECKS = [['assigned_backed','backed'], ['doubtful_pairs','doubtful'],
+                          ['missing_pairs','missing'], ['jev_pairs','jev_pairs'],
+                          ['jev_backed','jev_backed']];
+const FREE_CHECKS = [['assigned_unjudged','unjudged'], ['primary_agree','primary_agree'],
+                     ['assigned_pairs','assigned_pairs'], ['items_compared','items_compared']];
+/** Summary keys that are whole LISTS rather than counters; checked row by row below. */
+const DEPENDENT_LISTS = ['per_topic'];
+/** The per-topic fields that must agree. `backed_pct` is derived from these and rounded. */
+const TOPIC_FIELDS = ['assigned', 'backed', 'missing'];
+
+/** The key split is itself a contract: a bucket that changed sides makes a table meaningless. */
+function keyContractProblems() {
+  const dependent = new Set(DATA.threshold_dependent_keys);
+  const bad = [];
+  for (const [key] of DEPENDENT_CHECKS.concat(DEPENDENT_LISTS.map(k => [k]))) {
+    if (!dependent.has(key)) bad.push(key + ' ya no depende del umbral');
+  }
+  for (const [key] of FREE_CHECKS) if (dependent.has(key)) bad.push(key + ' ahora depende del umbral');
+  return bad;
+}
+
+/** Chart 01 is a per-topic number, so it is checked per topic, not via the corpus totals. */
+function perTopicProblems(summary, d) {
+  const bad = [];
+  if (summary.per_topic.length !== slugs.length) {
+    bad.push('per_topic: ' + slugs.length + ' topics aquí, ' + summary.per_topic.length + ' en el informe');
+  }
+  for (const row of summary.per_topic) {
+    const i = slugAt[row.slug];
+    if (i === undefined) { bad.push('per_topic[' + row.slug + ']: el informe lo trae, el vocabulario de la página no'); continue; }
+    for (const field of TOPIC_FIELDS) {
+      if (d.perTopic[i][field] !== row[field]) {
+        bad.push('per_topic[' + row.slug + '].' + field + ': ' + d.perTopic[i][field] + ' aquí, ' + row[field] + ' en el informe');
+      }
+    }
+  }
+  return bad;
+}
+
+/** Every way the page can disagree with `summary`, NAMED. Empty means they agree. PURE. */
+function selfCheck(summary, d) {
+  const mine = buckets(d);
+  const bad = keyContractProblems();
+  const atReportThreshold = d.t === summary.threshold;
+  const checks = atReportThreshold ? DEPENDENT_CHECKS.concat(FREE_CHECKS) : FREE_CHECKS;
+  for (const [key, bucket] of checks) {
+    if (mine[bucket] !== summary[key]) {
+      bad.push(key + ': ' + mine[bucket] + ' aquí, ' + summary[key] + ' en el informe');
+    }
+  }
+  if (atReportThreshold) bad.push.apply(bad, perTopicProblems(summary, d));
+  // `report._pair_totals`: assigned = backed + doubtful + unjudged, with nothing left over.
+  if (mine.backed !== mine.assigned_pairs - mine.doubtful - mine.unjudged) {
+    bad.push('las asignaciones no se reparten entre respaldadas, dudosas y sin juzgar');
+  }
+  return bad;
 }
 /* ===== end derive ===== */
 
@@ -358,6 +449,7 @@ const f2 = (x) => x.toFixed(2).replace('.', ',');
 // `report._pct`: one decimal, and an em dash when there is no whole to be a part of.
 const pct = (a, b) => b ? (a / b * 100).toFixed(1).replace('.', ',') + ' %' : '—';
 const labelOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
+const descOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
 const name = (slug) => labelOf[slug] || slug;
 const C = {accent:'#E0A233', slate:'#6E8CA0', sienna:'#C4643B', sage:'#7C9A8E',
            ink:'#ECE6DA', muted:'#A7A093', faint:'#6E685D', hair:'rgba(236,230,218,.05)', surface2:'#1C1811'};
@@ -370,40 +462,19 @@ const QUEUE_TOP = 200;
 let threshold = DATA.threshold;
 let showFallback = true;
 
-/* ----------------------------------------------------------------- self-check
-   The page recomputes what the report computed. If the two ever disagree, say so on screen:
-   a dashboard quietly showing numbers `xbrain jev report` would not print is worse than no
-   dashboard. The threshold-FREE buckets are checked at EVERY threshold (report.py says they
-   do not move), the dependent ones only at the threshold the summary was built at.         */
-const DEPENDENT_CHECKS = [['assigned_backed','backed'], ['doubtful_pairs','doubtful'],
-                          ['missing_pairs','missing'], ['jev_pairs','jev_pairs']];
-const FREE_CHECKS = [['assigned_unjudged','unjudged'], ['primary_agree','primary_agree'],
-                     ['assigned_pairs','assigned_pairs']];
+/* ----------------------------------------------------------------- self-check, on screen
+   `selfCheck` itself lives inside the derive region so the node harness can execute it; this
+   is only the half that touches the DOM. A fully diverging page would otherwise print a
+   hundred lines, so the banner shows the first few and counts the rest.                     */
+const BANNER_TOP = 6;
 
-function keyContractProblems() {
-  const dependent = new Set(DATA.threshold_dependent_keys);
-  const bad = [];
-  for (const [key] of DEPENDENT_CHECKS) if (!dependent.has(key)) bad.push(key + ' ya no depende del umbral');
-  for (const [key] of FREE_CHECKS) if (dependent.has(key)) bad.push(key + ' ahora depende del umbral');
-  return bad;
-}
-
-function selfCheck(d, t) {
-  const mine = buckets(d);
-  const bad = keyContractProblems();
-  const checks = t === DATA.threshold ? DEPENDENT_CHECKS.concat(FREE_CHECKS) : FREE_CHECKS;
-  for (const [key, bucket] of checks) {
-    if (mine[bucket] !== DATA.summary[key]) {
-      bad.push(key + ': ' + nf(mine[bucket]) + ' aquí, ' + nf(DATA.summary[key]) + ' en el informe');
-    }
-  }
-  // `report._pair_totals`: assigned = backed + doubtful + unjudged, with nothing left over.
-  if (mine.backed !== mine.assigned_pairs - mine.doubtful - mine.unjudged) {
-    bad.push('las asignaciones no se reparten entre respaldadas, dudosas y sin juzgar');
-  }
-  $('banner').hidden = bad.length === 0;
-  $('banner').innerHTML = bad.length
-    ? '<b>Inconsistencia entre el informe y el dashboard</b>' + esc(bad.join(' · ')) +
+function renderBanner(mismatches) {
+  const shown = mismatches.slice(0, BANNER_TOP).join(' · ');
+  const rest = mismatches.length - Math.min(mismatches.length, BANNER_TOP);
+  $('banner').hidden = mismatches.length === 0;
+  $('banner').innerHTML = mismatches.length
+    ? '<b>Inconsistencia entre el informe y el dashboard</b>' + esc(shown) +
+      (rest ? esc(' · … y ' + rest + ' más') : '') +
       '. No te fíes de los números de esta página: manda <code>xbrain jev report</code>.'
     : '';
 }
@@ -474,8 +545,11 @@ function renderTopics(d) {
             axisTick: {show: false}, axisLabel: {color: C.muted, fontFamily: UI, fontSize: 12}},
     tooltip: Object.assign({}, TIP, {formatter: function (p) {
       const r = rows[p.dataIndex];
-      if (!r.assigned) return esc(r.label) + '<br>enrich no lo asignó nunca';
-      return esc(r.label) + '<br>' + nf(r.backed) + ' de ' + nf(r.assigned) + ' respaldadas · ' +
+      // The vocabulary's own description: a slug says what the topic is CALLED, not what it
+      // covers, and "which topic is enrich over-assigning" is unanswerable without the second.
+      const desc = descOf[r.slug] ? '<br><i>' + esc(descOf[r.slug]) + '</i>' : '';
+      if (!r.assigned) return esc(r.label) + desc + '<br>enrich no lo asignó nunca';
+      return esc(r.label) + desc + '<br>' + nf(r.backed) + ' de ' + nf(r.assigned) + ' respaldadas · ' +
              nf(r.doubtful) + ' dudosas · ' + nf(r.unjudged) + ' sin juzgar<br>faltan ' + nf(r.missing);
     }}),
     series: [{
@@ -515,8 +589,13 @@ function renderHist(t) {
   const labels = Array.from({length: BINS}, (_, i) => f2(i / BINS));
   // A zero bin is shipped as null, not as 1: on a log axis `Math.max(v, 1)` would draw a bar
   // where the corpus has nothing, which is a count the page invented.
+  //
+  // NOT STACKED, and on a log axis that is not a style choice: a stacked segment is drawn
+  // between log(a) and log(a+b), so its height encodes neither `b` nor a ratio — only the
+  // stack top reads correctly, and the two colours are not comparable across bins. Side by
+  // side, each bar measures from the axis and means what it looks like.
   const series = (nm, data, color) => ({
-    name: nm, type: 'bar', stack: 'n', data: data.map(v => v || null),
+    name: nm, type: 'bar', data: data.map(v => v || null),
     itemStyle: {color: color, opacity: .85},
   });
   chartHist.setOption({
@@ -542,9 +621,17 @@ function renderHist(t) {
 }
 
 /* ----------------------------------------------------------------- queues */
+/** Only an http(s) URL becomes a link: `Item.url` is a bare `str` in the model, so the one
+    thing standing between a stored `javascript:` and an anchor is this test. The sibling page
+    has the same shape without the guard; the text is still shown either way. */
+const httpUrl = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : null);
+
 function links(it) {
   const note = it.note ? '<a class="lk" href="obsidian://open?path=' + encodeURIComponent(it.note) + '">nota ↗</a>' : '';
-  return note + '<a class="lk" href="' + esc(it.url) + '" target="_blank" rel="noopener">X ↗</a>';
+  const href = httpUrl(it.url);
+  return note + (href
+    ? '<a class="lk" href="' + esc(href) + '" target="_blank" rel="noopener">X ↗</a>'
+    : '<span class="lk">' + esc(it.url) + '</span>');
 }
 
 function postCell(it) {
@@ -559,14 +646,27 @@ function queue(el, rows, columns) {
     // `data-h` is the column header, repeated per cell: at phone width the header row is
     // dropped and each cell re-states its own name, so "0,77" is never a bare number.
     const cells = columns.map(c => '<td data-h="' + esc(c.h) + '">' + c.f(r) + '</td>').join('');
-    return '<tr data-id="' + esc(r.it.id) + '">' + cells + '</tr>';
+    // The row opens the drawer, so it is a control: reachable by tab, announced as a button.
+    return '<tr data-id="' + esc(r.it.id) + '" tabindex="0" role="button">' + cells + '</tr>';
   }).join('');
   const dropped = rows.length - Math.min(rows.length, QUEUE_TOP);
   el.innerHTML = '<div class="qwrap"><table class="q"><thead><tr>' + head + '</tr></thead><tbody>' +
     body + '</tbody></table></div>' +
+    // `report._cut_note`'s words, to the letter: one table, cut in two places, said twice.
     (dropped ? '<div class="cut">… y ' + nf(dropped) + (dropped === 1 ? ' fila más' : ' filas más') +
-               ' (el informe JSON las lleva todas)</div>' : '');
-  el.querySelectorAll('tr[data-id]').forEach(tr => tr.addEventListener('click', () => openDrawer(tr.dataset.id)));
+               ' (el JSON las lleva todas)</div>' : '');
+}
+
+/** ONE delegated listener per queue, wired once — not 200 re-attached on every slider event. */
+function wireQueue(el) {
+  const open = (e) => {
+    const row = e.target.closest('tr[data-id]');
+    if (row) openDrawer(row.dataset.id);
+  };
+  el.addEventListener('click', open);
+  el.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
+  });
 }
 
 /** True when Jev answered something outside the vocabulary — `report._primary_totals`' rule. */
@@ -616,9 +716,13 @@ function unjudgedRows(it) {
     'así que Jev nunca fue preguntado por ellos. Ni respaldados ni dudosos.</p>';
 }
 
+/** Where focus was when the drawer opened, so closing it does not dump the reader at the top. */
+let focusBeforeDrawer = null;
+
 function openDrawer(id) {
   const it = DATA.items.find(x => x.id === id);
   if (!it) return;
+  focusBeforeDrawer = document.activeElement;
   $('dw-title').textContent = '@' + it.handle;
   $('dw-meta').textContent = 'ITEM ' + it.id + ' · ' + it.model + ' (' + it.provider + ')' +
     (it.truncated ? ' · TRUNCADO' : '');
@@ -639,9 +743,20 @@ function openDrawer(id) {
   $('dw-body').scrollTop = 0;
   drawer.classList.add('open');
   scrim.classList.add('open');
+  // The reflow is load-bearing: `.drawer` is `visibility:hidden` until `.open` lands, and an
+  // invisible element cannot take focus. Reading a layout property forces the style recalc
+  // before the focus call, so the keyboard really does land inside the drawer it just opened.
+  void drawer.offsetWidth;
+  $('dw-close').focus();
 }
 
-function closeDrawer() { drawer.classList.remove('open'); scrim.classList.remove('open'); }
+function closeDrawer() {
+  if (!drawer.classList.contains('open')) return;  // Escape with nothing open must not steal focus
+  drawer.classList.remove('open');
+  scrim.classList.remove('open');
+  if (focusBeforeDrawer && focusBeforeDrawer.focus) focusBeforeDrawer.focus();
+  focusBeforeDrawer = null;
+}
 
 /* ----------------------------------------------------------------- wiring */
 function render() {
@@ -649,7 +764,7 @@ function render() {
   $('threshold-value').textContent = f2(threshold);
   $('presets').querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.t === threshold));
   $('reset-hint').textContent = threshold === DATA.threshold ? 'umbral del informe' : 'informe: ' + f2(DATA.threshold);
-  selfCheck(d, threshold);
+  renderBanner(selfCheck(DATA.summary, d));
   renderKpis(d);
   renderSidecar();
   renderTopics(d);
@@ -678,10 +793,11 @@ $('threshold').value = threshold;
 // The range reads back as 0.8500000000000001 often enough to matter: rounded to its own
 // step so a drag back to the report's umbral really lands on it.
 $('threshold').addEventListener('input', e => setThreshold(Math.round(+e.target.value * 100) / 100));
-$('show-fallback').classList.add('on');
+['q-doubtful', 'q-missing', 'q-primary'].forEach(id => wireQueue($(id)));
 $('show-fallback').addEventListener('click', function () {
   showFallback = !showFallback;
   this.classList.toggle('on', showFallback);
+  this.setAttribute('aria-checked', String(showFallback));
   render();
 });
 $('dw-close').addEventListener('click', closeDrawer);

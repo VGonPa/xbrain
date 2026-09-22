@@ -53,6 +53,24 @@ DERIVE_START = "/* ===== derive: mirrors jev/report.py ===== */"
 DERIVE_END = "/* ===== end derive ===== */"
 
 
+def _snippet(text: str, width: int = _TEXT_CHARS) -> str:
+    """The post on one line, cut to `width` — `width - 1` characters plus an ellipsis.
+
+    A post that simply stops mid-word reads as a BROKEN record rather than as a cut one, and
+    the drawer is the "see the whole item" surface, which makes the silent version worse here
+    than in a queue row. The cut rule is `report._snippet`'s, so the same post is cut at the
+    same place in the markdown report and on the page.
+
+    MIRRORED RATHER THAN CALLED, and the reason is the half that does not travel:
+    `report._snippet` finishes by running `_escape_cell` over the result, doubling backslashes
+    and escaping pipes so the text survives a markdown table row. Shipping that into the JSON
+    blob would put a literal `a\\|b` on screen. Escaping belongs to the destination, and this
+    destination is HTML — the template escapes for it (`esc`), at render time.
+    """
+    one_line = " ".join(text.split())
+    return one_line if len(one_line) <= width else one_line[: width - 1] + "…"
+
+
 def _row(
     item: Item, assessment: TopicAssessment, slugs: list[str], id2note: dict[str, str]
 ) -> dict[str, Any]:
@@ -73,7 +91,7 @@ def _row(
     return {
         "id": item.id,
         "handle": item.author.handle,
-        "text": " ".join(item.text.split())[:_TEXT_CHARS],
+        "text": _snippet(item.text),
         "url": item.url,
         "note": id2note.get(item.id),
         "cmp": enriched is not None,

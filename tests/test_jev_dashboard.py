@@ -204,6 +204,26 @@ def test_an_item_without_enrichment_is_shipped_but_not_comparable():
     assert data["summary"]["items_compared"] == 0
 
 
+def test_a_post_past_the_budget_is_cut_with_an_ellipsis_like_the_markdown_report():
+    """A post that simply stops mid-word reads as a broken record, not as a cut one.
+
+    `report._snippet` already solved this for the markdown table — cut to `width - 1`, then
+    an ellipsis — and the drawer is the "see the whole item" surface, so the silent version
+    is worse here than it is there.
+    """
+    long_post = "palabra " * 80  # 640 chars, well past the budget
+    short_post = "Claude Code hooks"
+    items = [_item("1", text=long_post), _item("2", text=short_post)]
+    data = _data(items, {i.id: _assessment(i) for i in items})
+
+    cut, whole = data["items"][0]["text"], data["items"][1]["text"]
+    assert len(cut) == 240 and cut.endswith("…")
+    assert cut[:239] == " ".join(long_post.split())[:239]
+    # A post that fits is NOT decorated: an ellipsis on a complete post is the same lie in
+    # the other direction.
+    assert whole == short_post
+
+
 # --------------------------------------------------------------------------- the page
 
 
@@ -241,27 +261,47 @@ def test_the_template_compares_with_ge_and_keeps_an_unjudged_bucket():
 
 # --------------------------------------------------------------------------- browser vs report
 
-_DERIVE_HARNESS = """
+_HARNESS = """
 const DATA = %s;
 %s
-console.log(JSON.stringify(buckets(derive(DATA.threshold))));
+console.log(JSON.stringify((() => { %s })()));
 """
 
 
-def _derive_in_node(data: dict[str, Any]) -> dict[str, int]:
-    """Run the template's OWN `derive` over `data` in node and return its buckets.
+def _run_in_node(data: dict[str, Any], body: str) -> Any:
+    """Run `body` against the template's OWN pure region, over `data`, in node.
 
     Only the delimited region is extracted, so nothing here needs a DOM or ECharts: the
     region is the pure half of the script on purpose, and the delimiters are exported by
     `jev/dashboard.py` so this test and the template can never disagree about where it is.
+    `body` is a statement block ending in `return`.
     """
     template = _resource("jev.template.html")
     region = template.split(DERIVE_START, 1)[1].split(DERIVE_END, 1)[0]
-    script = _DERIVE_HARNESS % (json.dumps(data, ensure_ascii=False), region)
+    script = _HARNESS % (json.dumps(data, ensure_ascii=False), region, body)
     out = subprocess.run(
         ["node", "-e", script], capture_output=True, text=True, timeout=30, check=True
     )
     return json.loads(out.stdout)
+
+
+def _derive_in_node(data: dict[str, Any]) -> dict[str, int]:
+    """The template's own buckets at the threshold its summary was built at."""
+    return _run_in_node(data, "return buckets(derive(DATA.threshold));")
+
+
+def _self_check_in_node(data: dict[str, Any], patch: dict[str, Any] | None = None) -> list[str]:
+    """The template's own `selfCheck` against `data["summary"]`, optionally corrupted.
+
+    `patch` is merged over the summary BEFORE the call, which is how the safety net is shown
+    to fire: a check that is never observed failing is indistinguishable from one that cannot.
+    """
+    overrides = json.dumps(patch or {}, ensure_ascii=False)
+    return _run_in_node(
+        data,
+        f"const s = Object.assign({{}}, DATA.summary, {overrides});"
+        " return selfCheck(s, derive(s.threshold));",
+    )
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
@@ -290,8 +330,13 @@ def test_the_browser_derives_the_same_buckets_as_the_report():
         "missing": data["summary"]["missing_pairs"],
         "unjudged": data["summary"]["assigned_unjudged"],
         "jev_pairs": data["summary"]["jev_pairs"],
+        # `jev_backed` and `items_compared` are DISPLAYED (the "Jev respaldado por enrich"
+        # KPI, and the denominator of "primario coincide"), so they are checked like the
+        # rest: a number on screen that nothing compares is a number free to be wrong.
+        "jev_backed": data["summary"]["jev_backed"],
         "primary_agree": data["summary"]["primary_agree"],
         "assigned_pairs": data["summary"]["assigned_pairs"],
+        "items_compared": data["summary"]["items_compared"],
     }
 
 
@@ -307,3 +352,88 @@ def test_the_browser_recomputes_the_buckets_when_the_threshold_moves():
 
     assert _derive_in_node(rows)["backed"] == 2  # 0.9 and 0.123456 both clear 0.10
     assert _derive_in_node(rows)["doubtful"] == 0
+
+
+def _every_bucket_fixture() -> dict[str, Any]:
+    """A corpus carrying every bucket at once: backed, doubtful, missing, unjudged, mismatch."""
+    backed = _item("1", topics=("ai-coding", "web3"))
+    doubtful = _item("2", text="Seed round", topics=("startups",))
+    return _data(
+        [backed, doubtful],
+        {
+            "1": _assessment(backed),
+            "2": _assessment(doubtful, membership={"ai-coding": 0.91, "startups": 0.4}),
+        },
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_self_check_is_silent_when_the_page_agrees_with_the_report():
+    """The net must not cry wolf: over its own summary it reports nothing at all."""
+    assert _self_check_in_node(_every_bucket_fixture()) == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+@pytest.mark.parametrize(
+    "key",
+    [
+        "assigned_backed",
+        "doubtful_pairs",
+        "missing_pairs",
+        "jev_pairs",
+        "jev_backed",
+        "assigned_unjudged",
+        "primary_agree",
+        "assigned_pairs",
+        "items_compared",
+    ],
+)
+def test_self_check_names_the_bucket_the_report_disagrees_about(key: str):
+    """Every checked key, off by one, must come back NAMED.
+
+    A check that is never observed failing is indistinguishable from one that cannot fail:
+    a wrong pairing in the tables (`['missing_pairs', 'doubtful']`) would ship a banner that
+    never fires, which is the exact failure the banner exists to prevent. One case per key,
+    because one key standing for the other eight is how a mis-pairing survives.
+    """
+    data = _every_bucket_fixture()
+
+    problems = _self_check_in_node(data, {key: data["summary"][key] + 1})
+
+    assert [p for p in problems if p.startswith(f"{key}:")], problems
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_self_check_compares_the_per_topic_rows_not_just_the_totals():
+    """Chart 01 is a per-topic number, so it is checked per topic.
+
+    The corpus totals can agree while a single topic's row is wrong — that is exactly what a
+    per-topic bug looks like, and a totals-only net would pass it.
+    """
+    data = _every_bucket_fixture()
+    rows = [dict(row) for row in data["summary"]["per_topic"]]
+    target = next(row for row in rows if row["assigned"])
+    target["backed"] += 1
+
+    problems = _self_check_in_node(data, {"per_topic": rows})
+
+    assert [p for p in problems if p.startswith(f"per_topic[{target['slug']}].backed:")], problems
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="no JS engine on this machine")
+def test_self_check_reports_a_key_that_changed_sides_in_the_report():
+    """The key split is itself a contract.
+
+    `selfCheck` checks the threshold-FREE buckets at EVERY threshold and the dependent ones
+    only at the report's. If `report.py` ever moves one across, the page's two tables become
+    quietly wrong about when they apply — so the mismatch between the shipped
+    `THRESHOLD_DEPENDENT_KEYS` and the page's own tables is reported rather than assumed.
+    """
+    data = _every_bucket_fixture()
+    data["threshold_dependent_keys"] = [
+        k for k in data["threshold_dependent_keys"] if k != "jev_backed"
+    ]
+
+    problems = _self_check_in_node(data)
+
+    assert [p for p in problems if "jev_backed" in p], problems
