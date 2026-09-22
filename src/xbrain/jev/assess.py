@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
+
 from xbrain.evidence import evidence_text
 from xbrain.jev.client import (
     ChoiceAnswer,
@@ -85,6 +87,13 @@ def parse_topic_result(
         raise JevError("Jev no contestó la pregunta 'primary'")
     if primary.choice not in {topic.slug for topic in vocab} | {fallback}:
         raise JevError(f"Jev eligió {primary.choice!r}, que no está entre las opciones")
+    # `PrimaryChoice` refuses a winner with no entry in its own distribution, and it refuses
+    # it with a `ValidationError` — not a `JevError`. Caught HERE, a truncated or renormalised
+    # distribution is one recorded failure; left to the record's validator it would escape the
+    # seam's error type and abort the whole batch. Same class of fault as a missing Noul, so
+    # the same exception.
+    if primary.choice not in primary.probabilities:
+        raise JevError(f"Jev eligió {primary.choice!r} pero no está en su propia distribución")
     return membership, PrimaryChoice(
         choice=primary.choice,
         confidence=primary.confidence,
@@ -226,6 +235,13 @@ def run_assessments(
                 assessed.append(future.result())
             except JevError as exc:
                 failed.append((item.id, str(exc)))
+            except ValidationError as exc:
+                # An answer the seam accepted but the RECORD refuses (a probability outside
+                # [0, 1], an empty model name). One bad item must not discard the assessments
+                # that already completed, so it is recorded exactly like a `JevError`. The
+                # first complaint only: `str(exc)` is a four-line banner and `failed` is
+                # printed one line per item.
+                failed.append((item.id, exc.errors()[0]["msg"]))
             if on_progress is not None:
                 on_progress(done, len(items))
     # Sorted, not completion-ordered: the same corpus must produce the same file whatever

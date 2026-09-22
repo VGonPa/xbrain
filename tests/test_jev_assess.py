@@ -14,7 +14,7 @@ from xbrain.jev.assess import (
     select_items,
     topic_contract,
 )
-from xbrain.jev.client import JevError
+from xbrain.jev.client import JevError, NoulAnswer
 from xbrain.jev.questions import build_topic_questions
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.verification import fingerprint_output
@@ -105,6 +105,27 @@ def test_parse_rejects_a_missing_noul_and_an_unknown_choice():
         )
 
 
+def test_parse_rejects_a_choice_missing_from_its_own_distribution():
+    """A choice that IS a valid option but absent from the distribution it came with.
+
+    `PrimaryChoice` refuses the record outright, so without this guard the failure surfaces
+    as a `ValidationError` — which is not a `JevError`, and so escapes the batch's per-item
+    handling and takes the whole run down with it.
+    """
+
+    class _ChoiceOffItsOwnDistribution(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            choice = result.answers["primary"]
+            del choice.probabilities[choice.choice]
+            return result
+
+    with pytest.raises(JevError, match="no está en su propia distribución"):
+        assess_topics(
+            _item(), _vocab(), _ChoiceOffItsOwnDistribution(), fallback="otro", char_limit=100
+        )
+
+
 def test_currency_tracks_vocab_and_evidence_but_not_re_enrichment():
     item, vocab = _item(), _vocab()
     assessment = assess_topics(item, vocab, FakeJevClient(), fallback="otro", char_limit=100)
@@ -154,6 +175,26 @@ def test_run_assessments_records_failures_and_keeps_going():
     assert result.failed == [("2", "fake failure")]
 
 
+def test_run_assessments_records_a_malformed_answer_instead_of_aborting_the_batch():
+    """An answer the seam accepts but the RECORD refuses is one bad item, not a bad batch."""
+
+    class _OutOfRangeNoul(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            if "BOOM" in state["post"]:
+                result.answers["topic__ai-coding"] = NoulAnswer(noul=1.7)
+            return result
+
+    items = [_item("1"), _item("2", text="BOOM")]
+    result = run_assessments(
+        items, _vocab(), _OutOfRangeNoul(), fallback="otro", char_limit=100, concurrency=2
+    )
+    assert [a.item_id for a in result.assessed] == ["1"]
+    # The first validator complaint, NOT pydantic's multi-line "1 validation error" banner:
+    # `failed` is printed one line per item.
+    assert result.failed == [("2", "Input should be less than or equal to 1")]
+
+
 def test_run_assessments_raises_when_every_item_fails():
     client = FakeJevClient(fail_when=lambda state: True)
     with pytest.raises(JevError, match="ninguna de las 2 evaluaciones"):
@@ -161,6 +202,31 @@ def test_run_assessments_raises_when_every_item_fails():
             [_item("1"), _item("2")],
             _vocab(),
             client,
+            fallback="otro",
+            char_limit=100,
+            concurrency=2,
+        )
+
+
+def test_run_assessments_raises_when_every_item_fails_validation():
+    """The all-failed rule covers a record-level refusal too, not only a seam error.
+
+    Without it, a ValidationError branch that forgot to append would leave `failed` empty
+    alongside an empty `assessed`, and the all-failed raise would `IndexError` on
+    `failed[0]` instead of reporting a dead provider.
+    """
+
+    class _AlwaysOutOfRange(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            result.answers["topic__ai-coding"] = NoulAnswer(noul=1.7)
+            return result
+
+    with pytest.raises(JevError, match="ninguna de las 2 evaluaciones"):
+        run_assessments(
+            [_item("1"), _item("2")],
+            _vocab(),
+            _AlwaysOutOfRange(),
             fallback="otro",
             char_limit=100,
             concurrency=2,
