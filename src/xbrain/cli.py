@@ -2774,6 +2774,12 @@ def _release_jev_client(client: JevClient) -> None:
     `original_error` is read BEFORE the `try` for the same reason `_finish_redescribe_run`
     does it: inside an `except` block `sys.exc_info()` reports the exception being handled
     here, not the one that was already travelling.
+
+    On the interrupt path this can close the transport while a worker is still in flight —
+    `run_assessments` shuts its pool down with `wait=False`, so a call already issued is
+    cancelled rather than awaited. That worker's exception lands in a future nobody reads,
+    which makes it noise and not a lost record: every record that completed was handed to
+    `_checkpoint` and written above, before this runs.
     """
     original_error = sys.exc_info()[1]
     try:
@@ -2864,19 +2870,26 @@ def jev_topics_cmd(
     except KeyboardInterrupt:
         # Summary first, then persist, then teardown — the shape `_finish_redescribe_run`
         # establishes. The tally can never fail, so it is never suppressed by a save that does.
-        kind = (
-            _n(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
-            if force
-            else _n(len(banked), "evaluación nueva", "evaluaciones nuevas")
-        )
-        typer.echo(
-            f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
-            f"({len(assessments)} en total) en {cfg.jev_topics_path}",
-            err=True,
-        )
-        # What the interruption cost is the question the operator actually has here.
-        typer.echo(f"  {_jev_cost_line(tuple(banked.values()))}", err=True)
-        _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
+        if not banked:
+            # A Ctrl-C before the first answer landed. Saving here would write `assessments`
+            # UNCHANGED — which for a first run is `{}` over the side-car, so an operator who
+            # interrupted a second too early would destroy every assessment they had ever
+            # paid for. There is also no bill to report: nothing was answered.
+            typer.echo("Interrumpido: nada nuevo que guardar", err=True)
+        else:
+            kind = (
+                _n(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
+                if force
+                else _n(len(banked), "evaluación nueva", "evaluaciones nuevas")
+            )
+            typer.echo(
+                f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
+                f"({len(assessments)} en total) en {cfg.jev_topics_path}",
+                err=True,
+            )
+            # What the interruption cost is the question the operator actually has here.
+            typer.echo(f"  {_jev_cost_line(tuple(banked.values()))}", err=True)
+            _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
         # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
         # to checkpoint must not change the code the shell sees. `from None` because the
         # traceback of a Ctrl-C tells the operator nothing.

@@ -704,3 +704,41 @@ def test_the_sidecar_is_flushed_during_a_long_run_not_only_at_the_end(tmp_path, 
     # One durable flush at 25, then the final write — not a single write at the end.
     assert sizes == [25, 30]
     assert len(load_assessments(_topics_path(tmp_path))) == 30
+
+
+def test_an_interrupt_that_rescued_nothing_writes_nothing(tmp_path: Path, monkeypatch):
+    """A Ctrl-C before the first answer lands has nothing to save, and must say so.
+
+    Reporting `0 evaluaciones nuevas guardadas · 0 tokens de entrada (~0.000 $)` describes a
+    save that did not happen and a bill that was never incurred. Worse, the save DID happen:
+    it wrote `{}` over the side-car, so an operator who hit Ctrl-C a second too early
+    destroyed every assessment they had ever paid for.
+    """
+    _setup_repo(tmp_path, monkeypatch, jev="concurrency = 1\n")
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(interrupt_after=0))
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 130, result.output
+    assert "Interrumpido: nada nuevo que guardar" in result.stderr
+    # No cost line: nothing was answered, so there is no bill to report.
+    assert "tokens de entrada" not in result.stderr
+    assert not _topics_path(tmp_path).exists()
+
+
+def test_an_interrupt_that_rescued_nothing_leaves_an_existing_sidecar_alone(
+    tmp_path: Path, monkeypatch
+):
+    """The file every earlier run paid for is not touched by a run that answered nothing."""
+    _setup_repo(tmp_path, monkeypatch, jev="concurrency = 1\n")
+    _seed(tmp_path)
+    save_assessments({"99": _stored_assessment("99")}, _topics_path(tmp_path))
+    before = _topics_path(tmp_path).read_bytes()
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(interrupt_after=0))
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 130, result.output
+    assert "Interrumpido: nada nuevo que guardar" in result.stderr
+    assert _topics_path(tmp_path).read_bytes() == before
