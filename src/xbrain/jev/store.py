@@ -28,7 +28,7 @@ side-car) and `data/` is gitignored in full, so there is no `git checkout` and n
   `topics.<UTC stamp>.bak` beside it before a run that re-asks a current one — the
   side-car's OWN reversibility, standing in for the snapshot it does not get. Those copies
   are never pruned, and nothing in THIS module writes them: the backup belongs to the
-  command that decided to overwrite (`cli._backup_jev_sidecar`), not to the writer.
+  command that decided to overwrite (`cli._back_up_before_forced_overwrite`), not to the writer.
 * A corrupt file is repaired by hand or paid for again — which is why `load_assessments`
   refuses one instead of quietly starting from `{}`.
 """
