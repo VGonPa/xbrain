@@ -1997,3 +1997,66 @@ def test_dataless_detection_is_false_where_the_platform_has_no_flags():
         st_mtime_ns = 0
 
     assert _is_dataless(_NoFlags()) is False
+
+
+# --------------------------------------------------------------------------- jev.html link
+
+
+def test_index_links_jev_html_when_the_page_exists(tmp_path: Path):
+    """`jev.html` is linked from `_index.md` by absolute `file://`, like `dashboard.html`.
+
+    The page is written by `xbrain jev dashboard`, never by `generate`, so the only thing
+    `generate` can know about it is whether it is on disk — which is why the link is
+    conditioned on existence rather than emitted always. An unconditional link would point
+    at a file that does not exist for every user who never runs the Jev side-car.
+    """
+    page = tmp_path / "jev.html"
+    page.write_text("<html></html>", encoding="utf-8")
+
+    generate({"1": _item("1", with_link=True)}, tmp_path)
+
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert f"]({page.resolve().as_uri()})" in index
+
+
+def test_index_omits_the_jev_link_when_the_page_was_never_written(tmp_path: Path):
+    """No side-car, no link. A dead `file://` in the index is worse than no entry at all:
+    Obsidian opens the browser on a page that does not exist, and the reader cannot tell
+    that from a page that failed to render.
+
+    The assertion is on the ROW, not on the filename. An unconditional link would render
+    its `None` href as the literal `(None)` — no `jev.html` anywhere in the file — so a
+    filename-only check passes over exactly the bug it was written to catch.
+    """
+    generate({"1": _item("1", with_link=True)}, tmp_path)
+
+    index = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert "Jev" not in index
+    assert "jev.html" not in index
+
+
+def test_generate_does_not_import_the_jev_package(tmp_path: Path):
+    """`generate.py` links the Jev page without depending on the Jev layer.
+
+    The wiki renderer is the mechanical end of the pipeline and runs for every user; the
+    Jev side-car is an optional, paid second opinion. An import would make the renderer
+    load — and fail with — a layer it only ever needs the FILENAME of. The link is a path
+    check, and this pins it.
+    """
+    import ast
+
+    source = Path(__file__).parent.parent / "src" / "xbrain" / "generate.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    offenders = [
+        f"{node.lineno}: {name}"
+        for node in ast.walk(tree)
+        for name in (
+            [alias.name for alias in node.names]
+            if isinstance(node, ast.Import)
+            else [node.module or ""]
+            if isinstance(node, ast.ImportFrom)
+            else []
+        )
+        if name == "xbrain.jev" or name.startswith("xbrain.jev.")
+    ]
+    assert offenders == []
