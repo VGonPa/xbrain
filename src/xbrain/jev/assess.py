@@ -227,12 +227,16 @@ def assess_topics(
     digest: str | None = None,
     now: datetime | None = None,
 ) -> TopicAssessment:
-    """One call for one item, TOTAL with respect to `JevError`.
+    """One call for one item, TOTAL with respect to `JevError` for everything Jev answered.
 
     The same `questions` object is asked and hashed, so a stored contract can never describe
     a question other than the one that was sent. A record the model refuses is converted at
     this seam: `JevError` is documented as the only exception the seam emits, and a caller
     with no batch around it must get the operator's message rather than a pydantic banner.
+
+    One thing is deliberately NOT a `JevError`: a malformed `questions` map raises
+    `ValueError`, exactly as `build_topic_questions` does for a malformed vocabulary. Both
+    are caller bugs, and neither is something to tell an operator about the provider.
 
     `output_fingerprint` records WHICH enrich assignment existed when Jev was asked. It is
     informational — the report recomputes the comparison against `enrich` at report time —

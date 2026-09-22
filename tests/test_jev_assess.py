@@ -317,9 +317,6 @@ def test_parse_accepts_a_tie_for_the_argmax():
     assert assessment.primary.probabilities["startups"] == 0.5
 
 
-# --------------------------------------------------------------------------- currency
-
-
 def test_an_out_of_range_confidence_is_wrapped_like_any_other_refusal():
     """`PrimaryChoice` is built inside `parse_topic_result`, not inside `assess_topics`' try.
 
@@ -352,6 +349,9 @@ def test_a_question_map_without_the_primary_choice_is_a_programmer_error():
     noul_only = {key: q for key, q in questions.items() if key != PRIMARY_KEY}
     with pytest.raises(ValueError, match="no incluye la Choice 'primary'"):
         parse_topic_result(result, noul_only)
+
+
+# --------------------------------------------------------------------------- currency
 
 
 def test_currency_tracks_vocab_and_evidence_but_not_re_enrichment():
