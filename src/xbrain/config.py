@@ -87,6 +87,14 @@ class Config:
     index_dir: Path
     index_max_matches_per_item: int
     index_get_char_budget: int
+    # `[jev]` — the Jev (TypeSafe AI) topic-assessment side-car (`xbrain jev …`).
+    # `jev_model` is an alias by default ("jev-latest"): updates are allowed on purpose,
+    # and every stored assessment records the concrete `model` the API answered with.
+    jev_model: str
+    jev_threshold: float
+    jev_fallback_option: str
+    jev_concurrency: int
+    jev_state_char_limit: int
 
     @property
     def payload_dir(self) -> Path:
@@ -118,6 +126,15 @@ class Config:
     @property
     def topics_path(self) -> Path:
         return self.data_dir / "topics.json"
+
+    @property
+    def jev_dir(self) -> Path:
+        """Side-car for Jev assessments and reports — never inside `items.json`."""
+        return self.data_dir / "jev"
+
+    @property
+    def jev_topics_path(self) -> Path:
+        return self.jev_dir / "topics.json"
 
     @property
     def storage_state_path(self) -> Path:
@@ -158,6 +175,27 @@ def _index_settings(settings: dict, data_dir: Path) -> tuple[Path, int, int]:
     if char_budget < 1:
         raise ValueError("config.toml: [index].get_char_budget must be >= 1")
     return index_dir, max_matches, char_budget
+
+
+def _jev_settings(settings: dict) -> tuple[str, float, str, int, int]:
+    """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit)`.
+
+    Range-checked here so a bad value fails when the config loads, not mid-run.
+    """
+    jev = settings.get("jev", {})
+    threshold = float(jev.get("threshold", 0.85))
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("config.toml: [jev].threshold must be in [0.0, 1.0]")
+    concurrency = int(jev.get("concurrency", 8))
+    if concurrency < 1:
+        raise ValueError("config.toml: [jev].concurrency must be >= 1")
+    char_limit = int(jev.get("state_char_limit", 100_000))
+    if char_limit < 1:
+        raise ValueError("config.toml: [jev].state_char_limit must be >= 1")
+    fallback = str(jev.get("fallback_option", "otro")).strip()
+    if not fallback:
+        raise ValueError("config.toml: [jev].fallback_option is empty")
+    return str(jev.get("model", "jev-latest")), threshold, fallback, concurrency, char_limit
 
 
 def load_config(repo_root: Path) -> Config:
@@ -217,6 +255,9 @@ def load_config(repo_root: Path) -> Config:
         )
     data_dir = repo_root / paths["data_dir"]
     index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
+    jev_model, jev_threshold, jev_fallback, jev_concurrency, jev_char_limit = _jev_settings(
+        settings
+    )
     return Config(
         repo_root=repo_root,
         vault=vault,
@@ -244,4 +285,9 @@ def load_config(repo_root: Path) -> Config:
         index_dir=index_dir,
         index_max_matches_per_item=index_max_matches,
         index_get_char_budget=index_char_budget,
+        jev_model=jev_model,
+        jev_threshold=jev_threshold,
+        jev_fallback_option=jev_fallback,
+        jev_concurrency=jev_concurrency,
+        jev_state_char_limit=jev_char_limit,
     )

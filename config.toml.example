@@ -152,3 +152,20 @@ command = "parakeet-mlx"
 #   Character ceiling per `xbrain get` response. Above it the response is truncated
 #   DECLARING SO and returns a cursor to continue — never silently. ~40k is a long
 #   article with its metadata: the common case does not paginate.
+
+[jev]
+# Jev (TypeSafe AI) topic assessment — `xbrain jev topics|report|dashboard`.
+# Key: TYPESAFE_API_KEY in the environment or in <repo>/.env (see .env.example).
+# Model alias; "jev-latest" follows TypeSafe's updates. Each stored assessment
+# records the concrete model version the API answered with.
+model = "jev-latest"
+# A topic counts as "backed by Jev" when its probability is >= threshold.
+# The dashboard has a slider; this is the CLI default and the slider's start.
+threshold = 0.85
+# The escape option of the primary-topic Choice ("a topic not in the vocabulary").
+# Must not collide with a vocabulary slug.
+fallback_option = "otro"
+# Concurrent requests (TypeSafe measures throughput saturating around 8).
+concurrency = 8
+# Evidence text is cut here (Jev's window is 32k tokens); assessments record `truncated`.
+state_char_limit = 100000
