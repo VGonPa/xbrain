@@ -18,8 +18,9 @@ from xbrain.jev.client import JevClient, JevResult, Question
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
+from xbrain.notes_io import note_filename
 from xbrain.rubrics import save_vocab
-from xbrain.store import save_store
+from xbrain.store import load_store, save_store
 
 runner = CliRunner()
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
@@ -1064,3 +1065,140 @@ def test_the_three_places_that_quote_the_bill_print_the_same_fragment(tmp_path: 
     assert fragment in topics.stdout
     assert fragment in report.stdout
     assert fragment in _report_paths(tmp_path)[1].read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- jev dashboard
+
+
+def _page(vault: Path) -> Path:
+    return vault / "x-knowledge" / "jev.html"
+
+
+def test_jev_dashboard_writes_a_self_contained_page_without_asking_jev_anything(
+    tmp_path: Path, monkeypatch
+):
+    """The dashboard is a RECAP of a side-car that was already paid for.
+
+    The client factory is the seam where money starts being spent, so "did not call Jev" is
+    asserted by making the call impossible rather than by counting calls afterwards.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("the dashboard must not ask Jev"))
+
+    result = runner.invoke(app, ["jev", "dashboard"])
+
+    assert result.exit_code == 0, result.output
+    page = _page(vault)
+    assert page.exists()
+    html = page.read_text(encoding="utf-8")
+    assert "/*__DATA__*/" not in html and "/*__ECHARTS__*/" not in html
+    assert '"ai-coding"' in html
+    assert "2 items en el dashboard" in result.stdout
+    assert page.resolve().as_uri() in result.stdout
+
+
+def test_jev_dashboard_ships_the_same_numbers_jev_report_prints(tmp_path: Path, monkeypatch):
+    """One side-car, two surfaces, ONE set of numbers.
+
+    The page carries the summary so the browser can check its own recompute against it; if
+    the CLI built that summary differently from `jev report`, the check would certify a
+    disagreement instead of catching one.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    assert runner.invoke(app, ["jev", "report"]).exit_code == 0
+
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+
+    report = json.loads(_report_paths(tmp_path)[0].read_text(encoding="utf-8"))["summary"]
+    blob = _blob(_page(vault))
+    # `generated_at` is the one key that legitimately differs: the two files were written a
+    # moment apart. Everything the two surfaces QUOTE has to be identical.
+    assert {k: v for k, v in blob["summary"].items() if k != "generated_at"} == {
+        k: v for k, v in report.items() if k != "generated_at"
+    }
+
+
+def _blob(page: Path) -> dict:
+    """The JSON the page hands the browser, read back out of the rendered HTML."""
+    html = page.read_text(encoding="utf-8")
+    payload = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+    return json.loads(payload)
+
+
+def test_jev_dashboard_threshold_moves_the_pages_default(tmp_path: Path, monkeypatch):
+    """`--threshold` is the umbral the page OPENS at, and the one its summary was built at.
+
+    Shipping a summary computed at one threshold beside a slider positioned at another would
+    make the page's own consistency check fire on the first paint.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    assert runner.invoke(app, ["jev", "dashboard", "--threshold", "0.5"]).exit_code == 0
+
+    blob = _blob(_page(vault))
+    assert blob["threshold"] == 0.5 and blob["summary"]["threshold"] == 0.5
+
+
+def test_jev_dashboard_refuses_a_threshold_outside_the_unit_interval(tmp_path: Path, monkeypatch):
+    """Refused BEFORE anything is written, the same guard `jev report` applies."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "1.5"])
+
+    assert result.exit_code == 1
+    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
+    assert not _page(vault).exists()
+
+
+def test_jev_dashboard_over_nothing_refuses_and_writes_no_page(tmp_path: Path, monkeypatch):
+    """A dashboard of zeros is not a dashboard — it is a plausible-looking lie.
+
+    The same refusal `jev report` makes, for the same reason: `data/` is gitignored and the
+    side-car costs money, so "nobody has run `xbrain jev topics`" must never render as a page
+    full of honest-looking noughts.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+    result = runner.invoke(app, ["jev", "dashboard"])
+
+    assert result.exit_code == 1
+    assert "no hay evaluaciones guardadas" in result.stderr
+    assert "xbrain jev topics" in result.stderr
+    assert not _page(vault).exists()
+
+
+def test_jev_dashboard_links_the_notes_that_exist_and_not_the_ones_that_do_not(
+    tmp_path: Path, monkeypatch
+):
+    """`nota ↗` is a deep link, so it may only point at a file that is really there.
+
+    The page is generated independently of `xbrain generate`, so it cannot assume the vault
+    has notes at all; a link to a note nobody wrote sends a reader to an Obsidian error.
+    """
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    items_dir = vault / "x-knowledge" / "items"
+    items_dir.mkdir(parents=True)
+    store = load_store(tmp_path / "data" / "items.json")
+    note = items_dir / note_filename(store["1"])
+    note.write_text("# nota", encoding="utf-8")
+
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+
+    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["items"]}
+    assert notes == {"1": str(note.resolve()), "2": None}

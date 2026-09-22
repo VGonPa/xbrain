@@ -57,6 +57,7 @@ from xbrain.jev.assess import (
     select_items,
 )
 from xbrain.jev.client import JevClient, JevError
+from xbrain.jev.dashboard import compute_jev_dashboard_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
     input_cost_usd,
     input_tokens_total,
@@ -72,6 +73,7 @@ from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
 from xbrain.models import ArchiveImport, Author, Item, SourceName, Topic
+from xbrain.notes_io import note_filename
 from xbrain.redescribe import (
     RedescribeReport,
     format_redescribe_summary,
@@ -182,10 +184,10 @@ from xbrain.worksheet import export_worksheet, import_worksheet
 if TYPE_CHECKING:
     # Annotations only. This saves NO import cost — `xbrain.jev.models` is loaded at
     # runtime anyway, transitively via `xbrain.jev.assess`. What it keeps is the
-    # module-top `xbrain.jev` import list at the six modules the CLI is meant to depend
-    # on directly (assess, client, defaults, env, report, store; `task-3-deviations.md`
-    # §1 plus `report` for `xbrain jev report`), so a seventh is a visible decision rather
-    # than a drive-by.
+    # module-top `xbrain.jev` import list at the seven modules the CLI is meant to depend
+    # on directly (assess, client, dashboard, defaults, env, report, store;
+    # `task-3-deviations.md` §1, plus `report` for `xbrain jev report` and `dashboard` for
+    # `xbrain jev dashboard`), so an eighth is a visible decision rather than a drive-by.
     from xbrain.jev.models import TopicAssessment
 
 logger = logging.getLogger(__name__)
@@ -3070,6 +3072,69 @@ def jev_report_cmd(
     json_path, md_path = write_reports(summary, comparisons, jev.store, cfg.jev_dir)
     typer.echo(_jev_report_line(summary))
     typer.echo(f"→ {md_path}\n→ {json_path}")
+
+
+def _jev_note_links(items: list[Item], items_dir: Path) -> dict[str, str]:
+    """Absolute paths to the notes that EXIST, for the page's `nota ↗` deep links.
+
+    Absolute because `obsidian://open?path=` needs them and `output_dir` can be relative when
+    the configured vault is. FILTERED BY EXISTENCE because `jev dashboard` runs independently
+    of `xbrain generate` and cannot assume a note was ever written for an item: a deep link to
+    a file nobody wrote sends a reader to an Obsidian error instead of to the post, and the
+    row it sits on looks identical either way.
+    """
+    candidates = ((item.id, items_dir / note_filename(item)) for item in items)
+    return {item_id: str(path.resolve()) for item_id, path in candidates if path.exists()}
+
+
+@jev_app.command("dashboard")
+@_handle_cli_errors
+def jev_dashboard_cmd(
+    threshold: float | None = typer.Option(
+        None, help="Umbral inicial del slider (por defecto [jev].threshold)"
+    ),
+) -> None:
+    """Escribe `<output_dir>/jev.html`: Jev frente a enrich, con umbral movible y colas.
+
+    No llama a Jev ni gasta nada: recapitula el side-car que `xbrain jev topics` ya pagó. La
+    página recalcula en el navegador todo lo que depende del umbral, así que lleva dentro el
+    resumen de `xbrain jev report` a este umbral y avisa en rojo si su propio recálculo se
+    separa de él. Las evaluaciones caducadas se excluyen, igual que en el informe.
+    """
+    cfg = _config()
+    t = cfg.jev_threshold if threshold is None else threshold
+    if not 0.0 <= t <= 1.0:
+        # The same guard as `jev report`, for the same reasons and BEFORE anything is written:
+        # above 1.0 nothing is ever backed, below 0.0 everything is, and either way the page
+        # is plausible-looking noise written over the last good one.
+        raise ValueError("--threshold debe estar en [0.0, 1.0]")
+    jev = _jev_pairs(cfg)
+    # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
+    # names the missing input and the command that fixes it — and nothing is written.
+    _refuse_empty_report(jev, cfg)
+    items = list(jev.store.values())
+    now = datetime.now(timezone.utc)
+    data = compute_jev_dashboard_data(
+        items,
+        jev.assessments,
+        jev.vocab,
+        threshold=t,
+        fallback=cfg.jev_fallback_option,
+        char_limit=cfg.jev_state_char_limit,
+        id2note=_jev_note_links(items, cfg.output_dir / "items"),
+        updated=f"{now:%b} {now.day}, {now.year}".upper(),
+    )
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    page = cfg.output_dir / "jev.html"
+    page.write_text(render_jev_dashboard_html(data), encoding="utf-8")
+    # The SAME line `jev report` prints, from the same summary: the two commands recap one
+    # side-car, and an operator who runs both must not have to reconcile two sets of numbers.
+    typer.echo(_jev_report_line(data["summary"]))
+    current = data["totals"]["current"]
+    typer.echo(
+        f"{plural(current, 'item en el dashboard', 'items en el dashboard')} "
+        f"→ {page.resolve().as_uri()}"
+    )
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")

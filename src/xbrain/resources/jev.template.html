@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XBrain — Jev · topics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Tokens, atmosphere and the shared furniture are `dashboard.template.html`'s, verbatim:
+   the two pages are siblings and a reader must not have to notice which one they are on. */
+:root{
+  --bg:#0E0D0B; --surface:#16130E; --surface-2:#1C1811;
+  --hairline:rgba(236,230,218,.09); --hairline-2:rgba(236,230,218,.05);
+  --ink:#ECE6DA; --ink-muted:#A7A093; --ink-faint:#6E685D;
+  --accent:#E0A233; --accent-soft:rgba(224,162,51,.14);
+  --sage:#7C9A8E; --sienna:#C4643B; --mauve:#9B8FB0; --slate:#6E8CA0; --sand:#C9A87C;
+  --saved:#7C9A8E; --failed:#B5533F;
+  --display:'Fraunces',Georgia,serif; --ui:'Hanken Grotesk',system-ui,sans-serif; --mono:'Spline Sans Mono',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;line-height:1.5;overflow-x:hidden;position:relative;min-height:100vh}
+.glow{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(820px 520px at 12% -6%, rgba(224,162,51,.10), transparent 60%),
+             radial-gradient(700px 700px at 108% 8%, rgba(110,140,160,.06), transparent 55%);}
+.grain{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:.035;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
+.wrap{position:relative;z-index:2;max-width:1360px;margin:0 auto;padding:56px 40px 72px}
+
+/* header */
+.masthead{display:flex;justify-content:space-between;align-items:flex-end;gap:32px;
+  padding-bottom:26px;border-bottom:1px solid var(--hairline);
+  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .05s forwards}
+.brand h1{font-family:var(--display);font-weight:600;font-size:52px;line-height:.98;letter-spacing:-.02em;
+  font-optical-sizing:auto}
+.brand h1 .dot{color:var(--accent)}
+.brand p{font-family:var(--display);font-style:italic;font-weight:400;font-size:18px;color:var(--ink-muted);margin-top:10px;letter-spacing:.01em}
+.stamp{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--ink-faint);text-transform:uppercase;
+  border:1px solid var(--hairline);border-radius:2px;padding:9px 14px;white-space:nowrap;line-height:1.7}
+.stamp b{color:var(--ink-muted);font-weight:500}
+
+/* kpi band */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);margin-top:34px;
+  border:1px solid var(--hairline);border-radius:12px;overflow:hidden;background:var(--surface);
+  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .14s forwards}
+.kpi{padding:22px 24px 20px;border-right:1px solid var(--hairline);border-bottom:1px solid var(--hairline);position:relative}
+.kpi:nth-child(4n){border-right:0}
+.kpi:nth-child(n+5){border-bottom:0}
+.kpi .lab{font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint);
+  min-height:31px}  /* two lines: a label that wraps must not drop its own number below its neighbours */
+.kpi .num{font-family:var(--display);font-weight:600;font-size:40px;line-height:1;margin-top:12px;letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums lining-nums;font-optical-sizing:auto}
+.kpi .num.accent{color:var(--accent)}
+.kpi .ctx{font-size:12.5px;color:var(--ink-muted);margin-top:9px}
+.kpi .ctx b{color:var(--sage);font-weight:600}
+
+/* panels */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}
+.panel{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:22px 24px 18px;
+  box-shadow:0 1px 0 rgba(0,0,0,.4), 0 18px 40px -30px rgba(0,0,0,.9);min-width:0;
+  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .22s forwards}
+.span2{grid-column:1 / -1}
+.phead{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
+  padding-bottom:14px;margin-bottom:12px;border-bottom:1px solid var(--hairline-2)}
+.phead .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);display:block;margin-bottom:7px}
+.phead h3{font-family:var(--display);font-weight:600;font-size:20px;letter-spacing:-.005em;line-height:1.1}
+.phead .sub{font-size:12px;color:var(--ink-faint);text-align:right}
+.chart{width:100%;max-width:100%}
+/* the caveat line under the KPIs — the numbers above mean something else without it */
+.vnote{font-size:12.5px;color:var(--ink-muted);margin:14px 2px 0;line-height:1.7}
+.vnote b{color:var(--ink);font-weight:600}
+.vnote .stale{color:var(--sand)}
+
+/* controls */
+.controls{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:20px}
+.controls .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint)}
+.controls input[type=range]{flex:1;min-width:200px;accent-color:var(--accent);height:4px}
+.tval{font-family:var(--display);font-weight:600;font-size:26px;color:var(--accent);
+  font-variant-numeric:tabular-nums lining-nums;min-width:62px;text-align:right}
+.seg{display:inline-flex;border:1px solid var(--hairline);border-radius:8px;overflow:hidden}
+.seg button{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  background:transparent;color:var(--ink-muted);border:0;padding:7px 13px;cursor:pointer;border-right:1px solid var(--hairline)}
+.seg button:last-child{border-right:0}
+.seg button.on{background:var(--accent-soft);color:var(--accent)}
+.toggle{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:12.5px;color:var(--ink-muted);user-select:none}
+.toggle .sw{width:34px;height:19px;border-radius:20px;background:#2a251c;border:1px solid var(--hairline);position:relative;transition:.22s;flex:none}
+.toggle .sw::after{content:"";position:absolute;top:1.5px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink-faint);transition:.22s}
+.toggle.on .sw{background:var(--accent-soft);border-color:rgba(224,162,51,.5)}
+.toggle.on .sw::after{transform:translateX(15px);background:var(--accent)}
+.hint{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--ink-faint)}
+
+/* the consistency banner: the page must never quietly show numbers the report would not */
+.banner{margin-top:24px;padding:14px 18px;border-radius:10px;font-size:13.5px;line-height:1.6;
+  background:rgba(181,83,63,.14);border:1px solid rgba(181,83,63,.55);color:#F0C7BD}
+.banner b{color:#FFF;font-weight:600;display:block;font-family:var(--mono);font-size:10.5px;
+  letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
+
+/* queues */
+.qwrap{overflow:auto;max-height:560px}
+.q thead th{position:sticky;top:0;z-index:1;background:var(--surface)}
+.q{width:100%;border-collapse:collapse;font-size:13px}
+.q th{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--ink-faint);text-align:left;font-weight:400;padding:0 10px 9px 0;white-space:nowrap}
+.q td{padding:9px 10px 9px 0;border-top:1px solid var(--hairline-2);vertical-align:top;overflow-wrap:anywhere}
+.q tr[data-id]{cursor:pointer}
+.q tr[data-id]:hover td{background:var(--surface-2)}
+.q .nn{font-family:var(--mono);font-size:12px;color:var(--accent);white-space:nowrap;font-variant-numeric:tabular-nums}
+.q .tp{color:var(--ink);white-space:nowrap}
+.q .tx{color:var(--ink-muted);line-height:1.45;min-width:180px}
+.q .hd{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:4px;display:flex;gap:14px;flex-wrap:wrap}
+.empty{font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:10px 0}
+.cut{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding-top:12px;border-top:1px solid var(--hairline-2);margin-top:6px}
+.lk{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--ink-faint);text-decoration:none;border-bottom:1px solid transparent;transition:.15s;white-space:nowrap}
+.lk:hover{color:var(--accent);border-color:rgba(224,162,51,.4)}
+
+/* drill-down drawer */
+.scrim{position:fixed;inset:0;background:rgba(6,5,4,.62);backdrop-filter:blur(2px);z-index:40;opacity:0;visibility:hidden;transition:.28s}
+.scrim.open{opacity:1;visibility:visible}
+.drawer{position:fixed;top:0;right:0;height:100vh;width:520px;max-width:94vw;z-index:41;
+  background:linear-gradient(180deg,var(--surface-2),var(--surface));border-left:1px solid var(--hairline);
+  box-shadow:-30px 0 80px -40px rgba(0,0,0,.9);transform:translateX(100%);transition:transform .34s cubic-bezier(.2,.7,.2,1);
+  display:flex;flex-direction:column;overflow:hidden}
+.drawer.open{transform:none}
+.dwtop{padding:30px 32px 22px;border-bottom:1px solid var(--hairline);position:relative}
+.dwtop .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent)}
+.dwtop h2{font-family:var(--display);font-weight:600;font-size:28px;line-height:1.05;margin-top:10px;letter-spacing:-.01em;overflow-wrap:anywhere}
+.dwtop .meta{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-top:12px;letter-spacing:.05em;overflow-wrap:anywhere}
+.dwbody{padding:24px 32px 48px;overflow-y:auto}
+.dwbody .ov{font-size:14.5px;line-height:1.62;color:var(--ink-muted);overflow-wrap:anywhere}
+.dwsec{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-faint);margin:26px 0 12px}
+.dwclose{position:absolute;top:26px;right:28px;z-index:2;width:32px;height:32px;border-radius:50%;
+  border:1px solid var(--hairline);background:transparent;color:var(--ink-muted);font-size:17px;cursor:pointer;line-height:1}
+.dwclose:hover{color:var(--ink);border-color:var(--ink-faint)}
+.sm-links{display:flex;gap:15px;margin-top:10px}
+/* membership bars in the drawer */
+.mini{display:flex;flex-direction:column;gap:7px}
+.mini .row{display:grid;grid-template-columns:1fr 120px 46px;align-items:center;gap:11px;font-size:12.5px;min-width:0}
+.mini .row .nm{color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.mini .row.on .nm{color:var(--ink)}
+.mini .row .track{height:7px;border-radius:4px;background:var(--surface-2);position:relative;overflow:hidden}
+.mini .row .bar{height:7px;border-radius:4px;background:var(--accent);opacity:.82;display:block}
+.mini .row.off .bar{background:var(--slate);opacity:.6}
+.mini .row .ct{font-family:var(--mono);font-size:11px;color:var(--ink-faint);text-align:right;
+  font-variant-numeric:tabular-nums}
+.mini .row .mark{color:var(--accent)}
+.cut-line{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--sienna);
+  box-shadow:0 0 0 1px rgba(14,13,11,.75)}
+
+footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
+  font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@media (max-width:900px){.grid{grid-template-columns:1fr}.span2{grid-column:auto}.kpis{grid-template-columns:repeat(2,1fr)}.kpi:nth-child(2n){border-right:0}.kpi:nth-child(n+5){border-bottom:1px solid var(--hairline)}.kpi:nth-child(n+7){border-bottom:0}}
+@media (max-width:640px){
+  .wrap{padding:28px 16px 48px}
+  /* A three-column queue does not fit a phone, and a pane that scrolls sideways hides the
+     one column a reader came for. Stack each row and give every cell its header back. */
+  .phead{flex-direction:column;align-items:flex-start;gap:4px}
+  .phead .sub{text-align:left}
+  .qwrap{max-height:520px;overflow-x:hidden}
+  .q thead{display:none}
+  .q tr[data-id]{display:block;padding:10px 0;border-top:1px solid var(--hairline-2)}
+  .q td{display:block;border:0;padding:2px 0}
+  .q td::before{content:attr(data-h);font-family:var(--mono);font-size:9px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--ink-faint);margin-right:8px}
+  .q .tx{min-width:0}
+  .masthead{flex-direction:column;align-items:flex-start;gap:14px}
+  .brand h1{font-size:38px}
+  .stamp{white-space:normal}
+  .kpi{padding:16px 16px 14px}
+  .kpi .num{font-size:30px}
+  .panel{padding:18px 16px 14px}
+  .controls{gap:12px}
+  .mini .row{grid-template-columns:1fr 70px 44px}
+}
+</style>
+</head>
+<body>
+<div class="glow"></div>
+<div class="grain"></div>
+<main class="wrap">
+  <header class="masthead">
+    <div class="brand">
+      <h1>XBrain<span class="dot">.</span> Jev</h1>
+      <p id="subtitle">Lo que Jev dice de cada post, frente a lo que asignó enrich</p>
+    </div>
+    <div class="stamp" id="stamp">ACTUALIZADO · —</div>
+  </header>
+
+  <section class="controls">
+    <span class="kick">Umbral</span>
+    <input type="range" id="threshold" min="0" max="1" step="0.01" aria-label="Umbral de pertenencia">
+    <span class="tval" id="threshold-value">—</span>
+    <div class="seg" id="presets"></div>
+    <div class="toggle" id="show-fallback"><span class="sw"></span><span>Incluir «Jev eligió el fallback»</span></div>
+    <span class="hint" id="reset-hint"></span>
+  </section>
+
+  <section class="banner" id="banner" hidden></section>
+
+  <section class="kpis" id="kpis"></section>
+  <p class="vnote" id="sidecar"></p>
+
+  <section class="grid">
+    <div class="panel span2">
+      <div class="phead">
+        <div><span class="kick">01 · Respaldo</span><h3>Respaldo por topic</h3></div>
+        <div class="sub">peor primero · % de asignaciones de enrich con noul ≥ umbral</div>
+      </div>
+      <div class="chart" id="chart-topics" style="height:520px"></div>
+    </div>
+
+    <div class="panel span2">
+      <div class="phead">
+        <div><span class="kick">02 · Distribución</span><h3>Distribución de nouls</h3></div>
+        <div class="sub">eje log · bins de 0,05 · la línea marca el umbral</div>
+      </div>
+      <div class="chart" id="chart-hist" style="height:320px"></div>
+    </div>
+
+    <div class="panel span2">
+      <div class="phead">
+        <div><span class="kick">03 · Dudosas</span><h3>Dudosas</h3></div>
+        <div class="sub" id="sub-doubtful">asignadas por enrich, noul &lt; umbral</div>
+      </div>
+      <div id="q-doubtful"></div>
+    </div>
+
+    <div class="panel span2">
+      <div class="phead">
+        <div><span class="kick">04 · Candidatas</span><h3>Candidatas que faltan</h3></div>
+        <div class="sub" id="sub-missing">no asignadas, noul ≥ umbral</div>
+      </div>
+      <div id="q-missing"></div>
+    </div>
+
+    <div class="panel span2">
+      <div class="phead">
+        <div><span class="kick">05 · Primario</span><h3>Primario que no coincide</h3></div>
+        <div class="sub" id="sub-primary">el primario de enrich frente al Choice de Jev</div>
+      </div>
+      <div id="q-primary"></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>XBRAIN · JEV vs ENRICH · TYPESAFE AI</span>
+    <span id="foot-note">SIN RED · ECHARTS EMPOTRADO</span>
+  </footer>
+</main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer">
+  <button class="dwclose" id="dw-close" aria-label="Cerrar">✕</button>
+  <div class="dwtop">
+    <span class="kick">item</span>
+    <h2 id="dw-title">—</h2>
+    <div class="meta" id="dw-meta">—</div>
+  </div>
+  <div class="dwbody" id="dw-body"></div>
+</aside>
+
+<script>/*__ECHARTS__*/</script>
+<script>
+const DATA = /*__DATA__*/;
+
+/* ===== derive: mirrors jev/report.py ===== */
+/* A PURE function of (DATA, t) — no DOM, no ECharts, no toggle state. That is what lets
+   tests/test_jev_dashboard.py lift this region out and run it through node against the same
+   fixture `build_report` summarised in Python, and it is why the queue filtering lives in
+   renderQueues and not here. Every rule below has a counterpart in jev/report.py:
+     backed / doubtful  -> _doubtful, and the partition in _pair_totals
+     unjudged           -> _unjudged   (a slug absent from `membership`, never a 0.0)
+     missing            -> _missing
+     jev_pairs          -> _jev_assigned
+     primary_agree      -> ItemComparison.primary_agrees                                   */
+const slugs = DATA.topics.map(t => t.slug);
+const slugAt = Object.fromEntries(slugs.map((s, i) => [s, i]));
+
+/** `enrich`'s side: each assigned topic lands in exactly ONE of backed / doubtful / unjudged. */
+function enrichSide(it, t, acc) {
+  for (const slug of it.assigned) {
+    acc.assignedPairs++;
+    const i = slugAt[slug];
+    if (i !== undefined) acc.perTopic[i].assigned++;
+    const noul = i === undefined ? null : it.m[i];
+    if (noul === null || noul === undefined) {
+      // Jev was never asked about this slug: it left the vocabulary after enrich wrote it.
+      acc.unjudged++;
+      if (i !== undefined) acc.perTopic[i].unjudged++;
+    } else if (noul >= t) {
+      acc.backed++;
+      acc.perTopic[i].backed++;
+    } else {
+      acc.doubtful.push({it: it, slug: slug, noul: noul});
+      acc.perTopic[i].doubtful++;
+    }
+  }
+}
+
+/** Jev's OWN assignment at `t`, and the half of it enrich does not have. */
+function jevSide(it, t, acc) {
+  const assigned = new Set(it.assigned);
+  it.m.forEach(function (noul, i) {
+    if (noul === null || !(noul >= t)) return;
+    acc.jevPairs++;
+    if (assigned.has(slugs[i])) {
+      acc.jevBacked++;
+    } else {
+      acc.missing.push({it: it, slug: slugs[i], noul: noul});
+      acc.perTopic[i].missing++;
+    }
+  });
+}
+
+/** The primary axis. No primary at all is not agreement — there is nothing to agree with. */
+function primarySide(it, acc) {
+  if (it.primary !== null && it.jp === it.primary) acc.primaryAgree++;
+  else acc.primary.push(it);
+}
+
+function derive(t) {
+  const acc = {
+    perTopic: slugs.map(function () { return {assigned: 0, backed: 0, doubtful: 0, unjudged: 0, missing: 0}; }),
+    doubtful: [], missing: [], primary: [],
+    assignedPairs: 0, backed: 0, unjudged: 0, jevPairs: 0, jevBacked: 0,
+    primaryAgree: 0, compared: 0,
+  };
+  for (const it of DATA.items) {
+    if (!it.cmp) continue;  // no enrichment: `report.compare_item` returns None for it
+    acc.compared++;
+    enrichSide(it, t, acc);
+    jevSide(it, t, acc);
+    primarySide(it, acc);
+  }
+  // Worst first, ties broken by item id, exactly as `_sorted_doubtful` / `_sorted_missing`.
+  acc.doubtful.sort((a, b) => a.noul - b.noul || (a.it.id < b.it.id ? -1 : 1));
+  acc.missing.sort((a, b) => b.noul - a.noul || (a.it.id < b.it.id ? -1 : 1));
+  return acc;
+}
+
+/** The counters `selfCheck` holds against the summary. Named as `_summarize` names them. */
+function buckets(d) {
+  return {
+    backed: d.backed, doubtful: d.doubtful.length, missing: d.missing.length,
+    unjudged: d.unjudged, jev_pairs: d.jevPairs, primary_agree: d.primaryAgree,
+    assigned_pairs: d.assignedPairs,
+  };
+}
+/* ===== end derive ===== */
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const nf = (n) => n.toLocaleString('es-ES');
+const f2 = (x) => x.toFixed(2).replace('.', ',');
+// `report._pct`: one decimal, and an em dash when there is no whole to be a part of.
+const pct = (a, b) => b ? (a / b * 100).toFixed(1).replace('.', ',') + ' %' : '—';
+const labelOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
+const name = (slug) => labelOf[slug] || slug;
+const C = {accent:'#E0A233', slate:'#6E8CA0', sienna:'#C4643B', sage:'#7C9A8E',
+           ink:'#ECE6DA', muted:'#A7A093', faint:'#6E685D', hair:'rgba(236,230,218,.05)', surface2:'#1C1811'};
+const UI = "'Hanken Grotesk',sans-serif", MONO = "'Spline Sans Mono',monospace";
+const TIP = {backgroundColor:C.surface2, borderColor:'rgba(236,230,218,.12)', borderWidth:1,
+  textStyle:{color:C.ink, fontFamily:UI, fontSize:12.5}, padding:[9,13],
+  extraCssText:'border-radius:8px;box-shadow:0 12px 30px -12px rgba(0,0,0,.8)'};
+const QUEUE_TOP = 200;
+
+let threshold = DATA.threshold;
+let showFallback = true;
+
+/* ----------------------------------------------------------------- self-check
+   The page recomputes what the report computed. If the two ever disagree, say so on screen:
+   a dashboard quietly showing numbers `xbrain jev report` would not print is worse than no
+   dashboard. The threshold-FREE buckets are checked at EVERY threshold (report.py says they
+   do not move), the dependent ones only at the threshold the summary was built at.         */
+const DEPENDENT_CHECKS = [['assigned_backed','backed'], ['doubtful_pairs','doubtful'],
+                          ['missing_pairs','missing'], ['jev_pairs','jev_pairs']];
+const FREE_CHECKS = [['assigned_unjudged','unjudged'], ['primary_agree','primary_agree'],
+                     ['assigned_pairs','assigned_pairs']];
+
+function keyContractProblems() {
+  const dependent = new Set(DATA.threshold_dependent_keys);
+  const bad = [];
+  for (const [key] of DEPENDENT_CHECKS) if (!dependent.has(key)) bad.push(key + ' ya no depende del umbral');
+  for (const [key] of FREE_CHECKS) if (dependent.has(key)) bad.push(key + ' ahora depende del umbral');
+  return bad;
+}
+
+function selfCheck(d, t) {
+  const mine = buckets(d);
+  const bad = keyContractProblems();
+  const checks = t === DATA.threshold ? DEPENDENT_CHECKS.concat(FREE_CHECKS) : FREE_CHECKS;
+  for (const [key, bucket] of checks) {
+    if (mine[bucket] !== DATA.summary[key]) {
+      bad.push(key + ': ' + nf(mine[bucket]) + ' aquí, ' + nf(DATA.summary[key]) + ' en el informe');
+    }
+  }
+  // `report._pair_totals`: assigned = backed + doubtful + unjudged, with nothing left over.
+  if (mine.backed !== mine.assigned_pairs - mine.doubtful - mine.unjudged) {
+    bad.push('las asignaciones no se reparten entre respaldadas, dudosas y sin juzgar');
+  }
+  $('banner').hidden = bad.length === 0;
+  $('banner').innerHTML = bad.length
+    ? '<b>Inconsistencia entre el informe y el dashboard</b>' + esc(bad.join(' · ')) +
+      '. No te fíes de los números de esta página: manda <code>xbrain jev report</code>.'
+    : '';
+}
+
+/* ----------------------------------------------------------------- kpis + side-car line */
+function kpi(lab, num, ctx, accent) {
+  return '<div class="kpi"><div class="lab">' + esc(lab) + '</div><div class="num' +
+    (accent ? ' accent' : '') + '">' + num + '</div><div class="ctx">' + ctx + '</div></div>';
+}
+
+function renderKpis(d) {
+  const tot = DATA.totals;
+  $('kpis').innerHTML = [
+    kpi('items comparados', nf(d.compared), 'de <b>' + nf(tot.current) + '</b> evaluaciones vigentes', true),
+    kpi('enrich respaldado por Jev', pct(d.backed, d.assignedPairs), nf(d.backed) + ' de ' + nf(d.assignedPairs) + ' asignaciones'),
+    kpi('Jev respaldado por enrich', pct(d.jevBacked, d.jevPairs), nf(d.jevBacked) + ' de ' + nf(d.jevPairs) + ' pares de Jev'),
+    kpi('primario coincide', pct(d.primaryAgree, d.compared), nf(d.primaryAgree) + ' de ' + nf(d.compared) + ' items'),
+    kpi('dudosas', nf(d.doubtful.length), 'asignadas, noul &lt; umbral'),
+    kpi('sin juzgar', nf(d.unjudged), 'el topic salió del vocabulario'),
+    kpi('candidatas que faltan', nf(d.missing.length), 'no asignadas, noul ≥ umbral'),
+    kpi('truncados', nf(tot.truncated), 'el post se recortó al preguntar'),
+  ].join('');
+}
+
+/** `report._side_car_line` + the bill, in one line under the KPIs. */
+function renderSidecar() {
+  const tot = DATA.totals;
+  const tally = (counts, one, many) => {
+    const names = Object.keys(counts).sort();
+    return (names.length === 1 ? one : many) + ': ' +
+      (names.map(n => esc(n) + ' (' + nf(counts[n]) + ')').join(', ') || '—');
+  };
+  const stale = tot.stale ? ' <span class="stale">' + nf(tot.stale) +
+    (tot.stale === 1 ? ' caducada' : ' caducadas') + '</span>' : ' 0 caducadas';
+  const orphans = tot.orphans ? ' · <span class="stale">' + nf(tot.orphans) +
+    (tot.orphans === 1 ? ' huérfana' : ' huérfanas') + '</span>' : '';
+  $('sidecar').innerHTML =
+    'Evaluaciones: <b>' + nf(tot.current) + '</b> vigentes de ' + nf(tot.assessed) + ' guardadas ·' +
+    stale + orphans + ' · ' + nf(tot.items) + ' items en el corpus · ' +
+    tally(tot.models, 'modelo', 'modelos') + ' · ' + tally(tot.providers, 'proveedor', 'proveedores') +
+    ' · Coste: ' + esc(tot.cost_text) + '.';
+}
+
+/* ----------------------------------------------------------------- charts */
+const chartTopics = echarts.init($('chart-topics'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
+const chartHist = echarts.init($('chart-hist'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
+
+/** `report._backing_order`: never-assigned rows last, then the EXACT ratio (never the %). */
+function topicRows(d) {
+  return slugs.map(function (slug, i) {
+    const row = d.perTopic[i];
+    return {slug: slug, label: name(slug), assigned: row.assigned, backed: row.backed,
+            doubtful: row.doubtful, unjudged: row.unjudged, missing: row.missing,
+            ratio: row.assigned ? row.backed / row.assigned : 0};
+  }).sort((a, b) => (a.assigned === 0) - (b.assigned === 0) || a.ratio - b.ratio ||
+                    (a.slug < b.slug ? -1 : 1));
+}
+
+function renderTopics(d) {
+  const rows = topicRows(d);
+  $('chart-topics').style.height = Math.max(320, rows.length * 22 + 40) + 'px';
+  chartTopics.resize();
+  chartTopics.setOption({
+    grid: {left: 4, right: 56, top: 6, bottom: 26, containLabel: true},
+    xAxis: {type: 'value', max: 100, axisLabel: {formatter: '{value} %', color: C.faint, fontFamily: MONO, fontSize: 11},
+            axisLine: {show: false}, axisTick: {show: false}, splitLine: {lineStyle: {color: C.hair}}},
+    yAxis: {type: 'category', inverse: true, data: rows.map(r => r.label), axisLine: {show: false},
+            axisTick: {show: false}, axisLabel: {color: C.muted, fontFamily: UI, fontSize: 12}},
+    tooltip: Object.assign({}, TIP, {formatter: function (p) {
+      const r = rows[p.dataIndex];
+      if (!r.assigned) return esc(r.label) + '<br>enrich no lo asignó nunca';
+      return esc(r.label) + '<br>' + nf(r.backed) + ' de ' + nf(r.assigned) + ' respaldadas · ' +
+             nf(r.doubtful) + ' dudosas · ' + nf(r.unjudged) + ' sin juzgar<br>faltan ' + nf(r.missing);
+    }}),
+    series: [{
+      type: 'bar', barMaxWidth: 13,
+      data: rows.map(r => ({value: r.assigned ? +(r.ratio * 100).toFixed(1) : 0,
+                            itemStyle: {color: r.assigned ? C.accent : C.faint, opacity: r.assigned ? .88 : .35}})),
+      label: {show: true, position: 'right', formatter: p => rows[p.dataIndex].assigned ? p.value + ' %' : 'sin asignar',
+              color: C.faint, fontFamily: MONO, fontSize: 10},
+    }],
+  });
+}
+
+const BINS = 20;
+
+/** Every (item, topic) noul in the corpus, split by whether enrich assigned that topic. */
+function histogram() {
+  const assigned = new Array(BINS).fill(0), other = new Array(BINS).fill(0);
+  for (const it of DATA.items) {
+    if (!it.cmp) continue;
+    const set = new Set(it.assigned);
+    it.m.forEach(function (noul, i) {
+      if (noul === null) return;  // never asked: it has no probability to bin
+      const b = Math.min(BINS - 1, Math.floor(noul * BINS));
+      (set.has(slugs[i]) ? assigned : other)[b]++;
+    });
+  }
+  return {assigned: assigned, other: other};
+}
+
+// The bins are a fact about the corpus, not about the slider: only the umbral MARK moves.
+// Recomputing 100k+ pairs on every input event is the difference between a slider that
+// drags and one that stutters.
+const HIST = histogram();
+
+function renderHist(t) {
+  const h = HIST;
+  const labels = Array.from({length: BINS}, (_, i) => f2(i / BINS));
+  // A zero bin is shipped as null, not as 1: on a log axis `Math.max(v, 1)` would draw a bar
+  // where the corpus has nothing, which is a count the page invented.
+  const series = (nm, data, color) => ({
+    name: nm, type: 'bar', stack: 'n', data: data.map(v => v || null),
+    itemStyle: {color: color, opacity: .85},
+  });
+  chartHist.setOption({
+    grid: {left: 8, right: 16, top: 34, bottom: 26, containLabel: true},
+    legend: {data: ['asignados por enrich', 'no asignados'], right: 4, top: 0,
+             textStyle: {color: C.muted, fontFamily: UI, fontSize: 12}, inactiveColor: C.faint,
+             itemWidth: 16, itemHeight: 9, itemGap: 18},
+    tooltip: Object.assign({}, TIP, {trigger: 'axis', axisPointer: {type: 'shadow'}}),
+    xAxis: {type: 'category', data: labels, axisLine: {lineStyle: {color: 'rgba(236,230,218,.14)'}},
+            axisTick: {show: false}, axisLabel: {color: C.faint, fontFamily: MONO, fontSize: 10},
+            splitLine: {show: false}},
+    yAxis: {type: 'log', minorTick: {show: false}, axisLine: {show: false}, axisTick: {show: false},
+            axisLabel: {color: C.faint, fontFamily: MONO, fontSize: 11}, splitLine: {lineStyle: {color: C.hair}}},
+    series: [
+      series('asignados por enrich', h.assigned, C.accent),
+      Object.assign(series('no asignados', h.other, C.slate), {
+        markLine: {silent: true, symbol: 'none', label: {show: false},
+                   lineStyle: {color: C.sienna, width: 1.5, type: 'dashed'},
+                   data: [{xAxis: t * BINS - 0.5}]},
+      }),
+    ],
+  });
+}
+
+/* ----------------------------------------------------------------- queues */
+function links(it) {
+  const note = it.note ? '<a class="lk" href="obsidian://open?path=' + encodeURIComponent(it.note) + '">nota ↗</a>' : '';
+  return note + '<a class="lk" href="' + esc(it.url) + '" target="_blank" rel="noopener">X ↗</a>';
+}
+
+function postCell(it) {
+  return '<div class="tx">' + esc(it.text) + '<div class="hd">@' + esc(it.handle) + links(it) + '</div></div>';
+}
+
+/** A queue table, cut at QUEUE_TOP and SAYING SO — `report._cut_note`'s rule. */
+function queue(el, rows, columns) {
+  if (!rows.length) { el.innerHTML = '<div class="empty">nada aquí con este umbral</div>'; return; }
+  const head = columns.map(c => '<th>' + esc(c.h) + '</th>').join('');
+  const body = rows.slice(0, QUEUE_TOP).map(function (r) {
+    // `data-h` is the column header, repeated per cell: at phone width the header row is
+    // dropped and each cell re-states its own name, so "0,77" is never a bare number.
+    const cells = columns.map(c => '<td data-h="' + esc(c.h) + '">' + c.f(r) + '</td>').join('');
+    return '<tr data-id="' + esc(r.it.id) + '">' + cells + '</tr>';
+  }).join('');
+  const dropped = rows.length - Math.min(rows.length, QUEUE_TOP);
+  el.innerHTML = '<div class="qwrap"><table class="q"><thead><tr>' + head + '</tr></thead><tbody>' +
+    body + '</tbody></table></div>' +
+    (dropped ? '<div class="cut">… y ' + nf(dropped) + (dropped === 1 ? ' fila más' : ' filas más') +
+               ' (el informe JSON las lleva todas)</div>' : '');
+  el.querySelectorAll('tr[data-id]').forEach(tr => tr.addEventListener('click', () => openDrawer(tr.dataset.id)));
+}
+
+/** True when Jev answered something outside the vocabulary — `report._primary_totals`' rule. */
+const choseFallback = (it) => slugAt[it.jp] === undefined;
+
+function renderQueues(d) {
+  const topic = {h: 'topic', f: r => '<span class="tp">' + esc(name(r.slug)) + '</span>'};
+  const noul = {h: 'noul', f: r => '<span class="nn">' + f2(r.noul) + '</span>'};
+  const post = {h: 'post', f: r => postCell(r.it)};
+  queue($('q-doubtful'), d.doubtful, [topic, noul, post]);
+  queue($('q-missing'), d.missing, [topic, noul, post]);
+  const primary = d.primary.filter(it => showFallback || !choseFallback(it)).map(it => ({it: it}));
+  queue($('q-primary'), primary, [
+    {h: 'enrich', f: r => '<span class="tp">' + esc(r.it.primary === null ? '— sin primario' : name(r.it.primary)) + '</span>'},
+    {h: 'Jev', f: r => '<span class="tp">' + esc(name(r.it.jp)) + (choseFallback(r.it) ? ' ·fallback' : '') + '</span>'},
+    {h: 'conf.', f: r => '<span class="nn">' + f2(r.it.jc) + '</span>'},
+    post,
+  ]);
+  $('sub-doubtful').textContent = nf(d.doubtful.length) + ' pares · asignadas por enrich, noul < umbral';
+  $('sub-missing').textContent = nf(d.missing.length) + ' pares · no asignadas, noul ≥ umbral';
+  $('sub-primary').textContent = nf(primary.length) + ' items · de ' + nf(d.primary.length) + ' sin coincidencia';
+}
+
+/* ----------------------------------------------------------------- drawer */
+const drawer = $('drawer'), scrim = $('scrim');
+
+function membershipRows(it) {
+  const assigned = new Set(it.assigned);
+  const ranked = slugs.map((slug, i) => ({slug: slug, noul: it.m[i]}))
+    .filter(r => r.noul !== null)
+    .sort((a, b) => b.noul - a.noul || (a.slug < b.slug ? -1 : 1));
+  return ranked.map(function (r) {
+    const on = assigned.has(r.slug);
+    const marks = (on ? ' <span class="mark">✓</span>' : '') + (r.slug === it.primary ? ' <span class="mark">★</span>' : '');
+    return '<div class="row ' + (on ? 'on' : 'off') + '"><span class="nm">' + esc(name(r.slug)) + marks +
+      '</span><span class="track"><span class="bar" style="width:' + (r.noul * 100).toFixed(1) + '%"></span>' +
+      '<span class="cut-line" style="left:' + (threshold * 100).toFixed(1) + '%"></span></span>' +
+      '<span class="ct">' + f2(r.noul) + '</span></div>';
+  }).join('');
+}
+
+function unjudgedRows(it) {
+  const missing = it.assigned.filter(slug => slugAt[slug] === undefined);
+  if (!missing.length) return '';
+  return '<div class="dwsec">Sin juzgar · fuera del vocabulario</div><p class="ov">' +
+    missing.map(esc).join(' · ') + ' — enrich los asignó bajo un <code>vocab.yaml</code> anterior, ' +
+    'así que Jev nunca fue preguntado por ellos. Ni respaldados ni dudosos.</p>';
+}
+
+function openDrawer(id) {
+  const it = DATA.items.find(x => x.id === id);
+  if (!it) return;
+  $('dw-title').textContent = '@' + it.handle;
+  $('dw-meta').textContent = 'ITEM ' + it.id + ' · ' + it.model + ' (' + it.provider + ')' +
+    (it.truncated ? ' · TRUNCADO' : '');
+  $('dw-body').innerHTML =
+    '<p class="ov">' + esc(it.text) + '</p><div class="sm-links">' + links(it) + '</div>' +
+    '<div class="dwsec">Pertenencia (noul) · ✓ asignado por enrich · ★ primario</div>' +
+    '<div class="mini">' + membershipRows(it) + '</div>' +
+    unjudgedRows(it) +
+    '<div class="dwsec">Primario · distribución del Choice</div>' +
+    '<div class="mini">' + it.top.map(function (pair) {
+      return '<div class="row ' + (pair[0] === it.jp ? 'on' : 'off') + '"><span class="nm">' + esc(name(pair[0])) +
+        (pair[0] === it.primary ? ' <span class="mark">★</span>' : '') + '</span>' +
+        '<span class="track"><span class="bar" style="width:' + (pair[1] * 100).toFixed(1) + '%"></span></span>' +
+        '<span class="ct">' + f2(pair[1]) + '</span></div>';
+    }).join('') + '</div>' +
+    '<p class="ov" style="margin-top:14px">Jev eligió <b>' + esc(name(it.jp)) + '</b> con ' + f2(it.jc) +
+    ' de confianza; enrich dice <b>' + esc(it.primary === null ? 'nada' : name(it.primary)) + '</b>.</p>';
+  $('dw-body').scrollTop = 0;
+  drawer.classList.add('open');
+  scrim.classList.add('open');
+}
+
+function closeDrawer() { drawer.classList.remove('open'); scrim.classList.remove('open'); }
+
+/* ----------------------------------------------------------------- wiring */
+function render() {
+  const d = derive(threshold);
+  $('threshold-value').textContent = f2(threshold);
+  $('presets').querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.t === threshold));
+  $('reset-hint').textContent = threshold === DATA.threshold ? 'umbral del informe' : 'informe: ' + f2(DATA.threshold);
+  selfCheck(d, threshold);
+  renderKpis(d);
+  renderSidecar();
+  renderTopics(d);
+  renderHist(threshold);
+  renderQueues(d);
+}
+
+function setThreshold(value) {
+  // Assigned VERBATIM. Rounding here to the slider's step looked harmless and was not: a
+  // configured `[jev].threshold` of 0.855 would come back as 0.86, so `t === DATA.threshold`
+  // would never hold again and `selfCheck` would silently stop running its threshold-
+  // dependent half — the half that checks the page against the report. The slider's own
+  // handler rounds its own reading; a preset carries an exact value and keeps it.
+  threshold = value;
+  $('threshold').value = threshold;
+  render();
+}
+
+$('stamp').innerHTML = 'ACTUALIZADO ' + esc(DATA.updated) + ' · <b>' + nf(DATA.totals.current) + ' EVALUACIONES</b>';
+$('presets').innerHTML = [0.5, 0.7, DATA.threshold, 0.95]
+  .filter((v, i, a) => a.indexOf(v) === i)
+  .sort((a, b) => a - b)
+  .map(v => '<button data-t="' + v + '">' + f2(v) + '</button>').join('');
+$('presets').addEventListener('click', e => { if (e.target.dataset.t) setThreshold(+e.target.dataset.t); });
+$('threshold').value = threshold;
+// The range reads back as 0.8500000000000001 often enough to matter: rounded to its own
+// step so a drag back to the report's umbral really lands on it.
+$('threshold').addEventListener('input', e => setThreshold(Math.round(+e.target.value * 100) / 100));
+$('show-fallback').classList.add('on');
+$('show-fallback').addEventListener('click', function () {
+  showFallback = !showFallback;
+  this.classList.toggle('on', showFallback);
+  render();
+});
+$('dw-close').addEventListener('click', closeDrawer);
+scrim.addEventListener('click', closeDrawer);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+addEventListener('resize', () => { chartTopics.resize(); chartHist.resize(); });
+render();
+</script>
+</body>
+</html>
