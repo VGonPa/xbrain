@@ -94,7 +94,7 @@ def unpriced_providers(assessments: Iterable[TopicAssessment]) -> tuple[str, ...
     """The distinct providers in `assessments` that `INPUT_USD_PER_MTOK` cannot price.
 
     Sorted and de-duplicated so the operator-facing line is stable across runs: this is
-    what turns a bare `~0.000 $` into "0.000 because nobody prices this judge".
+    what turns a bare `~0.0000 $` into "0.0000 because nobody prices this judge".
     """
     return tuple(sorted({a.provider for a in assessments if a.provider not in INPUT_USD_PER_MTOK}))
 

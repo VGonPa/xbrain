@@ -580,13 +580,13 @@ def test_the_summary_counts_the_side_car_records_the_filter_dropped():
     item = _item()
     pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
 
-    summary = summarize(pairs, VOCAB, 0.85, stale=4, orphans=2)
+    summary, comparisons = build_report(pairs, VOCAB, 0.85, stale=4, orphans=2)
 
     assert summary["assessments_stored"] == 7
     assert summary["assessments_stale"] == 4
     assert summary["assessments_orphaned"] == 2
     assert summary["items_assessed"] == 1
-    text = render_report_markdown(summary, [], {"1": item})
+    text = render_report_markdown(summary, comparisons, {"1": item})
     assert _headline_line(text, "Evaluaciones:") == (
         "Evaluaciones: 1 vigentes de 7 guardadas · 4 caducadas · 2 huérfanas"
     )
@@ -878,10 +878,10 @@ def test_summarize_counts_the_records_whose_evidence_was_cut():
         update={"truncated": True}
     )
 
-    summary = summarize([(item, assessment)], VOCAB, 0.85)
+    summary, comparisons = build_report([(item, assessment)], VOCAB, 0.85)
 
     assert summary["truncated"] == 1
-    assert "truncados: 1" in render_report_markdown(summary, [], {"1": item})
+    assert "truncados: 1" in render_report_markdown(summary, comparisons, {"1": item})
 
 
 def test_a_naive_now_is_refused_rather_than_stamped_as_utc():
@@ -980,3 +980,30 @@ def test_a_fallback_primary_gets_its_own_section_not_the_disagreement_one():
     assert summary["primary_agree"] == 0
     assert "### Jev eligió el fallback (1)" in text
     assert "### Desacuerdo real (0)" in text
+
+
+def test_the_markdown_explains_why_a_section_can_count_less_than_the_headline():
+    """The headline counters are INDEPENDENT; the sections PARTITION by priority.
+
+    An item whose primary left the vocabulary AND that Jev answered with the fallback is in
+    both headline counters but appears once, under the first reason that applies. So a reader
+    can see `**primario = fallback:** 1` two lines above `### Jev eligió el fallback (0)` —
+    and the file has to say why, not just the code.
+    """
+    item = _item("2", text="Seed round", topics=("retired-topic", "startups"))
+    assessment = _assessment(
+        item,
+        {"ai-coding": 0.1, "startups": 0.99, "misc": 0.05},
+        choice="otro",
+        probabilities={"otro": 0.6, "startups": 0.4, "ai-coding": 0.0, "misc": 0.0},
+    )
+    summary, comparisons = build_report([(item, assessment)], VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"2": item})
+
+    # The overlap really is on the page: counted twice above, filed once below.
+    assert summary["primary_fallback"] == 1 and summary["primary_unjudged"] == 1
+    assert "**primario = fallback:** 1" in text
+    assert "### Jev eligió el fallback (0)" in text
+    assert "### Primario sin juzgar (salió del vocabulario) (1)" in text
+    assert "estas cifras pueden sumar menos que las de arriba" in text

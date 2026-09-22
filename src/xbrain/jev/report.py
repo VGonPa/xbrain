@@ -831,7 +831,15 @@ def _primary_tables(
     for comparison in comparisons:
         if not comparison.primary_agrees:
             grouped[_primary_reason(comparison, slugs)].append(comparison)
-    lines = ["", f"## Primario que no coincide (top {top} por motivo)"]
+    lines = [
+        "",
+        f"## Primario que no coincide (top {top} por motivo)",
+        "",
+        "_Los contadores de la cabecera son independientes: un item cuyo primario salió del "
+        "vocabulario y que además Jev resolvió con el fallback cuenta en los dos. Aquí cada "
+        "item aparece UNA vez, bajo el primer motivo que le aplica, así que estas cifras "
+        "pueden sumar menos que las de arriba._",
+    ]
     for key, title in _PRIMARY_REASONS:
         lines += _primary_section(title, grouped[key], items_by_id, top)
     return lines

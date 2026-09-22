@@ -990,27 +990,54 @@ def test_jev_report_refuses_a_negative_threshold_too(tmp_path: Path, monkeypatch
     _assert_report_untouched(tmp_path, before)
 
 
-def test_jev_report_agrees_with_one_stale_record(tmp_path: Path, monkeypatch):
-    """Spanish agrees at 1 only, in the segment that reports what a vocabulary edit cost."""
+def test_jev_report_agrees_with_one_orphaned_record(tmp_path: Path, monkeypatch):
+    """A record whose ITEM is gone from the store is an orphan, not a stale one.
+
+    Two different events with the same symptom — the record leaves the comparison — and two
+    counters, so the operator can tell "the vocabulary moved" from "that post is no longer in
+    `items.json`". Spanish agrees at 1 only, and each segment agrees with its own number.
+    """
     _setup_repo(tmp_path, monkeypatch)
     save_store({"1": _item("1", "Claude Code hooks")}, tmp_path / "data" / "items.json")
     _seed_vocab(tmp_path)
     _assess_corpus(monkeypatch)
     stored = load_assessments(_topics_path(tmp_path))
+    # Id `2` is not in the store, so this record is an ORPHAN. Its contract is untouched:
+    # currency never enters into it — `current_pairs` iterates the store, not the side-car.
     save_assessments(
-        {
-            "1": stored["1"],
-            "2": stored["1"].model_copy(update={"item_id": "2", "contract": "f" * 64}),
-        },
+        {"1": stored["1"], "2": stored["1"].model_copy(update={"item_id": "2"})},
         _topics_path(tmp_path),
     )
 
     result = runner.invoke(app, ["jev", "report"])
 
     assert result.exit_code == 0, result.output
-    # One orphan (id 2 is not in the store) — and the line agrees with each number.
     assert "1 huérfana" in result.stdout
     assert "0 caducadas" in result.stdout
+
+
+def test_jev_report_agrees_with_one_stale_record(tmp_path: Path, monkeypatch):
+    """The orphan's twin: the item is still there, the CONTRACT no longer describes it.
+
+    The all-stale case is a refusal, so this is the only place the singular `1 caducada`
+    is reachable — one record survives the edit and one does not.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    stored = load_assessments(_topics_path(tmp_path))
+    # Item `2` is in the store and its stored ask no longer matches today's questions.
+    save_assessments(
+        {"1": stored["1"], "2": stored["2"].model_copy(update={"contract": "f" * 64})},
+        _topics_path(tmp_path),
+    )
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 caducada" in result.stdout and "1 caducadas" not in result.stdout
+    assert "huérfana" not in result.stdout
+    assert "items comparados 1/1" in result.stdout
 
 
 def test_the_three_places_that_quote_the_bill_print_the_same_fragment(tmp_path: Path, monkeypatch):
