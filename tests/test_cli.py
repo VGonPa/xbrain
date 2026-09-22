@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from xbrain import cli
 from xbrain.cli import app
 from xbrain.models import (
     Author,
@@ -4987,3 +4989,69 @@ def test_redescribe_frames_limit_help_says_items_not_videos():
     limit_help = match.group(0)
     assert "items" in limit_help
     assert "vídeos" not in limit_help
+
+
+def test_an_explicit_exit_code_survives_the_error_wrapper():
+    """A command's own `typer.Exit(code=N)` must reach the shell as N.
+
+    `click.exceptions.Exit` subclasses `RuntimeError`, which `_OPERATOR_ERRORS` lists. So
+    without an explicit re-raise the wrapper CATCHES a deliberate exit and re-reports it as
+    an operator error, replacing the code the command chose with 1.
+
+    The message it prints depends on call STYLE, which is worth knowing before predicting
+    it: `Exit.__init__` never calls `super().__init__`, so `args` comes from
+    `BaseException.__new__` — `str(Exit(code=130))` is `''` (hence a bare "Error: ") while
+    `str(Exit(130))` is `'130'`. Every call site in `cli.py` uses the keyword form; typer's
+    own `core.py` uses the positional one.
+
+    `xbrain jev topics` uses 130 for an interrupted run.
+    """
+
+    @cli._handle_cli_errors
+    def _command() -> None:
+        raise typer.Exit(code=130)
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _command()
+    assert excinfo.value.exit_code == 130
+
+
+@pytest.mark.parametrize(
+    "error",
+    # `RuntimeError` is the one that matters: `typer.Exit` and `typer.Abort` ARE
+    # `RuntimeError` subclasses, which is the whole reason the bug existed, so a re-raise
+    # clause widened to `(typer.Exit, typer.Abort, RuntimeError)` must go red here. The
+    # other two pin that the wrapper still covers the rest of `_OPERATOR_ERRORS`.
+    [ValueError("vocabulario vacío"), RuntimeError("no hay vocabulario"), OSError("disco lleno")],
+    ids=["ValueError", "RuntimeError", "OSError"],
+)
+def test_the_error_wrapper_still_converts_a_real_operator_error(error: Exception):
+    """The re-raise above must not punch a hole in the wrapper's actual job."""
+
+    @cli._handle_cli_errors
+    def _command() -> None:
+        raise error
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _command()
+    assert excinfo.value.exit_code == 1
+
+
+def test_an_abort_reaches_click_instead_of_the_operator_error_wrapper():
+    """`click.Abort` subclasses `RuntimeError` exactly as `Exit` does, so the wrapper ate it.
+
+    Live call site: `download-videos` asks `typer.confirm(..., abort=True)` before a large
+    download. Answering "n" must print Click's own "Aborted!" — not a bare "Error: ", which
+    is what `str(Abort())` renders as once `_OPERATOR_ERRORS` catches it.
+    """
+    probe = typer.Typer()
+
+    @probe.command()
+    @cli._handle_cli_errors
+    def _cmd() -> None:
+        raise typer.Abort()
+
+    result = CliRunner().invoke(probe, [])
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert "Error:" not in result.output

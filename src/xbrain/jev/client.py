@@ -93,3 +93,28 @@ class JevClient(Protocol):
     """
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult: ...
+
+    def close(self) -> None:
+        """Release whatever the client holds. Idempotent, and MUST NOT raise a vendor type.
+
+        Part of the protocol rather than the adapter's own extra, because the CALLER that
+        builds a client is the one that has to release it, and it only ever holds a
+        `JevClient`. A provider with nothing to release implements it as a no-op — which
+        is why it is cheaper to require than to make every caller probe for it.
+
+        The two requirements are the CALLER'S SAFETY, not politeness. `xbrain jev topics`
+        releases from a `finally` that can run while a `KeyboardInterrupt` or an all-failed
+        `JevError` is already propagating, and Python lets an exception raised in a `finally`
+        replace the one in flight. An implementation that honours this makes that impossible;
+        `TypeSafeJevClient.close` does, by converting `TypeSafeError` to `JevError` and by
+        releasing at most once. The caller guards the call anyway — a protocol nobody can
+        enforce at runtime is a promise, and the money is on the other side of it.
+
+        The `...` body is the Protocol convention, matching `ask`, and buys NOTHING beyond
+        that: a docstring-only body behaves identically, so neither form stops a class that
+        explicitly inherits this Protocol from silently getting a no-op `close`. Structural
+        conformance — a class that merely satisfies the protocol, which is how every provider
+        here is written — is checked by mypy at `typesafe.py`'s `_assert_conforms_to_protocol`,
+        and that is where the real guarantee lives.
+        """
+        ...

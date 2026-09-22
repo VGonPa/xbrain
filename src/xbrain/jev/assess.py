@@ -310,11 +310,28 @@ class Selection:
     The counts are not decoration: without them an empty selection caused by a regression in
     the evidence layer is indistinguishable from a clean "everything is up to date", and the
     run exits 0 either way.
+
+    THEY PARTITION THE CANDIDATE SET: `len(items) + skipped_current + skipped_no_evidence +
+    remaining` is every item considered. `forced` is a SUB-count of `items`, not a fifth
+    bucket — the items in it are being asked about, they are just being asked again.
     """
 
     items: tuple[Item, ...]
     skipped_current: int
     skipped_no_evidence: int
+    #: Selected items whose stored assessment was STILL CURRENT and is being re-asked anyway
+    #: because `force` is set. Under `force`, `skipped_current` is structurally 0 — it means
+    #: "we did not look", not "nothing was current" — so without this the operator cannot
+    #: tell "I just re-paid for 2,998 perfectly current assessments" from "2,998 contracts
+    #: had genuinely expired". That is the counter failing at the one moment it is worth
+    #: money. Counts only items that SURVIVED `limit`: a forced item that was cut is not
+    #: going to be re-asked, and reporting it would promise a re-bill that never happens.
+    forced: int = 0
+    #: Evaluable items left out by `limit`. The two skips above cost nothing; this is the one
+    #: that means "there is more backlog still to pay for". Without it `--limit 200` run
+    #: nightly cannot say whether the backlog is draining, stalled or growing, and `--dry-run`
+    #: reports the same truncated number so it cannot be used to find out either.
+    remaining: int = 0
 
 
 def select_items(
@@ -336,6 +353,10 @@ def select_items(
     "nothing to do". `limit=None` means no limit; a limit below 1 is an operator error, not
     an empty success.
 
+    Every candidate ends in exactly one of four places — selected, current, evidence-free, or
+    cut by `limit` — and `Selection` reports all four, so the operator's line accounts for the
+    whole corpus rather than for the part that happened to survive.
+
     The questions and their digest are built ONCE for the whole selection: they do not depend
     on the item, so doing it per item would redo identical work for every post in the corpus.
     """
@@ -343,6 +364,10 @@ def select_items(
         raise JevError("--limit debe ser >= 1")
     digest = questions_digest(build_topic_questions(vocab, fallback))
     selected: list[Item] = []
+    # Parallel to `selected`: was this item's stored assessment still current when we took
+    # it anyway? Recorded per item rather than counted on the spot so `limit` can cut both
+    # lists together — `forced` must describe the items that will actually be re-asked.
+    was_current: list[bool] = []
     skipped_current = 0
     skipped_no_evidence = 0
     for item in _candidates(store, ids):
@@ -352,14 +377,22 @@ def select_items(
         if state_chars == 0:
             skipped_no_evidence += 1
             continue
-        if not force and _contract_matches(assessments.get(item.id), state[STATE_KEY], digest):
+        # Computed even under `force`, which costs nothing and is the whole point: the
+        # answer is what tells a forced re-bill of a current corpus apart from a corpus
+        # whose contracts had expired. Skipping the check would make the two identical.
+        current = _contract_matches(assessments.get(item.id), state[STATE_KEY], digest)
+        if current and not force:
             skipped_current += 1
             continue
         selected.append(item)
+        was_current.append(current)
+    cut = len(selected) if limit is None else min(limit, len(selected))
     return Selection(
-        items=tuple(selected if limit is None else selected[:limit]),
+        items=tuple(selected[:cut]),
         skipped_current=skipped_current,
         skipped_no_evidence=skipped_no_evidence,
+        forced=sum(was_current[:cut]),
+        remaining=len(selected) - cut,
     )
 
 
@@ -396,6 +429,29 @@ def _report_progress(on_progress: Callable[[int, int], None] | None, done: int, 
         )
 
 
+def _deliver_result(
+    on_result: Callable[[TopicAssessment], None] | None, assessment: TopicAssessment
+) -> None:
+    """Hand a stored record to the caller's checkpoint, and never let it fail the run.
+
+    Guarded exactly like `_report_progress`, for a stronger reason: this hook exists so an
+    interrupted run keeps what it has already paid for, and a checkpoint that threw would
+    discard the very record it was called to save. The record stays in `assessed` either
+    way — a broken checkpoint costs durability, never the result.
+    """
+    if on_result is None:
+        return
+    try:
+        on_result(assessment)
+    except Exception as exc:
+        logger.warning(
+            "on_result falló para %s (%s: %s); la evaluación continúa",
+            assessment.item_id,
+            type(exc).__name__,
+            exc,
+        )
+
+
 def run_assessments(
     items: list[Item],
     vocab: list[Topic],
@@ -405,6 +461,7 @@ def run_assessments(
     char_limit: int,
     concurrency: int,
     on_progress: Callable[[int, int], None] | None = None,
+    on_result: Callable[[TopicAssessment], None] | None = None,
 ) -> RunResult:
     """Ask about every item, `concurrency` at a time.
 
@@ -417,10 +474,16 @@ def run_assessments(
     where every item failed raises, so a dead key is an error and not an empty success; an
     empty `items` is simply an empty result and never reaches the client.
 
-    An interrupt is NOT survivable, by design. `KeyboardInterrupt` cancels every queued call
-    — every item is submitted up front, so a plain shutdown would drain the whole queue and
-    the operator's Ctrl-C would still pay the full bill — and then propagates, discarding the
-    records already collected. Checkpointing those is the CLI's job, not this function's.
+    An interrupt discards THIS FUNCTION'S collection, by design. `KeyboardInterrupt` cancels
+    every queued call — every item is submitted up front, so a plain shutdown would drain the
+    whole queue and the operator's Ctrl-C would still pay the full bill — and then propagates
+    without a `RunResult`.
+
+    What survives an interrupt is whatever `on_result` was already handed. Every successful
+    record is delivered to it the moment it is stored, in arrival order, so a caller that
+    checkpoints there keeps the work it has paid for; a caller that passes none keeps
+    nothing, which is the same bargain as before. Holding the records back to deliver them
+    sorted at the end would make the hook useless for the one event it exists for.
 
     `client.ask` is called from `concurrency` threads at once and must be safe to do so; see
     the `JevClient` protocol.
@@ -442,11 +505,16 @@ def run_assessments(
         for done, future in enumerate(as_completed(futures), start=1):
             item = futures[future]
             try:
-                assessed.append(future.result())
+                assessment = future.result()
             except JevError as exc:
                 failed.append((item.id, str(exc)))
             except Exception as exc:
                 failed.append((item.id, f"{type(exc).__name__}: {exc}"))
+            else:
+                # Stored first, delivered second: the checkpoint is told about a record
+                # that is already in `assessed`, never the other way round.
+                assessed.append(assessment)
+                _deliver_result(on_result, assessment)
             _report_progress(on_progress, done, len(items))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)

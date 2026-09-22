@@ -22,6 +22,7 @@ from xbrain.jev.assess import (
     topic_contract,
 )
 from xbrain.jev.client import ChoiceAnswer, ChoiceQuestion, JevError, NoulAnswer, NoulQuestion
+from xbrain.jev.models import TopicAssessment
 from xbrain.jev.questions import PRIMARY_KEY, build_topic_questions
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.verification import fingerprint_output
@@ -410,12 +411,59 @@ def test_select_items_skips_current_unless_forced_and_counts_what_it_skipped():
     # The counts are the whole point: a silent funnel (evidence regressed, everything skips)
     # would otherwise be indistinguishable from a clean "nothing to do".
     assert (picked.skipped_current, picked.skipped_no_evidence) == (1, 1)
+    assert (picked.forced, picked.remaining) == (0, 0)
     forced = select_items(store, assessments, vocab, ids=None, limit=None, force=True, **kw)
     assert [item.id for item in forced.items] == ["1", "2"]
     # `force` does NOT override the evidence skip — there is nothing to ask about.
     assert (forced.skipped_current, forced.skipped_no_evidence) == (0, 1)
+    # …and the item that WAS current is counted as forced rather than vanishing. Under
+    # `--force` `skipped_current` is structurally 0 — it means "we did not look", not
+    # "nothing was current" — so without this the operator cannot tell a full re-bill of a
+    # current corpus from a corpus whose contracts had genuinely expired.
+    assert forced.forced == 1
     limited = select_items(store, assessments, vocab, ids=None, limit=1, force=True, **kw)
     assert [item.id for item in limited.items] == ["1"]
+    # The backlog `--limit` left behind is the one skip that costs money later.
+    assert limited.remaining == 1
+
+
+def test_forced_and_remaining_describe_the_items_actually_selected():
+    """`forced` counts what will be RE-ASKED, so a forced item cut by `--limit` is not one.
+
+    Counting it would report a re-bill that never happens; `forced` is read as "you are
+    about to pay for these again", and it has to be true of the items in `items`.
+    """
+    vocab, store = _vocab(), _store()
+    kw = {"fallback": "otro", "char_limit": 100}
+    client = FakeJevClient()
+    assessments = {
+        item_id: assess_topics(store[item_id], _questions(), client, char_limit=100)
+        for item_id in ("1", "2")
+    }
+    both = select_items(store, assessments, vocab, ids=None, limit=None, force=True, **kw)
+    assert [item.id for item in both.items] == ["1", "2"]
+    assert (both.forced, both.remaining) == (2, 0)
+    cut = select_items(store, assessments, vocab, ids=None, limit=1, force=True, **kw)
+    assert [item.id for item in cut.items] == ["1"]
+    # Two were current; only the ONE that survived the limit is being re-asked.
+    assert (cut.forced, cut.remaining) == (1, 1)
+
+
+def test_the_counts_partition_every_candidate():
+    """items + vigentes + sin evidencia + fuera del límite == the whole candidate set.
+
+    The echo is the operator's only view of the funnel. If the four numbers do not add up
+    to the corpus, a regression that silently drops items reads as a smaller corpus.
+    """
+    vocab, store = _vocab(), _store()
+    kw = {"fallback": "otro", "char_limit": 100}
+    current = assess_topics(store["1"], _questions(), FakeJevClient(), char_limit=100)
+    for limit in (None, 1, 2, 50):
+        sel = select_items(store, {"1": current}, vocab, ids=None, limit=limit, force=False, **kw)
+        total = len(sel.items) + sel.skipped_current + sel.skipped_no_evidence + sel.remaining
+        assert total == len(store), (limit, sel)
+        # `forced` is a SUB-count of `items`, never a fourth bucket.
+        assert sel.forced <= len(sel.items)
 
 
 def test_select_items_honours_the_order_asked_and_dedupes_repeats():
@@ -597,10 +645,57 @@ def test_a_failing_progress_callback_never_costs_a_record(caplog):
     assert "head cerró el pipe" in caplog.text
 
 
+def test_on_result_receives_every_successful_record_as_it_lands():
+    """The checkpoint hook sees each record the moment it is stored, and ONLY the
+    successful ones: an item that failed produced nothing anybody could save."""
+    delivered: list[str] = []
+    result = run_assessments(
+        [_item("1"), _item("2", text="BOOM"), _item("3")],
+        _vocab(),
+        FakeJevClient(fail_when=lambda state: "BOOM" in state["post"]),
+        fallback="otro",
+        char_limit=100,
+        concurrency=4,
+        on_result=lambda assessment: delivered.append(assessment.item_id),
+    )
+    # Sorted: `as_completed` decides the arrival order, and the hook is deliberately fed in
+    # that order rather than held back to be sorted — a checkpoint that waited for the end
+    # would save nothing on the interrupt it exists for.
+    assert sorted(delivered) == ["1", "3"]
+    assert [assessment.item_id for assessment in result.assessed] == ["1", "3"]
+    assert [item_id for item_id, _ in result.failed] == ["2"]
+
+
+def test_a_failing_on_result_is_logged_and_never_loses_a_record(caplog):
+    """The hook exists so an interrupted run keeps what it already paid for. A checkpoint
+    that threw would discard the very record it was called to save."""
+
+    def _broken(assessment: TopicAssessment) -> None:
+        raise OSError("disco lleno")
+
+    with caplog.at_level(logging.WARNING, logger="xbrain.jev.assess"):
+        result = run_assessments(
+            [_item("1"), _item("2")],
+            _vocab(),
+            FakeJevClient(),
+            fallback="otro",
+            char_limit=100,
+            concurrency=2,
+            on_result=_broken,
+        )
+    assert [assessment.item_id for assessment in result.assessed] == ["1", "2"]
+    # The warning has to name WHAT broke, exactly as the progress guard does.
+    assert "OSError" in caplog.text
+    assert "disco lleno" in caplog.text
+
+
 def test_an_interrupt_cancels_the_queued_calls_instead_of_paying_for_them():
     """Every item is submitted up front, so a plain `shutdown(wait=True)` would drain the
     whole queue — the operator's Ctrl-C would not interrupt anything and the full bill would
-    still arrive. The records already collected ARE lost: that is what an interrupt means."""
+    still arrive. With no `on_result`, as here, the records already collected ARE lost:
+    `run_assessments` re-raises without a `RunResult`. That is a property of THIS call,
+    not of interrupts — keeping them is the caller's job, through the checkpoint hook.
+    See `test_jev_topics_checkpoints_what_it_paid_for_when_interrupted`."""
 
     class _Interrupting(FakeJevClient):
         def ask(self, state, questions):

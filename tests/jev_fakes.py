@@ -32,6 +32,13 @@ class FakeJevClient:
 
     `input_tokens`/`output_tokens` are configurable and may be `None`, because the real
     provider reports no usage sometimes and cost code must be able to meet that path.
+
+    `close()` is a no-op that sets `closed`, so a caller that builds a client and never
+    releases it is a test failure rather than a leaked pool nobody notices.
+
+    `interrupt_after=N` answers N calls and raises `KeyboardInterrupt` on the next one,
+    which is how a Ctrl-C part-way through a paid run is exercised. Use it with
+    `concurrency=1`, or which calls landed before the interrupt is up to the pool.
     """
 
     def __init__(
@@ -46,6 +53,7 @@ class FakeJevClient:
         input_tokens: int | None = 100,
         output_tokens: int | None = 10,
         fail_when: Callable[[dict[str, str]], bool] | None = None,
+        interrupt_after: int | None = None,
     ) -> None:
         self.nouls = dict(nouls or {})
         self.default_noul = default_noul
@@ -56,7 +64,9 @@ class FakeJevClient:
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.fail_when = fail_when
+        self.interrupt_after = interrupt_after
         self.calls: list[tuple[dict[str, str], dict[str, Question]]] = []
+        self.closed = False
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
         # Deep snapshots, not references: a caller that builds `questions` in a loop and
@@ -64,6 +74,11 @@ class FakeJevClient:
         # shallow copy still shares each question's `criteria`, so editing one in place
         # would rewrite history the log had already recorded.
         self.calls.append((copy.deepcopy(state), copy.deepcopy(questions)))
+        if self.interrupt_after is not None and len(self.calls) > self.interrupt_after:
+            # Counted off `calls`, which was just appended to, so call N+1 is the one that
+            # raises. `KeyboardInterrupt` is a BaseException: it travels out of the worker
+            # through `Future.result()` untouched, which is the whole point.
+            raise KeyboardInterrupt
         if not questions:
             raise JevError("Jev: llamada sin preguntas")
         if self.fail_when is not None and self.fail_when(state):
@@ -91,3 +106,12 @@ class FakeJevClient:
             input_tokens=self.input_tokens,
             output_tokens=self.output_tokens,
         )
+
+    def close(self) -> None:
+        """The protocol's `close`, as a no-op that REMEMBERS it was called.
+
+        A fake that simply did nothing would let a caller forgetting to release its client
+        pass every test: the leak is a socket, not a wrong answer. Recording it is what
+        makes "the CLI closes what it built" an assertable fact.
+        """
+        self.closed = True

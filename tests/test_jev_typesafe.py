@@ -281,12 +281,39 @@ def test_a_key_the_sdk_refuses_fails_as_a_jev_error(monkeypatch):
     assert isinstance(excinfo.value.__cause__, TypeSafeError)
 
 
-def test_close_and_the_context_manager_close_the_client_we_own(monkeypatch):
+def test_close_closes_the_client_we_own(monkeypatch):
     monkeypatch.setattr("xbrain.jev.typesafe.TypeSafeClient", _RecordingSdkClient)
-    with TypeSafeJevClient(api_key="k", model="m") as client:
-        owned = client._client
-        assert owned.closed is False
+    client = TypeSafeJevClient(api_key="k", model="m")
+    owned = client._client
+    assert owned.closed is False
+    client.close()
     assert owned.closed is True
+
+
+def test_close_converts_an_sdk_failure_into_a_jev_error(monkeypatch):
+    """The module docstring promises every SDK exception becomes a `JevError`, and `close`
+    is no exception to that — a vendor type escaping here would reach a `finally` in the CLI
+    and, unguarded, replace the outcome of a run that has already been paid for."""
+
+    class _ExplodingSdkClient(_RecordingSdkClient):
+        def close(self):
+            raise TypeSafeError("transport teardown: connection reset by peer")
+
+    monkeypatch.setattr("xbrain.jev.typesafe.TypeSafeClient", _ExplodingSdkClient)
+    client = TypeSafeJevClient(api_key="k", model="m")
+    with pytest.raises(JevError, match="transport teardown") as excinfo:
+        client.close()
+    assert isinstance(excinfo.value.__cause__, TypeSafeError)
+
+
+def test_close_is_idempotent_so_a_second_release_is_not_a_second_failure(monkeypatch):
+    """The Protocol says idempotent. The CLI releases in a `finally` that can run after an
+    earlier release on the interrupt path, and a double close must not become an error."""
+    monkeypatch.setattr("xbrain.jev.typesafe.TypeSafeClient", _RecordingSdkClient)
+    client = TypeSafeJevClient(api_key="k", model="m")
+    client.close()
+    client.close()
+    assert client._client.closed is True
 
 
 def test_close_leaves_an_injected_client_alone():
