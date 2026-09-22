@@ -11,6 +11,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,11 +49,23 @@ from xbrain.fetch import (
 )
 from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
-from xbrain.jev.assess import RunResult, Selection, run_assessments, select_items
+from xbrain.jev.assess import (
+    RunResult,
+    Selection,
+    current_pairs,
+    run_assessments,
+    select_items,
+)
 from xbrain.jev.client import JevClient, JevError
-from xbrain.jev.defaults import input_cost_usd, input_tokens_total, unpriced_providers
+from xbrain.jev.defaults import (
+    input_cost_usd,
+    input_tokens_total,
+    jev_cost_fragment,
+    plural,
+    unpriced_providers,
+)
 from xbrain.jev.env import typesafe_api_key
-from xbrain.jev.report import build_report, current_assessments, write_reports
+from xbrain.jev.report import build_report, cost_fragment, write_reports
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -2661,45 +2674,24 @@ def _jev_client(cfg: Config) -> JevClient:
     return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
 
 
-def _n(count: int, singular: str, plural: str) -> str:
-    """`count` with its noun agreed. Spanish agrees at 1 ONLY — "0 evaluaciones" is plural.
-
-    One helper rather than a conditional per string: the count-bearing strings in this
-    command are operator-facing Spanish, and "1 evaluaciones guardadas" in the line that
-    reports what a run cost reads as a bug in the counting, not in the grammar.
-    """
-    return f"{count} {singular if count == 1 else plural}"
-
-
 def _jev_cost_line(assessments: tuple[TopicAssessment, ...]) -> str:
     """`N tokens de entrada (+K sin recuento) (~X $ · proveedor sin tarifa: …)`.
 
     A tuple, not an iterable: the three `jev.defaults` helpers each walk `assessments`, so a
     one-shot generator would be exhausted after the first and price the run at zero.
 
-    Every number here comes from `jev.defaults`, which is the ONE place a Jev run is priced —
-    `jev topics` and `jev summarize` report the same bill, and a formula inlined at each call
-    site is two definitions of it.
+    Every number here comes from `jev.defaults`, which is the ONE place a Jev run is priced,
+    and so does the SENTENCE — `jev topics`, `jev report` and `topics-report.md` quote the
+    same bill, and a fragment formatted at each call site is three definitions of it (it
+    printed `~0.000 $` here and `~0.0001 $` there for the same side-car).
 
-    The two parenthetical markers exist because a bare `~0.000 $` cannot say which zero it
-    is. A record whose provider reported no usage (`input_tokens is None`, a documented real
-    behaviour) contributes nothing it can prove, so without `(+K sin recuento)` a fully paid
-    run reports itself as free. A provider absent from the price table contributes 0.0 rather
-    than borrowing another vendor's rate — an invented rate reads as a bill, and that is the
-    worse error — so it is NAMED instead of being left to the number.
+    Why the fragment carries its two parenthetical markers is argued in
+    `jev_cost_fragment` itself; this function's only job is to hand it the three numbers.
     """
     tokens, unknown = input_tokens_total(assessments)
-    line = _n(tokens, "token de entrada", "tokens de entrada")
-    if unknown:
-        line += f" (+{unknown} sin recuento)"
-    cost = f"~{input_cost_usd(assessments):.3f} $"
-    unpriced = unpriced_providers(assessments)
-    if unpriced:
-        # Named, not counted: "proveedor sin tarifa: fake" answers which zero this is, and
-        # the list is already the count. Same shape as `modelo(s)` in the summary.
-        noun = "proveedor sin tarifa" if len(unpriced) == 1 else "proveedores sin tarifa"
-        cost += f" · {noun}: {', '.join(unpriced)}"
-    return f"{line} ({cost})"
+    return jev_cost_fragment(
+        tokens, unknown, input_cost_usd(assessments), unpriced_providers(assessments)
+    )
 
 
 def _jev_selection_line(selection: Selection, stored: int) -> str:
@@ -2711,17 +2703,17 @@ def _jev_selection_line(selection: Selection, stored: int) -> str:
     costs nothing and keeps the common line short. All-zero means the corpus is empty, which
     is its own answer.
     """
-    segments = [_n(len(selection.items), "item por evaluar", "items por evaluar")]
+    segments = [plural(len(selection.items), "item por evaluar", "items por evaluar")]
     if selection.skipped_current:
-        segments.append(_n(selection.skipped_current, "vigente", "vigentes"))
+        segments.append(plural(selection.skipped_current, "vigente", "vigentes"))
     if selection.skipped_no_evidence:
         segments.append(f"{selection.skipped_no_evidence} sin evidencia")
     if selection.forced:
         # Current, and being re-asked anyway. This is the re-bill, announced BEFORE it happens.
-        segments.append(_n(selection.forced, "forzado", "forzados"))
+        segments.append(plural(selection.forced, "forzado", "forzados"))
     if selection.remaining:
         segments.append(f"{selection.remaining} fuera del límite")
-    stored_text = _n(stored, "evaluación guardada", "evaluaciones guardadas")
+    stored_text = plural(stored, "evaluación guardada", "evaluaciones guardadas")
     return f"{' · '.join(segments)} ({stored_text})"
 
 
@@ -2735,8 +2727,8 @@ def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
     """
     models = sorted({assessment.model for assessment in result.assessed})
     typer.echo(
-        f"{_n(len(result.assessed), 'evaluada', 'evaluadas')} · "
-        f"{_n(len(result.failed), 'fallida', 'fallidas')} · "
+        f"{plural(len(result.assessed), 'evaluada', 'evaluadas')} · "
+        f"{plural(len(result.failed), 'fallida', 'fallidas')} · "
         f"{_jev_cost_line(result.assessed)} · "
         f"{'modelo' if len(models) == 1 else 'modelos'} {', '.join(models)} → {topics_path}"
     )
@@ -2745,7 +2737,7 @@ def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
     if len(result.failed) > _JEV_FAILURES_SHOWN:
         remaining = len(result.failed) - _JEV_FAILURES_SHOWN
         # The eleventh failure of eleven is "1 fallo más", not "1 fallos más".
-        typer.echo(f"  … y {_n(remaining, 'fallo', 'fallos')} más", err=True)
+        typer.echo(f"  … y {plural(remaining, 'fallo', 'fallos')} más", err=True)
 
 
 def _save_jev_sidecar(assessments: dict[str, TopicAssessment], path: Path, *, paid: int) -> None:
@@ -2759,7 +2751,7 @@ def _save_jev_sidecar(assessments: dict[str, TopicAssessment], path: Path, *, pa
     try:
         save_assessments(assessments, path)
     except OSError as exc:
-        lost = _n(paid, "evaluación pagada", "evaluaciones pagadas")
+        lost = plural(paid, "evaluación pagada", "evaluaciones pagadas")
         raise JevError(f"no se pudo guardar {path} ({lost} sin guardar): {exc}") from exc
 
 
@@ -2880,9 +2872,9 @@ def jev_topics_cmd(
             typer.echo("Interrumpido: nada nuevo que guardar", err=True)
         else:
             kind = (
-                _n(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
+                plural(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
                 if force
-                else _n(len(banked), "evaluación nueva", "evaluaciones nuevas")
+                else plural(len(banked), "evaluación nueva", "evaluaciones nuevas")
             )
             typer.echo(
                 f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
@@ -2909,48 +2901,139 @@ def jev_topics_cmd(
         _release_jev_client(client)
 
 
-def _jev_pairs(
-    cfg: Config,
-) -> tuple[dict[str, Item], list[Topic], list[tuple[Item, TopicAssessment]]]:
-    """Store, vocabulary and the CURRENT (item, assessment) pairs — shared by report + dashboard.
+@dataclass(frozen=True)
+class JevPairs:
+    """Everything a reader of the side-car needs, loaded once and counted.
 
-    ONE loader for both readers of the side-car. The report and the dashboard must never
-    disagree about which stored assessments are still current, and two call sites each
-    opening the three files their own way is exactly how they would: `current_assessments`
-    decides currency from the vocabulary and the fallback, so a reader that loaded a
-    different `vocab.yaml` would silently compare a different set.
+    `assessments` is the RAW side-car and `pairs` the current subset, with `stale` and
+    `orphans` accounting for the difference: `len(assessments) == len(pairs) + stale +
+    orphans`. Returning only `pairs` — as this loader first did — throws away the one number
+    that distinguishes "nobody has run `xbrain jev topics`" from "a vocabulary edit just
+    retired every paid record in the corpus", and those two readings differ by the price of
+    re-assessing ~3,000 posts.
+    """
+
+    store: dict[str, Item]
+    vocab: list[Topic]
+    assessments: dict[str, TopicAssessment]
+    pairs: list[tuple[Item, TopicAssessment]]
+    stale: int
+    orphans: int
+
+
+def _jev_pairs(cfg: Config) -> JevPairs:
+    """Store, vocabulary and the CURRENT (item, assessment) pairs, with the drop counts.
+
+    ONE loader for every reader of the side-car (today `jev report`; the dashboard next). They
+    must never disagree about which stored assessments are still current, and two call sites
+    each opening the three files their own way is exactly how they would: `assess.current_pairs`
+    decides currency from the vocabulary and the fallback, so a reader that loaded a different
+    `vocab.yaml` would silently compare a different set.
+
+    It LOADS and COUNTS; it does not judge. Whether an empty result is an error belongs to the
+    command (`_refuse_empty_report`), because a dashboard may legitimately want to render the
+    empty state that `jev report` refuses to write.
+
+    THE ONE EXCEPTION is an empty vocabulary, and it is not a judgement: there is nothing to
+    compare WITH, so no comparison is attempted and `stale`/`orphans` stay 0 because nothing
+    was examined. Calling `current_pairs` here would raise out of `build_topic_questions` with
+    a message about running `xbrain vocab` "antes de `xbrain jev topics`" — the wrong command
+    for this caller, and silent about the report it did not overwrite. A reader that finds an
+    empty `vocab` must say so itself rather than read the two zeros as "nothing was dropped".
     """
     store = load_store(cfg.items_path)
     vocab = load_vocab(cfg.data_dir / "vocab.yaml")
     assessments = load_assessments(cfg.jev_topics_path)
-    pairs = current_assessments(
+    if not vocab:
+        return JevPairs(
+            store=store, vocab=vocab, assessments=assessments, pairs=[], stale=0, orphans=0
+        )
+    current = current_pairs(
         list(store.values()),
         assessments,
         vocab,
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
     )
-    return store, vocab, pairs
-
-
-def _jev_report_line(summary: dict[str, Any], threshold: float) -> str:
-    """What the comparison found, in one line — the same numbers the two files carry.
-
-    The cost is a RECAP of work already paid for by `jev topics`, not a new bill, and it
-    carries the same unpriced-provider marker for the same reason `_jev_cost_line` does: a
-    bare `~0.0 $` cannot say whether the run was free or whether nobody prices that judge.
-    """
-    line = (
-        f"Umbral {threshold} · "
-        f"{_n(summary['items_assessed'], 'item evaluado', 'items evaluados')} · "
-        f"enrich respaldado {summary['enrich_backed_pct']} % · "
-        f"Jev respaldado {summary['jev_backed_pct']} % · "
-        f"dudosas {summary['doubtful_pairs']} · faltan {summary['missing_pairs']} · "
-        f"primario coincide {summary['primary_agree_pct']} % · ~{summary['cost_usd']} $"
+    return JevPairs(
+        store=store,
+        vocab=vocab,
+        assessments=assessments,
+        pairs=list(current.pairs),
+        stale=current.stale,
+        orphans=current.orphans,
     )
-    if summary["unpriced_providers"]:
-        line += f" · sin tarifa: {', '.join(summary['unpriced_providers'])}"
-    return line
+
+
+def _refuse_empty_report(jev: JevPairs, cfg: Config) -> None:
+    """Refuse BEFORE writing when there is nothing to compare, NAMING the missing input.
+
+    A report over nothing is not a report of zero — it is a plausible-looking file of zeros
+    written over the last good one, atomically. `data/` is gitignored, the side-car is not
+    snapshotted and it costs money to regenerate, so there is no copy to fall back to.
+
+    The empty-vocabulary case is the sharpest: `build_topic_questions` refuses an empty
+    vocabulary loudly, but only from inside the comparison loop — with an empty side-car the
+    loop never runs, so the behaviour used to FLIP on the contents of an unrelated file. The
+    silent branch was the one where the operator had no other signal.
+
+    Each message names the file and the command that fixes it, and says the previous report
+    was left alone — the operator's next question after "why did it stop" is "did it eat my
+    report".
+    """
+    kept = f"No se sobrescribe {cfg.jev_dir / 'topics-report.json'}"
+    if not jev.vocab:
+        raise JevError(
+            f"el vocabulario está vacío o falta {cfg.data_dir / 'vocab.yaml'}: "
+            f"ejecuta `xbrain vocab`. {kept}"
+        )
+    if not jev.store:
+        raise JevError(
+            f"no hay items que comparar en {cfg.items_path}: ejecuta `xbrain extract`. {kept}"
+        )
+    if not jev.assessments:
+        raise JevError(
+            f"no hay evaluaciones guardadas en {cfg.jev_topics_path}: "
+            f"ejecuta `xbrain jev topics`. {kept}"
+        )
+    if not jev.pairs:
+        raise JevError(
+            f"0 evaluaciones vigentes de {len(jev.assessments)} guardadas "
+            f"({jev.stale} caducadas, {jev.orphans} huérfanas): ejecuta `xbrain jev topics` "
+            f"(o revisa {cfg.data_dir / 'vocab.yaml'} si acabas de cambiarlo). {kept}"
+        )
+
+
+def _jev_report_line(summary: dict[str, Any]) -> str:
+    """What the comparison found, in one line — every number read from the summary.
+
+    The threshold is read from the summary too, not taken as a second argument: it is the one
+    number the line could otherwise print differently from the two files it announces.
+
+    It carries what the markdown headline carries, because this is the surface the operator
+    actually reads: how much of the side-car is current (`caducadas` — see `JevPairs`), how
+    much was comparable, `sin juzgar` next to `dudosas` (without it, `enrich respaldado 50 %`
+    beside `dudosas 0` is a riddle rather than a summary), and the shared cost fragment with
+    BOTH of its markers.
+
+    `dudosas` / `candidatas` are nouns on purpose: `faltan 1` does not agree, and this file
+    pluralises everything else by hand.
+    """
+    segments = [
+        f"Umbral {summary['threshold']}",
+        f"{plural(summary['assessments_stale'], 'caducada', 'caducadas')}",
+        f"items comparados {summary['items_compared']}/{summary['items_assessed']}",
+        f"enrich respaldado {summary['enrich_backed_pct']} %",
+        f"Jev respaldado {summary['jev_backed_pct']} %",
+        f"dudosas {summary['doubtful_pairs']}",
+        f"sin juzgar {summary['assigned_unjudged']}",
+        f"candidatas {summary['missing_pairs']}",
+        f"primario coincide {summary['primary_agree_pct']} %",
+        cost_fragment(summary),
+    ]
+    if summary["assessments_orphaned"]:
+        segments.insert(2, plural(summary["assessments_orphaned"], "huérfana", "huérfanas"))
+    return " · ".join(segments)
 
 
 @jev_app.command("report")
@@ -2970,16 +3053,22 @@ def jev_report_cmd(
     cfg = _config()
     t = cfg.jev_threshold if threshold is None else threshold
     if not 0.0 <= t <= 1.0:
-        # Refused BEFORE anything is written. A threshold outside [0, 1] produces a report
-        # where nothing is ever backed and nothing is ever missing — a plausible-looking
-        # file that is pure noise, and one that would overwrite the last good one.
+        # Refused BEFORE anything is written, and BOTH bounds earn their place. Above 1.0
+        # nothing is ever backed and every assignment is doubtful; below 0.0 the failure is
+        # the exact opposite — `noul >= t` holds for every pair, so EVERYTHING is backed and
+        # every topic Jev was asked about becomes a missing candidate, a report that reads as
+        # near-perfect agreement. Either way it is a plausible-looking file of pure noise,
+        # written over the last good one. `nan` fails the chain and is refused here too.
         raise ValueError("--threshold debe estar en [0.0, 1.0]")
-    store, vocab, pairs = _jev_pairs(cfg)
+    jev = _jev_pairs(cfg)
+    _refuse_empty_report(jev, cfg)
     # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
     # carry the rows, and a second pass would be a second place the threshold has to match.
-    summary, comparisons = build_report(pairs, vocab, t)
-    json_path, md_path = write_reports(summary, comparisons, store, cfg.jev_dir)
-    typer.echo(_jev_report_line(summary, t))
+    summary, comparisons = build_report(
+        jev.pairs, jev.vocab, t, stale=jev.stale, orphans=jev.orphans
+    )
+    json_path, md_path = write_reports(summary, comparisons, jev.store, cfg.jev_dir)
+    typer.echo(_jev_report_line(summary))
     typer.echo(f"→ {md_path}\n→ {json_path}")
 
 

@@ -6,9 +6,14 @@ because each file stays internally consistent. Consumers read `cfg.jev_*` and ne
 re-declare one.
 
 The pricing helpers live here for the same reason. `xbrain jev topics` reports what a run
-cost and `xbrain jev summarize` reports it again; a formula inlined at each call site is two
+cost and `xbrain jev report` reports it again; a formula inlined at each call site is two
 definitions of the bill, and the one that drifts is the one nobody re-derives. Every consumer
 calls these — none re-implements `tokens / 1e6 * rate`.
+
+The RENDERING lives here too, for the third time the same argument: `jev_cost_fragment` is the
+one Spanish sentence that quotes a bill. Three call sites used to format it themselves and
+printed the same side-car as `~0.000 $` and `~0.0001 $`, with the unpriced marker worded two
+ways — a recap that disagrees with the bill it recaps.
 """
 
 from __future__ import annotations
@@ -74,9 +79,14 @@ def input_cost_usd(assessments: Iterable[TopicAssessment]) -> float:
     `[jev].model` defaults to a moving alias, and records without a token count contribute
     nothing they cannot prove (see `input_tokens_total`).
     """
-    return sum(
-        (assessment.input_tokens or 0) / 1e6 * INPUT_USD_PER_MTOK.get(assessment.provider, 0.0)
-        for assessment in assessments
+    # `float(...)`: `sum()` over an empty iterable returns `int 0`, and a function annotated
+    # `-> float` that sometimes returns an int makes every caller remember the cast — or ship a
+    # JSON key whose type changes with the contents of the side-car.
+    return float(
+        sum(
+            (assessment.input_tokens or 0) / 1e6 * INPUT_USD_PER_MTOK.get(assessment.provider, 0.0)
+            for assessment in assessments
+        )
     )
 
 
@@ -87,3 +97,46 @@ def unpriced_providers(assessments: Iterable[TopicAssessment]) -> tuple[str, ...
     what turns a bare `~0.000 $` into "0.000 because nobody prices this judge".
     """
     return tuple(sorted({a.provider for a in assessments if a.provider not in INPUT_USD_PER_MTOK}))
+
+
+def plural(count: int, singular: str, plural: str) -> str:
+    """`count` with its noun agreed. Spanish agrees at 1 ONLY — "0 evaluaciones" is plural.
+
+    One helper rather than a conditional per string: the count-bearing strings in this package
+    are operator-facing Spanish, and "1 evaluaciones guardadas" in the line that reports what a
+    run cost reads as a bug in the counting, not in the grammar.
+
+    It lives HERE rather than in `cli.py` because the markdown report needs the same rule and
+    must not import the CLI; a second copy is a second rule, and the one that drifts is the one
+    nobody re-reads.
+    """
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def jev_cost_fragment(tokens: int, unknown: int, cost_usd: float, unpriced: Iterable[str]) -> str:
+    """`N tokens de entrada (+K sin recuento) (~X $ · proveedor sin tarifa: a, b)`.
+
+    THE ONE SENTENCE THAT QUOTES A BILL. `xbrain jev topics` reports what a run cost, and
+    `xbrain jev report` and `topics-report.md` recap the same side-car; a recap that prints a
+    different figure from the bill it recaps is the one thing a recap must not do. Formatting
+    it at each call site produced exactly that — `~0.000 $` against `~0.0001 $` for one run.
+
+    FOUR decimals, never three. At `0.042 $/MTok` a whole corpus costs under `0.50 $`, so three
+    decimals round most real runs to `~0.000 $`: a bill that reports itself as free.
+
+    The two parenthetical markers exist because a bare `~0.0000 $` cannot say which zero it is.
+    A record whose provider reported no usage (`input_tokens is None`, a documented real
+    behaviour) contributes nothing it can prove, so without `(+K sin recuento)` a fully paid run
+    reports itself as free. A provider absent from the price table contributes 0.0 rather than
+    borrowing another vendor's rate — an invented rate reads as a bill, and that is the worse
+    error — so it is NAMED, not counted.
+    """
+    line = plural(tokens, "token de entrada", "tokens de entrada")
+    if unknown:
+        line += f" (+{unknown} sin recuento)"
+    cost = f"~{cost_usd:.4f} $"
+    names = list(unpriced)
+    if names:
+        noun = "proveedor sin tarifa" if len(names) == 1 else "proveedores sin tarifa"
+        cost += f" · {noun}: {', '.join(names)}"
+    return f"{line} ({cost})"

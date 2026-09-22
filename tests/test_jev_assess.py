@@ -9,12 +9,14 @@ import pytest
 
 from tests.jev_fakes import FakeJevClient
 from xbrain.evidence import evidence_surfaces
+from xbrain.jev import assess as assess_module
 from xbrain.jev.assess import (
     RunResult,
     Selection,
     assess_topics,
     assessment_is_current,
     build_topic_state,
+    current_pairs,
     parse_topic_result,
     questions_digest,
     run_assessments,
@@ -384,6 +386,77 @@ def test_a_truncated_item_stays_current_until_the_window_changes():
     # A different window is a different ask, in BOTH directions.
     assert not assessment_is_current(assessment, item, vocab, fallback="otro", char_limit=10)
     assert not assessment_is_current(assessment, item, vocab, fallback="otro", char_limit=100_000)
+
+
+def test_current_pairs_partitions_the_side_car_into_current_stale_and_orphans():
+    """Every stored record ends in exactly one place, and the two that are DROPPED are COUNTED.
+
+    A drop with no counter is the failure `Selection` already refuses in as many words: after a
+    vocabulary edit a full side-car and a side-car nobody ever wrote produce the same `0`, and
+    the operator re-pays for the whole corpus to find out which one it was.
+    """
+    fresh, retired = _item("1"), _item("2", text="Fundraising tips")
+    gone = _item("9", text="Un item que ya no está en el store")
+    current = assess_topics(fresh, _questions(), FakeJevClient(), char_limit=100)
+    stale = assess_topics(retired, _questions(), FakeJevClient(), char_limit=100).model_copy(
+        update={"contract": "f" * 64}
+    )
+    orphan = assess_topics(gone, _questions(), FakeJevClient(), char_limit=100)
+
+    result = current_pairs(
+        [fresh, retired],
+        {"1": current, "2": stale, "9": orphan},
+        _vocab(),
+        fallback="otro",
+        char_limit=100,
+    )
+
+    assert result.pairs == ((fresh, current),)
+    assert result.stale == 1
+    assert result.orphans == 1
+    # THE THREE PARTITION THE SIDE-CAR: no stored record can go missing without a counter.
+    assert len(result.pairs) + result.stale + result.orphans == 3
+
+
+def test_current_pairs_builds_the_questions_digest_once_for_the_whole_side_car(monkeypatch):
+    """The digest does not depend on the item, and `select_items` hoists it for this reason.
+
+    Per item it is a vocabulary validation, a canonical JSON dump and a sha256 — thousands of
+    identical ones on the live corpus, in a command that is meant to be a cheap read.
+    """
+    items = [_item(str(i), text=f"post {i}") for i in range(1, 6)]
+    assessments = {
+        item.id: assess_topics(item, _questions(), FakeJevClient(), char_limit=100)
+        for item in items
+    }
+    calls: list[int] = []
+    real = assess_module.questions_digest
+
+    def _counting(questions):
+        calls.append(1)
+        return real(questions)
+
+    # Patched AFTER the fixtures are built, so only the call under test is counted.
+    monkeypatch.setattr(assess_module, "questions_digest", _counting)
+
+    result = current_pairs(items, assessments, _vocab(), fallback="otro", char_limit=100)
+
+    assert len(result.pairs) == 5
+    assert calls == [1]
+
+
+def test_current_pairs_and_assessment_is_current_are_one_definition():
+    """Two ways to ask the same question must never answer differently: `current_pairs` is
+    what the report uses and `assessment_is_current` is the public predicate."""
+    item, vocab = _item(), _vocab()
+    assessment = assess_topics(item, _questions(), FakeJevClient(), char_limit=100)
+    kw = {"fallback": "otro", "char_limit": 100}
+    changed = [Topic(slug="ai-coding", description="Otra descripción."), vocab[1]]
+
+    assert current_pairs([item], {"1": assessment}, vocab, **kw).pairs == ((item, assessment),)
+    assert assessment_is_current(assessment, item, vocab, **kw)
+    assert current_pairs([item], {"1": assessment}, changed, **kw).pairs == ()
+    assert not assessment_is_current(assessment, item, changed, **kw)
 
 
 # --------------------------------------------------------------------------- select_items

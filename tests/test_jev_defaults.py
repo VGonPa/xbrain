@@ -5,6 +5,8 @@ from xbrain.jev.defaults import (
     INPUT_USD_PER_MTOK,
     input_cost_usd,
     input_tokens_total,
+    jev_cost_fragment,
+    plural,
     unpriced_providers,
 )
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
@@ -84,3 +86,43 @@ def test_an_empty_run_is_zero_of_everything():
     assert input_cost_usd([]) == 0.0
     assert input_tokens_total([]) == (0, 0)
     assert unpriced_providers([]) == ()
+
+
+# ------------------------------------------------------- the one Spanish cost fragment
+
+
+def test_plural_agrees_at_one_only():
+    """Spanish agrees at 1 ONLY. "1 evaluaciones" reads as a bug in the counting."""
+    assert plural(0, "evaluación", "evaluaciones") == "0 evaluaciones"
+    assert plural(1, "evaluación", "evaluaciones") == "1 evaluación"
+    assert plural(2, "evaluación", "evaluaciones") == "2 evaluaciones"
+
+
+def test_the_cost_fragment_prints_four_decimals_so_a_real_bill_is_never_rounded_away():
+    """At 0.042 $/MTok a whole corpus costs under 0.50 $, so three decimals round most real
+    runs to `~0.000 $` — a bill that reports itself as free."""
+    assert jev_cost_fragment(1_500, 0, 0.0001, ()) == "1500 tokens de entrada (~0.0001 $)"
+    assert jev_cost_fragment(12_000_000, 0, 0.504, ()) == "12000000 tokens de entrada (~0.5040 $)"
+
+
+def test_the_cost_fragment_names_both_kinds_of_zero():
+    """`~0.0000 $` alone cannot say WHICH zero it is: nothing was reported, or nobody prices
+    the judge. Each marker appears only when it has something to say."""
+    assert jev_cost_fragment(0, 2, 0.0, ()) == "0 tokens de entrada (+2 sin recuento) (~0.0000 $)"
+    assert (
+        jev_cost_fragment(10, 0, 0.0, ("fake",))
+        == "10 tokens de entrada (~0.0000 $ · proveedor sin tarifa: fake)"
+    )
+    assert (
+        jev_cost_fragment(10, 0, 0.0, ("a", "b"))
+        == "10 tokens de entrada (~0.0000 $ · proveedores sin tarifa: a, b)"
+    )
+    # One token is one token.
+    assert jev_cost_fragment(1, 0, 0.0, ()) == "1 token de entrada (~0.0000 $)"
+
+
+def test_input_cost_is_a_float_even_when_there_is_nothing_to_price():
+    """`sum()` over an empty iterable returns `int 0`, so the annotation would be a lie and
+    every caller would have to remember the cast."""
+    assert isinstance(input_cost_usd([]), float)
+    assert input_cost_usd([]) == 0.0

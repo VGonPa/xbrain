@@ -1,16 +1,25 @@
 """Compare Jev's membership probabilities with the pipeline's `enrich` assignment at a
 threshold.
 
-Pure functions over the store and the side-car; the CLI and the dashboard both read through
-here so the two never disagree on a number. NOTHING in this module asks Jev anything or
-writes `items.json` — it only reads what the side-car already paid for.
+Pure functions over the store and the side-car. `xbrain jev report` reads through here, and
+Task 5's dashboard will, so the two can never disagree on a number. NOTHING in this module asks
+Jev anything or writes `items.json` — it only reads what the side-car already paid for.
 
-TWO THINGS ARE DELIBERATELY NOT RE-IMPLEMENTED HERE. Currency is `assess.assessment_is_current`
-alone (state + questions); `TopicAssessment.output_fingerprint` records which enrich assignment
-existed AT ASK TIME and is informational — comparing it would retire an assessment the moment
-the item was re-enriched, which is the one event this report exists to look at. And the bill is
-`defaults.input_cost_usd`: `jev topics` and this report must quote the same number, and a
-formula inlined at each call site is two definitions of it.
+THREE THINGS ARE DELIBERATELY NOT RE-IMPLEMENTED HERE.
+
+* Currency is `assess.current_pairs` alone (state + questions, digest hoisted once).
+  `TopicAssessment.output_fingerprint` records which enrich assignment existed AT ASK TIME and
+  is informational — comparing it would retire an assessment the moment the item was
+  re-enriched, which is the one event this report exists to look at.
+* The bill is `defaults.input_cost_usd`, and the SENTENCE that quotes it is
+  `defaults.jev_cost_fragment`: `jev topics` and this report must quote the same number in the
+  same words, and a formula or a format inlined at each call site is two definitions of it.
+* Spanish agreement is `defaults.plural`. "1 filas más" reads as a bug in the counting.
+
+NOTHING IS DROPPED WITHOUT A COUNTER. Stale and orphaned side-car records are excluded from the
+comparison and COUNTED in the summary (`assessments_stale`, `assessments_orphaned`): a full
+side-car retired by a vocabulary edit must never render identically to a side-car nobody ever
+wrote, because the second reading sends an operator to re-pay for the whole corpus.
 """
 
 from __future__ import annotations
@@ -23,15 +32,85 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from xbrain.jev.assess import assessment_is_current
-from xbrain.jev.defaults import input_cost_usd, input_tokens_total, unpriced_providers
+from xbrain.jev.assess import current_pairs
+from xbrain.jev.defaults import (
+    input_cost_usd,
+    input_tokens_total,
+    jev_cost_fragment,
+    plural,
+    unpriced_providers,
+)
 from xbrain.jev.models import TopicAssessment
-from xbrain.models import Item, Topic
+from xbrain.models import Item, Topic, _require_utc_aware
 from xbrain.store import _atomic_write
 
 #: `ItemComparison` fields holding `Pair` tuples. They are rendered by hand in the JSON
-#: record (item id dropped — it is the record's own key), so `asdict` must not emit them.
+#: record (item id dropped — the record already carries it as a field), so `asdict` must
+#: not emit them.
 _PAIR_FIELDS = frozenset({"doubtful", "missing"})
+
+#: Summary keys whose value MOVES when the threshold moves. Task 5's dashboard has a
+#: threshold slider and recomputes these client-side; everything else it may keep from the
+#: server-side summary. Without the split it has to guess, and a key it guesses wrong is a
+#: number on screen that the report would not print.
+#:
+#: `threshold` itself is in here: it IS the parameter, so a page showing another one has
+#: moved it. `assigned_pairs` and `assigned_unjudged` are NOT: what enrich assigned, and
+#: which of those slugs Jev was never asked about, are facts about the stored records.
+THRESHOLD_DEPENDENT_KEYS: frozenset[str] = frozenset(
+    {
+        "threshold",
+        "assigned_backed",
+        "enrich_backed_pct",
+        "jev_pairs",
+        "jev_backed",
+        "jev_backed_pct",
+        "doubtful_pairs",
+        "missing_pairs",
+        "per_topic",
+    }
+)
+
+#: The complement: every other summary key, unchanged by the slider. Exported rather than
+#: derived by the consumer so `THRESHOLD_DEPENDENT_KEYS | THRESHOLD_FREE_KEYS` can be
+#: asserted against `_summarize`'s actual output — a new key that lands in neither set is a
+#: red test here instead of a silent omission in the dashboard.
+THRESHOLD_FREE_KEYS: frozenset[str] = frozenset(
+    {
+        "generated_at",
+        "items_assessed",
+        "items_compared",
+        "assessments_stored",
+        "assessments_stale",
+        "assessments_orphaned",
+        "models",
+        "providers",
+        "truncated",
+        "input_tokens",
+        "input_tokens_unknown",
+        "cost_usd",
+        "unpriced_providers",
+        "assigned_pairs",
+        "assigned_unjudged",
+        "primary_agree",
+        "primary_agree_pct",
+        "primary_fallback",
+        "primary_unjudged",
+        "primary_unranked",
+    }
+)
+
+#: Why a primary does not coincide, in CLASSIFICATION PRIORITY order — the first that
+#: applies wins, so the five sections partition the non-agreeing comparisons. The enrich-side
+#: facts come first because they are the ones an operator acts on (re-enrich, or put the slug
+#: back in `vocab.yaml`); Jev's own answer next; the provider's omission last.
+_PRIMARY_REASONS: tuple[tuple[str, str], ...] = (
+    ("sin_primario", "Sin primario en enrich"),
+    ("sin_juzgar", "Primario sin juzgar (salió del vocabulario)"),
+    ("fallback", "Jev eligió el fallback"),
+    ("sin_rango", "Primario ausente de la distribución de Jev"),
+    ("desacuerdo", "Desacuerdo real"),
+)
 
 
 @dataclass(frozen=True)
@@ -90,9 +169,32 @@ class ItemComparison:
         """
         return self.primary_topic is not None and self.jev_primary == self.primary_topic
 
+    @property
+    def primary_unranked(self) -> bool:
+        """Jev was asked about enrich's primary, and then left it out of its own distribution.
+
+        `PrimaryChoice` deliberately does not enforce full coverage of the option set ("read a
+        option's probability with `.get(option, 0.0)`"), so a provider may score a slug in
+        `membership` and omit it from the Choice. `primary_rank` is `None` for that item — the
+        same `—` it renders for "no primary at all" and for `primary_unjudged` — which makes the
+        one case where Jev DEMONSTRABLY never considered the topic indistinguishable from the
+        two where it was never asked. This is the third state, named, so it gets a bucket
+        instead of quietly depressing the agreement rate.
+        """
+        return (
+            self.primary_topic is not None
+            and not self.primary_unjudged
+            and self.primary_rank is None
+        )
+
 
 def _pct(part: int, whole: int) -> float:
-    """`part` of `whole` as a percentage to one decimal; 0.0 when there is no whole."""
+    """`part` of `whole` as a percentage to one decimal; 0.0 when there is no whole.
+
+    DISPLAY ONLY. One decimal is what a reader wants, and it is also lossy at both ends —
+    2499 of 2500 renders `100.0`, 1 of 2500 renders `0.0`. Nothing may SORT on this value;
+    `_backing_order` keys on the exact ratio for exactly that reason.
+    """
     return round(part / whole * 100, 1) if whole else 0.0
 
 
@@ -199,49 +301,67 @@ def current_assessments(
     """The (item, assessment) pairs whose assessment is still current — stale ones are
     EXCLUDED, not folded in.
 
-    Currency is decided by `assess.assessment_is_current`, which rebuilds today's questions
-    from `vocab` + `fallback` and hashes them with the state. Re-deriving that rule here
-    would be a second definition of "still valid", and the one that drifts is the one nobody
-    re-computes. A stale record is dropped rather than reported, because a comparison against
-    a question Jev is no longer asked is not a weaker signal — it is a wrong one.
+    Currency is decided by `assess.current_pairs`, which builds today's questions ONCE for the
+    whole side-car and hashes them with each item's state. Re-deriving that rule here would be a
+    second definition of "still valid", and the one that drifts is the one nobody re-computes.
+    A stale record is dropped rather than reported, because a comparison against a question Jev
+    is no longer asked is not a weaker signal — it is a wrong one.
+
+    THIS WRAPPER DISCARDS THE DROP COUNTS. Call `assess.current_pairs` directly when they
+    matter — `_summarize` reports `assessments_stale` and `assessments_orphaned`, and a caller
+    that goes through here and then passes `stale=0` is telling the report nothing was dropped.
     """
-    pairs: list[tuple[Item, TopicAssessment]] = []
-    for item in items:
-        assessment = assessments.get(item.id)
-        if assessment is not None and assessment_is_current(
-            assessment, item, vocab, fallback=fallback, char_limit=char_limit
-        ):
-            pairs.append((item, assessment))
-    return pairs
+    return list(
+        current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit).pairs
+    )
 
 
-def _slug_counts(
-    comparisons: list[ItemComparison],
-) -> tuple[Counter[str], Counter[str], Counter[str]]:
-    """Per-slug `(assigned, doubtful, missing)` counters over every comparison."""
-    assigned: Counter[str] = Counter(slug for c in comparisons for slug in c.assigned)
-    doubtful: Counter[str] = Counter(pair.slug for c in comparisons for pair in c.doubtful)
-    missing: Counter[str] = Counter(pair.slug for c in comparisons for pair in c.missing)
-    return assigned, doubtful, missing
+def _slug_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
+    """Per-slug `assigned` / `doubtful` / `missing` / `unjudged` counters over every comparison."""
+    return {
+        "assigned": Counter(slug for c in comparisons for slug in c.assigned),
+        "doubtful": Counter(pair.slug for c in comparisons for pair in c.doubtful),
+        "missing": Counter(pair.slug for c in comparisons for pair in c.missing),
+        "unjudged": Counter(slug for c in comparisons for slug in c.unjudged),
+    }
 
 
-def _topic_row(
-    slug: str, assigned: Counter[str], doubtful: Counter[str], missing: Counter[str]
-) -> dict[str, Any]:
-    """One `per_topic` row. `backed` excludes the doubtful ones AND the unjudged ones.
+def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
+    """One `per_topic` row. The row's own three buckets PARTITION its `assigned`.
 
-    Rows are built per VOCABULARY topic, so `assigned - doubtful` is safe here in a way it is
-    not for the corpus-wide total: a slug that has left the vocabulary has no row at all.
+    `backed = assigned - doubtful - unjudged`, the same arithmetic as the corpus-wide total in
+    `_pair_totals`, and not because a vocabulary row can carry an unjudged pair today. It
+    cannot: `questions.build_topic_questions` asks one Noul per vocabulary slug and
+    `assess.parse_topic_result` refuses a partial answer set, so for a CURRENT assessment
+    `membership`'s keys are exactly today's vocabulary and an unjudged slug has no row to land
+    in. The term is here because that shelter depends entirely on the caller having filtered
+    through `current_assessments` — `summarize` and `build_report` are public and take raw
+    pairs — and a row that silently counts an unjudged pair as backed is the exact error
+    `_pair_totals` exists to prevent one altitude up.
     """
-    count = assigned[slug]
-    backed = count - doubtful[slug]
+    assigned = counts["assigned"][slug]
+    backed = assigned - counts["doubtful"][slug] - counts["unjudged"][slug]
     return {
         "slug": slug,
-        "assigned": count,
+        "assigned": assigned,
         "backed": backed,
-        "backed_pct": _pct(backed, count),
-        "missing": missing[slug],
+        "backed_pct": _pct(backed, assigned),
+        "missing": counts["missing"][slug],
     }
+
+
+def _backing_order(row: dict[str, Any]) -> tuple[bool, float, str]:
+    """`per_topic`'s sort key: never-assigned rows last, then the EXACT backing ratio.
+
+    The exact ratio, never `backed_pct`. `_pct` rounds to one decimal, so a topic at 2499 of
+    2500 ties with every perfect topic and is then ordered ALPHABETICALLY among them: in a
+    30-topic vocabulary the one topic with a real disagreement lands below every perfect topic
+    whose slug sorts earlier, in a section titled "peor primero". The rounded value is for the
+    reader; the order is for the truth.
+    """
+    assigned = row["assigned"]
+    ratio = row["backed"] / assigned if assigned else 0.0
+    return (assigned == 0, ratio, row["slug"])
 
 
 def _per_topic(comparisons: list[ItemComparison], vocab: list[Topic]) -> list[dict[str, Any]]:
@@ -254,10 +374,11 @@ def _per_topic(comparisons: list[ItemComparison], vocab: list[Topic]) -> list[di
     Sorting purely on `backed_pct` would put every unused topic on top, because `_pct` scores
     a zero whole as 0.0 — in a 30-topic vocabulary with a long tail, the answer would sit
     below rows about nothing. A topic nobody assigned has no backing rate to be worst at.
+    See `_backing_order` for why the key is the exact ratio and not the rendered percentage.
     """
-    assigned, doubtful, missing = _slug_counts(comparisons)
-    rows = [_topic_row(topic.slug, assigned, doubtful, missing) for topic in vocab]
-    return sorted(rows, key=lambda row: (row["assigned"] == 0, row["backed_pct"], row["slug"]))
+    counts = _slug_counts(comparisons)
+    rows = [_topic_row(topic.slug, counts) for topic in vocab]
+    return sorted(rows, key=_backing_order)
 
 
 def _pair_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
@@ -283,17 +404,22 @@ def _pair_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
 def _primary_totals(comparisons: list[ItemComparison], slugs: set[str]) -> dict[str, int]:
     """Agreements, fallback picks and never-asked primaries over the comparisons.
 
-    Three different events, three counters. `fallback` is Jev answering "none of these",
-    which says the vocabulary is missing a topic rather than that enrich is wrong.
-    `unjudged` is enrich's primary having left the vocabulary, which says nothing about
-    either of them. Both are disagreements only in the sense that they are not agreements,
-    and the denominator keeps counting them — exactly as `assigned_pairs` keeps counting an
-    unjudged pair. The buckets make the REASON visible; they do not hide the item.
+    Four different events, four counters. `fallback` is Jev answering "none of these", which
+    says the vocabulary is missing a topic rather than that enrich is wrong. `unjudged` is
+    enrich's primary having left the vocabulary, which says nothing about either of them.
+    `unranked` is the provider omitting the option from its own distribution. The last three
+    are disagreements only in the sense that they are not agreements.
+
+    THE DENOMINATOR KEEPS COUNTING THEM, deliberately: `primary_agree_pct` divides by every
+    comparison, exactly as `enrich_backed_pct` divides by every assigned pair including the
+    unjudged ones. Dropping them would let a corpus improve its agreement rate by losing
+    vocabulary. The buckets make the REASON visible; they do not shrink the denominator.
     """
     return {
         "agree": sum(1 for c in comparisons if c.primary_agrees),
         "fallback": sum(1 for c in comparisons if c.jev_primary not in slugs),
         "unjudged": sum(1 for c in comparisons if c.primary_unjudged),
+        "unranked": sum(1 for c in comparisons if c.primary_unranked),
     }
 
 
@@ -317,11 +443,10 @@ def _judge_fields(assessments: tuple[TopicAssessment, ...]) -> dict[str, Any]:
         "truncated": sum(1 for a in assessments if a.truncated),
         "input_tokens": tokens,
         "input_tokens_unknown": unknown,
-        # `float(...)` before rounding: `sum()` over an empty run returns `int 0` and
-        # `round(0, 4)` keeps it an int, so the key's TYPE would change with the contents
-        # of the side-car — drift in a value the dashboard consumes, and `~0 $` instead of
-        # `~0.0 $` for the reader.
-        "cost_usd": round(float(input_cost_usd(assessments)), 4),
+        # `input_cost_usd` returns a genuine float even for an empty run, so this key's TYPE
+        # cannot change with the contents of the side-car — a reader of the JSON gets a number
+        # it can format the same way every time.
+        "cost_usd": round(input_cost_usd(assessments), 4),
         "unpriced_providers": list(unpriced_providers(assessments)),
     }
 
@@ -339,16 +464,27 @@ def build_report(
     threshold: float,
     *,
     now: datetime | None = None,
+    stale: int = 0,
+    orphans: int = 0,
 ) -> tuple[dict[str, Any], list[ItemComparison]]:
     """The summary AND the comparisons it was computed from — one comparison pass.
 
-    Every caller needs both halves: the summary carries the numbers, the comparisons carry
-    the rows. Computing the comparisons twice is not just twice the work on a ~3,000-item
-    corpus — it is a second call site that has to be handed the same threshold, and the day
-    the two disagree the report's tables stop matching its own headline.
+    THE ENTRY POINT. Every caller needs both halves: the summary carries the numbers, the
+    comparisons carry the rows. Computing the comparisons twice is not just twice the work on a
+    ~3,000-item corpus — it is a second call site that has to be handed the same threshold, and
+    the day the two disagree the report's tables stop matching its own headline.
+
+    `pairs` MUST already be filtered by `current_assessments` (or `assess.current_pairs`): every
+    number below assumes each `membership` was produced by TODAY'S questions. Stale pairs do not
+    merely age the report, they make `per_topic` count topics Jev was never asked about.
+
+    `stale` and `orphans` are what that filter DROPPED. They default to 0 because a caller that
+    filtered nothing dropped nothing — but a caller that filtered and then omits them is telling
+    the report a retired side-car was empty, which is the one reading that costs money.
     """
     comparisons = compare_all(pairs, threshold)
-    return _summarize(comparisons, pairs, vocab, threshold, now), comparisons
+    summary = _summarize(comparisons, pairs, vocab, threshold, now, stale, orphans)
+    return summary, comparisons
 
 
 def summarize(
@@ -357,9 +493,15 @@ def summarize(
     threshold: float,
     *,
     now: datetime | None = None,
+    stale: int = 0,
+    orphans: int = 0,
 ) -> dict[str, Any]:
-    """The summary alone, for a caller that does not need the comparisons."""
-    return build_report(pairs, vocab, threshold, now=now)[0]
+    """The summary alone, for a caller that does not need the comparisons.
+
+    Prefer `build_report`: the CLI and the dashboard both want the rows as well, and this
+    wrapper throws away a comparison pass they would only redo.
+    """
+    return build_report(pairs, vocab, threshold, now=now, stale=stale, orphans=orphans)[0]
 
 
 def _summarize(
@@ -368,6 +510,8 @@ def _summarize(
     vocab: list[Topic],
     threshold: float,
     now: datetime | None,
+    stale: int,
+    orphans: int,
 ) -> dict[str, Any]:
     """Every number the report and the dashboard quote, computed ONCE, from the same pairs.
 
@@ -375,10 +519,18 @@ def _summarize(
     enrichment to compare against. They differ exactly by the items Jev has an opinion about
     that the pipeline has not enriched, and collapsing them would hide that population.
 
-    `generated_at` is stamped HERE rather than at render time so the JSON carries it too —
-    the dashboard reads that file and otherwise cannot say how old the report it is showing
-    is — and so `render_report_markdown` stays a pure function of its inputs.
+    `assessments_stored` is the size of the side-car the pairs were filtered OUT of:
+    `len(pairs) + stale + orphans`, a real partition rather than a number taken on trust.
+
+    `generated_at` is stamped HERE rather than at render time so the JSON carries it too — a
+    reader of the JSON otherwise cannot say how old the report it is showing is — and so
+    `render_report_markdown` stays a pure function of its inputs. An injected `now` must be
+    tz-aware for the same reason `TopicAssessment.asked_at` refuses a naive one: we do not
+    coerce, because that masks the bug, and a consumer ageing the report against `utcnow` would
+    silently read a local timestamp as UTC.
     """
+    if now is not None:
+        _require_utc_aware("now", now)
     assessments = tuple(assessment for _, assessment in pairs)
     totals = _pair_totals(comparisons)
     primary = _primary_totals(comparisons, {topic.slug for topic in vocab})
@@ -387,6 +539,9 @@ def _summarize(
         "threshold": threshold,
         "items_assessed": len(pairs),
         "items_compared": len(comparisons),
+        "assessments_stored": len(pairs) + stale + orphans,
+        "assessments_stale": stale,
+        "assessments_orphaned": orphans,
         **_judge_fields(assessments),
         "assigned_pairs": totals["assigned"],
         "assigned_backed": totals["backed"],
@@ -401,12 +556,31 @@ def _summarize(
         "primary_agree_pct": _pct(primary["agree"], len(comparisons)),
         "primary_fallback": primary["fallback"],
         "primary_unjudged": primary["unjudged"],
+        "primary_unranked": primary["unranked"],
         "per_topic": _per_topic(comparisons, vocab),
     }
 
 
+def _escape_cell(text: str) -> str:
+    r"""Make `text` safe to drop between two `|` in a markdown table row.
+
+    THE ESCAPE CHARACTER FIRST, THEN THE PIPE, and the order is the whole point. Escaping only
+    the pipe turns a post that already contains `a\|b` — a regex alternation, a shell escape, a
+    Windows path — into `a\\|b`, and cmark-gfm's row scanner consumes `\` plus ONE following
+    character: it eats both backslashes and the `|` is left as a LIVE cell delimiter. The row
+    gains a column, every column after it shifts, and the table silently misreports itself.
+    Doubling the backslash first means every `\|` the reader sees was written by us.
+
+    Applied to every interpolated value, not just the post text: `Topic.slug` is
+    pattern-constrained, but `Enrichment.primary_topic` is a bare `str` and
+    `[jev].fallback_option` is a free config string — and an item whose primary left the
+    vocabulary carries by construction a string today's validation never saw.
+    """
+    return text.replace("\\", "\\\\").replace("|", "\\|")
+
+
 def _snippet(item: Item | None, width: int = 80) -> str:
-    """The post's first `width` characters on one line, ESCAPED for a markdown table cell.
+    """The post on one line, cut to `width` (`width - 1` plus an ellipsis) and ESCAPED.
 
     Two different ways a post re-shapes the table it lands in, and both are handled here: a
     newline ends the row, and an unescaped `|` opens a new cell. The corpus is AI/dev posts
@@ -421,7 +595,7 @@ def _snippet(item: Item | None, width: int = 80) -> str:
     text = " ".join(item.text.split()) if item else ""
     if len(text) > width:
         text = text[: width - 1] + "…"
-    return text.replace("|", "\\|")
+    return _escape_cell(text)
 
 
 def _counted(counts: dict[str, int]) -> str:
@@ -429,28 +603,63 @@ def _counted(counts: dict[str, int]) -> str:
     return ", ".join(f"{name} ({count})" for name, count in sorted(counts.items())) or "—"
 
 
-def _cost_line(summary: dict[str, Any]) -> str:
-    """The bill, with both markers that say which kind of zero this is."""
-    line = f"Coste: {summary['input_tokens']} tokens de entrada"
-    if summary["input_tokens_unknown"]:
-        line += f" (+{summary['input_tokens_unknown']} sin recuento)"
-    line += f" · ~{summary['cost_usd']} $"
-    if summary["unpriced_providers"]:
-        line += f" · sin tarifa: {', '.join(summary['unpriced_providers'])}"
+def cost_fragment(summary: dict[str, Any]) -> str:
+    """The bill, in the ONE Spanish sentence `jev topics` and `jev report` also print.
+
+    PUBLIC because `cli._jev_report_line` prints the same segment: which summary keys feed the
+    fragment is itself a definition, and two adapters are two of them.
+
+    Formatted by `defaults.jev_cost_fragment`, never here: this is a RECAP of work `jev topics`
+    already paid for, and a recap that prints a different figure — or the same marker in
+    different words — from the bill it recaps is the one thing a recap must not do.
+    """
+    return jev_cost_fragment(
+        summary["input_tokens"],
+        summary["input_tokens_unknown"],
+        summary["cost_usd"],
+        summary["unpriced_providers"],
+    )
+
+
+def _tally(singular: str, plural_label: str, counts: dict[str, int]) -> str:
+    """`modelo: x (1)` / `modelos: x (1), y (2)` — the label agrees with how many there are."""
+    return f"{singular if len(counts) == 1 else plural_label}: {_counted(counts)}"
+
+
+def _side_car_line(summary: dict[str, Any]) -> str:
+    """How much of the side-car this report is actually about.
+
+    `caducadas` is printed even at zero. It is the number that distinguishes "nobody has run
+    `xbrain jev topics` yet" from "a vocabulary edit just retired every paid record you have",
+    and those two readings differ by the price of re-assessing the corpus. `huérfanas` is rarer,
+    so it appears only when it has something to say.
+    """
+    line = (
+        f"Evaluaciones: {summary['items_assessed']} vigentes de "
+        f"{summary['assessments_stored']} guardadas · "
+        f"{plural(summary['assessments_stale'], 'caducada', 'caducadas')}"
+    )
+    if summary["assessments_orphaned"]:
+        line += f" · {plural(summary['assessments_orphaned'], 'huérfana', 'huérfanas')}"
     return line
 
 
 def _headline(summary: dict[str, Any]) -> list[str]:
-    """Title, what was asked, and the four numbers the whole report exists to produce."""
+    """Title, what was asked, and the headline counts.
+
+    In reading order: how much of the side-car is current, agreement in both directions, the
+    three disagreement buckets, the primary counters and the bill.
+    """
     return [
         # ISO 8601 puts the calendar date in the first ten characters, so the title and the
         # JSON's `generated_at` can never name different days.
         f"# Jev · topics — {summary['generated_at'][:10]}",
         "",
-        f"Umbral {summary['threshold']} · modelos: {_counted(summary['models'])} · "
-        f"proveedores: {_counted(summary['providers'])}",
-        f"Items evaluados: {summary['items_assessed']} · comparables: "
-        f"{summary['items_compared']} · truncados: {summary['truncated']}",
+        f"Umbral {summary['threshold']} · {_tally('modelo', 'modelos', summary['models'])} · "
+        f"{_tally('proveedor', 'proveedores', summary['providers'])}",
+        _side_car_line(summary),
+        f"Items comparados: {summary['items_compared']} de {summary['items_assessed']} · "
+        f"truncados: {summary['truncated']}",
         "",
         f"**Asignaciones de enrich respaldadas por Jev:** {summary['assigned_backed']} de "
         f"{summary['assigned_pairs']} ({summary['enrich_backed_pct']} %) · "
@@ -461,8 +670,9 @@ def _headline(summary: dict[str, Any]) -> list[str]:
         f"{summary['missing_pairs']} · **primario coincide:** {summary['primary_agree']} "
         f"({summary['primary_agree_pct']} %) · **primario = fallback:** "
         f"{summary['primary_fallback']} · **primario sin juzgar:** "
-        f"{summary['primary_unjudged']}",
-        _cost_line(summary),
+        f"{summary['primary_unjudged']} · **primario sin rango:** "
+        f"{summary['primary_unranked']}",
+        f"Coste: {cost_fragment(summary)}",
     ]
 
 
@@ -475,21 +685,40 @@ def _table(title: str, columns: Sequence[str], rows: list[str]) -> list[str]:
     return ["", title, "", f"| {' | '.join(columns)} |", "|" + "---|" * len(columns), *rows]
 
 
+def _cut_note(shown: int, total: int) -> list[str]:
+    """`… y N filas más` under a table the `top` cut.
+
+    A section headed `top 20` reads the same whether there were 7 rows or 700. The JSON carries
+    every one of them, which is exactly why the file a PERSON reads has to say that it does not
+    — a silent drop in the artifact that exists to be read is the same failure as a silent drop
+    in a number.
+    """
+    dropped = total - shown
+    if dropped <= 0:
+        return []
+    return ["", f"_… y {plural(dropped, 'fila más', 'filas más')} (el JSON las lleva todas)._"]
+
+
 def _pair_table(title: str, pairs: list[Pair], items_by_id: dict[str, Item], top: int) -> list[str]:
     """The `top` worst pairs as a table; the caller has already sorted them."""
     rows = [
-        f"| {pair.item_id} | {pair.slug} | {pair.noul:.2f} | "
+        f"| {pair.item_id} | {_escape_cell(pair.slug)} | {pair.noul:.2f} | "
         f"{_snippet(items_by_id.get(pair.item_id))} |"
         for pair in pairs[:top]
     ]
-    return _table(title, ("item", "topic", "noul", "texto"), rows)
+    return _table(title, ("item", "topic", "noul", "texto"), rows) + _cut_note(
+        len(rows), len(pairs)
+    )
 
 
 def _disagreement_row(comparison: ItemComparison, items_by_id: dict[str, Item]) -> str:
-    """One row of the primary-disagreement table, rank included."""
+    """One row of a primary-mismatch section. WHY it does not coincide is the section it is in,
+    because `rango = —` means "never asked", "the provider omitted the option" AND "no primary
+    at all" — it cannot carry the reason on its own."""
     return (
-        f"| {comparison.item_id} | {comparison.primary_topic or '—'} | {comparison.jev_primary} "
-        f"| {comparison.jev_confidence:.2f} | {comparison.primary_rank or '—'} | "
+        f"| {comparison.item_id} | {_escape_cell(comparison.primary_topic or '—')} "
+        f"| {_escape_cell(comparison.jev_primary)} | {comparison.jev_confidence:.2f} "
+        f"| {comparison.primary_rank or '—'} | "
         f"{_snippet(items_by_id.get(comparison.item_id))} |"
     )
 
@@ -506,6 +735,108 @@ def _sorted_missing(comparisons: list[ItemComparison]) -> list[Pair]:
     return sorted(pairs, key=lambda pair: (-pair.noul, pair.item_id))
 
 
+def _sorted_unjudged(comparisons: list[ItemComparison]) -> list[tuple[str, str]]:
+    """Every `(item, topic)` pair Jev was never asked about, grouped by topic.
+
+    Sorted by slug so the retired topics cluster: the decision this table exists to prompt —
+    put the slug back in `vocab.yaml`, or re-enrich these items — is a per-topic one.
+    """
+    entries = ((c.item_id, slug) for c in comparisons for slug in c.unjudged)
+    return sorted(entries, key=lambda entry: (entry[1], entry[0]))
+
+
+def _unjudged_table(
+    comparisons: list[ItemComparison], items_by_id: dict[str, Item], top: int
+) -> list[str]:
+    """The pairs the headline counts as `sin juzgar`, NAMED.
+
+    The count alone cannot tell a reader WHICH topic to put back in `vocab.yaml`. The JSON
+    record carries the slugs and the file a person reads did not, which made the one bucket
+    that says "your vocabulary moved" the one bucket nobody could act on.
+    """
+    entries = _sorted_unjudged(comparisons)
+    rows = [
+        f"| {item_id} | {_escape_cell(slug)} | {_snippet(items_by_id.get(item_id))} |"
+        for item_id, slug in entries[:top]
+    ]
+    title = f"## Asignaciones sin juzgar (top {top})"
+    return _table(title, ("item", "topic", "texto"), rows) + _cut_note(len(rows), len(entries))
+
+
+def _primary_reason(comparison: ItemComparison, slugs: set[str]) -> str:
+    """Why this primary does not coincide — the FIRST reason in `_PRIMARY_REASONS` that applies.
+
+    Priority, not exclusivity: an item can be both `sin juzgar` and answered with the fallback.
+    Ordering the enrich-side facts first puts each item in the section whose remedy is the one
+    the operator controls.
+    """
+    if comparison.primary_topic is None:
+        return "sin_primario"
+    if comparison.primary_unjudged:
+        return "sin_juzgar"
+    if comparison.jev_primary not in slugs:
+        return "fallback"
+    if comparison.primary_unranked:
+        return "sin_rango"
+    return "desacuerdo"
+
+
+def _sorted_disagreements(comparisons: list[ItemComparison]) -> list[ItemComparison]:
+    """Most consequential first: enrich's primary furthest DOWN Jev's own ranking.
+
+    A primary at rank 29 of 30 is a real conflict; one at rank 2 is a close call, and the file
+    shows only the first `top` rows — unsorted, those were simply the first `top` in
+    `items.json` order. Unranked items (`—`) sort last within their section: there is no rank to
+    be worst at, and they already have a section of their own.
+    """
+    return sorted(
+        comparisons,
+        key=lambda c: (c.primary_rank is None, -(c.primary_rank or 0), c.item_id),
+    )
+
+
+def _primary_section(
+    title: str, comparisons: list[ItemComparison], items_by_id: dict[str, Item], top: int
+) -> list[str]:
+    """One reason's sub-table, with its own count in the heading."""
+    ranked = _sorted_disagreements(comparisons)
+    rows = [_disagreement_row(c, items_by_id) for c in ranked[:top]]
+    return _table(
+        f"### {title} ({len(comparisons)})",
+        ("item", "enrich", "Jev", "conf.", "rango del de enrich", "texto"),
+        rows,
+    ) + _cut_note(len(rows), len(ranked))
+
+
+def _primary_tables(
+    comparisons: list[ItemComparison], slugs: set[str], items_by_id: dict[str, Item], top: int
+) -> list[str]:
+    """The primary mismatches, SPLIT BY REASON.
+
+    One table headed "en desacuerdo" would say the opposite of what this module spends forty
+    lines establishing: an item with no primary, and an item whose primary left the vocabulary,
+    are not disagreements — "there is nothing to agree with" is not agreement, and neither is it
+    a conflict. The headline counts those buckets two lines above; a single table would erase
+    the distinction the headline just drew.
+
+    THE SECTIONS AND THE HEADLINE COUNT DIFFERENTLY, on purpose. `_primary_totals`' counters are
+    INDEPENDENT — an item whose primary left the vocabulary AND that Jev answered with the
+    fallback is counted by both `primario sin juzgar` and `primario = fallback`, because each
+    answers its own question about the corpus. The sections PARTITION: that item appears once,
+    under the first reason in `_PRIMARY_REASONS` that applies, because a row a reader has to act
+    on must not be filed in two places. So the section counts can sum to less than the headline
+    counters, and that is not a discrepancy.
+    """
+    grouped: dict[str, list[ItemComparison]] = {key: [] for key, _ in _PRIMARY_REASONS}
+    for comparison in comparisons:
+        if not comparison.primary_agrees:
+            grouped[_primary_reason(comparison, slugs)].append(comparison)
+    lines = ["", f"## Primario que no coincide (top {top} por motivo)"]
+    for key, title in _PRIMARY_REASONS:
+        lines += _primary_section(title, grouped[key], items_by_id, top)
+    return lines
+
+
 def render_report_markdown(
     summary: dict[str, Any],
     comparisons: list[ItemComparison],
@@ -516,15 +847,21 @@ def render_report_markdown(
     """The human-readable report: the headline numbers, then the worst `top` of each table.
 
     TRUNCATED ON PURPOSE. The corpus is ~3,000 items and the JSON beside it carries every
-    record, so this file is the thing a person reads — a table with 2,000 rows is not one.
+    record, so this file is the thing a person reads — a table with 2,000 rows is not one. Every
+    table that was cut says so, in `_cut_note`.
+
+    The vocabulary comes from `summary["per_topic"]`, which has exactly one row per vocabulary
+    topic: the renderer needs the slug set to tell "Jev chose the fallback" from a real
+    disagreement, and taking it from the summary keeps this function a pure function of its
+    two inputs.
     """
-    disagree = [c for c in comparisons if not c.primary_agrees]
+    slugs = {row["slug"] for row in summary["per_topic"]}
     lines = _headline(summary)
     lines += _table(
         "## Por topic (peor primero)",
-        ("topic", "asignadas", "respaldadas", "%", "faltan"),
+        ("topic", "asignadas", "respaldadas", "%", "candidatas"),
         [
-            f"| {row['slug']} | {row['assigned']} | {row['backed']} | "
+            f"| {_escape_cell(row['slug'])} | {row['assigned']} | {row['backed']} | "
             f"{row['backed_pct']} | {row['missing']} |"
             for row in summary["per_topic"]
         ],
@@ -538,11 +875,8 @@ def render_report_markdown(
         items_by_id,
         top,
     )
-    lines += _table(
-        f"## Primario en desacuerdo (top {top})",
-        ("item", "enrich", "Jev", "conf.", "rango del de enrich", "texto"),
-        [_disagreement_row(c, items_by_id) for c in disagree[:top]],
-    )
+    lines += _unjudged_table(comparisons, items_by_id, top)
+    lines += _primary_tables(comparisons, slugs, items_by_id, top)
     return "\n".join(lines) + "\n"
 
 
@@ -550,9 +884,9 @@ def _record(comparison: ItemComparison) -> dict[str, Any]:
     """One compared item as JSON: every field, with the tuples flattened to lists.
 
     Built from `asdict` rather than field by field so a field added to `ItemComparison` shows
-    up in the JSON — the dashboard's input — without a second edit here to remember. The two
-    `Pair` fields are re-rendered by hand: their `item_id` is the record's own id repeated on
-    every row.
+    up in the JSON — a reader of it gets the new field — without a second edit here to
+    remember. The two `Pair` fields are re-rendered by hand: their `item_id` is the record's own
+    id repeated on every row.
     """
     return {
         **{k: v for k, v in asdict(comparison).items() if k not in _PAIR_FIELDS},
@@ -561,7 +895,10 @@ def _record(comparison: ItemComparison) -> dict[str, Any]:
         "unjudged": list(comparison.unjudged),
         "doubtful": [{"slug": p.slug, "noul": p.noul} for p in comparison.doubtful],
         "missing": [{"slug": p.slug, "noul": p.noul} for p in comparison.missing],
+        # Properties are not fields, so `asdict` cannot see them; they are the two per-item
+        # reasons a reader of the JSON needs and would otherwise have to re-derive.
         "primary_agrees": comparison.primary_agrees,
+        "primary_unranked": comparison.primary_unranked,
     }
 
 
@@ -573,10 +910,20 @@ def write_reports(
 ) -> tuple[Path, Path]:
     """`topics-report.json` (summary + one record per compared item) and `topics-report.md`.
 
-    Two files, one computation: the markdown is what a person reads and the JSON is what the
-    dashboard reads, and both are rendered from the SAME `summary` and `comparisons` so they
-    cannot quote different numbers. Atomic, like every other write in the repo — a half-written
-    report read by the dashboard is a wrong report, not a missing one.
+    Two files, one computation: the markdown is what a person reads and the JSON is what a
+    program reads, and both are rendered from the SAME `summary` and `comparisons`, so they
+    cannot quote different numbers.
+
+    ATOMIC INDIVIDUALLY, NOT JOINTLY, and the difference is worth stating rather than leaving
+    to be discovered. Each file goes through `store._atomic_write` (temp file, then
+    `os.replace`), so neither can ever be read half-written and a failed write leaves the
+    PREVIOUS good copy of that file untouched. But they are two renames: if the second dies,
+    the JSON is the new run's and the markdown is still the previous run's. The JSON is written
+    FIRST because it is the machine-readable one — a program comparing `generated_at` can see
+    the pair is mismatched, while a person reading a stale markdown has no such signal.
+
+    The directory is created if it does not exist: on a corpus assessed elsewhere, this report
+    is the first thing that ever lands in `data/jev/`.
     """
     jev_dir.mkdir(parents=True, exist_ok=True)
     json_path = jev_dir / "topics-report.json"

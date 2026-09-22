@@ -284,6 +284,67 @@ def assessment_is_current(
     return _contract_matches(assessment, state[STATE_KEY], digest)
 
 
+@dataclass(frozen=True)
+class CurrentPairs:
+    """The still-current `(item, assessment)` pairs, and what was DROPPED getting there.
+
+    THE THREE NUMBERS PARTITION THE SIDE-CAR: `len(pairs) + stale + orphans` is every stored
+    record. That is the whole point of the dataclass. A drop with no counter is the failure
+    `Selection` refuses one screen up — after a vocabulary edit, a side-car holding thousands
+    of paid records and a side-car nobody ever wrote both produce `0 evaluaciones`, and the
+    operator re-pays for the corpus to find out which one they had.
+
+    `stale` is a record whose contract no longer describes today's ask. `orphans` is a record
+    whose item is no longer in the store — a different event with the same symptom, so it gets
+    its own number rather than hiding inside the first.
+    """
+
+    pairs: tuple[tuple[Item, TopicAssessment], ...]
+    stale: int
+    orphans: int
+
+
+def current_pairs(
+    items: list[Item],
+    assessments: dict[str, TopicAssessment],
+    vocab: list[Topic],
+    *,
+    fallback: str,
+    char_limit: int,
+) -> CurrentPairs:
+    """The pairs whose stored assessment still describes today's ask, and the two drop counts.
+
+    THE ONE DEFINITION OF CURRENCY for a whole side-car — `assessment_is_current` is the
+    single-record predicate, and both route through `_contract_matches`, so the report and the
+    assessment side can never disagree about what "still valid" means.
+
+    The questions and their digest are built ONCE for the whole side-car, exactly as
+    `select_items` hoists them and for the same reason: they do not depend on the item, so
+    doing it per record re-validates the vocabulary, re-serialises the canonical JSON and
+    re-hashes it thousands of times in a command that is meant to be a cheap read.
+    """
+    digest = questions_digest(build_topic_questions(vocab, fallback))
+    known = {item.id for item in items}
+    pairs: list[tuple[Item, TopicAssessment]] = []
+    stale = 0
+    for item in items:
+        assessment = assessments.get(item.id)
+        if assessment is None:
+            # Not a drop: this item simply has no stored assessment. It is counted by the
+            # assessment side (`Selection`), never here.
+            continue
+        state, _ = build_topic_state(item, char_limit)
+        if _contract_matches(assessment, state[STATE_KEY], digest):
+            pairs.append((item, assessment))
+        else:
+            stale += 1
+    return CurrentPairs(
+        pairs=tuple(pairs),
+        stale=stale,
+        orphans=sum(1 for item_id in assessments if item_id not in known),
+    )
+
+
 def _candidates(store: dict[str, Item], ids: list[str] | None) -> list[Item]:
     """The items `ids` names, in the order asked and de-duplicated; every item when `ids` is
     `None` or empty (`[]` is deliberately "the whole corpus" — the CLI maps a missing `--id`
