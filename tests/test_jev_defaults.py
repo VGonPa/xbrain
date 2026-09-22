@@ -108,7 +108,7 @@ def test_the_cost_fragment_prints_four_decimals_so_a_real_bill_is_never_rounded_
     for — and a whole ~2,600-item pass at ~15.5 M input tokens.
     """
     assert jev_cost_fragment(1_500, 0, 0.0001, ()) == "1500 tokens de entrada (~0.0001 $)"
-    assert jev_cost_fragment(15_546_000, 0, 0.6529, ()) == "15546000 tokens de entrada (~0.6529 $)"
+    assert jev_cost_fragment(15_498_000, 0, 0.6509, ()) == "15498000 tokens de entrada (~0.6509 $)"
 
 
 def test_the_cost_fragment_names_both_kinds_of_zero():
@@ -144,11 +144,11 @@ def test_the_documented_corpus_bill_is_computed_from_the_rate_not_asserted_besid
     number that has to be updated with it.
 
     The inputs are the measured corpus (`docs/jev.md` § What a pass actually costs):
-    2,591 records at ~6,000 input tokens each. The expected value is computed from the rate
-    rather than written as `0.6529`, so this asserts the PIPELINE from rate to bill, not a
+    2,583 records at ~6,000 input tokens each. The expected value is computed from the rate
+    rather than written as `0.6509`, so this asserts the PIPELINE from rate to bill, not a
     constant someone copied.
     """
-    records = 2_591
+    records = 2_583
     tokens_each = 6_000
     assessments = [_assessment(str(i), "typesafe", tokens_each) for i in range(records)]
 
@@ -161,5 +161,5 @@ def test_the_documented_corpus_bill_is_computed_from_the_rate_not_asserted_besid
     assert cost == pytest.approx(expected)
     # And the figure the docs quote, to the four decimals the bill is printed with.
     assert jev_cost_fragment(records * tokens_each, 0, round(cost, 4), ()) == (
-        "15546000 tokens de entrada (~0.6529 $)"
+        "15498000 tokens de entrada (~0.6509 $)"
     )
