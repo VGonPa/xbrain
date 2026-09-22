@@ -320,7 +320,8 @@ it and its complement together cover every key the summary emits.
 A comparison over nothing is not a comparison of zeros — it is a plausible file of zeros
 written over the last good one. So the command checks first, names the missing input, the
 command that fixes it, and the artifact it left alone. `jev dashboard` refuses on the same
-five conditions, naming `jev.html` instead:
+five conditions, naming `jev.html` instead — six lines below, because the last condition is
+shown in both of its number forms:
 
 ```text
 Error: el vocabulario está vacío o falta <data_dir>/vocab.yaml: ejecuta `xbrain vocab`. No se sobrescribe <artefacto>
@@ -331,12 +332,12 @@ Error: ninguna evaluación vigente tiene con qué compararse: los N items evalua
 Error: ninguna evaluación vigente tiene con qué compararse: el 1 item evaluado no está enriquecido. Ejecuta `xbrain enrich`. No se sobrescribe <artefacto>
 ```
 
+The last refusal appears twice because the whole phrase agrees in number — article, noun and
+verb — so at one item it reads `el 1 item evaluado no está enriquecido`, never `los 1 item
+evaluado no están enriquecidos`.
+
 `<artefacto>` is a full path, and it is the one the command being run would have written:
 `data/jev/topics-report.json` for `jev report`, `<output_dir>/jev.html` for `jev dashboard`.
-
-The fifth refusal is shown twice because the whole phrase agrees in number — article, noun
-and verb — so at one item it reads `el 1 item evaluado no está enriquecido`, not `los 1
-item evaluado no están enriquecidos`.
 
 The fourth is the one that costs money to misread, which is why `caducadas` is printed even
 at zero in every summary line: it is the number that tells "nobody has run `xbrain jev
