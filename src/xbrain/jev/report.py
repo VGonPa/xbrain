@@ -70,6 +70,15 @@ class ItemComparison:
     #: direction: as backed it invents an endorsement Jev never gave, as doubtful it invents
     #: a doubt. It is its own bucket, and `summarize` reports it.
     unjudged: tuple[str, ...] = ()
+    #: Whether `primary_topic` is itself a topic Jev was never asked about.
+    #:
+    #: The same fact as `unjudged`, on the primary axis. Without it, a primary that left the
+    #: vocabulary reads as "Jev picked something else" in the headline agreement rate, while
+    #: the identical fact about a membership topic gets its own bucket — the asymmetry
+    #: `unjudged` exists to remove. `primary_rank` is `None` in this case too, but that is
+    #: also `None` when the provider simply omitted an option from its distribution, so it
+    #: cannot carry the meaning on its own.
+    primary_unjudged: bool = False
 
     @property
     def primary_agrees(self) -> bool:
@@ -141,6 +150,15 @@ def _unjudged(assigned: Sequence[str], membership: dict[str, float]) -> tuple[st
     return tuple(slug for slug in assigned if slug not in membership)
 
 
+def _primary_unjudged(primary_topic: str | None, membership: dict[str, float]) -> bool:
+    """Whether enrich's primary is a topic absent from `membership` — never asked about.
+
+    Read off `membership`, like `_unjudged`: no primary at all is not "unjudged", it is
+    nothing to compare, which `primary_agrees` already reports as False.
+    """
+    return primary_topic is not None and primary_topic not in membership
+
+
 def _jev_assigned(membership: dict[str, float], threshold: float) -> tuple[str, ...]:
     """Jev's OWN assignment at this threshold: every topic at or above it, strongest first."""
     ranked = sorted(membership.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -166,6 +184,7 @@ def compare_item(
         missing=_missing(item.id, assigned, membership, threshold),
         jev_assigned=_jev_assigned(membership, threshold),
         unjudged=_unjudged(assigned, membership),
+        primary_unjudged=_primary_unjudged(item.enriched.primary_topic, membership),
     )
 
 
@@ -228,12 +247,17 @@ def _topic_row(
 def _per_topic(comparisons: list[ItemComparison], vocab: list[Topic]) -> list[dict[str, Any]]:
     """One row per vocabulary topic, WORST BACKING FIRST — the reading order of the report.
 
-    Sorted by `(backed_pct, slug)`: the question the report answers is "which topic is enrich
-    assigning that Jev does not recognise", and a vocabulary-ordered table buries it.
+    The question this table answers is "which topic is enrich assigning that Jev does not
+    recognise", and a vocabulary-ordered table buries it. So: rows WITH assignments first,
+    worst-backed first, then the never-assigned ones.
+
+    Sorting purely on `backed_pct` would put every unused topic on top, because `_pct` scores
+    a zero whole as 0.0 — in a 30-topic vocabulary with a long tail, the answer would sit
+    below rows about nothing. A topic nobody assigned has no backing rate to be worst at.
     """
     assigned, doubtful, missing = _slug_counts(comparisons)
     rows = [_topic_row(topic.slug, assigned, doubtful, missing) for topic in vocab]
-    return sorted(rows, key=lambda row: (row["backed_pct"], row["slug"]))
+    return sorted(rows, key=lambda row: (row["assigned"] == 0, row["backed_pct"], row["slug"]))
 
 
 def _pair_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
@@ -256,17 +280,21 @@ def _pair_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
     }
 
 
-def _primary_totals(comparisons: list[ItemComparison], slugs: set[str]) -> tuple[int, int]:
-    """`(agreements, fallback picks)` over the comparisons.
+def _primary_totals(comparisons: list[ItemComparison], slugs: set[str]) -> dict[str, int]:
+    """Agreements, fallback picks and never-asked primaries over the comparisons.
 
-    A primary outside the vocabulary is Jev answering "none of these", which is a different
-    event from disagreeing with enrich's pick and is counted separately — a corpus where Jev
-    keeps choosing the fallback says the vocabulary is missing a topic, not that enrich is
-    wrong.
+    Three different events, three counters. `fallback` is Jev answering "none of these",
+    which says the vocabulary is missing a topic rather than that enrich is wrong.
+    `unjudged` is enrich's primary having left the vocabulary, which says nothing about
+    either of them. Both are disagreements only in the sense that they are not agreements,
+    and the denominator keeps counting them — exactly as `assigned_pairs` keeps counting an
+    unjudged pair. The buckets make the REASON visible; they do not hide the item.
     """
-    agree = sum(1 for c in comparisons if c.primary_agrees)
-    fallback = sum(1 for c in comparisons if c.jev_primary not in slugs)
-    return agree, fallback
+    return {
+        "agree": sum(1 for c in comparisons if c.primary_agrees),
+        "fallback": sum(1 for c in comparisons if c.jev_primary not in slugs),
+        "unjudged": sum(1 for c in comparisons if c.primary_unjudged),
+    }
 
 
 def _judge_fields(assessments: tuple[TopicAssessment, ...]) -> dict[str, Any]:
@@ -289,25 +317,73 @@ def _judge_fields(assessments: tuple[TopicAssessment, ...]) -> dict[str, Any]:
         "truncated": sum(1 for a in assessments if a.truncated),
         "input_tokens": tokens,
         "input_tokens_unknown": unknown,
-        "cost_usd": round(input_cost_usd(assessments), 4),
+        # `float(...)` before rounding: `sum()` over an empty run returns `int 0` and
+        # `round(0, 4)` keeps it an int, so the key's TYPE would change with the contents
+        # of the side-car — drift in a value the dashboard consumes, and `~0 $` instead of
+        # `~0.0 $` for the reader.
+        "cost_usd": round(float(input_cost_usd(assessments)), 4),
         "unpriced_providers": list(unpriced_providers(assessments)),
     }
 
 
+def compare_all(
+    pairs: list[tuple[Item, TopicAssessment]], threshold: float
+) -> list[ItemComparison]:
+    """Every COMPARABLE pair, compared once. Pairs with no enrichment drop out."""
+    return [c for item, a in pairs if (c := compare_item(item, a, threshold)) is not None]
+
+
+def build_report(
+    pairs: list[tuple[Item, TopicAssessment]],
+    vocab: list[Topic],
+    threshold: float,
+    *,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any], list[ItemComparison]]:
+    """The summary AND the comparisons it was computed from — one comparison pass.
+
+    Every caller needs both halves: the summary carries the numbers, the comparisons carry
+    the rows. Computing the comparisons twice is not just twice the work on a ~3,000-item
+    corpus — it is a second call site that has to be handed the same threshold, and the day
+    the two disagree the report's tables stop matching its own headline.
+    """
+    comparisons = compare_all(pairs, threshold)
+    return _summarize(comparisons, pairs, vocab, threshold, now), comparisons
+
+
 def summarize(
-    pairs: list[tuple[Item, TopicAssessment]], vocab: list[Topic], threshold: float
+    pairs: list[tuple[Item, TopicAssessment]],
+    vocab: list[Topic],
+    threshold: float,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """The summary alone, for a caller that does not need the comparisons."""
+    return build_report(pairs, vocab, threshold, now=now)[0]
+
+
+def _summarize(
+    comparisons: list[ItemComparison],
+    pairs: list[tuple[Item, TopicAssessment]],
+    vocab: list[Topic],
+    threshold: float,
+    now: datetime | None,
 ) -> dict[str, Any]:
     """Every number the report and the dashboard quote, computed ONCE, from the same pairs.
 
     `items_assessed` counts the pairs handed in; `items_compared` counts the ones with an
     enrichment to compare against. They differ exactly by the items Jev has an opinion about
     that the pipeline has not enriched, and collapsing them would hide that population.
+
+    `generated_at` is stamped HERE rather than at render time so the JSON carries it too —
+    the dashboard reads that file and otherwise cannot say how old the report it is showing
+    is — and so `render_report_markdown` stays a pure function of its inputs.
     """
-    comparisons = [c for item, a in pairs if (c := compare_item(item, a, threshold)) is not None]
     assessments = tuple(assessment for _, assessment in pairs)
     totals = _pair_totals(comparisons)
-    agree, fallback = _primary_totals(comparisons, {topic.slug for topic in vocab})
+    primary = _primary_totals(comparisons, {topic.slug for topic in vocab})
     return {
+        "generated_at": (now or datetime.now(timezone.utc)).isoformat(),
         "threshold": threshold,
         "items_assessed": len(pairs),
         "items_compared": len(comparisons),
@@ -321,22 +397,31 @@ def summarize(
         "jev_backed_pct": _pct(totals["jev_backed"], totals["jev"]),
         "doubtful_pairs": totals["doubtful"],
         "missing_pairs": totals["missing"],
-        "primary_agree": agree,
-        "primary_agree_pct": _pct(agree, len(comparisons)),
-        "primary_fallback": fallback,
+        "primary_agree": primary["agree"],
+        "primary_agree_pct": _pct(primary["agree"], len(comparisons)),
+        "primary_fallback": primary["fallback"],
+        "primary_unjudged": primary["unjudged"],
         "per_topic": _per_topic(comparisons, vocab),
     }
 
 
 def _snippet(item: Item | None, width: int = 80) -> str:
-    """The post's first `width` characters on one line, for a table cell.
+    """The post's first `width` characters on one line, ESCAPED for a markdown table cell.
 
-    Whitespace is collapsed because a cell containing a newline or a pipe breaks the markdown
-    table around it, and the snippet exists to let a reader recognise the post without
-    opening it.
+    Two different ways a post re-shapes the table it lands in, and both are handled here: a
+    newline ends the row, and an unescaped `|` opens a new cell. The corpus is AI/dev posts
+    from X, where `cat x | grep y` and `A | B` phrasing are ordinary text — `cost | benefit |
+    ratio` turns a four-cell row into seven — so this is the common case, not a defensive
+    flourish.
+
+    The escape runs AFTER the cut, so the cut can never land between a backslash and its
+    pipe and leave a dangling escape. It can push the cell past `width`, which is fine:
+    `width` bounds the TEXT a reader has to scan, not the rendered cell.
     """
     text = " ".join(item.text.split()) if item else ""
-    return (text[: width - 1] + "…") if len(text) > width else text
+    if len(text) > width:
+        text = text[: width - 1] + "…"
+    return text.replace("|", "\\|")
 
 
 def _counted(counts: dict[str, int]) -> str:
@@ -358,7 +443,9 @@ def _cost_line(summary: dict[str, Any]) -> str:
 def _headline(summary: dict[str, Any]) -> list[str]:
     """Title, what was asked, and the four numbers the whole report exists to produce."""
     return [
-        f"# Jev · topics — {datetime.now(timezone.utc):%Y-%m-%d}",
+        # ISO 8601 puts the calendar date in the first ten characters, so the title and the
+        # JSON's `generated_at` can never name different days.
+        f"# Jev · topics — {summary['generated_at'][:10]}",
         "",
         f"Umbral {summary['threshold']} · modelos: {_counted(summary['models'])} · "
         f"proveedores: {_counted(summary['providers'])}",
@@ -373,7 +460,8 @@ def _headline(summary: dict[str, Any]) -> list[str]:
         f"{summary['assigned_unjudged']} · **candidatas que faltan:** "
         f"{summary['missing_pairs']} · **primario coincide:** {summary['primary_agree']} "
         f"({summary['primary_agree_pct']} %) · **primario = fallback:** "
-        f"{summary['primary_fallback']}",
+        f"{summary['primary_fallback']} · **primario sin juzgar:** "
+        f"{summary['primary_unjudged']}",
         _cost_line(summary),
     ]
 

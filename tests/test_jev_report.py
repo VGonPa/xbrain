@@ -1,5 +1,6 @@
 # tests/test_jev_report.py
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from xbrain.jev.models import PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import STATE_KEY, build_topic_questions
 from xbrain.jev.report import (
     Pair,
+    build_report,
     compare_item,
     current_assessments,
     render_report_markdown,
@@ -201,14 +203,22 @@ def test_summarize_prices_each_record_by_its_own_provider_and_names_the_unpriced
     """
     a = _item("1")
     b = _item("2", text="Seed round", topics=("startups",))
+    million = 1_000_000
     pairs = [
-        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})),
-        (b, _assessment(b, {"ai-coding": 0.1, "startups": 0.9, "misc": 0.1}, provider="fake")),
+        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}, tokens=million)),
+        (
+            b,
+            _assessment(
+                b, {"ai-coding": 0.1, "startups": 0.9, "misc": 0.1}, provider="fake", tokens=million
+            ),
+        ),
     ]
     summary = summarize(pairs, VOCAB, 0.85)
-    # 2000 tokens counted, but only the 1000 typesafe ones are billable.
-    assert summary["input_tokens"] == 2000
-    assert summary["cost_usd"] == round(1000 / 1e6 * 0.042, 4)
+    # Two million tokens counted, only the typesafe million billable: 1 Mtok × 0.042 $/Mtok.
+    # A literal, not the code's own formula — and one that separates the two mutations this
+    # test exists for: flat-rating both records gives 0.084, pricing neither gives 0.0.
+    assert summary["input_tokens"] == 2 * million
+    assert summary["cost_usd"] == 0.042
     assert summary["providers"] == {PRICED_PROVIDER: 1, "fake": 1}
     assert summary["unpriced_providers"] == ["fake"]
     # Both judges answered with the same model name, so `models` counts two.
@@ -280,3 +290,142 @@ def test_markdown_names_the_unpriced_provider_rather_than_printing_a_bare_zero()
     summary = summarize(pairs, VOCAB, 0.85)
     text = render_report_markdown(summary, [], {"1": item})
     assert "sin tarifa: fake" in text
+
+
+# ----------------------------------------------------------------- review round 1 fixes
+
+
+def test_markdown_escapes_a_pipe_in_the_post_text_instead_of_splitting_the_row():
+    """A post containing `|` must not grow extra cells in the table it lands in.
+
+    This corpus is AI/dev posts from X, where shell pipelines (`cat x | grep y`) and `A | B`
+    phrasing are ordinary, so an unescaped pipe is not a corner case — it is a ragged row in
+    the one file a person actually reads.
+    """
+    item = _item(text="cost | benefit | ratio")
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))]
+    summary = summarize(pairs, VOCAB, 0.85)
+    comparisons = [c for i, a in pairs if (c := compare_item(i, a, 0.85))]
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    row = next(line for line in text.splitlines() if line.startswith("| 1 | misc |"))
+    assert "cost \\| benefit \\| ratio" in row
+    # `| item | topic | noul | texto |` is four cells, whatever the post says. Splitting on
+    # UNESCAPED pipes is what the markdown renderer does, so it is what the count must use.
+    assert len(re.split(r"(?<!\\)\|", row)) == 6
+
+
+def test_summarize_reports_cost_as_a_float_even_when_nothing_was_priced():
+    """`sum()` over an empty run returns `int 0`, and `round(0, 4)` keeps it an int.
+
+    The dashboard consumes this key; a type that changes with the contents of the side-car
+    is drift, and `~0 $` instead of `~0.0 $` is the same drift reaching the reader.
+    """
+    summary = summarize([], VOCAB, 0.85)
+    assert summary["cost_usd"] == 0.0
+    assert isinstance(summary["cost_usd"], float)
+    assert "~0.0 $" in render_report_markdown(summary, [], {})
+
+
+def test_per_topic_puts_never_assigned_topics_after_the_ones_with_a_real_backing_rate():
+    """ "Peor primero" means worst BACKING first, and a topic nobody assigned has no backing
+    rate to be worst at.
+
+    `_pct` returns 0.0 for a zero whole, so a 30-topic vocabulary with a long tail of unused
+    topics would bury the answer this table exists to give under rows about nothing.
+    """
+    item = _item(topics=("ai-coding",))
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
+
+    rows = summarize(pairs, VOCAB, 0.85)["per_topic"]
+
+    assert [row["slug"] for row in rows] == ["ai-coding", "misc", "startups"]
+    assert rows[0]["assigned"] == 1 and rows[0]["backed_pct"] == 100.0
+    assert all(row["assigned"] == 0 for row in rows[1:])
+
+
+def test_summarize_counts_a_primary_jev_was_never_asked_about_separately():
+    """A primary that left the vocabulary is "Jev was never asked", not "Jev disagrees".
+
+    The membership side already gives that fact its own bucket (`assigned_unjudged`);
+    counting the same fact as a primary disagreement is the asymmetry that bucket exists to
+    remove. The denominator still counts the item — exactly as `assigned_pairs` still counts
+    an unjudged pair — so the bucket makes the reason visible without hiding the item.
+    """
+    item = _item(topics=("retired-topic", "ai-coding"))
+    assessment = _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})
+
+    comparison = compare_item(item, assessment, 0.85)
+    summary = summarize([(item, assessment)], VOCAB, 0.85)
+
+    assert comparison is not None
+    assert comparison.primary_topic == "retired-topic"
+    assert comparison.primary_unjudged is True
+    assert summary["primary_unjudged"] == 1
+    assert summary["primary_agree"] == 0
+    assert summary["primary_agree_pct"] == 0.0
+    # An in-vocabulary primary is NOT unjudged, whether or not Jev agreed with it.
+    agreed = _item(topics=("ai-coding", "misc"))
+    other = _assessment(agreed, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})
+    assert summarize([(agreed, other)], VOCAB, 0.85)["primary_unjudged"] == 0
+
+
+def test_build_report_returns_the_comparisons_the_summary_was_computed_from():
+    """One comparison pass, not two.
+
+    The CLI needs both halves; re-running `compare_item` for the second is twice the work on
+    a ~3,000-item corpus and a second call site that has to be handed the same threshold.
+    """
+    a = _item("1")
+    b = _item("2", text="Seed round", topics=("startups",), enriched=False)
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2})),
+        (b, _assessment(b, {"ai-coding": 0.1, "startups": 0.99, "misc": 0.05})),
+    ]
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85, now=now)
+
+    assert summary == summarize(pairs, VOCAB, 0.85, now=now)
+    # `b` has no enrichment, so it is assessed but not comparable — the list is the FILTERED
+    # one the summary counted, not one comparison per pair.
+    assert summary["items_assessed"] == 2 and summary["items_compared"] == 1
+    assert comparisons == [compare_item(a, pairs[0][1], 0.85)]
+
+
+def test_summarize_stamps_when_it_ran_and_the_markdown_reads_that_stamp():
+    """The JSON carries the stamp too, and the markdown reads it instead of the clock.
+
+    Task 5's dashboard reads the JSON; without a stamp it cannot say how old the report it is
+    rendering is. Taking the header date from the summary also makes `render_report_markdown`
+    a pure function of its inputs — it was the one clock call in the module.
+    """
+    item = _item()
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))]
+    stamped = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+    summary = summarize(pairs, VOCAB, 0.85, now=stamped)
+
+    assert summary["generated_at"] == "2026-01-02T03:04:05+00:00"
+    text = render_report_markdown(summary, [], {"1": item})
+    assert text.startswith("# Jev · topics — 2026-01-02")
+
+
+def test_snippet_truncates_a_long_post_and_still_escapes_every_pipe_it_keeps():
+    """The cut runs first and the escape second, so the two cannot interfere.
+
+    Escaping first and cutting after could land the cut between a backslash and its pipe,
+    leaving a half-written escape in the cell. Whichever way the post is cut, the row it
+    lands in still has exactly the cells its header declares.
+    """
+    item = _item(text="a | b " * 40)  # 240 characters, pipes throughout, well past the cut
+    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}))]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    row = next(line for line in text.splitlines() if line.startswith("| 1 | misc |"))
+    assert "…" in row  # the post really was cut
+    assert "a \\| b" in row  # and what survived is still escaped
+    assert len(re.split(r"(?<!\\)\|", row)) == 6

@@ -52,7 +52,7 @@ from xbrain.jev.assess import RunResult, Selection, run_assessments, select_item
 from xbrain.jev.client import JevClient, JevError
 from xbrain.jev.defaults import input_cost_usd, input_tokens_total, unpriced_providers
 from xbrain.jev.env import typesafe_api_key
-from xbrain.jev.report import compare_item, current_assessments, summarize, write_reports
+from xbrain.jev.report import build_report, current_assessments, write_reports
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -2975,8 +2975,9 @@ def jev_report_cmd(
         # file that is pure noise, and one that would overwrite the last good one.
         raise ValueError("--threshold debe estar en [0.0, 1.0]")
     store, vocab, pairs = _jev_pairs(cfg)
-    summary = summarize(pairs, vocab, t)
-    comparisons = [c for item, a in pairs if (c := compare_item(item, a, t)) is not None]
+    # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
+    # carry the rows, and a second pass would be a second place the threshold has to match.
+    summary, comparisons = build_report(pairs, vocab, t)
     json_path, md_path = write_reports(summary, comparisons, store, cfg.jev_dir)
     typer.echo(_jev_report_line(summary, t))
     typer.echo(f"→ {md_path}\n→ {json_path}")
