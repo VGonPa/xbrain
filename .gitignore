@@ -17,6 +17,9 @@ config.toml
 
 # Working docs (not tracked)
 zz-support-files/
+# Plan artifacts: briefs, reviews and full `*-full.diff` dumps of the branch under work.
+# Untracked but unignored, a single `git add -A` would have committed the whole plan.
+.superpowers/
 
 # Local secrets (TYPESAFE_API_KEY); see .env.example
 .env

@@ -53,12 +53,18 @@ can only succeed tests only the happy path, and the paths that cost money are th
 
 ## Safety: destructive operations auto-snapshot
 
-Destructive commands (`vocab --regenerate`, `topics --resynth`, `fetch --force`,
-`refresh-media`, `media`, `describe`, `download-videos`, `digest-video`,
-`video-digest --apply`) copy the full `data/` directory to
-`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. (`video-digest`
+Destructive commands copy the full `data/` directory to
+`data/snapshots/<UTC-ts>-pre-<command>/` before they write anything. The full set is listed
+in [ARCHITECTURE.md § Invariants](ARCHITECTURE.md#invariants) (invariant 8), which is the
+one place it is maintained — an abridged second copy here went stale and omitted half of
+them. It is `vocab --regenerate`, `topics --resynth`, `fetch --force`,
+`fetch --retry-failed`, `fetch --revalidate --write`, `media`, `describe`,
+`describe --apply`, `refresh-quoted`, `refresh-media`, `download-videos`, `digest-video`,
+`video-digest --apply`, `redescribe-frames`, `verify --write-verdicts`,
+`reextract --apply` and `refetch-truncated --apply`. (`video-digest`
 snapshots only on `--apply` — the branch that writes each `source.digest` — never on
-plain worksheet export; `verify` writes only its report and is not destructive.) (`download-videos`
+plain worksheet export; `verify` on its default report-only path writes only its report and
+is not destructive, but `verify --write-verdicts` persists onto each item and snapshots.) (`download-videos`
 takes its snapshot *after* the interactive size-gate confirmation, so a declined
 run leaves no stray snapshot — but always before the first byte is written.) If your change introduces or modifies a destructive
 operation, **wire the auto-snapshot** — see `_auto_snapshot` in `src/xbrain/cli.py`
@@ -73,9 +79,12 @@ it up and `snapshot restore` neither restores nor deletes it. `xbrain jev topics
 takes no snapshot of its own — it writes nothing a snapshot covers, and never touches
 `items.json`. The protection is a different one: a restore that moves an item's evidence or
 `vocab.yaml` retires the affected assessments, which are then **re-asked and re-paid for**
-rather than silently compared against the wrong corpus. If you add a command that writes
-under `data/jev/`, keep that property — the file costs money and has no undo. See
-[docs/jev.md](docs/jev.md).
+rather than silently compared against the wrong corpus. The one path that overwrites paid
+records — `jev topics --force` — has its own reversibility instead of a snapshot: it copies
+the side-car to `data/jev/topics.<UTC stamp>.bak` before the run and echoes the path, and
+those copies are never pruned automatically. If you add a command that writes under
+`data/jev/`, keep both properties — the file costs money and `snapshot restore` will not
+bring it back. See [docs/jev.md](docs/jev.md).
 
 `digest-video` is destructive because it attaches each video's transcript to the
 item as an `x_video` content source and rewrites `items.json`. It snapshots *only

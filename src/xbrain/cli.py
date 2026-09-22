@@ -188,9 +188,8 @@ if TYPE_CHECKING:
     # Annotations only. This saves NO import cost — `xbrain.jev.models` is loaded at
     # runtime anyway, transitively via `xbrain.jev.assess`. What it keeps is the
     # module-top `xbrain.jev` import list at the seven modules the CLI is meant to depend
-    # on directly (assess, client, dashboard, defaults, env, report, store;
-    # `task-3-deviations.md` §1, plus `report` for `xbrain jev report` and `dashboard` for
-    # `xbrain jev dashboard`), so an eighth is a visible decision rather than a drive-by.
+    # on directly (assess, client, dashboard, defaults, env, report, store), so an eighth
+    # is a visible decision rather than a drive-by.
     from xbrain.jev.models import TopicAssessment
 
 logger = logging.getLogger(__name__)
@@ -3040,7 +3039,7 @@ class JevPairs:
 def _jev_pairs(cfg: Config) -> JevPairs:
     """Store, vocabulary and the CURRENT (item, assessment) pairs, with the drop counts.
 
-    ONE loader for every reader of the side-car (today `jev report`; the dashboard next). They
+    ONE loader for every reader of the side-car — `jev report` and `jev dashboard`. They
     must never disagree about which stored assessments are still current, and two call sites
     each opening the three files their own way is exactly how they would: `assess.current_pairs`
     decides currency from the vocabulary and the fallback, so a reader that loaded a different

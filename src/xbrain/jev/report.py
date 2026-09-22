@@ -1,8 +1,8 @@
 """Compare Jev's membership probabilities with the pipeline's `enrich` assignment at a
 threshold.
 
-Pure functions over the store and the side-car. `xbrain jev report` reads through here, and
-Task 5's dashboard will, so the two can never disagree on a number. NOTHING in this module asks
+Pure functions over the store and the side-car. `xbrain jev report` and `xbrain jev dashboard`
+both read through here, so the two can never disagree on a number. NOTHING in this module asks
 Jev anything or writes `items.json` — it only reads what the side-car already paid for.
 
 THREE THINGS ARE DELIBERATELY NOT RE-IMPLEMENTED HERE.
@@ -49,7 +49,7 @@ from xbrain.store import _atomic_write
 #: not emit them.
 _PAIR_FIELDS = frozenset({"doubtful", "missing"})
 
-#: Summary keys whose value MOVES when the threshold moves. Task 5's dashboard has a
+#: Summary keys whose value MOVES when the threshold moves. The dashboard has a
 #: threshold slider and recomputes these client-side; everything else it may keep from the
 #: server-side summary. Without the split it has to guess, and a key it guesses wrong is a
 #: number on screen that the report would not print.
@@ -352,7 +352,7 @@ def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
         "backed": assigned - doubtful - unjudged,
         # The other two terms of the partition ride WITH the row. They cost nothing —
         # `_slug_counts` already built both Counters — and a consumer that shows them per
-        # topic (Task 5's chart-01 tooltip does) otherwise displays a per-topic number whose
+        # topic (the dashboard's chart-01 tooltip does) otherwise displays a per-topic number whose
         # only counterpart in this report is a corpus-wide sum. A number nothing can be
         # checked against is a number free to be wrong.
         "doubtful": doubtful,

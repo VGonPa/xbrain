@@ -659,7 +659,12 @@ generates an Obsidian wiki.
   leaves it behind — and because a restore reverts `vocab.yaml` as well as `items.json`, one
   from before a `vocab --regenerate` moves the questions digest and retires EVERY record at
   once (a full re-bill); only a restore leaving both the evidence and the vocabulary
-  untouched leaves an assessment current. `--force` overwrites a paid record with no recovery. `jev topics` is the
+  untouched leaves an assessment current. `--force` overwrites paid records, so a run that
+  actually re-asks a current one copies the side-car to `data/jev/topics.<UTC stamp>.bak`
+  first (echoed, never pruned) — that is the file's OWN reversibility, standing in for the
+  snapshot it does not get. ONE ASSESSMENT PER ITEM: the side-car is keyed by `item_id`
+  alone, so a second judge OVERWRITES the first's records; `provider`/`model` are provenance,
+  not a panel. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name

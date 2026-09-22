@@ -1,7 +1,11 @@
 """What one Jev assessment of one item looks like on disk.
 
 Provider-agnostic on purpose: a second judge answering the same questions (another model,
-a panel) produces the same record with another `provider`/`model`, so they can be compared.
+a panel) produces the same record with another `provider`/`model`, which are recorded for
+PROVENANCE — which judge said this, and under which version. Being able to hold two judges'
+answers side by side is a different thing and is not what the side-car does today: it is keyed
+by `item_id` alone, so a second judge overwrites the first (see `jev/store.py`).
+
 The record is FROZEN and refuses unknown fields, like every other persisted envelope in the
 repo (`knowledge/models.py`): a side-car file that a later run rewrites wholesale must not
 lose a field a newer writer added, and a record mutated after its `contract` was computed
@@ -85,7 +89,7 @@ class TopicAssessment(BaseModel):
     # fallback option, adding or removing a topic, or new evidence text does.
     contract: str = Field(pattern=_SHA256)
     # Length of the evidence BEFORE the cut, so a reader can tell how much was dropped;
-    # `truncated` says whether the cut happened. Task 2 computes both.
+    # `truncated` says whether the cut happened. `assess.build_topic_state` computes both.
     state_chars: int = Field(ge=0)
     truncated: bool = False
     membership: dict[str, Probability] = Field(min_length=1)

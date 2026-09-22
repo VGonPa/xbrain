@@ -111,7 +111,10 @@ With `--id a --id b` the candidate set is those two items and the line sums to 2
 - **forzados** *(a sub-count of `por evaluar`, not a fifth segment)* — appears only under
   `--force`: selected items whose assessment was *still current* and is being re-asked
   anyway. This is the segment that says "you are about to re-pay for work you already had",
-  and it is why a `--force` line can look like it sums to more than the corpus.
+  and it is why a `--force` line can look like it sums to more than the corpus. When it is
+  non-zero the run also copies the side-car first and prints
+  `Copia de seguridad: data/jev/topics.<UTC stamp>.bak`
+  ([the side-car section](#where-the-files-live-and-what-protects-them) has the details).
 - **fuera del límite** — evaluable items `--limit` left for a later run. Without it a
   nightly `--limit 200` cannot tell you whether the backlog is draining or growing.
 
@@ -178,7 +181,7 @@ The cost sentence is formatted with a decimal point and no digit grouping — th
 own numbers use es-ES formatting, the bill does not, because it is one string produced
 in exactly one place and printed identically by
 `jev topics`, `jev report`, `topics-report.md` and the dashboard, so a recap can never quote a
-different figure from the bill it recaps. Two markers exist because a bare `~0,0000 $`
+different figure from the bill it recaps. Two markers exist because a bare `~0.0000 $`
 cannot say which zero it is:
 
 - `(+K sin recuento)` — K records whose provider reported no token usage. They contribute
@@ -369,8 +372,10 @@ counts the **comparable** ones, the 2,565 that carry an enrichment. Same side-ca
 questions.
 
 It is **one self-contained file**: the data as a JSON blob, ECharts vendored into the page.
-Nothing is fetched at runtime except the Google Fonts stylesheet, so it renders offline in
-system fonts. Measured on this corpus on 2026-09-22 (2,609 items × 45 topics):
+No external scripts; the only network reference is the Google Fonts stylesheet, which both
+pages carry — so offline `jev.html` renders in system fonts and nothing else is missing
+(`dashboard.html` also pulls X video posters; this page has none). Measured on this corpus
+on 2026-09-22 (2,609 items × 45 topics):
 **4,531,327 bytes, about 4.53 MB** — ECharts 1.03 MB and the JSON blob 3.43 MB, of which
 the memberships are 1.16 MB, the `obsidian://` deep links 0.45 MB and the post text
 0.42 MB. Rendered with synthetic six-decimal probabilities, so the membership term is an
@@ -384,15 +389,19 @@ What it shows: the KPI band and the side-car line (`N vigentes de M guardadas` �
 number that says whether a vocabulary edit just retired paid work), a per-topic backing
 chart worst-first, a noul histogram on a log axis, three queues (doubtful, missing
 candidates, primary mismatches) and a per-item drawer with every membership as a bar and
-the five most probable options of the Choice.
+the five most probable options of the Choice (plus `enrich`'s own pick when the cut left it
+out — see the cuts below).
 
-**The page applies two cuts, and only one of them is visible.** The queues stop at **200
-rows** and say so with a cut note. The **post text is cut at 240 characters** in the blob
-itself and says nothing — it is enough to recognise a post in a queue row, and carrying the
-whole corpus of full texts would add megabytes to a page that is already large (the 240
-characters are the 0.42 MB above). Open the item's own note or its `X ↗` link for the full
-post; neither the drawer nor the queue has it. The Choice distribution is cut too, to the
-five most probable options, but the drawer labels that one (`5 más probables de 46`).
+**The page applies three cuts, and every one of them says so.** The queues stop at **200
+rows** and carry a cut note. The **post text is cut at 240 characters** in the blob itself
+and ends in an ellipsis — enough to recognise a post in a queue row, and carrying the whole
+corpus of full texts would add megabytes to a page that is already large (the 240 characters
+are the 0.42 MB above). Open the item's own note or its `X ↗` link for the full post;
+neither the drawer nor the queue has it. The **Choice distribution** is cut to the five most
+probable options, and the drawer labels that one (`5 más probables de 46`) — and when
+`enrich`'s own primary fell outside those five it is appended below them with its rank
+(`#29`), or `sin rango` when Jev omitted it from its distribution, so the section answers
+the reader's question and not only Jev's.
 
 **The threshold slider recomputes in the browser.** `jev report` prints one threshold; the
 page lets you move it, so every threshold-dependent number is re-derived client-side from
@@ -443,11 +452,27 @@ different event with the same symptom. `xbrain jev topics` re-asks exactly the s
 is **informational only** and never consulted for currency: comparing it would retire an
 assessment the moment the item was re-enriched.
 
+**`xbrain vocab` says what it just retired.** Any write of `vocab.yaml` moves the questions
+digest, so it expires the whole side-car at once — a re-worded description does it as surely
+as a new topic. Rather than leave that to be discovered by the next report's `0 vigentes`,
+`vocab --apply` and `vocab --executor api` print it:
+
+```text
+2583 evaluaciones de Jev quedan caducadas: `xbrain jev topics` las vuelve a pedir (y a facturar).
+```
+
+A plain `jev topics` is the whole remedy — a retired record is not current, so it is selected
+without `--force`, and `--force` would additionally re-bill whatever is still current.
+
+A worksheet export (`vocab --executor claude-code` or `manual`) writes no vocabulary, so it
+retires nothing and says nothing.
+
 ## Where the files live, and what protects them
 
 | Path | What it is |
 |---|---|
 | `data/jev/topics.json` | the side-car: one `TopicAssessment` per item id |
+| `data/jev/topics.<UTC stamp>.bak` | a copy of the side-car, written before a `--force` run re-asks a current record. Never pruned |
 | `data/jev/topics-report.json` · `.md` | the comparison, rewritten on every `jev report` |
 | `<output_dir>/jev.html` | the page, rewritten on every `jev dashboard` |
 
@@ -459,7 +484,8 @@ The config key is the subdirectory; `<output_dir>` is the absolute path it resol
 > synthesised topic pages and is part of the store. The second holds Jev's assessments and
 > is a side-car. Only the first is snapshotted.
 
-**This file costs money to regenerate and there is no undo.** Three consequences:
+**This file costs money to regenerate and `snapshot restore` will not bring it back.** Four
+consequences:
 
 - **It is not snapshotted.** `xbrain snapshot create` copies the four flat store artifacts
   from `data/`; `data/jev/topics.json` is one level down and is not among them. `xbrain
@@ -472,14 +498,30 @@ The config key is the subdirectory; `<output_dir>` is the absolute path it resol
   for — them. Either way staleness is **detected, never consumed**: a reverted item is never
   compared against an answer about its newer text.
 - **It is not in git.** `data/` is gitignored in full, so there is no `git checkout` back to
-  a good copy. `--force` overwrites a paid record with no recovery, and a corrupt file is
-  repaired by hand or paid for again — which is why a malformed side-car raises instead of
-  quietly starting from `{}`.
+  a good copy. A corrupt file is repaired by hand or paid for again — which is why a
+  malformed side-car raises instead of quietly starting from `{}`.
+- **`--force` keeps a copy, and it is the only automatic one.** A run that actually re-asks
+  a current assessment copies the side-car to `data/jev/topics.<UTC stamp>.bak` first and
+  says so:
+
+  ```text
+  Copia de seguridad: data/jev/topics.2026-09-22T18-30-05-123Z.bak
+  ```
+
+  Taken before the client is built — so a copy that cannot be written stops a run before it
+  is billed — and before the first checkpoint, so it is the file as it was. A `--force` that
+  re-asks nothing current writes no copy: the trigger is the re-ask (`N forzados`), not the
+  flag. To restore one, stop any running `jev` command and move the `.bak` back over
+  `data/jev/topics.json`.
+
+  **They are never pruned.** Nothing deletes them — not `jev topics`, not
+  `snapshot restore`, not a retention rule — because the copy an operator wants is the one
+  from before the run they regret, which the tool cannot know. Delete them by hand; each is
+  the size of the side-car.
 - **Two runs at once are last-write-wins.** The file is rewritten wholesale on every save.
 
 It is written atomically and dumped sorted and pretty, so an unchanged corpus re-dumps
-byte-identically and a hand `diff` between two runs shows only what moved. That copy is
-also the only backup there is.
+byte-identically and a hand `diff` between two runs shows only what moved.
 
 ## Vendor facts, with their dates
 
@@ -502,6 +544,15 @@ Two readings that follow from the first row and are easy to get backwards:
 - **`state_char_limit` is a bound on the evidence, not a defence of that budget.** Cutting
   the state shrinks only the state half of it; the question half does not move.
 
+And one that follows from the third row, for the same reason:
+
+- **Of the two rate ceilings, the REQUEST one binds on this corpus.** At ~6k input tokens
+  per call, 1,200 req/min is 20 req/s, which is ~120k tok/s — 48 % of the 250k tok/s limit
+  while the request rate is at 100 % of its own. The token ceiling would bind first only
+  above ~12.5k tokens per call, roughly double what this corpus sends. So a sustained `429`
+  is answered by lowering `[jev].concurrency`, not by cutting `state_char_limit` (which, by
+  the line above, moves almost nothing).
+
 The price is per *version* while `[jev].model` defaults to the moving `jev-latest` alias,
 so every figure derived from it is an estimate. Each stored assessment records the concrete
 model that answered, so a report can always say what it priced.
@@ -518,11 +569,15 @@ No key in the environment and none in `<repo>/.env`. Nothing was called and noth
 written. `xbrain jev topics --dry-run` reports whether a key is visible without spending.
 
 ```text
-Error: el SDK de TypeSafe no está disponible (…): instala las dependencias con `uv sync` y vuelve a lanzar el comando
+Error: el SDK de TypeSafe no está disponible (…): instala las dependencias con `uv sync --extra dev --locked` y vuelve a lanzar el comando
 ```
 
 The key was accepted but the vendor SDK is not importable — usually a half-finished
-`uv sync`. No call was made.
+install. Re-run the install command from [the README](../README.md#installation). Note the
+`--extra dev --locked`: a bare `uv sync` prunes the environment to the resolved set, and
+`dev` is an *extra*, so it would uninstall `pytest`, `ruff`, `mypy`, `poe`, `bandit` and
+`detect-secrets` — repairing the SDK and silently removing `uv run poe check`. No call was
+made.
 
 ```text
 Error: Jev: configuración inválida (…)
@@ -541,11 +596,14 @@ topics` — only the failures are pending. Sustained `Jev API: … 429` means th
 lower `[jev].concurrency`.
 
 ```text
-Error: ninguna de las N evaluaciones terminó; primer error: …
+Error: ninguna de las N evaluaciones terminó: N fallos, K motivos distintos; primero: …
 ```
 
 Every call failed: a wrong key, no network, or the API is down. **Nothing was written** —
-the side-car is exactly as it was.
+the side-car is exactly as it was. Read `K` before the quoted reason: **one** distinct
+motive is a single cause — a key, a quota, an outage — so fixing that one thing and
+re-running is the whole remedy, while **many** means the failures are per item and the
+quoted one does not cover the rest.
 
 ```text
 Interrumpido: N evaluaciones nuevas guardadas (M en total) en <path>     (exit 130)
