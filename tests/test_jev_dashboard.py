@@ -311,6 +311,36 @@ def test_the_caller_may_hand_in_the_currency_it_already_computed():
     assert handed_in["totals"]["stale"] == 1
 
 
+def test_a_handed_in_currency_computed_under_another_fallback_is_refused():
+    """The shortcut is only sound while the caller's inputs are the callee's.
+
+    `current` is a DECISION derived from `fallback` and `char_limit`, and it arrived carrying
+    neither, so a caller could hand in a decision made under one fallback while the blob was
+    built — and labelled, and priced — under another. The page would then show a currency
+    verdict computed against options it does not name, and every count would look fine.
+    Nothing in the shape of the object could catch that; the provenance has to travel with it.
+    """
+    item = _item()
+    assessments = {"1": _assessment(item)}
+    elsewhere = current_pairs(
+        [item], assessments, VOCAB, fallback="otra-cosa", char_limit=CHAR_LIMIT
+    )
+
+    with pytest.raises(ValueError, match="otra-cosa"):
+        _data([item], assessments, current=elsewhere)
+
+
+def test_a_handed_in_currency_computed_under_another_char_limit_is_refused():
+    """The second input to the same decision. `char_limit` changes the STATE that is hashed,
+    so a currency verdict from a different window retires — or keeps — a different set."""
+    item = _item()
+    assessments = {"1": _assessment(item)}
+    elsewhere = current_pairs([item], assessments, VOCAB, fallback=FALLBACK, char_limit=17)
+
+    with pytest.raises(ValueError, match="17"):
+        _data([item], assessments, current=elsewhere)
+
+
 def test_a_side_car_record_whose_item_left_the_corpus_is_an_orphan_not_a_stale_one():
     """`assessed == current + stale + orphans`, asserted as the equation `_totals` claims.
 
@@ -371,7 +401,7 @@ def test_a_truncated_assessment_is_flagged_on_its_own_row():
 
 
 def test_the_choice_distribution_is_cut_to_five_and_ties_break_by_name():
-    """`report._primary_rank` breaks ties by option name so two runs of one distribution can
+    """`report.primary_rank` breaks ties by option name so two runs of one distribution can
     never report different ranks; the drawer sorts the same list and must not disagree."""
     item = _item()
     assessment = _assessment(item).model_copy(

@@ -198,8 +198,12 @@ def _pct(part: int, whole: int) -> float:
     return round(part / whole * 100, 1) if whole else 0.0
 
 
-def _primary_rank(primary_topic: str | None, probabilities: dict[str, float]) -> int | None:
+def primary_rank(primary_topic: str | None, probabilities: dict[str, float]) -> int | None:
     """1-based rank of `primary_topic` in the Choice distribution; `None` when it is absent.
+
+    PUBLIC because `jev/dashboard.py` imports it: a leading underscore says "module-private",
+    and a second module reaching past it either invites a copy — which is the one that drifts
+    — or leaves the name lying about its own contract.
 
     Ranked by descending probability, ties broken by option name so two runs of the same
     distribution can never report different ranks. The rank is what separates "Jev disagrees"
@@ -281,7 +285,7 @@ def compare_item(
         primary_topic=item.enriched.primary_topic,
         jev_primary=assessment.primary.choice,
         jev_confidence=assessment.primary.confidence,
-        primary_rank=_primary_rank(item.enriched.primary_topic, assessment.primary.probabilities),
+        primary_rank=primary_rank(item.enriched.primary_topic, assessment.primary.probabilities),
         doubtful=_doubtful(item.id, assigned, membership, threshold),
         missing=_missing(item.id, assigned, membership, threshold),
         jev_assigned=_jev_assigned(membership, threshold),
@@ -663,7 +667,10 @@ def _headline(summary: dict[str, Any]) -> list[str]:
         # JSON's `generated_at` can never name different days.
         f"# Jev · topics — {summary['generated_at'][:10]}",
         "",
-        f"Umbral {summary['threshold']} · {_tally('modelo', 'modelos', summary['models'])} · "
+        # Three decimals, like the noul column it is read against and like the page's own
+        # umbral: a reader compares the two, and one at `0.85` beside a column at `0.850`
+        # is the like-for-like comparison this report exists to make, broken.
+        f"Umbral {summary['threshold']:.3f} · {_tally('modelo', 'modelos', summary['models'])} · "
         f"{_tally('proveedor', 'proveedores', summary['providers'])}",
         _side_car_line(summary),
         f"Items comparados: {summary['items_compared']} de {summary['items_assessed']} · "
@@ -708,9 +715,20 @@ def _cut_note(shown: int, total: int) -> list[str]:
 
 
 def _pair_table(title: str, pairs: list[Pair], items_by_id: dict[str, Item], top: int) -> list[str]:
-    """The `top` worst pairs as a table; the caller has already sorted them."""
+    """The `top` worst pairs as a table; the caller has already sorted them.
+
+    THREE decimals, like `jev.html`, and for the reason the page was moved to three: these
+    rows are read AGAINST the umbral — `## Dudosas` means "below it" — and at two decimals a
+    pair at 0.8496 prints `0.85` under a headline reading `Umbral 0.85`, so the row denies
+    the section it is in. One side-car must not quote two numbers for one value, and the
+    `top` cut sorts the boundary rows away only on a corpus large enough to have twenty
+    worse ones, so the contradiction surfaces exactly where every row gets read.
+
+    `_disagreement_row`'s confidence stays at two: it is never compared against the umbral,
+    and the page prints it at two as well.
+    """
     rows = [
-        f"| {pair.item_id} | {_escape_cell(pair.slug)} | {pair.noul:.2f} | "
+        f"| {pair.item_id} | {_escape_cell(pair.slug)} | {pair.noul:.3f} | "
         f"{_snippet(items_by_id.get(pair.item_id))} |"
         for pair in pairs[:top]
     ]

@@ -2474,6 +2474,11 @@ def _echo_jev_retired_by_vocab(cfg: Config) -> None:
     Called only where `vocab.yaml` is actually WRITTEN. `xbrain vocab --executor claude-code`
     exports a worksheet and writes nothing, so it retires nothing and says nothing.
 
+    The remedy is a PLAIN `jev topics`, never `--force`. A retired record is not current, so
+    `select_items` picks it up on its own; recommending `--force` would teach the operator to
+    reach for the one flag that also re-bills the records that ARE still current, which after
+    a partial vocabulary edit is the rest of the corpus.
+
     Reads through `load_assessments` rather than counting JSON keys here — one loader for the
     side-car — but an unreadable one must not fail a `vocab` run that has already succeeded,
     so the refusal is reported and the count is not claimed.
@@ -2483,14 +2488,14 @@ def _echo_jev_retired_by_vocab(cfg: Config) -> None:
     try:
         count = len(load_assessments(cfg.jev_topics_path))
     except JevError as exc:
-        typer.echo(f"Las evaluaciones de Jev quedan caducadas (no se pudo contarlas: {exc})")
+        typer.echo(f"Las evaluaciones de Jev quedan caducadas (no se pudieron contar: {exc})")
         return
     if not count:
         return
     retired = plural(
         count, "evaluación de Jev queda caducada", "evaluaciones de Jev quedan caducadas"
     )
-    typer.echo(f"{retired}: re-lánzalas con `xbrain jev topics --force` (vuelve a facturar).")
+    typer.echo(f"{retired}: `xbrain jev topics` las vuelve a pedir (y a facturar).")
 
 
 def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:

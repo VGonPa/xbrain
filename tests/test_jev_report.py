@@ -332,10 +332,10 @@ def test_markdown_and_files(tmp_path: Path):
     # On the line they belong to, not anywhere in the document.
     assert (
         _headline_line(text, "Umbral ")
-        == "Umbral 0.85 · modelo: jev-1.13.0 (1) · proveedor: typesafe (1)"
+        == "Umbral 0.850 · modelo: jev-1.13.0 (1) · proveedor: typesafe (1)"
     )
-    assert "| 1 | misc | 0.20 |" in text  # doubtful row
-    assert "| 1 | startups | 0.90 |" in text  # missing row
+    assert "| 1 | misc | 0.200 |" in text  # doubtful row
+    assert "| 1 | startups | 0.900 |" in text  # missing row
     json_path, md_path = write_reports(summary, comparisons, {"1": item}, tmp_path / "jev")
     assert json_path.name == "topics-report.json" and md_path.name == "topics-report.md"
     payload = json.loads(json_path.read_text(encoding="utf-8"))
@@ -351,6 +351,39 @@ def test_markdown_names_the_unpriced_provider_rather_than_printing_a_bare_zero()
     summary, comparisons = build_report(pairs, VOCAB, 0.85)
     text = render_report_markdown(summary, comparisons, {"1": item})
     assert "proveedor sin tarifa: fake" in text
+
+
+def test_a_boundary_noul_reads_like_the_page_and_not_like_its_own_contradiction():
+    """`0.8496` under a heading that means "below 0.850" must not render as `0.85`.
+
+    ONE side-car, two artifacts, and this was the one place they printed different numbers
+    for the same value: `jev.html` renders every noul compared against the umbral at three
+    decimals — it was changed to, because two decimals made 331 rows on the real corpus
+    contradict their own heading — while `topics-report.md` still rendered two. A pair at
+    0.8496 is doubtful, and under `## Dudosas` it printed `0.85` beside a headline reading
+    `Umbral 0.85`: a row that reads as a bug in the tool.
+
+    The umbral is formatted the same way for the same reason — a reader compares the column
+    with the headline, and a like-for-like comparison needs both at one precision.
+    """
+    item = _item()
+    # `choice="startups"` against enrich's `ai-coding` primary, so the real-disagreement
+    # section has a row and its `conf.` column can be pinned in the same assertion.
+    pairs = [
+        (
+            item,
+            _assessment(item, {"ai-coding": 0.8496, "startups": 0.9, "misc": 0.2}, "startups"),
+        )
+    ]
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    text = render_report_markdown(summary, comparisons, {"1": item})
+
+    assert "| 1 | ai-coding | 0.850 |" in text, text
+    assert _headline_line(text, "Umbral ").startswith("Umbral 0.850 ·")
+    # The confidence column is deliberately NOT moved: it is never compared against the
+    # umbral, and the page prints it at two decimals too.
+    assert "| 1 | ai-coding | startups | 0.70 |" in text, text
 
 
 # ------------------------------------------------------------------- markdown rendering
@@ -553,7 +586,7 @@ def test_missing_is_ordered_strongest_first_within_one_item():
 
 
 def test_primary_rank_breaks_a_tie_by_option_name():
-    """The tie-break is the property `_primary_rank`'s docstring sells: "two runs of the same
+    """The tie-break is the property `primary_rank`'s docstring sells: "two runs of the same
     distribution can never report different ranks".
 
     Distributions are stored and re-read as JSON, so insertion order is whatever the provider
@@ -721,10 +754,10 @@ def test_the_tables_are_worst_first_under_their_own_heading_and_cut_at_top():
 
     # Ascending noul, and only `top` of them.
     doubtful = [_cells(row)[3].strip() for row in _rows_under(text, "## Dudosas")]
-    assert doubtful == ["0.10", "0.40"]
+    assert doubtful == ["0.100", "0.400"]
     # Descending noul, so the STRONGEST candidates are the ones that survive the cut.
     missing = [_cells(row)[3].strip() for row in _rows_under(text, "## Candidatas que faltan")]
-    assert missing == ["0.99", "0.99"]
+    assert missing == ["0.990", "0.990"]
 
 
 def test_a_cut_table_says_how_many_rows_it_dropped():
@@ -777,7 +810,7 @@ def test_a_multiline_post_stays_on_one_row():
 
     text = render_report_markdown(summary, comparisons, {"1": item})
 
-    assert _rows_under(text, "## Dudosas") == ["| 1 | misc | 0.20 | línea uno línea dos |"]
+    assert _rows_under(text, "## Dudosas") == ["| 1 | misc | 0.200 | línea uno línea dos |"]
 
 
 def test_a_row_for_an_item_missing_from_the_store_renders_an_empty_text_cell():
@@ -792,7 +825,7 @@ def test_a_row_for_an_item_missing_from_the_store_renders_an_empty_text_cell():
     text = render_report_markdown(summary, comparisons, {})
 
     row = _rows_under(text, "## Dudosas")[0]
-    assert row == "| 1 | misc | 0.20 |  |"
+    assert row == "| 1 | misc | 0.200 |  |"
     assert len(_cells(row)) == 6
 
 

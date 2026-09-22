@@ -641,6 +641,56 @@ def test_run_assessments_raises_when_every_item_fails():
         )
 
 
+def test_the_all_failed_message_counts_the_DISTINCT_reasons():
+    """One reason or forty is the whole diagnosis, and `primer error` cannot carry it.
+
+    2,609 failures with ONE reason is a key, a quota or an outage — fix one thing, re-run.
+    2,609 failures with forty is the corpus, and each one has to be read. The old message
+    showed `failed[0][1]` and nothing else, which reads as the first case whichever it is:
+    the operator retries a dead run, or reads one reason and believes it covers the rest.
+    """
+
+    class _TwoDistinctReasons(FakeJevClient):
+        def ask(self, state, questions):
+            raise JevError("429 rate limited" if "throttled" in state["post"] else "campo ausente")
+
+    with pytest.raises(JevError) as caught:
+        run_assessments(
+            [_item("1", "throttled"), _item("2", "dos"), _item("3", "tres")],
+            _vocab(),
+            _TwoDistinctReasons(),
+            fallback="otro",
+            char_limit=100,
+            concurrency=1,
+        )
+
+    message = str(caught.value)
+    assert "3 fallos, 2 motivos distintos" in message, message
+    # Still names one verbatim: a count alone tells nobody what to fix.
+    assert "primero: 429 rate limited" in message, message
+
+
+def test_one_reason_for_every_failure_is_said_in_the_singular():
+    """`1 motivos distintos` reads as a bug in the counting — the repo's own `plural` rule,
+    and the case that actually matters, since a single cause is the retryable one."""
+
+    class _OneReason(FakeJevClient):
+        def ask(self, state, questions):
+            raise JevError("401 clave inválida")
+
+    with pytest.raises(JevError) as caught:
+        run_assessments(
+            [_item("1"), _item("2")],
+            _vocab(),
+            _OneReason(),
+            fallback="otro",
+            char_limit=100,
+            concurrency=1,
+        )
+
+    assert "2 fallos, 1 motivo distinto; primero: 401 clave inválida" in str(caught.value)
+
+
 def test_the_all_failed_rule_covers_an_unexpected_exception_too():
     """`failed[0]` must always exist when `assessed` is empty.
 
