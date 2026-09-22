@@ -396,6 +396,29 @@ def _report_progress(on_progress: Callable[[int, int], None] | None, done: int, 
         )
 
 
+def _deliver_result(
+    on_result: Callable[[TopicAssessment], None] | None, assessment: TopicAssessment
+) -> None:
+    """Hand a stored record to the caller's checkpoint, and never let it fail the run.
+
+    Guarded exactly like `_report_progress`, for a stronger reason: this hook exists so an
+    interrupted run keeps what it has already paid for, and a checkpoint that threw would
+    discard the very record it was called to save. The record stays in `assessed` either
+    way — a broken checkpoint costs durability, never the result.
+    """
+    if on_result is None:
+        return
+    try:
+        on_result(assessment)
+    except Exception as exc:
+        logger.warning(
+            "on_result falló para %s (%s: %s); la evaluación continúa",
+            assessment.item_id,
+            type(exc).__name__,
+            exc,
+        )
+
+
 def run_assessments(
     items: list[Item],
     vocab: list[Topic],
@@ -405,6 +428,7 @@ def run_assessments(
     char_limit: int,
     concurrency: int,
     on_progress: Callable[[int, int], None] | None = None,
+    on_result: Callable[[TopicAssessment], None] | None = None,
 ) -> RunResult:
     """Ask about every item, `concurrency` at a time.
 
@@ -417,10 +441,16 @@ def run_assessments(
     where every item failed raises, so a dead key is an error and not an empty success; an
     empty `items` is simply an empty result and never reaches the client.
 
-    An interrupt is NOT survivable, by design. `KeyboardInterrupt` cancels every queued call
-    — every item is submitted up front, so a plain shutdown would drain the whole queue and
-    the operator's Ctrl-C would still pay the full bill — and then propagates, discarding the
-    records already collected. Checkpointing those is the CLI's job, not this function's.
+    An interrupt discards THIS FUNCTION'S collection, by design. `KeyboardInterrupt` cancels
+    every queued call — every item is submitted up front, so a plain shutdown would drain the
+    whole queue and the operator's Ctrl-C would still pay the full bill — and then propagates
+    without a `RunResult`.
+
+    What survives an interrupt is whatever `on_result` was already handed. Every successful
+    record is delivered to it the moment it is stored, in arrival order, so a caller that
+    checkpoints there keeps the work it has paid for; a caller that passes none keeps
+    nothing, which is the same bargain as before. Holding the records back to deliver them
+    sorted at the end would make the hook useless for the one event it exists for.
 
     `client.ask` is called from `concurrency` threads at once and must be safe to do so; see
     the `JevClient` protocol.
@@ -442,11 +472,16 @@ def run_assessments(
         for done, future in enumerate(as_completed(futures), start=1):
             item = futures[future]
             try:
-                assessed.append(future.result())
+                assessment = future.result()
             except JevError as exc:
                 failed.append((item.id, str(exc)))
             except Exception as exc:
                 failed.append((item.id, f"{type(exc).__name__}: {exc}"))
+            else:
+                # Stored first, delivered second: the checkpoint is told about a record
+                # that is already in `assessed`, never the other way round.
+                assessed.append(assessment)
+                _deliver_result(on_result, assessment)
             _report_progress(on_progress, done, len(items))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)

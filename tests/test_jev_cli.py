@@ -32,7 +32,7 @@ def _refusing_client(reason: str) -> Callable[[Config], JevClient]:
     return _build
 
 
-def _setup_repo(tmp_path: Path, monkeypatch) -> Path:
+def _setup_repo(tmp_path: Path, monkeypatch, jev: str = "") -> Path:
     vault = tmp_path / "vault"
     vault.mkdir()
     (tmp_path / "config.toml").write_text(
@@ -41,7 +41,7 @@ def _setup_repo(tmp_path: Path, monkeypatch) -> Path:
         'output_subdir = "x-knowledge"\n'
         'data_dir = "data"\n'
         "[x]\n"
-        'handle = "vgonpa"\n',
+        'handle = "vgonpa"\n' + (f"[jev]\n{jev}" if jev else ""),
         encoding="utf-8",
     )
     (tmp_path / "data").mkdir()
@@ -209,3 +209,29 @@ def test_jev_topics_truncates_a_long_failure_list(tmp_path: Path, monkeypatch):
     # The one record that succeeded is still saved: a noisy failure list never costs work
     # that was already paid for.
     assert list(load_assessments(tmp_path / "data" / "jev" / "topics.json")) == ["01"]
+
+
+def test_jev_topics_checkpoints_what_it_paid_for_when_interrupted(tmp_path: Path, monkeypatch):
+    """Ctrl-C keeps the records that were already answered.
+
+    They are PAID FOR. `run_assessments` cancels the queued calls and re-raises, discarding
+    its own collection, so if the command did not checkpoint, an operator who interrupted a
+    3,000-item run would be billed again for every post that had already come back.
+    """
+    _setup_repo(tmp_path, monkeypatch, jev="concurrency = 1\n")
+    _seed(tmp_path)
+    fake = FakeJevClient(interrupt_after=1)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    # 130 is what an UNCAUGHT KeyboardInterrupt already exits with (click converts it).
+    # Catching the interrupt in order to checkpoint must not change the code the shell
+    # sees — and `_handle_cli_errors` would rewrite it to 1 if `typer.Exit` were not
+    # re-raised, so this pins a regression the side-car assertions below cannot see.
+    assert result.exit_code == 130, result.output
+    topics_path = tmp_path / "data" / "jev" / "topics.json"
+    assert list(load_assessments(topics_path)) == ["1"]
+    assert f"Interrumpido: 1 evaluaciones guardadas en {topics_path}" in result.output
+    # The pool is still released on the way out.
+    assert fake.closed is True

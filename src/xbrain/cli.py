@@ -51,6 +51,7 @@ from xbrain.jev.assess import RunResult, run_assessments, select_items
 from xbrain.jev.client import JevClient, JevError
 from xbrain.jev.defaults import INPUT_USD_PER_MTOK
 from xbrain.jev.env import typesafe_api_key
+from xbrain.jev.models import TopicAssessment
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -270,6 +271,14 @@ def _handle_cli_errors(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except typer.Exit:
+            # `click.exceptions.Exit` IS a `RuntimeError`, which `_OPERATOR_ERRORS` lists.
+            # Without this re-raise the clause below catches a command's own deliberate
+            # `typer.Exit(code=N)`, prints a bare "Error: " (its `str` is empty) and exits
+            # 1 — silently replacing the code the command chose. `xbrain jev topics` exits
+            # 130 on an interrupt, and the stacked `_handle_index_errors` raises its own
+            # Exit too, which is why this is a re-raise and not a special case for 130.
+            raise
         except _OPERATOR_ERRORS as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
@@ -2684,6 +2693,10 @@ def jev_topics_cmd(
         if done % 50 == 0 or done == total:
             typer.echo(f"  {done}/{total}")
 
+    def _checkpoint(assessment: TopicAssessment) -> None:
+        """Bank each record as it lands, so an interrupt has something to save."""
+        assessments[assessment.item_id] = assessment
+
     client = _jev_client(cfg)
     try:
         result = run_assessments(
@@ -2694,11 +2707,28 @@ def jev_topics_cmd(
             char_limit=cfg.jev_state_char_limit,
             concurrency=cfg.jev_concurrency,
             on_progress=_progress,
+            on_result=_checkpoint,
         )
+    except KeyboardInterrupt:
+        # Every record `_checkpoint` already banked is PAID FOR. `run_assessments` cancels
+        # the queued calls and re-raises WITHOUT a `RunResult`, throwing its own collection
+        # away, so this save is the only thing standing between a Ctrl-C and being billed
+        # a second time for posts that already came back.
+        save_assessments(assessments, cfg.jev_topics_path)
+        typer.echo(
+            f"Interrumpido: {len(assessments)} evaluaciones guardadas en {cfg.jev_topics_path}",
+            err=True,
+        )
+        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in
+        # order to checkpoint must not change the code the shell sees. `from None` because
+        # the traceback of a Ctrl-C tells the operator nothing.
+        raise typer.Exit(code=130) from None
     finally:
         # `finally`, not the next line: a run where every item failed raises out of
         # `run_assessments`, and that is exactly the path that would leak the pool.
         client.close()
+    # `_checkpoint` has already put every one of these in `assessments`; the merge stays
+    # here so the NORMAL path does not depend on a hook whose failures are swallowed.
     for assessment in result.assessed:
         assessments[assessment.item_id] = assessment
     save_assessments(assessments, cfg.jev_topics_path)

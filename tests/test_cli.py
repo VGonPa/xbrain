@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from xbrain import cli
 from xbrain.cli import app
 from xbrain.models import (
     Author,
@@ -4987,3 +4989,33 @@ def test_redescribe_frames_limit_help_says_items_not_videos():
     limit_help = match.group(0)
     assert "items" in limit_help
     assert "vídeos" not in limit_help
+
+
+def test_an_explicit_exit_code_survives_the_error_wrapper():
+    """A command's own `typer.Exit(code=N)` must reach the shell as N.
+
+    `click.exceptions.Exit` subclasses `RuntimeError`, which `_OPERATOR_ERRORS` lists. So
+    without an explicit re-raise the wrapper CATCHES a deliberate exit, prints a bare
+    "Error: " — `str(Exit(130))` is empty — and exits 1, silently replacing the code the
+    command chose. `xbrain jev topics` uses 130 for an interrupted run.
+    """
+
+    @cli._handle_cli_errors
+    def _command() -> None:
+        raise typer.Exit(code=130)
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _command()
+    assert excinfo.value.exit_code == 130
+
+
+def test_the_error_wrapper_still_converts_a_real_operator_error():
+    """The re-raise above must not punch a hole in the wrapper's actual job."""
+
+    @cli._handle_cli_errors
+    def _command() -> None:
+        raise ValueError("vocabulario vacío")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _command()
+    assert excinfo.value.exit_code == 1

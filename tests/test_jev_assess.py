@@ -22,6 +22,7 @@ from xbrain.jev.assess import (
     topic_contract,
 )
 from xbrain.jev.client import ChoiceAnswer, ChoiceQuestion, JevError, NoulAnswer, NoulQuestion
+from xbrain.jev.models import TopicAssessment
 from xbrain.jev.questions import PRIMARY_KEY, build_topic_questions
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.verification import fingerprint_output
@@ -595,6 +596,50 @@ def test_a_failing_progress_callback_never_costs_a_record(caplog):
     # The warning has to say WHAT broke: "on_progress falló" alone sends nobody anywhere.
     assert "BrokenPipeError" in caplog.text
     assert "head cerró el pipe" in caplog.text
+
+
+def test_on_result_receives_every_successful_record_as_it_lands():
+    """The checkpoint hook sees each record the moment it is stored, and ONLY the
+    successful ones: an item that failed produced nothing anybody could save."""
+    delivered: list[str] = []
+    result = run_assessments(
+        [_item("1"), _item("2", text="BOOM"), _item("3")],
+        _vocab(),
+        FakeJevClient(fail_when=lambda state: "BOOM" in state["post"]),
+        fallback="otro",
+        char_limit=100,
+        concurrency=4,
+        on_result=lambda assessment: delivered.append(assessment.item_id),
+    )
+    # Sorted: `as_completed` decides the arrival order, and the hook is deliberately fed in
+    # that order rather than held back to be sorted — a checkpoint that waited for the end
+    # would save nothing on the interrupt it exists for.
+    assert sorted(delivered) == ["1", "3"]
+    assert [assessment.item_id for assessment in result.assessed] == ["1", "3"]
+    assert [item_id for item_id, _ in result.failed] == ["2"]
+
+
+def test_a_failing_on_result_is_logged_and_never_loses_a_record(caplog):
+    """The hook exists so an interrupted run keeps what it already paid for. A checkpoint
+    that threw would discard the very record it was called to save."""
+
+    def _broken(assessment: TopicAssessment) -> None:
+        raise OSError("disco lleno")
+
+    with caplog.at_level(logging.WARNING, logger="xbrain.jev.assess"):
+        result = run_assessments(
+            [_item("1"), _item("2")],
+            _vocab(),
+            FakeJevClient(),
+            fallback="otro",
+            char_limit=100,
+            concurrency=2,
+            on_result=_broken,
+        )
+    assert [assessment.item_id for assessment in result.assessed] == ["1", "2"]
+    # The warning has to name WHAT broke, exactly as the progress guard does.
+    assert "OSError" in caplog.text
+    assert "disco lleno" in caplog.text
 
 
 def test_an_interrupt_cancels_the_queued_calls_instead_of_paying_for_them():
