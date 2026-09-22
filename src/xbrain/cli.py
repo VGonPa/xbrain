@@ -3081,7 +3081,14 @@ def _jev_report_line(summary: dict[str, Any]) -> str:
 @_handle_cli_errors
 def jev_report_cmd(
     threshold: float | None = typer.Option(
-        None, help="Umbral de pertenencia (por defecto [jev].threshold)"
+        # `\[` ESCAPES THE BRACKET FOR RICH, and the raw string is what carries the
+        # backslash to it. Typer renders help through Rich whenever rich is installed, and
+        # Rich reads `[jev]` as a style tag and consumes it: this read `(por defecto
+        # .threshold)` in every terminal, naming a key that exists in no config file.
+        # (`"\["` would also be an invalid Python escape sequence.) Pinned by
+        # `test_threshold_help_names_the_config_key_literally`.
+        None,
+        help=r"Umbral de pertenencia (por defecto \[jev].threshold)",
     ),
 ) -> None:
     """Compara las evaluaciones de Jev con la asignación de enrich, a un umbral.
@@ -3129,7 +3136,9 @@ def _jev_note_links(items: list[Item], items_dir: Path) -> dict[str, str]:
 @_handle_cli_errors
 def jev_dashboard_cmd(
     threshold: float | None = typer.Option(
-        None, help="Umbral inicial del slider (por defecto [jev].threshold)"
+        # `\[` escapes the bracket for Rich — see `jev_report_cmd` for the whole argument.
+        None,
+        help=r"Umbral inicial del slider (por defecto \[jev].threshold)",
     ),
 ) -> None:
     """Escribe `<output_dir>/jev.html`: Jev frente a enrich, con umbral movible y colas.

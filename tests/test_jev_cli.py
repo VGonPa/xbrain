@@ -1308,3 +1308,29 @@ def test_jev_dashboard_leaves_the_last_good_page_alone_when_the_rename_dies(
     # Byte-identical: not merely "a page exists", but the one that was there before.
     assert _page(vault).read_bytes() == good
     assert not list(_page(vault).parent.glob("*.tmp"))
+
+
+# ---------------------------------------------------------- help text survives Rich markup
+
+
+@pytest.mark.parametrize("command", ["report", "dashboard"])
+def test_threshold_help_names_the_config_key_literally(command: str) -> None:
+    """`--threshold`'s help must SAY `[jev].threshold`, not `.threshold`.
+
+    Typer renders help through Rich whenever rich is installed, and Rich reads `[jev]` as a
+    style tag and CONSUMES it: the shipped help read `(por defecto .threshold)`, naming a
+    key that does not exist in any config file. The literal is restored by escaping the
+    bracket for Rich (`\\[`), which is why the source string is a raw string.
+
+    The second assertion is the one that catches a half-fix. Asserting only that
+    `[jev].threshold` appears would still pass if some other `.threshold` in the same help
+    were left bare, so every occurrence of `.threshold` must be one that carries its
+    `[jev]` prefix.
+    """
+    # A wide terminal: Rich wraps the options table to the width it is given, and a help
+    # string broken across two lines would fail this on formatting rather than on content.
+    result = CliRunner(env={"COLUMNS": "200"}).invoke(app, ["jev", command, "--help"])
+
+    assert result.exit_code == 0
+    assert "[jev].threshold" in result.output
+    assert result.output.count(".threshold") == result.output.count("[jev].threshold")
