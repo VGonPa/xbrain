@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import typer
@@ -52,12 +52,13 @@ from xbrain.jev.assess import RunResult, Selection, run_assessments, select_item
 from xbrain.jev.client import JevClient, JevError
 from xbrain.jev.defaults import input_cost_usd, input_tokens_total, unpriced_providers
 from xbrain.jev.env import typesafe_api_key
+from xbrain.jev.report import compare_item, current_assessments, summarize, write_reports
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
-from xbrain.models import ArchiveImport, Author, Item, SourceName
+from xbrain.models import ArchiveImport, Author, Item, SourceName, Topic
 from xbrain.redescribe import (
     RedescribeReport,
     format_redescribe_summary,
@@ -168,9 +169,10 @@ from xbrain.worksheet import export_worksheet, import_worksheet
 if TYPE_CHECKING:
     # Annotations only. This saves NO import cost — `xbrain.jev.models` is loaded at
     # runtime anyway, transitively via `xbrain.jev.assess`. What it keeps is the
-    # module-top `xbrain.jev` import list at the five modules the CLI is meant to depend
-    # on directly (assess, client, defaults, env, store; `task-3-deviations.md` §1), so a
-    # sixth is a visible decision rather than a drive-by.
+    # module-top `xbrain.jev` import list at the six modules the CLI is meant to depend
+    # on directly (assess, client, defaults, env, report, store; `task-3-deviations.md`
+    # §1 plus `report` for `xbrain jev report`), so a seventh is a visible decision rather
+    # than a drive-by.
     from xbrain.jev.models import TopicAssessment
 
 logger = logging.getLogger(__name__)
@@ -2905,6 +2907,79 @@ def jev_topics_cmd(
         # LAST, and guarded. Releasing the pool is cleanup; it is never the run's verdict,
         # and on the interrupt path it runs while `Exit(130)` is in flight.
         _release_jev_client(client)
+
+
+def _jev_pairs(
+    cfg: Config,
+) -> tuple[dict[str, Item], list[Topic], list[tuple[Item, TopicAssessment]]]:
+    """Store, vocabulary and the CURRENT (item, assessment) pairs — shared by report + dashboard.
+
+    ONE loader for both readers of the side-car. The report and the dashboard must never
+    disagree about which stored assessments are still current, and two call sites each
+    opening the three files their own way is exactly how they would: `current_assessments`
+    decides currency from the vocabulary and the fallback, so a reader that loaded a
+    different `vocab.yaml` would silently compare a different set.
+    """
+    store = load_store(cfg.items_path)
+    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    assessments = load_assessments(cfg.jev_topics_path)
+    pairs = current_assessments(
+        list(store.values()),
+        assessments,
+        vocab,
+        fallback=cfg.jev_fallback_option,
+        char_limit=cfg.jev_state_char_limit,
+    )
+    return store, vocab, pairs
+
+
+def _jev_report_line(summary: dict[str, Any], threshold: float) -> str:
+    """What the comparison found, in one line — the same numbers the two files carry.
+
+    The cost is a RECAP of work already paid for by `jev topics`, not a new bill, and it
+    carries the same unpriced-provider marker for the same reason `_jev_cost_line` does: a
+    bare `~0.0 $` cannot say whether the run was free or whether nobody prices that judge.
+    """
+    line = (
+        f"Umbral {threshold} · "
+        f"{_n(summary['items_assessed'], 'item evaluado', 'items evaluados')} · "
+        f"enrich respaldado {summary['enrich_backed_pct']} % · "
+        f"Jev respaldado {summary['jev_backed_pct']} % · "
+        f"dudosas {summary['doubtful_pairs']} · faltan {summary['missing_pairs']} · "
+        f"primario coincide {summary['primary_agree_pct']} % · ~{summary['cost_usd']} $"
+    )
+    if summary["unpriced_providers"]:
+        line += f" · sin tarifa: {', '.join(summary['unpriced_providers'])}"
+    return line
+
+
+@jev_app.command("report")
+@_handle_cli_errors
+def jev_report_cmd(
+    threshold: float | None = typer.Option(
+        None, help="Umbral de pertenencia (por defecto [jev].threshold)"
+    ),
+) -> None:
+    """Compara las evaluaciones de Jev con la asignación de enrich, a un umbral.
+
+    Escribe `<data_dir>/jev/topics-report.json` y `topics-report.md` (por defecto bajo
+    `data/jev/`). No llama a Jev ni gasta nada: solo lee el side-car que `xbrain jev topics`
+    ya pagó. Las evaluaciones caducadas se excluyen, nunca se comparan como si estuvieran
+    vigentes.
+    """
+    cfg = _config()
+    t = cfg.jev_threshold if threshold is None else threshold
+    if not 0.0 <= t <= 1.0:
+        # Refused BEFORE anything is written. A threshold outside [0, 1] produces a report
+        # where nothing is ever backed and nothing is ever missing — a plausible-looking
+        # file that is pure noise, and one that would overwrite the last good one.
+        raise ValueError("--threshold debe estar en [0.0, 1.0]")
+    store, vocab, pairs = _jev_pairs(cfg)
+    summary = summarize(pairs, vocab, t)
+    comparisons = [c for item, a in pairs if (c := compare_item(item, a, t)) is not None]
+    json_path, md_path = write_reports(summary, comparisons, store, cfg.jev_dir)
+    typer.echo(_jev_report_line(summary, t))
+    typer.echo(f"→ {md_path}\n→ {json_path}")
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")

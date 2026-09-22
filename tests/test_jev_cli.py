@@ -1,4 +1,5 @@
 # tests/test_jev_cli.py
+import json
 import logging
 import sys
 from collections.abc import Callable
@@ -742,3 +743,114 @@ def test_an_interrupt_that_rescued_nothing_leaves_an_existing_sidecar_alone(
     assert result.exit_code == 130, result.output
     assert "Interrumpido: nada nuevo que guardar" in result.stderr
     assert _topics_path(tmp_path).read_bytes() == before
+
+
+# ------------------------------------------------------------------- `xbrain jev report`
+
+
+def _report_paths(tmp_path: Path) -> tuple[Path, Path]:
+    jev_dir = tmp_path / "data" / "jev"
+    return jev_dir / "topics-report.json", jev_dir / "topics-report.md"
+
+
+def _assess_corpus(monkeypatch) -> None:
+    """Fill the side-car with a judge that backs `ai-coding` (0.93) and little else (0.05).
+
+    The seeded corpus assigns `ai-coding` to item 1 and `startups` to item 2, so this one
+    fake produces one agreement and one disagreement in BOTH directions — item 2's
+    `startups` is doubtful and its `ai-coding` is a missing candidate.
+    """
+    monkeypatch.setattr(
+        cli,
+        "_jev_client",
+        lambda cfg: FakeJevClient(nouls={"ai-coding": 0.93}, primary="ai-coding"),
+    )
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+
+def test_jev_report_writes_json_and_markdown(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report", "--threshold", "0.5"])
+
+    assert result.exit_code == 0, result.output
+    assert "Umbral 0.5" in result.stdout
+    assert "2 items evaluados" in result.stdout
+    # The recap of what the side-car cost names the judge nobody prices, exactly as the run
+    # itself does: `~0.0 $` alone cannot say whether the work was free or merely unpriced.
+    assert "sin tarifa: fake" in result.stdout
+    json_path, md_path = _report_paths(tmp_path)
+    assert md_path.read_text(encoding="utf-8").startswith("# Jev · topics")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    # Item 2 is assigned `startups`, which this judge scores 0.05 — doubtful at 0.5 — while
+    # backing `ai-coding` at 0.93, which enrich did not assign to it.
+    assert payload["summary"]["doubtful_pairs"] == 1
+    assert payload["summary"]["missing_pairs"] == 1
+    assert payload["summary"]["items_compared"] == 2
+
+
+def test_jev_report_without_assessments_says_so(tmp_path: Path, monkeypatch):
+    """An empty side-car is a report of zero, not a crash and not a silent no-op."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 items evaluados" in result.stdout
+
+
+def test_jev_report_defaults_to_the_configured_threshold(tmp_path: Path, monkeypatch):
+    """No `--threshold` reads `[jev].threshold`, so the report and the config agree."""
+    _setup_repo(tmp_path, monkeypatch, jev="threshold = 0.95\n")
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "Umbral 0.95" in result.stdout
+
+
+def test_jev_report_refuses_a_threshold_outside_the_unit_interval(tmp_path: Path, monkeypatch):
+    """A probability cannot be 1.5. Accepting it would produce a report where nothing is
+    ever backed and nothing is ever missing — a plausible-looking file that is pure noise."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+    result = runner.invoke(app, ["jev", "report", "--threshold", "1.5"])
+
+    assert result.exit_code == 1
+    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
+    assert not _report_paths(tmp_path)[0].exists()
+
+
+def test_jev_report_excludes_assessments_a_vocabulary_change_retired(tmp_path: Path, monkeypatch):
+    """A stale assessment is left OUT, never compared as if it were current.
+
+    The contract binds a stored record to the questions Jev was ACTUALLY asked. Adding a
+    topic rewrites the question set, so every stored record now describes an ask that no
+    longer exists — and comparing against a question Jev was never shown is not a weaker
+    signal, it is a wrong one. The report must drop to zero rather than keep quoting numbers
+    off retired records.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    before = runner.invoke(app, ["jev", "report"])
+    assert "2 items evaluados" in before.stdout
+
+    save_vocab(
+        [
+            Topic(slug="ai-coding", description="Construir software con IA."),
+            Topic(slug="startups", description="Fundar empresas."),
+            Topic(slug="devtools", description="Herramientas para programar."),
+        ],
+        tmp_path / "data" / "vocab.yaml",
+    )
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    assert "0 items evaluados" in result.stdout
