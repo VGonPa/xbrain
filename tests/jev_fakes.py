@@ -80,13 +80,10 @@ class FakeJevClient:
                     choice=self.primary, confidence=self.confidence, probabilities=probabilities
                 )
             else:
+                # `raise`, not `assert`: `python -O` strips an assert, and this double is
+                # what every later task asserts against. Answering every key or raising here
+                # is what makes the result as complete as the real adapter demands.
                 raise JevError(f"tipo de pregunta no modelado para {key!r}: {type(question)}")
-        # The same completeness the adapter enforces, so a test can never assert against an
-        # answer set the real client would have refused. `raise`, not `assert`: `python -O`
-        # strips an assert, and this double is what every later task asserts against.
-        if answers.keys() != questions.keys():
-            unanswered = sorted(questions.keys() - answers.keys())
-            raise JevError(f"la doble no respondió a {unanswered!r}")
         return JevResult(
             provider=self.provider,
             model=self.model,
