@@ -1,13 +1,15 @@
-"""What counts as EVIDENCE for a generated output — one definition, four consumers
-(three of them bound here; the fourth, the checker, in #89 — see THE INVARIANT below).
+"""What counts as EVIDENCE for a generated output — one definition, five consumers
+(three bound here by identity; the checker through its own public scan; `jev` through the
+same surfaces in its own rendering — see THE INVARIANT below).
 
-THE PROBLEM THIS EXISTS TO KILL. Four components each need to know what may support a
+THE PROBLEM THIS EXISTS TO KILL. Five components each need to know what may support a
 claim in a generated `summary` / `digest` / `topics`:
 
   1. the GENERATOR — what the worksheet (or the `api` prompt) actually hands the agent
   2. the RUBRIC    — what the judge is told may support a claim
   3. the JUDGE     — what `verification._source_text` actually puts in front of it
   4. the CHECKER   — what the deterministic entity-grounding check searches for a name
+  5. JEV           — what the external topic judge is shown as its `state`
 
 Each used to keep its OWN hand-written list, and nothing bound them. The suite was green
 while the four contradicted one another, because every change tested only its own side.
@@ -21,20 +23,25 @@ THE INVARIANT. `evidence_surfaces(item, target)` is the single source of truth:
     generator fields  ⊇  evidence_surfaces(item, target)     [bound here]
     judge source      ==  evidence_surfaces(item, target)     [bound here]
     verify rubric     declares every surface it admits        [bound here]
-    checker evidence  ==  evidence_text(item, target)         [bound in #89, NOT here]
+    checker evidence  ==  evidence_text(item, target)         [bound in the checker's own
+                                                               binding test, not here]
+    jev state         ⊆   evidence_surfaces(item, "topics")    [values only, post first]
 
 `tests/test_evidence_contract.py` asserts the first three, per target, by identity against
 this module, per generator. Add a surface to one of those components and forget the others
 → red.
 
-**The CHECKER's leg is NOT bound in this module, and saying otherwise would be the exact
-dishonesty this PR exists to end.** The deterministic entity check lives in #89, which is
-stacked ON this branch — so nothing here can import it, and a test that compared
-`evidence_text` against `evidence_surfaces` would be asserting this module against itself:
-green forever, binding nothing. `evidence_text` is the API the checker MUST consume, and
-#89 carries the test that proves it does (it calls `evidence_text` and keeps no private
-list). Until #89 lands, `evidence_text` has no production caller, and this docstring says
-so rather than implying a fourth consumer that does not yet exist.
+**The CHECKER's and JEV's legs are not bound in THIS module, and that is deliberate.** A
+test here comparing `evidence_text` against `evidence_surfaces` would assert this module
+against itself: green forever, binding nothing. So the checker's leg is bound where the
+checker is — `tests/test_checker_evidence_binding.py`, through its public scan — and
+`entity_grounding.py` consumes `evidence_text` with no private list of its own.
+
+`xbrain.jev.assess` is the fifth consumer, and it takes the SURFACES rather than
+`evidence_text`: same definition, same target scoping, rendered to its own `state` (the
+atomic values only, no `[Author]` labels and no not-fetched markers, the post moved to the
+front, end-cut at `[jev].state_char_limit` with a visible marker). One definition, two
+renderings, and neither module owns the definition. See ARCHITECTURE.md § jev.
 
 EVIDENCE IS TARGET-DEPENDENT, and getting it wrong is a bug in BOTH directions. Judge a
 digest against the article and you excuse an invention it could not have sourced. Judge a

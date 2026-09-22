@@ -14,9 +14,31 @@ fake can simulate a transient API failure mid-batch.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
+
+#: Rich's ANSI colour spans, and its panel/box-drawing chrome (U+2500–U+257F).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_BOX_RE = re.compile("[\u2500-\u257f]")
+
+
+def plain_output(output: str) -> str:
+    """Normalise CliRunner output for substring assertions on Rich/Typer panels.
+
+    With colour on (CI, but not under pytest capture) Rich styles each flag with the
+    leading dash in its own ANSI span, so `--apply` never appears contiguously; the panel
+    also wraps onto several lines with `│` borders landing between words. Stripping the
+    escapes rejoins the flag, dropping the chrome and collapsing whitespace rejoins wrapped
+    words — which makes an assertion terminal-width AND colour independent.
+
+    It lives here rather than in a test module so any of them can assert on rendered output
+    without a second copy; `tests/test_cli.py`'s help battery is today's only caller. It
+    replaced a `COLUMNS` env crutch that was width-lucky rather than width-proof and did
+    nothing about ANSI.
+    """
+    return " ".join(_BOX_RE.sub(" ", _ANSI_RE.sub("", output)).split())
 
 
 @pytest.fixture(autouse=True)

@@ -39,11 +39,12 @@ DEFAULT_CONCURRENCY = 8
 #: Evidence text is cut here; assessments record the pre-cut length and `truncated`.
 DEFAULT_STATE_CHAR_LIMIT = 100_000
 
-#: USD per million INPUT tokens, per provider. TypeSafe's list price for `jev-1.13.0` on
-#: 2026-09-22 (docs.typesafe.ai/models): charged per input token, output tokens are free.
-#: This is a PER-VERSION price while `[jev].model` defaults to the moving `jev-latest`
-#: alias, so any figure derived from it is an ESTIMATE, not a bill — re-check it when the
-#: alias advances. Assessments record the concrete model, so a report can say what it priced.
+#: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model
+#: version it is quoted for, its source and its date live once in `docs/jev.md` § Vendor
+#: facts — update that table and this literal together, and restate neither anywhere else.
+#: It is a PER-VERSION list price while `[jev].model` defaults to the moving `jev-latest`
+#: alias, so any figure derived from it is an ESTIMATE, not a bill. Assessments record the
+#: concrete model that answered, so a report can always say what it priced.
 INPUT_USD_PER_MTOK: dict[str, float] = {"typesafe": 0.042}
 
 
@@ -121,8 +122,10 @@ def jev_cost_fragment(tokens: int, unknown: int, cost_usd: float, unpriced: Iter
     different figure from the bill it recaps is the one thing a recap must not do. Formatting
     it at each call site produced exactly that — `~0.000 $` against `~0.0001 $` for one run.
 
-    FOUR decimals, never three. At `0.042 $/MTok` a whole corpus costs under `0.50 $`, so three
-    decimals round most real runs to `~0.000 $`: a bill that reports itself as free.
+    FOUR decimals, never three. At `0.042 $/MTok` the numbers are small — measured, a whole
+    corpus is ~0.65 $ and a single item ~0.00025 $ (`docs/jev.md`, the one place the rate and
+    the measurement live) — so three decimals round a partial run to `~0.000 $`: a bill that
+    reports itself as free. A smoke run of twenty items is exactly that shape.
 
     The two parenthetical markers exist because a bare `~0.0000 $` cannot say which zero it is.
     A record whose provider reported no usage (`input_tokens is None`, a documented real

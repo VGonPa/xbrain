@@ -1079,6 +1079,12 @@ def _run_describe(
                 typer.echo(f"  {item_id}  {url}  {error}", err=True)
 
 
+# RAW docstring, and the `\[` in it, because typer renders a command docstring as its help
+# through Rich: `[describe]` reads as a style tag and gets eaten, leaving a bare `.version`
+# — a key in no config file, in the sentence whose job is to name the key. The backslash is
+# for Rich, so it has to survive Python: hence `r"""`, since `"\["` is also an invalid
+# Python escape. Same defect as `[vision]` in #90; pinned on the RENDERED help by
+# `test_command_help_renders_its_config_key_literally`.
 @app.command()
 @_handle_cli_errors
 def describe(
@@ -1100,7 +1106,7 @@ def describe(
     model: str | None = typer.Option(
         None,
         "--model",
-        help="Modelo de visión a usar. Si no se pasa, se usa el del config (`describe.model`).",
+        help=r"Modelo de visión a usar. Si no se pasa, se usa el del config (`\[describe].model`).",
     ),
     batch_size: int = typer.Option(
         5,
@@ -1125,11 +1131,11 @@ def describe(
         help="Imprime cada foto fallida (item_id, URL, error) al final del run.",
     ),
 ) -> None:
-    """Describe las fotos descargadas con un LLM de visión.
+    r"""Describe las fotos descargadas con un LLM de visión.
 
     Solo describe fotos con bytes en disco (`MediaPhotoDownloaded`).
     Las entradas ya descritas en la versión actual se saltan; bumpear
-    `[describe].version` en `config.toml` fuerza un re-describe
+    `\[describe].version` en `config.toml` fuerza un re-describe
     automático sin `--force`. Las descripciones se persisten en
     `items.json` y son consumidas por `xbrain enrich` y `xbrain topics`
     en las llamadas LLM subsiguientes.
@@ -1719,10 +1725,10 @@ def digest_video(
         "y el item vuelve a enrich y a video-digest. Úsalo para recuperar vídeos huecos.",
     ),
 ) -> None:
-    """Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
+    r"""Transcribe vídeos guardados y adjunta el transcript como source `x_video`.
 
     Para cada vídeo seleccionado: descarga efímera (reutiliza `fetch-video`) →
-    transcribe con un transcriptor EXTERNO local (config `transcribe.command`,
+    transcribe con un transcriptor EXTERNO local (config `\[transcribe].command`,
     por defecto `parakeet-mlx`; la ML NO vive en xbrain) → adjunta el transcript al
     item como `ContentSourceSuccess(kind="x_video")` → descarta los bytes. Los
     vídeos se **deduplican por identidad** (el id estable del path del mp4, no la
@@ -1738,11 +1744,11 @@ def digest_video(
     disco a la vez (efímero). Selecciona con `--ids`, `--topic` o `--all-pending`.
 
     `--frames` (opt-in, capa visual PR4): extrae key-frames con ffmpeg (EXTERNO),
-    los describe con el modelo de visión EXTERNO (`\\[vision].command`), adjunta las
+    los describe con el modelo de visión EXTERNO (`\[vision].command`), adjunta las
     descripciones al source `x_video` y embebe los frames en la nota como fotos.
     Las slides se describen. Un talking-head se salta solo si el vídeo tiene voz
     (el transcript ya lo cubre; se registra el motivo). Un vídeo mudo sin slides
-    se describe como metraje, con tope `\\[frames].footage_max_frames`. Sin
+    se describe como metraje, con tope `\[frames].footage_max_frames`. Sin
     `--frames` el flujo es el de PR2/PR3, salvo que el resumen puede acabar en
     `Huecos (sin voz ni frames): N` (los vídeos mudos quedan sin frames).
     """
@@ -3022,10 +3028,19 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
         # `report.compare_item` returns None for every record because no item carries an
         # enrichment. Every bucket is 0, the self-check agrees with a summary of zeros, and
         # the artifact renders clean — the one empty state that produces no signal at all.
+        # THE WHOLE PHRASE AGREES, not just the noun. `plural` agreed `item evaluado` while
+        # the article and the verb around it stayed hard-coded plural, so a one-item corpus
+        # refused with `los 1 item evaluado no están enriquecidos` — which reads as a bug in
+        # the counting, the exact failure `defaults.plural`'s own docstring says it exists
+        # to prevent. Spanish agrees at 1 ONLY, so each part is a two-way choice on the
+        # same count.
+        count = len(jev.pairs)
+        article = "el" if count == 1 else "los"
+        predicate = "no está enriquecido" if count == 1 else "no están enriquecidos"
         raise JevError(
-            f"ninguna evaluación vigente tiene con qué compararse: los "
-            f"{plural(len(jev.pairs), 'item evaluado', 'items evaluados')} no están "
-            f"enriquecidos. Ejecuta `xbrain enrich`. {kept}"
+            f"ninguna evaluación vigente tiene con qué compararse: {article} "
+            f"{plural(count, 'item evaluado', 'items evaluados')} {predicate}. "
+            f"Ejecuta `xbrain enrich`. {kept}"
         )
 
 
@@ -3081,7 +3096,14 @@ def _jev_report_line(summary: dict[str, Any]) -> str:
 @_handle_cli_errors
 def jev_report_cmd(
     threshold: float | None = typer.Option(
-        None, help="Umbral de pertenencia (por defecto [jev].threshold)"
+        # `\[` ESCAPES THE BRACKET FOR RICH, and the raw string is what carries the
+        # backslash to it. Typer renders help through Rich whenever rich is installed, and
+        # Rich reads `[jev]` as a style tag and consumes it: this read `(por defecto
+        # .threshold)` in every terminal, naming a key that exists in no config file.
+        # (`"\["` would also be an invalid Python escape sequence.) Pinned by
+        # `test_threshold_help_names_the_config_key_literally`.
+        None,
+        help=r"Umbral de pertenencia (por defecto \[jev].threshold)",
     ),
 ) -> None:
     """Compara las evaluaciones de Jev con la asignación de enrich, a un umbral.
@@ -3129,7 +3151,9 @@ def _jev_note_links(items: list[Item], items_dir: Path) -> dict[str, str]:
 @_handle_cli_errors
 def jev_dashboard_cmd(
     threshold: float | None = typer.Option(
-        None, help="Umbral inicial del slider (por defecto [jev].threshold)"
+        # `\[` escapes the bracket for Rich — see `jev_report_cmd` for the whole argument.
+        None,
+        help=r"Umbral inicial del slider (por defecto \[jev].threshold)",
     ),
 ) -> None:
     """Escribe `<output_dir>/jev.html`: Jev frente a enrich, con umbral movible y colas.
@@ -3964,6 +3988,8 @@ def search_command(
         typer.echo(render_search(response))
 
 
+# RAW docstring + `\[index]`: see the note on `describe` above — Rich renders this
+# docstring as the command's help and eats an unescaped `[index]`.
 @app.command("get")
 @_handle_cli_errors
 @_handle_index_errors
@@ -3978,13 +4004,13 @@ def get_command(
     cursor: str | None = typer.Option(None, "--cursor", help="Continúa una respuesta truncada."),
     json_out: bool = typer.Option(False, "--json", help="Documento JSON estable en stdout."),
 ) -> None:
-    """Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
+    r"""Entrega la evidencia de un item leyéndola del STORE, nunca del índice.
 
     Es el invariante 7 del spec §3.7: `get` funciona con `data/index/` borrado, porque un
     índice capaz de contestar `get` sería una copia del corpus que nada invalida, y el día
     que las dos discreparan no habría forma de saber cuál se le enseñó al lector.
 
-    El presupuesto por respuesta sale de `[index].get_char_budget`; por encima de él la
+    El presupuesto por respuesta sale de `\[index].get_char_budget`; por encima de él la
     respuesta se trunca DECLARÁNDOLO y entrega un cursor (spec §9.3), nunca en silencio.
     """
     from typing import Sequence, cast

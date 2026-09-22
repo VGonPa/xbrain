@@ -51,7 +51,7 @@ from xbrain.models import Item, Topic
 
 #: The post text carried into the blob, in characters. Long enough to recognise the post in a
 #: queue row, short enough that the whole corpus of them stays a fraction of the page: measured
-#: at 0.42 MB of the 4.05 MB page for 2,609 items (see `compute_jev_dashboard_data`).
+#: at 0.42 MB of the 4.53 MB page for 2,609 items (see `compute_jev_dashboard_data`).
 _TEXT_CHARS = 240
 #: How much of the Choice distribution the drawer shows. `PrimaryChoice.probabilities` can
 #: carry one entry per vocabulary topic plus the fallback; the tail is noise.
@@ -211,12 +211,15 @@ def compute_jev_dashboard_data(
     `generated_at`, and a function that reads the clock inside itself is not a pure function of
     its arguments and cannot be asserted against.
 
-    SIZE, measured rather than asserted: 4.05 MB for 2,609 items × 45 topics — ECharts 1.03 MB,
-    the JSON blob 2.95 MB, of which the unrounded memberships are 1.15 MB and the post text
-    0.42 MB. (Measured with synthetic six-decimal nouls, so the membership figure is an upper
-    bound; a provider that answers in two or three decimals ships less.) The memberships are
-    the deliberate cost and the module docstring says why; `_TEXT_CHARS` is the cheap lever if
-    the page ever has to shrink.
+    SIZE, measured rather than asserted (2026-09-22, the live corpus): 4,531,327 bytes — about
+    4.53 MB — for 2,609 items × 45 topics. ECharts 1.03 MB, the JSON blob 3.43 MB, of which the
+    unrounded memberships are 1.16 MB, the note deep links 0.45 MB and the post text 0.42 MB.
+    (Rendered with synthetic six-decimal nouls, so the membership figure is an upper bound; a
+    provider that answers in two or three decimals ships less. The deep links are present only
+    where `xbrain generate` has written the note, so a vault without notes is ~0.45 MB lighter
+    — an earlier reading of 4.05 MB was this same page measured with none of them.) The
+    memberships are the deliberate cost and the module docstring says why; `_TEXT_CHARS` is the
+    cheap lever if the page ever has to shrink. ARCHITECTURE.md § jev quotes this measurement.
 
     Each row's `m` ships the membership UNROUNDED — the page costs a few hundred KB more for
     it, and rounding to three decimals would let a `0.8496` render as `0.85` and then clear a

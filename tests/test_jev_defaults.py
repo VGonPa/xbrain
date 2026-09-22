@@ -1,6 +1,8 @@
 # tests/test_jev_defaults.py — the ONE place a Jev run's input cost is computed.
 from datetime import datetime, timezone
 
+import pytest
+
 from xbrain.jev.defaults import (
     INPUT_USD_PER_MTOK,
     input_cost_usd,
@@ -99,10 +101,14 @@ def test_plural_agrees_at_one_only():
 
 
 def test_the_cost_fragment_prints_four_decimals_so_a_real_bill_is_never_rounded_away():
-    """At 0.042 $/MTok a whole corpus costs under 0.50 $, so three decimals round most real
-    runs to `~0.000 $` — a bill that reports itself as free."""
+    """At 0.042 $/MTok the numbers are small, so three decimals round a partial run away.
+
+    The two cases are the two ends of a real corpus, measured (`docs/jev.md`): a handful of
+    items, whose bill THREE decimals would render `~0.000 $` — free, for work that was paid
+    for — and a whole ~2,600-item pass at ~15.5 M input tokens.
+    """
     assert jev_cost_fragment(1_500, 0, 0.0001, ()) == "1500 tokens de entrada (~0.0001 $)"
-    assert jev_cost_fragment(12_000_000, 0, 0.504, ()) == "12000000 tokens de entrada (~0.5040 $)"
+    assert jev_cost_fragment(15_498_000, 0, 0.6509, ()) == "15498000 tokens de entrada (~0.6509 $)"
 
 
 def test_the_cost_fragment_names_both_kinds_of_zero():
@@ -126,3 +132,34 @@ def test_input_cost_is_a_float_even_when_there_is_nothing_to_price():
     every caller would have to remember the cast."""
     assert isinstance(input_cost_usd([]), float)
     assert input_cost_usd([]) == 0.0
+
+
+def test_the_documented_corpus_bill_is_computed_from_the_rate_not_asserted_beside_it():
+    """The ~0.65 $ figure the docs and `jev_cost_fragment`'s docstring quote, RE-DERIVED.
+
+    `jev_cost_fragment` receives the cost as an argument, so every test around it pins
+    FORMATTING only: if `INPUT_USD_PER_MTOK` moved, the arithmetic in those docstrings
+    would rot with nothing going red. This test goes through `input_cost_usd`, which is the
+    function that actually applies the rate, so a rate change fails HERE — next to the
+    number that has to be updated with it.
+
+    The inputs are the measured corpus (`docs/jev.md` § What a pass actually costs):
+    2,583 records at ~6,000 input tokens each. The expected value is computed from the rate
+    rather than written as `0.6509`, so this asserts the PIPELINE from rate to bill, not a
+    constant someone copied.
+    """
+    records = 2_583
+    tokens_each = 6_000
+    assessments = [_assessment(str(i), "typesafe", tokens_each) for i in range(records)]
+
+    cost = input_cost_usd(assessments)
+
+    # `approx`: `input_cost_usd` prices PER RECORD (each record may have its own provider),
+    # so 2,583 additions accumulate a different last bit than one multiplication. The bill is
+    # printed at four decimals, which is far above that.
+    expected = records * tokens_each / 1e6 * INPUT_USD_PER_MTOK["typesafe"]
+    assert cost == pytest.approx(expected)
+    # And the figure the docs quote, to the four decimals the bill is printed with.
+    assert jev_cost_fragment(records * tokens_each, 0, round(cost, 4), ()) == (
+        "15498000 tokens de entrada (~0.6509 $)"
+    )

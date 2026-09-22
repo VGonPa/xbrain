@@ -1308,3 +1308,53 @@ def test_jev_dashboard_leaves_the_last_good_page_alone_when_the_rename_dies(
     # Byte-identical: not merely "a page exists", but the one that was there before.
     assert _page(vault).read_bytes() == good
     assert not list(_page(vault).parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (1, "el 1 item evaluado no está enriquecido"),
+        (2, "los 2 items evaluados no están enriquecidos"),
+    ],
+)
+def test_the_un_enriched_refusal_agrees_in_number(
+    count: int, expected: str, tmp_path: Path, monkeypatch
+):
+    """The whole phrase agrees, not just the noun.
+
+    `plural()` agreed `item evaluado` while the article and the verb around it stayed
+    hard-coded plural, so a one-item corpus refused with `los 1 item evaluado no están
+    enriquecidos` — which reads as a bug in the counting, the exact failure `defaults.plural`
+    exists to prevent ("1 filas más reads as a bug in the counting, not in the grammar").
+
+    Parametrised at 1 and 2 because a single case cannot tell agreement from a coincidence:
+    the plural branch was always right, and it is the singular that was broken.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    save_store(
+        {str(i): _item(str(i), f"Post {i}") for i in range(1, count + 1)},
+        tmp_path / "data" / "items.json",
+    )
+    _seed_vocab(tmp_path)
+    _assess_corpus(monkeypatch)
+    # Strip every enrichment AFTER assessing: the side-car stays full and current, and the
+    # comparison has nothing to compare against — the fifth refusal.
+    store = load_store(tmp_path / "data" / "items.json")
+    save_store(
+        {k: v.model_copy(update={"enriched": None}) for k, v in store.items()},
+        tmp_path / "data" / "items.json",
+    )
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert expected in result.stderr
+
+
+# ---------------------------------------------------------- help text survives Rich markup
+#
+# `xbrain jev report|dashboard --help` must render `[jev].threshold` literally — Rich reads
+# `[jev]` as a style tag and eats it. That is asserted, together with every other command
+# whose help names a config key, by the ONE parametrized test for the whole class:
+# `tests/test_cli.py::test_command_help_renders_its_config_key_literally`. It lived here
+# first; it was moved rather than copied so the repo has a single place to strengthen.

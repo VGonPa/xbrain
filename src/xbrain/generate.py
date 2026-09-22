@@ -202,8 +202,16 @@ def generate(
     # and `_index.md` syncs via iCloud), which is the unavoidable cost of opening a
     # local file from Obsidian; it self-heals on the next `generate` per machine.
     dashboard_href = (output_dir / "dashboard.html").resolve().as_uri()
+    # The Jev page follows the same absolute-`file://` rule for the same Obsidian reason,
+    # but the link is CONDITIONED on the file existing, because `generate` does not write
+    # it: `xbrain jev dashboard` does, from a side-car most runs never produce. An
+    # unconditional link would send every reader who has never run the Jev layer to a page
+    # that is not there, and a dead `file://` is indistinguishable from a broken render.
+    # Checked as a path, never imported: see `_render_index`.
+    jev_page = output_dir / "jev.html"
+    jev_href = jev_page.resolve().as_uri() if jev_page.exists() else None
     (output_dir / "_index.md").write_text(
-        _render_index(items, strings, dashboard_href), encoding="utf-8"
+        _render_index(items, strings, dashboard_href, jev_href), encoding="utf-8"
     )
     (output_dir / "log.md").write_text(_render_log(items), encoding="utf-8")
     for item in items:
@@ -934,12 +942,47 @@ def _count_topic_frequency(items: list[Item]) -> dict[str, int]:
     return topic_freq
 
 
-def _render_index(items: list[Item], strings: Strings, dashboard_href: str) -> str:
+def _browser_page_lines(dashboard_href: str, jev_href: str | None) -> list[str]:
+    """The `## Índices` rows that open a generated HTML page in the external browser.
+
+    Both use an absolute ``file://`` URI for the same reason (see `generate`), and they
+    differ in exactly one way: the dashboard row is unconditional because `generate` writes
+    that page itself moments later, so the link is a promise this function keeps. `jev.html`
+    comes from another command — `xbrain jev dashboard`, over an optional, paid side-car —
+    so the same unconditional row would be a promise nothing keeps, and a dead ``file://``
+    in Obsidian is indistinguishable from a page that failed to render. Hence `None` emits
+    NO row at all rather than a disabled one.
+    """
+    lines = [
+        f"- [📊 Dashboard interactivo]({dashboard_href}) — métricas, drill-down y enlaces "
+        "(se abre en el navegador)",
+    ]
+    if jev_href is not None:
+        lines.append(
+            f"- [🔍 Jev · topics]({jev_href}) — segunda opinión sobre los topics, "
+            "frente a `enrich` (se abre en el navegador)"
+        )
+    return lines
+
+
+def _render_index(
+    items: list[Item], strings: Strings, dashboard_href: str, jev_href: str | None
+) -> str:
     """Render the top-level index note: corpus stats and the topic list.
 
     `dashboard_href` is the absolute ``file://`` URI of ``dashboard.html`` so the
     index link opens the self-contained dashboard in the external browser (see
     `generate`); Obsidian neither lists nor renders the raw ``.html`` itself.
+
+    `jev_href` is the same URI for ``jev.html`` — the Jev-vs-`enrich` page written by
+    `xbrain jev dashboard` — or ``None`` when that page is not on disk, which is the normal
+    state: the Jev layer is optional and paid. It carries NO default, though `None` is a
+    valid value: `generate` is the only caller and always passes it, so a default could
+    only ever let a future caller drop the row silently — the same silent-absence failure
+    the conditional row exists to avoid. See `_browser_page_lines` for why the two rows are
+    not conditioned alike. Nothing here imports ``xbrain.jev``; this module needs
+    the page's NAME, not its layer, and `tests/test_generate.py` pins that the import never
+    appears.
     """
     bookmarks = sum(1 for i in items if i.source == "bookmark")
     own = sum(1 for i in items if i.source == "own_tweet")
@@ -961,7 +1004,7 @@ def _render_index(items: list[Item], strings: Strings, dashboard_href: str) -> s
         "## Índices",
         "",
         "- [[log|Log cronológico completo]]",
-        f"- [📊 Dashboard interactivo]({dashboard_href}) — métricas, drill-down y enlaces (se abre en el navegador)",
+        *_browser_page_lines(dashboard_href, jev_href),
         "",
         f"## {strings.topics_label}",
         "",
