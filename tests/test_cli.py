@@ -4995,9 +4995,16 @@ def test_an_explicit_exit_code_survives_the_error_wrapper():
     """A command's own `typer.Exit(code=N)` must reach the shell as N.
 
     `click.exceptions.Exit` subclasses `RuntimeError`, which `_OPERATOR_ERRORS` lists. So
-    without an explicit re-raise the wrapper CATCHES a deliberate exit, prints a bare
-    "Error: " — `str(Exit(130))` is empty — and exits 1, silently replacing the code the
-    command chose. `xbrain jev topics` uses 130 for an interrupted run.
+    without an explicit re-raise the wrapper CATCHES a deliberate exit and re-reports it as
+    an operator error, replacing the code the command chose with 1.
+
+    The message it prints depends on call STYLE, which is worth knowing before predicting
+    it: `Exit.__init__` never calls `super().__init__`, so `args` comes from
+    `BaseException.__new__` — `str(Exit(code=130))` is `''` (hence a bare "Error: ") while
+    `str(Exit(130))` is `'130'`. Every call site in `cli.py` uses the keyword form; typer's
+    own `core.py` uses the positional one.
+
+    `xbrain jev topics` uses 130 for an interrupted run.
     """
 
     @cli._handle_cli_errors
@@ -5009,12 +5016,21 @@ def test_an_explicit_exit_code_survives_the_error_wrapper():
     assert excinfo.value.exit_code == 130
 
 
-def test_the_error_wrapper_still_converts_a_real_operator_error():
+@pytest.mark.parametrize(
+    "error",
+    # `RuntimeError` is the one that matters: `typer.Exit` and `typer.Abort` ARE
+    # `RuntimeError` subclasses, which is the whole reason the bug existed, so a re-raise
+    # clause widened to `(typer.Exit, typer.Abort, RuntimeError)` must go red here. The
+    # other two pin that the wrapper still covers the rest of `_OPERATOR_ERRORS`.
+    [ValueError("vocabulario vacío"), RuntimeError("no hay vocabulario"), OSError("disco lleno")],
+    ids=["ValueError", "RuntimeError", "OSError"],
+)
+def test_the_error_wrapper_still_converts_a_real_operator_error(error: Exception):
     """The re-raise above must not punch a hole in the wrapper's actual job."""
 
     @cli._handle_cli_errors
     def _command() -> None:
-        raise ValueError("vocabulario vacío")
+        raise error
 
     with pytest.raises(typer.Exit) as excinfo:
         _command()

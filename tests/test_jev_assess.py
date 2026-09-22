@@ -692,7 +692,10 @@ def test_a_failing_on_result_is_logged_and_never_loses_a_record(caplog):
 def test_an_interrupt_cancels_the_queued_calls_instead_of_paying_for_them():
     """Every item is submitted up front, so a plain `shutdown(wait=True)` would drain the
     whole queue — the operator's Ctrl-C would not interrupt anything and the full bill would
-    still arrive. The records already collected ARE lost: that is what an interrupt means."""
+    still arrive. With no `on_result`, as here, the records already collected ARE lost:
+    `run_assessments` re-raises without a `RunResult`. That is a property of THIS call,
+    not of interrupts — keeping them is the caller's job, through the checkpoint hook.
+    See `test_jev_topics_checkpoints_what_it_paid_for_when_interrupted`."""
 
     class _Interrupting(FakeJevClient):
         def ask(self, state, questions):

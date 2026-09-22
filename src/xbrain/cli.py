@@ -48,9 +48,9 @@ from xbrain.fetch import (
 )
 from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
-from xbrain.jev.assess import RunResult, run_assessments, select_items
+from xbrain.jev.assess import RunResult, Selection, run_assessments, select_items
 from xbrain.jev.client import JevClient, JevError
-from xbrain.jev.defaults import INPUT_USD_PER_MTOK
+from xbrain.jev.defaults import input_cost_usd, input_tokens_total, unpriced_providers
 from xbrain.jev.env import typesafe_api_key
 from xbrain.jev.store import load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
@@ -166,9 +166,14 @@ from xbrain.video_digest import (
 from xbrain.worksheet import export_worksheet, import_worksheet
 
 if TYPE_CHECKING:
-    # `_checkpoint`'s annotation only. Kept out of the RUNTIME imports so the module-top
-    # `xbrain.jev` surface stays the agreed five — client, env, defaults, assess, store.
+    # Annotations only. This saves NO import cost — `xbrain.jev.models` is loaded at
+    # runtime anyway, transitively via `xbrain.jev.assess`. What it keeps is the
+    # module-top `xbrain.jev` import list at the five modules the CLI is meant to depend
+    # on directly (assess, client, defaults, env, store; `task-3-deviations.md` §1), so a
+    # sixth is a visible decision rather than a drive-by.
     from xbrain.jev.models import TopicAssessment
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="XBrain — bookmarks y tweets de X a un wiki de Obsidian")
 
@@ -2603,8 +2608,24 @@ def status() -> None:
     typer.echo(f"  última extracción tweets: {state.own_tweets.last_run}")
 
 
-jev_app = typer.Typer(help="Jev (TypeSafe AI): asignación y verificación de topics por item")
+jev_app = typer.Typer(
+    help="Jev (TypeSafe AI): a qué topics pertenece cada item, según un juez externo"
+)
 app.add_typer(jev_app, name="jev")
+
+#: Failures echoed in full before the rest are summarised. This is the PARTIAL-failure path:
+#: a run where NOTHING succeeded never gets here, because `run_assessments` raises instead of
+#: returning an empty `RunResult`. The case that hurts is a provider rate-limiting or timing
+#: out across most of a large batch while some answers still land — one line each would bury
+#: the summary printed above them.
+_JEV_FAILURES_SHOWN = 10
+#: Records banked between durable writes of the side-car. The dict in memory is not
+#: durability: a SIGTERM, a closed terminal, an OOM kill or any exception that is not
+#: `KeyboardInterrupt` skips the checkpoint handler entirely and every paid record in it is
+#: gone. Flushing every N bounds that loss to at most N-1 records, at the price of one
+#: rewrite of the side-car per N items — the repo's standard bargain for paid batch work
+#: (`media`, `describe` and `refetch` all write between units rather than at the end).
+_CHECKPOINT_EVERY = 25
 
 
 def _jev_client(cfg: Config) -> JevClient:
@@ -2617,7 +2638,9 @@ def _jev_client(cfg: Config) -> JevClient:
 
     The key is checked BEFORE that import, so the one path a first-run operator is most
     likely to take — no key configured — does not pay for the vendor's HTTP stack to be
-    told it is missing.
+    told it is missing. And the import itself is guarded: `ImportError` is not in
+    `_OPERATOR_ERRORS`, so a half-finished `uv sync` would otherwise reach the operator as a
+    traceback, after their key was accepted and the selection printed.
 
     Built only AFTER selection, so `--dry-run` and an empty backlog never need a key.
     """
@@ -2626,43 +2649,143 @@ def _jev_client(cfg: Config) -> JevClient:
         raise JevError(
             "TYPESAFE_API_KEY no encontrada: expórtala o pégala en <repo>/.env (ver .env.example)"
         )
-    from xbrain.jev.typesafe import TypeSafeJevClient
-
+    try:
+        from xbrain.jev.typesafe import TypeSafeJevClient
+    except ImportError as exc:
+        raise JevError(
+            f"el SDK de TypeSafe no está disponible ({exc}): instala las dependencias con "
+            "`uv sync` y vuelve a lanzar el comando"
+        ) from exc
     return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
 
 
-#: Failures echoed in full before the rest are summarised. A run of 3,000 items with a dead
-#: key would otherwise print 3,000 identical lines and bury the summary above them.
-_JEV_FAILURES_SHOWN = 10
+def _n(count: int, singular: str, plural: str) -> str:
+    """`count` with its noun agreed. Spanish agrees at 1 ONLY — "0 evaluaciones" is plural.
+
+    One helper rather than a conditional per string: the count-bearing strings in this
+    command are operator-facing Spanish, and "1 evaluaciones guardadas" in the line that
+    reports what a run cost reads as a bug in the counting, not in the grammar.
+    """
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _jev_cost_line(assessments: tuple[TopicAssessment, ...]) -> str:
+    """`N tokens de entrada (+K sin recuento) (~X $ · proveedor sin tarifa: …)`.
+
+    A tuple, not an iterable: the three `jev.defaults` helpers each walk `assessments`, so a
+    one-shot generator would be exhausted after the first and price the run at zero.
+
+    Every number here comes from `jev.defaults`, which is the ONE place a Jev run is priced —
+    `jev topics` and `jev summarize` report the same bill, and a formula inlined at each call
+    site is two definitions of it.
+
+    The two parenthetical markers exist because a bare `~0.000 $` cannot say which zero it
+    is. A record whose provider reported no usage (`input_tokens is None`, a documented real
+    behaviour) contributes nothing it can prove, so without `(+K sin recuento)` a fully paid
+    run reports itself as free. A provider absent from the price table contributes 0.0 rather
+    than borrowing another vendor's rate — an invented rate reads as a bill, and that is the
+    worse error — so it is NAMED instead of being left to the number.
+    """
+    tokens, unknown = input_tokens_total(assessments)
+    line = _n(tokens, "token de entrada", "tokens de entrada")
+    if unknown:
+        line += f" (+{unknown} sin recuento)"
+    cost = f"~{input_cost_usd(assessments):.3f} $"
+    unpriced = unpriced_providers(assessments)
+    if unpriced:
+        # Named, not counted: "proveedor sin tarifa: fake" answers which zero this is, and
+        # the list is already the count. Same shape as `modelo(s)` in the summary.
+        noun = "proveedor sin tarifa" if len(unpriced) == 1 else "proveedores sin tarifa"
+        cost += f" · {noun}: {', '.join(unpriced)}"
+    return f"{line} ({cost})"
+
+
+def _jev_selection_line(selection: Selection, stored: int) -> str:
+    """What the funnel did, in one line. The counts PARTITION the candidate set.
+
+    A segment is printed only when its count is non-zero, except the first and the last: the
+    information that distinguishes "everything is up to date" from "the evidence layer
+    regressed" is exactly the segment that is non-zero in each case, so suppressing zeros
+    costs nothing and keeps the common line short. All-zero means the corpus is empty, which
+    is its own answer.
+    """
+    segments = [_n(len(selection.items), "item por evaluar", "items por evaluar")]
+    if selection.skipped_current:
+        segments.append(_n(selection.skipped_current, "vigente", "vigentes"))
+    if selection.skipped_no_evidence:
+        segments.append(f"{selection.skipped_no_evidence} sin evidencia")
+    if selection.forced:
+        # Current, and being re-asked anyway. This is the re-bill, announced BEFORE it happens.
+        segments.append(_n(selection.forced, "forzado", "forzados"))
+    if selection.remaining:
+        segments.append(f"{selection.remaining} fuera del límite")
+    stored_text = _n(stored, "evaluación guardada", "evaluaciones guardadas")
+    return f"{' · '.join(segments)} ({stored_text})"
 
 
 def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
     """The run's one-line summary on stdout, then its per-item failures on stderr.
 
-    The cost is priced per RECORD, by the provider that ANSWERED it, never by one rate for
-    the whole run: `assessed` may mix providers, and each record carries its own. A provider
-    with no listed price contributes 0.0 rather than borrowing another vendor's rate — a
-    missing number reads as missing, an invented one reads as a bill. The figure is an
-    ESTIMATE either way (see `jev.defaults.INPUT_USD_PER_MTOK`), which is what `~` says.
+    Printed BEFORE the side-car is written, never after. The counters are sitting on
+    `result` and cannot fail; the save can. With the summary echoed afterwards, a save
+    failure means the operator never learns what the run cost or which items failed — the
+    exact bug `#90 re-review item 4` fixed for `redescribe-frames` (`_finish_redescribe_run`).
     """
-    tokens = sum(assessment.input_tokens or 0 for assessment in result.assessed)
-    usd = sum(
-        (assessment.input_tokens or 0) / 1e6 * INPUT_USD_PER_MTOK.get(assessment.provider, 0.0)
-        for assessment in result.assessed
-    )
     models = sorted({assessment.model for assessment in result.assessed})
     typer.echo(
-        f"{len(result.assessed)} evaluadas · {len(result.failed)} fallidas · "
-        f"{tokens} tokens de entrada (~{usd:.3f} $) · "
-        f"modelo {', '.join(models)} → {topics_path}"
+        f"{_n(len(result.assessed), 'evaluada', 'evaluadas')} · "
+        f"{_n(len(result.failed), 'fallida', 'fallidas')} · "
+        f"{_jev_cost_line(result.assessed)} · "
+        f"{'modelo' if len(models) == 1 else 'modelos'} {', '.join(models)} → {topics_path}"
     )
     for item_id, reason in result.failed[:_JEV_FAILURES_SHOWN]:
         typer.echo(f"  FALLO {item_id}: {reason}", err=True)
     if len(result.failed) > _JEV_FAILURES_SHOWN:
         remaining = len(result.failed) - _JEV_FAILURES_SHOWN
         # The eleventh failure of eleven is "1 fallo más", not "1 fallos más".
-        noun = "fallo" if remaining == 1 else "fallos"
-        typer.echo(f"  … y {remaining} {noun} más", err=True)
+        typer.echo(f"  … y {_n(remaining, 'fallo', 'fallos')} más", err=True)
+
+
+def _save_jev_sidecar(assessments: dict[str, TopicAssessment], path: Path, *, paid: int) -> None:
+    """Write the side-car, and NAME THE BILL when it cannot be written.
+
+    `Error: [Errno 28] No space left on device` is true and useless: it is about a
+    filesystem, and nothing connects it to "you were just billed for 2,998 assessments and
+    none of them was written". The paid count is the part the operator has to act on, and it
+    is the reason this is not simply `save_assessments`.
+    """
+    try:
+        save_assessments(assessments, path)
+    except OSError as exc:
+        lost = _n(paid, "evaluación pagada", "evaluaciones pagadas")
+        raise JevError(f"no se pudo guardar {path} ({lost} sin guardar): {exc}") from exc
+
+
+def _release_jev_client(client: JevClient) -> None:
+    """Release the client's pool without ever becoming the run's verdict.
+
+    `close()` reaches the vendor's HTTP stack, which is the layer `typesafe.py` wraps
+    everywhere else. A teardown fault is NOISE: the answers are already paid for, already in
+    memory and — by the time this runs — already written. Letting it out would (a) replace an
+    interrupt's `Exit(130)` or an all-failed `JevError` with a socket errno, which is Python's
+    default `finally` behaviour, and (b) on the success path, turn a completed run into
+    `Error: …` with exit 1.
+
+    `original_error` is read BEFORE the `try` for the same reason `_finish_redescribe_run`
+    does it: inside an `except` block `sys.exc_info()` reports the exception being handled
+    here, not the one that was already travelling.
+    """
+    original_error = sys.exc_info()[1]
+    try:
+        client.close()
+    except Exception as exc:
+        note = " (el error anterior sigue propagándose)" if original_error is not None else ""
+        logger.warning(
+            "cerrar el cliente Jev falló (%s: %s); el run no se ve afectado%s",
+            type(exc).__name__,
+            exc,
+            note,
+        )
 
 
 @jev_app.command("topics")
@@ -2670,12 +2793,15 @@ def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
 def jev_topics_cmd(
     ids: list[str] = typer.Option([], "--id", help="Solo estos items (repetible)"),
     limit: int | None = typer.Option(None, help="Máximo de items a evaluar"),
-    force: bool = typer.Option(False, help="Re-evaluar aunque la evaluación esté vigente"),
+    force: bool = typer.Option(
+        False, "--force", help="Re-evaluar aunque la evaluación esté vigente"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Solo cuenta; no llama a Jev"),
 ) -> None:
     """Pregunta a Jev, por item, a qué topics pertenece el post (un noul por topic + el primario).
 
-    Escribe data/jev/topics.json. Nunca toca items.json.
+    Escribe `<data_dir>/jev/topics.json` (por defecto `data/jev/topics.json`).
+    Nunca toca items.json.
     """
     cfg = _config()
     store = load_store(cfg.items_path)
@@ -2691,30 +2817,37 @@ def jev_topics_cmd(
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
     )
-    # The two skip counts are printed even when they are 0: an empty selection caused by a
-    # regression in the evidence layer and a clean "everything is up to date" both exit 0
-    # with nothing assessed, and only these numbers tell them apart.
-    typer.echo(
-        f"{len(selection.items)} items por evaluar · {selection.skipped_current} vigentes · "
-        f"{selection.skipped_no_evidence} sin evidencia "
-        f"({len(assessments)} evaluaciones guardadas)"
-    )
-    if dry_run or not selection.items:
+    typer.echo(_jev_selection_line(selection, len(assessments)))
+    if dry_run:
+        # `--dry-run` returns before `_jev_client`, so it validates neither the key nor the
+        # SDK import. Reporting the key here is what stops a green dry-run from being
+        # followed by a real run that dies on the first thing it checks.
+        configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
+        typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
         return
+    if not selection.items:
+        return
+
+    # The records THIS run paid for, in id order of arrival. `assessments` also holds every
+    # earlier run's work, so reporting its length as the rescue would tell an operator who
+    # banked 3 records into a side-car of 500 that they rescued 503.
+    banked: dict[str, TopicAssessment] = {}
 
     def _progress(done: int, total: int) -> None:
         if done % 50 == 0 or done == total:
             typer.echo(f"  {done}/{total}")
 
-    # The ids banked by THIS run. `assessments` also holds every earlier run's work, so
-    # without this the interrupt message could only report the file total — and an operator
-    # asking "did I lose what I just paid for?" would read 503 as 503 rescued.
-    banked: set[str] = set()
-
     def _checkpoint(assessment: TopicAssessment) -> None:
-        """Bank each record as it lands, so an interrupt has something to save."""
+        """Bank each record as it lands, and flush to disk every `_CHECKPOINT_EVERY`.
+
+        The dict alone is not durability — only `KeyboardInterrupt` is caught below, so a
+        SIGTERM or an unexpected exception would take every record in it. The periodic write
+        bounds that loss to at most `_CHECKPOINT_EVERY - 1` paid records.
+        """
         assessments[assessment.item_id] = assessment
-        banked.add(assessment.item_id)
+        banked[assessment.item_id] = assessment
+        if len(banked) % _CHECKPOINT_EVERY == 0:
+            save_assessments(assessments, cfg.jev_topics_path)
 
     client = _jev_client(cfg)
     try:
@@ -2729,35 +2862,36 @@ def jev_topics_cmd(
             on_result=_checkpoint,
         )
     except KeyboardInterrupt:
-        # Every record `_checkpoint` already banked is PAID FOR. `run_assessments` cancels
-        # the queued calls and re-raises WITHOUT a `RunResult`, throwing its own collection
-        # away, so this save is the only thing standing between a Ctrl-C and being billed
-        # a second time for posts that already came back.
-        save_assessments(assessments, cfg.jev_topics_path)
+        # Summary first, then persist, then teardown — the shape `_finish_redescribe_run`
+        # establishes. The tally can never fail, so it is never suppressed by a save that does.
+        kind = (
+            _n(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
+            if force
+            else _n(len(banked), "evaluación nueva", "evaluaciones nuevas")
+        )
         typer.echo(
-            f"Interrumpido: {len(banked)} evaluaciones nuevas guardadas "
+            f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
             f"({len(assessments)} en total) en {cfg.jev_topics_path}",
             err=True,
         )
-        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in
-        # order to checkpoint must not change the code the shell sees. `from None` because
-        # the traceback of a Ctrl-C tells the operator nothing.
+        # What the interruption cost is the question the operator actually has here.
+        typer.echo(f"  {_jev_cost_line(tuple(banked.values()))}", err=True)
+        _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
+        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
+        # to checkpoint must not change the code the shell sees. `from None` because the
+        # traceback of a Ctrl-C tells the operator nothing.
         raise typer.Exit(code=130) from None
+    else:
+        # `_checkpoint` has already put every one of these in `assessments`; the merge stays
+        # here so the NORMAL path does not depend on a hook whose failures are swallowed.
+        for assessment in result.assessed:
+            assessments[assessment.item_id] = assessment
+        _echo_jev_outcome(result, cfg.jev_topics_path)
+        _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(result.assessed))
     finally:
-        # `finally`, not the next line: a run where every item failed raises out of
-        # `run_assessments`, and that is exactly the path that would leak the pool.
-        #
-        # On the interrupt path this can close the transport while a worker is still in
-        # flight — `run_assessments` shuts the pool down with `wait=False`. That worker's
-        # exception lands in a future nobody reads, so it is noise, not a lost record:
-        # every record that completed was already handed to `_checkpoint` and saved above.
-        client.close()
-    # `_checkpoint` has already put every one of these in `assessments`; the merge stays
-    # here so the NORMAL path does not depend on a hook whose failures are swallowed.
-    for assessment in result.assessed:
-        assessments[assessment.item_id] = assessment
-    save_assessments(assessments, cfg.jev_topics_path)
-    _echo_jev_outcome(result, cfg.jev_topics_path)
+        # LAST, and guarded. Releasing the pool is cleanup; it is never the run's verdict,
+        # and on the interrupt path it runs while `Exit(130)` is in flight.
+        _release_jev_client(client)
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")
