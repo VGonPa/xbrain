@@ -16,7 +16,12 @@ from xbrain.jev.client import (
 class FakeJevClient:
     """Every `topic__<slug>` Noul answers `nouls.get(slug, default_noul)`; the `primary`
     Choice answers `primary` with `confidence` and a one-hot distribution. `fail_when(state)`
-    True raises `JevError`, so batch failure paths can be exercised per item."""
+    True raises `JevError`, so batch failure paths can be exercised per item.
+
+    `primary` is answered even when it is NOT one of the question's options, and that is
+    deliberate: it is how a caller (task 2) drives the "the primary must be a vocabulary
+    slug or the fallback" guard, e.g. `FakeJevClient(primary="banana")`. Constraining the
+    fake to the offered options would make that guard untestable."""
 
     def __init__(
         self,

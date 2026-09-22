@@ -74,8 +74,10 @@ class JevClient(Protocol):
 
 def _to_sdk(question: Question) -> Noul | Choice:
     if isinstance(question, NoulQuestion):
+        # `NoulCriteria` is a `total=False` TypedDict: describing only one outcome is
+        # legal on the wire, so a missing side is `None`, not a `KeyError` in the seam.
         criteria = (
-            NoulCriteria(true=question.criteria["true"], false=question.criteria["false"])
+            NoulCriteria(true=question.criteria.get("true"), false=question.criteria.get("false"))
             if question.criteria is not None
             else None
         )
@@ -123,7 +125,15 @@ class TypeSafeJevClient:
             sdk_client
             if sdk_client is not None
             else TypeSafeClient(
-                api_key=api_key, model=model, retry=RetryPolicy(max_retries=3), timeout=timeout
+                api_key=api_key,
+                model=model,
+                # TWO CLOCKS, AND ONLY ONE MAY GOVERN. `timeout` is per HTTP attempt;
+                # `RetryPolicy.timeout` is the TOTAL budget across attempts and defaults to
+                # 30 s — shorter than one attempt here, so it would cancel the retries of
+                # exactly the slow calls retries exist for. `None` disables it and leaves
+                # the attempt count as the only stop.
+                retry=RetryPolicy(max_retries=3, timeout=None),
+                timeout=timeout,
             )
         )
 
@@ -133,4 +143,11 @@ class TypeSafeJevClient:
             response = self._client.system_one(state, sdk_questions, model=self._model)
         except TypeSafeError as exc:
             raise JevError(f"Jev API: {exc}") from exc
-        return _from_sdk(response)
+        result = _from_sdk(response)
+        # The SDK drops answers whose `type` it does not model (forward-compat) with only a
+        # log line, and the API may omit one. Unasked-for silence would be stored downstream
+        # as "this topic scored nothing" instead of "this topic was never answered".
+        missing = questions.keys() - result.answers.keys()
+        if missing:
+            raise JevError(f"Jev no respondió a {sorted(missing)!r}")
+        return result
