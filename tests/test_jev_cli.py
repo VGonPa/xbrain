@@ -1,6 +1,7 @@
 # tests/test_jev_cli.py
 import json
 import logging
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -141,6 +142,10 @@ def _topics_path(tmp_path: Path) -> Path:
     return tmp_path / "data" / "jev" / "topics.json"
 
 
+def _jev_dir(tmp_path: Path) -> Path:
+    return tmp_path / "data" / "jev"
+
+
 # --------------------------------------------------------------------------- the happy path
 
 
@@ -243,6 +248,85 @@ def test_jev_topics_force_reasks_a_current_assessment_and_announces_the_rebill(
     assert forced.exit_code == 0, forced.output
     assert "2 items por evaluar · 2 forzados (2 evaluaciones guardadas)" in forced.stdout
     assert len(fake.calls) == 4
+
+
+def test_force_copies_the_side_car_before_the_run_can_overwrite_it(tmp_path: Path, monkeypatch):
+    """`--force` re-bills paid records, and until now nothing kept a copy of what it replaced.
+
+    `data/` is gitignored in full and `data/jev/topics.json` is outside `snapshot._ARTIFACTS`,
+    so a forced run over a full side-car had no undo ANYWHERE: not git, not `snapshot restore`,
+    not a `.bak`. Invariant 8 promises every command that overwrites a `data/` artifact is
+    reversible; this is the side-car's own version of it.
+
+    The copy is asserted to exist AT THE FIRST `ask` — before any answer can land, so before
+    any checkpoint write. A copy taken after the first flush is a copy of a file the run has
+    already begun to overwrite, which is not a backup.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    before = _topics_path(tmp_path).read_bytes()
+
+    baks_at_first_ask: list[list[str]] = []
+
+    class _LooksForTheBackup(FakeJevClient):
+        def ask(self, state, questions):
+            baks_at_first_ask.append(sorted(p.name for p in _jev_dir(tmp_path).glob("*.bak")))
+            return super().ask(state, questions)
+
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: _LooksForTheBackup())
+    forced = runner.invoke(app, ["jev", "topics", "--force"])
+
+    assert forced.exit_code == 0, forced.output
+    baks = sorted(_jev_dir(tmp_path).glob("*.bak"))
+    assert len(baks) == 1, [b.name for b in baks]
+    assert baks[0].read_bytes() == before, "the .bak must be the file as it was BEFORE the run"
+    assert baks_at_first_ask[0] == [baks[0].name], (
+        "the copy must exist before the first answer lands, not after the first checkpoint"
+    )
+    assert f"Copia de seguridad: {baks[0]}" in forced.stdout
+
+
+def test_the_backup_name_carries_a_utc_stamp_so_two_forced_runs_do_not_collide(
+    tmp_path: Path, monkeypatch
+):
+    """A fixed name would make the SECOND forced run overwrite the first run's only copy —
+    the exact loss the backup exists to prevent, one run later."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    assert runner.invoke(app, ["jev", "topics", "--force"]).exit_code == 0
+    assert runner.invoke(app, ["jev", "topics", "--force"]).exit_code == 0
+
+    baks = sorted(_jev_dir(tmp_path).glob("*.bak"))
+    assert len(baks) == 2, [b.name for b in baks]
+    # `topics.<stamp>.bak`, the stamp `snapshot_create` writes: sorting the names sorts the
+    # runs, and the UTC `Z` is what makes that true across a DST boundary.
+    for bak in baks:
+        assert re.fullmatch(r"topics\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.bak", bak.name), (
+            bak.name
+        )
+
+
+def test_a_run_that_forces_nothing_leaves_no_backup(tmp_path: Path, monkeypatch):
+    """The trigger is `forced > 0`, not the `--force` FLAG. `--force` over a side-car with
+    nothing current re-asks records it is not replacing, and a `.bak` per ordinary run would
+    litter `data/jev/` with copies of a file nothing overwrote — which is how an operator
+    learns to ignore them."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+
+    first = runner.invoke(app, ["jev", "topics"])
+    forced_but_empty = runner.invoke(app, ["jev", "topics", "--force", "--id", "9"])
+
+    assert first.exit_code == 0, first.output
+    assert "Copia de seguridad" not in first.stdout
+    assert forced_but_empty.exit_code == 1, forced_but_empty.output
+    assert list(_jev_dir(tmp_path).glob("*.bak")) == []
 
 
 def test_jev_topics_reports_the_backlog_the_limit_left_behind(tmp_path: Path, monkeypatch):
@@ -357,8 +441,16 @@ def test_jev_topics_builds_the_client_from_the_dotenv_key_and_the_configured_mod
 
 
 def test_jev_topics_names_the_remedy_when_the_sdk_is_not_installed(tmp_path, monkeypatch):
-    """`ImportError` is not in `_OPERATOR_ERRORS`, so a half-finished `uv sync` reached the
-    operator as a traceback — after their key was accepted and the selection printed."""
+    """`ImportError` is not in `_OPERATOR_ERRORS`, so a half-finished install reached the
+    operator as a traceback — after their key was accepted and the selection printed.
+
+    The remedy has to be the WHOLE command. A bare `uv sync` is not this repo's install: `dev`
+    is an `[project.optional-dependencies]` EXTRA, so `uv sync` without `--extra dev` prunes
+    the environment to the resolved set and uninstalls pytest, ruff, mypy, poe, bandit and
+    detect-secrets — the operator fixes a missing SDK and loses `uv run poe check`, with no
+    error naming a cause, just a command that has stopped existing. The old assertion was the
+    substring `uv sync`, which the broken advice satisfies.
+    """
     _setup_repo(tmp_path, monkeypatch)
     _seed(tmp_path)
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-de-prueba")
@@ -369,7 +461,7 @@ def test_jev_topics_names_the_remedy_when_the_sdk_is_not_installed(tmp_path, mon
 
     assert result.exit_code == 1
     assert "el SDK de TypeSafe no está disponible" in result.stderr
-    assert "uv sync" in result.stderr
+    assert "uv sync --extra dev --locked" in result.stderr
     assert "Traceback" not in result.stderr
 
 
@@ -603,6 +695,39 @@ def test_a_failing_close_does_not_downgrade_the_interrupt_exit_code(tmp_path, mo
     assert result.exit_code == 130, result.output
     assert list(load_assessments(_topics_path(tmp_path))) == ["1"]
     assert "Interrumpido:" in result.stderr
+
+
+def test_a_failed_checkpoint_names_the_bill_like_the_final_save_does(tmp_path, monkeypatch, caplog):
+    """One failure, two messages, depending only on WHEN the disk filled.
+
+    The final save goes through `_save_jev_sidecar`, which turns `[Errno 28]` into a sentence
+    naming the paid records at risk. `_checkpoint` called `save_assessments` directly, so the
+    SAME failure at record 25 was logged as a bare errno — and the checkpoint is the write
+    that exists precisely to protect paid work, so it is the one an operator most needs told
+    in those terms.
+
+    A checkpoint failure is swallowed by design (`assess._deliver_result`: a broken hook must
+    never discard the record it was called to save), so the log line IS the surface.
+    """
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    # Every record checkpoints, so the first answer hits the failing write.
+    monkeypatch.setattr(cli, "_CHECKPOINT_EVERY", 1)
+
+    def _boom(assessments, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cli, "save_assessments", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="xbrain.jev.assess"):
+        result = runner.invoke(app, ["jev", "topics"])
+
+    assert "evaluación pagada sin guardar" in caplog.text, caplog.text
+    assert str(_topics_path(tmp_path)) in caplog.text
+    # And the run still ends on the FINAL save's message, which names the whole bill.
+    assert result.exit_code == 1
+    assert "2 evaluaciones pagadas sin guardar" in result.stderr
 
 
 def test_jev_topics_names_the_bill_when_the_sidecar_cannot_be_written(tmp_path, monkeypatch):

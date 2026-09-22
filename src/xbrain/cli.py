@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from collections.abc import Callable
@@ -2457,6 +2458,41 @@ def verify_command(
     )
 
 
+def _echo_jev_retired_by_vocab(cfg: Config) -> None:
+    """Say how many Jev assessments a `vocab.yaml` write just retired. Silent when none exist.
+
+    ANY vocabulary write retires the WHOLE side-car, and no contract arithmetic is needed to
+    know it: `TopicAssessment.contract` hashes the QUESTIONS, the questions are built from the
+    vocabulary, so a re-worded description expires every record exactly as adding a topic
+    does. The count is therefore `len(assessments)`, always.
+
+    Without this the retirement was silent, and the next `xbrain jev report` printed
+    `0 vigentes` over a full file — which reads as "nobody has ever run `jev topics`". The two
+    readings differ by the price of re-assessing the corpus, and an operator who reaches for
+    `--force` to resolve the ambiguity pays it.
+
+    Called only where `vocab.yaml` is actually WRITTEN. `xbrain vocab --executor claude-code`
+    exports a worksheet and writes nothing, so it retires nothing and says nothing.
+
+    Reads through `load_assessments` rather than counting JSON keys here — one loader for the
+    side-car — but an unreadable one must not fail a `vocab` run that has already succeeded,
+    so the refusal is reported and the count is not claimed.
+    """
+    if not cfg.jev_topics_path.exists():
+        return
+    try:
+        count = len(load_assessments(cfg.jev_topics_path))
+    except JevError as exc:
+        typer.echo(f"Las evaluaciones de Jev quedan caducadas (no se pudo contarlas: {exc})")
+        return
+    if not count:
+        return
+    retired = plural(
+        count, "evaluación de Jev queda caducada", "evaluaciones de Jev quedan caducadas"
+    )
+    typer.echo(f"{retired}: re-lánzalas con `xbrain jev topics --force` (vuelve a facturar).")
+
+
 def _mark_for_regenerate(store: dict, cfg: Config, regenerate: bool) -> None:
     """When `--regenerate` is set, drop every item's enrichment and persist."""
     if regenerate:
@@ -2479,6 +2515,7 @@ def _vocab_apply(cfg: Config, store: dict, apply: Path, regenerate: bool) -> Non
     _mark_for_regenerate(store, cfg, regenerate)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     typer.echo(f"Vocabulario aplicado: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    _echo_jev_retired_by_vocab(cfg)
 
 
 def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool) -> None:
@@ -2502,6 +2539,7 @@ def _vocab_run(cfg: Config, store: dict, executor: str | None, regenerate: bool)
     save_vocab(topics, cfg.data_dir / "vocab.yaml")
     _mark_for_regenerate(store, cfg, regenerate)
     typer.echo(f"Vocabulario inducido: {len(topics)} topics → {cfg.data_dir / 'vocab.yaml'}")
+    _echo_jev_retired_by_vocab(cfg)
 
 
 @app.command()
@@ -2664,8 +2702,14 @@ def _jev_client(cfg: Config) -> JevClient:
     The key is checked BEFORE that import, so the one path a first-run operator is most
     likely to take — no key configured — does not pay for the vendor's HTTP stack to be
     told it is missing. And the import itself is guarded: `ImportError` is not in
-    `_OPERATOR_ERRORS`, so a half-finished `uv sync` would otherwise reach the operator as a
+    `_OPERATOR_ERRORS`, so a half-finished install would otherwise reach the operator as a
     traceback, after their key was accepted and the selection printed.
+
+    The remedy it names is the WHOLE command (`uv sync --extra dev --locked`, what both CI
+    workflows run) and never a bare `uv sync`: `dev` is an optional-dependencies EXTRA, so
+    `uv sync` alone prunes the environment to the resolved set and takes pytest, ruff, mypy,
+    poe, bandit and detect-secrets with it. The operator repairs the SDK and silently loses
+    `uv run poe check` — a command that has vanished rather than an error naming a cause.
 
     Built only AFTER selection, so `--dry-run` and an empty backlog never need a key.
     """
@@ -2679,7 +2723,7 @@ def _jev_client(cfg: Config) -> JevClient:
     except ImportError as exc:
         raise JevError(
             f"el SDK de TypeSafe no está disponible ({exc}): instala las dependencias con "
-            "`uv sync` y vuelve a lanzar el comando"
+            "`uv sync --extra dev --locked` y vuelve a lanzar el comando"
         ) from exc
     return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
 
@@ -2765,6 +2809,49 @@ def _save_jev_sidecar(assessments: dict[str, TopicAssessment], path: Path, *, pa
         raise JevError(f"no se pudo guardar {path} ({lost} sin guardar): {exc}") from exc
 
 
+def _back_up_before_forced_overwrite(path: Path, forced: int) -> None:
+    """Copy the side-car beside itself under a UTC stamp, and echo the copy. Or do nothing.
+
+    THE SIDE-CAR'S OWN REVERSIBILITY. ARCHITECTURE invariant 8 says every command that
+    overwrites a `data/` artifact leaves a way back, and every other one gets that from
+    `snapshot create`. This file does not: `data/jev/topics.json` is deliberately OUTSIDE
+    `snapshot._ARTIFACTS` (a snapshot covers the corpus, not a second opinion about it), and
+    `data/` is gitignored in full. So before this, `--force` over thousands of paid records
+    had no undo anywhere — not git, not `snapshot restore`, not a copy.
+
+    Stamped rather than fixed (`topics.bak`) because the second forced run would otherwise
+    overwrite the first one's only copy: the loss the backup exists to prevent, one run later.
+    The stamp is `snapshot_create`'s, to the millisecond and in UTC, so the two reversibility
+    mechanisms sort and read alike and scripted runs in the same second do not collide.
+
+    NEVER PRUNED — by anything, ever. A cleanup rule would have to decide which paid copy is
+    expendable, and the one an operator wants is the one from before the run they regret,
+    which is not knowable here. `docs/jev.md` tells them to delete them by hand.
+
+    The CONDITION lives here rather than at the call site, so `jev_topics_cmd` reads as one
+    step ("protect the side-car") instead of carrying the two branches that decide whether
+    there is anything to protect. `forced`, not the `--force` FLAG: a forced run that re-asks
+    nothing current overwrites nothing, and a `.bak` per ordinary run is how an operator
+    learns to ignore them.
+    """
+    if not forced or not path.exists():
+        return
+    now = datetime.now(timezone.utc)
+    stamp = now.strftime("%Y-%m-%dT%H-%M-%S-") + f"{now.microsecond // 1000:03d}Z"
+    backup = path.with_name(f"{path.stem}.{stamp}.bak")
+    try:
+        shutil.copy2(path, backup)
+    except OSError as exc:
+        # Same argument as `_save_jev_sidecar`: the errno is about a filesystem and says
+        # nothing about what is at stake. Raised BEFORE the client is built, so a run that
+        # cannot be made reversible has not yet cost anything.
+        raise JevError(
+            f"no se pudo copiar {path} a {backup} ({exc}); "
+            f"--force sobrescribiría evaluaciones pagadas sin copia"
+        ) from exc
+    typer.echo(f"Copia de seguridad: {backup}")
+
+
 def _release_jev_client(client: JevClient) -> None:
     """Release the client's pool without ever becoming the run's verdict.
 
@@ -2837,6 +2924,9 @@ def jev_topics_cmd(
         return
     if not selection.items:
         return
+    # BEFORE the client, so a backup that cannot be written stops a run that has not yet been
+    # billed — and before the first checkpoint, so the copy is the file as it was.
+    _back_up_before_forced_overwrite(cfg.jev_topics_path, selection.forced)
 
     # The records THIS run paid for, in id order of arrival. `assessments` also holds every
     # earlier run's work, so reporting its length as the rescue would tell an operator who
@@ -2853,11 +2943,17 @@ def jev_topics_cmd(
         The dict alone is not durability — only `KeyboardInterrupt` is caught below, so a
         SIGTERM or an unexpected exception would take every record in it. The periodic write
         bounds that loss to at most `_CHECKPOINT_EVERY - 1` paid records.
+
+        Through `_save_jev_sidecar`, not `save_assessments`: ONE failure must not produce two
+        messages depending on when the disk filled. `assess._deliver_result` swallows whatever
+        this raises (a broken checkpoint must never discard the record it was called to save),
+        so the log line is the only surface there is — and a bare `[Errno 28]` in it is about
+        a filesystem, while this is about the paid records it just failed to protect.
         """
         assessments[assessment.item_id] = assessment
         banked[assessment.item_id] = assessment
         if len(banked) % _CHECKPOINT_EVERY == 0:
-            save_assessments(assessments, cfg.jev_topics_path)
+            _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
 
     client = _jev_client(cfg)
     try:
@@ -2929,6 +3025,11 @@ class JevPairs:
     pairs: list[tuple[Item, TopicAssessment]]
     stale: int
     orphans: int
+    #: The two options `pairs` was decided under, carried so a consumer that rebuilds a
+    #: `CurrentPairs` from this (the dashboard) hands on the real provenance instead of
+    #: re-asserting its own `cfg` and calling that agreement.
+    fallback: str
+    char_limit: int
 
 
 def _jev_pairs(cfg: Config) -> JevPairs:
@@ -2957,7 +3058,14 @@ def _jev_pairs(cfg: Config) -> JevPairs:
     assessments = load_assessments(cfg.jev_topics_path)
     if not vocab:
         return JevPairs(
-            store=store, vocab=vocab, assessments=assessments, pairs=[], stale=0, orphans=0
+            store=store,
+            vocab=vocab,
+            assessments=assessments,
+            pairs=[],
+            stale=0,
+            orphans=0,
+            fallback=cfg.jev_fallback_option,
+            char_limit=cfg.jev_state_char_limit,
         )
     current = current_pairs(
         list(store.values()),
@@ -2973,6 +3081,8 @@ def _jev_pairs(cfg: Config) -> JevPairs:
         pairs=list(current.pairs),
         stale=current.stale,
         orphans=current.orphans,
+        fallback=current.fallback,
+        char_limit=current.char_limit,
     )
 
 
@@ -3186,7 +3296,15 @@ def jev_dashboard_cmd(
         # `_jev_pairs` already decided currency to get here; recomputing it would be a second
         # `build_topic_state` and sha256 over the whole corpus, and a second chance for the
         # page to disagree with the refusal that just let it through.
-        current=CurrentPairs(pairs=tuple(jev.pairs), stale=jev.stale, orphans=jev.orphans),
+        current=CurrentPairs(
+            pairs=tuple(jev.pairs),
+            stale=jev.stale,
+            orphans=jev.orphans,
+            # From the loader, not from `cfg` again: handing `cfg`'s values back would assert
+            # the agreement this rebuild exists to preserve instead of carrying it.
+            fallback=jev.fallback,
+            char_limit=jev.char_limit,
+        ),
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     # Atomically, like the reports: a page half-written by a full disk or a Ctrl-C would
