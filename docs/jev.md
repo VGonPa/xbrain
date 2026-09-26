@@ -357,7 +357,7 @@ the report says so above the tables.
 `missing_pairs` · `primary_agree` · `primary_agree_pct` · `primary_fallback` ·
 `primary_unjudged` · `primary_unranked` · `posts_with_disagreement` · `posts_enrich_only` ·
 `posts_jev_only` · `posts_primary_differs` · `per_topic` · `topic_confusion` ·
-`primary_confusion`.
+`primary_confusion` · `confidence_bands`.
 
 `assessments_stored == items_assessed + assessments_stale + assessments_orphaned` — a real
 partition of the side-car, so "0 vigentes" can always be told apart from "0 guardadas".
@@ -378,7 +378,10 @@ number. `posts_enrich_only`, `posts_jev_only` and `posts_primary_differs` split 
 KIND of disagreement (a post can count in more than one). Each `per_topic` row carries
 `disagreeing` = its `doubtful` + its `missing`: the posts that disagree about that topic.
 Separately, each row also carries `enrich_primary` and `jev_primary`: on how many compared posts
-each side picked it as THE topic (these are not part of `disagreeing`).
+each side picked it as THE topic (these are not part of `disagreeing`), and `primary_both`: on how
+many both picked it — the diagonal of the primary cross, equal to `enrich_primary` minus the
+`primary_confusion` rows where enrich picked it. `primary_both` summed over the topics is
+`primary_agree`.
 
 `topic_confusion` pairs what each side put INSTEAD. On every post, each topic only enrich has
 (`doubtful`) is paired with each topic only Jev has (`missing`); a post where only one side has
@@ -389,9 +392,22 @@ four rows. `primary_confusion` is the same shape for the primary: enrich's prima
 choice on every post where they differ (`enrich: null` = enrich left no primary; the fallback
 appears as Jev answered it), and its rows' `posts` add up to `posts_primary_differs`.
 
-The JSON report carries these COUNTS only. The posts behind each row live in one index,
-`report.post_sets`, which only the page ships (to open a pair's posts): the lists grow with
-every evaluated post, and a report file is for numbers.
+`confidence_bands` says how sure Jev was on each disagreement, one row per band:
+`{kind, key, label, lo, hi, top, pairs, posts}`. The edges are defined once, in
+`report.confidence_bands`: for what enrich assigns and Jev does not back (`kind:
+"enrich_only"`), below 0.2 (`e-lo`, *Jev lo descarta claramente*), 0.2–0.5 (`e-mid`) and
+0.5–threshold (`e-near`, *casi*); for what Jev would add (`jev_only`), threshold–0.95
+(`j-near`) and 0.95 and above (`j-hi`). Each band holds its lower edge (a pair at exactly 0.5
+is `e-near`; at exactly the threshold it is not a doubt at all, it is `j-near`), and the top
+band holds 1.0. A band the threshold leaves no room for is left out (at a threshold of 0.4 there
+is no `e-near`). `pairs` counts (post, topic) disagreements and `posts` the posts they are on,
+so a post with two doubtful topics in one band counts once there. Each kind's `pairs` add up
+to `doubtful_pairs` and `missing_pairs`.
+
+The JSON report carries these COUNTS only. The posts behind them live in one index,
+`report.post_sets`, which only the page ships: `cx` and `px` per confusion pair, `pd` per topic
+(the posts where both sides pick it as primary) and `bands` per band. The lists grow with every
+evaluated post, and a report file is for numbers.
 
 Under the recap line, `jev report` prints the run history in the shared cost sentence:
 
@@ -496,8 +512,8 @@ Top to bottom:
    - *Jev añadiría N topics que enrich no puso* — `missing_pairs`.
    - *El topic principal coincide en P %* — `primary_agree_pct`.
 5. **Four tabs**: **Posts**, **Topics**, **Comparar Jev vs enrich** and **Configuración**.
-   Posts and Topics are described below; Comparar and Configuración show a one-line
-   placeholder (they arrive in later PRs).
+   Posts, Topics and Comparar are described below; Configuración shows a one-line
+   placeholder (it arrives in a later PR).
 
 ### The Posts tab
 
@@ -589,10 +605,11 @@ It is **one file**: the data as a JSON blob in the page, no charting library, no
 scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
 the vault loses the pictures and nothing else. The only network reference is the Google
 Fonts stylesheet. Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
-**3,762,648 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
-rows and evidence) and ~1.2 KB for the rest. The Topics tab's data is the two confusion lists
-(~18 KB of counts) and `post_sets` (~23 KB, ~80 bytes per evaluated post). With every post
-evaluated the page would be about **7.2 MB**. JavaScript draws everything; without it the page says so.
+**3,796,590 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
+rows and evidence) and ~1.2 KB for the rest. The Topics and Comparar tabs' data is the
+confusion lists and bands (~19 KB of counts) and `post_sets` (~38 KB, ~130 bytes per evaluated
+post: pairs ~23 KB, primary diagonal ~5 KB, bands ~10 KB). With every post evaluated the page
+would be about **7.3 MB**. JavaScript draws everything; without it the page says so.
 
 ### The Topics tab
 
@@ -640,6 +657,44 @@ Links: *ver en Posts* opens the Posts tab on every post with this topic (`#posts
 topic's name in the Jev vs enrich rows opens its page, and the Posts rail offers *ficha del
 topic* for the topic it is filtering by. Back and forward move between the index, a topic and a
 pair. If the tab ever fails to draw, it says so inside the tab.
+
+### The Comparar tab
+
+`#compare` compares Jev's decisions with enrich's in plain words. Every number is a report
+count, and every number opens the posts behind it.
+
+1. **En tres frases**: the header's three numbers, each with what it means and a link to its
+   posts in the Posts tab (*Enrich asigna y Jev no*, *Jev añadiría topic*, *Primario distinto*).
+2. **Los tres tipos de desacuerdo**: one card per kind with its post count
+   (`posts_enrich_only`, `posts_jev_only`, `posts_primary_differs`), the topic count behind the
+   first two (`doubtful_pairs`, `missing_pairs`), and *ver los posts*. A post can be in more than
+   one, so they do not add up.
+3. **Acuerdo por topic, peores primero**: the ten first topics in the Topics index's default
+   order (worst agreement first among the topics enrich put on at least 5 posts; the rest after,
+   marked *pocos datos*) with *Enrich lo pone*, *Jev confirma*, *Acuerdo* and *Discrepancias*,
+   which opens the Posts tab on the posts that disagree about the topic (`#posts?t=…`). *ver los
+   N en Topics* opens the full index.
+4. **Cruce del topic principal**: enrich's primary against Jev's. On the left, where they
+   coincide, per topic (`primary_both`); on the right, every pair where they do not
+   (`primary_confusion`), most posts first, with *sin principal* for a post enrich left without
+   one and *«otro» (ninguno del vocabulario)* for Jev's fallback. Ten show; *ver todos* opens
+   the rest. A row opens exactly its posts (`#compare?pd=<slug>`, `#compare?px=<enrich>~<jev>`).
+5. **Jev eligió «otro»**: `primary_fallback`, a link to those posts, and what primary enrich
+   had on them. Read it as a likely hole in the vocabulary: a subject no topic covers.
+6. **Qué seguro estaba Jev en los desacuerdos**: the `confidence_bands`, each with its
+   edges written as *probabilidad* (the threshold is the one in the header), its disagreements
+   and its posts; the posts open as cards (`#compare?b=<key>`).
+
+A list opens under its section, as the same cards as the Posts tab, twenty at a time, scrolled
+into view; *cerrar esta lista* goes back. A URL naming a band, pair or topic these data do not
+have says *Ese grupo ya no existe en estos datos*; a post of the list missing from the page is
+counted. Leaving the tab and coming back (through the tab link) returns to the same list, and
+the Posts and Topics tabs keep their own views meanwhile.
+
+On the real vault (2026-09-26, 293 evaluated posts) the bands read: of 331 topics enrich put
+that Jev does not back, 53 are below 0.2, 91 between 0.2 and 0.5 and **187 between 0.5 and the
+threshold** — most of the doubts are near misses, not rejections. Of the 221 Jev would add, 152
+sit between the threshold and 0.95 and 69 at 0.95 or above.
 
 Two more things the page cannot tell you itself:
 
