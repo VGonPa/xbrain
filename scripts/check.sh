@@ -253,6 +253,39 @@ print_github_summary() {
 }
 
 # ============================================================================
+# 0. PREREQUISITES - what this gate needs on the machine besides Python
+# ============================================================================
+# Chrome is a REAL prerequisite. tests/test_jev_page_browser.py drives jev.html
+# in headless Chrome -- the only check that each filter shows the posts its number
+# counts, that j/k/n/p land where they say and that the URL keeps the view. They
+# carry a `skipif`, so a machine without Chrome runs the suite and the gate still
+# says ALL CRITICAL CHECKS PASSED having driven the page not at all.
+#
+# Locally that trade is fine and this banner just says what you are running. On a
+# runner it is not: quality.yml sets XBRAIN_REQUIRE_CHROME=1, which turns every
+# one of those skips into a failure (`_need_chrome` in that file), and
+# test_chrome_is_available_where_the_page_tests_are_required names the cause.
+# The tests look for XBRAIN_CHROME, then google-chrome / chromium on PATH, then the
+# macOS app bundle; this banner checks the same places, less XBRAIN_CHROME's.
+CHROME_BIN="${XBRAIN_CHROME:-}"
+if [ -z "$CHROME_BIN" ]; then
+    for candidate in google-chrome google-chrome-stable chromium chromium-browser chrome; do
+        if command -v "$candidate" > /dev/null 2>&1; then CHROME_BIN="$candidate"; break; fi
+    done
+fi
+if [ -z "$CHROME_BIN" ] && [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+fi
+if [ -n "$CHROME_BIN" ]; then
+    print_success "Chrome found - the jev page browser tests will RUN"
+else
+    print_warning "Chrome not found - the jev page browser tests will SKIP"
+    echo "     They are the only check that jev.html shows what its numbers say."
+    echo "     Install Chrome, or run with XBRAIN_REQUIRE_CHROME=1 to make the skips fail."
+fi
+echo ""
+
+# ============================================================================
 # 1. RUFF CHECK - Code linting  (CRITICAL)
 # ============================================================================
 # Delegates to the `lint` poe task rather than re-spelling `ruff check <dirs>`

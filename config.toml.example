@@ -152,3 +152,35 @@ command = "parakeet-mlx"
 #   Character ceiling per `xbrain get` response. Above it the response is truncated
 #   DECLARING SO and returns a cursor to continue — never silently. ~40k is a long
 #   article with its metadata: the common case does not paginate.
+
+[jev]
+# Jev (TypeSafe AI) topic assessment — `xbrain jev topics|report|dashboard`. See docs/jev.md.
+# Key: TYPESAFE_API_KEY in the environment or in <repo>/.env (see .env.example).
+# Model alias; "jev-latest" follows TypeSafe's updates. Each stored assessment
+# records the concrete model version the API answered with.
+model = "jev-latest"
+# A topic counts as "backed by Jev" when its probability is >= threshold.
+# `xbrain jev dashboard` always compares at this value; `xbrain jev report` uses it by
+# default and accepts --threshold to read the same side-car at another one.
+threshold = 0.85
+# The escape option of the primary-topic Choice ("a topic not in the vocabulary").
+# Must not collide with a vocabulary slug; `xbrain jev topics` refuses the run if it does
+# (the config loader cannot check it — it never sees the vocabulary).
+fallback_option = "otro"
+# Concurrent requests in flight. 8 is where an independent benchmark measured throughput
+# saturating; it is not a TypeSafe figure. The provider's own rate limits return 429 over
+# either a token/second or a request/minute ceiling. On this corpus (~6k input tokens per
+# call) the REQUEST ceiling is the one that binds: 1,200 req/min is 20 req/s, which is only
+# ~120k tok/s against a 250k tok/s limit. Lower this against a sustained 429 — cutting
+# state_char_limit instead moves almost nothing, because the questions are ~89% of a call.
+# Every figure here, sourced and dated, is in docs/jev.md § Vendor facts.
+concurrency = 8
+# Evidence text is cut here. The request budget covers `state` plus ALL the questions, and
+# one call asks one Noul per vocabulary topic plus the primary Choice — so the budget
+# tightens as `[vocab].target_count` grows, and truncating the state does not shrink the
+# question half. Measured on a 2,609-item corpus: the questions are ~89% of what a pass
+# sends, so this setting is not the cost lever; the vocabulary size is. 100k chars is
+# ~25k tokens. Assessments record the pre-cut length and `truncated`. See docs/jev.md.
+state_char_limit = 100000
+# Output: <data_dir>/jev/topics.json — a side-car, NOT part of the store and NOT snapshotted.
+# It costs money to regenerate and has no undo; see docs/jev.md.

@@ -29,7 +29,7 @@ from xbrain.models import LINK_CONTENT_KINDS, ContentSourceSuccess, Item, Topic
 from xbrain.rubrics import load_rubric
 
 
-def _link_content_source(item: Item) -> ContentSourceSuccess | None:
+def link_content_source(item: Item) -> ContentSourceSuccess | None:
     """First successfully-fetched LINKED page source (`LINK_CONTENT_KINDS`), or None.
 
     Only the success variant of `ContentSource` carries `text`. The isinstance
@@ -62,7 +62,7 @@ def _article_title(item: Item) -> str | None:
     never received. Cost, measured: 8 summaries flagged ungrounded for a name that sits in
     the article's TITLE.
     """
-    source = _link_content_source(item)
+    source = link_content_source(item)
     return source.title if source else None
 
 

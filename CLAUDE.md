@@ -645,12 +645,73 @@ generates an Obsidian wiki.
   LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
   life of the corpus it described, and it is the worst kind of wrong in this file, because
   this file is read first and acted on.
+- Jev topic assessment (`xbrain jev topics|report|dashboard`, `src/xbrain/jev/`) — a SIDE-CAR,
+  not a pipeline stage. One TypeSafe call per item carries one Noul per vocabulary slug plus a
+  primary Choice with an escape option; the probabilities land in `data/jev/topics.json` and
+  `jev report` compares them with `enrich` at `[jev].threshold` (default `0.85`), both
+  directions. **It never writes `items.json`, never issues a verdict, never re-renders a note,
+  and takes no snapshot** — a second opinion you can run, read or throw away. Currency is a
+  `contract` hash over the state and the QUESTIONS: re-enriching an item keeps its assessment
+  (that is the event the report exists to look at), while new evidence, a moved vocabulary or a
+  changed `fallback_option` retires it; retired records are excluded from every reader and
+  COUNTED, because a side-car a `vocab` edit just retired must never read like one nobody
+  wrote. The file is PAID, gitignored and outside `snapshot._ARTIFACTS`, so `snapshot restore`
+  leaves it behind — and because a restore reverts `vocab.yaml` as well as `items.json`, one
+  from before a `vocab --regenerate` moves the questions digest and retires EVERY record at
+  once (a full re-bill); only a restore leaving both the evidence and the vocabulary
+  untouched leaves an assessment current. `--force` overwrites paid records, so a run that
+  actually re-asks a current one copies the side-car to `data/jev/topics.<UTC stamp>.bak`
+  first (echoed, never pruned) — that is the file's OWN reversibility, standing in for the
+  snapshot it does not get. ONE ASSESSMENT PER ITEM: the side-car is keyed by `item_id`
+  alone, so a second judge OVERWRITES the first's records; `provider`/`model` are provenance,
+  not a panel. Every pass that SENT a request appends one `JevRun` line to
+  `data/jev/runs.jsonl` (requests, ok, failed, unsaved, tokens per provider, interrupted),
+  counted at the client seam (`CountingJevClient`) and appended from `jev.run.run_topics`'
+  `finally` — every exit path, 402s and Ctrl-C included, and the log step never becomes the
+  verdict; tokens, never dollars (priced at read time by `report.run_history`, which also
+  prices assessments no logged pass covers as "fuera del registro"). `jev dashboard` compares at the FIXED
+  `[jev].threshold`, recomputes nothing in the browser (no slider, no JS mirror, no node in
+  CI) and is a post browser (every post as a card, Jev vs enrich under it, filters + topic
+  navigator + j/k/n/p, view in the URL hash; photos by relative path into `_media/`, never
+  base64). Which filter a card is in is decided in Python (`in` keys, tested equal to the
+  report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
+  disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
+  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Topics tab
+  (`#topics`, `#topics?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
+  `primary_confusion` in report.py (counts only; the post lists are `report.post_sets`,
+  page-only, never in topics-report.json); the page never tallies cards into a number. Comparar
+  tab (`#compare`, `?b=`/`?px=`/`?pd=`): `confidence_bands` (edges defined ONCE in
+  `report._BAND_SPECS`, cut at `ItemComparison.threshold`) and `per_topic.primary_both`, lists
+  from `post_sets.bands` / `pd` / `px`; the template's `loadData(blob)` is the one place derived
+  values are set. Plus
+  cost total / per pass / per post. `jev topics` is the
+  only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
+  `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
+  never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
+  collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:
+  `docs/jev.md`, ARCHITECTURE.md § jev.
+- Error messages pick their language by AUDIENCE, not by exception type. `JevError` and the
+  operator-facing `ValueError`s are Spanish sentences (``el vocabulario está vacío: ejecuta
+  `xbrain vocab`…``); only a `config.toml` schema fault stays English, because `config.py`
+  is. `_handle_cli_errors` surfaces both as one `Error: …` line and exit 1 — and **re-raises
+  `typer.Exit` / `typer.Abort` first**, since both subclass `RuntimeError`: without that, a
+  command's chosen exit code became a bare `Error:` and exit 1. That is what lets
+  `xbrain jev topics` exit 130 on Ctrl-C, and it is why `xbrain index …` no longer prints a
+  second empty `Error:` line and `download-videos` prints `Aborted!` on `n`.
 
 ## Conventions
 - TDD: every module has a `tests/test_*.py`. Run `uv run pytest -v`.
 - The X GraphQL parser anchors on key names, not paths — X's private API drifts.
-- Never commit personal data: `auth/storage_state.json`, `data/`, `config.toml`.
-  All are gitignored.
+- Never commit personal data or secrets: `auth/storage_state.json`, `data/`, `config.toml`,
+  `.env`. All are gitignored. `.env` holds `TYPESAFE_API_KEY` (`xbrain jev`); `.env.example`
+  is the committed template and carries no value.
+- **`git add` BEFORE `uv run poe check`.** The gate's `detect-secrets scan src/xbrain tests
+  scripts` only sees files git TRACKS, so a new, unstaged file is invisible to it. Probed on
+  2026-09-22 with a DUMMY value in AWS's format (what detect-secrets' `AWSKeyDetector` matches
+  on — not a credential): untracked, `src/xbrain/_probe_secret.py` is absent from the scan's
+  results; `git add` it and the same scan reports it. The probe file was deleted afterwards. So a secrets gate that went
+  green over a new file did not look at it. (Only this check resolves its files through git —
+  ruff, mypy and pytest walk the directories — which is exactly why it is the one to remember.)
 
 ## Git workflow
 - `develop` is the integration branch: `feature-branch → PR → develop`. Branch

@@ -1,0 +1,201 @@
+"""The Jev seam, vendor-free: the question and answer types xbrain itself speaks.
+
+Nothing here imports a provider SDK. `JevClient` is the whole contract — a provider is a
+class with an `ask`, and `typesafe.py` is the first one. Keeping the protocol and the
+adapter apart is what lets the rest of the package (questions, assessment, store, report)
+import this module without paying for, or depending on, anybody's HTTP stack. Mirrors
+`executors/base.py` vs `executors/api.py`.
+"""
+
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from typing import Literal, Protocol
+
+#: The two sides of a Noul's criteria. A `Literal` key type, not a bare `str`, because a
+#: misspelt side is not a typo the wire can report: the provider accepts `None` as
+#: "undescribed", so `{"tru": …}` would ship a question with its description silently gone.
+NoulSide = Literal["true", "false"]
+
+
+class JevError(RuntimeError):
+    """An operator-facing Jev failure, in the language the CLI prints.
+
+    Raised for an unusable key or client configuration, a question we refuse to send, a
+    provider error, an answer set that does not match the questions asked, and the operator
+    errors of the assessment side (an unknown `--id`, a `--limit` below 1). It is the ONLY
+    exception type the seam emits: no provider exception reaches a caller.
+
+    It is not the only one the PACKAGE raises. A malformed vocabulary is a `ValueError` from
+    `questions.build_topic_questions` — a configuration fault, caught before any call — so a
+    CLI over this package must handle both.
+    """
+
+
+@dataclass(frozen=True)
+class NoulQuestion:
+    """A yes/no question. `criteria` describes the two outcomes; either side may be left
+    out, which asks the question with that outcome undescribed."""
+
+    instructions: str
+    criteria: dict[NoulSide, str] | None = None
+
+
+@dataclass(frozen=True)
+class ChoiceQuestion:
+    """A pick-one question: `criteria` maps each option to its description."""
+
+    instructions: str
+    criteria: dict[str, str | None]
+
+
+Question = NoulQuestion | ChoiceQuestion
+
+
+@dataclass(frozen=True)
+class NoulAnswer:
+    """A probability in [0, 1] that the answer to a `NoulQuestion` is yes."""
+
+    noul: float
+
+
+@dataclass(frozen=True)
+class ChoiceAnswer:
+    """The option a `ChoiceQuestion` picked, with its confidence and the distribution."""
+
+    choice: str
+    confidence: float
+    probabilities: dict[str, float]
+
+
+Answer = NoulAnswer | ChoiceAnswer
+
+
+@dataclass(frozen=True)
+class JevResult:
+    """One answered call. `provider` and `model` travel WITH the answers, so a record built
+    from this result can never be attributed to the wrong judge; token counts are `None`
+    when the provider did not report usage."""
+
+    provider: str
+    model: str
+    answers: dict[str, Answer]
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+class JevClient(Protocol):
+    """One call: a `state` and a map of typed questions, all answered against that state.
+
+    `ask` MUST be safe to call concurrently from several threads with one client instance:
+    `assess.run_assessments` shares a single client across a pool of `[jev].concurrency`
+    workers. An implementation that mutates per-call state on `self` has to guard it.
+    """
+
+    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult: ...
+
+    def close(self) -> None:
+        """Release whatever the client holds. Idempotent, and MUST NOT raise a vendor type.
+
+        Part of the protocol rather than the adapter's own extra, because the CALLER that
+        builds a client is the one that has to release it, and it only ever holds a
+        `JevClient`. A provider with nothing to release implements it as a no-op — which
+        is why it is cheaper to require than to make every caller probe for it.
+
+        The two requirements are the CALLER'S SAFETY, not politeness. `xbrain jev topics`
+        releases from a `finally` that can run while a `KeyboardInterrupt` or an all-failed
+        `JevError` is already propagating, and Python lets an exception raised in a `finally`
+        replace the one in flight. An implementation that honours this makes that impossible;
+        `TypeSafeJevClient.close` does, by converting `TypeSafeError` to `JevError` and by
+        releasing at most once. The caller guards the call anyway — a protocol nobody can
+        enforce at runtime is a promise, and the money is on the other side of it.
+
+        The `...` body is the Protocol convention, matching `ask`, and buys NOTHING beyond
+        that: a docstring-only body behaves identically, so neither form stops a class that
+        explicitly inherits this Protocol from silently getting a no-op `close`. Structural
+        conformance — a class that merely satisfies the protocol, which is how every provider
+        here is written — is checked by mypy at `typesafe.py`'s `_assert_conforms_to_protocol`,
+        and that is where the real guarantee lives.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class SeamCounts:
+    """Everything `CountingJevClient` saw, read under ONE lock so the numbers agree.
+
+    `sent` — calls forwarded. `answered` — calls that returned a result. `raised` — calls
+    that raised an `Exception`. A `KeyboardInterrupt` is neither, so a call cut short by
+    Ctrl-C stays in `sent - answered - raised`: in flight. The token, usage and model
+    tallies cover EVERY answer, including ones xbrain later refuses — each was billed.
+    """
+
+    sent: int
+    answered: int
+    raised: int
+    input_tokens_by_provider: dict[str, int]
+    input_tokens_unknown: int
+    models: tuple[str, ...]
+
+
+class CountingJevClient:
+    """A `JevClient` that counts what it forwards — how `runs.jsonl` knows what was billed.
+
+    Counted at the seam because nothing else sees it: `run_assessments` reports ITEMS that
+    come back, drops answers it refuses, and discards everything on an interrupt. A call is
+    billed when it is answered, so every returned `JevResult` is folded in here — tokens per
+    provider, answers without usage, models — whatever becomes of it afterwards. Each `ask`
+    is one item; retries inside the vendor SDK are invisible and not counted. Thread-safe,
+    because `ask` is called from `[jev].concurrency` workers at once.
+    """
+
+    def __init__(self, inner: JevClient) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+        self._sent = 0
+        self._answered = 0
+        self._raised = 0
+        self._tokens: dict[str, int] = {}
+        self._unknown = 0
+        self._models: set[str] = set()
+
+    @property
+    def sent(self) -> int:
+        """Calls forwarded so far, whatever became of them."""
+        with self._lock:
+            return self._sent
+
+    def snapshot(self) -> SeamCounts:
+        """Every counter at one instant — one lock acquisition, so they are consistent."""
+        with self._lock:
+            return SeamCounts(
+                sent=self._sent,
+                answered=self._answered,
+                raised=self._raised,
+                input_tokens_by_provider=dict(sorted(self._tokens.items())),
+                input_tokens_unknown=self._unknown,
+                models=tuple(sorted(self._models)),
+            )
+
+    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
+        with self._lock:
+            self._sent += 1
+        try:
+            result = self._inner.ask(state, questions)
+        except Exception:
+            with self._lock:
+                self._raised += 1
+            raise
+        with self._lock:
+            self._answered += 1
+            self._tokens[result.provider] = self._tokens.get(result.provider, 0) + (
+                result.input_tokens or 0
+            )
+            if result.input_tokens is None:
+                self._unknown += 1
+            self._models.add(result.model)
+        return result
+
+    def close(self) -> None:
+        self._inner.close()
