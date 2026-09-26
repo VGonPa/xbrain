@@ -264,7 +264,9 @@ details.saw[open]>summary{color:var(--ink)}
 .csec{margin-top:30px}
 .csec>.muted{max-width:820px}
 .csec .facts{margin-top:12px}
-.fact .go{display:inline-block;margin-top:8px}
+.fact .go{display:inline-block;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
+.csec .fact{min-width:0}
+.otro-n+.pairs{margin-top:12px}
 .kinds{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:12px}
 .kind{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}
 .kind .lab{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
