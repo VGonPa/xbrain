@@ -485,7 +485,10 @@ Three that send people here first, because the symptom does not name Jev:
   untouched leaves an assessment current. Retired records report as `caducadas` on the
   next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
 - **A red *"La página no pudo dibujarse"* banner on `jev.html`.** The page's script failed
-  while drawing. The numbers are in `xbrain jev report`; report the banner's message as a bug.
+  while loading. The numbers are in `xbrain jev report`; report the banner's message as a bug.
+  One post that cannot be drawn only shows *no se pudo dibujar* on its own card.
+- **`jev.html` shows *falta en _media/: corre xbrain generate* instead of photos.** Run
+  `xbrain generate` (it mirrors `data/media/` into the vault), then `xbrain jev dashboard`.
 - **`registro de pasadas ilegible en la línea N`.** One line of `data/jev/runs.jsonl` does not
   parse. Split it, never delete it: an old torn line can hold a valid record glued after the
   fragment, and that record is a paid pass. The commands refuse rather than skip paid history.

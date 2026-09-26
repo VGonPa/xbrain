@@ -147,7 +147,8 @@ _READ_VIEW = r"""
 setTimeout(() => {
   const pre = document.createElement('pre'); pre.id = 'probe';
   pre.textContent = JSON.stringify({q: view.q, f: view.f, search: document.getElementById('search').value,
-    banner_hidden: document.getElementById('banner').hidden, count: document.getElementById('count').textContent});
+    banner_hidden: document.getElementById('banner').hidden, count: document.getElementById('count').textContent,
+    more_shown: getComputedStyle(document.getElementById('more')).display !== 'none'});
   document.body.appendChild(pre);
 }, 200);
 </script>
@@ -347,3 +348,5 @@ def test_a_malformed_hash_opens_the_page_instead_of_breaking_it(tmp_path, hash_)
 
     assert seen["banner_hidden"] is True
     assert seen["count"].startswith("mostrando")
+    # One post, all drawn: no "Mostrar 0 más" button left on screen.
+    assert seen["more_shown"] is False
