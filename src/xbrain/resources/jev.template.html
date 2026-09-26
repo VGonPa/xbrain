@@ -2185,7 +2185,9 @@ function configFiles(C) {
     return sec;
   }
   sec.appendChild(cfgTable([['Fichero', null], ['Ruta', 'cp'], ['Qué es', 'cw'], ['En snapshots', null]], C.files.map(f => {
-    const spec = CONFIG_FILES[f.key] || {what: '', by: ''};
+    // No fallback: a file with no words here throws into the tab's guard, never a blank row.
+    const spec = CONFIG_FILES[f.key];
+    if (!spec) throw new Error('fichero sin descripción en la página: ' + f.key);
     const where = el('div');
     where.appendChild(el('code', null, f.path));
     // The page's own file is written right after this blob is built: it is never «missing» here.

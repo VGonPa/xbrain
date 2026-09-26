@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import typer
 
+from xbrain.config import load_config
 from xbrain.dashboard import _resource
 from xbrain.jev.assess import (
     CUT_MARKER,
@@ -42,6 +43,7 @@ from xbrain.jev.dashboard import (
     _question_row,
     collect_jev_media,
     compute_jev_dashboard_data,
+    page_files,
     render_jev_dashboard_html,
 )
 from xbrain.jev.defaults import INPUT_USD_PER_MTOK, JEV_DEFAULTS, tokens_cost_usd
@@ -2161,3 +2163,22 @@ def test_the_docs_link_lands_on_the_configuracion_section():
 
     assert url == DOCS_CONFIG_URL and url.startswith(DOCS_URL + "#")
     assert url[len(DOCS_URL) :] in anchors
+
+
+def test_the_tab_describes_exactly_the_files_page_files_ships(tmp_path):
+    """One description per `page_files` key, and no fallback: a file the page has no words for
+    throws into the tab's guard instead of drawing a row that says nothing."""
+    (tmp_path / "config.toml").write_text(
+        '[paths]\nvault = "/tmp/vault"\noutput_subdir = "x"\ndata_dir = "data"\n'
+        '[x]\nhandle = "h"\n',
+        encoding="utf-8",
+    )
+    config = _config_code()
+    table = config[config.index("const CONFIG_FILES = {") :]
+    table = table[: table.index("\n};")]
+
+    described = set(re.findall(r"^  (\w+): \{", table, re.M))
+
+    assert described == {f["key"] for f in page_files(load_config(tmp_path))}
+    assert "CONFIG_FILES[f.key] ||" not in config
+    assert "if (!spec) throw new Error(" in config
