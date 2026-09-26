@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import webbrowser
 from collections import Counter
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -75,6 +76,7 @@ from xbrain.jev.report import (
 )
 from xbrain.jev.lock import pass_lock
 from xbrain.jev.run import RunOutcome, run_topics
+from xbrain.jev.serve import JevService, make_server, serve_until_interrupted
 from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -3121,6 +3123,46 @@ def jev_dashboard_cmd() -> None:
         f"{plural(posts, 'post en el dashboard', 'posts en el dashboard')} "
         f"({plural(compared, 'comparado', 'comparados')} con Jev) → {page.resolve().as_uri()}"
     )
+
+
+@jev_app.command("serve")
+@_handle_cli_errors
+def jev_serve_cmd(
+    port: int = typer.Option(
+        8765, "--port", min=0, max=65535, help="Puerto en 127.0.0.1 (0 = uno libre cualquiera)"
+    ),
+    no_open: bool = typer.Option(False, "--no-open", help="No abrir el navegador"),
+) -> None:
+    r"""Sirve la página de Jev en 127.0.0.1, en vivo, con botones para evaluar desde ella.
+
+    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local para pedir
+    a Jev un post, un topic, los N siguientes sin evaluar o los posts de un cruce: primero
+    una estimación (posts y $), después la confirmación, y un único trabajo en segundo plano
+    que corre la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Cada
+    trabajo tiene un tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para:
+    deja que el trabajo guarde lo pagado y sale con 130.
+    """
+    cfg = _config()
+    service = JevService(cfg, lambda: _jev_client(cfg))
+    # Built once BEFORE binding: a corrupt side-car or run log refuses here, like `jev
+    # dashboard`, instead of on the first page load. Nothing is asked and no key is needed.
+    data = service.blob()
+    if "error" in data["cost"]:
+        typer.echo(f"Aviso: {data['cost']['error']}", err=True)
+    try:
+        server = make_server(service, port)
+    except OSError as exc:
+        raise JevError(
+            f"el puerto {port} está ocupado o no se puede usar ({exc}): elige otro con --port"
+        ) from exc
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    typer.echo(f"Página de Jev en {url} (solo este equipo) · Ctrl-C para parar")
+    if not no_open:
+        webbrowser.open(url)
+    code = serve_until_interrupted(server, service)
+    if code:
+        typer.echo("Servidor parado.", err=True)
+        raise typer.Exit(code=code)
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")

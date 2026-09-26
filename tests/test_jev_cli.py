@@ -4,6 +4,7 @@ import logging
 import re
 import sys
 from collections.abc import Callable
+from typing import Any
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1896,3 +1897,139 @@ def test_jev_topics_dry_run_only_reads_so_it_needs_no_lock(tmp_path: Path, monke
 
     assert result.exit_code == 0, result.output
     assert "2 items por evaluar" in result.output
+
+
+# --------------------------------------------------------------------------- jev serve
+
+
+def _never(reason: str) -> Callable[..., Any]:
+    """A stand-in that fails the test if the command gets as far as calling it."""
+
+    def _called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(reason)
+
+    return _called
+
+
+def _serve_seeded(tmp_path: Path, monkeypatch) -> None:
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+
+def test_jev_serve_binds_loopback_opens_the_page_and_exits_130_on_ctrl_c(
+    tmp_path: Path, monkeypatch
+):
+    from xbrain.jev import serve as jev_serve
+
+    _serve_seeded(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("serving must not build a client"))
+    opened: list[str] = []
+    monkeypatch.setattr(cli.webbrowser, "open", opened.append)
+    served: list[tuple[str, int]] = []
+
+    def _ctrl_c(server, service) -> int:
+        served.append(server.server_address)
+        server.server_close()
+        return 130
+
+    monkeypatch.setattr(cli, "serve_until_interrupted", _ctrl_c)
+
+    result = runner.invoke(app, ["jev", "serve", "--port", "0"])
+
+    assert result.exit_code == 130, result.output
+    [(host, port)] = served
+    assert host == jev_serve.HOST == "127.0.0.1"
+    assert opened == [f"http://127.0.0.1:{port}/"]
+    assert f"http://127.0.0.1:{port}/" in result.output
+
+
+def test_jev_serve_no_open_does_not_open_a_browser(tmp_path: Path, monkeypatch):
+    _serve_seeded(tmp_path, monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr(cli.webbrowser, "open", opened.append)
+
+    def _served(server, service) -> int:
+        server.server_close()
+        return 0
+
+    monkeypatch.setattr(cli, "serve_until_interrupted", _served)
+
+    result = runner.invoke(app, ["jev", "serve", "--port", "0", "--no-open"])
+
+    assert result.exit_code == 0, result.output
+    assert opened == []
+
+
+def test_jev_serve_refuses_a_busy_port_by_name(tmp_path: Path, monkeypatch):
+    import socket
+
+    _serve_seeded(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "serve_until_interrupted", _never("never served"))
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        result = runner.invoke(app, ["jev", "serve", "--port", str(port), "--no-open"])
+
+    assert result.exit_code == 1
+    assert f"el puerto {port} está ocupado" in result.output and "--port" in result.output
+
+
+@pytest.mark.parametrize("port", ["-1", "65536"])
+def test_jev_serve_refuses_a_port_out_of_range(tmp_path: Path, monkeypatch, port: str):
+    _serve_seeded(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["jev", "serve", "--port", port, "--no-open"])
+
+    assert result.exit_code == 2 and "--port" in result.output
+
+
+def test_jev_serve_refuses_before_binding_when_the_page_cannot_be_built(
+    tmp_path: Path, monkeypatch
+):
+    """A corrupt side-car is refused the way `jev dashboard` refuses it, before any port."""
+    _serve_seeded(tmp_path, monkeypatch)
+    _jev_dir(tmp_path).mkdir(parents=True)
+    _topics_path(tmp_path).write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(cli, "make_server", _never("never bound"))
+
+    result = runner.invoke(app, ["jev", "serve", "--no-open"])
+
+    assert result.exit_code == 1 and "side-car ilegible" in result.output
+
+
+def test_jev_serve_evaluates_through_the_cli_client_seam(tmp_path: Path, monkeypatch):
+    """The job builds its client through `_jev_client`, the one seam (the key check, the SDK
+    import) — never a second way to make a TypeSafe client."""
+    from xbrain.jev.serve import JevService
+
+    _serve_seeded(tmp_path, monkeypatch)
+    fake = FakeJevClient(provider="typesafe")
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+    services: list[JevService] = []
+
+    def _capture(server, service) -> int:
+        services.append(service)
+        server.server_close()
+        return 0
+
+    monkeypatch.setattr(cli, "serve_until_interrupted", _capture)
+    runner.invoke(app, ["jev", "serve", "--port", "0", "--no-open"])
+    [service] = services
+    assert service._make_client() is fake
+
+
+def test_jev_serve_refuses_an_empty_vocabulary_or_corpus_by_name(tmp_path: Path, monkeypatch):
+    """With no side-car at all the page still serves (that is where a first pass can start);
+    with nothing to ask about or nothing to ask it with, it says which file and which command."""
+    _setup_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "make_server", _never("never bound"))
+    _seed_vocab(tmp_path)
+
+    no_items = runner.invoke(app, ["jev", "serve", "--no-open"])
+    save_store({"1": _item("1", "Claude Code hooks")}, tmp_path / "data" / "items.json")
+    (tmp_path / "data" / "vocab.yaml").unlink()
+    no_vocab = runner.invoke(app, ["jev", "serve", "--no-open"])
+
+    assert no_items.exit_code == 1 and "`xbrain extract`" in no_items.output
+    assert no_vocab.exit_code == 1 and "`xbrain vocab`" in no_vocab.output

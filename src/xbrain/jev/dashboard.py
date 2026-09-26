@@ -793,7 +793,12 @@ def page_files(cfg: Config, *, served: bool = False) -> list[dict[str, Any]]:
 
 
 def build_page_data(
-    cfg: Config, *, now: datetime, jev: JevPairs | None = None, served: bool = False
+    cfg: Config,
+    *,
+    now: datetime,
+    jev: JevPairs | None = None,
+    served: bool = False,
+    media: MediaFiles | None = None,
 ) -> dict[str, Any]:
     """Everything `jev.html` needs, loaded from `cfg` and computed: THE call `jev dashboard`
     makes (and a local server would), so the page's inputs are assembled in one place.
@@ -802,6 +807,8 @@ def build_page_data(
     refuse an empty side-car). A run log with a corrupt line does not cost the page: its
     error rides in `cost.error`, and the caller decides how to announce it. `served` is True
     for a page a server renders live, so the page does not call itself the static file.
+    `media` is `collect_jev_media`'s answer when the caller keeps one (a server pays for its
+    ~thousands of `stat`s once, not per request); looked up here otherwise.
     """
     jev = jev or load_jev_pairs(cfg)
     items = list(jev.store.values())
@@ -827,7 +834,7 @@ def build_page_data(
         # `current_pairs` a pass. The Configuración tab's estimate still makes its own
         # (`_pending`, the command's selection) — deliberately, see there.
         current=jev.current(),
-        media=collect_jev_media(items, cfg.output_dir, cfg.media_dir),
+        media=collect_jev_media(items, cfg.output_dir, cfg.media_dir) if media is None else media,
     )
 
 
