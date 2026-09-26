@@ -1442,11 +1442,11 @@ def _page(vault: Path) -> Path:
 def _blob(page: Path) -> dict:
     """The JSON the page hands the browser, read back out of the rendered HTML.
 
-    `rsplit`, not `split`: the payload is the page's last `const DATA = `, whatever a template
+    `rsplit`, not `split`: the payload is the page's last `let DATA = `, whatever a template
     comment or an earlier script might say.
     """
     html = page.read_text(encoding="utf-8")
-    payload = html.rsplit("const DATA = ", 1)[1].split(";\n", 1)[0]
+    payload = html.rsplit("let DATA = ", 1)[1].split(";\n", 1)[0]
     return json.loads(payload)
 
 

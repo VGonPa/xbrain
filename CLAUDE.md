@@ -679,7 +679,11 @@ generates an Obsidian wiki.
   headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Topics tab
   (`#topics`, `#topics?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
   `primary_confusion` in report.py (counts only; the post lists are `report.post_sets`,
-  page-only, never in topics-report.json); the page never tallies cards into a number. Plus
+  page-only, never in topics-report.json); the page never tallies cards into a number. Comparar
+  tab (`#compare`, `?b=`/`?px=`/`?pd=`): `confidence_bands` (edges defined ONCE in
+  `report._BAND_SPECS`, cut at `ItemComparison.threshold`) and `per_topic.primary_both`, lists
+  from `post_sets.bands` / `pd` / `px`; the template's `loadData(blob)` is the one place derived
+  values are set. Plus
   cost total / per pass / per post. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`

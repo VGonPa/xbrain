@@ -597,8 +597,9 @@ def compute_jev_dashboard_data(
             "models": summary["models"],
         },
         "cost": _cost_block(runs, assessments, [a for _, a in pairs], runs_error),
-        # The posts behind every confusion row, for the Topics tab to open a pair. Page-only:
-        # the summary (and so `topics-report.json`) keeps the counts.
+        # The posts behind every pair, primary diagonal and confidence band, for the Topics and
+        # Comparar tabs to open. Page-only: the summary (and so `topics-report.json`) keeps
+        # the counts.
         "post_sets": post_sets(comparisons),
         "posts": sorted((_card(item, corpus) for item in items), key=_order),
     }
