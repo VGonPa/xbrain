@@ -11,7 +11,6 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -50,14 +49,12 @@ from xbrain.fetch import (
 from xbrain.fetch_x import fetch_x_articles, refetch_full_texts_pooled
 from xbrain.generate import generate as run_generate
 from xbrain.jev.assess import (
-    CurrentPairs,
     RunResult,
     Selection,
-    current_pairs,
     select_items,
 )
 from xbrain.jev.client import JevClient, JevError
-from xbrain.jev.dashboard import compute_jev_dashboard_data, render_jev_dashboard_html
+from xbrain.jev.dashboard import build_page_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
     input_cost_usd,
     input_tokens_total,
@@ -66,6 +63,7 @@ from xbrain.jev.defaults import (
     unpriced_providers,
 )
 from xbrain.jev.env import typesafe_api_key
+from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.report import (
     build_report,
     cost_fragment,
@@ -79,8 +77,7 @@ from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
 from xbrain.refetch_pool import PAUSE_MAX_MS, PAUSE_MIN_MS, clamp_tabs
-from xbrain.models import ArchiveImport, Author, Item, SourceName, Topic
-from xbrain.notes_io import note_filename
+from xbrain.models import ArchiveImport, Author, Item, SourceName
 from xbrain.redescribe import (
     RedescribeReport,
     format_redescribe_summary,
@@ -2901,85 +2898,6 @@ def jev_topics_cmd(
         raise typer.Exit(code=130)
 
 
-@dataclass(frozen=True)
-class JevPairs:
-    """Everything a reader of the side-car needs, loaded once and counted.
-
-    `assessments` is the RAW side-car and `pairs` the current subset, with `stale` and
-    `orphans` accounting for the difference: `len(assessments) == len(pairs) + stale +
-    orphans`. Returning only `pairs` — as this loader first did — throws away the one number
-    that distinguishes "nobody has run `xbrain jev topics`" from "a vocabulary edit just
-    retired every paid record in the corpus", and those two readings differ by the price of
-    re-assessing ~3,000 posts.
-    """
-
-    store: dict[str, Item]
-    vocab: list[Topic]
-    assessments: dict[str, TopicAssessment]
-    pairs: list[tuple[Item, TopicAssessment]]
-    stale: int
-    orphans: int
-    #: The two options `pairs` was decided under, carried so a consumer that rebuilds a
-    #: `CurrentPairs` from this (the dashboard) hands on the real provenance instead of
-    #: re-asserting its own `cfg` and calling that agreement.
-    fallback: str
-    char_limit: int
-
-
-def _jev_pairs(cfg: Config) -> JevPairs:
-    """Store, vocabulary and the CURRENT (item, assessment) pairs, with the drop counts.
-
-    ONE loader for every reader of the side-car — `jev report` and `jev dashboard`. They
-    must never disagree about which stored assessments are still current, and two call sites
-    each opening the three files their own way is exactly how they would: `assess.current_pairs`
-    decides currency from the vocabulary and the fallback, so a reader that loaded a different
-    `vocab.yaml` would silently compare a different set.
-
-    It LOADS and COUNTS; it does not judge. Whether an empty result is an error belongs to the
-    command (`_refuse_empty_report`), and today BOTH commands say yes: `jev report` and
-    `jev dashboard` refuse over an empty side-car, each naming the artifact it protects. A
-    future reader that genuinely wants to render the empty state simply does not call it.
-
-    THE ONE EXCEPTION is an empty vocabulary, and it is not a judgement: there is nothing to
-    compare WITH, so no comparison is attempted and `stale`/`orphans` stay 0 because nothing
-    was examined. Calling `current_pairs` here would raise out of `build_topic_questions` with
-    a message about running `xbrain vocab` "antes de `xbrain jev topics`" — the wrong command
-    for this caller, and silent about the report it did not overwrite. A reader that finds an
-    empty `vocab` must say so itself rather than read the two zeros as "nothing was dropped".
-    """
-    store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
-    assessments = load_assessments(cfg.jev_topics_path)
-    if not vocab:
-        return JevPairs(
-            store=store,
-            vocab=vocab,
-            assessments=assessments,
-            pairs=[],
-            stale=0,
-            orphans=0,
-            fallback=cfg.jev_fallback_option,
-            char_limit=cfg.jev_state_char_limit,
-        )
-    current = current_pairs(
-        list(store.values()),
-        assessments,
-        vocab,
-        fallback=cfg.jev_fallback_option,
-        char_limit=cfg.jev_state_char_limit,
-    )
-    return JevPairs(
-        store=store,
-        vocab=vocab,
-        assessments=assessments,
-        pairs=list(current.pairs),
-        stale=current.stale,
-        orphans=current.orphans,
-        fallback=current.fallback,
-        char_limit=current.char_limit,
-    )
-
-
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
     """Refuse BEFORE writing when there is nothing to compare, NAMING the missing input.
 
@@ -3121,7 +3039,7 @@ def jev_report_cmd(
     """
     cfg = _config()
     t = _jev_threshold(cfg, threshold)
-    jev = _jev_pairs(cfg)
+    jev = load_jev_pairs(cfg)
     _refuse_empty_report(jev, cfg, cfg.jev_dir / "topics-report.json")
     # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
     # carry the rows, and a second pass would be a second place the threshold has to match.
@@ -3134,6 +3052,7 @@ def jev_report_cmd(
         now=datetime.now(timezone.utc),
         stale=jev.stale,
         orphans=jev.orphans,
+        unassessed=jev.unassessed,
     )
     # The run log is read BEFORE anything is written: a corrupt line refuses the command, and
     # a refusal after `write_reports` would leave new files behind an exit 1.
@@ -3146,74 +3065,32 @@ def jev_report_cmd(
     typer.echo(f"→ {md_path}\n→ {json_path}")
 
 
-def _jev_note_links(items: list[Item], items_dir: Path) -> dict[str, str]:
-    """Absolute paths to the notes that EXIST, for the page's `nota ↗` deep links.
-
-    Absolute because `obsidian://open?path=` needs them and `output_dir` can be relative when
-    the configured vault is. FILTERED BY EXISTENCE because `jev dashboard` runs independently
-    of `xbrain generate` and cannot assume a note was ever written for an item: a deep link to
-    a file nobody wrote sends a reader to an Obsidian error instead of to the post, and the
-    row it sits on looks identical either way.
-    """
-    candidates = ((item.id, items_dir / note_filename(item)) for item in items)
-    return {item_id: str(path.resolve()) for item_id, path in candidates if path.exists()}
-
-
 @jev_app.command("dashboard")
 @_handle_cli_errors
 def jev_dashboard_cmd() -> None:
-    r"""Escribe `<output_dir>/jev.html`: los posts donde enrich y Jev no coinciden, y el coste.
+    r"""Escribe `<output_dir>/jev.html`: un navegador de todos los posts con enrich frente a Jev.
 
-    Compara al umbral de \[jev].threshold (fijo: la página no lo mueve ni recalcula nada), con
-    los mismos números que imprime `xbrain jev report`. Enseña el coste de cada pasada de
-    `xbrain jev topics` (del registro `runs.jsonl`) y el de cada post. No llama a Jev ni gasta
-    nada. Las evaluaciones caducadas se excluyen, igual que en el informe.
+    Cada post es una tarjeta (texto, fotos de `_media/`, post citado, enlace) con, debajo, lo
+    que puso enrich y lo que ve Jev al umbral de \[jev].threshold (fijo: la página no lo mueve
+    ni recalcula nada), con los mismos números que imprime `xbrain jev report`. Filtros,
+    topics, búsqueda y el coste de cada pasada (del registro `runs.jsonl`) y de cada post. No
+    llama a Jev ni gasta nada.
+    Corre `xbrain generate` antes para que las fotos y los enlaces a las notas existan.
     """
     cfg = _config()
-    jev = _jev_pairs(cfg)
+    jev = load_jev_pairs(cfg)
     page = cfg.output_dir / "jev.html"
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
     # names the missing input, the command that fixes it, and the artifact left alone, which
     # for THIS command is the page and not the report it never touches.
     _refuse_empty_report(jev, cfg, page)
-    items = list(jev.store.values())
-    now = datetime.now(timezone.utc)
-    # A corrupt run log does not cost the operator the page: the cost strip shows the error
-    # (and so does stderr), the disagreement table renders as usual.
-    runs_error: str | None = None
-    try:
-        runs = load_runs(cfg.jev_runs_path)
-    except JevError as exc:
-        runs, runs_error = [], str(exc)
-        typer.echo(f"Aviso: {runs_error}", err=True)
-    data = compute_jev_dashboard_data(
-        items,
-        jev.assessments,
-        jev.vocab,
-        threshold=cfg.jev_threshold,
-        fallback=cfg.jev_fallback_option,
-        char_limit=cfg.jev_state_char_limit,
-        id2note=_jev_note_links(items, cfg.output_dir / "items"),
-        updated=f"{now:%b} {now.day}, {now.year}".upper(),
-        runs=runs,
-        runs_error=runs_error,
-        now=now,
-        # `_jev_pairs` already decided currency to get here; recomputing it would be a second
-        # `build_topic_state` and sha256 over the whole corpus, and a second chance for the
-        # page to disagree with the refusal that just let it through.
-        current=CurrentPairs(
-            pairs=tuple(jev.pairs),
-            stale=jev.stale,
-            orphans=jev.orphans,
-            # From the loader, not from `cfg` again: handing `cfg`'s values back would assert
-            # the agreement this rebuild exists to preserve instead of carrying it.
-            fallback=jev.fallback,
-            char_limit=jev.char_limit,
-        ),
-        # The page is written HERE, next to the `_media/` mirror the notes embed from: its
-        # photos are relative paths into that folder, checked file by file.
-        page_dir=cfg.output_dir,
-    )
+    # Everything the page needs is assembled in ONE place (`jev.dashboard.build_page_data`),
+    # handed the loader's result so currency is not decided twice.
+    data = build_page_data(cfg, now=datetime.now(timezone.utc), jev=jev)
+    # A corrupt run log does not cost the operator the page: the cost strip shows the error,
+    # stderr repeats it, and everything else renders as usual.
+    if "error" in data["cost"]:
+        typer.echo(f"Aviso: {data['cost']['error']}", err=True)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     # Atomically, like the reports: a page half-written by a full disk or a Ctrl-C would
     # truncate the last good one into unparseable HTML, which is the failure

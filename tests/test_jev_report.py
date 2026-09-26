@@ -261,6 +261,40 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
     assert [row["slug"] for row in summary["per_topic"]] == ["misc", "ai-coding", "startups"]
 
 
+def test_the_disagreement_kinds_are_counted_apart():
+    """Each kind on its own post, so a count that read another kind's property shows up:
+    "1" only has an enrich-only topic, "2" only a Jev-only one, "3" only a primary Jev does
+    not share, "4" agrees on everything."""
+    only_enrich = _item("1", topics=("ai-coding", "misc"))
+    only_jev = _item("2", topics=("ai-coding",))
+    only_primary = _item("3", topics=("ai-coding",))
+    agrees = _item("4", topics=("ai-coding",))
+    low = {"startups": 0.1, "misc": 0.1}
+    pairs = [
+        (only_enrich, _assessment(only_enrich, {"ai-coding": 0.9, **low})),
+        (only_jev, _assessment(only_jev, {"ai-coding": 0.9, "startups": 0.9, "misc": 0.1})),
+        (only_primary, _assessment(only_primary, {"ai-coding": 0.9, **low}, choice="startups")),
+        (agrees, _assessment(agrees, {"ai-coding": 0.9, **low})),
+    ]
+
+    summary = summarize(pairs, VOCAB, 0.85)
+
+    assert summary["posts_enrich_only"] == 1
+    assert summary["posts_jev_only"] == 1
+    assert summary["posts_primary_differs"] == 1
+    assert summary["posts_with_disagreement"] == 3
+
+
+def test_the_summary_counts_the_posts_with_no_current_answer():
+    """`items_unassessed` = posts never asked + posts whose answer is stale: what `jev
+    topics` would ask next. The caller that loaded the corpus hands it in; 0 by default."""
+    item = _item("1")
+    pairs = [(item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}))]
+
+    assert summarize(pairs, VOCAB, 0.85)["items_unassessed"] == 0
+    assert summarize(pairs, VOCAB, 0.85, stale=2, unassessed=5)["items_unassessed"] == 5
+
+
 def test_a_topics_disagreeing_posts_are_its_doubtful_plus_its_missing_ones():
     """The topic navigator's "discrepancias": posts where enrich puts the topic and Jev does
     not back it, plus posts where Jev backs it and enrich did not put it. One post cannot be

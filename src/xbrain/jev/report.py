@@ -238,7 +238,7 @@ def _primary_unjudged(primary_topic: str | None, membership: dict[str, float]) -
     return primary_topic is not None and primary_topic not in membership
 
 
-def _jev_assigned(membership: dict[str, float], threshold: float) -> tuple[str, ...]:
+def jev_assigned(membership: dict[str, float], threshold: float) -> tuple[str, ...]:
     """Jev's OWN assignment at this threshold: every topic at or above it, strongest first."""
     ranked = sorted(membership.items(), key=lambda kv: (-kv[1], kv[0]))
     return tuple(slug for slug, noul in ranked if noul >= threshold)
@@ -261,7 +261,7 @@ def compare_item(
         primary_rank=_primary_rank(item.enriched.primary_topic, assessment.primary.probabilities),
         doubtful=_doubtful(item.id, assigned, membership, threshold),
         missing=_missing(item.id, assigned, membership, threshold),
-        jev_assigned=_jev_assigned(membership, threshold),
+        jev_assigned=jev_assigned(membership, threshold),
         unjudged=_unjudged(assigned, membership),
         primary_unjudged=_primary_unjudged(item.enriched.primary_topic, membership),
     )
@@ -470,6 +470,7 @@ def build_report(
     now: datetime | None = None,
     stale: int = 0,
     orphans: int = 0,
+    unassessed: int = 0,
 ) -> tuple[dict[str, Any], list[ItemComparison]]:
     """The summary AND the comparisons it was computed from — one comparison pass.
 
@@ -485,9 +486,12 @@ def build_report(
     `stale` and `orphans` are what that filter DROPPED. They default to 0 because a caller that
     filtered nothing dropped nothing — but a caller that filtered and then omits them is telling
     the report a retired side-car was empty, which is the one reading that costs money.
+
+    `unassessed` is how many posts of the corpus have NO current answer — never asked, or
+    stale. Only a caller that loaded the corpus knows it (`pairs` holds the answered ones).
     """
     comparisons = compare_all(pairs, threshold)
-    summary = _summarize(comparisons, pairs, vocab, threshold, now, stale, orphans)
+    summary = _summarize(comparisons, pairs, vocab, threshold, now, (stale, orphans, unassessed))
     return summary, comparisons
 
 
@@ -499,13 +503,16 @@ def summarize(
     now: datetime | None = None,
     stale: int = 0,
     orphans: int = 0,
+    unassessed: int = 0,
 ) -> dict[str, Any]:
     """The summary alone, for a caller that does not need the comparisons.
 
     Prefer `build_report`: the CLI and the dashboard both want the rows as well, and this
     wrapper throws away a comparison pass they would only redo.
     """
-    return build_report(pairs, vocab, threshold, now=now, stale=stale, orphans=orphans)[0]
+    return build_report(
+        pairs, vocab, threshold, now=now, stale=stale, orphans=orphans, unassessed=unassessed
+    )[0]
 
 
 def _summarize(
@@ -514,8 +521,7 @@ def _summarize(
     vocab: list[Topic],
     threshold: float,
     now: datetime | None,
-    stale: int,
-    orphans: int,
+    dropped: tuple[int, int, int],
 ) -> dict[str, Any]:
     """Every number the report and the dashboard quote, computed ONCE, from the same pairs.
 
@@ -535,6 +541,7 @@ def _summarize(
     """
     if now is not None:
         _require_utc_aware("now", now)
+    stale, orphans, unassessed = dropped
     assessments = tuple(assessment for _, assessment in pairs)
     totals = _pair_totals(comparisons)
     primary = _primary_totals(comparisons, {topic.slug for topic in vocab})
@@ -543,6 +550,8 @@ def _summarize(
         "threshold": threshold,
         "items_assessed": len(pairs),
         "items_compared": len(comparisons),
+        # Posts with no current answer (never asked + stale): what `jev topics` asks next.
+        "items_unassessed": unassessed,
         "assessments_stored": len(pairs) + stale + orphans,
         "assessments_stale": stale,
         "assessments_orphaned": orphans,

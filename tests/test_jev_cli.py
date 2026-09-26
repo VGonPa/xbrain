@@ -1109,6 +1109,7 @@ def test_jev_report_writes_json_and_markdown(tmp_path: Path, monkeypatch):
     assert payload["summary"]["doubtful_pairs"] == 1
     assert payload["summary"]["missing_pairs"] == 1
     assert payload["summary"]["items_compared"] == 2
+    assert payload["summary"]["items_unassessed"] == 0
 
 
 def test_jev_report_prints_what_every_logged_pass_cost(tmp_path: Path, monkeypatch):
@@ -1400,6 +1401,9 @@ def test_jev_report_agrees_with_one_stale_record(tmp_path: Path, monkeypatch):
     assert "1 caducada" in result.stdout and "1 caducadas" not in result.stdout
     assert "huérfana" not in result.stdout
     assert "items comparados 1/1" in result.stdout
+    # The stale one is a post with no current answer: `jev topics` would ask it next.
+    summary = json.loads(_report_paths(tmp_path)[0].read_text(encoding="utf-8"))["summary"]
+    assert summary["items_unassessed"] == 1
 
 
 def test_the_three_places_that_quote_the_bill_print_the_same_fragment(tmp_path: Path, monkeypatch):
@@ -1591,8 +1595,11 @@ def test_jev_dashboard_links_the_notes_that_exist_and_not_the_ones_that_do_not(
 
     assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
-    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["posts"]}
-    assert notes == {"1": str(note.resolve()), "2": None}
+    blob = _blob(_page(vault))
+    notes = {row["id"]: row["note"] for row in blob["posts"]}
+    # The directory ships once; each post carries its note's file name.
+    assert blob["notes_dir"] == str(items_dir.resolve())
+    assert notes == {"1": note.name, "2": None}
 
 
 def test_jev_dashboard_links_photos_relative_to_the_page_into_the_vault_media_mirror(
@@ -1618,14 +1625,18 @@ def test_jev_dashboard_links_photos_relative_to_the_page_into_the_vault_media_mi
     media_dir = vault / "x-knowledge" / "_media" / "1"
     media_dir.mkdir(parents=True)
     (media_dir / "0.jpg").write_bytes(b"jpg")
+    downloaded = tmp_path / "data" / "media" / "2"
+    downloaded.mkdir(parents=True)
+    (downloaded / "0.jpg").write_bytes(b"jpg")
 
     assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
     page = _page(vault)
     media = {row["id"]: row["media"] for row in _blob(page)["posts"]}
-    assert media["1"] == [{"type": "photo", "src": "_media/1/0.jpg", "desc": ""}]
+    assert media["1"] == [{"type": "photo", "src": "_media/1/0.jpg", "desc": "", "why": None}]
     assert (page.parent / media["1"][0]["src"]).is_file()
-    assert media["2"] == [{"type": "photo", "src": None, "desc": ""}]
+    # Downloaded into data/media but never mirrored into the vault: `xbrain generate` fixes it.
+    assert media["2"] == [{"type": "photo", "src": None, "desc": "", "why": "not_mirrored"}]
 
 
 def test_jev_dashboard_refuses_a_corpus_where_nothing_is_comparable(tmp_path: Path, monkeypatch):

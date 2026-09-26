@@ -137,6 +137,37 @@ def test_the_state_surfaces_say_how_much_of_each_survived_the_cut():
     assert [s.kept for s in state_surfaces(item, char_limit=62)] == [50, 11]
 
 
+def test_the_state_surfaces_rebuild_the_state_of_a_rich_item_and_its_cut():
+    """A quote-tweet with a thread and a fetched article: the surfaces joined ARE the state,
+    and the kept pieces joined are exactly the text the cut sent (`text[:char_limit]`)."""
+    from xbrain.models import Content, ContentSourceSuccess
+
+    item = _item(text="El post.")
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceSuccess(kind="thread", url=item.url, text="Hilo " * 30),
+            ContentSourceSuccess(
+                kind="quoted_tweet",
+                url="https://x.com/b/status/9",
+                text="Citado.",
+                author=Author(handle="b", name="Bea"),
+            ),
+            ContentSourceSuccess(
+                kind="external_article", url="https://e.com", title="Título", text="Cuerpo " * 40
+            ),
+        ],
+    )
+    whole = build_topic_state(item, 100_000)[0]["post"]
+
+    surfaces = state_surfaces(item, 100_000)
+    assert "\n".join(s.text for s in surfaces) == whole
+    assert [s.key for s in surfaces][0] == "tweet"
+    for limit in (5, 60, 200, len(whole) - 1):
+        kept = "\n".join(s.text[: s.kept] for s in state_surfaces(item, limit) if s.kept)
+        assert kept == whole[:limit].rstrip("\n"), limit
+
+
 # --------------------------------------------------------------------------- contract
 
 

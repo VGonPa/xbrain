@@ -30,6 +30,8 @@ from xbrain.jev.dashboard import (
     ASK_COMMAND,
     DOCS_URL,
     SURFACE_LABELS,
+    MediaFiles,
+    collect_jev_media,
     compute_jev_dashboard_data,
     render_jev_dashboard_html,
 )
@@ -40,12 +42,15 @@ from xbrain.jev.report import build_report, run_history
 from xbrain.models import (
     Author,
     Content,
+    ContentSourceFailure,
     ContentSourceSuccess,
     Enrichment,
     Item,
     Link,
     MediaPhotoDescribed,
     MediaPhotoDownloaded,
+    MediaPhotoFailed,
+    MediaPhotoPending,
     MediaVideoDownloaded,
     Topic,
     VideoFrame,
@@ -178,22 +183,31 @@ def test_the_summary_is_build_reports_at_the_configured_threshold():
 
 def test_each_card_has_one_row_per_topic_either_side_has_with_its_verdict():
     """Enrich's topics in enrich's order, then the ones only Jev backs — each with the
-    probability and the verdict read off `build_report`'s comparison, never re-derived."""
+    probability (unrounded) and the verdict read off `build_report`'s comparison."""
     item = _item("1", topics=("ai-coding",))
-    assessment = _assessment(item, membership={"ai-coding": 0.4, "startups": 0.97})
+    assessment = _assessment(item, membership={"ai-coding": 0.4, "startups": 0.973456})
 
     jev = _post(_data([item], {"1": assessment}), "1")["jev"]
 
     assert jev["topics"] == [
         {"slug": "ai-coding", "enrich": True, "p": 0.4, "verdict": "solo_enrich"},
-        {"slug": "startups", "enrich": False, "p": 0.97, "verdict": "solo_jev"},
+        {"slug": "startups", "enrich": False, "p": 0.973456, "verdict": "solo_jev"},
     ]
+    assert jev["compared"] is True
     assert jev["primary"] == "ai-coding" and jev["jev_primary"] == "ai-coding"
     assert jev["jev_confidence"] == 0.77
-    assert jev["primary_agrees"] is True and jev["jev_fallback"] is False
-    # One enrich-only topic + one Jev-only topic; the primaries agree.
-    assert (jev["enrich_only"], jev["jev_only"], jev["primary_differs"]) == (1, 1, False)
+    assert jev["primary_differs"] is False and jev["jev_fallback"] is False
     assert jev["disagreements"] == 2
+
+
+def test_a_card_ships_only_the_fields_the_page_reads():
+    """No `primary_agrees`, `enrich_only` or `jev_only` counts: the filters are the card's
+    `in` list, and the primary line reads `primary_differs`."""
+    item = _item("1")
+
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
+
+    assert not {"primary_agrees", "enrich_only", "jev_only"} & set(jev)
 
 
 def test_a_topic_both_sides_hold_is_coinciden():
@@ -205,6 +219,35 @@ def test_a_topic_both_sides_hold_is_coinciden():
         {"slug": "ai-coding", "enrich": True, "p": 0.9, "verdict": "coinciden"}
     ]
     assert jev["disagreements"] == 0
+
+
+def test_jevs_primary_is_a_row_when_no_other_row_names_it():
+    """A topic filter must find the post whose primary Jev put on a topic it does not back
+    at the threshold. The row is not a disagreement of its own: the primary line counts it."""
+    item = _item("1", topics=("ai-coding",))
+    assessment = _assessment(
+        item, membership={"ai-coding": 0.9, "startups": 0.3}, choice="startups"
+    )
+
+    jev = _post(_data([item], {"1": assessment}), "1")["jev"]
+
+    assert jev["topics"][-1] == {
+        "slug": "startups",
+        "enrich": False,
+        "p": 0.3,
+        "verdict": "primario_jev",
+    }
+    assert jev["disagreements"] == 1  # the primary, once
+
+
+def test_the_fallback_is_not_a_topic_row():
+    item = _item("1", topics=("ai-coding",))
+
+    jev = _post(_data([item], {"1": _assessment(item, choice="otro")}), "1")["jev"]
+
+    assert [row["slug"] for row in jev["topics"]] == ["ai-coding"]
+    assert jev["jev_primary"] == "otro" and jev["jev_fallback"] is True
+    assert jev["primary_differs"] is True and jev["disagreements"] == 1
 
 
 def test_the_threshold_is_the_one_handed_in_and_nothing_on_the_page_moves_it():
@@ -231,16 +274,6 @@ def test_a_topic_that_left_the_vocabulary_is_neither_confirmed_nor_denied():
     assert jev["disagreements"] == 0
 
 
-def test_a_primary_jev_does_not_share_is_a_disagreement_and_the_fallback_is_named():
-    item = _item("1", topics=("ai-coding",))
-
-    jev = _post(_data([item], {"1": _assessment(item, choice="otro")}), "1")["jev"]
-
-    assert jev["primary_agrees"] is False and jev["primary_differs"] is True
-    assert jev["jev_primary"] == "otro" and jev["jev_fallback"] is True
-    assert jev["disagreements"] == 1
-
-
 def test_posts_are_ordered_most_disagreement_first_then_the_unevaluated():
     agree = _item("1", topics=("ai-coding",))
     one = _item("2", topics=("ai-coding",))
@@ -255,7 +288,6 @@ def test_posts_are_ordered_most_disagreement_first_then_the_unevaluated():
     data = _data([never, agree, one, two], assessments)
 
     assert [post["id"] for post in data["posts"]] == ["3", "2", "1", "0"]
-    assert [post["jev"]["disagreements"] for post in data["posts"][:3]] == [2, 1, 0]
 
 
 def test_posts_that_disagree_equally_are_ordered_by_id():
@@ -272,7 +304,7 @@ def test_posts_that_disagree_equally_are_ordered_by_id():
 
 def test_every_post_is_a_card_and_says_whether_jev_evaluated_it():
     """The browser shows the whole corpus: an unevaluated post, a stale answer and a post
-    with nothing to compare against are cards too, each with its status and no comparison."""
+    with nothing to compare against are cards too, each with its status."""
     compared, stale, never, plain = _item("1"), _item("2", text="old"), _item("3"), _item("4")
     plain.enriched = None
     assessments = {
@@ -285,27 +317,42 @@ def test_every_post_is_a_card_and_says_whether_jev_evaluated_it():
 
     status = {post["id"]: post["status"] for post in data["posts"]}
     assert status == {"1": "compared", "2": "stale", "3": "unevaluated", "4": "not_enriched"}
-    assert all(post["jev"] is None for post in data["posts"] if post["id"] != "1")
+    assert _post(data, "2")["jev"] is None and _post(data, "3")["jev"] is None
     # What enrich said is on the card whether or not Jev was asked.
     assert _post(data, "3")["enrich"] == {"topics": ["ai-coding"], "primary": "ai-coding"}
     assert _post(data, "4")["enrich"] is None
-    # The "Sin evaluar por Jev" count: posts with no CURRENT answer (none, or a stale one).
-    assert data["totals"]["unevaluated"] == 2
 
 
-def test_the_disagreement_counts_are_the_ones_the_report_computes():
-    """The filter counts and `jev report`'s numbers are one number each."""
-    agree, differ = _item("1", topics=("ai-coding",)), _item("2", topics=("startups",))
+def test_a_paid_answer_for_a_post_without_enrichment_still_shows_what_jev_sees():
+    """Nothing to compare against is not nothing to show: Jev's own topics at the threshold
+    and its primary, with no verdict against enrich and no disagreement."""
+    plain = _item("1")
+    plain.enriched = None
+    assessment = _assessment(plain, membership={"ai-coding": 0.9, "startups": 0.95})
 
-    data = _data([agree, differ], {"1": _assessment(agree), "2": _assessment(differ)})
+    jev = _post(_data([plain], {"1": assessment}), "1")["jev"]
 
-    summary = data["summary"]
-    assert summary["posts_with_disagreement"] == 1
-    assert sum(1 for p in data["posts"] if p["jev"]["disagreements"]) == 1
-    assert summary["posts_primary_differs"] == sum(
-        1 for p in data["posts"] if p["jev"]["primary_differs"]
-    )
-    assert summary["posts_jev_only"] == sum(1 for p in data["posts"] if p["jev"]["jev_only"])
+    assert jev["compared"] is False
+    assert jev["topics"] == [
+        {"slug": "startups", "enrich": False, "p": 0.95, "verdict": "jev"},
+        {"slug": "ai-coding", "enrich": False, "p": 0.9, "verdict": "jev"},
+    ]
+    assert jev["jev_primary"] == "ai-coding" and jev["primary"] is None
+    assert jev["disagreements"] == 0 and jev["primary_differs"] is False
+    assert jev["model"] == "jev-1.13.0" and jev["surfaces"]
+
+
+def test_a_post_with_no_evidence_says_so_instead_of_offering_a_command():
+    """`jev topics` skips a post with no evidence (`state_chars == 0`, `select_items`'s own
+    test), so a copy-able command for it would do nothing."""
+    empty, never = _item("1", text=" "), _item("2")
+    empty.author = Author(handle="", name="")
+
+    data = _data([empty, never], {})
+
+    assert _post(data, "1")["no_evidence"] is True
+    assert _post(data, "2")["no_evidence"] is False
+    assert build_topic_state(empty, CHAR_LIMIT)[1] == 0
 
 
 def test_a_truncated_assessment_is_flagged_on_its_card():
@@ -356,15 +403,113 @@ def test_an_item_enrich_left_without_a_primary_is_still_compared():
     item = _item("1", topics=("ai-coding",))
     item.enriched.primary_topic = None
 
-    post = _post(_data([item], {"1": _assessment(item)}), "1")
+    jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
 
-    assert post["jev"]["primary"] is None and post["jev"]["primary_agrees"] is False
-    assert post["jev"]["topics"][0] == {
+    assert jev["primary"] is None and jev["primary_differs"] is True
+    assert jev["topics"][0] == {
         "slug": "ai-coding",
         "enrich": True,
         "p": 0.9,
         "verdict": "coinciden",
     }
+
+
+# --------------------------------------------------------------------------- filters = report counts
+
+
+def _corpus() -> tuple[list[Item], dict[str, TopicAssessment]]:
+    """One post per case the filters must tell apart."""
+    agree = _item("agree", topics=("ai-coding",))
+    enrich_only = _item("enrich-only", topics=("ai-coding", "startups"))
+    jev_only = _item("jev-only", topics=("ai-coding",))
+    fallback = _item("fallback", topics=("ai-coding",))
+    other_primary = _item("other-primary", topics=("ai-coding",))
+    stale = _item("stale", text="old")
+    never = _item("never")
+    plain = _item("plain")
+    plain.enriched = None
+    low = {"startups": 0.1}
+    assessments = {
+        "agree": _assessment(agree, membership={"ai-coding": 0.9, **low}),
+        "enrich-only": _assessment(enrich_only, membership={"ai-coding": 0.9, **low}),
+        "jev-only": _assessment(jev_only, membership={"ai-coding": 0.9, "startups": 0.9}),
+        "fallback": _assessment(fallback, membership={"ai-coding": 0.9, **low}, choice="otro"),
+        "other-primary": _assessment(
+            other_primary, membership={"ai-coding": 0.9, **low}, choice="startups"
+        ),
+        "stale": _assessment(stale, contract="e" * 64),
+        "plain": _assessment(plain),
+    }
+    return [agree, enrich_only, jev_only, fallback, other_primary, stale, never, plain], assessments
+
+
+@pytest.mark.parametrize(
+    ("key", "count"),
+    [
+        ("disc", ("summary", "posts_with_disagreement")),
+        ("enrich_only", ("summary", "posts_enrich_only")),
+        ("adds", ("summary", "posts_jev_only")),
+        ("prim", ("summary", "posts_primary_differs")),
+        ("fallback", ("summary", "primary_fallback")),
+        ("uneval", ("summary", "items_unassessed")),
+    ],
+)
+def test_each_filters_cards_are_exactly_the_posts_its_report_count_counts(key, count):
+    """The page filters by `key in card["in"]` and prints the report's number beside it.
+    Decided here, per card, from `ItemComparison` and the status — so the two cannot drift."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+    section, name = count
+
+    members = [post["id"] for post in data["posts"] if key in post["in"]]
+
+    assert len(members) == data[section][name]
+    assert members  # every case is represented in the fixture
+
+
+def test_the_filter_keys_name_the_right_posts():
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    keys = {post["id"]: set(post["in"]) for post in data["posts"]}
+    assert keys["agree"] == set()
+    assert keys["enrich-only"] == {"disc", "enrich_only"}
+    assert keys["jev-only"] == {"disc", "adds"}
+    assert keys["fallback"] == {"disc", "prim", "fallback"}
+    assert keys["other-primary"] == {"disc", "prim"}
+    assert keys["stale"] == keys["never"] == {"uneval"}
+    assert keys["plain"] == set()
+
+
+def test_per_topic_numbers_are_the_cards_topic_rows():
+    """For each topic, the rows the cards carry add up to its `per_topic` row: coinciden =
+    backed, solo Jev = missing, solo enrich + solo Jev = disagreeing. A topic click under
+    "Con discrepancias" lists exactly `disagreeing` posts."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    for row in data["summary"]["per_topic"]:
+        verdicts = [
+            topic["verdict"]
+            for post in data["posts"]
+            if post["jev"] and post["jev"]["compared"]
+            for topic in post["jev"]["topics"]
+            if topic["slug"] == row["slug"]
+        ]
+        assert verdicts.count("coinciden") == row["backed"], row["slug"]
+        assert verdicts.count("solo_jev") == row["missing"], row["slug"]
+        assert verdicts.count("solo_enrich") == row["doubtful"], row["slug"]
+        assert verdicts.count("solo_enrich") + verdicts.count("solo_jev") == row["disagreeing"]
+
+
+def test_a_cards_slugs_are_every_topic_enrich_or_jev_has_on_it():
+    """What a topic filter matches outside the disagreement views."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    assert _post(data, "other-primary")["slugs"] == ["ai-coding", "startups"]
+    assert _post(data, "never")["slugs"] == ["ai-coding"]
+    assert _post(data, "plain")["slugs"] == ["ai-coding"]
 
 
 # --------------------------------------------------------------------------- the share card
@@ -376,12 +521,14 @@ def test_the_card_carries_the_whole_post_and_who_wrote_it():
     long_post = "palabra " * 400
     item = _item("1", text=long_post)
 
-    post = _post(_data([item], {}, id2note={"1": "/v/items/1.md"}), "1")
+    data = _data([item], {}, id2note={"1": "1.md"}, notes_dir="/v/items")
+    post = _post(data, "1")
 
     assert post["text"] == long_post
     assert post["author"] == {"handle": "alice", "name": "Alice"}
-    assert post["url"] == item.url and post["note"] == "/v/items/1.md"
-    assert post["created"] == item.created_at.isoformat()
+    assert post["url"] == item.url and post["created"] == item.created_at.isoformat()
+    # The directory once, the file per post: 2.6k copies of one long prefix were 435 KB.
+    assert data["notes_dir"] == "/v/items" and post["note"] == "1.md"
 
 
 def _photo(item_id: str, n: int, description: str | None = None):
@@ -405,21 +552,37 @@ def _photo(item_id: str, n: int, description: str | None = None):
     )
 
 
-def test_photos_are_relative_paths_into_the_vaults_media_mirror_checked_per_file(tmp_path):
-    """The page sits next to `_media/`, the folder the Obsidian notes embed from: a photo is
-    `_media/<local_path>`, RELATIVE, and only when that file is really there — never base64."""
+def _files(mirrored=(), downloaded=()) -> MediaFiles:
+    return MediaFiles(mirrored=frozenset(mirrored), downloaded=frozenset(downloaded))
+
+
+def test_a_mirrored_photo_is_a_relative_path_into_the_vaults_media_folder():
     item = _item("1")
-    item.media = [_photo("1", 0, description="Un gráfico."), _photo("1", 1)]
-    (tmp_path / "_media" / "1").mkdir(parents=True)
-    (tmp_path / "_media" / "1" / "0.jpg").write_bytes(b"jpg")
+    item.media = [_photo("1", 0, description="Un gráfico.")]
 
-    media = _post(_data([item], {}, page_dir=tmp_path), "1")["media"]
+    media = _post(_data([item], {}, media=_files(mirrored={"1/0.jpg"})), "1")["media"]
 
-    assert media == [
-        {"type": "photo", "src": "_media/1/0.jpg", "desc": "Un gráfico."},
-        {"type": "photo", "src": None, "desc": ""},
+    assert media == [{"type": "photo", "src": "_media/1/0.jpg", "desc": "Un gráfico.", "why": None}]
+
+
+def test_a_photo_without_a_file_on_the_page_says_why():
+    """Downloaded but not mirrored yet (`xbrain generate` fixes it), never downloaded,
+    failed, or gone from both places: four different next steps."""
+    item = _item("1")
+    pending = MediaPhotoPending(url="https://pbs.twimg.com/p.jpg")
+    failed = MediaPhotoFailed(
+        url="https://pbs.twimg.com/f.jpg", failure_reason="http_4xx", attempts=1, last_attempt_at=DT
+    )
+    item.media = [_photo("1", 0), _photo("1", 1), pending, failed]
+
+    media = _post(_data([item], {}, media=_files(downloaded={"1/0.jpg"})), "1")["media"]
+
+    assert [(m["src"], m["why"]) for m in media] == [
+        (None, "not_mirrored"),
+        (None, "missing"),
+        (None, "not_downloaded"),
+        (None, "failed"),
     ]
-    assert (tmp_path / media[0]["src"]).is_file()
 
 
 def test_a_photo_caption_is_cut_for_the_tooltip():
@@ -433,42 +596,52 @@ def test_a_photo_caption_is_cut_for_the_tooltip():
     assert photo["desc"] == "d" * 279 + "…"
 
 
-def test_without_a_page_dir_no_photo_path_is_promised():
+def _video(n: int) -> MediaVideoDownloaded:
+    return MediaVideoDownloaded(
+        url=f"https://video.twimg.com/{n}.mp4",
+        thumbnail_url="https://pbs.twimg.com/poster.jpg",
+        local_path=f"1/video-{n}.mp4",
+        bytes_size=9,
+        downloaded_at=DT,
+    )
+
+
+def test_each_video_shows_the_first_frame_of_its_own_source():
+    """Videos pair with the post's `x_video` sources in order; a video with no extracted
+    frame of its own is a placeholder, never the other video's still. A non-video source
+    that carries frames is not a video's frame."""
     item = _item("1")
-    item.media = [_photo("1", 0)]
-
-    assert _post(_data([item], {}), "1")["media"] == [{"type": "photo", "src": None, "desc": ""}]
-
-
-def test_a_video_shows_its_first_local_frame_and_is_marked_as_a_video(tmp_path):
-    item = _item("1")
-    item.media = [
-        MediaVideoDownloaded(
-            url="https://video.twimg.com/1.mp4",
-            thumbnail_url="https://pbs.twimg.com/poster.jpg",
-            local_path="1/video.mp4",
-            bytes_size=9,
-            downloaded_at=DT,
-        )
-    ]
+    item.media = [_video(0), _video(1)]
     item.content = Content(
         fetched_at=DT,
         sources=[
             ContentSourceSuccess(
+                kind="external_article",
+                url="https://e.com",
+                text="art",
+                frames=[VideoFrame(timestamp=0.0, local_path="1/frames/article.jpg")],
+            ),
+            ContentSourceSuccess(
                 kind="x_video",
                 url=item.url,
                 text="transcript",
-                frames=[VideoFrame(timestamp=1.0, local_path="1/frames/0.jpg")],
-            )
+                frames=[
+                    VideoFrame(timestamp=1.0, local_path="1/frames/0.jpg"),
+                    VideoFrame(timestamp=2.0, local_path="1/frames/1.jpg"),
+                ],
+            ),
+            ContentSourceSuccess(kind="x_video", url=item.url, text="second, no frames"),
         ],
     )
-    (tmp_path / "_media" / "1" / "frames").mkdir(parents=True)
-    (tmp_path / "_media" / "1" / "frames" / "0.jpg").write_bytes(b"jpg")
 
-    media = _post(_data([item], {}, page_dir=tmp_path), "1")["media"]
+    media = _post(
+        _data([item], {}, media=_files(mirrored={"1/frames/0.jpg", "1/frames/article.jpg"})), "1"
+    )["media"]
 
-    # A local still, never the remote poster: the page fetches nothing.
-    assert media == [{"type": "video", "src": "_media/1/frames/0.jpg", "desc": ""}]
+    assert media == [
+        {"type": "video", "src": "_media/1/frames/0.jpg", "desc": "", "why": None},
+        {"type": "video", "src": None, "desc": "", "why": "no_frame"},
+    ]
 
 
 def test_at_most_four_media_per_card():
@@ -478,31 +651,67 @@ def test_at_most_four_media_per_card():
     assert len(_post(_data([item], {}), "1")["media"]) == 4
 
 
-def test_the_quoted_post_is_the_one_jev_read(tmp_path):
-    """The nested card is `quoted_source` — the same quoted post the evidence carries — cut
-    for the page, with who wrote it."""
-    item = _item("1")
-    item.content = Content(
-        fetched_at=DT,
-        sources=[
-            ContentSourceSuccess(
-                kind="quoted_tweet",
-                url="https://x.com/karpathy/status/9",
-                text="q" * 700,
-                author=Author(handle="karpathy", name="Andrej Karpathy"),
-            )
-        ],
+def _quoted_source(text: str) -> ContentSourceSuccess:
+    return ContentSourceSuccess(
+        kind="quoted_tweet",
+        url="https://x.com/karpathy/status/9",
+        text=text,
+        author=Author(handle="karpathy", name="Andrej Karpathy"),
     )
 
-    quoted = _post(_data([item], {}), "1")["quoted"]
 
-    assert quoted == {
+def test_the_quoted_post_is_the_one_jev_read_cut_for_the_page():
+    """`quoted_source` — the same quoted post the evidence carries — cut at 600 characters."""
+    item = _item("1")
+    item.content = Content(fetched_at=DT, sources=[_quoted_source("q" * 601)])
+
+    assert _post(_data([item], {}), "1")["quoted"] == {
         "handle": "karpathy",
         "name": "Andrej Karpathy",
         "url": "https://x.com/karpathy/status/9",
         "text": "q" * 600,
         "cut": True,
+        "missing": False,
     }
+
+
+def test_a_quoted_post_of_exactly_600_characters_is_not_cut():
+    item = _item("1")
+    item.content = Content(fetched_at=DT, sources=[_quoted_source("q" * 600)])
+
+    quoted = _post(_data([item], {}), "1")["quoted"]
+
+    assert quoted["text"] == "q" * 600 and quoted["cut"] is False
+
+
+def test_a_quoted_post_that_could_not_be_read_is_still_shown_as_missing():
+    """30 of 911 quote-tweets have no readable quoted source: the card says so and links to
+    X, instead of looking like a post that quotes nothing."""
+    failed = _item("1")
+    failed.quoted_id = "77"
+    failed.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceFailure(
+                kind="quoted_tweet", url="https://x.com/b/status/77", failure_reason="not_found"
+            )
+        ],
+    )
+    bare = _item("2")
+    bare.quoted_id = "88"
+
+    data = _data([failed, bare], {})
+
+    assert _post(data, "1")["quoted"] == {
+        "handle": None,
+        "name": None,
+        "url": "https://x.com/b/status/77",
+        "text": "",
+        "cut": False,
+        "missing": True,
+    }
+    assert _post(data, "2")["quoted"]["url"] == "https://x.com/i/status/88"
+    assert _post(data, "2")["quoted"]["missing"] is True
 
 
 def test_the_link_card_is_the_fetched_article_labelled_with_its_kind():
@@ -514,10 +723,7 @@ def test_the_link_card_is_the_fetched_article_labelled_with_its_kind():
         fetched_at=DT,
         sources=[
             ContentSourceSuccess(
-                kind="x_article",
-                url="https://x.com/i/article/5",
-                title="Un artículo",
-                text="cuerpo",
+                kind="x_article", url="https://x.com/i/article/5", title="Un artículo", text="c"
             )
         ],
     )
@@ -527,10 +733,34 @@ def test_the_link_card_is_the_fetched_article_labelled_with_its_kind():
         "domain": "x.com",
         "title": "Un artículo",
         "kind": "x_article",
+        "failed": False,
     }
 
 
-def test_without_a_fetched_article_the_link_card_is_the_first_link():
+def test_a_link_whose_fetch_failed_says_it_could_not_be_read():
+    item = _item("1")
+    item.links = [Link(url="https://blog.example.com/post", domain="blog.example.com")]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            ContentSourceFailure(
+                kind="external_article",
+                url="https://blog.example.com/post",
+                failure_reason="not_found",
+            )
+        ],
+    )
+
+    assert _post(_data([item], {}), "1")["link"] == {
+        "url": "https://blog.example.com/post",
+        "domain": "blog.example.com",
+        "title": None,
+        "kind": "external_article",
+        "failed": True,
+    }
+
+
+def test_without_a_fetch_the_link_card_is_the_first_link():
     item = _item("1")
     item.links = [Link(url="https://www.example.com/a", domain="example.com")]
 
@@ -539,34 +769,89 @@ def test_without_a_fetched_article_the_link_card_is_the_first_link():
         "domain": "example.com",
         "title": None,
         "kind": None,
+        "failed": False,
     }
     assert _post(_data([_item("2")], {}), "2")["link"] is None
+
+
+# --------------------------------------------------------------------------- media on disk
+
+
+def test_the_media_collector_is_the_only_place_that_looks_at_the_disk(tmp_path):
+    """`collect_jev_media` stats each photo and frame in the page's `_media/` mirror and in
+    `data/media/`; the blob builder only reads its answer, so it stays pure."""
+    page_dir, media_root = tmp_path / "vault", tmp_path / "data-media"
+    item = _item("1")
+    item.media = [_photo("1", 0), _photo("1", 1), _photo("1", 2)]
+    for root, name in (
+        (page_dir / "_media", "0.jpg"),
+        (media_root, "0.jpg"),
+        (media_root, "1.jpg"),
+    ):
+        (root / "1").mkdir(parents=True, exist_ok=True)
+        (root / "1" / name).write_bytes(b"jpg")
+
+    files = collect_jev_media([item], page_dir, media_root)
+
+    assert files == _files(mirrored={"1/0.jpg"}, downloaded={"1/0.jpg", "1/1.jpg"})
+    media = _post(_data([item], {}, media=files), "1")["media"]
+    assert [m["why"] for m in media] == [None, "not_mirrored", "missing"]
+    assert (page_dir / media[0]["src"]).is_file()
 
 
 # --------------------------------------------------------------------------- what Jev saw
 
 
 def test_what_jev_saw_is_the_state_split_into_its_surfaces():
-    """From `assess.state_surfaces` — the state `build_topic_state` sent — with Spanish labels,
-    each surface's size, and how much of it the cut kept."""
+    """From `assess.state_surfaces`, with Spanish labels, sizes and what the cut kept. The
+    tweet and the author are already on the card, so their text is not shipped twice."""
     item = _item("1", text="Claude Code hooks")
 
     jev = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]
 
     assert jev["surfaces"] == [
-        {"key": "tweet", "label": "Tweet", "chars": 17, "kept": 17, "text": "Claude Code hooks"},
-        {"key": "author", "label": "Autor", "chars": 11, "kept": 11, "text": "alice\nAlice"},
+        {
+            "key": "tweet",
+            "label": "Tweet",
+            "chars": 17,
+            "kept": 17,
+            "text": None,
+            "same_as": "post",
+        },
+        {
+            "key": "author",
+            "label": "Autor",
+            "chars": 11,
+            "kept": 11,
+            "text": None,
+            "same_as": "author",
+        },
     ]
     assert jev["state_chars"] == _assessment(item).state_chars == 17 + 1 + 11
 
 
+def test_the_quoted_surface_points_at_the_quoted_card():
+    item = _item("1")
+    item.content = Content(fetched_at=DT, sources=[_quoted_source("citado")])
+
+    surfaces = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]["surfaces"]
+
+    [quoted] = [s for s in surfaces if s["key"] == "quoted"]
+    assert quoted["text"] is None and quoted["same_as"] == "quoted"
+
+
 def test_a_surface_ships_at_most_600_characters_but_says_its_full_size():
-    item = _item("1", text="y" * 1500)
+    item = _item("1")
+    item.content = Content(
+        fetched_at=DT,
+        sources=[ContentSourceSuccess(kind="thread", url=item.url, text="y" * 1500)],
+    )
 
-    [tweet, _author] = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]["surfaces"]
+    surfaces = _post(_data([item], {"1": _assessment(item)}), "1")["jev"]["surfaces"]
 
-    assert tweet["text"] == "y" * 600
-    assert (tweet["chars"], tweet["kept"]) == (1500, 1500)
+    [thread] = [s for s in surfaces if s["key"] == "thread"]
+    assert thread["text"] == "y" * 600 and thread["same_as"] is None
+    assert (thread["chars"], thread["kept"]) == (1500, 1500)
 
 
 def test_what_the_cut_left_out_is_on_the_surface():
@@ -584,6 +869,29 @@ def test_what_the_cut_left_out_is_on_the_surface():
     ]
 
 
+def test_an_evaluated_card_stays_within_its_byte_budget():
+    """The page ships every post; an evaluated card is the heavy one. A 280-character tweet,
+    a quoted post, a 2,000-character article and two topics: the tweet travels once (the
+    surfaces point at it) and the card stays under 3 KB (2,852 bytes when this was written;
+    most of it is the article surface's 600 characters)."""
+    item = _item("1", text="t" * 280, topics=("ai-coding", "startups"))
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            _quoted_source("q" * 300),
+            ContentSourceSuccess(
+                kind="external_article", url="https://e.com/a", title="A", text="a" * 2000
+            ),
+        ],
+    )
+
+    card = _post(_data([item], {"1": _assessment(item)}), "1")
+    size = len(json.dumps(card, ensure_ascii=False).encode())
+
+    assert json.dumps(card).count("t" * 280) == 1
+    assert size <= 3000, size
+
+
 def test_the_copy_command_is_the_jev_topics_id_option_the_cli_really_has():
     """The static page's "copiar comando" completes `ASK_COMMAND` with a post id; the line
     must be one `xbrain jev topics` accepts, not a remembered spelling."""
@@ -597,7 +905,7 @@ def test_the_copy_command_is_the_jev_topics_id_option_the_cli_really_has():
 def test_every_surface_the_state_can_carry_has_a_spanish_label():
     assert set(SURFACE_KEYS["topics"]) <= set(SURFACE_LABELS)
     assert SURFACE_LABELS["quoted"] == "Post citado"
-    assert SURFACE_LABELS["video_transcript"] == "Transcript del vídeo"
+    assert SURFACE_LABELS["video_transcript"] == "Transcripción del vídeo"
 
 
 # --------------------------------------------------------------------------- cost & runs
@@ -822,6 +1130,39 @@ def test_scraped_text_cannot_close_the_script_tag_or_break_the_parse():
     assert json.loads(json.dumps(data))["posts"][0]["text"].startswith("cierra aquí </script>")
 
 
+def test_hostile_strings_in_every_scraped_field_survive_the_page_parse_intact():
+    """Author, quoted post, link title, photo caption and an evidence surface each carry a
+    script-closer, markup and a JavaScript line separator (U+2028/U+2029): the page's DATA,
+    parsed back out of the HTML, equals the blob — nothing broke out, nothing was mangled."""
+    hostile = "</script><img src=x onerror=alert(1)>\u2028\u2029'\"&"
+    item = _item("1", text="post " + hostile)
+    item.author = Author(handle="h" + hostile, name="N" + hostile)
+    item.media = [_photo("1", 0, description="foto " + hostile)]
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            _quoted_source("citado " + hostile),
+            ContentSourceSuccess(
+                kind="external_article", url="https://e.com", title="T" + hostile, text="a"
+            ),
+            ContentSourceSuccess(kind="thread", url=item.url, text="hilo " + hostile),
+        ],
+    )
+    data = _data([item], {"1": _assessment(item)})
+
+    html = render_jev_dashboard_html(data)
+
+    assert html.count("</script>") == 1
+    assert "\u2028" not in html and "\u2029" not in html
+    payload = html.rsplit("const DATA = ", 1)[1].split(";\n", 1)[0]
+    assert json.loads(payload) == json.loads(json.dumps(data))
+    card = json.loads(payload)["posts"][0]
+    assert card["quoted"]["text"].endswith(hostile)
+    assert card["link"]["title"].endswith(hostile)
+    assert card["media"][0]["desc"].endswith(hostile)
+    assert any(s["text"] and s["text"].endswith(hostile) for s in card["jev"]["surfaces"])
+
+
 def test_the_boot_guard_is_registered_before_anything_that_can_throw():
     """A guard installed after the work it guards is not a guard: an uncaught throw at script
     evaluation would leave the header and an empty table, which reads as "nothing to fix"."""
@@ -862,45 +1203,76 @@ def test_the_posts_view_lives_in_the_hash_so_it_can_be_bookmarked():
     assert "|| 'disc'" in hash_code
 
 
-def test_the_filter_rail_counts_come_from_the_report_not_from_the_page():
-    """Each virtual filter's number is a `summary`/`totals` key; each topic's three numbers
-    are its `per_topic` row. The page counts nothing it then presents as a report number."""
+def test_each_filter_is_a_card_key_with_the_reports_count_beside_it():
+    """The rail's views are `(key, name, report count)` triples: the page tests membership
+    with `p.in.includes(key)` — decided in Python — and prints the report's number for it.
+    Every key the blob can put on a card has exactly one view, with its own name."""
     template = _resource("jev.template.html")
-    rail = _script_section(template, "function renderRail(", "/* end rail */")
+    rail = _script_section(template, "const FILTERS = [", "function railButton(")
 
-    for key in (
-        "T.items",
-        "S.posts_with_disagreement",
-        "T.unevaluated",
-        "S.posts_jev_only",
-        "S.posts_primary_differs",
-        "S.primary_fallback",
-        ".assigned",
-        ".backed",
-        ".disagreeing",
-    ):
-        assert key in rail, key
-    for label in (
-        "Todos",
-        "Con discrepancias",
-        "Sin evaluar por Jev",
-        "Jev añadiría topic",
-        "Primario distinto",
-        "Jev eligió «",
-    ):
-        assert label in rail, label
+    views = re.findall(r"\{key: '(\w+)', name: '([^']*)'[^}]*count: \(\) => (DATA\.[\w.]+)\}", rail)
+    assert {key: (name, count) for key, name, count in views} == {
+        "all": ("Todos", "DATA.totals.items"),
+        "disc": ("Con discrepancias", "DATA.summary.posts_with_disagreement"),
+        "enrich_only": ("Enrich asigna y Jev no", "DATA.summary.posts_enrich_only"),
+        "adds": ("Jev añadiría topic", "DATA.summary.posts_jev_only"),
+        "prim": ("Primario distinto", "DATA.summary.posts_primary_differs"),
+        "fallback": ("Jev eligió «", "DATA.summary.primary_fallback"),
+        "uneval": ("Sin evaluar por Jev", "DATA.summary.items_unassessed"),
+    }
+    matches = _script_section(template, "function matches(", "function sorted(")
+    assert "p.in.includes(view.f)" in matches
+
+
+def test_a_topic_under_a_disagreement_view_lists_the_posts_its_number_counts():
+    """Under "Con discrepancias" a topic lists the cards whose row for it is solo enrich or
+    solo Jev — its `per_topic.disagreeing`; under the one-direction views, that direction."""
+    template = _resource("jev.template.html")
+
+    assert (
+        "const TOPIC_VERDICTS = {disc: ['solo_enrich', 'solo_jev'], "
+        "enrich_only: ['solo_enrich'], adds: ['solo_jev']};" in template
+    )
+    assert (
+        "const TOPIC_COUNT = {disc: 'disagreeing', enrich_only: 'doubtful', adds: 'missing'};"
+        in template
+    )
+
+
+def test_the_verdict_chips_name_each_verdict_the_blob_can_send():
+    template = _resource("jev.template.html")
+    chips = _script_section(template, "const VERDICT = {", "function probBar(")
+
+    assert dict(re.findall(r"(\w+): \['\w+', '([^']+)'", chips)) == {
+        "coinciden": "coinciden",
+        "solo_enrich": "solo enrich",
+        "solo_jev": "solo Jev",
+        "sin_juzgar": "sin juzgar",
+        "primario_jev": "primario de Jev",
+        "jev": "Jev lo ve",
+    }
 
 
 def test_the_cards_are_built_from_text_nodes_never_from_html_strings():
     """Scraped post text, quoted posts, article titles and evidence reach the DOM as TEXT:
-    the card code has no `innerHTML`, so no scraped string is ever parsed as markup."""
+    the card code has no HTML-parsing sink at all, and every href comes from `httpUrl`, the
+    http(s) regex in `linkified`, or the note link built from DATA."""
     template = _resource("jev.template.html")
     cards = _script_section(template, "/* cards */", "/* end cards */")
 
-    assert "innerHTML" not in cards
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in cards, sink
     assert "textContent" in cards
-    # Links only to http(s) — `Item.url` and a link's url are bare `str`s in the model.
-    assert "httpUrl(" in cards
+    assert cards.count(".href = ") == 1 and "a.href = href;" in cards
+    hrefs = re.findall(r"\blink\(([^,]+),", cards)
+    assert set(hrefs) == {
+        "x",
+        "url",
+        "href",
+        "'obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note)",
+    }
+    assert "const x = httpUrl(p.url);" in cards and cards.count("const href = httpUrl(") == 2
+    assert "text.replace(/https?:\\/\\/[^\\s]+/g" in cards
 
 
 def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():
@@ -915,6 +1287,7 @@ def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():
         "Lo que vio Jev",
         "recortado",
         "sin evaluar por Jev",
+        "sin evidencia",
         "copiar comando",
         "DATA.ask_command",
         "DATA.surface_chars",
@@ -928,7 +1301,7 @@ def test_the_keyboard_moves_by_card_and_by_disagreement():
 
     for key in ("'j'", "'k'", "'n'", "'p'"):
         assert key in keys, key
-    assert "disagreements" in keys
+    assert "const disagrees = (p) => p.in.includes('disc');" in keys
 
 
 def test_the_cards_render_incrementally():

@@ -306,7 +306,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
       <aside class="rail" id="rail" aria-label="Filtros y topics"></aside>
       <div>
         <div class="controls">
-          <input type="search" id="search" placeholder="Buscar por texto, autor o topic" aria-label="Buscar posts">
+          <input type="search" id="search" placeholder="Buscar por texto, autor, id o topic" aria-label="Buscar posts">
           <select id="sort" aria-label="Ordenar">
             <option value="disc">Más discrepancias primero</option>
             <option value="recent">Más recientes primero</option>
@@ -352,7 +352,8 @@ function paintBootFailure(message) {
   banner.appendChild(document.createTextNode(
     String(message) + '. No hay números que leer aquí: usa `xbrain jev report`.'));
 }
-addEventListener('error', (e) => paintBootFailure(e.message));
+const onBootError = (e) => paintBootFailure(e.message);
+addEventListener('error', onBootError);
 
 const DATA = /*__DATA__*/;
 
@@ -487,12 +488,16 @@ const TABS = ['posts', 'topics', 'compare', 'config'];
 const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc'};
 
 function readHash() {
-  const raw = decodeURIComponent(location.hash.replace(/^#/, ''));
-  const [tab, query] = raw.split('?');
+  // Split on the FIRST '?': the tab is the part before it, decoded on its own (a malformed
+  // escape must not throw); the query goes to URLSearchParams RAW, which decodes it once.
+  const raw = location.hash.replace(/^#/, '');
+  const cut = raw.indexOf('?');
+  let tab = cut === -1 ? raw : raw.slice(0, cut);
+  try { tab = decodeURIComponent(tab); } catch (err) { tab = ''; }
   view.tab = TABS.includes(tab) ? tab : 'posts';
   // Another tab's hash says nothing about the Posts view: keep it for when the reader returns.
   if (view.tab !== 'posts') return;
-  const params = new URLSearchParams(query || '');
+  const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
   const f = params.get('f');
   view.f = (FILTERS.some(x => x.key === f) && f) || 'disc';
   view.t = LABEL[params.get('t')] ? params.get('t') : '';
@@ -524,15 +529,23 @@ function showTab() {
 }
 
 /* ---------------------------------------------------------------- the filter rail */
-/** The virtual filters. `test` decides membership; the NUMBER shown is the report's. */
+/** The views of the corpus. WHICH posts a view holds is decided in `jev/dashboard.py`
+    (each card's `in` list); the NUMBER beside it is the report's count of the same posts. */
 const FILTERS = [
-  {key: 'all', test: () => true},
-  {key: 'disc', test: p => !!p.jev && p.jev.disagreements > 0},
-  {key: 'uneval', test: p => p.status === 'unevaluated' || p.status === 'stale'},
-  {key: 'adds', test: p => !!p.jev && p.jev.jev_only > 0},
-  {key: 'prim', test: p => !!p.jev && p.jev.primary_differs},
-  {key: 'fallback', test: p => !!p.jev && p.jev.jev_fallback},
+  {key: 'all', name: 'Todos', count: () => DATA.totals.items},
+  {key: 'disc', name: 'Con discrepancias', count: () => DATA.summary.posts_with_disagreement},
+  {key: 'enrich_only', name: 'Enrich asigna y Jev no', count: () => DATA.summary.posts_enrich_only},
+  {key: 'adds', name: 'Jev añadiría topic', count: () => DATA.summary.posts_jev_only},
+  {key: 'prim', name: 'Primario distinto', count: () => DATA.summary.posts_primary_differs},
+  {key: 'fallback', name: 'Jev eligió «' + DATA.fallback + '»', count: () => DATA.summary.primary_fallback},
+  {key: 'uneval', name: 'Sin evaluar por Jev', count: () => DATA.summary.items_unassessed},
 ];
+/** Under these views a topic narrows to the posts that disagree ABOUT that topic, in that
+    direction — the posts its `per_topic` number counts. Under the others, to posts where
+    enrich or Jev has the topic at all. */
+const TOPIC_VERDICTS = {disc: ['solo_enrich', 'solo_jev'], enrich_only: ['solo_enrich'], adds: ['solo_jev']};
+/** The `per_topic` field that counts the posts a topic click lists, per view. */
+const TOPIC_COUNT = {disc: 'disagreeing', enrich_only: 'doubtful', adds: 'missing'};
 
 function railButton(pressed, name, count, onClick, title) {
   const b = document.createElement('button');
@@ -558,23 +571,14 @@ function countSpan(text) {
 let topicsOpen = !matchMedia('(max-width: 900px)').matches;
 
 function renderRail() {
-  const S = DATA.summary, T = DATA.totals;
-  const names = {
-    all: ['Todos', T.items],
-    disc: ['Con discrepancias', S.posts_with_disagreement],
-    uneval: ['Sin evaluar por Jev', T.unevaluated],
-    adds: ['Jev añadiría topic', S.posts_jev_only],
-    prim: ['Primario distinto', S.posts_primary_differs],
-    fallback: ['Jev eligió «' + DATA.fallback + '»', S.primary_fallback],
-  };
+  const S = DATA.summary;
   const rail = $('rail');
   rail.replaceChildren();
   const h = document.createElement('h3');
   h.textContent = 'Posts';
   rail.appendChild(h);
   FILTERS.forEach(f => {
-    const [name, n] = names[f.key];
-    rail.appendChild(railButton(view.f === f.key, name, countSpan(nf(n)), () => { view.f = f.key; update(); }));
+    rail.appendChild(railButton(view.f === f.key, f.name, countSpan(nf(f.count())), () => { view.f = f.key; update(); }));
   });
   // The 45 topics are a long list: on a narrow screen they start folded so the posts are
   // not a screen-height away. The reader's choice survives the rail being redrawn.
@@ -588,8 +592,9 @@ function renderRail() {
   rail.appendChild(box);
   const legend = document.createElement('p');
   legend.className = 'legend';
-  legend.textContent = 'enrich · Jev confirma · discrepancias, sobre los ' + nf(S.items_compared) +
-    ' posts comparados. Pulsa para filtrar; otra vez para quitarlo.';
+  legend.textContent = 'Cada topic: posts donde lo puso enrich · de esos, los que Jev confirma · ' +
+    'posts que discrepan sobre él. Cuentan solo los ' + nf(S.items_compared) + ' posts comparados; ' +
+    'la lista usa además el filtro de arriba, y su total va en «mostrando».';
   box.appendChild(legend);
   const rows = Object.fromEntries(S.per_topic.map(r => [r.slug, r]));
   const topics = DATA.topics.slice().sort((a, b) =>
@@ -609,6 +614,15 @@ function renderRail() {
       view.t = view.t === t.slug ? '' : t.slug;
       update();
     }, t.description));
+    if (view.t === t.slug) {
+      const field = TOPIC_COUNT[view.f];
+      const note = document.createElement('p');
+      note.className = 'legend';
+      note.textContent = field
+        ? 'con este filtro, la lista es la columna ' + (field === 'disagreeing' ? 'de discrepancias' : field === 'doubtful' ? '«enrich lo pone y Jev no»' : '«Jev lo añadiría»') + ': ' + nf(r[field] || 0) + ' posts'
+        : 'con este filtro, la lista cuenta todos los posts donde enrich o Jev lo tienen';
+      box.appendChild(note);
+    }
   });
 }
 /* end rail */
@@ -622,6 +636,8 @@ function el(tag, cls, text) {
   return node;
 }
 
+/** An anchor. Callers pass only `httpUrl(...)` results, a URL matched by `linkified`'s
+    http(s) regex, or the `obsidian://` note link built from DATA. */
 function link(href, cls, text) {
   const a = el('a', cls, text);
   a.href = href;
@@ -629,14 +645,16 @@ function link(href, cls, text) {
   return a;
 }
 
-/** The post's words with its URLs as links; everything else stays a text node. */
+/** The post's words with its URLs as links; everything else stays a text node. Punctuation
+    that ends a sentence right after a URL stays outside the link. */
 function linkified(text) {
   const frag = document.createDocumentFragment();
   let last = 0;
   text.replace(/https?:\/\/[^\s]+/g, (m, at) => {
+    const url = m.replace(/[).,;:!?»"'\]]+$/, '');
     frag.appendChild(document.createTextNode(text.slice(last, at)));
-    frag.appendChild(link(m, null, m.replace(/^https?:\/\//, '')));
-    last = at + m.length;
+    frag.appendChild(link(url, null, url.replace(/^https?:\/\//, '')));
+    last = at + url.length;
     return m;
   });
   frag.appendChild(document.createTextNode(text.slice(last)));
@@ -646,7 +664,7 @@ function linkified(text) {
 const STATUS = {
   unevaluated: 'sin evaluar por Jev',
   stale: 'sin evaluar por Jev · evaluación caducada',
-  not_enriched: 'sin enrich con qué comparar',
+  not_enriched: 'sin enrich con el que comparar',
 };
 
 function header(p) {
@@ -660,7 +678,9 @@ function header(p) {
   const links = el('div', 'links');
   const x = httpUrl(p.url);
   if (x) links.appendChild(link(x, 'lk', 'X ↗'));
-  if (p.note) links.appendChild(link('obsidian://open?path=' + encodeURIComponent(p.note), 'lk', 'nota ↗'));
+  if (p.note && DATA.notes_dir) {
+    links.appendChild(link('obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note), 'lk', 'nota ↗'));
+  }
   h.appendChild(links);
   return h;
 }
@@ -684,6 +704,15 @@ function body(text, cls) {
   return wrap;
 }
 
+/** Why a picture is not on the page, and what brings it back. */
+const WHY = {
+  not_mirrored: 'falta en _media/: corre xbrain generate',
+  not_downloaded: 'imagen sin descargar: corre xbrain media',
+  failed: 'la descarga falló',
+  missing: 'el fichero ya no está',
+  no_frame: 'vídeo sin fotograma extraído',
+};
+
 function mediaGrid(media) {
   const g = el('div', 'media n' + media.length);
   media.forEach(m => {
@@ -695,7 +724,7 @@ function mediaGrid(media) {
       img.alt = m.desc || '';
       fig.appendChild(img);
     } else {
-      fig.appendChild(el('div', 'noimg', m.type === 'video' ? 'vídeo sin fotograma local' : 'imagen no descargada'));
+      fig.appendChild(el('div', 'noimg', WHY[m.why] || 'imagen no disponible'));
     }
     if (m.type === 'video') fig.appendChild(el('span', 'play', '▶'));
     if (m.desc) fig.title = m.desc;
@@ -708,7 +737,7 @@ function quotedCard(q) {
   const box = el('div', 'tw quoted');
   const h = el('div', 'twh');
   const who = el('div', 'who');
-  who.appendChild(el('b', null, q.name || (q.handle ? '@' + q.handle : 'Post citado')));
+  who.appendChild(el('b', null, q.missing ? 'Post citado no disponible' : q.name || (q.handle ? '@' + q.handle : 'Post citado')));
   if (q.handle) who.appendChild(el('span', null, ' @' + q.handle));
   h.appendChild(who);
   const links = el('div', 'links');
@@ -716,6 +745,10 @@ function quotedCard(q) {
   if (href) links.appendChild(link(href, 'lk', 'X ↗'));
   h.appendChild(links);
   box.appendChild(h);
+  if (q.missing) {
+    box.appendChild(el('p', 'twt', 'No se pudo leer: ábrelo en X. Jev no lo vio.'));
+    return box;
+  }
   const t = el('p', 'twt');
   t.appendChild(linkified(q.text + (q.cut ? ' …' : '')));
   box.appendChild(t);
@@ -727,7 +760,8 @@ const KIND = {external_article: 'artículo', x_article: 'x_article · página de
 function linkCard(l) {
   const href = httpUrl(l.url);
   const card = href ? link(href, 'lc') : el('div', 'lc');
-  card.appendChild(el('span', 'dom', (l.domain || '') + (l.kind ? ' · ' + (KIND[l.kind] || l.kind) : '')));
+  card.appendChild(el('span', 'dom', (l.domain || '') + (l.kind ? ' · ' + (KIND[l.kind] || l.kind) : '') +
+    (l.failed ? ' · no se pudo leer' : '')));
   card.appendChild(el('b', null, l.title || l.url));
   return card;
 }
@@ -737,6 +771,8 @@ const VERDICT = {
   solo_enrich: ['en', 'solo enrich', 'enrich lo pone y Jev no lo ve'],
   solo_jev: ['jv', 'solo Jev', 'Jev lo ve y enrich no lo puso'],
   sin_juzgar: ['un', 'sin juzgar', 'ya no está en el vocabulario: Jev no lo evaluó'],
+  primario_jev: ['un', 'primario de Jev', 'Jev lo elige como principal aunque no lo respalda al umbral'],
+  jev: ['jv', 'Jev lo ve', 'Jev lo ve al umbral; el post no tiene enrich con el que comparar'],
 };
 
 function probBar(p) {
@@ -783,21 +819,29 @@ function topicTable(rows) {
 
 function primaries(j) {
   const line = el('p', 'prim' + (j.primary_differs ? ' diff' : ''));
-  line.appendChild(document.createTextNode('Principal · enrich: '));
-  line.appendChild(el('b', null, j.primary == null ? 'sin principal' : label(j.primary)));
-  line.appendChild(document.createTextNode(' · Jev: '));
-  line.appendChild(el('b', null, label(j.jev_primary) + (j.jev_fallback ? ' (ninguno del vocabulario)' : '')));
+  const jev = label(j.jev_primary) + (j.jev_fallback ? ' (ninguno del vocabulario)' : '');
+  if (j.compared) {
+    line.appendChild(document.createTextNode('Principal · enrich: '));
+    line.appendChild(el('b', null, j.primary == null ? 'sin principal' : label(j.primary)));
+    line.appendChild(document.createTextNode(' · Jev: '));
+  } else {
+    line.appendChild(document.createTextNode('Principal según Jev: '));
+  }
+  line.appendChild(el('b', null, jev));
   line.appendChild(document.createTextNode(' (probabilidad ' + prob(j.jev_confidence) + ')' +
-    (j.primary_differs ? ' — no coinciden' : ' — coinciden')));
+    (j.compared ? (j.primary_differs ? ' — no coinciden' : ' — coinciden') : '')));
   return line;
 }
+
+/** Where a surface's text is on the card, when it is not repeated here. */
+const SAME_AS = {post: 'el texto del post, arriba', author: 'el autor, arriba', quoted: 'el post citado, arriba'};
 
 /** "Lo que vio Jev": each evidence surface, its size, and whether the state's cut reached it. */
 function whatJevSaw(j) {
   const d = el('details', 'saw');
-  const total = j.surfaces.reduce((n, s) => n + s.chars, 0);
   d.appendChild(el('summary', null, 'Lo que vio Jev · ' + pl(j.surfaces.length, 'fuente', 'fuentes') + ', ' +
     nf(j.state_chars) + ' caracteres' + (j.truncated ? ' · recortado a ' + nf(DATA.char_limit) : '')));
+  let shortened = false;
   j.surfaces.forEach(s => {
     const box = el('div', 'src');
     const sl = el('div', 'sl', s.label + ' · ' + nf(s.chars) + ' car.');
@@ -805,12 +849,16 @@ function whatJevSaw(j) {
       sl.appendChild(el('span', 'cut', s.kept ? ' · recortado: Jev leyó ' + nf(s.kept) : ' · fuera: el recorte no llegó a enviarla'));
     }
     box.appendChild(sl);
-    box.appendChild(el('pre', null, s.text + (s.text.length < s.chars ? ' …' : '')));
+    if (s.text == null) {
+      box.appendChild(el('pre', null, '= ' + (SAME_AS[s.same_as] || 'arriba')));
+    } else {
+      if (s.text.length < s.chars) shortened = true;
+      box.appendChild(el('pre', null, s.text + (s.text.length < s.chars ? ' …' : '')));
+    }
     d.appendChild(box);
   });
-  if (total > 0 && j.surfaces.some(s => s.text.length < s.chars)) {
-    d.appendChild(el('p', 'muted', 'Esta página enseña como mucho ' + nf(DATA.surface_chars) +
-      ' caracteres por fuente; el texto completo llegará con `xbrain jev serve`.'));
+  if (shortened) {
+    d.appendChild(el('p', 'muted', 'Esta página muestra como máximo ' + nf(DATA.surface_chars) + ' caracteres por fuente.'));
   }
   return d;
 }
@@ -819,19 +867,21 @@ function jevBlock(p) {
   const box = el('div', 'jev');
   const j = p.jev;
   const h = el('div', 'jh');
-  h.appendChild(el('span', 'kick', 'Jev vs enrich'));
+  h.appendChild(el('span', 'kick', j && !j.compared ? 'Lo que ve Jev' : 'Jev vs enrich'));
   if (j) {
-    h.appendChild(el('span', 'badge' + (j.disagreements ? ' d' : ''),
-      j.disagreements ? pl(j.disagreements, 'discrepancia', 'discrepancias') : 'sin discrepancias'));
+    if (j.compared) {
+      h.appendChild(el('span', 'badge' + (j.disagreements ? ' d' : ''),
+        j.disagreements ? pl(j.disagreements, 'discrepancia', 'discrepancias') : 'sin discrepancias'));
+    }
     if (j.truncated) {
       const b = el('span', 'badge cut', 'recortado');
-      b.title = 'el post era más largo que el límite y Jev leyó una parte';
+      b.title = 'la evidencia superaba el límite y se recortó; el tweet va entero, lo que falta es de las otras fuentes';
       h.appendChild(b);
     }
     h.appendChild(el('span', 'meta', j.model + ' · ' + when(j.asked_at) + ' · ' +
       (j.unpriced ? 'sin tarifa' : usd(j.cost_usd, 5)) + (j.tokens == null ? ' · sin recuento' : ' · ' + nf(j.tokens) + ' tokens')));
     box.appendChild(h);
-    box.appendChild(topicTable(j.topics));
+    if (j.topics.length) box.appendChild(topicTable(j.topics));
     box.appendChild(primaries(j));
     box.appendChild(whatJevSaw(j));
     return box;
@@ -848,7 +898,11 @@ function jevBlock(p) {
     box.appendChild(el('span', 'muted', 'Topics de enrich:'));
     box.appendChild(chips);
   }
-  if (p.status !== 'not_enriched') box.appendChild(askLine(p.id));
+  if (p.no_evidence) {
+    box.appendChild(el('p', 'muted', 'sin evidencia: el post no tiene texto ni fuentes que preguntar, y `xbrain jev topics` lo salta.'));
+  } else {
+    box.appendChild(askLine(p.id));
+  }
   return box;
 }
 
@@ -884,6 +938,20 @@ function card(p) {
   a.appendChild(jevBlock(p));
   return a;
 }
+
+/** A card that fails to draw costs one line, not the page: the rest keep rendering. */
+function safeCard(p) {
+  try {
+    return card(p);
+  } catch (err) {
+    const a = el('article', 'card');
+    a.id = 'post-' + p.id;
+    a.tabIndex = -1;
+    a.dataset.id = p.id;
+    a.appendChild(el('p', 'empty', 'Este post (' + p.id + ') no se pudo dibujar: ' + (err && err.message ? err.message : err)));
+    return a;
+  }
+}
 /* end cards */
 
 /* ---------------------------------------------------------------- list: filter, sort, pages */
@@ -893,17 +961,17 @@ let drawn = 0;       // how many of them are in the DOM
 let cursor = -1;     // the current card (j/k/n/p)
 
 function matches(p) {
-  const filter = FILTERS.find(f => f.key === view.f) || FILTERS[1];
-  if (!filter.test(p)) return false;
+  if (view.f !== 'all' && !p.in.includes(view.f)) return false;
   if (view.t) {
-    const inEnrich = !!p.enrich && p.enrich.topics.includes(view.t);
-    const inJev = !!p.jev && p.jev.topics.some(r => r.slug === view.t);
-    if (!inEnrich && !inJev) return false;
+    const verdicts = TOPIC_VERDICTS[view.f];
+    const hit = verdicts
+      ? !!p.jev && p.jev.topics.some(r => r.slug === view.t && verdicts.includes(r.verdict))
+      : p.slugs.includes(view.t);
+    if (!hit) return false;
   }
   if (!view.q) return true;
   const q = view.q.toLowerCase();
-  const slugs = (p.enrich ? p.enrich.topics : []).concat(p.jev ? p.jev.topics.map(r => r.slug).concat([p.jev.jev_primary]) : []);
-  const hay = [p.text, p.author.handle, p.author.name, p.id].concat(slugs, slugs.map(label)).join(' ').toLowerCase();
+  const hay = [p.text, p.author.handle, p.author.name, p.id].concat(p.slugs, p.slugs.map(label)).join(' ').toLowerCase();
   return hay.indexOf(q) !== -1;
 }
 
@@ -921,7 +989,7 @@ function drawMore() {
   const box = $('cards');
   const upto = Math.min(shown.length, drawn + PAGE);
   const frag = document.createDocumentFragment();
-  for (let i = drawn; i < upto; i++) frag.appendChild(card(shown[i]));
+  for (let i = drawn; i < upto; i++) frag.appendChild(safeCard(shown[i]));
   box.appendChild(frag);
   drawn = upto;
   $('more').hidden = drawn >= shown.length;
@@ -980,7 +1048,7 @@ function onKey(e) {
   if (view.tab !== 'posts' || e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = (e.target && e.target.tagName) || '';
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-  const disagrees = (p) => !!p.jev && p.jev.disagreements > 0;
+  const disagrees = (p) => p.in.includes('disc');
   if (e.key === 'j') goTo(cursor + 1);
   else if (e.key === 'k') goTo(Math.max(0, cursor - 1));
   else if (e.key === 'n') {
@@ -994,13 +1062,13 @@ function onKey(e) {
 
 function renderExcluded() {
   const t = DATA.totals, parts = [];
-  if (t.stale) parts.push(pl(t.stale, 'evaluación caducada', 'evaluaciones caducadas') + ' (el post o el vocabulario cambió; `xbrain jev topics` las vuelve a pedir)');
+  if (t.stale) parts.push(pl(t.stale, 'evaluación caducada', 'evaluaciones caducadas') + ' (el post o el vocabulario cambió; `xbrain jev topics` las vuelve a pedir; su post sale como «evaluación caducada»)');
   if (t.orphans) parts.push(pl(t.orphans, 'evaluación huérfana', 'evaluaciones huérfanas') + ' (su post ya no está en el corpus)');
   if (t.not_compared) parts.push(pl(t.not_compared, 'post evaluado sin enriquecer', 'posts evaluados sin enriquecer') + ' (nada con qué comparar)');
   $('excluded').textContent = parts.length ? 'Fuera de las cifras: ' + parts.join(' · ') + '.' : '';
 }
 
-/** Everything that touches the DOM. Its single call site is wrapped. */
+/** Everything that touches the DOM at load. Its single call site is wrapped. */
 function boot() {
   renderStamp();
   renderCost();
@@ -1031,6 +1099,10 @@ function boot() {
 
 try {
   boot();
+  // The banner says "the page could not draw itself". After boot the page HAS drawn itself,
+  // so a later error (one card, one click) must not paint that over it: cards carry their
+  // own error line (`safeCard`).
+  removeEventListener('error', onBootError);
 } catch (err) {
   paintBootFailure(err && err.message ? err.message : err);
   throw err;
