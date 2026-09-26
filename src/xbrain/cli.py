@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 from collections import Counter
 from collections.abc import Callable
@@ -55,11 +54,9 @@ from xbrain.jev.assess import (
     RunResult,
     Selection,
     current_pairs,
-    run_assessments,
-    run_record,
     select_items,
 )
-from xbrain.jev.client import CountingJevClient, JevClient, JevError
+from xbrain.jev.client import JevClient, JevError
 from xbrain.jev.dashboard import compute_jev_dashboard_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
     input_cost_usd,
@@ -76,7 +73,8 @@ from xbrain.jev.report import (
     run_history,
     write_reports,
 )
-from xbrain.jev.store import append_run, load_assessments, load_runs, save_assessments
+from xbrain.jev.run import run_topics
+from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -194,10 +192,10 @@ from xbrain.worksheet import export_worksheet, import_worksheet
 if TYPE_CHECKING:
     # Annotations only. This saves NO import cost — `xbrain.jev.models` is loaded at
     # runtime anyway, transitively via `xbrain.jev.assess`. What it keeps is the
-    # module-top `xbrain.jev` import list at the seven modules the CLI is meant to depend
-    # on directly (assess, client, dashboard, defaults, env, report, store), so an eighth
+    # module-top `xbrain.jev` import list at the eight modules the CLI is meant to depend
+    # on directly (assess, client, dashboard, defaults, env, report, run, store), so a ninth
     # is a visible decision rather than a drive-by.
-    from xbrain.jev.models import TopicAssessment
+    from xbrain.jev.models import JevRun, TopicAssessment
 
 logger = logging.getLogger(__name__)
 
@@ -2693,13 +2691,6 @@ app.add_typer(jev_app, name="jev")
 #: out across most of a large batch while some answers still land — one line each would bury
 #: the summary printed above them.
 _JEV_FAILURES_SHOWN = 10
-#: Records banked between durable writes of the side-car. The dict in memory is not
-#: durability: a SIGTERM, a closed terminal, an OOM kill or any exception that is not
-#: `KeyboardInterrupt` skips the checkpoint handler entirely and every paid record in it is
-#: gone. Flushing every N bounds that loss to at most N-1 records, at the price of one
-#: rewrite of the side-car per N items — the repo's standard bargain for paid batch work
-#: (`media`, `describe` and `refetch` all write between units rather than at the end).
-_CHECKPOINT_EVERY = 25
 
 
 def _jev_client(cfg: Config) -> JevClient:
@@ -2805,133 +2796,42 @@ def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
         typer.echo(f"  … y {plural(remaining, 'fallo', 'fallos')} más", err=True)
 
 
-def _save_jev_sidecar(assessments: dict[str, TopicAssessment], path: Path, *, paid: int) -> None:
-    """Write the side-car, and NAME THE BILL when it cannot be written.
-
-    `Error: [Errno 28] No space left on device` is true and useless: it is about a
-    filesystem, and nothing connects it to "you were just billed for 2,998 assessments and
-    none of them was written". The paid count is the part the operator has to act on, and it
-    is the reason this is not simply `save_assessments`.
-    """
-    try:
-        save_assessments(assessments, path)
-    except OSError as exc:
-        lost = plural(paid, "evaluación pagada", "evaluaciones pagadas")
-        raise JevError(f"no se pudo guardar {path} ({lost} sin guardar): {exc}") from exc
-
-
-def _back_up_before_forced_overwrite(path: Path, forced: int) -> None:
-    """Copy the side-car beside itself under a UTC stamp, and echo the copy. Or do nothing.
-
-    THE SIDE-CAR'S OWN REVERSIBILITY. ARCHITECTURE invariant 8 says every command that
-    overwrites a `data/` artifact leaves a way back, and every other one gets that from
-    `snapshot create`. This file does not: `data/jev/topics.json` is deliberately OUTSIDE
-    `snapshot._ARTIFACTS` (a snapshot covers the corpus, not a second opinion about it), and
-    `data/` is gitignored in full. So before this, `--force` over thousands of paid records
-    had no undo anywhere — not git, not `snapshot restore`, not a copy.
-
-    Stamped rather than fixed (`topics.bak`) because the second forced run would otherwise
-    overwrite the first one's only copy: the loss the backup exists to prevent, one run later.
-    The stamp is `snapshot_create`'s, to the millisecond and in UTC, so the two reversibility
-    mechanisms sort and read alike and scripted runs in the same second do not collide.
-
-    NEVER PRUNED — by anything, ever. A cleanup rule would have to decide which paid copy is
-    expendable, and the one an operator wants is the one from before the run they regret,
-    which is not knowable here. `docs/jev.md` tells them to delete them by hand.
-
-    The CONDITION lives here rather than at the call site, so `jev_topics_cmd` reads as one
-    step ("protect the side-car") instead of carrying the two branches that decide whether
-    there is anything to protect. `forced`, not the `--force` FLAG: a forced run that re-asks
-    nothing current overwrites nothing, and a `.bak` per ordinary run is how an operator
-    learns to ignore them.
-    """
-    if not forced or not path.exists():
-        return
-    now = datetime.now(timezone.utc)
-    stamp = now.strftime("%Y-%m-%dT%H-%M-%S-") + f"{now.microsecond // 1000:03d}Z"
-    backup = path.with_name(f"{path.stem}.{stamp}.bak")
-    try:
-        shutil.copy2(path, backup)
-    except OSError as exc:
-        # Same argument as `_save_jev_sidecar`: the errno is about a filesystem and says
-        # nothing about what is at stake. Raised BEFORE the client is built, so a run that
-        # cannot be made reversible has not yet cost anything.
-        raise JevError(
-            f"no se pudo copiar {path} a {backup} ({exc}); "
-            f"--force sobrescribiría evaluaciones pagadas sin copia"
-        ) from exc
-    typer.echo(f"Copia de seguridad: {backup}")
-
-
-def _release_jev_client(client: JevClient) -> None:
-    """Release the client's pool without ever becoming the run's verdict.
-
-    `close()` reaches the vendor's HTTP stack, which is the layer `typesafe.py` wraps
-    everywhere else. A teardown fault is NOISE: the answers are already paid for, already in
-    memory and — by the time this runs — already written. Letting it out would (a) replace an
-    interrupt's `Exit(130)` or an all-failed `JevError` with a socket errno, which is Python's
-    default `finally` behaviour, and (b) on the success path, turn a completed run into
-    `Error: …` with exit 1.
-
-    `original_error` is read BEFORE the `try` for the same reason `_finish_redescribe_run`
-    does it: inside an `except` block `sys.exc_info()` reports the exception being handled
-    here, not the one that was already travelling.
-
-    On the interrupt path this can close the transport while a worker is still in flight —
-    `run_assessments` shuts its pool down with `wait=False`, so a call already issued is
-    cancelled rather than awaited. That worker's exception lands in a future nobody reads,
-    which makes it noise and not a lost record: every record that completed was handed to
-    `_checkpoint` and written above, before this runs.
-    """
-    original_error = sys.exc_info()[1]
-    try:
-        client.close()
-    except Exception as exc:
-        note = " (el error anterior sigue propagándose)" if original_error is not None else ""
-        logger.warning(
-            "cerrar el cliente Jev falló (%s: %s); el run no se ve afectado%s",
-            type(exc).__name__,
-            exc,
-            note,
-        )
-
-
-def _log_jev_run(
-    path: Path,
-    client: CountingJevClient,
-    banked: tuple[TopicAssessment, ...],
-    started_at: datetime,
-    *,
-    interrupted: bool,
+def _echo_jev_interrupt(
+    banked: tuple[TopicAssessment, ...], stored: int, *, force: bool, path: Path
 ) -> None:
-    """Append the pass to the run log — or, if that fails, print the line to paste by hand.
+    """What Ctrl-C kept, on stderr — printed BEFORE `run_topics` saves it.
 
-    Nothing is written when nothing was SENT (a Ctrl-C before the first call): the log is a
-    history of requests made, not of invocations.
-
-    Runs from `jev_topics_cmd`'s `finally`, so it must never become the run's verdict: an
-    exception here would REPLACE an interrupt's `Exit(130)` or the all-failed `JevError`
-    (Python's `finally` rule, the same hazard `_release_jev_client` guards against), and on
-    the success path it would turn a paid, saved run into exit 1. The history line is not
-    worth the side-car, but it is not thrown away either: it goes to stderr, whole.
+    With nothing banked there is nothing to save and no bill to report: `run_topics` writes
+    nothing (saving would put an unchanged map over the side-car, `{}` on a first run).
     """
-    if not client.sent:
+    if not banked:
+        typer.echo("Interrumpido: nada nuevo que guardar", err=True)
         return
-    run = run_record(
-        banked,
-        started_at=started_at,
-        finished_at=datetime.now(timezone.utc),
-        sent=client.sent,
-        finished=client.finished,
-        interrupted=interrupted,
+    kind = (
+        plural(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
+        if force
+        else plural(len(banked), "evaluación nueva", "evaluaciones nuevas")
     )
-    try:
-        append_run(run, path)
-    except OSError as exc:
-        typer.echo(f"no se pudo registrar la pasada en {path} ({exc}); añádela a mano:", err=True)
-        typer.echo(run.model_dump_json(), err=True)
+    typer.echo(
+        f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
+        f"({stored} en total) en {path}",
+        err=True,
+    )
+    # What the interruption cost is the question the operator actually has here.
+    typer.echo(f"  {_jev_cost_line(banked)}", err=True)
+
+
+def _echo_jev_logged(run: JevRun, path: Path, error: OSError | None) -> None:
+    """Where the pass went in the run log — or the line to append by hand when it could not.
+
+    The failure is not an error of the command: the pass keeps its exit code and its saved
+    records. The line goes to stderr whole so the history is not lost.
+    """
+    if error is None:
+        typer.echo(f"pasada registrada → {path}")
         return
-    typer.echo(f"pasada registrada → {path}")
+    typer.echo(f"no se pudo registrar la pasada en {path} ({error}); añádela a mano:", err=True)
+    typer.echo(run.model_dump_json(), err=True)
 
 
 @jev_app.command("topics")
@@ -2973,97 +2873,31 @@ def jev_topics_cmd(
         return
     if not selection.items:
         return
-    # BEFORE the client, so a backup that cannot be written stops a run that has not yet been
-    # billed — and before the first checkpoint, so the copy is the file as it was.
-    _back_up_before_forced_overwrite(cfg.jev_topics_path, selection.forced)
-
-    # The records THIS run paid for, in id order of arrival. `assessments` also holds every
-    # earlier run's work, so reporting its length as the rescue would tell an operator who
-    # banked 3 records into a side-car of 500 that they rescued 503.
-    banked: dict[str, TopicAssessment] = {}
 
     def _progress(done: int, total: int) -> None:
         if done % 50 == 0 or done == total:
             typer.echo(f"  {done}/{total}")
 
-    def _checkpoint(assessment: TopicAssessment) -> None:
-        """Bank each record as it lands, and flush to disk every `_CHECKPOINT_EVERY`.
-
-        The dict alone is not durability — only `KeyboardInterrupt` is caught below, so a
-        SIGTERM or an unexpected exception would take every record in it. The periodic write
-        bounds that loss to at most `_CHECKPOINT_EVERY - 1` paid records.
-
-        Through `_save_jev_sidecar`, not `save_assessments`: ONE failure must not produce two
-        messages depending on when the disk filled. `assess._deliver_result` swallows whatever
-        this raises (a broken checkpoint must never discard the record it was called to save),
-        so the log line is the only surface there is — and a bare `[Errno 28]` in it is about
-        a filesystem, while this is about the paid records it just failed to protect.
-        """
-        assessments[assessment.item_id] = assessment
-        banked[assessment.item_id] = assessment
-        if len(banked) % _CHECKPOINT_EVERY == 0:
-            _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
-
-    # Wrapped so the run log can say how many calls were SENT, which nothing else observes.
-    client = CountingJevClient(_jev_client(cfg))
-    started_at = datetime.now(timezone.utc)
-    interrupted = False
-    try:
-        result = run_assessments(
-            list(selection.items),
-            vocab,
-            client,
-            fallback=cfg.jev_fallback_option,
-            char_limit=cfg.jev_state_char_limit,
-            concurrency=cfg.jev_concurrency,
-            on_progress=_progress,
-            on_result=_checkpoint,
-        )
-    except KeyboardInterrupt:
-        interrupted = True
-        # Summary first, then persist, then teardown — the shape `_finish_redescribe_run`
-        # establishes. The tally can never fail, so it is never suppressed by a save that does.
-        if not banked:
-            # A Ctrl-C before the first answer landed. Saving here would write `assessments`
-            # UNCHANGED — which for a first run is `{}` over the side-car, so an operator who
-            # interrupted a second too early would destroy every assessment they had ever
-            # paid for. There is also no bill to report: nothing was answered.
-            typer.echo("Interrumpido: nada nuevo que guardar", err=True)
-        else:
-            kind = (
-                plural(len(banked), "evaluación re-evaluada", "evaluaciones re-evaluadas")
-                if force
-                else plural(len(banked), "evaluación nueva", "evaluaciones nuevas")
-            )
-            typer.echo(
-                f"Interrumpido: {kind} guardada{'' if len(banked) == 1 else 's'} "
-                f"({len(assessments)} en total) en {cfg.jev_topics_path}",
-                err=True,
-            )
-            # What the interruption cost is the question the operator actually has here.
-            typer.echo(f"  {_jev_cost_line(tuple(banked.values()))}", err=True)
-            _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
+    # THE run loop lives in `jev.run` so a local server can call the same one; this command
+    # only decides what to print, and when (`run_topics`' hooks fire at those moments).
+    outcome = run_topics(
+        cfg,
+        selection,
+        assessments,
+        vocab,
+        lambda: _jev_client(cfg),
+        on_backup=lambda backup: typer.echo(f"Copia de seguridad: {backup}"),
+        on_progress=_progress,
+        on_summary=lambda result: _echo_jev_outcome(result, cfg.jev_topics_path),
+        on_interrupted=lambda banked, stored: _echo_jev_interrupt(
+            banked, stored, force=force, path=cfg.jev_topics_path
+        ),
+        on_logged=_echo_jev_logged,
+    )
+    if outcome.interrupted:
         # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
-        # to checkpoint must not change the code the shell sees. `from None` because the
-        # traceback of a Ctrl-C tells the operator nothing.
-        raise typer.Exit(code=130) from None
-    else:
-        # `_checkpoint` has already put every one of these in `assessments`; the merge stays
-        # here so the NORMAL path does not depend on a hook whose failures are swallowed.
-        for assessment in result.assessed:
-            assessments[assessment.item_id] = assessment
-        _echo_jev_outcome(result, cfg.jev_topics_path)
-        _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(result.assessed))
-    finally:
-        # EVERY exit path of a pass that sent something lands here: success, a partial
-        # failure, the all-failed `JevError` (a 402 on every call is still requests made),
-        # a side-car that could not be written, and Ctrl-C. `_log_jev_run` never raises.
-        _log_jev_run(
-            cfg.jev_runs_path, client, tuple(banked.values()), started_at, interrupted=interrupted
-        )
-        # LAST, and guarded. Releasing the pool is cleanup; it is never the run's verdict,
-        # and on the interrupt path it runs while `Exit(130)` is in flight.
-        _release_jev_client(client)
+        # to checkpoint must not change the code the shell sees.
+        raise typer.Exit(code=130)
 
 
 @dataclass(frozen=True)

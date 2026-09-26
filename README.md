@@ -1460,11 +1460,12 @@ xbrain/
 │   ├── jev/              # `xbrain jev`: the Jev (TypeSafe) second opinion on topics
 │   │   ├── client.py     #   the vendor-free seam: questions, answers, JevClient
 │   │   ├── typesafe.py   #   the ONLY module that imports the TypeSafe SDK
-│   │   ├── models.py     #   TopicAssessment / PrimaryChoice — frozen, extra-forbid
+│   │   ├── models.py     #   TopicAssessment / PrimaryChoice / JevRun — frozen, extra-forbid
 │   │   ├── defaults.py   #   the [jev] defaults, the price table, the ONE cost sentence
 │   │   ├── env.py        #   TYPESAFE_API_KEY from the environment, else <repo>/.env
 │   │   ├── questions.py  #   one Noul per topic + the primary Choice, canonically ordered
 │   │   ├── assess.py     #   item → state → ask → parse → stamp the contract
+│   │   ├── run.py        #   run_topics: THE paid pass (backup, checkpoint, save, run log)
 │   │   ├── store.py      #   data/jev/topics.json (a side-car; items.json is never written) + runs.jsonl
 │   │   ├── report.py     #   the ONE comparison against `enrich`, at a threshold
 │   │   └── dashboard.py  #   the jev.html blob (same template mechanism as dashboard.html)

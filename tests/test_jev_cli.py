@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from tests.jev_fakes import FakeJevClient
 from xbrain import cli
+from xbrain.jev import run as jev_run
 from xbrain.cli import app
 from xbrain.config import Config
 from xbrain.jev.client import JevClient, JevResult, Question
@@ -472,13 +473,13 @@ def test_jev_topics_passes_the_configured_concurrency_to_the_runner(tmp_path, mo
     _seed(tmp_path)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
     seen: list[int] = []
-    real = cli.run_assessments
+    real = jev_run.run_assessments
 
     def _spy(*args, **kwargs):
         seen.append(kwargs["concurrency"])
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "run_assessments", _spy)
+    monkeypatch.setattr(jev_run, "run_assessments", _spy)
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
     assert seen == [3]
 
@@ -672,14 +673,16 @@ def test_a_failing_close_never_costs_the_run_its_records(tmp_path: Path, monkeyp
     _seed(tmp_path)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: _ClosingFailsClient())
 
-    with caplog.at_level(logging.WARNING, logger="xbrain.cli"):
+    with caplog.at_level(logging.WARNING, logger="xbrain.jev.run"):
         result = runner.invoke(app, ["jev", "topics"])
 
     assert result.exit_code == 0, result.output
     assert list(load_assessments(_topics_path(tmp_path))) == ["1", "2"]
     assert "2 evaluadas · 0 fallidas" in result.stdout
     # Noise, but never silent noise.
-    assert "cerrar el cliente Jev falló" in caplog.text
+    # From the run loop, where teardown now lives — not merely somewhere in the log.
+    [record] = [r for r in caplog.records if "cerrar el cliente Jev falló" in r.getMessage()]
+    assert record.name == "xbrain.jev.run"
     assert "Connection reset by peer" in caplog.text
 
 
@@ -713,12 +716,12 @@ def test_a_failed_checkpoint_names_the_bill_like_the_final_save_does(tmp_path, m
     _seed(tmp_path)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
     # Every record checkpoints, so the first answer hits the failing write.
-    monkeypatch.setattr(cli, "_CHECKPOINT_EVERY", 1)
+    monkeypatch.setattr(jev_run, "CHECKPOINT_EVERY", 1)
 
     def _boom(assessments, path):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(cli, "save_assessments", _boom)
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
 
     with caplog.at_level(logging.WARNING, logger="xbrain.jev.assess"):
         result = runner.invoke(app, ["jev", "topics"])
@@ -740,7 +743,7 @@ def test_jev_topics_names_the_bill_when_the_sidecar_cannot_be_written(tmp_path, 
     def _boom(assessments, path):
         raise OSError(13, "Permission denied")
 
-    monkeypatch.setattr(cli, "save_assessments", _boom)
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
 
     result = runner.invoke(app, ["jev", "topics"])
 
@@ -819,13 +822,13 @@ def test_the_sidecar_is_flushed_during_a_long_run_not_only_at_the_end(tmp_path, 
     )
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
     sizes: list[int] = []
-    real_save = cli.save_assessments
+    real_save = jev_run.save_assessments
 
     def _recording_save(assessments, path):
         sizes.append(len(assessments))
         real_save(assessments, path)
 
-    monkeypatch.setattr(cli, "save_assessments", _recording_save)
+    monkeypatch.setattr(jev_run, "save_assessments", _recording_save)
 
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
 
@@ -989,7 +992,7 @@ def test_the_run_is_logged_even_when_the_side_car_cannot_be_written(tmp_path, mo
     def _boom(assessments, path):
         raise OSError(13, "Permission denied")
 
-    monkeypatch.setattr(cli, "save_assessments", _boom)
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
 
     result = runner.invoke(app, ["jev", "topics"])
 
@@ -1011,7 +1014,7 @@ def test_a_log_that_cannot_be_written_never_costs_the_run_its_records_or_its_ver
     def _boom(run, path):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(cli, "append_run", _boom)
+    monkeypatch.setattr(jev_run, "append_run", _boom)
 
     result = runner.invoke(app, ["jev", "topics"])
 
