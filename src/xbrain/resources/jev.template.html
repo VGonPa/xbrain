@@ -437,7 +437,9 @@ function paintBootFailure(message) {
 const onBootError = (e) => paintBootFailure(e.message);
 addEventListener('error', onBootError);
 
-const DATA = /*__DATA__*/;
+/* The blob, and everything derived from it, is set in `loadData` — the one entry point a page
+   that receives new data (a local server) calls before re-drawing the current tab. */
+let DATA = /*__DATA__*/;
 
 /* ---------------------------------------------------------------- helpers
    Nothing below COMPUTES a comparison or a price: every number is read from DATA, which
@@ -452,11 +454,24 @@ const usd = (x, d) => (x == null ? '—' : '~' + dec(x, d || 4) + ' $');
 const prob = (p) => (p == null ? '—' : dec(p, 2));
 const when = (iso) => new Date(iso).toLocaleString('es-ES', {dateStyle: 'medium', timeStyle: 'short'});
 const day = (iso) => new Date(iso).toLocaleDateString('es-ES', {day: 'numeric', month: 'short', year: 'numeric'});
-const LABEL = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
-const DESC = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
+let LABEL = {};
+let DESC = {};
+/** Decimals for the threshold and every band edge: two, or as many as the threshold has (up to
+    four), so 0,875 never prints as 0,88 beside an edge at 0,875. */
+let PDIGITS = 2;
+const pfmt = (x) => dec(x, PDIGITS);
 const label = (slug) => LABEL[slug] || slug;
 /** Only an http(s) URL becomes a link: `Item.url` is a bare `str` in the model. */
 const httpUrl = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : null);
+
+/** Every value the page derives from the blob, set from it: call before drawing. */
+function loadData(blob) {
+  DATA = blob;
+  LABEL = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
+  DESC = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
+  TOPIC_MIN = DATA.topic_min;
+  PDIGITS = Math.min(4, Math.max(2, (String(DATA.threshold).split('.')[1] || '').length));
+}
 
 /* ---------------------------------------------------------------- header */
 function renderStamp() {
@@ -464,7 +479,7 @@ function renderStamp() {
   $('stamp').innerHTML =
     'ACTUALIZADO <b>' + esc(DATA.updated) + '</b><br>' +
     (models.length === 1 ? 'MODELO ' : 'MODELOS ') + '<b>' + esc(models.join(', ') || '—') + '</b><br>' +
-    'UMBRAL <b>' + esc(dec(DATA.threshold, 2)) + '</b> (config)<br>' +
+    'UMBRAL <b>' + esc(pfmt(DATA.threshold)) + '</b> (config)<br>' +
     '<a href="' + esc(DATA.docs_url) + '" target="_blank" rel="noopener">DOCUMENTACIÓN ↗</a>';
 }
 
@@ -546,17 +561,17 @@ function fact(big, why) {
 
 function renderNumbers() {
   const S = DATA.summary;
-  $('numbers-sub').textContent = 'mismos números que `xbrain jev report` · umbral ' + dec(DATA.threshold, 2) +
+  $('numbers-sub').textContent = 'mismos números que `xbrain jev report` · umbral ' + pfmt(DATA.threshold) +
     ' · ' + pl(S.items_compared, 'post comparado', 'posts comparados');
   $('facts').innerHTML =
     fact('Jev confirma <em>' + nf(S.assigned_backed) + '</em> de ' + nf(S.assigned_pairs) +
       ' topics de enrich (<em>' + dec(S.enrich_backed_pct, 1) + ' %</em>)',
       'De todos los topics que puso enrich, cuántos ve también Jev con probabilidad ≥ ' +
-      dec(DATA.threshold, 2) + '. Los que no, son candidatos a quitar.' +
+      pfmt(DATA.threshold) + '. Los que no, son candidatos a quitar.' +
       (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está', 'topics ya no están') +
         ' en el vocabulario y no se juzgan.' : '')) +
     fact('Jev añadiría <em>' + nf(S.missing_pairs) + '</em> topics que enrich no puso',
-      'Topics que Jev ve con probabilidad ≥ ' + dec(DATA.threshold, 2) +
+      'Topics que Jev ve con probabilidad ≥ ' + pfmt(DATA.threshold) +
       ' y que enrich no asignó. Son candidatos a añadir.') +
     fact('El topic principal coincide en <em>' + dec(S.primary_agree_pct, 1) + ' %</em>',
       'En cuántos posts el topic principal de enrich es el mismo que elige Jev.' +
@@ -621,7 +636,7 @@ const FILTERS = [
   {key: 'enrich_only', name: 'Enrich asigna y Jev no', count: () => DATA.summary.posts_enrich_only},
   {key: 'adds', name: 'Jev añadiría topic', count: () => DATA.summary.posts_jev_only},
   {key: 'prim', name: 'Primario distinto', count: () => DATA.summary.posts_primary_differs},
-  {key: 'fallback', name: 'Jev eligió «' + DATA.fallback + '»', count: () => DATA.summary.primary_fallback},
+  {key: 'fallback', get name() { return 'Jev eligió «' + DATA.fallback + '»'; }, count: () => DATA.summary.primary_fallback},
   {key: 'uneval', name: 'Sin evaluar por Jev', count: () => DATA.summary.items_unassessed},
 ];
 /** Under these views a topic narrows to the posts that disagree ABOUT that topic, in that
@@ -886,7 +901,7 @@ function probBar(p) {
   track.appendChild(fill);
   const mark = el('s');
   mark.style.left = Math.round(DATA.threshold * 100) + '%';
-  mark.title = 'umbral ' + dec(DATA.threshold, 2);
+  mark.title = 'umbral ' + pfmt(DATA.threshold);
   track.appendChild(mark);
   wrap.appendChild(track);
   wrap.appendChild(el('span', null, prob(p)));
@@ -1168,13 +1183,13 @@ function onKey(e) {
 /* topics */
 /** The floor below which a topic sorts last by default and is marked «pocos datos»: defined
     once in `jev/dashboard.py` (`TOPIC_MIN`) and shipped. */
-const TOPIC_MIN = DATA.topic_min;
+let TOPIC_MIN = 5;
 /** The index columns. Every number is a `per_topic` field computed in `jev/report.py`; `key`
     is the field and the sort. */
 const TOPIC_COLUMNS = [
   {key: 'label', name: 'Topic', why: 'nombre, slug y descripción del vocabulario'},
   {key: 'assigned', name: 'Enrich lo pone', why: 'posts donde enrich puso este topic'},
-  {key: 'backed', name: 'Jev confirma', why: 'de esos, en cuántos lo ve también Jev (probabilidad ≥ ' + dec(DATA.threshold, 2) + ')'},
+  {key: 'backed', name: 'Jev confirma', get why() { return 'de esos, en cuántos lo ve también Jev (probabilidad ≥ ' + pfmt(DATA.threshold) + ')'; }},
   {key: 'backed_pct', name: 'Acuerdo', why: 'Jev confirma ÷ enrich lo pone'},
   {key: 'missing', name: 'Jev lo añadiría', why: 'posts donde Jev lo ve y enrich no lo puso'},
   {key: 'disagreeing', name: 'Discrepancias', why: 'enrich lo pone y Jev no, más los que Jev añadiría'},
@@ -1387,7 +1402,7 @@ function topicNumbers(r) {
     grid.appendChild(c);
   };
   cell('Enrich lo pone', nf(r.assigned), 'posts comparados donde enrich puso este topic');
-  cell('Jev confirma', nf(r.backed) + (r.assigned ? ' (' + dec(r.backed_pct, 1) + ' %)' : ''), 'de esos, los que Jev también ve (probabilidad ≥ ' + dec(DATA.threshold, 2) + ')');
+  cell('Jev confirma', nf(r.backed) + (r.assigned ? ' (' + dec(r.backed_pct, 1) + ' %)' : ''), 'de esos, los que Jev también ve (probabilidad ≥ ' + pfmt(DATA.threshold) + ')');
   cell('Jev lo añadiría', nf(r.missing), 'Jev lo ve y enrich no lo puso');
   cell('Discrepancias', nf(r.disagreeing), 'solo enrich + solo Jev');
   cell('Principal', nf(r.enrich_primary) + ' / ' + nf(r.jev_primary), 'posts donde es el topic principal: enrich / Jev');
@@ -1402,33 +1417,26 @@ function otherName(value, kind, side) {
   return value + (side === 'enrich' ? ' (ya no está en el vocabulario)' : ' (ninguno del vocabulario)');
 }
 
-/** One list of confusion pairs for the topic: the other side's topic and how many posts. The
-    first eight show; "ver todos" opens the rest in place. */
-function pairsList(title, rows, other, kind, empty) {
-  const slug = topicsView.t;
+/** A titled list of links with a post count each; the rows past `shown` stay hidden until
+    "ver todos (N <unit> más, M posts)" opens them. `unit` is the singular and plural of what a
+    row is — a «cruce» of two topics, or a topic. Shared by the Topics and Comparar tabs. */
+function linkList(title, rows, shown, unit) {
   const box = el('div', 'pairs');
   box.appendChild(el('h4', null, title));
-  if (!rows.length) {
-    box.appendChild(el('p', 'muted', empty));
-    return box;
-  }
   const list = el('ol');
   rows.forEach((row, i) => {
     const li = el('li');
-    if (i >= TOPIC_PAIRS_SHOWN) li.hidden = true;
-    const params = {t: slug};
-    params[kind] = pairKey(row);
-    const href = hashHref('topics', params);
-    const a = link(href, null, otherName(row[other], kind, other));
-    a.dataset.pair = kind + ':' + pairKey(row);
+    if (i >= shown) li.hidden = true;
+    const a = link(row.href, null, row.name);
+    Object.assign(a.dataset, row.data || {});
     li.appendChild(a);
     li.appendChild(el('span', 'c', pl(row.posts, 'post', 'posts')));
     list.appendChild(li);
   });
   box.appendChild(list);
-  if (rows.length > TOPIC_PAIRS_SHOWN) {
-    const rest = rows.slice(TOPIC_PAIRS_SHOWN);
-    const more = el('button', 'more small', 'ver todos (' + pl(rest.length, 'cruce más', 'cruces más') + ', ' +
+  if (rows.length > shown) {
+    const rest = rows.slice(shown);
+    const more = el('button', 'more small', 'ver todos (' + pl(rest.length, unit[0], unit[1]) + ', ' +
       pl(rest.reduce((n, r) => n + r.posts, 0), 'post', 'posts') + ')');
     more.type = 'button';
     more.addEventListener('click', () => {
@@ -1438,6 +1446,25 @@ function pairsList(title, rows, other, kind, empty) {
     box.appendChild(more);
   }
   return box;
+}
+
+/** One list of confusion pairs for the topic: the other side's topic and how many posts. The
+    first eight show; "ver todos" opens the rest in place. */
+function pairsList(title, rows, other, kind, empty) {
+  const slug = topicsView.t;
+  if (!rows.length) {
+    const box = el('div', 'pairs');
+    box.appendChild(el('h4', null, title));
+    box.appendChild(el('p', 'muted', empty));
+    return box;
+  }
+  const items = rows.map(row => {
+    const params = {t: slug};
+    params[kind] = pairKey(row);
+    const href = hashHref('topics', params);
+    return {name: otherName(row[other], kind, other), posts: row.posts, href: href, data: {pair: kind + ':' + pairKey(row)}};
+  });
+  return linkList(title, items, TOPIC_PAIRS_SHOWN, ['cruce más', 'cruces más']);
 }
 
 /** Posts drawn a page at a time, with a "Mostrar más" of their own. */
@@ -1594,22 +1621,25 @@ function renderTopics() {
 /* ---------------------------------------------------------------- the Comparar tab */
 /* compare */
 /** How many topics the agreement table shows (the rest are one link away, in the Topics tab's
-    order), and how many primary-cross pairs before "ver todos". */
+    order), and how many rows of a cross list before "ver todos". */
 const COMPARE_TOPICS = 10;
 const COMPARE_PAIRS_SHOWN = 10;
-/** The list the URL opens, if any: a confidence band (`b`), a primary pair (`px`) or the posts
-    where both sides pick one topic as primary (`pd`). Kept RAW and resolved at render. */
+/** The ONE list the URL opens, if any, resolved in this order: a confidence band (`b`), a
+    primary pair (`px`), the posts where both sides pick one topic (`pd`). Kept RAW and
+    resolved at render; the others are dropped so the URL says what the page shows. */
 const compareView = {b: '', px: '', pd: ''};
+const COMPARE_KEYS = ['b', 'px', 'pd'];
+/** The list the tab last drew (its `compareHref`), so re-drawing the same one keeps the scroll. */
+let shownCompare = '';
 
 function readCompareHash(params) {
-  compareView.b = params.get('b') || '';
-  compareView.px = params.get('px') || '';
-  compareView.pd = params.get('pd') || '';
+  const first = COMPARE_KEYS.find(k => params.get(k));
+  COMPARE_KEYS.forEach(k => { compareView[k] = k === first ? params.get(k) : ''; });
 }
 
 function compareHref() {
   const params = {};
-  ['b', 'px', 'pd'].forEach(k => { if (compareView[k]) params[k] = compareView[k]; });
+  COMPARE_KEYS.forEach(k => { if (compareView[k]) params[k] = compareView[k]; });
   return hashHref('compare', params);
 }
 
@@ -1618,11 +1648,17 @@ function own(obj, key) {
   return obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
 }
 
-/** A band's edges as the reader reads them. Each band holds its lower edge. */
+/** A band's edges as the reader reads them, at the threshold's precision. Each band holds its
+    lower edge. */
 function bandRange(b) {
-  if (b.kind === 'enrich_only' && b.lo === 0) return 'probabilidad < ' + dec(b.hi, 2);
-  if (b.top) return 'probabilidad ≥ ' + dec(b.lo, 2);
-  return 'probabilidad ' + dec(b.lo, 2) + ' – ' + dec(b.hi, 2);
+  if (b.kind === 'enrich_only' && b.lo === 0) return 'probabilidad < ' + pfmt(b.hi);
+  if (b.top) return 'probabilidad ≥ ' + pfmt(b.lo);
+  return 'probabilidad ' + pfmt(b.lo) + ' – ' + pfmt(b.hi);
+}
+
+/** A share, or «—» when there is nothing to take it of: 0 of 0 is not 0 %. */
+function pct(value, base) {
+  return base ? dec(value, 1) + ' %' : '—';
 }
 
 function pxName(row) {
@@ -1630,7 +1666,8 @@ function pxName(row) {
 }
 
 /** The list the URL names, resolved against THESE data — with the section it opens under —
-    or `stale` when it names a band, pair or topic these data do not have. */
+    or `stale` when it names a band, pair or topic these data do not have. A pair that ends in
+    Jev's «otro» opens under the «otro» section, where that number is. */
 function resolveCompareList() {
   const S = DATA.summary;
   const sets = DATA.post_sets;
@@ -1644,7 +1681,8 @@ function resolveCompareList() {
     const row = S.primary_confusion.find(r => pairKey(r) === compareView.px);
     const ids = own(sets.px, compareView.px);
     if (!row || !ids) return {sec: 'cross', stale: true};
-    return {sec: 'cross', ids: ids, count: row.posts, title: 'Principal · enrich: ' + pxName(row).replace(' → ', ' · Jev: ')};
+    const title = 'Principal · enrich: ' + otherName(row.enrich, 'px', 'enrich') + ' · Jev: ' + otherName(row.jev, 'px', 'jev');
+    return {sec: row.jev === DATA.fallback ? 'otro' : 'cross', ids: ids, count: row.posts, title: title};
   }
   if (compareView.pd) {
     const row = own(topicRows(), compareView.pd);
@@ -1666,7 +1704,7 @@ function csec(key, title, intro) {
 /** 1 · The header's three numbers, in words, each with the posts behind it. */
 function compareResumen() {
   const S = DATA.summary;
-  const thr = dec(DATA.threshold, 2);
+  const thr = pfmt(DATA.threshold);
   const sec = csec('resumen', 'En tres frases', null);
   const facts = el('div', 'facts');
   const line = (big, why, go, words) => {
@@ -1679,13 +1717,15 @@ function compareResumen() {
     box.appendChild(a);
     facts.appendChild(box);
   };
-  line('Jev confirma ' + nf(S.assigned_backed) + ' de ' + nf(S.assigned_pairs) + ' topics de enrich (' + dec(S.enrich_backed_pct, 1) + ' %).',
-    'De los topics que puso enrich, los que Jev también ve con probabilidad ≥ ' + thr + '. Los demás son candidatos a quitar.',
+  line('Jev confirma ' + nf(S.assigned_backed) + ' de ' + nf(S.assigned_pairs) + ' topics de enrich (' + pct(S.enrich_backed_pct, S.assigned_pairs) + ').',
+    'De los topics que puso enrich, los que Jev también ve con probabilidad ≥ ' + thr + '. Los otros ' + nf(S.doubtful_pairs) +
+    ' (probabilidad < ' + thr + ') son candidatos a quitar.' +
+    (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está', 'topics ya no están') + ' en el vocabulario y no se juzgan.' : ''),
     'enrich_only', 'ver los ' + pl(S.posts_enrich_only, 'post', 'posts') + ' con un topic que Jev no confirma →');
   line('Jev añadiría ' + nf(S.missing_pairs) + ' topics que enrich no puso.',
     'Topics que Jev ve con probabilidad ≥ ' + thr + ' y enrich no asignó. Son candidatos a añadir.',
     'adds', 'ver los ' + pl(S.posts_jev_only, 'post', 'posts') + ' donde Jev añadiría →');
-  line('El topic principal coincide en ' + dec(S.primary_agree_pct, 1) + ' % de los posts.',
+  line('El topic principal coincide en ' + pct(S.primary_agree_pct, S.items_compared) + ' de los posts.',
     'En ' + nf(S.primary_agree) + ' de ' + nf(S.items_compared) + ' posts comparados, el principal de enrich es el que elige Jev.',
     'prim', 'ver los ' + pl(S.posts_primary_differs, 'post', 'posts') + ' donde no coincide →');
   sec.appendChild(facts);
@@ -1695,7 +1735,7 @@ function compareResumen() {
 /** 2 · The three kinds of disagreement: each is a Posts filter, with the report's count. */
 function compareKinds() {
   const S = DATA.summary;
-  const thr = dec(DATA.threshold, 2);
+  const thr = pfmt(DATA.threshold);
   const sec = csec('kinds', 'Los tres tipos de desacuerdo', 'Un post puede tener más de uno, así que no se suman.');
   const why = {
     enrich_only: 'Posts con algún topic que puso enrich y Jev no ve (probabilidad < ' + thr + '): ' + pl(S.doubtful_pairs, 'topic', 'topics') + ' en total.',
@@ -1742,7 +1782,7 @@ function compareTopics() {
     name.appendChild(link(topicHref(slug), 'tl', label(slug)));
     if (r.assigned < TOPIC_MIN) name.appendChild(el('span', 'few', 'pocos datos'));
     tr.appendChild(name);
-    const cells = [nf(r.assigned), nf(r.backed), r.assigned ? dec(r.backed_pct, 1) + ' %' : '—'];
+    const cells = [nf(r.assigned), nf(r.backed), pct(r.backed_pct, r.assigned)];
     cells.forEach((text, i) => {
       const td = el('td', 'n', text);
       td.dataset.h = heads[i + 1];
@@ -1767,39 +1807,17 @@ function compareTopics() {
   return sec;
 }
 
-/** A list of (name, count) rows, each opening a list of this tab; past `shown`, "ver todos". */
-function countList(title, rows, shown) {
-  const box = el('div', 'pairs');
-  box.appendChild(el('h4', null, title));
-  const list = el('ol');
-  rows.forEach((row, i) => {
-    const li = el('li');
-    if (i >= shown) li.hidden = true;
-    const href = hashHref('compare', row.params);
-    const a = link(href, null, row.name);
-    Object.assign(a.dataset, row.data);
-    li.appendChild(a);
-    li.appendChild(el('span', 'c', pl(row.posts, 'post', 'posts')));
-    list.appendChild(li);
-  });
-  box.appendChild(list);
-  if (rows.length > shown) {
-    const rest = rows.slice(shown);
-    const more = el('button', 'more small', 'ver todos (' + pl(rest.length, 'cruce más', 'cruces más') + ', ' +
-      pl(rest.reduce((n, r) => n + r.posts, 0), 'post', 'posts') + ')');
-    more.type = 'button';
-    more.addEventListener('click', () => {
-      list.querySelectorAll('li[hidden]').forEach(li => { li.hidden = false; });
-      more.hidden = true;
-    });
-    box.appendChild(more);
-  }
-  return box;
+function pxRow(row, name) {
+  const key = pairKey(row);
+  const href = hashHref('compare', {px: key});
+  return {name: name, posts: row.posts, href: href, data: {px: key}};
 }
 
-function pxRow(row) {
-  const key = pairKey(row);
-  return {name: pxName(row), posts: row.posts, params: {px: key}, data: {px: key}};
+function emptyBox(title, words) {
+  const box = el('div', 'pairs');
+  box.appendChild(el('h4', null, title));
+  box.appendChild(el('p', 'muted', words));
+  return box;
 }
 
 /** 4 · Enrich's primary × Jev's: the diagonal by topic, then every pair off it, most posts first. */
@@ -1815,22 +1833,18 @@ function compareCross() {
   sec.appendChild(agree);
   const diagonal = S.per_topic.filter(r => r.primary_both > 0)
     .sort((a, b) => b.primary_both - a.primary_both || label(a.slug).localeCompare(label(b.slug), 'es'))
-    .map(r => ({name: label(r.slug), posts: r.primary_both, params: {pd: r.slug}, data: {pd: r.slug}}));
+    .map(r => {
+      const href = hashHref('compare', {pd: r.slug});
+      return {name: label(r.slug), posts: r.primary_both, href: href, data: {pd: r.slug}};
+    });
   const grid = el('div', 'pgrid');
-  grid.appendChild(diagonal.length ? countList('Coinciden: los dos eligen', diagonal, COMPARE_PAIRS_SHOWN)
+  grid.appendChild(diagonal.length ? linkList('Coinciden: los dos eligen', diagonal, COMPARE_PAIRS_SHOWN, ['topic más', 'topics más'])
     : emptyBox('Coinciden', 'En ningún post comparado eligen el mismo principal.'));
-  const pairs = S.primary_confusion.map(pxRow);
-  grid.appendChild(pairs.length ? countList('No coinciden: enrich → Jev', pairs, COMPARE_PAIRS_SHOWN)
+  const pairs = S.primary_confusion.map(row => pxRow(row, pxName(row)));
+  grid.appendChild(pairs.length ? linkList('No coinciden: enrich → Jev', pairs, COMPARE_PAIRS_SHOWN, ['cruce más', 'cruces más'])
     : emptyBox('No coinciden', 'En todos los posts comparados eligen el mismo principal.'));
   sec.appendChild(grid);
   return sec;
-}
-
-function emptyBox(title, words) {
-  const box = el('div', 'pairs');
-  box.appendChild(el('h4', null, title));
-  box.appendChild(el('p', 'muted', words));
-  return box;
 }
 
 /** 5 · Jev's «none of these»: how often, its posts, and what enrich had there. */
@@ -1846,23 +1860,28 @@ function compareOtro() {
     line.appendChild(link(href, 'lk go', 'ver los posts →'));
   }
   sec.appendChild(line);
-  const rows = S.primary_confusion.filter(r => r.jev === DATA.fallback).map(pxRow);
-  rows.forEach(r => { r.name = otherName(DATA.summary.primary_confusion.find(x => pairKey(x) === r.params.px).enrich, 'px', 'enrich'); });
-  if (rows.length) sec.appendChild(countList('El principal que había puesto enrich', rows, COMPARE_PAIRS_SHOWN));
+  const rows = [];
+  S.primary_confusion.forEach(row => {
+    if (row.jev === DATA.fallback) rows.push(pxRow(row, otherName(row.enrich, 'px', 'enrich')));
+  });
+  if (rows.length) sec.appendChild(linkList('El principal que había puesto enrich', rows, COMPARE_PAIRS_SHOWN, ['topic más', 'topics más']));
   return sec;
 }
 
-/** 6 · How sure Jev was on each disagreement: the bands `report.py` cut, their pairs and posts. */
+/** 6 · How sure Jev was on each disagreement: the bands `report.py` cut, their pairs and posts.
+    Each group's total is the summary field its bands name (`total`). */
 function compareBands() {
   const S = DATA.summary;
   const sec = csec('bands', 'Qué seguro estaba Jev en los desacuerdos',
     'Cada desacuerdo es un topic de un post, y Jev le dio una probabilidad. Aquí, por tramos de esa probabilidad; ' +
-    'cada tramo incluye su borde inferior y el umbral es ' + dec(DATA.threshold, 2) + '. Un post con dos desacuerdos en el mismo tramo es un post.');
+    'cada tramo incluye su borde inferior y el umbral es ' + pfmt(DATA.threshold) + '. Un post con dos desacuerdos en el mismo tramo es un post.');
   const grid = el('div', 'bands');
-  [['enrich_only', 'Enrich asigna y Jev no', S.doubtful_pairs], ['jev_only', 'Jev añadiría', S.missing_pairs]].forEach(([kind, title, total]) => {
+  [['enrich_only', 'Enrich asigna y Jev no'], ['jev_only', 'Jev añadiría']].forEach(([kind, title]) => {
+    const bands = S.confidence_bands.filter(b => b.kind === kind);
     const box = el('div', 'pairs');
+    const total = bands.length ? S[bands[0].total] : 0;
     box.appendChild(el('h4', null, title + ' · ' + pl(total, 'desacuerdo', 'desacuerdos')));
-    S.confidence_bands.filter(b => b.kind === kind).forEach(b => {
+    bands.forEach(b => {
       const row = el('div', 'bandrow');
       row.dataset.bandRow = b.key;
       row.appendChild(el('b', null, b.label));
@@ -1887,21 +1906,30 @@ function compareBands() {
   return sec;
 }
 
-/** The posts a count stands for, as cards, under the section it belongs to. */
+/** The posts a count stands for, as cards, under the section it belongs to. The heading counts
+    what the list holds; a summary count that differs is named, not hidden. */
 function compareList(list) {
-  if (list.stale) return el('p', 'note', 'Ese grupo ya no existe en estos datos; arriba, la comparación completa.');
+  if (list.stale) return el('p', 'note', 'Ese grupo ya no existe en estos datos; en esta pestaña, la comparación completa.');
   const sec = el('section', 'tgroup');
   sec.id = 'compare-list';
   const byId = postById();
   const posts = list.ids.map(id => byId[id]).filter(Boolean);
-  sec.appendChild(el('h3', 'tsec', pl(list.count, 'post', 'posts') + ' · ' + list.title));
+  sec.appendChild(el('h3', 'tsec', pl(list.ids.length, 'post', 'posts') + ' · ' + list.title));
   const clear = hashHref('compare', {});
   sec.appendChild(link(clear, 'lk clear', 'cerrar esta lista ✕'));
+  if (list.count !== list.ids.length) {
+    sec.appendChild(el('p', 'note', 'El resumen cuenta ' + pl(list.count, 'post', 'posts') + ' en este grupo; la lista tiene ' + nf(list.ids.length) + '.'));
+  }
   if (posts.length < list.ids.length) {
     sec.appendChild(el('p', 'note', nf(list.ids.length - posts.length) + ' de ' + nf(list.ids.length) + ' posts no están en esta página.'));
   }
   sec.appendChild(cardList(posts));
   return sec;
+}
+
+/** Nothing to compare — no current answer for any enriched post: say so, and what is left out. */
+function compareNothing(box) {
+  box.appendChild(el('p', 'empty', 'Ningún post comparado todavía: no hay ninguna evaluación vigente de Jev para un post con enrich.'));
 }
 
 /** Draws the tab. Guarded: after boot, a throw here would otherwise leave an emptied tab. */
@@ -1910,6 +1938,12 @@ function renderCompare() {
   const box = $('compare-body');
   try {
     box.replaceChildren();
+    const parts = excludedParts();
+    if (parts.length) box.appendChild(el('p', 'note', 'Fuera de estas cifras: ' + parts.join(' · ') + '.'));
+    if (!DATA.summary.items_compared) {
+      compareNothing(box);
+      return;
+    }
     const list = resolveCompareList();
     const sections = [
       ['resumen', compareResumen], ['kinds', compareKinds], ['topics', compareTopics],
@@ -1924,13 +1958,30 @@ function renderCompare() {
       (err && err.message ? err.message : err)));
   }
 }
+
+/** Draws the tab and scrolls to its list only when the list is a new one: re-drawing the same
+    list (or none) leaves the scroll where the reader has it. */
+function showCompare() {
+  const before = shownCompare;
+  renderCompare();
+  shownCompare = compareHref();
+  const list = $('compare-list');
+  if (list && shownCompare !== before) list.scrollIntoView({block: 'start'});
+}
 /* end compare */
 
-function renderExcluded() {
+/** What the numbers leave out, one phrase each: stale and orphaned answers, and evaluated
+    posts with no enrichment to compare against. The Posts footer and the Comparar tab say it. */
+function excludedParts() {
   const t = DATA.totals, parts = [];
   if (t.stale) parts.push(pl(t.stale, 'evaluación caducada', 'evaluaciones caducadas') + ' (el post o el vocabulario cambió; `xbrain jev topics` las vuelve a pedir; su post sale como «evaluación caducada»)');
   if (t.orphans) parts.push(pl(t.orphans, 'evaluación huérfana', 'evaluaciones huérfanas') + ' (su post ya no está en el corpus)');
   if (t.not_compared) parts.push(pl(t.not_compared, 'post evaluado sin enriquecer', 'posts evaluados sin enriquecer') + ' (nada con qué comparar)');
+  return parts;
+}
+
+function renderExcluded() {
+  const parts = excludedParts();
   $('excluded').textContent = parts.length ? 'Fuera de las cifras: ' + parts.join(' · ') + '.' : '';
 }
 
@@ -1939,6 +1990,7 @@ let shownTopic = '';
 
 /** Everything that touches the DOM at load. Its single call site is wrapped. */
 function boot() {
+  loadData(DATA);
   renderStamp();
   renderCost();
   renderNumbers();
@@ -1954,11 +2006,7 @@ function boot() {
     if (pair) pair.scrollIntoView({block: 'start'});
   }
   shownTopic = topicsView.t;
-  if (view.tab === 'compare') {
-    renderCompare();
-    const list = $('compare-list');
-    if (list) list.scrollIntoView({block: 'start'});
-  }
+  if (view.tab === 'compare') showCompare();
   $('search').addEventListener('input', function () { view.q = this.value.trim(); update(); });
   $('sort').addEventListener('change', function () { view.s = this.value; update(); });
   $('more').addEventListener('click', drawMore);
@@ -1979,12 +2027,9 @@ function boot() {
       if (pair) pair.scrollIntoView({block: 'start'});
       else if (topicsView.t && topicsView.t !== before) $('tab-topics').scrollIntoView({block: 'start'});
     }
-    if (view.tab === 'compare') {
-      renderCompare();
-      // Opening a list is what the reader asked to see; closing one leaves the scroll alone.
-      const list = $('compare-list');
-      if (list) list.scrollIntoView({block: 'start'});
-    }
+    // Opening a list is what the reader asked to see; the same list again, or none, leaves the
+    // scroll alone.
+    if (view.tab === 'compare') showCompare();
   });
   document.addEventListener('keydown', onKey);
   if ('IntersectionObserver' in window) {

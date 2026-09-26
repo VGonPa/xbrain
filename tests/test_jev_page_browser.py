@@ -84,31 +84,47 @@ def test_chrome_is_available_where_the_page_tests_are_required():
         )
 
 
+#: What a reader SEES: an element that is laid out (a `display:none` anywhere up its tree has
+#: no client rects) and not `visibility:hidden`. A probe that reads the DOM without this
+#: certifies content nobody can see — the 9b pair list and a hidden tab both passed that way.
+_SEEN = r"""
+const seen = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+const inView = e => { if (!seen(e)) return false; const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= -2 && r.top < innerHeight; };
+const txt = e => (seen(e) ? e.textContent : null);
+const seenCards = root => [...root.querySelectorAll('.card')].filter(seen).map(c => c.dataset.id);
+"""
+
 #: Runs after the page has booted. Every step goes through the page's own controls (rail
 #: buttons, keys, the search box) and reads the page's own list.
-_PROBE = r"""
-<script>
+_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const count = () => Number(document.getElementById('count').textContent.match(/mostrando ([\d.]+)/)[1].replace(/\./g, ''));
+const count = () => Number(txt(document.getElementById('count')).match(/mostrando ([\d.]+)/)[1].replace(/\./g, ''));
 const num = (text) => Number(text.replace(/\./g, ''));
 const key = k => document.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true}));
 const cur = () => { const c = document.querySelector('.card.cur'); return c && c.dataset.id; };
-const railButtons = () => [...document.querySelectorAll('#rail > button.f')];
+const railButtons = () => [...document.querySelectorAll('#rail > button.f')].filter(seen);
 const topicButtons = () => [...document.querySelectorAll('#rail .tbox button.f')];
-const drawAll = async () => { while (!document.getElementById('more').hidden) { document.getElementById('more').click(); await sleep(5); } };
+const drawAll = async () => { while (seen(document.getElementById('more'))) { document.getElementById('more').click(); await sleep(5); } };
+const cards = async () => { await drawAll(); return seenCards(document.getElementById('cards')); };
 (async () => {
   await sleep(100);
   const out = {view: {f: view.f, count: count()}, filters: {}, topics: {}, all_topics: {}};
-  for (const b of railButtons()) {
+  for (const name of railButtons().map(b => b.firstChild.textContent)) {
+    // The rail is redrawn on every click: read the number beside the button before pressing it.
+    const b = railButtons().find(x => x.firstChild.textContent === name);
+    const rail = num(txt(b.lastChild));
     b.click(); await sleep(10);
-    out.filters[b.firstChild.textContent] = {rail: num(b.lastChild.textContent), list: count(), ids: shown.map(p => p.id), hash: location.hash};
+    out.filters[name] = {rail: rail, list: count(), ids: await cards(), hash: location.hash};
   }
   railButtons().find(b => b.firstChild.textContent === 'Con discrepancias').click(); await sleep(10);
   for (const b of topicButtons()) {
     const parts = b.lastChild.textContent.split(' · ').map(num);
     const name = b.firstChild.textContent;
     b.click(); await sleep(10);
-    out.topics[name] = {disagreeing: parts[2], list: count(), ids: shown.map(p => p.id)};
+    out.topics[name] = {disagreeing: parts[2], list: count(), ids: await cards()};
     b.click(); await sleep(10);
   }
   out.one_way = {};
@@ -117,20 +133,21 @@ const drawAll = async () => { while (!document.getElementById('more').hidden) { 
     out.one_way[view_] = {};
     for (const b of topicButtons()) {
       b.click(); await sleep(10);
-      out.one_way[view_][b.firstChild.textContent] = shown.map(p => p.id);
+      out.one_way[view_][b.firstChild.textContent] = await cards();
       b.click(); await sleep(10);
     }
   }
   railButtons().find(b => b.firstChild.textContent === 'Todos').click(); await sleep(10);
   for (const b of topicButtons()) {
     b.click(); await sleep(10);
-    out.all_topics[b.firstChild.textContent] = shown.map(p => p.id);
+    out.all_topics[b.firstChild.textContent] = await cards();
     b.click(); await sleep(10);
   }
   // Todos: fifty cards, then fifty more once j walks past them.
-  out.drawn_first = document.querySelectorAll('#cards .card').length;
+  railButtons().find(b => b.firstChild.textContent === 'Todos').click(); await sleep(10);
+  out.drawn_first = seenCards(document.getElementById('cards')).length;
   for (let i = 0; i < 55; i++) key('j');
-  out.drawn_after = document.querySelectorAll('#cards .card').length;
+  out.drawn_after = seenCards(document.getElementById('cards')).length;
   out.j_cursor = cur(); out.j_expected = shown[54].id;
   // Re-clicking the view redraws the list and resets the cursor (the same hash would not).
   railButtons().find(b => b.firstChild.textContent === 'Todos').click(); await sleep(10);
@@ -139,9 +156,9 @@ const drawAll = async () => { while (!document.getElementById('more').hidden) { 
   // Sin evaluar: which cards offer the command, which say there is no evidence.
   railButtons().find(b => b.firstChild.textContent === 'Sin evaluar por Jev').click(); await sleep(10);
   await drawAll();
-  out.copy_ids = [...document.querySelectorAll('#cards .card')].filter(c => c.querySelector('.ask button')).map(c => c.dataset.id);
-  out.no_evidence_ids = [...document.querySelectorAll('#cards .card')].filter(c => c.textContent.includes('sin evidencia')).map(c => c.dataset.id);
-  out.commands = [...document.querySelectorAll('#cards .ask code')].map(c => c.textContent).slice(0, 2);
+  out.copy_ids = [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && seen(c.querySelector('.ask button'))).map(c => c.dataset.id);
+  out.no_evidence_ids = [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && c.textContent.includes('sin evidencia')).map(c => c.dataset.id);
+  out.commands = [...document.querySelectorAll('#cards .ask code')].filter(seen).map(c => c.textContent).slice(0, 2);
   // The URL keeps a search with characters that need escaping.
   const box = document.getElementById('search');
   box.value = 'R&D c++ 50% ¿qué?'; box.dispatchEvent(new Event('input')); await sleep(10);
@@ -159,19 +176,23 @@ const drawAll = async () => { while (!document.getElementById('more').hidden) { 
 })();
 </script>
 """
+)
 
 #: For a page opened AT a given hash: what the view became and whether it drew.
-_READ_VIEW = r"""
-<script>
+_READ_VIEW = (
+    "<script>"
+    + _SEEN
+    + r"""
 setTimeout(() => {
   const pre = document.createElement('pre'); pre.id = 'probe';
   pre.textContent = JSON.stringify({q: view.q, f: view.f, search: document.getElementById('search').value,
-    banner_hidden: document.getElementById('banner').hidden, count: document.getElementById('count').textContent,
-    more_shown: getComputedStyle(document.getElementById('more')).display !== 'none'});
+    banner_hidden: document.getElementById('banner').hidden, count: txt(document.getElementById('count')),
+    cards: seenCards(document.getElementById('cards')), more_shown: seen(document.getElementById('more'))});
   document.body.appendChild(pre);
 }, 200);
 </script>
 """
+)
 
 
 def _fixture() -> dict[str, Any]:
@@ -441,15 +462,17 @@ def _topics_fixture() -> dict[str, Any]:
 
 #: The Topics tab, from its index. Every step records its own error, so one broken step names
 #: itself instead of leaving the whole probe silent.
-_TOPICS_PROBE = r"""
-<script>
+_TOPICS_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const indexOrder = () => [...document.querySelectorAll('#topics-index tbody tr')].map(tr => tr.dataset.slug);
+const indexOrder = () => [...document.querySelectorAll('#topics-index tbody tr')].filter(seen).map(tr => tr.dataset.slug);
 const sortHeader = name => [...document.querySelectorAll('#topics-index th .th')].find(b => b.firstChild.textContent.startsWith(name));
-const tabState = () => ({hash: location.hash, index: !document.getElementById('topics-index').hidden,
-  detail: !document.getElementById('topic-detail').hidden, pair: !!document.getElementById('topic-pair')});
+const tabState = () => ({hash: location.hash, index: seen(document.getElementById('topics-index')),
+  detail: seen(document.getElementById('topic-detail')), pair: seen(document.getElementById('topic-pair'))});
 async function drawAll(root) {
-  for (;;) { const more = [...root.querySelectorAll('button.more')].find(b => !b.hidden); if (!more) return; more.click(); await sleep(5); }
+  for (;;) { const more = [...root.querySelectorAll('button.more')].find(seen); if (!more) return; more.click(); await sleep(5); }
 }
 (async () => {
   const out = {errors: []};
@@ -477,27 +500,26 @@ async function drawAll(root) {
     document.querySelector('#topics-index a.tl[href="#topics?t=alpha"]').click(); await sleep(30);
     out.detail = tabState();
     const coinciden = document.querySelector('#topic-detail section[data-group="coinciden"]');
-    out.coinciden_first = coinciden.querySelectorAll('.card').length;
+    out.coinciden_first = seenCards(coinciden).length;
     await drawAll(coinciden);
-    out.coinciden_all = coinciden.querySelectorAll('.card').length;
-    out.coinciden_shown = Number(coinciden.querySelector('h3').textContent.split(' · ')[1]);
+    out.coinciden_all = seenCards(coinciden).length;
+    out.coinciden_shown = Number(txt(coinciden.querySelector('h3')).split(' · ')[1]);
   });
   await step('open omega and its big pair', async () => {
     location.hash = '#topics?t=omega'; await sleep(30);
-    out.omega_pairs = [...document.querySelectorAll('#topic-detail a[data-pair]')].map(a => a.dataset.pair);
+    out.omega_pairs = [...document.querySelectorAll('#topic-detail a[data-pair]')].filter(seen).map(a => a.dataset.pair);
     out.omega_empty = [...document.querySelectorAll('#topic-detail .pairs p.muted')].map(p => p.textContent);
     document.querySelector('#topic-detail a[data-pair="cx:-~omega"]').click(); await sleep(30);
     const pair = document.getElementById('topic-pair');
-    const top = pair.getBoundingClientRect().top;
-    out.pair_in_view = top >= 0 && top < innerHeight;
-    out.big_pair_first = pair.querySelectorAll('.card').length;
+    out.pair_in_view = inView(pair);
+    out.big_pair_first = seenCards(pair).length;
     await drawAll(pair);
-    out.big_pair_all = [...pair.querySelectorAll('.card')].map(c => c.dataset.id);
+    out.big_pair_all = seenCards(pair);
   });
   await step('a real A~B pair', async () => {
     location.hash = '#topics?t=gamma'; await sleep(30);
     document.querySelector('#topic-detail a[data-pair="cx:gamma~omega"]').click(); await sleep(30);
-    out.ab_pair = [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id);
+    out.ab_pair = seenCards(document.getElementById('topic-pair'));
     out.ab_hash = location.hash;
   });
   await step('back and forward', async () => {
@@ -509,7 +531,8 @@ async function drawAll(root) {
     location.hash = '#topics?t=alpha'; await sleep(30);
     [...document.querySelectorAll('#topic-detail .tnav a')].find(a => a.textContent.startsWith('ver en Posts')).click(); await sleep(30);
     out.posts_hash = location.hash;
-    out.posts_ids = shown.map(p => p.id);
+    while (seen(document.getElementById('more'))) { document.getElementById('more').click(); await sleep(5); }
+    out.posts_ids = seenCards(document.getElementById('cards'));
   });
   await step('card row to topic', async () => {
     const row = document.querySelector('#cards .rows a.tlink');
@@ -520,13 +543,13 @@ async function drawAll(root) {
   await step('pairs past eight', async () => {
     const rows = Array.from({length: 11}, (_, i) => ({enrich: 'alpha', jev: 'x' + i, posts: 2}));
     const list = pairsList('prueba', rows, 'jev', 'cx', '');
-    document.body.appendChild(list);
+    document.getElementById('topic-detail').appendChild(list);
     // What the reader SEES: a CSS `display` on the rows would override the `hidden` attribute.
-    out.pairs_visible_before = [...list.querySelectorAll('li')].filter(li => getComputedStyle(li).display !== 'none').length;
+    out.pairs_visible_before = [...list.querySelectorAll('li')].filter(seen).length;
     const more = list.querySelector('button.more');
     out.pairs_more = more.textContent;
     more.click();
-    out.pairs_visible_after = [...list.querySelectorAll('li')].filter(li => getComputedStyle(li).display !== 'none').length;
+    out.pairs_visible_after = [...list.querySelectorAll('li')].filter(seen).length;
     list.remove();
   });
   await step('scroll kept on return', async () => {
@@ -555,12 +578,12 @@ async function drawAll(root) {
     const gone = DATA.post_sets.cx['gamma~omega'][0];
     DATA.posts = DATA.posts.filter(p => p.id !== gone);
     location.hash = '#topics?t=gamma&cx=gamma~omega'; await sleep(30);
-    out.missing_note = (document.querySelector('#topic-pair .note') || {}).textContent || null;
+    out.missing_note = txt(document.querySelector('#topic-pair .note'));
   });
   await step('guard', async () => {
     DATA.summary.per_topic = null;
     location.hash = '#topics?t=beta'; await sleep(30);
-    out.guard = document.getElementById('topic-detail').textContent;
+    out.guard = txt(document.getElementById('topic-detail'));
     out.guard_banner_hidden = document.getElementById('banner').hidden;
   });
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
@@ -568,24 +591,29 @@ async function drawAll(root) {
 })();
 </script>
 """
+)
 
 #: A topics page opened at a given hash.
-_READ_TOPICS = r"""
-<script>
+_READ_TOPICS = (
+    "<script>"
+    + _SEEN
+    + r"""
 setTimeout(() => {
   const pre = document.createElement('pre'); pre.id = 'probe';
-  pre.textContent = JSON.stringify({detail: !document.getElementById('topic-detail').hidden,
-    title: (document.querySelector('#topic-detail .th2') || {}).textContent || null,
-    notes: [...document.querySelectorAll('#topic-detail .note')].map(p => p.textContent),
-    groups: document.querySelectorAll('#topic-detail section[data-group]').length,
-    order: [...document.querySelectorAll('#topics-index tbody tr')].map(tr => tr.dataset.slug),
-    arrow: ([...document.querySelectorAll('#topics-index th[aria-sort="ascending"], #topics-index th[aria-sort="descending"]')][0] || {}).textContent || null,
-    pair_cards: [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id),
+  const pair = document.getElementById('topic-pair');
+  pre.textContent = JSON.stringify({detail: seen(document.getElementById('topic-detail')),
+    title: txt(document.querySelector('#topic-detail .th2')),
+    notes: [...document.querySelectorAll('#topic-detail .note')].filter(seen).map(p => p.textContent),
+    groups: [...document.querySelectorAll('#topic-detail section[data-group]')].filter(seen).length,
+    order: [...document.querySelectorAll('#topics-index tbody tr')].filter(seen).map(tr => tr.dataset.slug),
+    arrow: txt([...document.querySelectorAll('#topics-index th[aria-sort="ascending"], #topics-index th[aria-sort="descending"]')][0]),
+    pair_cards: pair ? seenCards(pair) : [],
     banner_hidden: document.getElementById('banner').hidden});
   document.body.appendChild(pre);
 }, 200);
 </script>
 """
+)
 
 
 @pytest.fixture(scope="module")
@@ -808,135 +836,174 @@ def test_a_topics_url_opened_fresh_shows_that_view(tmp_path, hash_, expect):
 
 # --------------------------------------------------------------------------- the Comparar tab
 
-#: The Comparar tab, from its top. Each click goes through the tab's own links and reads the
-#: list the page drew; every step records its own error.
-_COMPARE_PROBE = r"""
-<script>
+_COMPARE_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cnum = t => Number(String(t).match(/[\d.]+/)[0].replace(/\./g, ''));
-const listIds = () => [...document.querySelectorAll('#compare-list .card')].map(c => c.dataset.id);
+const sec = key => document.querySelector('#tab-compare [data-sec="' + key + '"]');
 async function drawAll(root) {
-  for (;;) { const more = [...root.querySelectorAll('button.more')].find(b => !b.hidden && b.textContent.startsWith('Mostrar')); if (!more) return; more.click(); await sleep(5); }
+  for (;;) { const more = [...root.querySelectorAll('button.more')].find(b => seen(b) && b.textContent.startsWith('Mostrar')); if (!more) return; more.click(); await sleep(5); }
 }
+async function postsList() { await drawAll(document.getElementById('cards')); return {count: txt(document.getElementById('count')), ids: seenCards(document.getElementById('cards'))}; }
 async function openList(a) {
   a.click(); await sleep(30);
   const list = document.getElementById('compare-list');
-  if (!list) return null;
-  const top = list.getBoundingClientRect().top;
-  const first = list.querySelectorAll('.card').length;
+  if (!seen(list)) return {hash: location.hash, list: false};
+  const in_view = inView(list);
+  const first = seenCards(list).length;
   await drawAll(list);
-  return {hash: location.hash, head: cnum(list.querySelector('h3').textContent), first: first,
-    ids: listIds(), in_view: top >= -2 && top < innerHeight};
+  return {hash: location.hash, head: txt(list.querySelector('h3')), first: first, ids: seenCards(list), in_view: in_view,
+    under: list.previousElementSibling && list.previousElementSibling.dataset.sec,
+    notes: [...list.querySelectorAll('.note')].filter(seen).map(p => p.textContent)};
 }
 (async () => {
   const out = {errors: [], kinds: {}, sentences: {}, bands: {}, px: {}, pd: {}};
   const step = async (name, fn) => { try { await fn(); } catch (e) { out.errors.push(name + ': ' + e); } };
   await sleep(100);
   const home = async () => { location.hash = '#compare'; await sleep(30); };
+  await step('shell', async () => {
+    out.tab_seen = seen(document.getElementById('tab-compare'));
+    out.sections = [...document.querySelectorAll('#tab-compare [data-sec]')].filter(seen).map(s => s.dataset.sec);
+  });
   await step('kinds', async () => {
     for (const k of ['enrich_only', 'adds', 'prim']) {
       await home();
       const card = document.querySelector('#tab-compare [data-kind="' + k + '"]');
-      const shownCount = cnum(card.querySelector('.cnum').textContent);
-      card.querySelector('a').click(); await sleep(30);
-      out.kinds[k] = {shown: shownCount, hash: location.hash, list: shown.map(p => p.id)};
+      const shownCount = txt(card.querySelector('.cnum'));
+      const why = txt(card.querySelector('p'));
+      const a = card.querySelector('a');
+      const link = txt(a);
+      a.click(); await sleep(30);
+      out.kinds[k] = Object.assign({shown: shownCount, why: why, link: link, hash: location.hash}, await postsList());
     }
   });
   await step('sentences', async () => {
     await home();
-    for (const a of document.querySelectorAll('#tab-compare [data-sec="resumen"] a[data-go]')) {
-      out.sentences[a.dataset.go] = {text: a.textContent, href: a.getAttribute('href')};
+    for (const box of sec('resumen').querySelectorAll('.fact')) {
+      const a = box.querySelector('a[data-go]');
+      out.sentences[a.dataset.go] = {big: txt(box.querySelector('.big')), why: txt(box.querySelector('.why')), link: txt(a), href: a.getAttribute('href')};
     }
-    out.resumen = document.querySelector('#tab-compare [data-sec="resumen"]').textContent;
   });
   await step('topics table', async () => {
     await home();
-    out.topic_rows = [...document.querySelectorAll('#tab-compare [data-sec="topics"] tbody tr')].map(tr => tr.dataset.slug);
-    out.topic_more = document.querySelector('#tab-compare [data-sec="topics"] a.all').textContent;
-    const disc = document.querySelector('#tab-compare [data-sec="topics"] tr[data-slug="gamma"] a.disc');
-    out.gamma_disc = cnum(disc.textContent);
+    out.topic_rows = [...sec('topics').querySelectorAll('tbody tr')].filter(seen).map(tr => tr.dataset.slug);
+    out.topic_more = txt(sec('topics').querySelector('a.all'));
+    out.gamma_cells = [...sec('topics').querySelectorAll('tr[data-slug="gamma"] td')].map(txt);
+    out.f01_cells = [...sec('topics').querySelectorAll('tr[data-slug="f01"] td')].map(txt);
+    const disc = sec('topics').querySelector('tr[data-slug="gamma"] a.disc');
     disc.click(); await sleep(30);
-    out.gamma_disc_list = shown.map(p => p.id);
-    out.gamma_disc_hash = location.hash;
+    out.gamma_disc = Object.assign({hash: location.hash}, await postsList());
   });
   await step('bands', async () => {
     await home();
-    const keys = [...document.querySelectorAll('#tab-compare a[data-band]')].map(a => a.dataset.band);
-    out.band_ranges = Object.fromEntries([...document.querySelectorAll('#tab-compare [data-band-row]')].map(r => [r.dataset.bandRow, r.querySelector('.range').textContent]));
-    for (const key of keys) {
+    out.band_heads = [...sec('bands').querySelectorAll('h4')].map(txt);
+    out.band_rows = Object.fromEntries([...sec('bands').querySelectorAll('[data-band-row]')].map(r =>
+      [r.dataset.bandRow, {label: txt(r.querySelector('b')), range: txt(r.querySelector('.range')), pairs: txt(r.querySelector('.pairs-n')), link: txt(r.querySelector('a[data-band]'))}]));
+    for (const key of Object.keys(out.band_rows)) {
       await home();
-      const a = document.querySelector('#tab-compare a[data-band="' + key + '"]');
-      const row = a.closest('[data-band-row]');
-      out.bands[key] = Object.assign({shown: cnum(a.textContent), pairs: cnum(row.querySelector('.pairs-n').textContent)}, await openList(a));
+      out.bands[key] = await openList(sec('bands').querySelector('a[data-band="' + key + '"]'));
     }
   });
   await step('px', async () => {
     await home();
-    const more = document.querySelector('#tab-compare [data-sec="cross"] button.more');
-    if (more) more.click();
-    const keys = [...document.querySelectorAll('#tab-compare [data-sec="cross"] a[data-px]')].map(a => a.dataset.px);
-    for (const key of keys) {
+    const rows = () => [...sec('cross').querySelectorAll('a[data-px]')];
+    out.px_order = rows().filter(seen).map(a => a.dataset.px);
+    for (const key of out.px_order) {
       await home();
-      const m = document.querySelector('#tab-compare [data-sec="cross"] button.more'); if (m) m.click();
-      const a = document.querySelector('#tab-compare [data-sec="cross"] a[data-px="' + key + '"]');
-      out.px[key] = Object.assign({shown: cnum(a.parentNode.querySelector('.c').textContent), name: a.textContent}, await openList(a));
+      const a = rows().find(x => x.dataset.px === key);
+      out.px[key] = Object.assign({name: txt(a), count: txt(a.parentNode.querySelector('.c'))}, await openList(a));
     }
   });
   await step('pd', async () => {
     await home();
-    const keys = [...document.querySelectorAll('#tab-compare a[data-pd]')].map(a => a.dataset.pd);
-    for (const key of keys) {
+    const rows = () => [...sec('cross').querySelectorAll('a[data-pd]')];
+    out.pd_order = rows().filter(seen).map(a => a.dataset.pd);
+    for (const key of out.pd_order) {
       await home();
-      const a = document.querySelector('#tab-compare a[data-pd="' + key + '"]');
-      out.pd[key] = Object.assign({shown: cnum(a.parentNode.querySelector('.c').textContent)}, await openList(a));
+      const a = rows().find(x => x.dataset.pd === key);
+      out.pd[key] = Object.assign({name: txt(a), count: txt(a.parentNode.querySelector('.c'))}, await openList(a));
     }
     await home();
-    out.agree_total = cnum(document.querySelector('#tab-compare [data-sec="cross"] .agree').textContent);
+    out.agree = txt(sec('cross').querySelector('.agree'));
   });
   await step('otro', async () => {
     await home();
-    const sec = document.querySelector('#tab-compare [data-sec="otro"]');
-    out.otro_shown = cnum(sec.querySelector('.cnum').textContent);
-    out.otro_rows = [...sec.querySelectorAll('a[data-px]')].map(a => a.dataset.px);
-    sec.querySelector('a.go').click(); await sleep(30);
-    out.otro_hash = location.hash;
-    out.otro_list = shown.map(p => p.id);
+    out.otro_count = txt(sec('otro').querySelector('.cnum'));
+    out.otro_rows = [...sec('otro').querySelectorAll('a[data-px]')].filter(seen).map(a => [a.dataset.px, a.textContent, txt(a.parentNode.querySelector('.c'))]);
+    out.otro_open = await openList(sec('otro').querySelector('a[data-px]'));
+    await home();
+    sec('otro').querySelector('a.go').click(); await sleep(30);
+    out.otro_posts = Object.assign({hash: location.hash}, await postsList());
   });
   await step('lists past ten', async () => {
-    const rows = Array.from({length: 12}, (_, i) => ({name: 'x' + i, posts: 2, params: {px: 'a~x' + i}, data: {px: 'a~x' + i}}));
-    const box = countList('prueba', rows, COMPARE_PAIRS_SHOWN);
+    await home();
+    const rows = Array.from({length: 12}, (_, i) => ({name: 'x' + i, posts: 2, href: '#compare', data: {}}));
+    const box = linkList('prueba', rows, COMPARE_PAIRS_SHOWN, ['topic más', 'topics más']);
     document.getElementById('compare-body').appendChild(box);
-    const visible = () => [...box.querySelectorAll('li')].filter(li => getComputedStyle(li).display !== 'none').length;
+    const visible = () => [...box.querySelectorAll('li')].filter(seen).length;
     out.list_visible_before = visible();
-    out.list_more = box.querySelector('button.more').textContent;
+    out.list_more = txt(box.querySelector('button.more'));
     box.querySelector('button.more').click();
     out.list_visible_after = visible();
     box.remove();
   });
-  await step('tabs keep their state', async () => {
-    location.hash = '#compare?b=e-lo'; await sleep(30);
-    location.hash = '#posts?f=adds'; await sleep(30);
-    out.compare_tab_href = document.querySelector('.tabs a[data-tab="compare"]').getAttribute('href');
-    location.hash = '#compare'; await sleep(30);
+  await step('round trips', async () => {
+    out.round = {};
+    for (const h of ['#compare?px=gamma~omega', '#compare?pd=delta', '#compare?b=e-lo']) {
+      location.hash = h; await sleep(30);
+      location.hash = '#posts?f=adds'; await sleep(30);
+      document.querySelector('.tabs a[data-tab="compare"]').click(); await sleep(30);
+      out.round[h] = {hash: location.hash, ids: seenCards(document.getElementById('compare-list') || document.body)};
+    }
     out.posts_tab_href = document.querySelector('.tabs a[data-tab="posts"]').getAttribute('href');
     out.posts_f_kept = view.f;
+  });
+  await step('resolution order', async () => {
+    location.hash = '#compare?px=gamma~omega&pd=alpha&b=e-near'; await sleep(30);
+    out.order_ids = seenCards(document.getElementById('compare-list'));
+    out.order_tab_href = document.querySelector('.tabs a[data-tab="compare"]').getAttribute('href');
+  });
+  await step('same list keeps the scroll', async () => {
+    location.hash = '#compare?b=e-mid'; await sleep(30);
+    window.scrollTo(0, 0); await sleep(10);
+    location.hash = '#compare?b=e-mid&z=1'; await sleep(30);
+    out.same_list_scroll = window.scrollY;
   });
   await step('clear', async () => {
     location.hash = '#compare?b=e-lo'; await sleep(30);
     document.querySelector('#compare-list a.clear').click(); await sleep(30);
-    out.cleared = {hash: location.hash, list: !!document.getElementById('compare-list')};
+    out.cleared = {hash: location.hash, list: seen(document.getElementById('compare-list'))};
+  });
+  await step('stale', async () => {
+    location.hash = '#compare?b=no-existe'; await sleep(30);
+    out.stale_notes = [...document.querySelectorAll('#tab-compare .note')].filter(seen).map(p => p.textContent);
+  });
+  await step('count differs', async () => {
+    DATA.summary.confidence_bands.find(b => b.key === 'j-hi').posts = 99;
+    location.hash = '#compare?b=j-hi'; await sleep(30);
+    const list = document.getElementById('compare-list');
+    out.differs = {head: txt(list.querySelector('h3')), notes: [...list.querySelectorAll('.note')].filter(seen).map(p => p.textContent)};
   });
   await step('missing post', async () => {
     const gone = DATA.post_sets.bands['e-mid'][0];
     DATA.posts = DATA.posts.filter(p => p.id !== gone);
     location.hash = '#compare?b=e-mid'; await sleep(30);
-    out.missing_note = (document.querySelector('#compare-list .note') || {}).textContent || null;
+    out.missing_note = [...document.querySelectorAll('#compare-list .note')].filter(seen).map(p => p.textContent);
+  });
+  await step('loadData', async () => {
+    location.hash = '#posts'; await sleep(20);
+    loadData(Object.assign({}, DATA, {threshold: 0.875, fallback: 'nada'}));
+    location.hash = '#compare'; await sleep(30);
+    out.after_load = {range: txt(document.querySelector('#tab-compare [data-band-row="e-lo"] .range')),
+      filter: FILTERS.find(f => f.key === 'fallback').name, otro_title: txt(sec('otro').querySelector('h3'))};
   });
   await step('guard', async () => {
     location.hash = '#posts'; await sleep(20);
     DATA.summary.confidence_bands = null;
     location.hash = '#compare'; await sleep(30);
-    out.guard = document.getElementById('tab-compare').textContent;
+    out.guard = txt(document.getElementById('tab-compare'));
     out.guard_banner_hidden = document.getElementById('banner').hidden;
   });
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
@@ -944,22 +1011,29 @@ async function openList(a) {
 })();
 </script>
 """
+)
 
 #: A Comparar page opened at a given hash.
-_READ_COMPARE = r"""
-<script>
+_READ_COMPARE = (
+    "<script>"
+    + _SEEN
+    + r"""
 setTimeout(() => {
   const pre = document.createElement('pre'); pre.id = 'probe';
   const list = document.getElementById('compare-list');
-  pre.textContent = JSON.stringify({tab: view.tab, visible: !document.getElementById('tab-compare').hidden,
-    list: list ? [...list.querySelectorAll('.card')].map(c => c.dataset.id) : null,
-    head: list ? list.querySelector('h3').textContent : null,
-    notes: [...document.querySelectorAll('#tab-compare .note')].map(p => p.textContent),
+  const tab = document.getElementById('tab-compare');
+  pre.textContent = JSON.stringify({tab: view.tab, visible: seen(tab), text: txt(tab),
+    list: seen(list) ? seenCards(list) : null, head: list ? txt(list.querySelector('h3')) : null,
+    in_view: inView(list),
+    notes: [...document.querySelectorAll('#tab-compare .note, #tab-compare .empty')].filter(seen).map(p => p.textContent),
+    ranges: [...document.querySelectorAll('#tab-compare .range')].map(txt),
+    stamp: txt(document.getElementById('stamp')),
     banner_hidden: document.getElementById('banner').hidden});
   document.body.appendChild(pre);
 }, 200);
 </script>
 """
+)
 
 
 @pytest.fixture(scope="module")
@@ -972,42 +1046,68 @@ def compare_probed(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 _KIND_COUNTS = {
-    "enrich_only": "posts_enrich_only",
-    "adds": "posts_jev_only",
-    "prim": "posts_primary_differs",
+    "enrich_only": ("posts_enrich_only", "doubtful_pairs"),
+    "adds": ("posts_jev_only", "missing_pairs"),
+    "prim": ("posts_primary_differs", None),
 }
 
 
 @_requires_chrome
-def test_each_disagreement_kind_opens_exactly_the_posts_its_count_counts(compare_probed):
-    data, seen = compare_probed
+def test_the_tab_and_its_six_sections_are_on_screen(compare_probed):
+    _data_, seen = compare_probed
 
-    for key, field in _KIND_COUNTS.items():
+    assert seen["tab_seen"] is True
+    assert seen["sections"] == ["resumen", "kinds", "topics", "cross", "otro", "bands"]
+
+
+@_requires_chrome
+def test_each_disagreement_kind_says_its_numbers_and_opens_exactly_its_posts(compare_probed):
+    data, seen = compare_probed
+    s = data["summary"]
+
+    for key, (posts, pairs) in _KIND_COUNTS.items():
         kind = seen["kinds"][key]
-        assert kind["shown"] == data["summary"][field] == len(kind["list"]), key
-        assert set(kind["list"]) == _ids(data, key), key
-        assert kind["hash"] == f"#posts?f={key}", key
+        assert kind["shown"] == str(s[posts]), key
+        assert set(kind["ids"]) == _ids(data, key) and len(kind["ids"]) == s[posts], key
+        assert kind["count"].startswith(f"mostrando {s[posts]} de"), key
+        assert kind["hash"] == f"#posts?f={key}" and kind["link"] == "ver los posts →", key
+        if pairs:
+            assert kind["why"].endswith(f": {s[pairs]} topics en total."), key
 
 
 @_requires_chrome
 def test_the_three_sentences_quote_the_header_numbers_and_open_their_posts(compare_probed):
     data, seen = compare_probed
     s = data["summary"]
+    one, add, prim = (seen["sentences"][k] for k in ("enrich_only", "adds", "prim"))
 
-    assert f"Jev confirma {s['assigned_backed']} de {s['assigned_pairs']}" in seen["resumen"]
-    assert f"Jev añadiría {s['missing_pairs']}" in seen["resumen"]
-    assert f"coincide en {s['primary_agree_pct']:.1f} %".replace(".", ",") in seen["resumen"]
-    assert {go: v["href"] for go, v in seen["sentences"].items()} == {
+    assert one["big"] == "Jev confirma 39 de 57 topics de enrich (68,4 %)."
+    assert (s["assigned_backed"], s["assigned_pairs"], s["enrich_backed_pct"]) == (39, 57, 68.4)
+    assert one["why"].endswith(
+        f"Los otros {s['doubtful_pairs']} (probabilidad < 0,85) son candidatos a quitar."
+    )
+    assert (
+        one["link"] == f"ver los {s['posts_enrich_only']} posts con un topic que Jev no confirma →"
+    )
+    assert add["big"] == f"Jev añadiría {s['missing_pairs']} topics que enrich no puso."
+    assert add["link"] == f"ver los {s['posts_jev_only']} posts donde Jev añadiría →"
+    assert prim["big"] == "El topic principal coincide en 71,7 % de los posts."
+    assert s["primary_agree_pct"] == 71.7
+    assert prim["why"].startswith(
+        f"En {s['primary_agree']} de {s['items_compared']} posts comparados"
+    )
+    assert prim["link"] == f"ver los {s['posts_primary_differs']} posts donde no coincide →"
+    assert {k: v["href"] for k, v in seen["sentences"].items()} == {
         "enrich_only": "#posts?f=enrich_only",
         "adds": "#posts?f=adds",
         "prim": "#posts?f=prim",
     }
-    assert str(s["posts_primary_differs"]) in seen["sentences"]["prim"]["text"]
 
 
 @_requires_chrome
 def test_the_topic_table_is_the_ten_worst_in_the_topics_tabs_order(compare_probed):
     data, seen = compare_probed
+    gamma = {r["slug"]: r for r in data["summary"]["per_topic"]}["gamma"]
 
     assert seen["topic_rows"] == [
         "gamma",
@@ -1021,23 +1121,37 @@ def test_the_topic_table_is_the_ten_worst_in_the_topics_tabs_order(compare_probe
         "f05",
         "f06",
     ]
-    assert seen["topic_more"].startswith("ver los 12")
-    gamma = {r["slug"]: r for r in data["summary"]["per_topic"]}["gamma"]
-    assert seen["gamma_disc"] == gamma["disagreeing"] == len(seen["gamma_disc_list"]) == 5
-    assert seen["gamma_disc_hash"] == "#posts?t=gamma"
+    assert seen["topic_more"] == "ver los 12 en Topics →"
+    assert seen["gamma_cells"] == ["Gamma", "10", "0", "0,0 %", "10"]
+    # Never assigned: no agreement to be 0 % of.
+    assert seen["f01_cells"] == ["F01pocos datos", "0", "0", "—", "0"]
+    assert gamma["disagreeing"] == 10 == len(seen["gamma_disc"]["ids"])
+    assert seen["gamma_disc"]["hash"] == "#posts?t=gamma"
 
 
 @_requires_chrome
-def test_each_band_opens_exactly_its_posts_and_says_its_pairs(compare_probed):
+def test_each_band_says_its_numbers_and_opens_exactly_its_posts(compare_probed):
     data, seen = compare_probed
     rows = {row["key"]: row for row in data["summary"]["confidence_bands"]}
 
+    assert seen["band_heads"] == [
+        "Enrich asigna y Jev no · 18 desacuerdos",
+        "Jev añadiría · 24 desacuerdos",
+    ]
     assert set(seen["bands"]) == set(rows) == {"e-lo", "e-mid", "e-near", "j-near", "j-hi"}
     for key, band in seen["bands"].items():
-        assert band["shown"] == band["head"] == rows[key]["posts"] == len(band["ids"]), key
-        assert band["pairs"] == rows[key]["pairs"], key
-        assert band["ids"] == data["post_sets"]["bands"][key], key
-        assert band["hash"] == f"#compare?b={key}", key
+        row = seen["band_rows"][key]
+        assert row["label"] == rows[key]["label"], key
+        assert row["pairs"] == f"{rows[key]['pairs']} desacuerdos", key
+        assert row["link"] == f"{rows[key]['posts']} post" + (
+            "s" if rows[key]["posts"] != 1 else ""
+        ), key
+        assert (
+            band["ids"] == data["post_sets"]["bands"][key]
+            and len(band["ids"]) == rows[key]["posts"]
+        ), key
+        assert band["head"].startswith(row["link"] + " · " + rows[key]["label"]), key
+        assert band["hash"] == f"#compare?b={key}" and band["under"] == "bands", key
         assert band["in_view"] is True, key
     assert seen["bands"]["j-near"]["first"] == 20 and len(seen["bands"]["j-near"]["ids"]) == 22
 
@@ -1046,7 +1160,7 @@ def test_each_band_opens_exactly_its_posts_and_says_its_pairs(compare_probed):
 def test_the_band_edges_are_stated_as_probabilities(compare_probed):
     _data_, seen = compare_probed
 
-    assert seen["band_ranges"] == {
+    assert {k: r["range"] for k, r in seen["band_rows"].items()} == {
         "e-lo": "probabilidad < 0,20",
         "e-mid": "probabilidad 0,20 – 0,50",
         "e-near": "probabilidad 0,50 – 0,85",
@@ -1056,61 +1170,138 @@ def test_the_band_edges_are_stated_as_probabilities(compare_probed):
 
 
 @_requires_chrome
-def test_each_primary_cross_pair_opens_exactly_its_posts(compare_probed):
+def test_each_primary_cross_pair_is_ranked_named_and_opens_exactly_its_posts(compare_probed):
     data, seen = compare_probed
 
-    assert list(seen["px"]) == ["delta~otro", "gamma~omega", "-~alpha", "alpha~beta"]
+    assert seen["px_order"] == ["gamma~omega", "delta~otro", "-~alpha", "alpha~beta"]
+    names = {k: v["name"] for k, v in seen["px"].items()}
+    assert names == {
+        "gamma~omega": "Gamma → Omega",
+        "delta~otro": "Delta → otro (ninguno del vocabulario)",
+        "-~alpha": "sin principal → Alpha",
+        "alpha~beta": "Alpha → Beta",
+    }
     for key, pair in seen["px"].items():
-        assert pair["shown"] == pair["head"] == len(pair["ids"]), key
+        n = len(data["post_sets"]["px"][key])
         assert pair["ids"] == data["post_sets"]["px"][key], key
+        assert pair["count"] == f"{n} post" + ("s" if n != 1 else ""), key
+        assert pair["head"].startswith(pair["count"] + " · Principal · enrich: "), key
         assert pair["hash"] == "#compare?px=" + key.replace("~", "%7E"), key
-    assert "sin principal" in seen["px"]["-~alpha"]["name"]
-    assert "(ninguno del vocabulario)" in seen["px"]["delta~otro"]["name"]
+    assert seen["px"]["delta~otro"]["under"] == "otro"
+    assert seen["px"]["gamma~omega"]["under"] == "cross"
 
 
 @_requires_chrome
-def test_the_diagonal_opens_the_posts_where_both_pick_the_topic(compare_probed):
+def test_the_diagonal_is_ranked_ties_by_label_and_opens_its_posts(compare_probed):
     data, seen = compare_probed
+    s = data["summary"]
 
-    assert {k: v["shown"] for k, v in seen["pd"].items()} == {"alpha": 28, "beta": 4, "gamma": 2}
+    assert seen["pd_order"] == ["alpha", "beta", "delta", "gamma"]
+    assert {k: v["count"] for k, v in seen["pd"].items()} == {
+        "alpha": "28 posts",
+        "beta": "4 posts",
+        "delta": "3 posts",
+        "gamma": "3 posts",
+    }
     for key, pd in seen["pd"].items():
-        assert pd["ids"] == data["post_sets"]["pd"][key] and pd["head"] == len(pd["ids"]), key
-    assert seen["agree_total"] == data["summary"]["primary_agree"] == 34
+        assert pd["ids"] == data["post_sets"]["pd"][key] and pd["under"] == "cross", key
+    assert seen["agree"] == (
+        f"Coinciden en {s['primary_agree']} posts de {s['items_compared']} comparados; "
+        f"no coinciden en {s['posts_primary_differs']} posts."
+    )
 
 
 @_requires_chrome
 def test_the_other_fallback_is_counted_with_its_posts_and_what_enrich_had(compare_probed):
     data, seen = compare_probed
 
-    assert seen["otro_shown"] == data["summary"]["primary_fallback"] == 4
-    assert seen["otro_rows"] == ["delta~otro"]
-    assert seen["otro_hash"] == "#posts?f=fallback"
-    assert set(seen["otro_list"]) == _ids(data, "fallback") and len(seen["otro_list"]) == 4
+    assert seen["otro_count"] == str(data["summary"]["primary_fallback"]) == "5"
+    assert seen["otro_rows"] == [["delta~otro", "Delta", "5 posts"]]
+    assert seen["otro_open"]["under"] == "otro"
+    assert seen["otro_open"]["ids"] == data["post_sets"]["px"]["delta~otro"]
+    assert seen["otro_posts"]["hash"] == "#posts?f=fallback"
+    assert (
+        set(seen["otro_posts"]["ids"]) == _ids(data, "fallback")
+        and len(seen["otro_posts"]["ids"]) == 5
+    )
 
 
 @_requires_chrome
-def test_a_long_compare_list_shows_ten_and_ver_todos_opens_the_rest(compare_probed):
+def test_a_long_list_shows_ten_and_ver_todos_names_its_unit(compare_probed):
     _data_, seen = compare_probed
 
     assert seen["list_visible_before"] == 10
-    assert seen["list_more"] == "ver todos (2 cruces más, 4 posts)"
+    assert seen["list_more"] == "ver todos (2 topics más, 4 posts)"
     assert seen["list_visible_after"] == 12
 
 
 @_requires_chrome
 def test_leaving_and_returning_keeps_each_tabs_view(compare_probed):
-    _data_, seen = compare_probed
+    data, seen = compare_probed
+    sets = data["post_sets"]
 
-    assert seen["compare_tab_href"] == "#compare?b=e-lo"
+    assert seen["round"] == {
+        "#compare?px=gamma~omega": {
+            "hash": "#compare?px=gamma%7Eomega",
+            "ids": sets["px"]["gamma~omega"],
+        },
+        "#compare?pd=delta": {"hash": "#compare?pd=delta", "ids": sets["pd"]["delta"]},
+        "#compare?b=e-lo": {"hash": "#compare?b=e-lo", "ids": sets["bands"]["e-lo"]},
+    }
     assert seen["posts_tab_href"] == "#posts?f=adds" and seen["posts_f_kept"] == "adds"
     assert seen["cleared"] == {"hash": "#compare", "list": False}
+
+
+@_requires_chrome
+def test_one_list_at_a_time_band_first_and_the_tab_link_says_which(compare_probed):
+    data, seen = compare_probed
+
+    assert seen["order_ids"] == data["post_sets"]["bands"]["e-near"]
+    assert seen["order_tab_href"] == "#compare?b=e-near"
+
+
+@_requires_chrome
+def test_the_same_list_again_does_not_scroll(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["same_list_scroll"] == 0
+
+
+@_requires_chrome
+def test_a_stale_group_says_so_in_this_tab(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["stale_notes"] == [
+        "Ese grupo ya no existe en estos datos; en esta pestaña, la comparación completa."
+    ]
+
+
+@_requires_chrome
+def test_a_list_heading_counts_what_it_lists_and_names_a_differing_summary(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["differs"]["head"].startswith("1 post · ")
+    assert seen["differs"]["notes"] == [
+        "El resumen cuenta 99 posts en este grupo; la lista tiene 1."
+    ]
 
 
 @_requires_chrome
 def test_a_compare_list_whose_posts_are_missing_says_how_many(compare_probed):
     _data_, seen = compare_probed
 
-    assert seen["missing_note"] == "1 de 3 posts no están en esta página."
+    assert seen["missing_note"] == ["1 de 7 posts no están en esta página."]
+
+
+@_requires_chrome
+def test_new_data_through_loaddata_reaches_every_derived_value(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["after_load"] == {
+        "range": "probabilidad < 0,200",
+        "filter": "Jev eligió «nada»",
+        "otro_title": "Jev eligió «nada»",
+    }
 
 
 @_requires_chrome
@@ -1125,10 +1316,10 @@ def test_a_compare_tab_that_fails_after_boot_says_so_in_the_tab(compare_probed):
 @pytest.mark.parametrize(
     ("hash_", "expect"),
     [
-        ("#compare?b=e-near", {"list": ["n00", "n01"]}),
-        ("#compare?px=gamma~omega", {"list": ["m00", "m01", "m02"]}),
+        ("#compare?b=e-near", {"list": ["n00", "n01", "n02"]}),
+        ("#compare?px=gamma~omega", {"list": [f"m{n:02d}" for n in range(7)]}),
         ("#compare?px=-~alpha", {"list": ["s00", "s01"]}),
-        ("#compare?pd=gamma", {"list": ["n00", "n01"]}),
+        ("#compare?pd=gamma", {"list": ["n00", "n01", "n02"]}),
         ("#compare?b=no-existe", {"note": "Ese grupo ya no existe en estos datos"}),
         ("#compare?px=zz~yy", {"note": "Ese grupo ya no existe en estos datos"}),
         ("#compare?pd=%E0", {"note": "Ese grupo ya no existe en estos datos"}),
@@ -1146,6 +1337,35 @@ def test_a_compare_url_opened_fresh_shows_that_view(tmp_path, hash_, expect):
     assert seen["banner_hidden"] is True and seen["tab"] == "compare" and seen["visible"]
     if "list" in expect:
         assert seen["list"] == expect["list"]
+        assert seen["in_view"] is True
     if "note" in expect:
         assert seen["list"] is None
         assert any(expect["note"] in note for note in seen["notes"]), seen["notes"]
+
+
+@_requires_chrome
+def test_nothing_compared_says_so_instead_of_zero_percent(tmp_path):
+    """A vocabulary edit retires every answer: the tab says nothing is compared and why,
+    and shows no «0,0 %» that reads as a measured disagreement."""
+    _need_chrome()
+    items = [_item(f"{n}") for n in range(3)]
+    data = _data(items, {i.id: _assessment(i, contract="0" * 64) for i in items})
+    assert data["summary"]["items_compared"] == 0 and data["totals"]["stale"] == 3
+
+    seen = _open(_page(tmp_path, data, _READ_COMPARE), "#compare")
+
+    assert "Ningún post comparado todavía" in seen["text"]
+    assert "3 evaluaciones caducadas" in seen["text"]
+    assert "0,0 %" not in seen["text"] and "%" not in seen["text"]
+
+
+@_requires_chrome
+def test_the_edges_print_at_the_thresholds_own_precision(tmp_path):
+    _need_chrome()
+    items, assessments = _corpus()
+    data = _data(items, assessments, threshold=0.875)
+
+    seen = _open(_page(tmp_path, data, _READ_COMPARE), "#compare")
+
+    assert "UMBRAL 0,875" in seen["stamp"]
+    assert "probabilidad 0,500 – 0,875" in seen["ranges"]
