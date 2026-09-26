@@ -671,7 +671,13 @@ generates an Obsidian wiki.
   verdict; tokens, never dollars (priced at read time by `report.run_history`, which also
   prices assessments no logged pass covers as "fuera del registro"). `jev dashboard` compares at the FIXED
   `[jev].threshold`, recomputes nothing in the browser (no slider, no JS mirror, no node in
-  CI) and shows the disagreeing posts plus cost total / per pass / per post. `jev topics` is the
+  CI) and is a post browser (every post as a card, Jev vs enrich under it, filters + topic
+  navigator + j/k/n/p, view in the URL hash; photos by relative path into `_media/`, never
+  base64). Which filter a card is in is decided in Python (`in` keys, tested equal to the
+  report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
+  disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
+  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Plus
+  cost total / per pass / per post. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name

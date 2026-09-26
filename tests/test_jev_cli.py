@@ -20,7 +20,7 @@ from xbrain.jev.client import JevClient, JevResult, Question
 from xbrain.jev.defaults import plural
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
 from xbrain.jev.store import load_assessments, load_runs, save_assessments
-from xbrain.models import Author, Enrichment, Item, Topic
+from xbrain.models import Author, Enrichment, Item, MediaPhotoDownloaded, Topic
 from xbrain.notes_io import note_filename
 from xbrain.rubrics import save_vocab
 from xbrain import store as store_module
@@ -1109,6 +1109,7 @@ def test_jev_report_writes_json_and_markdown(tmp_path: Path, monkeypatch):
     assert payload["summary"]["doubtful_pairs"] == 1
     assert payload["summary"]["missing_pairs"] == 1
     assert payload["summary"]["items_compared"] == 2
+    assert payload["summary"]["items_unassessed"] == 0
 
 
 def test_jev_report_prints_what_every_logged_pass_cost(tmp_path: Path, monkeypatch):
@@ -1400,6 +1401,9 @@ def test_jev_report_agrees_with_one_stale_record(tmp_path: Path, monkeypatch):
     assert "1 caducada" in result.stdout and "1 caducadas" not in result.stdout
     assert "huérfana" not in result.stdout
     assert "items comparados 1/1" in result.stdout
+    # The stale one is a post with no current answer: `jev topics` would ask it next.
+    summary = json.loads(_report_paths(tmp_path)[0].read_text(encoding="utf-8"))["summary"]
+    assert summary["items_unassessed"] == 1
 
 
 def test_the_three_places_that_quote_the_bill_print_the_same_fragment(tmp_path: Path, monkeypatch):
@@ -1468,8 +1472,8 @@ def test_jev_dashboard_writes_a_self_contained_page_without_asking_jev_anything(
     html = page.read_text(encoding="utf-8")
     assert "/*__DATA__*/" not in html and "/*__ECHARTS__*/" not in html
     assert '"ai-coding"' in html
-    # The rows of the table: every compared post, disagreement or not.
-    assert "2 posts en el dashboard" in result.stdout
+    # Every post is a card; the compared ones are the ones Jev vs enrich is shown for.
+    assert "2 posts en el dashboard (2 comparados con Jev)" in result.stdout
     assert page.resolve().as_uri() in result.stdout
 
 
@@ -1591,8 +1595,48 @@ def test_jev_dashboard_links_the_notes_that_exist_and_not_the_ones_that_do_not(
 
     assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
-    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["posts"]}
-    assert notes == {"1": str(note.resolve()), "2": None}
+    blob = _blob(_page(vault))
+    notes = {row["id"]: row["note"] for row in blob["posts"]}
+    # The directory ships once; each post carries its note's file name.
+    assert blob["notes_dir"] == str(items_dir.resolve())
+    assert notes == {"1": note.name, "2": None}
+
+
+def test_jev_dashboard_links_photos_relative_to_the_page_into_the_vault_media_mirror(
+    tmp_path: Path, monkeypatch
+):
+    """The page is written next to the `_media/` folder the notes embed from, so a photo is
+    `_media/<local_path>` — present on disk — and a missing file is not linked."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    store = load_store(tmp_path / "data" / "items.json")
+    photo = {
+        "url": "https://pbs.twimg.com/a.jpg",
+        "width": 4,
+        "height": 4,
+        "bytes_size": 3,
+        "downloaded_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+    }
+    store["1"].media = [MediaPhotoDownloaded(local_path="1/0.jpg", **photo)]
+    store["2"].media = [MediaPhotoDownloaded(local_path="2/0.jpg", **photo)]
+    save_store(store, tmp_path / "data" / "items.json")
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    media_dir = vault / "x-knowledge" / "_media" / "1"
+    media_dir.mkdir(parents=True)
+    (media_dir / "0.jpg").write_bytes(b"jpg")
+    downloaded = tmp_path / "data" / "media" / "2"
+    downloaded.mkdir(parents=True)
+    (downloaded / "0.jpg").write_bytes(b"jpg")
+
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+
+    page = _page(vault)
+    media = {row["id"]: row["media"] for row in _blob(page)["posts"]}
+    assert media["1"] == [{"type": "photo", "src": "_media/1/0.jpg", "desc": "", "why": None}]
+    assert (page.parent / media["1"][0]["src"]).is_file()
+    # Downloaded into data/media but never mirrored into the vault: `xbrain generate` fixes it.
+    assert media["2"] == [{"type": "photo", "src": None, "desc": "", "why": "not_mirrored"}]
 
 
 def test_jev_dashboard_refuses_a_corpus_where_nothing_is_comparable(tmp_path: Path, monkeypatch):

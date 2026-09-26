@@ -9,7 +9,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 /* Tokens, atmosphere and the shared furniture are `dashboard.template.html`'s, verbatim:
-   the two pages are siblings and a reader must not have to notice which one they are on. */
+   the two pages are siblings and a reader must not have to notice which one they are on.
+   This page also follows a LIGHT system theme (the block right after), with the same roles. */
 :root{
   --bg:#0E0D0B; --surface:#16130E; --surface-2:#1C1811;
   --hairline:rgba(236,230,218,.09); --hairline-2:rgba(236,230,218,.05);
@@ -17,18 +18,35 @@
   --accent:#E0A233; --accent-soft:rgba(224,162,51,.14);
   --sage:#7C9A8E; --sienna:#C4643B; --mauve:#9B8FB0; --slate:#6E8CA0; --sand:#C9A87C;
   --saved:#7C9A8E; --failed:#B5533F;
+  --sage-line:rgba(124,154,142,.45); --sienna-line:rgba(196,100,59,.6); --sienna-soft:rgba(196,100,59,.10);
+  --accent-line:rgba(224,162,51,.5); --banner-ink:#F0C7BD; --banner-strong:#FFF;
+  --glow-a:rgba(224,162,51,.10); --glow-b:rgba(110,140,160,.06); --grain:.035;
   --display:'Fraunces',Georgia,serif; --ui:'Hanken Grotesk',system-ui,sans-serif; --mono:'Spline Sans Mono',monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#F6F2EA; --surface:#FFFDF9; --surface-2:#F1EBDF;
+    --hairline:rgba(40,34,24,.13); --hairline-2:rgba(40,34,24,.07);
+    --ink:#1F1B15; --ink-muted:#5C5548; --ink-faint:#8B8374;
+    --accent:#A8690F; --accent-soft:rgba(168,105,15,.11);
+    --sage:#3F6B5B; --sienna:#A8481F; --sand:#7D5E33;
+    --saved:#3F6B5B; --failed:#A23F2B;
+    --sage-line:rgba(63,107,91,.45); --sienna-line:rgba(168,72,31,.55); --sienna-soft:rgba(168,72,31,.08);
+    --accent-line:rgba(168,105,15,.45); --banner-ink:#6E2A1C; --banner-strong:#3D130A;
+    --glow-a:rgba(168,105,15,.08); --glow-b:rgba(63,107,91,.05); --grain:.02;
+  }
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;line-height:1.5;overflow-x:hidden;position:relative;min-height:100vh}
 .glow{position:fixed;inset:0;pointer-events:none;z-index:0;
-  background:radial-gradient(820px 520px at 12% -6%, rgba(224,162,51,.10), transparent 60%),
-             radial-gradient(700px 700px at 108% 8%, rgba(110,140,160,.06), transparent 55%);}
-.grain{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:.035;mix-blend-mode:overlay;
+  background:radial-gradient(820px 520px at 12% -6%, var(--glow-a), transparent 60%),
+             radial-gradient(700px 700px at 108% 8%, var(--glow-b), transparent 55%);}
+.grain{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:var(--grain);mix-blend-mode:overlay;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
 .wrap{position:relative;z-index:2;max-width:1360px;margin:0 auto;padding:56px 40px 72px}
 a{color:inherit}
+button{font:inherit;color:inherit}
 
 /* header */
 .masthead{display:flex;justify-content:space-between;align-items:flex-end;gap:32px;
@@ -69,6 +87,8 @@ a{color:inherit}
 .phead .sub{font-size:12px;color:var(--ink-faint);text-align:right}
 .note{font-size:13px;color:var(--sand);margin:12px 2px 0;line-height:1.6}
 .muted{font-size:12.5px;color:var(--ink-faint);margin:10px 2px 0;line-height:1.6}
+details.hist{margin-top:18px}
+details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:10px}
 
 /* the three numbers */
 .facts{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
@@ -76,54 +96,141 @@ a{color:inherit}
 .fact .big em{font-style:normal;color:var(--accent)}
 .fact .why{font-size:13px;color:var(--ink-muted);margin-top:8px;line-height:1.55}
 
-/* controls */
-.controls{display:flex;align-items:center;gap:22px;flex-wrap:wrap;margin-bottom:14px}
-.controls label{display:inline-flex;align-items:center;gap:9px;font-size:13px;color:var(--ink-muted);cursor:pointer}
-.controls input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
-.controls input[type=search]{flex:1;min-width:220px;max-width:420px;background:var(--surface-2);color:var(--ink);
-  border:1px solid var(--hairline);border-radius:8px;padding:8px 12px;font-family:var(--ui);font-size:13.5px}
-.controls input[type=search]:focus-visible,.controls input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.count{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint)}
-
-/* tables */
+/* tables (the per-pass history) */
 .twrap{overflow:auto}
-.posts .twrap{max-height:760px}
 .t thead th{position:sticky;top:0;z-index:1;background:var(--surface)}
 .t{width:100%;border-collapse:collapse;font-size:13px}
 .t th{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
   color:var(--ink-faint);text-align:left;font-weight:400;padding:0 12px 9px 0;white-space:nowrap}
 .t td{padding:10px 12px 10px 0;border-top:1px solid var(--hairline-2);vertical-align:top;overflow-wrap:anywhere}
 .t .n{font-family:var(--mono);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
-.t .tx{color:var(--ink-muted);line-height:1.45;min-width:220px;max-width:460px}
-.t .hd{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:5px;display:flex;gap:14px;flex-wrap:wrap}
-.lk{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--ink-faint);text-decoration:none;white-space:nowrap}
-.lk:hover{color:var(--accent)}
-.tag{display:inline-block;margin:0 6px 5px 0;padding:2px 8px;border-radius:10px;font-size:12px;white-space:nowrap;
-  border:1px solid var(--hairline);color:var(--ink)}
-.tag small{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-left:5px}
-.tag.ok{border-color:rgba(124,154,142,.45)}
-.tag.ok b{color:var(--sage)}
-.tag.no{border-color:rgba(196,100,59,.6);background:rgba(196,100,59,.10)}
-.tag.no b{color:var(--sienna)}
-.tag.un{color:var(--ink-faint);border-style:dashed}
-.tag.add{border-color:rgba(224,162,51,.5);background:var(--accent-soft)}
-.tag.add b{color:var(--accent)}
-.prim{white-space:nowrap}
-.prim.diff{color:var(--sienna)}
-.prim .arrow{color:var(--ink-faint);margin:0 5px}
 .empty{font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:14px 0}
+
+/* tabs */
+.tabs{display:flex;gap:4px;margin-top:30px;border-bottom:1px solid var(--hairline);overflow-x:auto}
+.tabs a{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;text-decoration:none;
+  color:var(--ink-faint);padding:12px 16px 11px;border-bottom:2px solid transparent;white-space:nowrap}
+.tabs a:hover{color:var(--ink)}
+.tabs a[aria-current="page"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tabs a:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.soon{margin-top:22px;padding:28px 24px;border:1px dashed var(--hairline);border-radius:14px;color:var(--ink-muted);font-size:14px}
+.soon b{font-family:var(--display);font-weight:600;font-size:20px;color:var(--ink);display:block;margin-bottom:6px}
+
+/* posts: rail + list */
+.browse{display:grid;grid-template-columns:290px minmax(0,1fr);gap:26px;margin-top:22px;align-items:start}
+.rail{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;padding-right:4px}
+.rail h3{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);font-weight:400;margin:4px 0 8px}
+.rail .tbox{margin-top:22px}
+.rail .tbox>summary{cursor:pointer;font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 8px}
+.rail .legend{font-size:11.5px;color:var(--ink-faint);line-height:1.5;margin:-2px 0 8px}
+.f{display:flex;justify-content:space-between;align-items:baseline;gap:10px;width:100%;text-align:left;cursor:pointer;
+  background:none;border:1px solid transparent;border-radius:8px;padding:6px 9px;font-size:13.5px;color:var(--ink-muted)}
+.f:hover{background:var(--surface);color:var(--ink)}
+.f[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--ink)}
+.f:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.f .c{font-family:var(--mono);font-size:11px;color:var(--ink-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
+.f .c .d{color:var(--sienna)}
+.f .c .z{opacity:.5}
+.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+.controls input[type=search]{flex:1;min-width:200px;background:var(--surface-2);color:var(--ink);
+  border:1px solid var(--hairline);border-radius:8px;padding:8px 12px;font-family:var(--ui);font-size:13.5px}
+.controls select{background:var(--surface-2);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:7px 10px;font-family:var(--ui);font-size:13px}
+.controls input:focus-visible,.controls select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.count{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint)}
+.keys{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin:-4px 0 12px}
+.keys kbd{font-family:var(--mono);border:1px solid var(--hairline);border-radius:3px;padding:0 4px;margin:0 2px}
+.chipline{display:flex;gap:8px;flex-wrap:wrap;margin:-4px 0 12px}
+.chipx{font-size:12px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:999px;padding:2px 10px;cursor:pointer}
+.more{display:block;margin:18px auto 0;background:var(--surface);border:1px solid var(--hairline);border-radius:8px;padding:8px 16px;cursor:pointer;font-size:13px;color:var(--ink-muted)}
+.more:hover{color:var(--ink)}
+/* `display:block` above would override the `hidden` attribute and leave "Mostrar 0 más" on screen. */
+.more[hidden]{display:none}
+
+/* the card: an X-style share preview, then Jev vs enrich */
+.card{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:16px 18px 14px;margin-bottom:16px;
+  scroll-margin-top:14px;box-shadow:0 18px 40px -34px rgba(0,0,0,.9)}
+.card.cur{border-color:var(--accent-line);box-shadow:0 0 0 1px var(--accent-line)}
+.card:focus{outline:none}
+.twh{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.av{width:36px;height:36px;border-radius:50%;background:var(--accent);color:var(--bg);display:grid;place-items:center;font-weight:700;flex:none}
+.who{min-width:0;line-height:1.3}
+.who b{font-weight:600}
+.who span{color:var(--ink-faint);font-size:13px}
+.links{margin-left:auto;display:flex;gap:12px;align-items:center}
+.lk{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--ink-faint);text-decoration:none;white-space:nowrap}
+.lk:hover{color:var(--accent)}
+.st{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px dashed var(--hairline);border-radius:999px;padding:1px 8px;color:var(--ink-faint)}
+.twt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15.5px;line-height:1.55;margin:10px 0 4px}
+.twt a{color:var(--accent)}
+.twt.clamp{max-height:12.5em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
+.toggle{background:none;border:0;color:var(--accent);cursor:pointer;font-size:13px;padding:2px 0}
+.media{display:grid;gap:4px;border-radius:12px;overflow:hidden;margin-top:10px}
+.media.n2,.media.n4{grid-template-columns:1fr 1fr}.media.n3{grid-template-columns:2fr 1fr}
+.media figure{margin:0;position:relative;background:var(--surface-2);min-height:110px}
+.media img{display:block;width:100%;height:100%;max-height:380px;object-fit:cover}
+.play{position:absolute;inset:0;display:grid;place-items:center;font-size:34px;color:#fff;text-shadow:0 2px 8px #000;pointer-events:none}
+.noimg{display:grid;place-items:center;height:110px;color:var(--ink-faint);font-family:var(--mono);font-size:11px}
+.tw.quoted{border:1px solid var(--hairline);border-radius:12px;padding:10px 12px;margin-top:10px;background:var(--surface-2)}
+.tw.quoted .twt{font-size:14px;margin:6px 0 0}
+.lc{display:flex;flex-direction:column;gap:2px;border:1px solid var(--hairline);border-radius:12px;padding:9px 12px;margin-top:10px;text-decoration:none;color:var(--ink)}
+.lc:hover{border-color:var(--accent-line)}
+.lc .dom{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.lc b{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.jev{margin-top:14px;padding-top:12px;border-top:1px solid var(--hairline-2)}
+.jh{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
+.jh .kick{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint)}
+.jh .meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-left:auto}
+.badge{font-family:var(--mono);font-size:10px;letter-spacing:.06em;border-radius:999px;padding:1px 8px;border:1px solid var(--hairline);color:var(--ink-muted)}
+.badge.d{border-color:var(--sienna-line);color:var(--sienna);background:var(--sienna-soft)}
+.badge.cut{border-color:var(--accent-line);color:var(--accent)}
+.rows{width:100%;border-collapse:collapse;font-size:13px}
+.rows td{padding:5px 10px 5px 0;border-top:1px solid var(--hairline-2);vertical-align:middle}
+.rows td.tp{width:40%;overflow-wrap:anywhere}
+.rows td.en{width:3em;text-align:center;font-family:var(--mono)}
+.rows td.en.y{color:var(--sage)}
+.rows td.en.n{color:var(--ink-faint)}
+.bar{display:flex;align-items:center;gap:8px;min-width:130px}
+.bar i{display:block;height:6px;border-radius:3px;background:var(--hairline);flex:1;position:relative;overflow:hidden}
+.bar i b{position:absolute;inset:0 auto 0 0;background:var(--slate)}
+.bar i s{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--ink-faint)}
+.bar span{font-family:var(--mono);font-size:11px;width:3.2em;text-align:right;font-variant-numeric:tabular-nums}
+.v{font-size:11.5px;border-radius:999px;padding:1px 9px;white-space:nowrap;border:1px solid var(--hairline)}
+.v.ok{border-color:var(--sage-line);color:var(--sage)}
+.v.en{border-color:var(--sienna-line);color:var(--sienna);background:var(--sienna-soft)}
+.v.jv{border-color:var(--accent-line);color:var(--accent);background:var(--accent-soft)}
+.v.un{border-style:dashed;color:var(--ink-faint)}
+.prim{font-size:13px;margin-top:9px;color:var(--ink-muted)}
+.prim b{color:var(--ink);font-weight:600}
+.prim.diff b{color:var(--sienna)}
+details.saw{margin-top:10px}
+details.saw>summary{cursor:pointer;font-size:12.5px;color:var(--ink-muted)}
+details.saw[open]>summary{color:var(--ink)}
+.src{margin:10px 0 0;padding-left:10px;border-left:2px solid var(--hairline)}
+.src .sl{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.src .sl .cut{color:var(--sienna)}
+.src pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ui);font-size:13px;color:var(--ink-muted);margin-top:3px}
+.ask{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.ask code{font-family:var(--mono);font-size:11.5px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere}
+.ask button{background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px}
+.ask button:hover{border-color:var(--accent-line)}
+.echips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.echips span{font-size:12px;border:1px solid var(--hairline);border-radius:999px;padding:1px 9px}
 
 /* the failure banner: shown only when the page could not draw itself */
 .banner{margin-top:24px;padding:14px 18px;border-radius:10px;font-size:13.5px;line-height:1.6;
-  background:rgba(181,83,63,.14);border:1px solid rgba(181,83,63,.55);color:#F0C7BD}
-.banner b{color:#FFF;font-weight:600;display:block;font-family:var(--mono);font-size:10.5px;
+  background:rgba(181,83,63,.14);border:1px solid rgba(181,83,63,.55);color:var(--banner-ink)}
+.banner b{color:var(--banner-strong);font-weight:600;display:block;font-family:var(--mono);font-size:10.5px;
   letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
 
 footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
 
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-@media (max-width:900px){.facts{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}.kpi{border-right:0;border-bottom:1px solid var(--hairline)}.kpi:last-child{border-bottom:0}}
+@media (max-width:900px){
+  .facts{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}.kpi{border-right:0;border-bottom:1px solid var(--hairline)}.kpi:last-child{border-bottom:0}
+  .browse{grid-template-columns:1fr}
+  .rail{position:static;max-height:none}
+}
 @media (max-width:640px){
   .wrap{padding:28px 16px 48px}
   .masthead{flex-direction:column;align-items:flex-start;gap:14px}
@@ -132,13 +239,16 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   .panel{padding:18px 16px 14px}
   .phead{flex-direction:column;align-items:flex-start;gap:4px}
   .phead .sub{text-align:left}
-  /* A five-column table does not fit a phone: stack each row, each cell names itself. */
+  .card{padding:14px 14px 12px}
+  .links{margin-left:0;width:100%}
+  .rows td.tp{width:auto}
+  .bar{min-width:90px}
+  /* The history table does not fit a phone: stack each row, each cell names itself. */
   .t thead{display:none}
   .t tr{display:block;padding:10px 0;border-top:1px solid var(--hairline-2)}
   .t td{display:block;border:0;padding:3px 0}
   .t td::before{content:attr(data-h);font-family:var(--mono);font-size:9px;letter-spacing:.16em;
     text-transform:uppercase;color:var(--ink-faint);margin-right:8px}
-  .t .tx{min-width:0;max-width:none}
 }
 </style>
 </head>
@@ -149,19 +259,19 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   <header class="masthead">
     <div class="brand">
       <h1>XBrain<span class="dot">.</span> Jev</h1>
-      <p>Dónde no coinciden los topics de enrich con los de Jev, post a post</p>
+      <p>Qué topics pone enrich, cuáles ve Jev, y dónde no coinciden</p>
     </div>
     <div class="stamp" id="stamp">ACTUALIZADO · —</div>
   </header>
 
   <p class="about"><b>Qué es esto.</b> <span id="about">Jev es un segundo juez que lee cada
     post y dice, para cada topic del vocabulario, la probabilidad de que el post trate de él.
-    Esta página compara esa respuesta con los topics que puso enrich y lista los posts donde
-    no coinciden, para que corrijas los que están mal. Arriba, lo que ha costado preguntar.</span></p>
+    Esta página pone al lado lo que puso enrich y lo que ve Jev, post a post, para que
+    encuentres y corrijas los topics mal puestos. Arriba, lo que ha costado preguntar.</span></p>
 
   <noscript><section class="banner">
-    <b>Esta página necesita JavaScript</b>Los datos están incrustados en la página, pero la
-    tabla se dibuja con JavaScript. Ábrela en un navegador con JS, o usa
+    <b>Esta página necesita JavaScript</b>Los datos están incrustados en la página, pero los
+    posts se dibujan con JavaScript. Ábrela en un navegador con JS, o usa
     <code>xbrain jev report</code>.
   </section></noscript>
   <section class="banner" id="banner" hidden></section>
@@ -173,8 +283,9 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     </div>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="before-log" hidden></p>
-    <h3 class="phead" style="margin-top:22px;border:0;padding-bottom:0"><span class="kick">Histórico por pasada</span></h3>
-    <div class="twrap"><table class="t" id="runs"></table></div>
+    <details class="hist" id="hist"><summary>Histórico por pasada</summary>
+      <div class="twrap"><table class="t" id="runs"></table></div>
+    </details>
   </section>
 
   <section class="panel" id="numbers">
@@ -185,30 +296,55 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div class="facts" id="facts"></div>
   </section>
 
-  <section class="panel posts" id="posts">
-    <div class="phead">
-      <div><span class="kick">03 · Posts</span><h2>Posts donde enrich y Jev no coinciden</h2></div>
-      <div class="sub">✓ Jev lo confirma · ✗ Jev no lo ve · + Jev lo añadiría · pasa el ratón para ver la probabilidad</div>
+  <nav class="tabs" aria-label="Secciones">
+    <a href="#posts" data-tab="posts">Posts</a>
+    <a href="#topics" data-tab="topics">Topics</a>
+    <a href="#compare" data-tab="compare">Comparar Jev vs enrich</a>
+    <a href="#config" data-tab="config">Configuración</a>
+  </nav>
+
+  <section id="tab-posts" class="tab">
+    <div class="browse">
+      <aside class="rail" id="rail" aria-label="Filtros y topics"></aside>
+      <div>
+        <div class="controls">
+          <input type="search" id="search" placeholder="Buscar por texto, autor, id o topic" aria-label="Buscar posts">
+          <select id="sort" aria-label="Ordenar">
+            <option value="disc">Más discrepancias primero</option>
+            <option value="recent">Más recientes primero</option>
+            <option value="cost">Más caros primero</option>
+          </select>
+          <span class="count" id="count">—</span>
+        </div>
+        <div class="chipline" id="active"></div>
+        <p class="keys">Teclado: <kbd>j</kbd>/<kbd>k</kbd> siguiente / anterior post · <kbd>n</kbd>/<kbd>p</kbd> siguiente / anterior con discrepancias</p>
+        <div id="cards"></div>
+        <div id="sentinel"></div>
+        <button class="more" id="more" hidden>Mostrar más</button>
+        <p class="muted" id="excluded"></p>
+      </div>
     </div>
-    <div class="controls">
-      <label><input type="checkbox" id="only-disagreements" checked> Solo posts con desacuerdo</label>
-      <input type="search" id="search" placeholder="Buscar por texto, autor o topic" aria-label="Buscar posts">
-      <span class="count" id="count">—</span>
-    </div>
-    <div class="twrap"><table class="t" id="post-table"></table></div>
-    <p class="muted" id="excluded"></p>
+  </section>
+  <section id="tab-topics" class="tab" hidden>
+    <div class="soon"><b>Topics</b>El índice de topics (descripción, cifras, con qué se confunde cada uno) llega en el siguiente PR.</div>
+  </section>
+  <section id="tab-compare" class="tab" hidden>
+    <div class="soon"><b>Comparar Jev vs enrich</b>La comparación de decisiones (acuerdo por topic, cruces de topic principal, tipos de desacuerdo) llega en el siguiente PR.</div>
+  </section>
+  <section id="tab-config" class="tab" hidden>
+    <div class="soon"><b>Configuración</b>Umbral, modelo, preguntas exactas y vocabulario llega en el siguiente PR.</div>
   </section>
 
   <footer>
     <span>XBRAIN · JEV vs ENRICH</span>
-    <span>DATOS EMPOTRADOS · TIPOGRAFÍAS DE GOOGLE FONTS</span>
+    <span>DATOS EMPOTRADOS · IMÁGENES DE _media/ · TIPOGRAFÍAS DE GOOGLE FONTS</span>
   </footer>
 </main>
 
 <script>
 /* THE GUARD IS THE FIRST THING THE SCRIPT DOES, and everything that can throw is inside
    `boot()` below — a guard installed after the work it guards is not a guard. An uncaught
-   throw would leave the header and an empty table, which reads as "nothing to fix". The
+   throw would leave the header and an empty list, which reads as "nothing to fix". The
    message goes in as a TEXT NODE, so the guard needs nothing declared further down. */
 function paintBootFailure(message) {
   const banner = document.getElementById('banner');
@@ -218,13 +354,14 @@ function paintBootFailure(message) {
   banner.appendChild(document.createTextNode(
     String(message) + '. No hay números que leer aquí: usa `xbrain jev report`.'));
 }
-addEventListener('error', (e) => paintBootFailure(e.message));
+const onBootError = (e) => paintBootFailure(e.message);
+addEventListener('error', onBootError);
 
 const DATA = /*__DATA__*/;
 
 /* ---------------------------------------------------------------- helpers
    Nothing below COMPUTES a comparison or a price: every number is read from DATA, which
-   `jev/report.py` produced. These only format. */
+   `jev/report.py` produced. These only format, filter and order. */
 const $ = (id) => document.getElementById(id);
 const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const nf = (n) => Number(n).toLocaleString('es-ES');
@@ -234,6 +371,7 @@ const pl = (n, one, many) => nf(n) + ' ' + (n === 1 ? one : many);
 const usd = (x, d) => (x == null ? '—' : '~' + dec(x, d || 4) + ' $');
 const prob = (p) => (p == null ? '—' : dec(p, 2));
 const when = (iso) => new Date(iso).toLocaleString('es-ES', {dateStyle: 'medium', timeStyle: 'short'});
+const day = (iso) => new Date(iso).toLocaleDateString('es-ES', {day: 'numeric', month: 'short', year: 'numeric'});
 const LABEL = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
 const DESC = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
 const label = (slug) => LABEL[slug] || slug;
@@ -346,105 +484,641 @@ function renderNumbers() {
         esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''));
 }
 
-/* ---------------------------------------------------------------- 03 the posts */
-let onlyDisagreements = true;
-let query = '';
+/* ---------------------------------------------------------------- tabs (hash-routed) */
+const TABS = ['posts', 'topics', 'compare', 'config'];
+/** The whole Posts view: filter, topic, search, sort. The hash carries it (bookmarkable). */
+const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc'};
 
-function tag(slug, cls, mark, p, hint) {
-  const title = esc((DESC[slug] ? DESC[slug] + ' — ' : '') + hint);
-  return '<span class="tag ' + cls + '" title="' + title + '"><b>' + mark + '</b> ' + esc(label(slug)) +
-    (p == null ? '' : '<small>' + prob(p) + '</small>') + '</span>';
+function readHash() {
+  // Split on the FIRST '?': the tab is the part before it, decoded on its own (a malformed
+  // escape must not throw); the query goes to URLSearchParams RAW, which decodes it once.
+  const raw = location.hash.replace(/^#/, '');
+  const cut = raw.indexOf('?');
+  let tab = cut === -1 ? raw : raw.slice(0, cut);
+  try { tab = decodeURIComponent(tab); } catch (err) { tab = ''; }
+  view.tab = TABS.includes(tab) ? tab : 'posts';
+  // Another tab's hash says nothing about the Posts view: keep it for when the reader returns.
+  if (view.tab !== 'posts') return;
+  const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
+  const f = params.get('f');
+  view.f = (FILTERS.some(x => x.key === f) && f) || 'disc';
+  view.t = LABEL[params.get('t')] ? params.get('t') : '';
+  view.q = params.get('q') || '';
+  view.s = ['disc', 'recent', 'cost'].includes(params.get('s')) ? params.get('s') : 'disc';
 }
 
-function enrichCell(post) {
-  if (!post.enrich.length) return '<span class="empty">sin topics</span>';
-  return post.enrich.map(function (e) {
-    if (e.ok === null) return tag(e.slug, 'un', '·', null, 'Jev no evaluó este topic: ya no está en el vocabulario');
-    return e.ok
-      ? tag(e.slug, 'ok', '✓', e.p, 'Jev lo confirma: probabilidad ' + prob(e.p))
-      : tag(e.slug, 'no', '✗', e.p, 'Jev no lo ve: probabilidad ' + prob(e.p) + ', por debajo de ' + dec(DATA.threshold, 2));
-  }).join('');
+function writeHash() {
+  const params = new URLSearchParams();
+  if (view.f !== 'disc') params.set('f', view.f);
+  if (view.t) params.set('t', view.t);
+  if (view.q) params.set('q', view.q);
+  if (view.s !== 'disc') params.set('s', view.s);
+  const hash = '#posts' + (params.toString() ? '?' + params.toString() : '');
+  // The Posts tab link carries the view, so leaving for another tab and coming back keeps it.
+  document.querySelector('.tabs a[data-tab="posts"]').setAttribute('href', hash);
+  if (view.tab !== 'posts') return;
+  // replaceState: typing in the search box must not push one history entry per keystroke.
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+/* end hash */
+
+function showTab() {
+  TABS.forEach(tab => { $('tab-' + tab).hidden = tab !== view.tab; });
+  document.querySelectorAll('.tabs a').forEach(a => {
+    if (a.dataset.tab === view.tab) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
 }
 
-function addsCell(post) {
-  if (!post.adds.length) return '<span class="empty">—</span>';
-  return post.adds.map(a => tag(a.slug, 'add', '+', a.p, 'Jev lo añadiría: probabilidad ' + prob(a.p))).join('');
+/* ---------------------------------------------------------------- the filter rail */
+/** The views of the corpus. WHICH posts a view holds is decided in `jev/dashboard.py`
+    (each card's `in` list); the NUMBER beside it is the report's count of the same posts. */
+const FILTERS = [
+  {key: 'all', name: 'Todos', count: () => DATA.totals.items},
+  {key: 'disc', name: 'Con discrepancias', count: () => DATA.summary.posts_with_disagreement},
+  {key: 'enrich_only', name: 'Enrich asigna y Jev no', count: () => DATA.summary.posts_enrich_only},
+  {key: 'adds', name: 'Jev añadiría topic', count: () => DATA.summary.posts_jev_only},
+  {key: 'prim', name: 'Primario distinto', count: () => DATA.summary.posts_primary_differs},
+  {key: 'fallback', name: 'Jev eligió «' + DATA.fallback + '»', count: () => DATA.summary.primary_fallback},
+  {key: 'uneval', name: 'Sin evaluar por Jev', count: () => DATA.summary.items_unassessed},
+];
+/** Under these views a topic narrows to the posts that disagree ABOUT that topic, in that
+    direction — the posts its `per_topic` number counts. Under the others, to posts where
+    enrich or Jev has the topic at all. */
+const TOPIC_VERDICTS = {disc: ['solo_enrich', 'solo_jev'], enrich_only: ['solo_enrich'], adds: ['solo_jev']};
+/** The `per_topic` field that counts the posts a topic click lists, per view. */
+const TOPIC_COUNT = {disc: 'disagreeing', enrich_only: 'doubtful', adds: 'missing'};
+
+function railButton(pressed, name, count, onClick, title) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'f';
+  b.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+  if (title) b.title = title;
+  const n = document.createElement('span');
+  n.textContent = name;
+  b.appendChild(n);
+  b.appendChild(count);
+  b.addEventListener('click', onClick);
+  return b;
 }
 
-function primaryCell(post) {
-  const mine = post.primary === null ? '— sin principal' : label(post.primary);
-  const jev = label(post.jev_primary) + (post.jev_fallback ? ' (ninguno)' : '');
-  if (post.primary_agrees) return '<span class="prim">' + esc(mine) + ' ✓</span>';
-  return '<span class="prim diff" title="enrich → Jev">' + esc(mine) + '<span class="arrow">→</span>' + esc(jev) + '</span>';
+function countSpan(text) {
+  const c = document.createElement('span');
+  c.className = 'c';
+  c.textContent = text;
+  return c;
 }
 
-function postCell(post) {
-  const note = post.note ? '<a class="lk" href="obsidian://open?path=' + encodeURIComponent(post.note) + '">nota ↗</a>' : '';
-  const href = httpUrl(post.url);
-  const x = href ? '<a class="lk" href="' + esc(href) + '" target="_blank" rel="noopener">X ↗</a>' : '';
-  const cut = post.truncated ? '<span title="el post era más largo que el límite y Jev leyó una parte">recortado</span>' : '';
-  return '<div class="tx">' + esc(post.text) + '<div class="hd">@' + esc(post.handle) + note + x + cut + '</div></div>';
+let topicsOpen = !matchMedia('(max-width: 900px)').matches;
+
+function renderRail() {
+  const S = DATA.summary;
+  const rail = $('rail');
+  rail.replaceChildren();
+  const h = document.createElement('h3');
+  h.textContent = 'Posts';
+  rail.appendChild(h);
+  FILTERS.forEach(f => {
+    rail.appendChild(railButton(view.f === f.key, f.name, countSpan(nf(f.count())), () => { view.f = f.key; update(); }));
+  });
+  // The 45 topics are a long list: on a narrow screen they start folded so the posts are
+  // not a screen-height away. The reader's choice survives the rail being redrawn.
+  const box = document.createElement('details');
+  box.className = 'tbox';
+  box.open = topicsOpen;
+  box.addEventListener('toggle', () => { topicsOpen = box.open; });
+  const th = document.createElement('summary');
+  th.textContent = 'Topics';
+  box.appendChild(th);
+  rail.appendChild(box);
+  const legend = document.createElement('p');
+  legend.className = 'legend';
+  legend.textContent = 'Cada topic: posts donde lo puso enrich · de esos, los que Jev confirma · ' +
+    'posts que discrepan sobre él. Cuentan solo los ' + nf(S.items_compared) + ' posts comparados; ' +
+    'la lista usa además el filtro de arriba, y su total va en «mostrando».';
+  box.appendChild(legend);
+  const rows = Object.fromEntries(S.per_topic.map(r => [r.slug, r]));
+  const topics = DATA.topics.slice().sort((a, b) =>
+    ((rows[b.slug] || {}).disagreeing || 0) - ((rows[a.slug] || {}).disagreeing || 0) || a.label.localeCompare(b.label, 'es'));
+  topics.forEach(t => {
+    const r = rows[t.slug] || {assigned: 0, backed: 0, disagreeing: 0};
+    const c = countSpan('');
+    const parts = [[nf(r.assigned), r.assigned ? '' : 'z'], [nf(r.backed), r.backed ? '' : 'z'], [nf(r.disagreeing), r.disagreeing ? 'd' : 'z']];
+    parts.forEach(([text, cls], i) => {
+      if (i) c.appendChild(document.createTextNode(' · '));
+      const s = document.createElement('span');
+      if (cls) s.className = cls;
+      s.textContent = text;
+      c.appendChild(s);
+    });
+    box.appendChild(railButton(view.t === t.slug, t.label, c, () => {
+      view.t = view.t === t.slug ? '' : t.slug;
+      update();
+    }, t.description));
+    if (view.t === t.slug) {
+      const field = TOPIC_COUNT[view.f];
+      const note = document.createElement('p');
+      note.className = 'legend';
+      note.textContent = field
+        ? 'con este filtro, la lista es la columna ' + (field === 'disagreeing' ? 'de discrepancias' : field === 'doubtful' ? '«enrich lo pone y Jev no»' : '«Jev lo añadiría»') + ': ' + nf(r[field] || 0) + ' posts'
+        : 'con este filtro, la lista cuenta todos los posts donde enrich o Jev lo tienen';
+      box.appendChild(note);
+    }
+  });
+}
+/* end rail */
+
+/* ---------------------------------------------------------------- the cards */
+/* cards */
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
 }
 
-function matches(post) {
-  if (onlyDisagreements && !post.disagreements) return false;
-  if (!query) return true;
-  const topics = post.enrich.map(e => e.slug).concat(post.adds.map(a => a.slug), [post.primary || '', post.jev_primary]);
-  const hay = [post.text, post.handle].concat(topics, topics.map(label)).join(' ').toLowerCase();
-  return hay.indexOf(query) !== -1;
+/** An anchor. Callers pass only `httpUrl(...)` results, a URL matched by `linkified`'s
+    http(s) regex, or the `obsidian://` note link built from DATA. */
+function link(href, cls, text) {
+  const a = el('a', cls, text);
+  a.href = href;
+  if (/^https?:/i.test(href)) { a.target = '_blank'; a.rel = 'noopener'; }
+  return a;
 }
 
-function renderPosts() {
-  // DATA.posts is already ordered most-disagreement first by `jev/dashboard.py`.
-  const shown = DATA.posts.filter(matches);
-  // The report's count (`posts_with_disagreement`), the number `xbrain jev report` prints.
-  $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + nf(DATA.posts.length) + ' posts · ' +
-    pl(DATA.summary.posts_with_disagreement, 'con desacuerdo', 'con desacuerdo');
-  const heads = ['Post', 'Topics de enrich', 'Jev añadiría', 'Principal (enrich → Jev)', 'Coste'];
+/** A URL as matched, less the sentence punctuation after it. A closing ")" is the URL's own
+    only while the URL has as many "(" (Wikipedia's `Foo_(bar)`); otherwise it closes an aside. */
+function trimUrl(m) {
+  let url = m;
+  for (;;) {
+    const last = url.slice(-1);
+    const unbalanced = last === ')' && url.split(')').length > url.split('(').length;
+    if (/[.,;:!?»"'\]]/.test(last) || unbalanced) url = url.slice(0, -1);
+    else return url;
+  }
+}
+
+/** The post's words with its URLs as links; everything else stays a text node. Punctuation
+    that ends a sentence right after a URL stays outside the link (`trimUrl`). */
+function linkified(text) {
+  const frag = document.createDocumentFragment();
+  let last = 0;
+  text.replace(/https?:\/\/[^\s]+/g, (m, at) => {
+    const url = trimUrl(m);
+    frag.appendChild(document.createTextNode(text.slice(last, at)));
+    frag.appendChild(link(url, null, url.replace(/^https?:\/\//, '')));
+    last = at + url.length;
+    return m;
+  });
+  frag.appendChild(document.createTextNode(text.slice(last)));
+  return frag;
+}
+
+const STATUS = {
+  unevaluated: 'sin evaluar por Jev',
+  stale: 'sin evaluar por Jev · evaluación caducada',
+  not_enriched: 'sin enrich con el que comparar',
+};
+
+function header(p) {
+  const h = el('div', 'twh');
+  h.appendChild(el('div', 'av', ((p.author.name || p.author.handle || '?').trim().charAt(0) || '?').toUpperCase()));
+  const who = el('div', 'who');
+  who.appendChild(el('b', null, p.author.name || p.author.handle));
+  who.appendChild(el('span', null, ' @' + p.author.handle + ' · ' + day(p.created)));
+  h.appendChild(who);
+  if (STATUS[p.status]) h.appendChild(el('span', 'st', STATUS[p.status]));
+  const links = el('div', 'links');
+  const x = httpUrl(p.url);
+  if (x) links.appendChild(link(x, 'lk', 'X ↗'));
+  if (p.note && DATA.notes_dir) {
+    links.appendChild(link('obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note), 'lk', 'nota ↗'));
+  }
+  h.appendChild(links);
+  return h;
+}
+
+/** The text, whole; a long one starts collapsed with a "ver todo" toggle. */
+function body(text, cls) {
+  const wrap = document.createDocumentFragment();
+  const t = el('p', cls || 'twt');
+  t.appendChild(linkified(text));
+  wrap.appendChild(t);
+  if (text.length > 700) {
+    t.classList.add('clamp');
+    const b = el('button', 'toggle', 'ver todo');
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      const open = t.classList.toggle('clamp');
+      b.textContent = open ? 'ver todo' : 'ver menos';
+    });
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+/** Why a picture is not on the page, and what brings it back. */
+const WHY = {
+  not_mirrored: 'falta en _media/: corre xbrain generate',
+  not_downloaded: 'imagen sin descargar: corre xbrain media',
+  failed: 'la descarga falló',
+  missing: 'el fichero ya no está',
+  no_frame: 'vídeo sin fotograma extraído',
+};
+
+function mediaGrid(media) {
+  const g = el('div', 'media n' + media.length);
+  media.forEach(m => {
+    const fig = el('figure');
+    if (m.src) {
+      const img = el('img');
+      img.loading = 'lazy';
+      img.src = m.src;
+      img.alt = m.desc || '';
+      fig.appendChild(img);
+    } else {
+      fig.appendChild(el('div', 'noimg', WHY[m.why] || 'imagen no disponible'));
+    }
+    if (m.type === 'video') fig.appendChild(el('span', 'play', '▶'));
+    if (m.desc) fig.title = m.desc;
+    g.appendChild(fig);
+  });
+  return g;
+}
+
+function quotedCard(q) {
+  const box = el('div', 'tw quoted');
+  const h = el('div', 'twh');
+  const who = el('div', 'who');
+  who.appendChild(el('b', null, q.missing ? 'Post citado no disponible' : q.name || (q.handle ? '@' + q.handle : 'Post citado')));
+  if (q.handle) who.appendChild(el('span', null, ' @' + q.handle));
+  h.appendChild(who);
+  const links = el('div', 'links');
+  const href = httpUrl(q.url);
+  if (href) links.appendChild(link(href, 'lk', 'X ↗'));
+  h.appendChild(links);
+  box.appendChild(h);
+  if (q.missing) {
+    box.appendChild(el('p', 'twt', q.why === 'not_fetched'
+      ? 'Sin leer todavía: corre xbrain refresh-quoted (con --from-store no usa la red). Jev no lo vio.'
+      : 'No se pudo leer: ábrelo en X. Jev no lo vio.'));
+    return box;
+  }
+  const t = el('p', 'twt');
+  t.appendChild(linkified(q.text + (q.cut ? ' …' : '')));
+  box.appendChild(t);
+  return box;
+}
+
+const KIND = {external_article: 'artículo', x_article: 'x_article · página de X'};
+
+function linkCard(l) {
+  const href = httpUrl(l.url);
+  const card = href ? link(href, 'lc') : el('div', 'lc');
+  card.appendChild(el('span', 'dom', (l.domain || '') + (l.kind ? ' · ' + (KIND[l.kind] || l.kind) : '') +
+    (l.failed ? ' · no se pudo leer' : '')));
+  card.appendChild(el('b', null, l.title || l.url));
+  return card;
+}
+
+const VERDICT = {
+  coinciden: ['ok', 'coinciden', 'enrich lo pone y Jev lo confirma'],
+  solo_enrich: ['en', 'solo enrich', 'enrich lo pone y Jev no lo ve'],
+  solo_jev: ['jv', 'solo Jev', 'Jev lo ve y enrich no lo puso'],
+  sin_juzgar: ['un', 'sin juzgar', 'ya no está en el vocabulario: Jev no lo evaluó'],
+  primario_jev: ['un', 'primario de Jev', 'Jev lo elige como principal aunque no lo respalda al umbral'],
+  jev: ['jv', 'Jev lo ve', 'Jev lo ve al umbral; el post no tiene enrich con el que comparar'],
+};
+
+function probBar(p) {
+  const wrap = el('div', 'bar');
+  const track = el('i');
+  const fill = el('b');
+  fill.style.width = (p == null ? 0 : Math.round(p * 100)) + '%';
+  track.appendChild(fill);
+  const mark = el('s');
+  mark.style.left = Math.round(DATA.threshold * 100) + '%';
+  mark.title = 'umbral ' + dec(DATA.threshold, 2);
+  track.appendChild(mark);
+  wrap.appendChild(track);
+  wrap.appendChild(el('span', null, prob(p)));
+  wrap.title = 'probabilidad según Jev' + (p == null ? ': no evaluado' : ': ' + prob(p));
+  return wrap;
+}
+
+function topicTable(rows) {
+  const t = el('table', 'rows');
+  const tb = el('tbody');
+  rows.forEach(r => {
+    const tr = el('tr');
+    const tp = el('td', 'tp', label(r.slug));
+    tp.title = DESC[r.slug] || '';
+    tr.appendChild(tp);
+    const en = el('td', 'en ' + (r.enrich ? 'y' : 'n'), r.enrich ? '✓' : '—');
+    en.title = r.enrich ? 'enrich lo puso' : 'enrich no lo puso';
+    tr.appendChild(en);
+    const pb = el('td');
+    pb.appendChild(probBar(r.p));
+    tr.appendChild(pb);
+    const [cls, words, why] = VERDICT[r.verdict];
+    const vd = el('td');
+    const chip = el('span', 'v ' + cls, words);
+    chip.title = why;
+    vd.appendChild(chip);
+    tr.appendChild(vd);
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  return t;
+}
+
+function primaries(j) {
+  const line = el('p', 'prim' + (j.primary_differs ? ' diff' : ''));
+  const jev = label(j.jev_primary) + (j.jev_fallback ? ' (ninguno del vocabulario)' : '');
+  if (j.compared) {
+    line.appendChild(document.createTextNode('Principal · enrich: '));
+    line.appendChild(el('b', null, j.primary == null ? 'sin principal' : label(j.primary)));
+    line.appendChild(document.createTextNode(' · Jev: '));
+  } else {
+    line.appendChild(document.createTextNode('Principal según Jev: '));
+  }
+  line.appendChild(el('b', null, jev));
+  line.appendChild(document.createTextNode(' (probabilidad ' + prob(j.jev_confidence) + ')' +
+    (j.compared ? (j.primary_differs ? ' — no coinciden' : ' — coinciden') : '')));
+  return line;
+}
+
+/** Where a surface's text is on the card, when it is not repeated here. */
+const SAME_AS = {post: 'el texto del post, arriba', author: 'el autor, arriba', quoted: 'el post citado, arriba'};
+
+/** "Lo que vio Jev": each evidence surface, its size, and whether the state's cut reached it. */
+function whatJevSaw(j) {
+  const d = el('details', 'saw');
+  d.appendChild(el('summary', null, 'Lo que vio Jev · ' + pl(j.surfaces.length, 'fuente', 'fuentes') + ', ' +
+    nf(j.state_chars) + ' caracteres' + (j.truncated ? ' · recortado a ' + nf(DATA.char_limit) : '')));
+  let shortened = false;
+  j.surfaces.forEach(s => {
+    const box = el('div', 'src');
+    const sl = el('div', 'sl', s.label + ' · ' + nf(s.chars) + ' car.');
+    if (s.kept < s.chars) {
+      sl.appendChild(el('span', 'cut', s.kept ? ' · recortado: Jev leyó ' + nf(s.kept) : ' · fuera: el recorte no llegó a enviarla'));
+    }
+    box.appendChild(sl);
+    if (s.text == null) {
+      box.appendChild(el('pre', null, '= ' + (SAME_AS[s.same_as] || 'arriba')));
+    } else {
+      if (s.text.length < s.chars) shortened = true;
+      box.appendChild(el('pre', null, s.text + (s.text.length < s.chars ? ' …' : '')));
+    }
+    d.appendChild(box);
+  });
+  if (shortened) {
+    d.appendChild(el('p', 'muted', 'Esta página muestra como máximo ' + nf(DATA.surface_chars) + ' caracteres por fuente.'));
+  }
+  return d;
+}
+
+function jevBlock(p) {
+  const box = el('div', 'jev');
+  const j = p.jev;
+  const h = el('div', 'jh');
+  h.appendChild(el('span', 'kick', j && !j.compared ? 'Lo que ve Jev' : 'Jev vs enrich'));
+  if (j) {
+    if (j.compared) {
+      h.appendChild(el('span', 'badge' + (j.disagreements ? ' d' : ''),
+        j.disagreements ? pl(j.disagreements, 'discrepancia', 'discrepancias') : 'sin discrepancias'));
+    }
+    if (j.truncated) {
+      const b = el('span', 'badge cut', 'recortado');
+      b.title = 'la evidencia superaba el límite y se recortó; el tweet va entero, lo que falta es de las otras fuentes';
+      h.appendChild(b);
+    }
+    h.appendChild(el('span', 'meta', j.model + ' · ' + when(j.asked_at) + ' · ' +
+      (j.unpriced ? 'sin tarifa' : usd(j.cost_usd, 5)) + (j.tokens == null ? ' · sin recuento' : ' · ' + nf(j.tokens) + ' tokens')));
+    box.appendChild(h);
+    if (j.topics.length) box.appendChild(topicTable(j.topics));
+    box.appendChild(primaries(j));
+    box.appendChild(whatJevSaw(j));
+    return box;
+  }
+  h.appendChild(el('span', 'badge', STATUS[p.status] || 'sin evaluar por Jev'));
+  box.appendChild(h);
+  if (p.enrich && p.enrich.topics.length) {
+    const chips = el('div', 'echips');
+    p.enrich.topics.forEach(s => {
+      const c = el('span', null, label(s) + (s === p.enrich.primary ? ' (principal)' : ''));
+      c.title = DESC[s] || '';
+      chips.appendChild(c);
+    });
+    box.appendChild(el('span', 'muted', 'Topics de enrich:'));
+    box.appendChild(chips);
+  }
+  if (p.no_evidence) {
+    box.appendChild(el('p', 'muted', 'sin evidencia: el post no tiene texto ni fuentes que preguntar, y `xbrain jev topics` lo salta.'));
+  } else {
+    box.appendChild(askLine(p.id));
+  }
+  return box;
+}
+
+/** Static page: nothing is asked from here. "copiar comando" hands over the exact line. */
+function askLine(id) {
+  const line = el('div', 'ask');
+  const cmd = DATA.ask_command + ' ' + id;
+  line.appendChild(el('code', null, cmd));
+  const b = el('button', null, 'copiar comando');
+  b.type = 'button';
+  b.addEventListener('click', () => {
+    const done = () => { b.textContent = 'copiado ✓'; setTimeout(() => { b.textContent = 'copiar comando'; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(done, () => { b.textContent = 'selecciona y copia'; });
+    } else {
+      b.textContent = 'selecciona y copia';
+    }
+  });
+  line.appendChild(b);
+  return line;
+}
+
+function card(p) {
+  const a = el('article', 'card');
+  a.id = 'post-' + p.id;
+  a.tabIndex = -1;
+  a.dataset.id = p.id;
+  a.appendChild(header(p));
+  a.appendChild(body(p.text));
+  if (p.media.length) a.appendChild(mediaGrid(p.media));
+  if (p.quoted) a.appendChild(quotedCard(p.quoted));
+  if (p.link) a.appendChild(linkCard(p.link));
+  a.appendChild(jevBlock(p));
+  return a;
+}
+
+/** A card that fails to draw costs one line, not the page: the rest keep rendering. */
+function safeCard(p) {
+  try {
+    return card(p);
+  } catch (err) {
+    const a = el('article', 'card');
+    a.id = 'post-' + p.id;
+    a.tabIndex = -1;
+    a.dataset.id = p.id;
+    a.appendChild(el('p', 'empty', 'Este post (' + p.id + ') no se pudo dibujar: ' + (err && err.message ? err.message : err)));
+    return a;
+  }
+}
+/* end cards */
+
+/* ---------------------------------------------------------------- list: filter, sort, pages */
+const PAGE = 50;
+let shown = [];      // the filtered, sorted posts
+let drawn = 0;       // how many of them are in the DOM
+let cursor = -1;     // the current card (j/k/n/p)
+
+function matches(p) {
+  if (view.f !== 'all' && !p.in.includes(view.f)) return false;
+  if (view.t) {
+    const verdicts = TOPIC_VERDICTS[view.f];
+    const hit = verdicts
+      ? !!p.jev && p.jev.topics.some(r => r.slug === view.t && verdicts.includes(r.verdict))
+      : p.slugs.includes(view.t);
+    if (!hit) return false;
+  }
+  if (!view.q) return true;
+  const q = view.q.toLowerCase();
+  const hay = [p.text, p.author.handle, p.author.name, p.id].concat(p.slugs, p.slugs.map(label)).join(' ').toLowerCase();
+  return hay.indexOf(q) !== -1;
+}
+
+function sorted(list) {
+  // DATA.posts is already in "más discrepancias" order (decided in `jev/dashboard.py`).
+  if (view.s === 'recent') return list.slice().sort((a, b) => (a.created < b.created ? 1 : a.created > b.created ? -1 : 0));
+  if (view.s === 'cost') {
+    const cost = p => (p.jev && p.jev.cost_usd != null ? p.jev.cost_usd : -1);
+    return list.slice().sort((a, b) => cost(b) - cost(a));
+  }
+  return list;
+}
+
+function drawMore() {
+  const box = $('cards');
+  const upto = Math.min(shown.length, drawn + PAGE);
+  const frag = document.createDocumentFragment();
+  for (let i = drawn; i < upto; i++) frag.appendChild(safeCard(shown[i]));
+  box.appendChild(frag);
+  drawn = upto;
+  $('more').hidden = drawn >= shown.length;
+  $('more').textContent = 'Mostrar ' + nf(Math.min(PAGE, shown.length - drawn)) + ' más (quedan ' + nf(shown.length - drawn) + ')';
+}
+
+function renderList() {
+  shown = sorted(DATA.posts.filter(matches));
+  drawn = 0;
+  cursor = -1;
+  $('cards').replaceChildren();
+  $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + nf(DATA.posts.length) + ' posts';
   if (!shown.length) {
-    const why = !DATA.posts.length ? 'No hay posts comparados.'
-      : query ? 'Ningún post coincide con la búsqueda.'
-      : 'Ningún post con desacuerdo a este umbral.';
-    $('post-table').innerHTML = '<tbody><tr><td class="empty">' + why + '</td></tr></tbody>';
+    const why = !DATA.posts.length ? 'No hay posts.'
+      : view.q ? 'Ningún post coincide con la búsqueda.'
+      : 'Ningún post coincide con este filtro.';
+    $('cards').appendChild(el('p', 'empty', why));
+    $('more').hidden = true;
     return;
   }
-  const cells = (p) => [postCell(p), enrichCell(p), addsCell(p), primaryCell(p),
-    '<span class="n" title="' + (p.tokens == null ? 'sin recuento de tokens' : esc(nf(p.tokens) + ' tokens de entrada')) + '">' + (p.unpriced ? 'sin tarifa' : usd(p.cost_usd, 5)) + '</span>'];
-  $('post-table').innerHTML = '<thead><tr>' + heads.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
-    shown.map(p => '<tr>' + cells(p).map((v, i) => '<td data-h="' + heads[i] + '">' + v + '</td>').join('') + '</tr>').join('') +
-    '</tbody>';
+  drawMore();
 }
+
+function renderActive() {
+  const box = $('active');
+  box.replaceChildren();
+  if (view.t) {
+    const b = el('button', 'chipx', 'Topic: ' + label(view.t) + ' ✕');
+    b.type = 'button';
+    b.addEventListener('click', () => { view.t = ''; update(); });
+    box.appendChild(b);
+  }
+}
+
+function update() {
+  writeHash();
+  renderRail();
+  renderActive();
+  renderList();
+}
+
+/* ---------------------------------------------------------------- keyboard */
+function goTo(index) {
+  if (index < 0 || index >= shown.length) return;
+  while (drawn <= index) drawMore();
+  const prev = document.querySelector('.card.cur');
+  if (prev) prev.classList.remove('cur');
+  cursor = index;
+  const node = $('post-' + shown[index].id);
+  node.classList.add('cur');
+  node.focus({preventScroll: true});
+  node.scrollIntoView({block: 'start', behavior: 'smooth'});
+}
+
+function onKey(e) {
+  if (view.tab !== 'posts' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  const disagrees = (p) => p.in.includes('disc');
+  if (e.key === 'j') goTo(cursor + 1);
+  else if (e.key === 'k') goTo(Math.max(0, cursor - 1));
+  else if (e.key === 'n') {
+    for (let i = cursor + 1; i < shown.length; i++) if (disagrees(shown[i])) { goTo(i); break; }
+  } else if (e.key === 'p') {
+    for (let i = cursor - 1; i >= 0; i--) if (disagrees(shown[i])) { goTo(i); break; }
+  } else return;
+  e.preventDefault();
+}
+/* end keys */
 
 function renderExcluded() {
   const t = DATA.totals, parts = [];
-  if (t.stale) parts.push(pl(t.stale, 'evaluación caducada', 'evaluaciones caducadas') + ' (el post o el vocabulario cambió; `xbrain jev topics` las vuelve a pedir)');
+  if (t.stale) parts.push(pl(t.stale, 'evaluación caducada', 'evaluaciones caducadas') + ' (el post o el vocabulario cambió; `xbrain jev topics` las vuelve a pedir; su post sale como «evaluación caducada»)');
   if (t.orphans) parts.push(pl(t.orphans, 'evaluación huérfana', 'evaluaciones huérfanas') + ' (su post ya no está en el corpus)');
-  if (t.not_compared) parts.push(pl(t.not_compared, 'post sin enriquecer', 'posts sin enriquecer') + ' (nada con qué comparar)');
-  $('excluded').textContent = parts.length ? 'Fuera de la tabla: ' + parts.join(' · ') + '.' : '';
+  if (t.not_compared) parts.push(pl(t.not_compared, 'post evaluado sin enriquecer', 'posts evaluados sin enriquecer') + ' (nada con qué comparar)');
+  $('excluded').textContent = parts.length ? 'Fuera de las cifras: ' + parts.join(' · ') + '.' : '';
 }
 
-/** Everything that touches the DOM. Its single call site is wrapped. */
+/** Everything that touches the DOM at load. Its single call site is wrapped. */
 function boot() {
   renderStamp();
   renderCost();
   renderNumbers();
   renderExcluded();
-  // A reload restores the form; read it back instead of trusting the script's defaults.
-  onlyDisagreements = $('only-disagreements').checked;
-  query = $('search').value.trim().toLowerCase();
-  renderPosts();
-  $('only-disagreements').addEventListener('change', function () {
-    onlyDisagreements = this.checked;
-    renderPosts();
+  readHash();
+  showTab();
+  $('search').value = view.q;
+  $('sort').value = view.s;
+  update();
+  $('search').addEventListener('input', function () { view.q = this.value.trim(); update(); });
+  $('sort').addEventListener('change', function () { view.s = this.value; update(); });
+  $('more').addEventListener('click', drawMore);
+  addEventListener('hashchange', () => {
+    readHash();
+    showTab();
+    $('search').value = view.q;
+    $('sort').value = view.s;
+    if (view.tab === 'posts') update();
   });
-  $('search').addEventListener('input', function () {
-    query = this.value.trim().toLowerCase();
-    renderPosts();
-  });
+  document.addEventListener('keydown', onKey);
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting) && drawn < shown.length && view.tab === 'posts') drawMore();
+    }, {rootMargin: '600px'}).observe($('sentinel'));
+  }
 }
 
 try {
   boot();
+  // The banner says "the page could not draw itself". After boot the page HAS drawn itself,
+  // so a later error (one card, one click) must not paint that over it: cards carry their
+  // own error line (`safeCard`).
+  removeEventListener('error', onBootError);
 } catch (err) {
   paintBootFailure(err && err.message ? err.message : err);
   throw err;

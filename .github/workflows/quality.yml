@@ -51,12 +51,22 @@ jobs:
       # Pin the Python hash seed so the gate is byte-reproducible run-to-run
       # (determinism; check.sh pins the same default for local runs).
       PYTHONHASHSEED: "0"
+      # tests/test_jev_page_browser.py drives `jev.html` in headless Chrome: the only check
+      # that each filter shows the posts its number counts, that j/k/n/p land where they say
+      # and that the URL keeps the view. The tests skip on a laptop without Chrome; on a
+      # RUNNER that skip would be fail-open (no Chrome, silent skips, green gate). This flag
+      # turns the skip into a failure. `ubuntu-latest` ships google-chrome.
+      XBRAIN_REQUIRE_CHROME: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v3
       - name: Set up Python
         run: uv python install 3.12
+      # Dies here, before the install, if the image lost Chrome — and the log records which
+      # Chrome drove the page tests.
+      - name: Check Chrome is present (the jev page browser tests drive it)
+        run: google-chrome --version
       # `uv pip install` is uv's pip-COMPATIBILITY mode: it resolves fresh from
       # pyproject.toml and never reads uv.lock. With `ruff>=0.5` declared, every run
       # installed whatever ruff had shipped that morning, and the lockfile committed in

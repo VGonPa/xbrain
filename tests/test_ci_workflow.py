@@ -247,6 +247,11 @@ _REQUIRED_CHECK = "quality"
 _GATE_SCRIPT = "scripts/check.sh"
 
 
+# The variable that turns the jev page browser tests' `skipif` from fail-open into
+# fail-closed. Read by tests/test_jev_page_browser.py; set by the gate job so a runner without
+# Chrome goes RED instead of silently dropping the only tests that drive the page.
+_CHROME_REQUIRED_VAR = "XBRAIN_REQUIRE_CHROME"
+
 # Events that must be able to produce the `quality` check run.
 _GATING_EVENTS = ("push", "pull_request")
 
@@ -822,6 +827,33 @@ def test_gate_step_actually_runs_and_is_not_conditional() -> None:
         f"reports GREEN having run none of the quality checks. Branch protection would "
         f"then be waving through completely unverified code."
     )
+
+
+def test_gate_requires_chrome_so_the_jev_page_browser_tests_cannot_skip() -> None:
+    """The gate job must export `XBRAIN_REQUIRE_CHROME`, or the page's behaviour goes
+    unchecked in silence.
+
+    tests/test_jev_page_browser.py drives `jev.html` in headless Chrome — the only check that
+    each filter shows the posts its number counts, that the keys land where they say, and
+    that the URL keeps the view. The tests carry a `skipif` so a laptop without Chrome can
+    still run the suite; this variable makes the same code fail-closed on a runner.
+    """
+    env = _gate_job().get("env") or {}
+    assert str(env.get(_CHROME_REQUIRED_VAR, "")).strip() not in ("", "0", "false", "False"), (
+        f"The `{_REQUIRED_CHECK}` job does not export `{_CHROME_REQUIRED_VAR}` "
+        f"(env: {env!r}). Without it, a runner with no Chrome SKIPS the jev page browser "
+        f"tests and the gate still reports green."
+    )
+
+
+def test_gate_checks_chrome_up_front_and_the_check_is_not_skippable() -> None:
+    """A step must run `google-chrome --version`, unconditionally: the job dies before the
+    install rather than deep in pytest, and the log records which Chrome drove the page."""
+    steps = _gate_job().get("steps") or []
+    chrome_steps = [step for step in steps if "google-chrome --version" in str(step.get("run", ""))]
+    assert chrome_steps, f"No step in the `{_REQUIRED_CHECK}` job runs `google-chrome --version`."
+    for step in chrome_steps:
+        assert "if" not in step, f"The Chrome check declares `if: {step.get('if')!r}`."
 
 
 def test_gate_declares_no_continue_on_error() -> None:

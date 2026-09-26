@@ -93,7 +93,7 @@ from xbrain.executors.api import (
 )
 from xbrain.models import Item, VerifyTarget
 from xbrain.rubrics import ARTICLE_CHAR_LIMIT
-from xbrain.worksheet import _link_content_source, _video_transcript
+from xbrain.worksheet import link_content_source, _video_transcript
 
 
 @dataclass(frozen=True)
@@ -156,12 +156,12 @@ def _video_title(item: Item) -> tuple[str, ...]:
 
 
 def _article_title(item: Item) -> tuple[str, ...]:
-    source = _link_content_source(item)
+    source = link_content_source(item)
     return (source.title,) if source and source.title else ()
 
 
 def _article_body(item: Item) -> tuple[str, ...]:
-    source = _link_content_source(item)
+    source = link_content_source(item)
     return (source.text[:ARTICLE_CHAR_LIMIT],) if source else ()
 
 

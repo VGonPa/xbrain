@@ -225,6 +225,12 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
     assert summary["doubtful_pairs"] == 1 and summary["missing_pairs"] == 1
     assert summary["primary_agree"] == 1 and summary["primary_agree_pct"] == 50.0
     assert summary["primary_fallback"] == 1
+    # The three disagreement kinds, counted in POSTS: "1" has an enrich-only topic (misc)
+    # and a Jev-only one (startups); "2" has Jev choosing the fallback as its primary.
+    assert summary["posts_enrich_only"] == 1
+    assert summary["posts_jev_only"] == 1
+    assert summary["posts_primary_differs"] == 1
+    assert summary["posts_with_disagreement"] == 2
     assert summary["input_tokens"] == 1500 and summary["cost_usd"] == 0.0001
     assert summary["models"] == {"jev-1.13.0": 2}
     by_slug = {row["slug"]: row for row in summary["per_topic"]}
@@ -240,6 +246,7 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "unjudged": 0,
         "backed_pct": 0.0,
         "missing": 0,
+        "disagreeing": 1,
     }
     assert by_slug["startups"] == {
         "slug": "startups",
@@ -249,8 +256,62 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "unjudged": 0,
         "backed_pct": 100.0,
         "missing": 1,
+        "disagreeing": 1,
     }
     assert [row["slug"] for row in summary["per_topic"]] == ["misc", "ai-coding", "startups"]
+
+
+def test_the_disagreement_kinds_are_counted_apart():
+    """Each kind on its own post, so a count that read another kind's property shows up:
+    "1" only has an enrich-only topic, "2" only a Jev-only one, "3" only a primary Jev does
+    not share, "4" agrees on everything."""
+    only_enrich = _item("1", topics=("ai-coding", "misc"))
+    only_jev = _item("2", topics=("ai-coding",))
+    only_primary = _item("3", topics=("ai-coding",))
+    agrees = _item("4", topics=("ai-coding",))
+    low = {"startups": 0.1, "misc": 0.1}
+    pairs = [
+        (only_enrich, _assessment(only_enrich, {"ai-coding": 0.9, **low})),
+        (only_jev, _assessment(only_jev, {"ai-coding": 0.9, "startups": 0.9, "misc": 0.1})),
+        (only_primary, _assessment(only_primary, {"ai-coding": 0.9, **low}, choice="startups")),
+        (agrees, _assessment(agrees, {"ai-coding": 0.9, **low})),
+    ]
+
+    summary = summarize(pairs, VOCAB, 0.85)
+
+    assert summary["posts_enrich_only"] == 1
+    assert summary["posts_jev_only"] == 1
+    assert summary["posts_primary_differs"] == 1
+    assert summary["posts_with_disagreement"] == 3
+
+
+def test_the_summary_counts_the_posts_with_no_current_answer():
+    """`items_unassessed` = posts never asked + posts whose answer is stale: what `jev
+    topics` would ask next. The caller that loaded the corpus hands it in; 0 by default."""
+    item = _item("1")
+    pairs = [(item, _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}))]
+
+    assert summarize(pairs, VOCAB, 0.85)["items_unassessed"] == 0
+    assert summarize(pairs, VOCAB, 0.85, stale=2, unassessed=5)["items_unassessed"] == 5
+
+
+def test_a_topics_disagreeing_posts_are_its_doubtful_plus_its_missing_ones():
+    """The topic navigator's "discrepancias": posts where enrich puts the topic and Jev does
+    not back it, plus posts where Jev backs it and enrich did not put it. One post cannot be
+    both for the same topic, so the sum counts POSTS."""
+    a, b, c = _item("1", topics=("ai-coding",)), _item("2", topics=("ai-coding",)), _item("3")
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.2, "startups": 0.9, "misc": 0.1})),
+        (b, _assessment(b, {"ai-coding": 0.3, "startups": 0.1, "misc": 0.1})),
+        (c, _assessment(c, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.9})),
+    ]
+
+    by_slug = {row["slug"]: row for row in summarize(pairs, VOCAB, 0.85)["per_topic"]}
+
+    assert (by_slug["ai-coding"]["doubtful"], by_slug["ai-coding"]["missing"]) == (2, 0)
+    assert by_slug["ai-coding"]["disagreeing"] == 2
+    assert by_slug["startups"]["disagreeing"] == by_slug["startups"]["missing"] == 1
+    assert by_slug["misc"]["disagreeing"] == 0
 
 
 def test_summarize_prices_each_record_by_its_own_provider_and_names_the_unpriced_one():
