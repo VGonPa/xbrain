@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import unicodedata
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -31,7 +32,7 @@ from xbrain.jev.client import (
     Question,
 )
 from xbrain.jev.defaults import plural
-from xbrain.jev.models import PrimaryChoice, TopicAssessment
+from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import PRIMARY_KEY, STATE_KEY, TOPIC_PREFIX, build_topic_questions
 from xbrain.models import Item, Topic, VerifyTarget
 from xbrain.verification import fingerprint_output
@@ -617,3 +618,37 @@ def run_assessments(
             f"primero: {failed[0][1]}"
         )
     return RunResult(assessed=tuple(assessed), failed=tuple(failed))
+
+
+def run_record(
+    banked: tuple[TopicAssessment, ...],
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    sent: int,
+    finished: int,
+    interrupted: bool,
+) -> JevRun:
+    """The `runs.jsonl` line for one pass: what the seam counted and what was banked.
+
+    `sent`/`finished` come from `client.CountingJevClient` — the only place a SEND is
+    observable. `ok` is what was BANKED (every record `run_assessments` delivered), the same
+    set the rest of `jev topics` reports on; `failed` is the rest of what came back, answers
+    this repo refused included. Tokens are summed per the provider that answered each record,
+    because that is what the price is keyed on (`defaults.tokens_cost_usd`).
+    """
+    tokens: Counter[str] = Counter()
+    for assessment in banked:
+        tokens[assessment.provider] += assessment.input_tokens or 0
+    return JevRun(
+        started_at=started_at,
+        finished_at=finished_at,
+        models=sorted({assessment.model for assessment in banked}),
+        requests=sent,
+        ok=len(banked),
+        failed=finished - len(banked),
+        input_tokens_by_provider=dict(sorted(tokens.items())),
+        input_tokens=sum(tokens.values()),
+        input_tokens_unknown=sum(1 for a in banked if a.input_tokens is None),
+        interrupted=interrupted,
+    )

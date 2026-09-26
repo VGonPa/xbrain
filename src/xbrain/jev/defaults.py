@@ -66,6 +66,17 @@ def input_tokens_total(assessments: Iterable[TopicAssessment]) -> tuple[int, int
     return counted, unknown
 
 
+def tokens_cost_usd(tokens: int, provider: str) -> float:
+    """Estimated USD for `tokens` input tokens answered by `provider` — THE price formula.
+
+    Every bill in the package goes through here: a stored assessment (`input_cost_usd`) and a
+    pass in the run log (`report.run_history`) alike. Two formulas would let a price
+    correction reprice one history and not the other. A provider absent from
+    `INPUT_USD_PER_MTOK` prices at 0.0 and is NAMED by the caller (`unpriced_providers`).
+    """
+    return tokens / 1e6 * INPUT_USD_PER_MTOK.get(provider, 0.0)
+
+
 def input_cost_usd(assessments: Iterable[TopicAssessment]) -> float:
     """Estimated USD for the INPUT tokens of `assessments`, priced PER RECORD.
 
@@ -85,7 +96,7 @@ def input_cost_usd(assessments: Iterable[TopicAssessment]) -> float:
     # JSON key whose type changes with the contents of the side-car.
     return float(
         sum(
-            (assessment.input_tokens or 0) / 1e6 * INPUT_USD_PER_MTOK.get(assessment.provider, 0.0)
+            tokens_cost_usd(assessment.input_tokens or 0, assessment.provider)
             for assessment in assessments
         )
     )

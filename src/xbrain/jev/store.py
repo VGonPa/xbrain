@@ -36,12 +36,13 @@ side-car) and `data/` is gitignored in full, so there is no `git checkout` and n
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from xbrain.jev.client import JevError
-from xbrain.jev.models import TopicAssessment
+from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.store import _atomic_write
 
 
@@ -88,3 +89,42 @@ def save_assessments(assessments: dict[str, TopicAssessment], path: Path) -> Non
         for item_id, assessment in sorted(assessments.items())
     }
     _atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def load_runs(path: Path) -> list[JevRun]:
+    """Every logged pass, in file (= chronological) order; `[]` when the log does not exist.
+
+    Same stance as `load_assessments`: a line that does not parse or validate is REFUSED with
+    the path and its line number, never skipped. Each line is paid history, and a report that
+    silently dropped one would under-quote the bill. Blank lines are not records.
+    """
+    if not path.exists():
+        return []
+    runs: list[JevRun] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            runs.append(JevRun.model_validate_json(line))
+        except ValidationError as exc:
+            raise JevError(
+                f"{path}: registro de pasadas ilegible en la línea {number} ({exc})"
+            ) from exc
+    return runs
+
+
+def append_run(run: JevRun, path: Path) -> None:
+    """Append one line to the run log: one `write` of one line, then flush and fsync.
+
+    APPEND, never rewrite: earlier lines are paid history and this call must not be able to
+    touch them. A single writer (`jev topics` is one process) and one `write` per line is
+    atomic enough; a crash mid-write leaves at most a torn LAST line, which `load_runs`
+    names by number instead of hiding. Like the side-car, the log is not snapshotted and
+    lives under the gitignored `data/`.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = run.model_dump_json() + "\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())

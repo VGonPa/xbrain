@@ -33,6 +33,8 @@ def test_jev_defaults(tmp_path: Path):
     assert cfg.jev_state_char_limit == 100_000
     assert cfg.jev_dir == tmp_path / "data" / "jev"
     assert cfg.jev_topics_path == tmp_path / "data" / "jev" / "topics.json"
+    # The run log sits beside the side-car: same directory, same gitignored `data/`.
+    assert cfg.jev_runs_path == tmp_path / "data" / "jev" / "runs.jsonl"
 
 
 def test_jev_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypatch):

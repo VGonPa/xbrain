@@ -9,6 +9,7 @@ import this module without paying for, or depending on, anybody's HTTP stack. Mi
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -118,3 +119,50 @@ class JevClient(Protocol):
         and that is where the real guarantee lives.
         """
         ...
+
+
+class CountingJevClient:
+    """A `JevClient` that counts the calls it forwards — how `runs.jsonl` knows what was SENT.
+
+    Counted at the seam because nothing else sees a send: `run_assessments` reports ITEMS
+    that come back, and an interrupted pass leaves calls in flight whose outcome nobody
+    observes. `sent` is every call forwarded (each item once; retries inside the vendor SDK
+    are invisible here and not counted). `finished` is every call that came back, with an
+    answer or with an `Exception`; a `KeyboardInterrupt` is neither, so a call cut short by
+    Ctrl-C stays in `sent - finished` — in flight. Thread-safe, because `ask` is called
+    from `[jev].concurrency` workers at once.
+    """
+
+    def __init__(self, inner: JevClient) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+        self._sent = 0
+        self._finished = 0
+
+    @property
+    def sent(self) -> int:
+        """Calls forwarded so far, whatever became of them."""
+        with self._lock:
+            return self._sent
+
+    @property
+    def finished(self) -> int:
+        """Calls that came back — answered, or failed with an `Exception`."""
+        with self._lock:
+            return self._finished
+
+    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
+        with self._lock:
+            self._sent += 1
+        try:
+            result = self._inner.ask(state, questions)
+        except Exception:
+            with self._lock:
+                self._finished += 1
+            raise
+        with self._lock:
+            self._finished += 1
+        return result
+
+    def close(self) -> None:
+        self._inner.close()

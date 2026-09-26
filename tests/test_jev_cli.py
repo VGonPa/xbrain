@@ -17,7 +17,7 @@ from xbrain.cli import app
 from xbrain.config import Config
 from xbrain.jev.client import JevClient, JevResult, Question
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
-from xbrain.jev.store import load_assessments, save_assessments
+from xbrain.jev.store import load_assessments, load_runs, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.notes_io import note_filename
 from xbrain.rubrics import save_vocab
@@ -870,6 +870,158 @@ def test_an_interrupt_that_rescued_nothing_leaves_an_existing_sidecar_alone(
     assert result.exit_code == 130, result.output
     assert "Interrumpido: nada nuevo que guardar" in result.stderr
     assert _topics_path(tmp_path).read_bytes() == before
+
+
+# ------------------------------------------------------------------- the run log (runs.jsonl)
+
+
+def _runs_path(tmp_path: Path) -> Path:
+    return tmp_path / "data" / "jev" / "runs.jsonl"
+
+
+def test_a_successful_run_logs_one_line_with_what_it_sent_and_what_it_cost(
+    tmp_path: Path, monkeypatch
+):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(input_tokens=1_500))
+    before = datetime.now(timezone.utc)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok, run.failed, run.interrupted) == (2, 2, 0, False)
+    # Tokens per the provider that ANSWERED (the fake reports `fake`), never a dollar figure.
+    assert run.input_tokens_by_provider == {"fake": 3_000}
+    assert (run.input_tokens, run.input_tokens_unknown) == (3_000, 0)
+    assert run.models == ["jev-1.13.0"]
+    assert before <= run.started_at <= run.finished_at <= datetime.now(timezone.utc)
+    # The operator is told where the history went, after it was written.
+    assert f"pasada registrada → {_runs_path(tmp_path)}" in result.stdout
+
+
+def test_a_partial_failure_logs_the_failures_too(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    fake = FakeJevClient(fail_when=lambda state: "Seed" in state["post"])
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok, run.failed) == (2, 1, 1)
+
+
+def test_a_run_where_every_call_failed_is_still_history(tmp_path: Path, monkeypatch):
+    """The 402 case: 2 requests sent, 2 failed, exit 1. Those requests were made, and the log
+    is the only place that remembers them — the side-car gained nothing."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(fail_when=lambda state: True))
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 1
+    assert "ninguna de las 2 evaluaciones terminó" in result.stderr
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok, run.failed, run.interrupted) == (2, 0, 2, False)
+    assert run.input_tokens_by_provider == {} and run.models == []
+
+
+def test_an_interrupted_run_logs_what_was_sent_including_the_call_in_flight(
+    tmp_path: Path, monkeypatch
+):
+    """Ctrl-C after one answer: two calls were SENT (the second is the one interrupted), one
+    came back. `requests` counts sends, so the in-flight call is visible as the difference."""
+    _setup_repo(tmp_path, monkeypatch, jev="concurrency = 1\n")
+    _seed(tmp_path)
+    fake = FakeJevClient(interrupt_after=1)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 130, result.output
+    [run] = load_runs(_runs_path(tmp_path))
+    assert run.interrupted is True
+    assert run.requests == len(fake.calls) == 2
+    assert (run.ok, run.failed) == (1, 0)
+    assert run.input_tokens == 100
+
+
+def test_answers_without_usage_are_counted_as_unknown_not_as_free(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(input_tokens=None))
+
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.input_tokens, run.input_tokens_unknown) == (0, 2)
+    # The provider answered; it just reported no usage. Its row is there, at zero counted.
+    assert run.input_tokens_by_provider == {"fake": 0}
+
+
+def test_a_dry_run_or_an_empty_backlog_logs_nothing(tmp_path: Path, monkeypatch):
+    """No request sent, no line: the log is a history of BILLED passes, not of invocations."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("--dry-run must not call Jev"))
+
+    assert runner.invoke(app, ["jev", "topics", "--dry-run"]).exit_code == 0
+    assert not _runs_path(tmp_path).exists()
+
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("nothing pending"))
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    assert len(load_runs(_runs_path(tmp_path))) == 1  # the one pass that sent requests
+
+
+def test_the_run_is_logged_even_when_the_side_car_cannot_be_written(tmp_path, monkeypatch):
+    """The bill does not depend on the disk: the requests were sent whether or not the
+    answers could be kept, so the history records them either way."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+
+    def _boom(assessments, path):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "save_assessments", _boom)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 1
+    assert "2 evaluaciones pagadas sin guardar" in result.stderr
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok) == (2, 2)
+
+
+def test_a_log_that_cannot_be_written_never_costs_the_run_its_records_or_its_verdict(
+    tmp_path: Path, monkeypatch
+):
+    """Losing the history line is bad; losing the paid side-car over it is worse. The line
+    is printed to stderr so the operator can append it by hand."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+
+    def _boom(run, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cli, "append_run", _boom)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    assert list(load_assessments(_topics_path(tmp_path))) == ["1", "2"]
+    assert f"no se pudo registrar la pasada en {_runs_path(tmp_path)}" in result.stderr
+    # The line itself, so it can be appended by hand: a JSON object with the request count.
+    logged = [line for line in result.stderr.splitlines() if line.startswith("{")]
+    assert logged and json.loads(logged[0])["requests"] == 2
+    assert "pasada registrada" not in result.stdout
 
 
 # ------------------------------------------------------------------- `xbrain jev report`

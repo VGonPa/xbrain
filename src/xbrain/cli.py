@@ -56,9 +56,10 @@ from xbrain.jev.assess import (
     Selection,
     current_pairs,
     run_assessments,
+    run_record,
     select_items,
 )
-from xbrain.jev.client import JevClient, JevError
+from xbrain.jev.client import CountingJevClient, JevClient, JevError
 from xbrain.jev.dashboard import compute_jev_dashboard_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
     input_cost_usd,
@@ -69,7 +70,7 @@ from xbrain.jev.defaults import (
 )
 from xbrain.jev.env import typesafe_api_key
 from xbrain.jev.report import build_report, cost_fragment, write_reports
-from xbrain.jev.store import load_assessments, save_assessments
+from xbrain.jev.store import append_run, load_assessments, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -190,7 +191,7 @@ if TYPE_CHECKING:
     # module-top `xbrain.jev` import list at the seven modules the CLI is meant to depend
     # on directly (assess, client, dashboard, defaults, env, report, store), so an eighth
     # is a visible decision rather than a drive-by.
-    from xbrain.jev.models import TopicAssessment
+    from xbrain.jev.models import JevRun, TopicAssessment
 
 logger = logging.getLogger(__name__)
 
@@ -2889,6 +2890,24 @@ def _release_jev_client(client: JevClient) -> None:
         )
 
 
+def _log_jev_run(path: Path, run: JevRun) -> None:
+    """Append the pass to the run log — or, if that fails, print the line to paste by hand.
+
+    Runs from `jev_topics_cmd`'s `finally`, so it must never become the run's verdict: an
+    exception here would REPLACE an interrupt's `Exit(130)` or the all-failed `JevError`
+    (Python's `finally` rule, the same hazard `_release_jev_client` guards against), and on
+    the success path it would turn a paid, saved run into exit 1. The history line is not
+    worth the side-car, but it is not thrown away either: it goes to stderr, whole.
+    """
+    try:
+        append_run(run, path)
+    except OSError as exc:
+        typer.echo(f"no se pudo registrar la pasada en {path} ({exc}); añádela a mano:", err=True)
+        typer.echo(run.model_dump_json(), err=True)
+        return
+    typer.echo(f"pasada registrada → {path}")
+
+
 @jev_app.command("topics")
 @_handle_cli_errors
 def jev_topics_cmd(
@@ -2959,7 +2978,10 @@ def jev_topics_cmd(
         if len(banked) % _CHECKPOINT_EVERY == 0:
             _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(banked))
 
-    client = _jev_client(cfg)
+    # Wrapped so the run log can say how many calls were SENT, which nothing else observes.
+    client = CountingJevClient(_jev_client(cfg))
+    started_at = datetime.now(timezone.utc)
+    interrupted = False
     try:
         result = run_assessments(
             list(selection.items),
@@ -2972,6 +2994,7 @@ def jev_topics_cmd(
             on_result=_checkpoint,
         )
     except KeyboardInterrupt:
+        interrupted = True
         # Summary first, then persist, then teardown — the shape `_finish_redescribe_run`
         # establishes. The tally can never fail, so it is never suppressed by a save that does.
         if not banked:
@@ -3006,6 +3029,21 @@ def jev_topics_cmd(
         _echo_jev_outcome(result, cfg.jev_topics_path)
         _save_jev_sidecar(assessments, cfg.jev_topics_path, paid=len(result.assessed))
     finally:
+        # EVERY exit path of a pass that sent something lands here: success, a partial
+        # failure, the all-failed `JevError` (a 402 on every call is still requests made),
+        # a side-car that could not be written, and Ctrl-C. `_log_jev_run` never raises.
+        if client.sent:
+            _log_jev_run(
+                cfg.jev_runs_path,
+                run_record(
+                    tuple(banked.values()),
+                    started_at=started_at,
+                    finished_at=datetime.now(timezone.utc),
+                    sent=client.sent,
+                    finished=client.finished,
+                    interrupted=interrupted,
+                ),
+            )
         # LAST, and guarded. Releasing the pool is cleanup; it is never the run's verdict,
         # and on the interrupt path it runs while `Exit(130)` is in flight.
         _release_jev_client(client)

@@ -22,6 +22,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -38,6 +39,21 @@ _SHA256 = r"^[0-9a-f]{64}$"
 Probability = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
 #: An identifier that must actually identify something.
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+def _require_utc(name: str, value: datetime) -> datetime:
+    """Aware AND at offset zero.
+
+    We do NOT coerce — `xbrain.models._require_utc_aware` says why in as many words: "that
+    would mask the bug". Storing every instant as UTC is also what keeps two records written on
+    machines in different zones comparable by their string form.
+    """
+    _require_utc_aware(name, value)
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{name} must be UTC (offset +00:00), got {value.utcoffset()} in {value!r}"
+        )
+    return value
 
 
 class PrimaryChoice(BaseModel):
@@ -100,15 +116,67 @@ class TopicAssessment(BaseModel):
     @field_validator("asked_at")
     @classmethod
     def _utc(cls, value: datetime) -> datetime:
-        """Naive is refused by the shared helper; a non-UTC offset is refused here.
+        """Naive or non-UTC is refused (see `_require_utc`)."""
+        return _require_utc("asked_at", value)
 
-        We do NOT coerce — `xbrain.models._require_utc_aware` says why in as many words:
-        "that would mask the bug". Storing every instant as UTC is also what keeps two
-        records written on machines in different zones comparable by their string form.
-        """
-        _require_utc_aware("asked_at", value)
-        if value.utcoffset() != timedelta(0):
+
+class JevRun(BaseModel):
+    """One `xbrain jev topics` pass that SENT at least one request — a line of `runs.jsonl`.
+
+    The side-car keeps only the latest assessment per item, so it cannot say what has been
+    billed over time; this record can. It stores TOKENS, never dollars: the cost is computed
+    at read time (`report.run_history`), so a price correction reprices the whole history.
+
+    `requests` counts the calls xbrain SENT, each item once. The SDK retries internally and
+    those retries are not visible here, so they are not counted. `ok` and `failed` are the
+    calls that came back; on an interrupted pass the difference is the calls still in flight
+    when Ctrl-C landed, whose outcome nobody observed.
+
+    `input_tokens_by_provider` rather than one `provider`: every answer carries the provider
+    that gave it, and the price is per provider (`defaults.tokens_cost_usd`), so a single
+    field would misprice a mixed pass. It is EMPTY when nothing answered — a pass where every
+    call failed (a 402, a dead key) reports no provider at all, and is still history.
+    `input_tokens` is its sum, stored so a plain reader of the file gets the total;
+    `input_tokens_unknown` counts answers that reported no usage.
+    """
+
+    model_config = _FROZEN
+
+    started_at: datetime
+    finished_at: datetime
+    models: list[NonEmpty]
+    requests: int = Field(ge=0)
+    ok: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    input_tokens_by_provider: dict[str, int]
+    input_tokens: int = Field(ge=0)
+    input_tokens_unknown: int = Field(ge=0)
+    interrupted: bool
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def _utc(cls, value: datetime, info: ValidationInfo) -> datetime:
+        return _require_utc(str(info.field_name), value)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> JevRun:
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at is earlier than started_at")
+        if self.models != sorted(set(self.models)):
+            raise ValueError(f"models must be sorted and distinct, got {self.models!r}")
+        answered = self.ok + self.failed
+        if answered > self.requests:
+            raise ValueError(f"ok + failed ({answered}) exceeds requests ({self.requests})")
+        if not self.interrupted and answered != self.requests:
             raise ValueError(
-                f"asked_at must be UTC (offset +00:00), got {value.utcoffset()} in {value!r}"
+                f"a pass that was not interrupted accounts for every request: "
+                f"ok + failed = {answered}, requests = {self.requests}"
             )
-        return value
+        if any(tokens < 0 for tokens in self.input_tokens_by_provider.values()):
+            raise ValueError("input_tokens_by_provider holds a negative count")
+        if sum(self.input_tokens_by_provider.values()) != self.input_tokens:
+            raise ValueError(
+                f"input_tokens ({self.input_tokens}) is not the sum of "
+                f"input_tokens_by_provider {self.input_tokens_by_provider!r}"
+            )
+        return self
