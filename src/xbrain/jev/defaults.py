@@ -38,6 +38,17 @@ DEFAULT_FALLBACK_OPTION = "otro"
 DEFAULT_CONCURRENCY = 8
 #: Evidence text is cut here; assessments record the pre-cut length and `truncated`.
 DEFAULT_STATE_CHAR_LIMIT = 100_000
+#: THE `[jev]` keys `config.toml` accepts, each with its default, in the order the
+#: Configuración tab lists them. `config.py` refuses any other key by this list, and the page
+#: states each one's value next to this default — one list, so a sixth key cannot reach the
+#: loader without reaching the page.
+JEV_DEFAULTS: dict[str, str | float | int] = {
+    "threshold": DEFAULT_THRESHOLD,
+    "model": DEFAULT_MODEL,
+    "fallback_option": DEFAULT_FALLBACK_OPTION,
+    "concurrency": DEFAULT_CONCURRENCY,
+    "state_char_limit": DEFAULT_STATE_CHAR_LIMIT,
+}
 
 #: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model
 #: version it is quoted for, its source and its date live once in `docs/jev.md` § Vendor

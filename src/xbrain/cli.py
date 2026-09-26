@@ -54,7 +54,7 @@ from xbrain.jev.assess import (
     select_items,
 )
 from xbrain.jev.client import JevClient, JevError
-from xbrain.jev.dashboard import build_page_data, render_jev_dashboard_html
+from xbrain.jev.dashboard import JEV_PAGE, build_page_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
     input_cost_usd,
     input_tokens_total,
@@ -68,6 +68,7 @@ from xbrain.jev.report import (
     build_report,
     cost_fragment,
     history_fragment,
+    report_paths,
     run_history,
     write_reports,
 )
@@ -3040,7 +3041,7 @@ def jev_report_cmd(
     cfg = _config()
     t = _jev_threshold(cfg, threshold)
     jev = load_jev_pairs(cfg)
-    _refuse_empty_report(jev, cfg, cfg.jev_dir / "topics-report.json")
+    _refuse_empty_report(jev, cfg, report_paths(cfg.jev_dir)[0])
     # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
     # carry the rows, and a second pass would be a second place the threshold has to match.
     # The clock is read HERE and handed down, so `build_report` stays a pure function of its
@@ -3079,7 +3080,7 @@ def jev_dashboard_cmd() -> None:
     """
     cfg = _config()
     jev = load_jev_pairs(cfg)
-    page = cfg.output_dir / "jev.html"
+    page = cfg.output_dir / JEV_PAGE
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
     # names the missing input, the command that fixes it, and the artifact left alone, which
     # for THIS command is the page and not the report it never touches.

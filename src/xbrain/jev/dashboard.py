@@ -31,6 +31,7 @@ ECharts. Nothing is fetched at runtime except the Google Fonts stylesheet.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -42,9 +43,18 @@ from xbrain.config import Config
 from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.executors.api import quoted_source
 from xbrain.generate import VAULT_MEDIA_SUBDIR
-from xbrain.jev.assess import CurrentPairs, build_topic_state, current_pairs, state_surfaces
-from xbrain.jev.client import JevError
-from xbrain.jev.defaults import unpriced
+from xbrain.jev.assess import (
+    CUT_MARKER,
+    STATE_SURFACE_KEYS,
+    CurrentPairs,
+    build_topic_state,
+    current_pairs,
+    questions_digest,
+    select_items,
+    state_surfaces,
+)
+from xbrain.jev.client import ChoiceQuestion, JevError, Question
+from xbrain.jev.defaults import INPUT_USD_PER_MTOK, JEV_DEFAULTS, unpriced
 from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.jev.report import (
@@ -54,10 +64,13 @@ from xbrain.jev.report import (
     build_report,
     chose_fallback,
     jev_assigned,
+    pass_estimate,
     post_cost_view,
     post_sets,
+    report_paths,
     run_history,
 )
+from xbrain.jev.questions import build_topic_questions
 from xbrain.jev.store import load_runs
 from xbrain.models import (
     LINK_CONTENT_KINDS,
@@ -90,6 +103,8 @@ TOPIC_MIN = 5
 _MEDIA_PER_CARD = 4
 #: Where the page's "docs" link points: the operator guide, which explains every number here.
 DOCS_URL = "https://github.com/VGonPa/xbrain/blob/develop/docs/jev.md"
+#: The page's file name under `<output_dir>` — where `jev dashboard` writes it.
+JEV_PAGE = "jev.html"
 #: The command a "copiar comando" button completes with a post id — `jev topics --id`.
 ASK_COMMAND = "xbrain jev topics --id"
 #: Evidence surface → the name the page gives it (the keys are `xbrain.evidence`'s).
@@ -505,6 +520,84 @@ def _cost_block(
     return block
 
 
+def _question_row(key: str, question: Question) -> dict[str, Any]:
+    """One question as it goes on the wire: its key, kind, instructions and criteria in wire
+    order (pairs, not an object: the order of a Choice's options reaches the model)."""
+    return {
+        "key": key,
+        "type": "choice" if isinstance(question, ChoiceQuestion) else "yes_no",
+        "instructions": question.instructions,
+        "criteria": [[option, text] for option, text in (question.criteria or {}).items()],
+    }
+
+
+def _estimate(
+    items: list[Item],
+    assessments: dict[str, TopicAssessment],
+    vocab: list[Topic],
+    current: list[TopicAssessment],
+    *,
+    fallback: str,
+    char_limit: int,
+) -> dict[str, Any]:
+    """What one more pass would cost: the current answers' means (`report.post_cost_view`)
+    times what `jev topics` would ask now (`assess.select_items`, the `--dry-run` count) and
+    times every post with evidence. `report.pass_estimate` does the arithmetic."""
+    selection = select_items(
+        {item.id: item for item in items},
+        assessments,
+        vocab,
+        ids=None,
+        limit=None,
+        force=False,
+        fallback=fallback,
+        char_limit=char_limit,
+    )
+    per_post = post_cost_view(current)
+    with_evidence = len(selection.items) + selection.skipped_current
+    return {
+        "per_post": per_post,
+        "pending": pass_estimate(per_post, len(selection.items)),
+        "corpus": pass_estimate(per_post, with_evidence),
+    }
+
+
+def config_view(
+    items: list[Item],
+    assessments: dict[str, TopicAssessment],
+    vocab: list[Topic],
+    current: list[TopicAssessment],
+    *,
+    settings: dict[str, Any],
+    files: list[dict[str, str]] | None,
+) -> dict[str, Any]:
+    """The Configuración tab's data: every `[jev]` setting beside its default, the models that
+    answered, the price table, the questions EXACTLY as `build_topic_questions` sends them and
+    their digest (the contract's half that is not the post), the surfaces the state carries in
+    its order with the cut's marker, the files, and what another pass would cost.
+
+    `settings` is `{config key: value in effect}`, keyed like `JEV_DEFAULTS`.
+    """
+    fallback, char_limit = settings["fallback_option"], settings["state_char_limit"]
+    questions = build_topic_questions(vocab, fallback)
+    return {
+        "settings": [
+            {"key": key, "value": settings[key], "default": default}
+            for key, default in JEV_DEFAULTS.items()
+        ],
+        "models_answered": dict(Counter(a.model for a in assessments.values())),
+        "prices": dict(INPUT_USD_PER_MTOK),
+        "questions": [_question_row(key, q) for key, q in questions.items()],
+        "questions_digest": questions_digest(questions),
+        "surfaces": [{"key": k, "label": SURFACE_LABELS[k]} for k in STATE_SURFACE_KEYS],
+        "cut_marker": CUT_MARKER.format(dropped="N"),
+        "files": files,
+        "estimate": _estimate(
+            items, assessments, vocab, current, fallback=fallback, char_limit=char_limit
+        ),
+    }
+
+
 def compute_jev_dashboard_data(
     items: list[Item],
     assessments: dict[str, TopicAssessment],
@@ -516,6 +609,9 @@ def compute_jev_dashboard_data(
     id2note: dict[str, str],
     updated: str,
     runs: Sequence[JevRun],
+    model: str,
+    concurrency: int,
+    files: list[dict[str, str]] | None = None,
     runs_error: str | None = None,
     now: datetime | None = None,
     current: CurrentPairs | None = None,
@@ -541,6 +637,10 @@ def compute_jev_dashboard_data(
     of the arguments. `id2note` maps a post to its note's file name inside `notes_dir` (the
     directory ships once). `media` is `collect_jev_media`'s answer; without it no file is
     known to exist and every picture is a placeholder.
+
+    `model` and `concurrency` are the `[jev]` settings the comparison does not use, handed in
+    so the Configuración tab states them; `files` is where the side-car, the run log, the
+    vocabulary, the reports and the page live (`page_files`), `None` from a pure caller.
     """
     if current is None:
         current = current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit)
@@ -551,6 +651,7 @@ def compute_jev_dashboard_data(
             f"fallback={fallback!r} y char_limit={char_limit}"
         )
     pairs = list(current.pairs)
+    answers = [assessment for _, assessment in pairs]
     summary, comparisons = build_report(
         pairs,
         vocab,
@@ -596,7 +697,21 @@ def compute_jev_dashboard_data(
             "not_compared": summary["items_assessed"] - summary["items_compared"],
             "models": summary["models"],
         },
-        "cost": _cost_block(runs, assessments, [a for _, a in pairs], runs_error),
+        "cost": _cost_block(runs, assessments, answers, runs_error),
+        "config": config_view(
+            items,
+            assessments,
+            vocab,
+            answers,
+            settings={
+                "threshold": threshold,
+                "model": model,
+                "fallback_option": fallback,
+                "concurrency": concurrency,
+                "state_char_limit": char_limit,
+            },
+            files=files,
+        ),
         # The posts behind every pair, primary diagonal and confidence band, for the Topics and
         # Comparar tabs to open. Page-only: the summary (and so `topics-report.json`) keeps
         # the counts.
@@ -613,6 +728,21 @@ def note_links(items: Sequence[Item], items_dir: Path) -> tuple[str, dict[str, s
     return str(items_dir.resolve()), {
         item_id: name for item_id, name in names.items() if (items_dir / name).exists()
     }
+
+
+def page_files(cfg: Config) -> list[dict[str, str]]:
+    """Where every file the page reads or is written to lives, absolute — each path from the
+    place its writer or reader takes it (`Config`, `report.report_paths`, `JEV_PAGE`)."""
+    report_json, report_md = report_paths(cfg.jev_dir)
+    paths = (
+        ("topics", cfg.jev_topics_path),
+        ("runs", cfg.jev_runs_path),
+        ("vocab", cfg.vocab_path),
+        ("report_json", report_json),
+        ("report_md", report_md),
+        ("page", cfg.output_dir / JEV_PAGE),
+    )
+    return [{"key": key, "path": str(path.resolve())} for key, path in paths]
 
 
 def build_page_data(cfg: Config, *, now: datetime, jev: JevPairs | None = None) -> dict[str, Any]:
@@ -642,6 +772,9 @@ def build_page_data(cfg: Config, *, now: datetime, jev: JevPairs | None = None) 
         notes_dir=notes_dir,
         updated=f"{now:%b} {now.day}, {now.year}".upper(),
         runs=runs,
+        model=cfg.jev_model,
+        concurrency=cfg.jev_concurrency,
+        files=page_files(cfg),
         runs_error=runs_error,
         now=now,
         # The loader already decided currency; recomputing it would be a second

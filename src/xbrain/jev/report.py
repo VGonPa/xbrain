@@ -967,11 +967,30 @@ def post_cost_view(assessments: Sequence[TopicAssessment]) -> dict[str, Any]:
     mean over all of them. `mean_usd` is `None` when nothing can be priced.
     """
     costs = [cost for a in assessments if (cost := assessment_cost_usd(a)) is not None]
+    tokens = [a.input_tokens for a in assessments if a.input_tokens is not None]
     return {
         "mean_usd": sum(costs) / len(costs) if costs else None,
         "n": len(costs),
         "of": len(assessments),
         "unpriced_providers": list(unpriced_providers(assessments)),
+        # Over the answers that REPORTED usage (`tokens_n` of `of`): an unknown count is not 0.
+        "mean_tokens": sum(tokens) / len(tokens) if tokens else None,
+        "tokens_n": len(tokens),
+    }
+
+
+def pass_estimate(per_post: dict[str, Any], posts: int) -> dict[str, Any]:
+    """What asking about `posts` more posts would cost, from `post_cost_view`'s means — an
+    ESTIMATE: the mean of the answers already paid for, times a count, at list price.
+
+    `tokens` is the mean input tokens × `posts`, `usd` the mean priced cost × `posts`; either
+    is `None` when there is nothing to take its mean over, never a 0 that reads as free.
+    """
+    mean_tokens, mean_usd = per_post["mean_tokens"], per_post["mean_usd"]
+    return {
+        "posts": posts,
+        "tokens": None if mean_tokens is None else round(mean_tokens * posts),
+        "usd": None if mean_usd is None else mean_usd * posts,
     }
 
 
@@ -1368,6 +1387,12 @@ def _record(comparison: ItemComparison) -> dict[str, Any]:
     }
 
 
+def report_paths(jev_dir: Path) -> tuple[Path, Path]:
+    """`(topics-report.json, topics-report.md)` under `jev_dir` — where `write_reports` writes,
+    named once for every reader that points at them (the CLI, the Configuración tab)."""
+    return jev_dir / "topics-report.json", jev_dir / "topics-report.md"
+
+
 def write_reports(
     summary: dict[str, Any],
     comparisons: list[ItemComparison],
@@ -1392,8 +1417,7 @@ def write_reports(
     is the first thing that ever lands in `data/jev/`.
     """
     jev_dir.mkdir(parents=True, exist_ok=True)
-    json_path = jev_dir / "topics-report.json"
-    md_path = jev_dir / "topics-report.md"
+    json_path, md_path = report_paths(jev_dir)
     payload = {"summary": summary, "items": [_record(c) for c in comparisons]}
     _atomic_write(json_path, json.dumps(payload, indent=2, ensure_ascii=False))
     _atomic_write(md_path, render_report_markdown(summary, comparisons, items_by_id))

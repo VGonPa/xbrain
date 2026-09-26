@@ -160,3 +160,21 @@ def test_a_jev_key_that_is_not_a_table_is_refused_clearly(tmp_path: Path):
     )
     with pytest.raises(ValueError, match=re.escape("config.toml: [jev] must be a table")):
         load_config(tmp_path)
+
+
+def test_config_toml_accepts_exactly_the_keys_the_defaults_name(tmp_path: Path):
+    """The `[jev]` keys are listed once (`defaults.JEV_DEFAULTS`, which the Configuración tab
+    reads too); the loader refuses any other and names the allowed ones from that list."""
+    _write_repo(tmp_path, "[jev]\nnope = 1\n")
+
+    with pytest.raises(ValueError) as exc:
+        load_config(tmp_path)
+
+    assert f"(allowed: {', '.join(sorted(defaults.JEV_DEFAULTS))})" in str(exc.value)
+    assert set(defaults.JEV_DEFAULTS) == {
+        "model",
+        "threshold",
+        "fallback_option",
+        "concurrency",
+        "state_char_limit",
+    }

@@ -517,9 +517,8 @@ Top to bottom:
      above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`).
    - *Jev añadiría N topics que enrich no puso* — `missing_pairs`.
    - *El topic principal coincide en P %* — `primary_agree_pct`.
-5. **Four tabs**: **Posts**, **Topics**, **Comparar Jev vs enrich** and **Configuración**.
-   Posts, Topics and Comparar are described below; Configuración shows a one-line
-   placeholder.
+5. **Four tabs**: **Posts**, **Topics**, **Comparar Jev vs enrich** and **Configuración**,
+   each described below.
 
 ### The Posts tab
 
@@ -716,6 +715,46 @@ On the real vault (2026-09-26, 293 evaluated posts) the bands read: of 331 topic
 that Jev does not back, 53 are below 0.2, 91 between 0.2 and 0.5 and **187 between 0.5 and the
 threshold**. Of the 221 Jev would add, 152
 sit between the threshold and 0.95 and 69 at 0.95 or above.
+
+### The Configuración tab
+
+`#config`, read-only: what this page was built with and what Jev is asked. Nothing on it is
+typed into the page; every value comes from Python in the blob (`config`), so the tab cannot
+drift from what `xbrain jev topics` sends. To change a setting, edit `config.toml` and re-run
+`xbrain jev dashboard`.
+
+1. **Ajustes** — the five `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
+   `config.toml` is validated against), each with the value in effect, its default
+   (*por defecto* or *por defecto: X*), one line on what changing it does (the threshold moves
+   every number but retires nothing; a new fallback retires every answer; a new char limit only
+   the posts whose cut moves; the model and concurrency retire nothing) and its key. Under the
+   model, the models that actually answered, counted over the whole side-car. Then the input
+   price per provider from `INPUT_USD_PER_MTOK` (not a config key) and *Los tokens de salida
+   son gratis.*
+2. **Las preguntas exactas** — `build_topic_questions(vocab, fallback)` as sent: one yes/no
+   question per topic (*sí/no por topic = pertenencia, varios posibles*), shown with the first
+   one in wire order and all of them one click away, and the primary-topic choice (*elección =
+   el principal, uno solo; sus probabilidades suman 1*), shown with its escape option and every
+   option one click away. Instructions are English, descriptions verbatim. Below, the
+   questions' sha256 digest (`assess.questions_digest`, the half of each answer's contract that
+   is not the post): when it changes, every stored answer is stale.
+3. **El vocabulario** — every topic of `vocab.yaml` with its slug and description; each name
+   opens its page in the Topics tab.
+4. **Qué ve Jev de cada post** — the evidence surfaces in the order the state carries them
+   (`assess.STATE_SURFACE_KEYS`: the tweet first, then `xbrain.evidence`'s order for target
+   `topics`), the cut at `state_char_limit` and the exact line a cut state ends with
+   (`assess.CUT_MARKER`), with a link to this document.
+5. **Ficheros** — absolute paths of `topics.json`, `runs.jsonl`, `vocab.yaml`,
+   `topics-report.json` / `.md` and `jev.html`, and a note: `data/` is not in git, and the
+   side-car and the run log are not snapshotted either.
+6. **Coste de una pasada (estimación)** — the mean input tokens and dollars per current answer
+   (`report.post_cost_view`, over the answers that report usage), times the posts
+   `xbrain jev topics` would ask now (`assess.select_items`, the `--dry-run` count: never asked
+   or stale, with evidence) and times every post with evidence (as with `--force`), computed by
+   `report.pass_estimate`. An estimate at list price, labelled as such; `—` when no answer has a
+   token count to average.
+
+If the tab ever fails to draw, it says so inside the tab.
 
 Two more things the page cannot tell you itself:
 

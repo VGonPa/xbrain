@@ -1757,3 +1757,29 @@ def test_every_jev_command_says_in_its_help_that_it_uses_the_run_log(command: st
 
     assert result.exit_code == 0
     assert "runs.jsonl" in result.output
+
+
+def test_jev_dashboard_states_the_configured_settings_and_where_each_file_lives(
+    tmp_path: Path, monkeypatch
+):
+    """The Configuración tab states `[jev]` as config.toml sets it — not the defaults — and
+    the absolute path of each file, from the same `Config` properties the commands use."""
+    vault = _setup_repo(tmp_path, monkeypatch, jev='model = "jev-9.9.9"\nconcurrency = 3\n')
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+
+    config = _blob(_page(vault))["config"]
+    values = {row["key"]: row["value"] for row in config["settings"]}
+    assert values["model"] == "jev-9.9.9" and values["concurrency"] == 3
+    report_json, report_md = _report_paths(tmp_path)
+    assert config["files"] == [
+        {"key": "topics", "path": str(_topics_path(tmp_path).resolve())},
+        {"key": "runs", "path": str(_runs_path(tmp_path).resolve())},
+        {"key": "vocab", "path": str((tmp_path / "data" / "vocab.yaml").resolve())},
+        {"key": "report_json", "path": str(report_json.resolve())},
+        {"key": "report_md", "path": str(report_md.resolve())},
+        {"key": "page", "path": str(_page(vault).resolve())},
+    ]
