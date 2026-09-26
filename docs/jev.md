@@ -718,19 +718,22 @@ sit between the threshold and 0.95 and 69 at 0.95 or above.
 
 ### The Configuración tab
 
-`#config`, read-only: what this page was built with and what Jev is asked. Nothing on it is
-typed into the page; every value comes from Python in the blob (`config`), so the tab cannot
-drift from what `xbrain jev topics` sends. To change a setting, edit `config.toml` and re-run
-`xbrain jev dashboard`.
+`#config`, read-only: what this page was built with and what Jev is asked. No value on it is
+written into the page's code; each comes from Python in the blob (`config`), so the tab shows
+what `xbrain jev topics` sends as of the last `xbrain jev dashboard`. To change a setting,
+edit `config.toml` and re-run `xbrain jev dashboard`.
 
 1. **Ajustes** — the five `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
-   `config.toml` is validated against), each with the value in effect, its default
-   (*por defecto* or *por defecto: X*), one line on what changing it does (the threshold moves
-   every number but retires nothing; a new fallback retires every answer; a new char limit only
-   the posts whose cut moves; the model and concurrency retire nothing) and its key. Under the
-   model, the models that actually answered, counted over the whole side-car. Then the input
-   price per provider from `INPUT_USD_PER_MTOK` (not a config key) and *Los tokens de salida
-   son gratis.*
+   `config.toml` is validated against, read through `Config.jev_settings()`), each with the
+   value in effect, its default (*por defecto* or *por defecto: X*), one line on what changing
+   it does (the threshold moves every number but retires nothing; a new fallback retires every
+   answer; a new char limit only the posts whose cut moves; the model and concurrency retire
+   nothing) and its key. The intro separates the two kinds: the threshold, the fallback and the
+   char limit built this page; the model (*Modelo que se pedirá*) and the concurrency only
+   matter to the next `xbrain jev topics`. Under the model, the models that answered the
+   current answers, most answers first, and the reminder that a stored answer does not record
+   which model was *requested*. Then the input price per provider from `INPUT_USD_PER_MTOK`
+   (not a config key) and *Los tokens de salida son gratis.*
 2. **Las preguntas exactas** — `build_topic_questions(vocab, fallback)` as sent: one yes/no
    question per topic (*sí/no por topic = pertenencia, varios posibles*), shown with the first
    one in wire order and all of them one click away, and the primary-topic choice (*elección =
@@ -742,19 +745,29 @@ drift from what `xbrain jev topics` sends. To change a setting, edit `config.tom
    opens its page in the Topics tab.
 4. **Qué ve Jev de cada post** — the evidence surfaces in the order the state carries them
    (`assess.STATE_SURFACE_KEYS`: the tweet first, then `xbrain.evidence`'s order for target
-   `topics`), the cut at `state_char_limit` and the exact line a cut state ends with
-   (`assess.CUT_MARKER`), with a link to this document.
-5. **Ficheros** — absolute paths of `topics.json`, `runs.jsonl`, `vocab.yaml`,
-   `topics-report.json` / `.md` and `jev.html`, and a note: `data/` is not in git, and the
-   side-car and the run log are not snapshotted either.
+   `topics`; `build_topic_state` sorts by it), the cut at `state_char_limit` and the exact line
+   a cut state ends with (`assess.CUT_MARKER`). The tweet goes first, so a cut reaches it only
+   when the tweet by itself is longer than the limit. A link leads to this section.
+5. **Ficheros** — each file by its path under `data/` (`jev/topics.json`, `jev/runs.jsonl`,
+   `vocab.yaml`, `jev/topics-report.json` / `.md`) and `jev.html`, with its absolute path,
+   *(aún no existe: lo crea …)* for one not written yet (the run log appears with the first
+   pass that sends a request), and whether a snapshot of `data/` carries it
+   (`snapshot.is_snapshotted`: only `vocab.yaml` here). Two notes: `data/` is not in git, and
+   Jev's answers and run log are not snapshotted while enrich's `topics.json` and `vocab.yaml`
+   are; re-doing `jev/topics.json` costs money and `snapshot restore` does not bring it back.
 6. **Coste de una pasada (estimación)** — the mean input tokens and dollars per current answer
-   (`report.post_cost_view`, over the answers that report usage), times the posts
-   `xbrain jev topics` would ask now (`assess.select_items`, the `--dry-run` count: never asked
-   or stale, with evidence) and times every post with evidence (as with `--force`), computed by
-   `report.pass_estimate`. An estimate at list price, labelled as such; `—` when no answer has a
-   token count to average.
+   (`report.post_cost_view`, the cost strip's own; when the two means average different
+   answers, the line says both counts), times the posts `xbrain jev topics` would ask now
+   (`assess.select_items`, the `--dry-run` count: never asked or stale, with evidence) and
+   times every post with evidence (as if everything were asked again), by
+   `report.estimate_selection`. An estimate at list price, labelled as such; `—` when no answer
+   has a token count to average, and the dollar figures say so when a provider has no price.
 
-If the tab ever fails to draw, it says so inside the tab.
+If the tab ever fails to draw, it says so inside the tab (and logs the error to the console).
+
+**Limitation.** An assessment records the model that *answered*, never the one *requested*;
+the run log does not record it either. So the tab cannot say which `[jev].model` produced the
+stored answers. Recording the requested model in `JevRun` is a follow-up.
 
 Two more things the page cannot tell you itself:
 

@@ -293,6 +293,7 @@ details.saw[open]>summary{color:var(--ink)}
 .cfg .t td.cv{font-family:var(--mono);font-size:12px;min-width:120px}
 .cfg .t td.cv small{display:block;font-family:var(--ui);font-size:11.5px;color:var(--ink-faint);margin-top:3px}
 .cfg .t td.cw{color:var(--ink-muted);max-width:520px}
+.cfg .t td.cp small.missing{display:block;font-size:11.5px;color:var(--sand);margin-top:3px}
 .cfg .t td.ck code,.cfg .t td.cp code{font-family:var(--mono);font-size:11.5px;color:var(--ink-muted);overflow-wrap:anywhere}
 .cfg .t td a.tl{font-weight:600;color:var(--ink);text-decoration:none}
 .cfg .t td a.tl:hover{color:var(--accent)}
@@ -1637,6 +1638,7 @@ function renderTopics() {
     if (detail) renderTopicDetail();
     else renderTopicsIndex();
   } catch (err) {
+    console.error(err);
     $('topics-index').hidden = true;
     $('topic-detail').hidden = false;
     $('topic-detail').replaceChildren(el('p', 'empty', 'La pestaña Topics no pudo dibujarse: ' +
@@ -1982,6 +1984,7 @@ function renderCompare() {
       if (list && list.sec === key) box.appendChild(compareList(list));
     });
   } catch (err) {
+    console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Comparar no pudo dibujarse: ' +
       (err && err.message ? err.message : err)));
   }
@@ -2000,30 +2003,34 @@ function showCompare() {
 
 /* ---------------------------------------------------------------- the Configuración tab */
 /* config */
-/** What each `[jev]` setting changes, in plain words, keyed by its config.toml key. The keys,
-    the values in effect and the defaults are `config.settings` (from `jev/defaults.py`); only
-    the words live here. */
+/** What each `[jev]` setting changes, in plain words, keyed by its config.toml key. The values
+    in effect come from config.toml (`Config.jev_settings()`), the keys and defaults from
+    `jev/defaults.py` (`JEV_DEFAULTS`), all shipped in `config.settings`; only the words live
+    here. `page` says whether the value built this page or only the next `xbrain jev topics`. */
 const CONFIG_SETTINGS = {
-  threshold: {name: 'Umbral', fmt: (v) => pfmt(v),
+  threshold: {name: 'Umbral', page: true, fmt: (v) => pfmt(v),
     why: 'probabilidad desde la que un topic cuenta como «Jev lo ve». Mueve todos los números de esta página y de `xbrain jev report`; no cambia lo que se pregunta, así que no caduca ninguna evaluación.'},
-  model: {name: 'Modelo pedido', fmt: (v) => v,
-    why: 'el modelo que se pide a Jev. Un alias como jev-latest sigue sus actualizaciones; cada evaluación guarda el modelo que respondió. Cambiarlo no caduca evaluaciones.'},
-  fallback_option: {name: 'Opción de escape', fmt: (v) => '«' + v + '»',
+  model: {name: 'Modelo que se pedirá', page: false, fmt: (v) => v,
+    why: 'el modelo que pedirá a Jev la próxima `xbrain jev topics`. Un alias como jev-latest sigue sus actualizaciones; cada evaluación guarda el modelo que respondió. Cambiarlo no caduca evaluaciones.'},
+  fallback_option: {name: 'Opción de escape', page: true, fmt: (v) => '«' + v + '»',
     why: 'la última opción de la elección del principal: «ningún topic de la lista». Cambiarla cambia las preguntas y caduca todas las evaluaciones.'},
-  concurrency: {name: 'Peticiones a la vez', fmt: (v) => nf(v),
+  concurrency: {name: 'Peticiones a la vez', page: false, fmt: (v) => nf(v),
     why: 'cuántos posts pregunta a la vez `xbrain jev topics`. Solo cambia la velocidad de una pasada.'},
-  state_char_limit: {name: 'Límite de evidencia', fmt: (v) => pl(v, 'carácter', 'caracteres'),
+  state_char_limit: {name: 'Límite de evidencia', page: true, fmt: (v) => pl(v, 'carácter', 'caracteres'),
     why: 'cuánta evidencia de un post se envía; lo que pasa de ahí se corta por el final. Cambiarlo caduca solo los posts cuyo corte se mueve.'},
 };
-/** The files, by `config.files` key: what each one is. */
+/** The files, by `config.files` key: what each one is, and the command that creates it. The
+    name, path, whether it exists and whether a snapshot carries it are Python's. */
 const CONFIG_FILES = {
-  topics: ['topics.json', 'las evaluaciones de Jev (una por post): el side-car'],
-  runs: ['runs.jsonl', 'el registro de pasadas: una línea por `xbrain jev topics` que envió peticiones'],
-  vocab: ['vocab.yaml', 'el vocabulario: de aquí salen las preguntas'],
-  report_json: ['topics-report.json', 'el informe de `xbrain jev report`, para programas'],
-  report_md: ['topics-report.md', 'el mismo informe, para leer'],
-  page: ['jev.html', 'esta página, la escribe `xbrain jev dashboard`'],
+  topics: {what: 'las evaluaciones de Jev, una por post, guardadas aparte de items.json (el «side-car»)', by: '`xbrain jev topics`'},
+  runs: {what: 'el registro de pasadas: una línea por cada `xbrain jev topics` que envió peticiones', by: 'la primera `xbrain jev topics` que envíe peticiones'},
+  vocab: {what: 'el vocabulario: de aquí salen las preguntas', by: '`xbrain vocab`'},
+  report_json: {what: 'el informe de `xbrain jev report`, para programas', by: '`xbrain jev report`'},
+  report_md: {what: 'el mismo informe, para leer', by: '`xbrain jev report`'},
+  page: {what: 'esta página; la escribe `xbrain jev dashboard`', by: '`xbrain jev dashboard`'},
 };
+/** The page's own row when a server draws it live: the file is the static copy, not this one. */
+const CONFIG_PAGE_SERVED = 'la copia estática de esta página, que escribe `xbrain jev dashboard`; la que ves la dibuja el servidor en vivo';
 
 function cfgSection(title, intro) {
   const sec = el('section', 'cfg');
@@ -2062,15 +2069,20 @@ function valueCell(text, small) {
 }
 
 function configSettings(C) {
-  const sec = cfgSection('Ajustes', 'Con estos valores se hizo esta página. Se cambian en config.toml, nunca aquí.');
-  const models = Object.entries(C.models_answered).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const built = C.settings.filter(s => CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
+  const next = C.settings.filter(s => !CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
+  const sec = cfgSection('Ajustes', built.join(', ') + ': con estos valores se calculó esta página. ' +
+    next.join(' y ') + ': no cambian esta página, son lo que usará la próxima `xbrain jev topics`. ' +
+    'Todo se cambia en config.toml, nunca aquí.');
+  // Shipped most answers first, then by name: drawn in that order.
+  const models = C.models_answered;
   const rows = C.settings.map(s => {
     const spec = CONFIG_SETTINGS[s.key];
     let small = s.value === s.default ? 'por defecto' : 'por defecto: ' + spec.fmt(s.default);
     if (s.key === 'model') {
-      small += ' · respondieron: ' + (models.length
-        ? models.map(([m, n]) => m + ' (' + pl(n, 'evaluación', 'evaluaciones') + ')').join(', ')
-        : 'ninguna evaluación guardada');
+      small += ' · las evaluaciones guardadas no registran qué modelo se pidió, solo el que respondió: ' + (models.length
+        ? models.map(([m, n]) => m + ' (' + pl(n, 'evaluación vigente', 'evaluaciones vigentes') + ')').join(', ')
+        : 'ninguna evaluación vigente');
     }
     return [spec.name, valueCell(spec.fmt(s.value), small), spec.why, el('code', null, '[jev].' + s.key)];
   });
@@ -2104,7 +2116,7 @@ function configQuestions(C) {
   const sec = cfgSection('Las preguntas exactas',
     'Cada post es una petición a Jev con ' + pl(C.questions.length, 'pregunta', 'preguntas') +
     ', en inglés tal como se envían; las descripciones van literales, en el idioma del vocabulario. ' +
-    'Lo que Jev lee del post va aparte, como `post` (ver «Qué ve Jev de cada post»).');
+    'Lo que Jev lee del post va aparte, en un campo llamado `post` (ver «Qué ve Jev de cada post»).');
   const grid = el('div', 'qgrid');
   const yes = el('div', 'q');
   yes.appendChild(el('span', 'lab', pl(yesNo.length, 'pregunta', 'preguntas') + ' sí/no'));
@@ -2131,14 +2143,14 @@ function configQuestions(C) {
   sec.appendChild(grid);
   const d = el('p', 'muted', 'Huella de las preguntas (sha256): ');
   d.appendChild(el('span', 'digest', C.questions_digest));
-  d.appendChild(document.createTextNode('. Entra en el contrato de cada evaluación: si cambia una pregunta, cambia la huella y todas las evaluaciones guardadas caducan.'));
+  d.appendChild(document.createTextNode('. Cada evaluación guarda esta huella junto con la de su post, y así se sabe si sigue vigente: si cambia una pregunta, cambia la huella y todas las evaluaciones guardadas caducan.'));
   sec.appendChild(d);
   return sec;
 }
 
 function configVocabulary() {
   const sec = cfgSection('El vocabulario', pl(DATA.topics.length, 'topic', 'topics') +
-    ' de vocab.yaml. La descripción de cada uno es, literal, la respuesta «true» de su pregunta sí/no y su opción en la elección. Cada nombre abre su ficha en Topics.');
+    ' de vocab.yaml; el slug es su nombre en las preguntas. La descripción de cada uno es, literal, la respuesta «true» de su pregunta sí/no y su opción en la elección. Cada nombre abre su ficha en Topics.');
   sec.appendChild(cfgTable([['Topic', 'ck'], ['Descripción', 'cw']], DATA.topics.map(t => {
     const name = el('div');
     name.appendChild(link(topicHref(t.slug), 'tl', t.label));
@@ -2150,16 +2162,18 @@ function configVocabulary() {
 
 function configEvidence(C, limit) {
   const sec = cfgSection('Qué ve Jev de cada post',
-    'Un solo texto, `post`, con estas fuentes en este orden (cada una solo si el post la tiene):');
+    'Un solo texto, el campo `post` de cada petición, con estas fuentes en este orden (cada una solo si el post la tiene):');
   const ol = el('ol', 'surf');
   C.surfaces.forEach(s => ol.appendChild(el('li', null, s.label)));
   sec.appendChild(ol);
   const cut = el('p', 'muted', 'El corte: si pasa de ' + pl(limit, 'carácter', 'caracteres') +
-    ', se corta por el final — el tweet va primero, así que nunca se pierde — y se añade una línea ');
+    ', se corta por el final y se añade una línea ');
   cut.appendChild(el('code', 'marker', C.cut_marker));
-  cut.appendChild(document.createTextNode(' (N, los caracteres que quedaron fuera). Cada post dice en «Lo que vio Jev» qué fuentes llevaba y si se recortó. '));
-  const docs = httpUrl(DATA.docs_url);
-  if (docs) cut.appendChild(link(docs, 'lk', 'cómo se construye, en la documentación ↗'));
+  cut.appendChild(document.createTextNode(' (N, los caracteres que quedaron fuera). ' +
+    'El tweet va primero: un corte solo llega a él si el propio tweet pasa del límite. ' +
+    'Cada post dice en «Lo que vio Jev» qué fuentes llevaba y si se recortó. '));
+  const docs = httpUrl(C.docs_url);
+  if (docs) cut.appendChild(link(docs, 'lk', 'esta pestaña, en la documentación ↗'));
   sec.appendChild(cut);
   return sec;
 }
@@ -2170,17 +2184,37 @@ function configFiles(C) {
     sec.appendChild(el('p', 'muted', 'Esta página se generó sin rutas de ficheros.'));
     return sec;
   }
-  sec.appendChild(cfgTable([['Fichero', null], ['Ruta', 'cp'], ['Qué es', 'cw']], C.files.map(f => {
-    const spec = CONFIG_FILES[f.key] || [f.key, ''];
-    return [spec[0], el('code', null, f.path), spec[1]];
+  sec.appendChild(cfgTable([['Fichero', null], ['Ruta', 'cp'], ['Qué es', 'cw'], ['En snapshots', null]], C.files.map(f => {
+    const spec = CONFIG_FILES[f.key] || {what: '', by: ''};
+    const where = el('div');
+    where.appendChild(el('code', null, f.path));
+    // The page's own file is written right after this blob is built: it is never «missing» here.
+    if (!f.exists && f.key !== 'page') where.appendChild(el('small', 'missing', '(aún no existe: lo crea ' + spec.by + ')'));
+    return [f.label, where, f.served ? CONFIG_PAGE_SERVED : spec.what, f.snapshotted ? 'sí' : 'no'];
   })));
-  sec.appendChild(el('p', 'note', 'data/ no está en git. topics.json y runs.jsonl, además, no entran en los snapshots (vocab.yaml sí): costaron dinero y `xbrain snapshot restore` no los devuelve.'));
+  sec.appendChild(el('p', 'note', 'data/ no está en git. Las evaluaciones de Jev (jev/topics.json) y su registro (jev/runs.jsonl) no entran en los snapshots; el topics.json de enrich y vocab.yaml sí.'));
+  sec.appendChild(el('p', 'note', 'Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo devuelve; runs.jsonl es el histórico de costes.'));
   return sec;
 }
 
-function estimateText(e) {
+function estimateText(e, p) {
   if (e.tokens == null) return pl(e.posts, 'post', 'posts') + ' · sin media que multiplicar';
-  return pl(e.posts, 'post', 'posts') + ' · ~' + nf(e.tokens) + ' tokens de entrada';
+  return pl(e.posts, 'post', 'posts') + ' · ~' + nf(e.tokens) + ' tokens de entrada' +
+    (p.unpriced_providers.length ? ' · el $ solo promedia proveedores con tarifa (sin tarifa: ' +
+      p.unpriced_providers.join(', ') + ')' : '');
+}
+
+/** «Media por post»'s line: one denominator when tokens and dollars average the same answers,
+    both when they do not (an answer with tokens but no price counts for one only). */
+function perPostText(p) {
+  if (p.mean_tokens == null) return 'ninguna evaluación vigente trae recuento de tokens';
+  const tail = p.unpriced_providers.length ? ' · sin tarifa: ' + p.unpriced_providers.join(', ') : '';
+  if (p.tokens_n === p.n) {
+    return 'de ' + nf(p.tokens_n) + ' de las ' + nf(p.of) + ' evaluaciones vigentes (las que traen recuento) · ' +
+      usd(p.mean_usd, 5) + ' de media' + tail;
+  }
+  return 'tokens: media de ' + nf(p.tokens_n) + ' de las ' + nf(p.of) + ' evaluaciones vigentes (las que traen recuento) · ' +
+    '$: ' + usd(p.mean_usd, 5) + ', media de ' + nf(p.n) + ' (las que además tienen tarifa)' + tail;
 }
 
 function configCost(C) {
@@ -2188,7 +2222,7 @@ function configCost(C) {
   const sec = cfgSection('Coste de una pasada (estimación)',
     'Estimación: la media de las evaluaciones vigentes por un número de posts, a precio de lista. ' +
     '«Lo que falta» son los posts que `xbrain jev topics` preguntaría ahora (nunca preguntados o caducados, con evidencia); ' +
-    '«todo el corpus», cada post con evidencia, como con --force.');
+    '«todo el corpus», cada post con evidencia, como si se volviera a preguntar todo.');
   const facts = el('div', 'kinds');
   const fact = (lab, big, why) => {
     const k = el('div', 'kind');
@@ -2197,12 +2231,9 @@ function configCost(C) {
     k.appendChild(el('p', null, why));
     facts.appendChild(k);
   };
-  fact('Media por post', p.mean_tokens == null ? '—' : nf(Math.round(p.mean_tokens)) + ' tokens',
-    p.mean_tokens == null ? 'ninguna evaluación vigente trae recuento de tokens'
-      : 'de ' + nf(p.tokens_n) + ' de las ' + nf(p.of) + ' evaluaciones vigentes (las que traen recuento) · ' +
-        usd(p.mean_usd, 5) + ' de media' + (p.unpriced_providers.length ? ' · sin tarifa: ' + p.unpriced_providers.join(', ') : ''));
-  fact('Lo que falta', usd(C.estimate.pending.usd), estimateText(C.estimate.pending));
-  fact('Todo el corpus', usd(C.estimate.corpus.usd), estimateText(C.estimate.corpus));
+  fact('Media por post', p.mean_tokens == null ? '—' : nf(Math.round(p.mean_tokens)) + ' tokens', perPostText(p));
+  fact('Lo que falta', usd(C.estimate.pending.usd), estimateText(C.estimate.pending, p));
+  fact('Todo el corpus', usd(C.estimate.corpus.usd), estimateText(C.estimate.corpus, p));
   sec.appendChild(facts);
   return sec;
 }
@@ -2216,6 +2247,7 @@ function renderConfig() {
     [configSettings(C), configQuestions(C), configVocabulary(), configEvidence(C, limit), configFiles(C), configCost(C)]
       .forEach(sec => box.appendChild(sec));
   } catch (err) {
+    console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Configuración no pudo dibujarse: ' +
       (err && err.message ? err.message : err)));
   }

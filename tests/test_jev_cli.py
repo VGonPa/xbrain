@@ -16,6 +16,7 @@ from xbrain import cli
 from xbrain.jev import run as jev_run
 from xbrain.cli import app
 from xbrain.config import Config
+from xbrain.jev.dashboard import page_files
 from xbrain.jev.client import JevClient, JevResult, Question
 from xbrain.jev.defaults import plural
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
@@ -1775,11 +1776,60 @@ def test_jev_dashboard_states_the_configured_settings_and_where_each_file_lives(
     values = {row["key"]: row["value"] for row in config["settings"]}
     assert values["model"] == "jev-9.9.9" and values["concurrency"] == 3
     report_json, report_md = _report_paths(tmp_path)
+    # No `jev report` has run: the reports do not exist yet, and the page says so. Only
+    # vocab.yaml sits in a snapshot of data/ — the Jev side-car and its run log do not.
     assert config["files"] == [
-        {"key": "topics", "path": str(_topics_path(tmp_path).resolve())},
-        {"key": "runs", "path": str(_runs_path(tmp_path).resolve())},
-        {"key": "vocab", "path": str((tmp_path / "data" / "vocab.yaml").resolve())},
-        {"key": "report_json", "path": str(report_json.resolve())},
-        {"key": "report_md", "path": str(report_md.resolve())},
-        {"key": "page", "path": str(_page(vault).resolve())},
+        {
+            "key": "topics",
+            "label": "jev/topics.json",
+            "path": str(_topics_path(tmp_path).resolve()),
+            "exists": True,
+            "snapshotted": False,
+        },
+        {
+            "key": "runs",
+            "label": "jev/runs.jsonl",
+            "path": str(_runs_path(tmp_path).resolve()),
+            "exists": True,
+            "snapshotted": False,
+        },
+        {
+            "key": "vocab",
+            "label": "vocab.yaml",
+            "path": str((tmp_path / "data" / "vocab.yaml").resolve()),
+            "exists": True,
+            "snapshotted": True,
+        },
+        {
+            "key": "report_json",
+            "label": "jev/topics-report.json",
+            "path": str(report_json.resolve()),
+            "exists": False,
+            "snapshotted": False,
+        },
+        {
+            "key": "report_md",
+            "label": "jev/topics-report.md",
+            "path": str(report_md.resolve()),
+            "exists": False,
+            "snapshotted": False,
+        },
+        {
+            "key": "page",
+            "label": "jev.html",
+            "path": str(_page(vault).resolve()),
+            "exists": False,
+            "snapshotted": False,
+            "served": False,
+        },
     ]
+
+
+def test_a_served_page_says_so_in_its_own_file_row(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    cfg = cli._config()
+
+    [page] = [f for f in page_files(cfg, served=True) if f["key"] == "page"]
+
+    assert page["served"] is True
+    assert all("served" not in f for f in page_files(cfg) if f["key"] != "page")

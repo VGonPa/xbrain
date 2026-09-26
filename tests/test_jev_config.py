@@ -178,3 +178,42 @@ def test_config_toml_accepts_exactly_the_keys_the_defaults_name(tmp_path: Path):
         "concurrency",
         "state_char_limit",
     }
+
+
+#: A value other than the default for every `[jev]` key, as config.toml would carry it.
+_NON_DEFAULT = {
+    "threshold": 0.875,
+    "model": "jev-9.9.9",
+    "fallback_option": "ninguno",
+    "concurrency": 3,
+    "state_char_limit": 5000,
+}
+
+
+def test_every_jev_key_config_toml_accepts_is_parsed_into_the_config(tmp_path: Path):
+    """A key `JEV_DEFAULTS` lists (so the loader accepts it) but nobody parses would be read
+    as the default forever. Every key, a non-default value, read back from `cfg.jev_<key>`
+    and from `jev_settings()`, the one dict the dashboard is built from."""
+    assert set(_NON_DEFAULT) == set(defaults.JEV_DEFAULTS)
+    for key, value in _NON_DEFAULT.items():
+        assert value != defaults.JEV_DEFAULTS[key], key
+    body = "".join(
+        f'{k} = "{v}"\n' if isinstance(v, str) else f"{k} = {v}\n" for k, v in _NON_DEFAULT.items()
+    )
+    _write_repo(tmp_path, "[jev]\n" + body)
+
+    cfg = load_config(tmp_path)
+
+    for key, value in _NON_DEFAULT.items():
+        assert getattr(cfg, f"jev_{key}") == value, key
+    assert cfg.jev_settings() == _NON_DEFAULT
+    assert list(cfg.jev_settings()) == list(defaults.JEV_DEFAULTS)
+
+
+def test_the_vocabulary_and_the_jev_page_have_one_path_each(tmp_path: Path):
+    _write_repo(tmp_path)
+
+    cfg = load_config(tmp_path)
+
+    assert cfg.vocab_path == cfg.data_dir / "vocab.yaml"
+    assert cfg.jev_page_path == cfg.output_dir / "jev.html"

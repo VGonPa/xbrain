@@ -686,7 +686,8 @@ generates an Obsidian wiki.
   values are set. Configuración tab (`#config`, read-only): the blob's `config` block from
   `dashboard.config_view` — `[jev]` keys from `defaults.JEV_DEFAULTS`, the wire questions from
   `build_topic_questions` (never copied into the template), `STATE_SURFACE_KEYS`/`CUT_MARKER`
-  from assess.py, the pass estimate from `report.pass_estimate`. Plus
+  from assess.py, the pass estimate from `report.estimate_selection` (topics-only means:
+  `topics_pass_estimate`); settings through `Config.jev_settings()`. Plus
   cost total / per pass / per post. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`

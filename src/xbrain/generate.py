@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import assert_never, cast
 
-from xbrain.config import SUPPORTED_TOPIC_STYLES
+from xbrain.config import JEV_PAGE, SUPPORTED_TOPIC_STYLES
 from xbrain.dashboard import collect_thumbnails, compute_dashboard_data, render_dashboard_html
 from xbrain.i18n import Strings, strings_for
 from xbrain.executors.api import quoted_source
@@ -208,7 +208,7 @@ def generate(
     # unconditional link would send every reader who has never run the Jev layer to a page
     # that is not there, and a dead `file://` is indistinguishable from a broken render.
     # Checked as a path, never imported: see `_render_index`.
-    jev_page = output_dir / "jev.html"
+    jev_page = output_dir / JEV_PAGE
     jev_href = jev_page.resolve().as_uri() if jev_page.exists() else None
     (output_dir / "_index.md").write_text(
         _render_index(items, strings, dashboard_href, jev_href), encoding="utf-8"

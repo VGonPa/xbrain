@@ -54,7 +54,7 @@ from xbrain.jev.assess import (
     select_items,
 )
 from xbrain.jev.client import JevClient, JevError
-from xbrain.jev.dashboard import JEV_PAGE, build_page_data, render_jev_dashboard_html
+from xbrain.jev.dashboard import build_page_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
     input_cost_usd,
     input_tokens_total,
@@ -2850,7 +2850,7 @@ def jev_topics_cmd(
     """
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    vocab = load_vocab(cfg.vocab_path)
     assessments = load_assessments(cfg.jev_topics_path)
     selection = select_items(
         store,
@@ -2928,8 +2928,7 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
     kept = f"No se sobrescribe {artifact}"
     if not jev.vocab:
         raise JevError(
-            f"el vocabulario está vacío o falta {cfg.data_dir / 'vocab.yaml'}: "
-            f"ejecuta `xbrain vocab`. {kept}"
+            f"el vocabulario está vacío o falta {cfg.vocab_path}: ejecuta `xbrain vocab`. {kept}"
         )
     if not jev.store:
         raise JevError(
@@ -2944,7 +2943,7 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
         raise JevError(
             f"0 evaluaciones vigentes de {len(jev.assessments)} guardadas "
             f"({jev.stale} caducadas, {jev.orphans} huérfanas): ejecuta `xbrain jev topics` "
-            f"(o revisa {cfg.data_dir / 'vocab.yaml'} si acabas de cambiarlo). {kept}"
+            f"(o revisa {cfg.vocab_path} si acabas de cambiarlo). {kept}"
         )
     if not any(item.enriched is not None for item, _ in jev.pairs):
         # The fifth state, and the quietest: the side-car is full and current, and
@@ -3080,7 +3079,7 @@ def jev_dashboard_cmd() -> None:
     """
     cfg = _config()
     jev = load_jev_pairs(cfg)
-    page = cfg.output_dir / JEV_PAGE
+    page = cfg.jev_page_path
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
     # names the missing input, the command that fixes it, and the artifact left alone, which
     # for THIS command is the page and not the report it never touches.

@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from xbrain.jev.assess import current_pairs
+from xbrain.jev.assess import Selection, current_pairs
 from xbrain.jev.defaults import (
     input_cost_usd,
     input_tokens_total,
@@ -979,9 +979,14 @@ def post_cost_view(assessments: Sequence[TopicAssessment]) -> dict[str, Any]:
     }
 
 
-def pass_estimate(per_post: dict[str, Any], posts: int) -> dict[str, Any]:
-    """What asking about `posts` more posts would cost, from `post_cost_view`'s means — an
-    ESTIMATE: the mean of the answers already paid for, times a count, at list price.
+def topics_pass_estimate(per_post: dict[str, Any], posts: int) -> dict[str, Any]:
+    """What asking the TOPICS questions about `posts` more posts would cost, from
+    `post_cost_view`'s means — an ESTIMATE: the mean of the topics answers already paid for,
+    times a count, at list price.
+
+    TOPICS-ONLY on purpose: the mean is a topics pass's per-post cost (one yes/no question per
+    topic plus the choice). Another ask with other questions has another per-post cost, and
+    borrowing this mean would misquote it; it needs a mean of its own.
 
     `tokens` is the mean input tokens × `posts`, `usd` the mean priced cost × `posts`; either
     is `None` when there is nothing to take its mean over, never a 0 that reads as free.
@@ -991,6 +996,24 @@ def pass_estimate(per_post: dict[str, Any], posts: int) -> dict[str, Any]:
         "posts": posts,
         "tokens": None if mean_tokens is None else round(mean_tokens * posts),
         "usd": None if mean_usd is None else mean_usd * posts,
+    }
+
+
+def estimate_selection(selection: Selection, per_post: dict[str, Any]) -> dict[str, Any]:
+    """What a topics pass over `selection` would cost (`pending`: everything it would ask,
+    before any `--limit` cut) and what asking every post with evidence again would
+    (`corpus`: pending plus the current ones it skipped) — `topics_pass_estimate` of each.
+
+    `selection` is one made WITHOUT `force`: under `force`, `skipped_current` is 0 by
+    construction and the corpus would read as the pending posts.
+
+    It takes a `Selection` rather than counts so a caller cannot hand it a count decided
+    elsewhere: the posts are the ones `assess.select_items` decided, the `--dry-run` answer.
+    """
+    pending = len(selection.items) + selection.remaining
+    return {
+        "pending": topics_pass_estimate(per_post, pending),
+        "corpus": topics_pass_estimate(per_post, pending + selection.skipped_current),
     }
 
 

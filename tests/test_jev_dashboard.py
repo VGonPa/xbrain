@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ import typer
 from xbrain.dashboard import _resource
 from xbrain.jev.assess import (
     CUT_MARKER,
+    Selection,
     STATE_SURFACE_KEYS,
     build_topic_state,
     current_pairs,
@@ -32,10 +34,12 @@ from xbrain.evidence import SURFACE_KEYS
 from xbrain.cli import app
 from xbrain.jev.dashboard import (
     ASK_COMMAND,
+    DOCS_CONFIG_URL,
     DOCS_URL,
     SURFACE_LABELS,
     TOPIC_MIN,
     MediaFiles,
+    _question_row,
     collect_jev_media,
     compute_jev_dashboard_data,
     render_jev_dashboard_html,
@@ -43,7 +47,13 @@ from xbrain.jev.dashboard import (
 from xbrain.jev.defaults import INPUT_USD_PER_MTOK, JEV_DEFAULTS, tokens_cost_usd
 from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import STATE_KEY, build_topic_questions
-from xbrain.jev.report import build_report, pass_estimate, post_cost_view, run_history
+from xbrain.jev.report import (
+    build_report,
+    estimate_selection,
+    post_cost_view,
+    run_history,
+    topics_pass_estimate,
+)
 from xbrain.models import (
     Author,
     Content,
@@ -61,6 +71,7 @@ from xbrain.models import (
     VideoFrame,
 )
 
+REPO = Path(__file__).resolve().parent.parent
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
 #: A fixed clock. The blob carries `summary["generated_at"]`, so a function that reads the
 #: clock itself cannot be asserted against — and is not the pure function it claims to be.
@@ -106,6 +117,7 @@ def _assessment(
     choice: str = "ai-coding",
     input_tokens: int | None = 2000,
     char_limit: int = CHAR_LIMIT,
+    fallback: str = FALLBACK,
 ) -> TopicAssessment:
     """A record whose contract is the one TODAY'S ask would stamp, so it reads as current.
 
@@ -114,7 +126,7 @@ def _assessment(
     fixture instead of a test passing over a contract nobody computes any more.
     """
     state, state_chars = build_topic_state(item, char_limit)
-    digest = questions_digest(build_topic_questions(vocab or VOCAB, FALLBACK))
+    digest = questions_digest(build_topic_questions(vocab or VOCAB, fallback))
     return TopicAssessment(
         item_id=item.id,
         provider=provider,
@@ -148,20 +160,44 @@ def _run(started: datetime, tokens: int = 4000, requests: int = 2) -> JevRun:
     )
 
 
-def _data(items: list[Item], assessments: dict[str, TopicAssessment], **kwargs) -> dict[str, Any]:
-    options: dict[str, Any] = {
+def _settings(**over: Any) -> dict[str, Any]:
+    """`Config.jev_settings()` as a test hands it in: the fixture's values, keyed like
+    `JEV_DEFAULTS`, with `over` replacing some."""
+    settings: dict[str, Any] = {
         "threshold": 0.85,
-        "fallback": FALLBACK,
-        "char_limit": CHAR_LIMIT,
+        "model": MODEL,
+        "fallback_option": FALLBACK,
+        "concurrency": CONCURRENCY,
+        "state_char_limit": CHAR_LIMIT,
+    }
+    settings.update(over)
+    return settings
+
+
+#: `_data`'s short names for the settings a test most often moves.
+_SETTING_NAMES = {"fallback": "fallback_option", "char_limit": "state_char_limit"}
+
+
+def _data(
+    items: list[Item],
+    assessments: dict[str, TopicAssessment],
+    vocab: list[Topic] | None = None,
+    **kwargs,
+) -> dict[str, Any]:
+    over = {
+        _SETTING_NAMES.get(key, key): kwargs.pop(key)
+        for key in ("threshold", "fallback", "char_limit", "model", "concurrency")
+        if key in kwargs
+    }
+    options: dict[str, Any] = {
+        "settings": _settings(**over),
         "id2note": {},
         "updated": "SEP 22, 2026",
         "now": NOW,
         "runs": [],
-        "model": MODEL,
-        "concurrency": CONCURRENCY,
     }
     options.update(kwargs)
-    return compute_jev_dashboard_data(items, assessments, VOCAB, **options)
+    return compute_jev_dashboard_data(items, assessments, vocab or VOCAB, **options)
 
 
 def _post(data: dict[str, Any], item_id: str) -> dict[str, Any]:
@@ -618,15 +654,11 @@ def _compare_fixture() -> dict[str, Any]:
         items,
         assessments,
         COMPARE_VOCAB,
-        threshold=0.85,
-        fallback=FALLBACK,
-        char_limit=CHAR_LIMIT,
+        settings=_settings(),
         id2note={},
         updated="SEP 26, 2026",
         runs=[],
         now=NOW,
-        model=MODEL,
-        concurrency=CONCURRENCY,
     )
 
 
@@ -1330,15 +1362,11 @@ def test_scraped_text_cannot_close_the_script_tag_or_break_the_parse():
         [item],
         {"1": _assessment(item, vocab=vocab)},
         vocab,
-        threshold=0.85,
-        fallback=FALLBACK,
-        char_limit=CHAR_LIMIT,
+        settings=_settings(),
         id2note={},
         updated="SEP 22, 2026",
         now=NOW,
         runs=[],
-        model=MODEL,
-        concurrency=CONCURRENCY,
     )
 
     html = render_jev_dashboard_html(data)
@@ -1826,14 +1854,37 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
     assert {row["key"]: row["default"] for row in settings} == JEV_DEFAULTS
 
 
-def test_the_models_that_answered_are_counted_over_the_whole_side_car():
-    """Which models actually answered — stale records included: they were paid for too."""
-    fresh, old = _item("1"), _item("2", text="otro texto")
-    stale = _assessment(old, contract="0" * 64).model_copy(update={"model": "jev-1.0.0"})
+def test_the_models_that_answered_are_the_current_answers_most_first():
+    """Counted over the CURRENT answers, like every other number on the page (a stale record
+    is outside the numbers), and ordered by count, then name — so the list reads the same in
+    every render. The fixture's name order is the reverse of its count order."""
+    items = [_item(str(n), text=f"post {n}") for n in range(4)]
+    answers = {i.id: _assessment(i) for i in items}
+    answers["0"] = answers["0"].model_copy(update={"model": "jev-2.0.0"})
+    stale = _item("viejo", text="otro texto")
+    answers["viejo"] = _assessment(stale, contract="0" * 64).model_copy(
+        update={"model": "jev-0.1.0"}
+    )
 
-    data = _data([fresh, old], {"1": _assessment(fresh), "2": stale})
+    data = _data([*items, stale], answers)
 
-    assert _config(data)["models_answered"] == {"jev-1.13.0": 1, "jev-1.0.0": 1}
+    assert _config(data)["models_answered"] == [["jev-1.13.0", 3], ["jev-2.0.0", 1]]
+
+
+def test_the_page_is_built_from_one_settings_dict_keyed_like_the_defaults():
+    item = _item()
+
+    with pytest.raises(ValueError, match="state_char_limit"):
+        compute_jev_dashboard_data(
+            [item],
+            {},
+            VOCAB,
+            settings={k: v for k, v in _settings().items() if k != "state_char_limit"},
+            id2note={},
+            updated="SEP 22, 2026",
+            runs=[],
+            now=NOW,
+        )
 
 
 def test_the_prices_are_the_one_pricing_table():
@@ -1884,11 +1935,29 @@ def test_what_jev_reads_is_listed_in_the_order_the_state_carries_it():
 
 
 def test_the_state_carries_its_surfaces_in_the_order_the_page_lists():
+    """Five surfaces, so an order that only happens to agree for tweet + author cannot pass:
+    the state is `STATE_SURFACE_KEYS` filtered to what the post has."""
     item = _item("1", text="Claude Code hooks")
+    item.content = Content(
+        fetched_at=DT,
+        sources=[
+            _quoted_source("citado"),
+            ContentSourceSuccess(
+                kind="x_article", url="https://x.com/i/article/5", title="Un artículo", text="c"
+            ),
+        ],
+    )
 
     keys = [part.key for part in state_surfaces(item, CHAR_LIMIT)]
 
-    assert keys == [k for k in STATE_SURFACE_KEYS if k in keys] == ["tweet", "author"]
+    assert len(keys) >= 4
+    assert keys == [k for k in STATE_SURFACE_KEYS if k in keys]
+    assert keys == ["tweet", "author", "article_title", "article", "quoted"]
+
+
+def test_a_question_of_an_unknown_kind_is_refused_not_labelled():
+    with pytest.raises(TypeError):
+        _question_row("x", object())  # type: ignore[arg-type]
 
 
 def test_the_cut_is_signposted_with_the_marker_the_page_quotes():
@@ -1905,35 +1974,75 @@ def test_a_pure_call_ships_no_file_paths():
     assert _config(_data([item], {"1": _assessment(item)}))["files"] is None
 
 
-def test_the_estimate_is_the_mean_per_post_times_what_jev_topics_would_ask():
-    """Pending = `assess.select_items`'s own selection (the `jev topics --dry-run` count);
-    corpus = every post with evidence. Mean tokens and mean dollars are the current answers'."""
+def _estimate_fixture() -> tuple[dict[str, Any], dict[str, TopicAssessment]]:
     asked = [_item(str(n)) for n in range(3)]
     never = [_item(f"n{n}") for n in range(4)]
     empty = _item("vacio", text=" ")
     empty.author = Author(handle="", name="")
+    stale = _item("viejo", text="cambió")
     tokens = {"0": 1000, "1": 3000, "2": None}
     assessments = {i.id: _assessment(i, input_tokens=tokens[i.id]) for i in asked}
+    assessments["viejo"] = _assessment(stale, contract="0" * 64)
+    return _data([*asked, *never, empty, stale], assessments), assessments
 
-    estimate = _config(_data([*asked, *never, empty], assessments))["estimate"]
 
-    per_post = post_cost_view(list(assessments.values()))
+def test_the_estimate_is_the_mean_per_post_times_what_jev_topics_would_ask():
+    """Pending = `assess.select_items`'s own selection (the `jev topics --dry-run` count);
+    corpus = every post with evidence. The means are the current answers' — the same
+    `post_cost_view` the cost strip shows, computed once."""
+    data, assessments = _estimate_fixture()
+    estimate = _config(data)["estimate"]
+    current = [a for k, a in assessments.items() if k != "viejo"]
+
+    per_post = post_cost_view(current)
     assert per_post["mean_tokens"] == 2000 and per_post["tokens_n"] == 2
-    assert estimate["per_post"] == per_post
+    assert estimate["per_post"] == per_post == data["cost"]["per_post"]
     assert (
         estimate["pending"]
-        == pass_estimate(per_post, 4)
+        == topics_pass_estimate(per_post, 5)
         == {
-            "posts": 4,
-            "tokens": 8000,
-            "usd": pytest.approx(4 * tokens_cost_usd(2000, PRICED_PROVIDER)),
+            "posts": 5,
+            "tokens": 10000,
+            "usd": pytest.approx(5 * tokens_cost_usd(2000, PRICED_PROVIDER)),
         }
     )
-    assert estimate["corpus"] == pass_estimate(per_post, 7)
+    assert estimate["corpus"] == topics_pass_estimate(per_post, 8)
+
+
+def test_the_estimates_pending_posts_are_the_unassessed_ones_with_evidence():
+    """The estimate runs its OWN currency pass (`select_items`) beside the page's; the two
+    must agree: pending = `items_unassessed` − the evidence-free posts, which the cards
+    already mark."""
+    data, _ = _estimate_fixture()
+
+    evidence_free = sum(post["no_evidence"] for post in data["posts"])
+    assert evidence_free == 1
+    assert (
+        _config(data)["estimate"]["pending"]["posts"]
+        == data["summary"]["items_unassessed"] - evidence_free
+    )
+
+
+def test_an_estimate_is_built_from_a_selection():
+    """`report.estimate_selection` takes any `Selection`: pending is what it would ask
+    (limit or not), the corpus adds what it skipped as current."""
+    per_post = post_cost_view([_assessment(_item(), input_tokens=1000)])
+    selection = Selection(
+        items=(_item("a"),), skipped_current=3, skipped_no_evidence=2, remaining=4
+    )
+
+    assert estimate_selection(selection, per_post) == {
+        "pending": topics_pass_estimate(per_post, 5),
+        "corpus": topics_pass_estimate(per_post, 8),
+    }
 
 
 def test_an_estimate_with_nothing_to_average_says_so():
-    assert pass_estimate(post_cost_view([]), 5) == {"posts": 5, "tokens": None, "usd": None}
+    assert topics_pass_estimate(post_cost_view([]), 5) == {
+        "posts": 5,
+        "tokens": None,
+        "usd": None,
+    }
 
 
 def _config_code() -> str:
@@ -1948,7 +2057,7 @@ def test_the_config_code_builds_text_nodes_and_only_links_inside_the_page():
     assert ".href = " not in config
     for arg in set(re.findall(r"\blink\(([^,]+),", config)):
         assert arg in ("topicHref(t.slug)", "docs"), arg
-    assert "const docs = httpUrl(DATA.docs_url);" in config
+    assert "const docs = httpUrl(C.docs_url);" in config
 
 
 def test_the_config_tab_reads_every_value_from_the_blob():
@@ -1964,6 +2073,11 @@ def test_the_config_tab_reads_every_value_from_the_blob():
         "C.questions_digest",
         "C.surfaces",
         "C.cut_marker",
+        "C.docs_url",
+        "f.label",
+        "f.exists",
+        "f.snapshotted",
+        "f.served",
         "C.files",
         "C.estimate.per_post",
         "C.estimate.pending",
@@ -2004,8 +2118,46 @@ def test_the_config_words_that_carry_meaning_are_pinned():
         "sí/no por topic = pertenencia, varios posibles",
         "elección = el principal, uno solo; sus probabilidades suman 1",
         "'Los tokens de salida son gratis.'",
-        "no está en git",
-        "no entran en los snapshots",
+        "data/ no está en git.",
+        "Las evaluaciones de Jev (jev/topics.json) y su registro (jev/runs.jsonl) no entran en "
+        "los snapshots; el topics.json de enrich y vocab.yaml sí.",
+        "Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo "
+        "devuelve; runs.jsonl es el histórico de costes.",
+        "El tweet va primero: un corte solo llega a él si el propio tweet pasa del límite.",
+        "como si se volviera a preguntar todo",
+        "(aún no existe: lo crea ",
+        "'Modelo que se pedirá'",
+        "no cambian esta página, son lo que usará la próxima `xbrain jev topics`",
+        "las evaluaciones guardadas no registran qué modelo se pidió",
+        "el $ solo promedia proveedores con tarifa",
+        "la que ves la dibuja el servidor en vivo",
         "'La pestaña Configuración no pudo dibujarse: '",
     ):
         assert words in config, words
+
+
+def test_each_tab_guard_logs_the_error_it_hides():
+    """The in-tab message shows `err.message`; the stack goes to the console, where a reader
+    who reports it can find it."""
+    template = _resource("jev.template.html")
+
+    for tab in ("Topics", "Comparar", "Configuración"):
+        guard = template[: template.index(f"'La pestaña {tab} no pudo dibujarse: '")]
+        catch = guard[guard.rindex("} catch (err) {") :]
+        assert "console.error(err);" in catch, tab
+
+
+def test_the_docs_link_lands_on_the_configuracion_section():
+    """GitHub's anchor for a heading: lower case, spaces to hyphens, accents kept."""
+    doc = (REPO / "docs" / "jev.md").read_text(encoding="utf-8")
+    anchors = {
+        "#" + line[4:].strip().lower().replace(" ", "-")
+        for line in doc.splitlines()
+        if line.startswith("### ")
+    }
+    item = _item()
+
+    url = _config(_data([item], {"1": _assessment(item)}))["docs_url"]
+
+    assert url == DOCS_CONFIG_URL and url.startswith(DOCS_URL + "#")
+    assert url[len(DOCS_URL) :] in anchors

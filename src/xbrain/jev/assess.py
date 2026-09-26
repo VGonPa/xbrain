@@ -53,15 +53,14 @@ _POST_SURFACE = "tweet"
 CUT_MARKER = "[… evidencia recortada: {dropped} caracteres omitidos …]"
 
 
-def _state_rank(key: str) -> bool:
-    """The state's order over surface keys: the post's own words first, the rest in the
-    canonical evidence order (a stable sort on this boolean)."""
-    return key != _POST_SURFACE
-
-
-#: Every surface the state may carry, in the order it carries them — `_state_order` over the
-#: target's keys, for a reader (the Configuración tab) that lists them without an item.
-STATE_SURFACE_KEYS: tuple[str, ...] = tuple(sorted(SURFACE_KEYS[TARGET], key=_state_rank))
+#: THE ORDER THE STATE CARRIES ITS SURFACES IN: the post's own words first, then the
+#: target's surfaces in the canonical evidence order (a stable sort on "is it the post").
+#: `_state_order` sorts an item's surfaces by position here, and the Configuración tab lists
+#: it — one order, so the page cannot describe a state nobody sends.
+STATE_SURFACE_KEYS: tuple[str, ...] = tuple(
+    sorted(SURFACE_KEYS[TARGET], key=lambda key: key != _POST_SURFACE)
+)
+_STATE_POSITION = {key: n for n, key in enumerate(STATE_SURFACE_KEYS)}
 
 
 def _nfc(text: str) -> str:
@@ -85,12 +84,13 @@ def _state_order(item: Item) -> list[Surface]:
     the unbounded video transcript comes third. Cutting that blob at `char_limit` therefore
     eats the transcript and throws away the post: measured on the corpus, 7 of 7 items over
     the 100k default lost their own tweet, and Jev was then asked whether "the post in
-    `post`" was about a topic with the post no longer in it. Leading with the tweet makes
-    that structurally impossible — a cut can only ever reach the supporting surfaces.
+    `post`" was about a topic with the post no longer in it. Leading with the tweet means a cut
+    reaches the post's own words only when the tweet by itself is longer than `char_limit`;
+    every other cut falls on the supporting surfaces.
+
+    The order is `STATE_SURFACE_KEYS`, by position.
     """
-    # A stable sort on a boolean: the post surface moves to the front, everything else keeps
-    # its canonical relative order.
-    return sorted(evidence_surfaces(item, TARGET), key=lambda surface: _state_rank(surface.key))
+    return sorted(evidence_surfaces(item, TARGET), key=lambda s: _STATE_POSITION[s.key])
 
 
 def _state_text(item: Item) -> str:
