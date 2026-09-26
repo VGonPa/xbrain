@@ -15,8 +15,10 @@ from xbrain.jev.report import (
     Pair,
     build_report,
     compare_item,
+    assessment_cost_usd,
     current_assessments,
     history_fragment,
+    post_cost_view,
     render_report_markdown,
     run_history,
     summarize,
@@ -1071,49 +1073,163 @@ def test_the_run_history_prices_every_pass_through_the_one_price_formula():
     assert total["unpriced_providers"] == ["fake"]
 
 
-def test_assessments_older_than_the_log_are_counted_apart_not_silently_left_out():
-    """Runs made before the log existed are in the side-car and nowhere in the history. A
-    total that omitted them without saying so would under-quote the bill."""
-    before, after = _item("1"), _item("2")
-    old = _assessment(before, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, tokens=4000)
-    new = _assessment(after, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}).model_copy(
-        update={"asked_at": datetime(2026, 9, 26, 9, 0, 10, tzinfo=timezone.utc)}
-    )
-    run = _logged(datetime(2026, 9, 26, 9, tzinfo=timezone.utc))
-
-    history = run_history([run], {"1": old, "2": new})
-
-    assert history["before_log"]["assessments"] == 1  # `old` was asked on DT, before the log
-    assert history["before_log"]["input_tokens"] == 4000
-    assert history["before_log"]["cost_usd"] == tokens_cost_usd(4000, PRICED_PROVIDER)
+def _stored(item_id: str, asked_at: datetime, tokens: int = 1000) -> TopicAssessment:
+    item = _item(item_id)
+    return _assessment(
+        item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, tokens=tokens
+    ).model_copy(update={"asked_at": asked_at})
 
 
-def test_with_no_log_every_stored_assessment_predates_it():
-    item = _item()
-    stored = {"1": _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1})}
+def _at(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 9, 26, hour, minute, tzinfo=timezone.utc)
+
+
+def test_an_assessment_counts_as_logged_only_inside_a_logged_pass():
+    """Covered iff `asked_at` falls inside SOME logged pass's [started_at, finished_at].
+
+    Before the first pass, between two passes (a run from an older copy of xbrain, an
+    append that failed, a SIGTERM) and after the last: all outside the log, and all counted
+    and priced so the total never silently omits them. The runs are handed in out of order
+    and the boundaries are inclusive.
+    """
+    run_a = _logged(_at(9))  # 09:00:00 – 09:00:30
+    run_b = _logged(_at(11))  # 11:00:00 – 11:00:30
+    stored = {
+        "before": _stored("before", _at(8), tokens=1000),
+        "at-start": _stored("at-start", _at(9), tokens=10),
+        "in-a": _stored("in-a", _at(9) + timedelta(seconds=30), tokens=20),
+        "between": _stored("between", _at(10), tokens=3000),
+        "after-a-no-run": _stored("after-a-no-run", _at(9, 5), tokens=500),
+        "in-b": _stored("in-b", _at(11) + timedelta(seconds=10), tokens=30),
+        "after": _stored("after", _at(12), tokens=7),
+    }
+
+    outside = run_history([run_b, run_a], stored)["out_of_log"]
+
+    assert outside["assessments"] == 4  # before, between, after-a-no-run, after
+    assert outside["input_tokens"] == 1000 + 3000 + 500 + 7
+    assert outside["cost_usd"] == tokens_cost_usd(4507, PRICED_PROVIDER)
+
+
+def test_with_no_log_every_stored_assessment_is_outside_it():
+    stored = {"1": _stored("1", DT)}
 
     history = run_history([], stored)
 
     assert history["runs"] == []
-    assert history["total"]["runs"] == 0 and history["total"]["cost_usd"] == 0.0
-    assert history["before_log"]["assessments"] == 1
+    assert history["total"]["runs"] == 0
+    assert history["total"]["cost_usd"] == 0.0 and isinstance(history["total"]["cost_usd"], float)
+    assert history["out_of_log"]["assessments"] == 1
+
+
+def test_a_pass_where_nothing_answered_costs_a_float_zero():
+    """No provider answered, so there is nothing to price: still a float, like every cost."""
+    silent = _logged(_at(9), requests=2, ok=0, tokens={})
+
+    [row] = run_history([silent], {})["runs"]
+
+    assert row["cost_usd"] == 0.0 and isinstance(row["cost_usd"], float)
 
 
 def test_the_history_line_quotes_the_bill_in_the_shared_sentence():
-    run = _logged(datetime(2026, 9, 26, 9, tzinfo=timezone.utc))
-    history = run_history([run], {})
+    run = _logged(_at(9))
 
-    line = history_fragment(history)
+    line = history_fragment(run_history([run], {}))
 
     assert line.startswith("1 pasada · 2 peticiones · ")
     assert jev_cost_fragment(2000, 0, tokens_cost_usd(2000, PRICED_PROVIDER), ()) in line
 
 
-def test_the_history_line_names_what_predates_the_log():
+def test_the_history_line_says_there_is_no_log_and_prices_what_is_outside_it():
+    """Not `0 pasadas · … (~0.0000 $)`: that reads as "free"."""
+    line = history_fragment(run_history([], {"1": _stored("1", DT, tokens=4000)}))
+
+    assert line.startswith("sin pasadas registradas")
+    assert "1 evaluación fuera del registro de pasadas" in line
+    assert jev_cost_fragment(4000, 0, tokens_cost_usd(4000, PRICED_PROVIDER), ()) in line
+
+
+def test_the_history_line_prices_assessments_outside_the_log_too():
+    run = _logged(_at(9))
+    line = history_fragment(run_history([run], {"x": _stored("x", _at(10), tokens=3000)}))
+
+    assert "1 evaluación fuera del registro de pasadas" in line
+    assert jev_cost_fragment(3000, 0, tokens_cost_usd(3000, PRICED_PROVIDER), ()) in line
+
+
+# ------------------------------------------------------------------ disagreement, one place
+
+
+def test_a_comparison_names_its_three_kinds_of_disagreement():
+    item = _item(topics=("ai-coding", "misc"))
+    comparison = compare_item(
+        item,
+        _assessment(item, {"ai-coding": 0.95, "startups": 0.9, "misc": 0.2}, choice="startups"),
+        0.85,
+    )
+
+    assert [p.slug for p in comparison.enrich_only] == ["misc"]
+    assert [p.slug for p in comparison.jev_only] == ["startups"]
+    assert comparison.primary_differs is True
+    assert comparison.disagreements == 3
+
+
+def test_an_enrich_without_a_primary_counts_as_a_primary_that_differs():
+    """Nothing for Jev to agree with is itself something to fix."""
+    item = _item(topics=("ai-coding",))
+    item.enriched.primary_topic = None
+    comparison = compare_item(
+        item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}), 0.85
+    )
+
+    assert comparison.primary_differs is True and comparison.disagreements == 1
+
+
+def test_the_summary_counts_posts_with_any_disagreement():
+    agree, differ = _item("1", topics=("ai-coding",)), _item("2", topics=("misc",))
+    pairs = [
+        (agree, _assessment(agree, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})),
+        (differ, _assessment(differ, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1})),
+    ]
+
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    assert summary["posts_with_disagreement"] == sum(1 for c in comparisons if c.disagreements)
+    assert summary["posts_with_disagreement"] == 1
+
+
+# ------------------------------------------------------------------ what one post cost
+
+
+def test_a_posts_cost_is_unknown_without_usage_and_unpriced_for_an_unknown_provider():
     item = _item()
-    stored = {"1": _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1})}
+    counted = _assessment(item, {"ai-coding": 0.9}, tokens=2500)
+    silent = _assessment(item, {"ai-coding": 0.9}, tokens=None)
+    unpriced_judge = _assessment(item, {"ai-coding": 0.9}, tokens=2500, provider="fake")
 
-    line = history_fragment(run_history([], stored))
+    assert assessment_cost_usd(counted) == tokens_cost_usd(2500, PRICED_PROVIDER)
+    assert assessment_cost_usd(silent) is None
+    assert assessment_cost_usd(unpriced_judge) is None
 
-    assert line.startswith("0 pasadas · 0 peticiones")
-    assert "1 evaluación anterior al registro de pasadas" in line
+
+def test_the_mean_cost_per_post_counts_only_posts_it_can_price_and_says_how_many():
+    a, b, c = _item("1"), _item("2"), _item("3")
+    view = post_cost_view(
+        [
+            _assessment(a, {"ai-coding": 0.9}, tokens=2000),
+            _assessment(b, {"ai-coding": 0.9}, tokens=None),
+            _assessment(c, {"ai-coding": 0.9}, tokens=9000, provider="fake"),
+        ]
+    )
+
+    assert view["mean_usd"] == tokens_cost_usd(2000, PRICED_PROVIDER)
+    assert (view["n"], view["of"]) == (1, 3)
+    assert view["unpriced_providers"] == ["fake"]
+
+
+def test_the_mean_cost_is_none_when_no_post_can_be_priced():
+    item = _item()
+
+    view = post_cost_view([_assessment(item, {"ai-coding": 0.9}, tokens=None)])
+
+    assert view["mean_usd"] is None and (view["n"], view["of"]) == (0, 1)

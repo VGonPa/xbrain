@@ -218,22 +218,59 @@ def test_posts_are_ordered_most_disagreement_first():
     assert [post["disagreements"] for post in data["posts"]] == [2, 1, 0]
 
 
+def test_posts_that_disagree_equally_are_ordered_by_id():
+    """Two renders of one side-car must list tied posts in the same order."""
+    items = [_item(i, topics=("ai-coding",)) for i in ("b", "c", "a")]
+    assessments = {
+        i.id: _assessment(i, membership={"ai-coding": 0.4, "startups": 0.1}) for i in items
+    }
+
+    data = _data(items, assessments)
+
+    assert [post["id"] for post in data["posts"]] == ["a", "b", "c"]
+
+
+def test_the_disagreement_count_is_the_one_the_report_computes():
+    """The page's filter count and `jev report`'s "posts con desacuerdo" are one number."""
+    agree, differ = _item("1", topics=("ai-coding",)), _item("2", topics=("startups",))
+
+    data = _data([agree, differ], {"1": _assessment(agree), "2": _assessment(differ)})
+
+    assert data["summary"]["posts_with_disagreement"] == 1
+    assert sum(1 for post in data["posts"] if post["disagreements"]) == 1
+
+
+def test_a_truncated_assessment_is_flagged_on_its_row():
+    """The page marks the post "recortado": Jev judged a CUT post, the one to distrust."""
+    item = _item()
+    assessment = _assessment(item).model_copy(update={"truncated": True})
+
+    assert _post(_data([item], {"1": assessment}), "1")["truncated"] is True
+
+
 def test_each_post_carries_what_its_stored_assessment_cost():
-    """Priced through `defaults.tokens_cost_usd`, the one formula — and `None`, not zero,
-    when the provider reported no usage: that answer was paid for, at an unknown price."""
-    counted, uncounted = _item("1"), _item("2")
+    """Priced by `report.assessment_cost_usd` — and `None`, not zero, when the usage is
+    unknown or nobody prices the provider. The mean is over the CURRENT posts it can price,
+    and says how many: a stale record (with other tokens) never enters it."""
+    counted, uncounted, foreign, stale = _item("1"), _item("2"), _item("3"), _item("4", text="old")
     assessments = {
         "1": _assessment(counted, input_tokens=2500),
         "2": _assessment(uncounted, input_tokens=None),
+        "3": _assessment(foreign, input_tokens=9000, provider="otro-juez"),
+        "4": _assessment(stale, contract="e" * 64, input_tokens=77_000),
     }
 
-    data = _data([counted, uncounted], assessments)
+    data = _data([counted, uncounted, foreign, stale], assessments)
 
     assert _post(data, "1")["tokens"] == 2500
     assert _post(data, "1")["cost_usd"] == tokens_cost_usd(2500, PRICED_PROVIDER)
     assert _post(data, "2")["tokens"] is None and _post(data, "2")["cost_usd"] is None
-    # The header's average is over the posts whose cost is KNOWN.
-    assert data["cost"]["per_post_usd"] == tokens_cost_usd(2500, PRICED_PROVIDER)
+    assert _post(data, "3")["cost_usd"] is None and _post(data, "3")["unpriced"] is True
+    assert _post(data, "1")["unpriced"] is False
+    per_post = data["cost"]["per_post"]
+    assert per_post["mean_usd"] == tokens_cost_usd(2500, PRICED_PROVIDER)
+    assert (per_post["n"], per_post["of"]) == (1, 3)
+    assert per_post["unpriced_providers"] == ["otro-juez"]
 
 
 def test_an_item_without_enrichment_is_not_a_row_but_is_counted():
@@ -306,15 +343,41 @@ def test_the_cost_block_is_report_run_history_over_the_whole_side_car():
     assert data["cost"]["total"]["requests"] == 2
 
 
-def test_assessments_older_than_the_log_are_announced_not_hidden():
+def test_assessments_outside_the_log_are_announced_not_hidden():
     """The first real run predates the log: 20 records, an empty `runs.jsonl`. The page
     must say they exist instead of showing a total that silently omits them."""
     item = _item("1")
 
     data = _data([item], {"1": _assessment(item)}, runs=[])
 
-    assert data["cost"]["before_log"]["assessments"] == 1
+    assert data["cost"]["out_of_log"]["assessments"] == 1
     assert data["cost"]["total"]["runs"] == 0
+
+
+def test_the_stored_answers_card_counts_and_prices_the_current_ones_only():
+    """With a stale record, the card's number and its cost describe the same set."""
+    fresh, stale = _item("1"), _item("2", text="old")
+    assessments = {
+        "1": _assessment(fresh, input_tokens=2000),
+        "2": _assessment(stale, contract="e" * 64, input_tokens=50_000),
+    }
+
+    current = _data([fresh, stale], assessments)["cost"]["current"]
+
+    assert current["assessments"] == 1
+    assert current["input_tokens"] == 2000
+    assert current["cost_usd"] == pytest.approx(tokens_cost_usd(2000, PRICED_PROVIDER))
+
+
+def test_a_run_log_that_cannot_be_read_replaces_the_cost_strip_not_the_page():
+    """One torn line must not cost the operator the whole disagreement table."""
+    item = _item()
+
+    data = _data([item], {"1": _assessment(item)}, runs=[], runs_error="runs.jsonl: línea 3")
+
+    assert data["cost"]["error"] == "runs.jsonl: línea 3"
+    assert "total" not in data["cost"] and "runs" not in data["cost"]
+    assert [post["id"] for post in data["posts"]] == ["1"]
 
 
 # --------------------------------------------------------------------------- side-car accounting
@@ -334,6 +397,7 @@ def test_stale_and_orphaned_records_are_excluded_and_counted():
 
     assert [post["id"] for post in data["posts"]] == ["1"]
     totals = data["totals"]
+    assert totals["models"] == data["summary"]["models"] == {"jev-1.13.0": 1}
     assert (totals["current"], totals["stale"], totals["orphans"]) == (1, 1, 1)
     assert totals["assessed"] == totals["current"] + totals["stale"] + totals["orphans"]
 
@@ -451,8 +515,7 @@ def test_the_page_says_what_it_is_for():
     assert "Coste y peticiones" in template
     assert "Histórico por pasada" in template
     # The pre-log line: "N evaluaciones anteriores" + " al registro de pasadas".
-    assert "'evaluación anterior', 'evaluaciones anteriores'" in template
-    assert "' al registro de pasadas" in template
+    assert "fuera del registro de pasadas" in template
 
 
 def test_scraped_text_cannot_close_the_script_tag_or_break_the_parse():
@@ -492,3 +555,25 @@ def test_the_boot_guard_is_registered_before_anything_that_can_throw():
         assert guard < template.index(later), later
     assert template.count("boot();") == 1
     assert "<noscript>" in template
+
+
+def test_the_page_reads_the_form_state_the_browser_restored():
+    """A reload restores the checkbox and the search box; the table must follow them, not
+    the defaults the script started with."""
+    template = _resource("jev.template.html")
+    boot = template[template.index("function boot(") :]
+
+    assert "onlyDisagreements = $('only-disagreements').checked" in boot
+    assert "$('search').value" in boot
+
+
+def test_the_page_handles_the_cost_error_the_unpriced_row_and_an_empty_table():
+    template = _resource("jev.template.html")
+
+    assert "c.error" in template  # the run log could not be read: say so in the strip
+    assert "sin tarifa" in template  # a row whose provider nobody prices
+    assert "No hay posts comparados" in template  # distinct from "nothing matches"
+    assert "per_post.n" in template and "per_post.of" in template  # "media de K de las N"
+    assert "posts_with_disagreement" in template  # the report's count, not the page's
+    # One money format across the strip: the shared Python sentence is not shipped.
+    assert "side_car_text" not in template

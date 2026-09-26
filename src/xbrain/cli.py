@@ -2846,7 +2846,8 @@ def jev_topics_cmd(
 ) -> None:
     """Pregunta a Jev, por item, a qué topics pertenece el post (un noul por topic + el primario).
 
-    Escribe `<data_dir>/jev/topics.json` (por defecto `data/jev/topics.json`).
+    Escribe `<data_dir>/jev/topics.json` (por defecto `data/jev/topics.json`) y, si envió
+    alguna petición, añade una línea con lo que costó la pasada a `data/jev/runs.jsonl`.
     Nunca toca items.json.
     """
     cfg = _config()
@@ -3089,6 +3090,7 @@ def _jev_report_line(summary: dict[str, Any]) -> str:
         f"sin juzgar {summary['assigned_unjudged']}",
         f"candidatas {summary['missing_pairs']}",
         f"primario coincide {summary['primary_agree_pct']} %",
+        plural(summary["posts_with_disagreement"], "post con desacuerdo", "posts con desacuerdo"),
         cost_fragment(summary),
     ]
     if summary["assessments_orphaned"]:
@@ -3114,7 +3116,7 @@ def jev_report_cmd(
 
     Escribe `<data_dir>/jev/topics-report.json` y `topics-report.md` (por defecto bajo
     `data/jev/`). No llama a Jev ni gasta nada: solo lee el side-car que `xbrain jev topics`
-    ya pagó. Las evaluaciones caducadas se excluyen, nunca se comparan como si estuvieran
+    ya pagó. Imprime también el histórico de coste de `data/jev/runs.jsonl`. Las evaluaciones caducadas se excluyen, nunca se comparan como si estuvieran
     vigentes.
     """
     cfg = _config()
@@ -3133,11 +3135,13 @@ def jev_report_cmd(
         stale=jev.stale,
         orphans=jev.orphans,
     )
+    # The run log is read BEFORE anything is written: a corrupt line refuses the command, and
+    # a refusal after `write_reports` would leave new files behind an exit 1.
+    history = run_history(load_runs(cfg.jev_runs_path), jev.assessments)
     json_path, md_path = write_reports(summary, comparisons, jev.store, cfg.jev_dir)
     typer.echo(_jev_report_line(summary))
     # The line above prices the side-car (the latest answer per item); this one prices every
-    # pass the run log recorded, re-asks included.
-    history = run_history(load_runs(cfg.jev_runs_path), jev.assessments)
+    # pass the run log recorded, re-asks included, and names what the log never saw.
     typer.echo(f"Histórico: {history_fragment(history)}")
     typer.echo(f"→ {md_path}\n→ {json_path}")
 
@@ -3174,6 +3178,14 @@ def jev_dashboard_cmd() -> None:
     _refuse_empty_report(jev, cfg, page)
     items = list(jev.store.values())
     now = datetime.now(timezone.utc)
+    # A corrupt run log does not cost the operator the page: the cost strip shows the error
+    # (and so does stderr), the disagreement table renders as usual.
+    runs_error: str | None = None
+    try:
+        runs = load_runs(cfg.jev_runs_path)
+    except JevError as exc:
+        runs, runs_error = [], str(exc)
+        typer.echo(f"Aviso: {runs_error}", err=True)
     data = compute_jev_dashboard_data(
         items,
         jev.assessments,
@@ -3183,7 +3195,8 @@ def jev_dashboard_cmd() -> None:
         char_limit=cfg.jev_state_char_limit,
         id2note=_jev_note_links(items, cfg.output_dir / "items"),
         updated=f"{now:%b} {now.day}, {now.year}".upper(),
-        runs=load_runs(cfg.jev_runs_path),
+        runs=runs,
+        runs_error=runs_error,
         now=now,
         # `_jev_pairs` already decided currency to get here; recomputing it would be a second
         # `build_topic_state` and sha256 over the whole corpus, and a second chance for the

@@ -34,12 +34,12 @@ from typing import Any
 
 from xbrain.jev.assess import current_pairs
 from xbrain.jev.defaults import (
-    INPUT_USD_PER_MTOK,
     input_cost_usd,
     input_tokens_total,
     jev_cost_fragment,
     plural,
     tokens_cost_usd,
+    unpriced,
     unpriced_providers,
 )
 from xbrain.jev.models import JevRun, TopicAssessment
@@ -119,6 +119,32 @@ class ItemComparison:
         report a perfect agreement rate.
         """
         return self.primary_topic is not None and self.jev_primary == self.primary_topic
+
+    @property
+    def enrich_only(self) -> tuple[Pair, ...]:
+        """Disagreement 1 of 3 — enrich assigns it and Jev does not back it (`doubtful`)."""
+        return self.doubtful
+
+    @property
+    def jev_only(self) -> tuple[Pair, ...]:
+        """Disagreement 2 of 3 — Jev backs it and enrich did not assign it (`missing`)."""
+        return self.missing
+
+    @property
+    def primary_differs(self) -> bool:
+        """Disagreement 3 of 3 — the primary topic is not the one Jev chose.
+
+        An item enrich left WITHOUT a primary counts: there is nothing for Jev to agree with,
+        and that is itself a thing to fix. (`primary_agrees` is False for it for the same
+        reason.)
+        """
+        return not self.primary_agrees
+
+    @property
+    def disagreements(self) -> int:
+        """How much this post disagrees: each enrich-only topic, each Jev-only topic, and the
+        primary when it differs. THE definition every surface sorts and filters on."""
+        return len(self.enrich_only) + len(self.jev_only) + int(self.primary_differs)
 
     @property
     def primary_unranked(self) -> bool:
@@ -359,6 +385,11 @@ def _pair_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
     }
 
 
+def chose_fallback(comparison: ItemComparison, slugs: set[str]) -> bool:
+    """Whether Jev's primary is outside the vocabulary — the fallback ("none of these")."""
+    return comparison.jev_primary not in slugs
+
+
 def _primary_totals(comparisons: list[ItemComparison], slugs: set[str]) -> dict[str, int]:
     """Agreements, fallback picks and never-asked primaries over the comparisons.
 
@@ -375,7 +406,7 @@ def _primary_totals(comparisons: list[ItemComparison], slugs: set[str]) -> dict[
     """
     return {
         "agree": sum(1 for c in comparisons if c.primary_agrees),
-        "fallback": sum(1 for c in comparisons if c.jev_primary not in slugs),
+        "fallback": sum(1 for c in comparisons if chose_fallback(c, slugs)),
         "unjudged": sum(1 for c in comparisons if c.primary_unjudged),
         "unranked": sum(1 for c in comparisons if c.primary_unranked),
     }
@@ -515,6 +546,7 @@ def _summarize(
         "primary_fallback": primary["fallback"],
         "primary_unjudged": primary["unjudged"],
         "primary_unranked": primary["unranked"],
+        "posts_with_disagreement": sum(1 for c in comparisons if c.disagreements),
         "per_topic": _per_topic(comparisons, vocab),
     }
 
@@ -534,9 +566,10 @@ def _run_row(run: JevRun) -> dict[str, Any]:
         "failed": run.failed,
         "input_tokens": run.input_tokens,
         "input_tokens_unknown": run.input_tokens_unknown,
-        "cost_usd": sum(tokens_cost_usd(tokens, p) for p, tokens in by_provider.items()),
+        # `float(...)`: a pass where nothing answered sums an empty generator to `int 0`.
+        "cost_usd": float(sum(tokens_cost_usd(tokens, p) for p, tokens in by_provider.items())),
         "providers": sorted(by_provider),
-        "unpriced_providers": sorted(p for p in by_provider if p not in INPUT_USD_PER_MTOK),
+        "unpriced_providers": list(unpriced(by_provider)),
         "models": list(run.models),
         "interrupted": run.interrupted,
     }
@@ -560,63 +593,120 @@ def _history_total(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _before_log(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
-    """The stored records asked before the first logged pass (all of them with no log)."""
-    first = min((run.started_at for run in runs), default=None)
-    older = tuple(a for a in assessments.values() if first is None or a.asked_at < first)
-    tokens, unknown = input_tokens_total(older)
+def bill(assessments: Sequence[TopicAssessment]) -> dict[str, Any]:
+    """How many answers, their tokens and what they cost — UNROUNDED, for a surface to format.
+
+    The summary's own `cost_usd` is rounded to four decimals for the JSON report; a page
+    that shows a single post's share needs the exact figure.
+    """
+    tokens, unknown = input_tokens_total(assessments)
     return {
-        "assessments": len(older),
+        "assessments": len(assessments),
         "input_tokens": tokens,
         "input_tokens_unknown": unknown,
-        "cost_usd": input_cost_usd(older),
-        "unpriced_providers": list(unpriced_providers(older)),
+        "cost_usd": input_cost_usd(assessments),
+        "unpriced_providers": list(unpriced_providers(assessments)),
     }
 
 
-def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
-    """What Jev has cost over time: every logged pass, their total, and what predates the log.
+def _out_of_log(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
+    """The stored records no logged pass covers — counted and priced, never dropped.
 
-    `runs` is `store.load_runs`; `assessments` is the RAW side-car, every record including
-    stale and orphaned ones — they were all paid for.
-
-    `before_log` exists because the log started after the side-car did. A record asked
-    before the first logged pass (all of them, when the log is empty) is in no line of the
-    history, and a total that left it out WITHOUT SAYING SO would under-quote the bill. It is
-    counted and priced from its own stored tokens, never folded into the total: the total is
-    what the log recorded, and the side-car holds only the LATEST answer per item, so it
-    cannot reconstruct the earlier passes anyway.
+    A record is COVERED iff its `asked_at` falls inside some logged topics pass's
+    [`started_at`, `finished_at`] (inclusive). Everything else is outside the log: records
+    asked before the log existed, by a copy of xbrain that does not write it, in a pass
+    whose line could not be appended, or in a pass killed by SIGTERM. Their bill is priced
+    from their own stored tokens.
     """
-    rows = [_run_row(run) for run in runs]
+    windows = [(run.started_at, run.finished_at) for run in runs]
+    return bill(
+        tuple(
+            a
+            for a in assessments.values()
+            if not any(start <= a.asked_at <= end for start, end in windows)
+        )
+    )
+
+
+def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
+    """What Jev topic passes have cost over time: every logged pass, their total, and what
+    the log never saw.
+
+    `runs` is `store.load_runs`, filtered here to `kind == "topics"` (the file is shared by
+    every kind of pass); `assessments` is the RAW side-car, every record including stale
+    and orphaned ones — they were all paid for.
+
+    `out_of_log` is kept apart from the total rather than folded into it: the total is what
+    the log recorded, and the side-car holds only the LATEST answer per item, so it cannot
+    reconstruct the passes the log missed. It is counted and priced so a surface can say so
+    instead of quoting a total that silently omits it.
+    """
+    topics_runs = [run for run in runs if run.kind == "topics"]
+    rows = [_run_row(run) for run in topics_runs]
     return {
         "runs": sorted(rows, key=lambda row: row["started_at"], reverse=True),
         "total": _history_total(rows),
-        "before_log": _before_log(runs, assessments),
+        "out_of_log": _out_of_log(topics_runs, assessments),
     }
 
 
 def history_fragment(history: dict[str, Any]) -> str:
-    """`N pasadas · M peticiones · <the shared cost sentence>` (+ what predates the log).
+    """`N pasadas · M peticiones · <the shared cost sentence>`, plus what the log never saw.
 
-    The bill itself is `defaults.jev_cost_fragment`, the one sentence every surface quotes;
-    this only prefixes the counts the history adds and names the records the log never saw.
+    With no logged pass it says so — `sin pasadas registradas` — instead of quoting a
+    `~0.0000 $` that reads as "free". What is outside the log is named AND priced through
+    the same shared sentence.
     """
     total = history["total"]
-    line = (
-        f"{plural(total['runs'], 'pasada', 'pasadas')} · "
-        f"{plural(total['requests'], 'petición', 'peticiones')} · "
-        + jev_cost_fragment(
-            total["input_tokens"],
-            total["input_tokens_unknown"],
-            total["cost_usd"],
-            total["unpriced_providers"],
+    if total["runs"]:
+        line = (
+            f"{plural(total['runs'], 'pasada', 'pasadas')} · "
+            f"{plural(total['requests'], 'petición', 'peticiones')} · "
+            + jev_cost_fragment(
+                total["input_tokens"],
+                total["input_tokens_unknown"],
+                total["cost_usd"],
+                total["unpriced_providers"],
+            )
         )
-    )
-    older = history["before_log"]["assessments"]
-    if older:
-        noun = plural(older, "evaluación anterior", "evaluaciones anteriores")
-        line += f" · {noun} al registro de pasadas"
+    else:
+        line = "sin pasadas registradas"
+    outside = history["out_of_log"]
+    if outside["assessments"]:
+        noun = plural(outside["assessments"], "evaluación", "evaluaciones")
+        line += f" · {noun} fuera del registro de pasadas: " + jev_cost_fragment(
+            outside["input_tokens"],
+            outside["input_tokens_unknown"],
+            outside["cost_usd"],
+            outside["unpriced_providers"],
+        )
     return line
+
+
+def assessment_cost_usd(assessment: TopicAssessment) -> float | None:
+    """What one stored answer cost; `None` when it cannot be said.
+
+    Unknown usage (`input_tokens is None`) and an unpriced provider are both `None`, never
+    `0.0`: a zero would read as "free" and would drag a mean down.
+    """
+    if assessment.input_tokens is None or unpriced([assessment.provider]):
+        return None
+    return tokens_cost_usd(assessment.input_tokens, assessment.provider)
+
+
+def post_cost_view(assessments: Sequence[TopicAssessment]) -> dict[str, Any]:
+    """The mean cost of one stored answer, over the ones that CAN be priced — and how many.
+
+    `n` answers priced of `of`: without the count, a mean over 3 of 2,600 posts reads like a
+    mean over all of them. `mean_usd` is `None` when nothing can be priced.
+    """
+    costs = [cost for a in assessments if (cost := assessment_cost_usd(a)) is not None]
+    return {
+        "mean_usd": sum(costs) / len(costs) if costs else None,
+        "n": len(costs),
+        "of": len(assessments),
+        "unpriced_providers": list(unpriced_providers(assessments)),
+    }
 
 
 def _escape_cell(text: str) -> str:

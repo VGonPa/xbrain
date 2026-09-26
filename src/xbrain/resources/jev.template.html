@@ -261,25 +261,40 @@ function unpricedNote(names) {
 }
 
 function renderCost() {
-  const c = DATA.cost, T = c.total;
+  const c = DATA.cost;
+  const cur = c.current;
+  const curUnknown = cur.input_tokens_unknown ? ' (+' + nf(cur.input_tokens_unknown) + ' sin recuento)' : '';
+  const perPost = kpi('Media por post', usd(c.per_post.mean_usd, 5),
+    'media de ' + nf(c.per_post.n) + ' de las ' + nf(c.per_post.of) + ' evaluaciones vigentes: las que tienen recuento de tokens' +
+    (c.per_post.unpriced_providers.length ? ' y tarifa (sin tarifa: ' +
+      esc(c.per_post.unpriced_providers.join(', ')) + ')' : ''));
+  const stored = kpi('Evaluaciones vigentes', nf(cur.assessments),
+    'lo que costaron: ' + usd(cur.cost_usd) + ' · ' + pl(cur.input_tokens, 'token', 'tokens') + ' de entrada' +
+    curUnknown + unpricedNote(cur.unpriced_providers));
+  if (c.error) {
+    // The run log could not be read: say so where the total would be, keep everything else.
+    $('kpis').innerHTML = kpi('Total', '—', 'no se pudo leer el registro de pasadas: ' + esc(c.error)) + perPost + stored;
+    $('runs').outerHTML = '<div class="empty">Sin histórico: corrige la línea indicada arriba en runs.jsonl ' +
+      '(si contiene un registro válido pegado tras un fragmento, sepáralo; no la borres).</div>';
+    return;
+  }
+  const T = c.total;
   const unknown = T.input_tokens_unknown ? ' (+' + nf(T.input_tokens_unknown) + ' respuestas sin recuento)' : '';
   $('kpis').innerHTML =
     // No logged pass is not a free history: a bare ~0,0000 $ would read as one.
     kpi('Total', T.runs ? usd(T.cost_usd) : '—',
-      pl(T.requests, 'petición', 'peticiones') + ' · ' + pl(T.input_tokens, 'token', 'tokens') +
-      ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') + unpricedNote(T.unpriced_providers)) +
-    kpi('Media por post', usd(c.per_post_usd, 5),
-      'lo que costó la evaluación guardada de un post (media de las ' +
-      nf(DATA.totals.current) + ' vigentes, las que tienen recuento de tokens)') +
-    kpi('Evaluaciones guardadas', nf(DATA.totals.assessed),
-      'coste de las guardadas: ' + esc(c.side_car_text));
-  const before = c.before_log;
-  if (before.assessments) {
+      (T.runs ? pl(T.requests, 'petición', 'peticiones') + ' · ' + pl(T.input_tokens, 'token', 'tokens') +
+        ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') + unpricedNote(T.unpriced_providers)
+        : 'sin pasadas registradas')) +
+    perPost + stored;
+  const out = c.out_of_log;
+  if (out.assessments) {
     $('before-log').hidden = false;
     $('before-log').textContent =
-      pl(before.assessments, 'evaluación anterior', 'evaluaciones anteriores') +
-      ' al registro de pasadas: se pagaron antes de que existiera el registro, así que no ' +
-      'están en el total (' + usd(before.cost_usd) + ' según sus propios tokens).';
+      pl(out.assessments, 'evaluación', 'evaluaciones') +
+      ' fuera del registro de pasadas (' + usd(out.cost_usd) + ' según sus propios tokens): se hicieron ' +
+      'antes de que existiera el registro, con otra copia de xbrain, o en una pasada que no llegó a ' +
+      'registrarse. No están en el total.';
   }
   renderRuns(c.runs);
 }
@@ -298,7 +313,8 @@ function renderRuns(runs) {
     nf(r.input_tokens) + (r.input_tokens_unknown ? ' (+' + nf(r.input_tokens_unknown) + ' sin recuento)' : ''),
     usd(r.cost_usd) + unpricedNote(r.unpriced_providers),
     esc(r.models.join(', ') || '—'),
-    r.interrupted ? 'sí (' + nf(r.requests - r.ok - r.failed) + ' en vuelo)' : 'no',
+    r.interrupted ? 'sí (' + nf(r.requests - r.ok - r.failed - (r.unsaved || 0)) + ' en vuelo, ' +
+      nf(r.unsaved || 0) + ' sin guardar)' : 'no',
   ];
   t.innerHTML = '<thead><tr>' + heads.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
     runs.map(r => '<tr>' + row(r).map((v, i) => '<td class="n" data-h="' + heads[i] + '">' + v + '</td>').join('') + '</tr>').join('') +
@@ -381,18 +397,19 @@ function matches(post) {
 function renderPosts() {
   // DATA.posts is already ordered most-disagreement first by `jev/dashboard.py`.
   const shown = DATA.posts.filter(matches);
-  const withDisagreement = DATA.posts.filter(p => p.disagreements).length;
+  // The report's count (`posts_with_disagreement`), the number `xbrain jev report` prints.
   $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + nf(DATA.posts.length) + ' posts · ' +
-    pl(withDisagreement, 'con desacuerdo', 'con desacuerdo');
+    pl(DATA.summary.posts_with_disagreement, 'con desacuerdo', 'con desacuerdo');
   const heads = ['Post', 'Topics de enrich', 'Jev añadiría', 'Principal (enrich → Jev)', 'Coste'];
   if (!shown.length) {
-    $('post-table').innerHTML = '<tbody><tr><td class="empty">' +
-      (onlyDisagreements && !query ? 'Ningún post con desacuerdo a este umbral.' : 'Ningún post coincide con la búsqueda.') +
-      '</td></tr></tbody>';
+    const why = !DATA.posts.length ? 'No hay posts comparados.'
+      : query ? 'Ningún post coincide con la búsqueda.'
+      : 'Ningún post con desacuerdo a este umbral.';
+    $('post-table').innerHTML = '<tbody><tr><td class="empty">' + why + '</td></tr></tbody>';
     return;
   }
   const cells = (p) => [postCell(p), enrichCell(p), addsCell(p), primaryCell(p),
-    '<span class="n" title="' + (p.tokens == null ? 'sin recuento de tokens' : esc(nf(p.tokens) + ' tokens de entrada')) + '">' + usd(p.cost_usd, 5) + '</span>'];
+    '<span class="n" title="' + (p.tokens == null ? 'sin recuento de tokens' : esc(nf(p.tokens) + ' tokens de entrada')) + '">' + (p.unpriced ? 'sin tarifa' : usd(p.cost_usd, 5)) + '</span>'];
   $('post-table').innerHTML = '<thead><tr>' + heads.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
     shown.map(p => '<tr>' + cells(p).map((v, i) => '<td data-h="' + heads[i] + '">' + v + '</td>').join('') + '</tr>').join('') +
     '</tbody>';
@@ -412,6 +429,9 @@ function boot() {
   renderCost();
   renderNumbers();
   renderExcluded();
+  // A reload restores the form; read it back instead of trusting the script's defaults.
+  onlyDisagreements = $('only-disagreements').checked;
+  query = $('search').value.trim().toLowerCase();
   renderPosts();
   $('only-disagreements').addEventListener('change', function () {
     onlyDisagreements = this.checked;

@@ -102,13 +102,19 @@ def input_cost_usd(assessments: Iterable[TopicAssessment]) -> float:
     )
 
 
-def unpriced_providers(assessments: Iterable[TopicAssessment]) -> tuple[str, ...]:
-    """The distinct providers in `assessments` that `INPUT_USD_PER_MTOK` cannot price.
+def unpriced(providers: Iterable[str]) -> tuple[str, ...]:
+    """The distinct `providers` that `INPUT_USD_PER_MTOK` cannot price — THE definition.
 
     Sorted and de-duplicated so the operator-facing line is stable across runs: this is
-    what turns a bare `~0.0000 $` into "0.0000 because nobody prices this judge".
+    what turns a bare `~0.0000 $` into "0.0000 because nobody prices this judge". Every
+    other module asks here instead of reading the price table.
     """
-    return tuple(sorted({a.provider for a in assessments if a.provider not in INPUT_USD_PER_MTOK}))
+    return tuple(sorted({p for p in providers if p not in INPUT_USD_PER_MTOK}))
+
+
+def unpriced_providers(assessments: Iterable[TopicAssessment]) -> tuple[str, ...]:
+    """`unpriced` over the providers that answered `assessments`."""
+    return unpriced(a.provider for a in assessments)
 
 
 def plural(count: int, singular: str, plural: str) -> str:

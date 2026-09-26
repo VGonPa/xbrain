@@ -17,6 +17,7 @@ from xbrain.jev import run as jev_run
 from xbrain.cli import app
 from xbrain.config import Config
 from xbrain.jev.client import JevClient, JevResult, Question
+from xbrain.jev.defaults import plural
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
 from xbrain.jev.store import load_assessments, load_runs, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
@@ -1129,6 +1130,36 @@ def test_jev_report_prints_what_every_logged_pass_cost(tmp_path: Path, monkeypat
     ]
 
 
+def test_jev_report_refuses_a_corrupt_run_log_before_writing_anything(tmp_path, monkeypatch):
+    """The log is read FIRST: a refusal after the reports were written would leave new
+    files behind an exit 1."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    with _runs_path(tmp_path).open("a", encoding="utf-8") as handle:
+        handle.write("{roto\n")
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert "línea 2" in result.stderr
+    json_path, md_path = _report_paths(tmp_path)
+    assert not json_path.exists() and not md_path.exists()
+
+
+def test_jev_report_and_the_page_quote_the_same_disagreement_count(tmp_path, monkeypatch):
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    report = runner.invoke(app, ["jev", "report"])
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+
+    count = _blob(_page(vault))["summary"]["posts_with_disagreement"]
+    assert count > 0
+    assert plural(count, "post con desacuerdo", "posts con desacuerdo") in report.stdout
+
+
 def test_jev_report_without_assessments_refuses_and_names_the_command_that_fixes_it(
     tmp_path: Path, monkeypatch
 ):
@@ -1498,7 +1529,24 @@ def test_jev_dashboard_shows_what_every_logged_pass_cost(tmp_path: Path, monkeyp
     assert (run["requests"], run["ok"], run["failed"]) == (2, 2, 0)
     assert cost["total"]["requests"] == 2 and cost["total"]["input_tokens"] == 200
     # Everything in the side-car was asked during that logged pass.
-    assert cost["before_log"]["assessments"] == 0
+    assert cost["out_of_log"]["assessments"] == 0
+
+
+def test_jev_dashboard_renders_the_page_when_the_run_log_is_corrupt(tmp_path, monkeypatch):
+    """One torn line replaces the cost strip with its own error; the table still renders."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    with _runs_path(tmp_path).open("a", encoding="utf-8") as handle:
+        handle.write("{roto\n")
+
+    result = runner.invoke(app, ["jev", "dashboard"])
+
+    assert result.exit_code == 0, result.output
+    blob = _blob(_page(vault))
+    assert "línea 2" in blob["cost"]["error"] and str(_runs_path(tmp_path)) in blob["cost"]["error"]
+    assert len(blob["posts"]) == 2
+    assert "línea 2" in result.stderr  # and the operator is told, not only the page
 
 
 def test_jev_dashboard_over_nothing_refuses_and_writes_no_page(tmp_path: Path, monkeypatch):
@@ -1655,3 +1703,13 @@ def test_the_un_enriched_refusal_agrees_in_number(
 # whose help names a config key, by the ONE parametrized test for the whole class:
 # `tests/test_cli.py::test_command_help_renders_its_config_key_literally`. It lived here
 # first; it was moved rather than copied so the repo has a single place to strengthen.
+
+
+@pytest.mark.parametrize("command", ["topics", "report", "dashboard"])
+def test_every_jev_command_says_in_its_help_that_it_uses_the_run_log(command: str):
+    """`topics` appends to it, `report` and `dashboard` read it: an operator reading
+    `--help` should learn the file exists without opening docs/jev.md."""
+    result = runner.invoke(app, ["jev", command, "--help"])
+
+    assert result.exit_code == 0
+    assert "runs.jsonl" in result.output

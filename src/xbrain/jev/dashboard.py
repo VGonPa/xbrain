@@ -2,8 +2,8 @@
 
 ONE JOB. The page answers "which posts have topics I should fix, and what did Jev cost me to
 find out", in plain words. It does that at ONE threshold — `[jev].threshold` from config — and
-recomputes nothing in the browser: the browser filters, searches and sorts rows; it never
-decides whether a topic is backed.
+recomputes nothing in the browser: the rows arrive ordered (most disagreement first, then
+by id — decided here), and the browser only filters and searches them.
 
 NOTHING HERE RE-IMPLEMENTS A NUMBER.
 
@@ -12,7 +12,8 @@ NOTHING HERE RE-IMPLEMENTS A NUMBER.
   `summary`, shipped whole, and each post row is built from its `ItemComparison` — which
   topics are doubtful, missing or unjudged is read off the comparison, never re-derived.
 * The cost is `report.run_history` (the run log, priced now from its tokens) and
-  `defaults.tokens_cost_usd` (a post's own stored tokens). One price formula for everything.
+  `report.assessment_cost_usd` / `report.post_cost_view` (a post's own stored tokens). One
+  price formula for everything, and `ItemComparison.disagreements` is what a row counts.
 
 Rendered through the same mechanism as `dashboard.html` — `render_dashboard_html` with a
 second template — but without ECharts: the page is a table and a few numbers, so the library
@@ -27,9 +28,17 @@ from typing import Any
 
 from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.jev.assess import CurrentPairs, current_pairs
-from xbrain.jev.defaults import tokens_cost_usd
+from xbrain.jev.defaults import unpriced
 from xbrain.jev.models import JevRun, TopicAssessment
-from xbrain.jev.report import ItemComparison, build_report, cost_fragment, run_history
+from xbrain.jev.report import (
+    ItemComparison,
+    assessment_cost_usd,
+    bill,
+    build_report,
+    chose_fallback,
+    post_cost_view,
+    run_history,
+)
 from xbrain.models import Item, Topic
 
 #: The post text carried into the blob, in characters: long enough to recognise the post in a
@@ -72,13 +81,9 @@ def _post_row(
     slugs: set[str],
     id2note: dict[str, str],
 ) -> dict[str, Any]:
-    """One table row: what enrich said, where Jev disagrees, and what this post's answer cost.
-
-    `disagreements` is what the page sorts and filters on: each doubtful topic, each topic Jev
-    would add, and a primary that does not coincide (an enrich with no primary counts — there
-    is nothing for Jev to agree with, and that is itself worth fixing).
-    """
-    tokens = assessment.input_tokens
+    """One table row, RESHAPED from `report`: what enrich said, where Jev disagrees
+    (`ItemComparison.disagreements` — the one definition), and what this answer cost
+    (`report.assessment_cost_usd`: `None` for unknown usage or an unpriced provider)."""
     return {
         "id": item.id,
         "handle": item.author.handle,
@@ -86,29 +91,37 @@ def _post_row(
         "url": item.url,
         "note": id2note.get(item.id),
         "enrich": _enrich_marks(comparison, assessment.membership),
-        "adds": [{"slug": pair.slug, "p": pair.noul} for pair in comparison.missing],
+        "adds": [{"slug": pair.slug, "p": pair.noul} for pair in comparison.jev_only],
         "primary": comparison.primary_topic,
         "jev_primary": comparison.jev_primary,
-        "jev_fallback": comparison.jev_primary not in slugs,
+        "jev_fallback": chose_fallback(comparison, slugs),
         "primary_agrees": comparison.primary_agrees,
-        "disagreements": len(comparison.doubtful)
-        + len(comparison.missing)
-        + (0 if comparison.primary_agrees else 1),
-        "tokens": tokens,
-        "cost_usd": None if tokens is None else tokens_cost_usd(tokens, assessment.provider),
+        "disagreements": comparison.disagreements,
+        "tokens": assessment.input_tokens,
+        "cost_usd": assessment_cost_usd(assessment),
+        "unpriced": bool(unpriced([assessment.provider])),
         "truncated": assessment.truncated,
     }
 
 
-def _per_post_usd(pairs: Sequence[tuple[Item, TopicAssessment]]) -> float | None:
-    """Mean cost of one stored answer, over the current posts whose usage is KNOWN.
-
-    `None` when none is known: an average over nothing is not zero.
-    """
-    known = [a for _, a in pairs if a.input_tokens is not None]
-    if not known:
-        return None
-    return sum(tokens_cost_usd(a.input_tokens or 0, a.provider) for a in known) / len(known)
+def _cost_block(
+    runs: Sequence[JevRun],
+    assessments: dict[str, TopicAssessment],
+    current: list[TopicAssessment],
+    runs_error: str | None,
+) -> dict[str, Any]:
+    """The cost strip's data: the run history (or the error that kept it out), the mean per
+    post, and the CURRENT answers — counted and priced as one set, the set `summary` covers
+    (`bill` is unrounded; the summary's `cost_usd` is rounded for the JSON report)."""
+    block: dict[str, Any] = {
+        "per_post": post_cost_view(current),
+        "current": bill(current),
+    }
+    if runs_error is not None:
+        block["error"] = runs_error
+    else:
+        block.update(run_history(runs, assessments))
+    return block
 
 
 def compute_jev_dashboard_data(
@@ -122,6 +135,7 @@ def compute_jev_dashboard_data(
     id2note: dict[str, str],
     updated: str,
     runs: Sequence[JevRun],
+    runs_error: str | None = None,
     now: datetime | None = None,
     current: CurrentPairs | None = None,
 ) -> dict[str, Any]:
@@ -134,6 +148,10 @@ def compute_jev_dashboard_data(
 
     `assessments` is the RAW side-car on purpose: the cost history prices every record that
     was paid for, stale or not (`report.run_history`).
+
+    `runs_error` is why the run log could not be read (a corrupt line). The page then shows
+    that message in place of the cost strip and keeps everything else: one torn line must
+    not cost the operator the disagreement table.
 
     `now` is the clock, threaded from the caller so `summary["generated_at"]` is a function
     of the arguments.
@@ -179,12 +197,7 @@ def compute_jev_dashboard_data(
             "not_compared": summary["items_assessed"] - summary["items_compared"],
             "models": summary["models"],
         },
-        "cost": {
-            **run_history(runs, assessments),
-            "per_post_usd": _per_post_usd(pairs),
-            # The side-car's own bill, in the shared sentence — what the rows below add up to.
-            "side_car_text": cost_fragment(summary),
-        },
+        "cost": _cost_block(runs, assessments, [a for _, a in pairs], runs_error),
         "posts": posts,
     }
 
