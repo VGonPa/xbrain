@@ -244,6 +244,8 @@ details.saw[open]>summary{color:var(--ink)}
 .pairs ol{list-style:none}
 .pairs li{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-top:1px solid var(--hairline-2);font-size:13.5px}
 .pairs li:first-child{border-top:0}
+/* `display:flex` above would override the `hidden` attribute and show every row past the cut. */
+.pairs li[hidden]{display:none}
 .pairs li a{color:var(--ink);text-decoration:none}
 .pairs li a:hover{color:var(--accent)}
 .pairs li .c{font-family:var(--mono);font-size:11px;color:var(--ink-faint);white-space:nowrap}

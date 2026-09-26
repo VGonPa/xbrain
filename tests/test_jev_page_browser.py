@@ -521,11 +521,12 @@ async function drawAll(root) {
     const rows = Array.from({length: 11}, (_, i) => ({enrich: 'alpha', jev: 'x' + i, posts: 2}));
     const list = pairsList('prueba', rows, 'jev', 'cx', '');
     document.body.appendChild(list);
-    out.pairs_visible_before = [...list.querySelectorAll('li')].filter(li => !li.hidden).length;
+    // What the reader SEES: a CSS `display` on the rows would override the `hidden` attribute.
+    out.pairs_visible_before = [...list.querySelectorAll('li')].filter(li => getComputedStyle(li).display !== 'none').length;
     const more = list.querySelector('button.more');
     out.pairs_more = more.textContent;
     more.click();
-    out.pairs_visible_after = [...list.querySelectorAll('li')].filter(li => !li.hidden).length;
+    out.pairs_visible_after = [...list.querySelectorAll('li')].filter(li => getComputedStyle(li).display !== 'none').length;
     list.remove();
   });
   await step('scroll kept on return', async () => {
@@ -901,6 +902,17 @@ async function openList(a) {
     out.otro_hash = location.hash;
     out.otro_list = shown.map(p => p.id);
   });
+  await step('lists past ten', async () => {
+    const rows = Array.from({length: 12}, (_, i) => ({name: 'x' + i, posts: 2, params: {px: 'a~x' + i}, data: {px: 'a~x' + i}}));
+    const box = countList('prueba', rows, COMPARE_PAIRS_SHOWN);
+    document.getElementById('compare-body').appendChild(box);
+    const visible = () => [...box.querySelectorAll('li')].filter(li => getComputedStyle(li).display !== 'none').length;
+    out.list_visible_before = visible();
+    out.list_more = box.querySelector('button.more').textContent;
+    box.querySelector('button.more').click();
+    out.list_visible_after = visible();
+    box.remove();
+  });
   await step('tabs keep their state', async () => {
     location.hash = '#compare?b=e-lo'; await sleep(30);
     location.hash = '#posts?f=adds'; await sleep(30);
@@ -1065,6 +1077,15 @@ def test_the_other_fallback_is_counted_with_its_posts_and_what_enrich_had(compar
     assert seen["otro_rows"] == ["delta~otro"]
     assert seen["otro_hash"] == "#posts?f=fallback"
     assert set(seen["otro_list"]) == _ids(data, "fallback") and len(seen["otro_list"]) == 4
+
+
+@_requires_chrome
+def test_a_long_compare_list_shows_ten_and_ver_todos_opens_the_rest(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["list_visible_before"] == 10
+    assert seen["list_more"] == "ver todos (2 cruces más, 4 posts)"
+    assert seen["list_visible_after"] == 12
 
 
 @_requires_chrome
