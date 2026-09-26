@@ -578,7 +578,9 @@ def _compare_fixture() -> dict[str, Any]:
     order: gamma (0 %), delta (89 %), alpha (91 %), then beta under the floor, then the
     never-assigned: 12 topics. 53 compared; plus two never-asked posts."""
     specs: list[tuple[str, tuple[str, ...], dict[str, float], str]] = []
-    specs += [(f"c{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(6)]
+    # c00 also carries a slug that has left the vocabulary: Jev was never asked about it.
+    specs += [("c00", ("alpha", "retirado"), {"alpha": 0.9}, "alpha")]
+    specs += [(f"c{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(1, 6)]
     specs += [("l00", ("beta", "delta"), {"beta": 0.1, "delta": 0.05}, "beta")]
     specs += [(f"l{n:02d}", ("beta",), {"beta": 0.1}, "beta") for n in range(1, 4)]
     specs += [(f"m{n:02d}", ("gamma",), {"gamma": 0.3}, "omega") for n in range(7)]
@@ -639,6 +641,7 @@ def test_the_compare_fixture_tells_every_number_apart():
     assert both == {"alpha": 28, "beta": 4, "delta": 3, "gamma": 3}
     assert (s["primary_fallback"], s["primary_agree"], s["items_compared"]) == (5, 38, 53)
     assert (s["doubtful_pairs"], s["missing_pairs"]) == (18, 24)
+    assert s["assigned_unjudged"] == 1
     assert len(data["topics"]) == 12
 
 
@@ -1519,7 +1522,7 @@ def test_the_topic_index_opens_on_the_worst_agreement_among_topics_with_enough_p
     says what N is."""
     topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
 
-    assert "let TOPIC_MIN = " in topics
+    assert "let TOPIC_MIN;" in topics
     assert "  TOPIC_MIN = DATA.topic_min;" in _script_section(
         _resource("jev.template.html"),
         "function loadData(",

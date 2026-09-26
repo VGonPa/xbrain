@@ -1278,8 +1278,9 @@ _BAND_KIND_NAMES = {"enrich_only": "enrich asigna y Jev no", "jev_only": "Jev a�
 
 
 def _band_range(band: dict[str, Any]) -> str:
-    """A band's edges at three decimals, like the umbral: `< lo` for the bottom band, `≥ lo`
-    for the top one, `lo – hi` otherwise (each band holds its lower edge)."""
+    """A band's edges at three decimals, like the umbral: `< hi` for the enrich side's bottom
+    band, `≥ lo` for the Jev side's top one, `lo – hi` otherwise (each band holds its lower
+    edge)."""
     if band["kind"] == "enrich_only" and band["lo"] == 0:
         return f"< {band['hi']:.3f}"
     if band["top"]:

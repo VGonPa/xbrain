@@ -565,15 +565,15 @@ function renderNumbers() {
     ' · ' + pl(S.items_compared, 'post comparado', 'posts comparados');
   $('facts').innerHTML =
     fact('Jev confirma <em>' + nf(S.assigned_backed) + '</em> de ' + nf(S.assigned_pairs) +
-      ' topics de enrich (<em>' + dec(S.enrich_backed_pct, 1) + ' %</em>)',
+      ' topics de enrich (<em>' + pct(S.enrich_backed_pct, S.assigned_pairs) + '</em>)',
       'De todos los topics que puso enrich, cuántos ve también Jev con probabilidad ≥ ' +
       pfmt(DATA.threshold) + '. Los que no, son candidatos a quitar.' +
-      (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está', 'topics ya no están') +
-        ' en el vocabulario y no se juzgan.' : '')) +
+      (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está en el vocabulario y no se juzga.',
+        'topics ya no están en el vocabulario y no se juzgan.') : '')) +
     fact('Jev añadiría <em>' + nf(S.missing_pairs) + '</em> topics que enrich no puso',
       'Topics que Jev ve con probabilidad ≥ ' + pfmt(DATA.threshold) +
       ' y que enrich no asignó. Son candidatos a añadir.') +
-    fact('El topic principal coincide en <em>' + dec(S.primary_agree_pct, 1) + ' %</em>',
+    fact('El topic principal coincide en <em>' + pct(S.primary_agree_pct, S.items_compared) + '</em>',
       'En cuántos posts el topic principal de enrich es el mismo que elige Jev.' +
       (S.primary_fallback ? ' En ' + pl(S.primary_fallback, 'post', 'posts') + ' Jev eligió «' +
         esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''));
@@ -1183,7 +1183,7 @@ function onKey(e) {
 /* topics */
 /** The floor below which a topic sorts last by default and is marked «pocos datos»: defined
     once in `jev/dashboard.py` (`TOPIC_MIN`) and shipped. */
-let TOPIC_MIN = 5;
+let TOPIC_MIN;
 /** The index columns. Every number is a `per_topic` field computed in `jev/report.py`; `key`
     is the field and the sort. */
 const TOPIC_COLUMNS = [
@@ -1720,7 +1720,8 @@ function compareResumen() {
   line('Jev confirma ' + nf(S.assigned_backed) + ' de ' + nf(S.assigned_pairs) + ' topics de enrich (' + pct(S.enrich_backed_pct, S.assigned_pairs) + ').',
     'De los topics que puso enrich, los que Jev también ve con probabilidad ≥ ' + thr + '. Los otros ' + nf(S.doubtful_pairs) +
     ' (probabilidad < ' + thr + ') son candidatos a quitar.' +
-    (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está', 'topics ya no están') + ' en el vocabulario y no se juzgan.' : ''),
+    (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está en el vocabulario y no se juzga.',
+      'topics ya no están en el vocabulario y no se juzgan.') : ''),
     'enrich_only', 'ver los ' + pl(S.posts_enrich_only, 'post', 'posts') + ' con un topic que Jev no confirma →');
   line('Jev añadiría ' + nf(S.missing_pairs) + ' topics que enrich no puso.',
     'Topics que Jev ve con probabilidad ≥ ' + thr + ' y enrich no asignó. Son candidatos a añadir.',

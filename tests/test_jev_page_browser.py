@@ -474,6 +474,17 @@ const tabState = () => ({hash: location.hash, index: seen(document.getElementByI
 async function drawAll(root) {
   for (;;) { const more = [...root.querySelectorAll('button.more')].find(seen); if (!more) return; more.click(); await sleep(5); }
 }
+// Registered AFTER the page's own listener, so when it counts a change the page has drawn it.
+let hashChanges = 0;
+addEventListener('hashchange', () => { hashChanges++; });
+/** Go back or forward and wait for the page to have handled it — never a fixed sleep. */
+async function travel(go) {
+  const before = hashChanges;
+  go();
+  for (let t = 0; hashChanges === before && t < 300; t++) await sleep(10);
+  if (hashChanges === before) throw new Error('no hashchange after history navigation');
+  await sleep(0);
+}
 (async () => {
   const out = {errors: []};
   const step = async (name, fn) => { try { await fn(); } catch (e) { out.errors.push(name + ': ' + e); } };
@@ -523,9 +534,9 @@ async function drawAll(root) {
     out.ab_hash = location.hash;
   });
   await step('back and forward', async () => {
-    history.back(); await sleep(50); out.back1 = tabState();
-    history.back(); await sleep(50); out.back2 = tabState();
-    history.forward(); await sleep(50); out.forward = tabState();
+    await travel(() => history.back()); out.back1 = tabState();
+    await travel(() => history.back()); out.back2 = tabState();
+    await travel(() => history.forward()); out.forward = tabState();
   });
   await step('ver en Posts', async () => {
     location.hash = '#topics?t=alpha'; await sleep(30);
@@ -558,13 +569,13 @@ async function drawAll(root) {
     location.hash = '#topics?t=alpha'; await sleep(30);
     window.scrollTo(0, document.getElementById('tab-topics').offsetTop + 900); await sleep(10);
     document.querySelector('#topic-detail a[data-pair]').click(); await sleep(30);
-    history.back(); await sleep(50);
+    await travel(() => history.back());
     out.topic_tab_top_after_back = tabTop();
     location.hash = '#topics'; await sleep(30);
     window.scrollTo(0, document.getElementById('tab-topics').offsetTop + 600); await sleep(10);
     document.querySelector('#topics-index a.tl').click(); await sleep(30);
     out.entered_tab_top = tabTop();
-    history.back(); await sleep(50);
+    await travel(() => history.back());
     out.index_tab_top_after_back = tabTop();
   });
   await step('sort survives a topic', async () => {
@@ -1028,6 +1039,7 @@ setTimeout(() => {
     notes: [...document.querySelectorAll('#tab-compare .note, #tab-compare .empty')].filter(seen).map(p => p.textContent),
     ranges: [...document.querySelectorAll('#tab-compare .range')].map(txt),
     stamp: txt(document.getElementById('stamp')),
+    facts: txt(document.getElementById('facts')),
     banner_hidden: document.getElementById('banner').hidden});
   document.body.appendChild(pre);
 }, 200);
@@ -1081,10 +1093,11 @@ def test_the_three_sentences_quote_the_header_numbers_and_open_their_posts(compa
     s = data["summary"]
     one, add, prim = (seen["sentences"][k] for k in ("enrich_only", "adds", "prim"))
 
-    assert one["big"] == "Jev confirma 39 de 57 topics de enrich (68,4 %)."
-    assert (s["assigned_backed"], s["assigned_pairs"], s["enrich_backed_pct"]) == (39, 57, 68.4)
+    assert one["big"] == "Jev confirma 39 de 58 topics de enrich (67,2 %)."
+    assert (s["assigned_backed"], s["assigned_pairs"], s["enrich_backed_pct"]) == (39, 58, 67.2)
     assert one["why"].endswith(
-        f"Los otros {s['doubtful_pairs']} (probabilidad < 0,85) son candidatos a quitar."
+        f"Los otros {s['doubtful_pairs']} (probabilidad < 0,85) son candidatos a quitar. "
+        f"{s['assigned_unjudged']} topic ya no está en el vocabulario y no se juzga."
     )
     assert (
         one["link"] == f"ver los {s['posts_enrich_only']} posts con un topic que Jev no confirma →"
@@ -1357,6 +1370,8 @@ def test_nothing_compared_says_so_instead_of_zero_percent(tmp_path):
     assert "Ningún post comparado todavía" in seen["text"]
     assert "3 evaluaciones caducadas" in seen["text"]
     assert "0,0 %" not in seen["text"] and "%" not in seen["text"]
+    # The header's three numbers too: a share of nothing is «—», not 0,0 %.
+    assert "%" not in seen["facts"] and seen["facts"].count("—") == 2
 
 
 @_requires_chrome
