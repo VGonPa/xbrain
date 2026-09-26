@@ -375,19 +375,23 @@ topic enrich assigned that Jev does not back, a topic Jev backs that enrich did 
 or a primary that differs (a post enrich left without a primary counts). The recap line
 prints it as `N posts con desacuerdo`, and the dashboard's "Con discrepancias" count is the same
 number. `posts_enrich_only`, `posts_jev_only` and `posts_primary_differs` split the same posts by
-KIND of disagreement (a post can count in more than one), and each `per_topic` row carries
-`disagreeing` = its `doubtful` + its `missing`: the posts that disagree about that topic, plus
-`enrich_primary` and `jev_primary`: on how many compared posts each side picked it as THE
-topic.
+KIND of disagreement (a post can count in more than one). Each `per_topic` row carries
+`disagreeing` = its `doubtful` + its `missing`: the posts that disagree about that topic.
+Separately, each row also carries `enrich_primary` and `jev_primary`: on how many compared posts
+each side picked it as THE topic (these are not part of `disagreeing`).
 
 `topic_confusion` pairs what each side put INSTEAD. On every post, each topic only enrich has
 (`doubtful`) is paired with each topic only Jev has (`missing`); a post where only one side has
 something pairs it with `null` (enrich put a topic Jev does not back and Jev put nothing in its
-place, or Jev added one without replacing anything). Each row is `{enrich, jev, posts, ids}`,
-most posts first; a post with two topics on one side is in two rows. `primary_confusion` is the
-same shape for the primary: enrich's primary × Jev's choice on every post where they differ
-(`enrich: null` = enrich left no primary; the fallback appears as Jev answered it), and its
-rows' `posts` add up to `posts_primary_differs`.
+place, or Jev added one without replacing anything). Each row is `{enrich, jev, posts}`, most
+posts first. It is a PRODUCT: a post with two enrich-only topics and two Jev-only topics is in
+four rows. `primary_confusion` is the same shape for the primary: enrich's primary × Jev's
+choice on every post where they differ (`enrich: null` = enrich left no primary; the fallback
+appears as Jev answered it), and its rows' `posts` add up to `posts_primary_differs`.
+
+The JSON report carries these COUNTS only. The posts behind each row live in one index,
+`report.post_sets`, which only the page ships (to open a pair's posts): the lists grow with
+every evaluated post, and a report file is for numbers.
 
 Under the recap line, `jev report` prints the run history in the shared cost sentence:
 
@@ -492,7 +496,8 @@ Top to bottom:
    - *Jev añadiría N topics que enrich no puso* — `missing_pairs`.
    - *El topic principal coincide en P %* — `primary_agree_pct`.
 5. **Four tabs**: **Posts**, **Topics**, **Comparar Jev vs enrich** and **Configuración**.
-   Posts and Topics are described below; the other two show a one-line placeholder.
+   Posts and Topics are described below; Comparar and Configuración show a one-line
+   placeholder (they arrive in later PRs).
 
 ### The Posts tab
 
@@ -584,31 +589,48 @@ It is **one file**: the data as a JSON blob in the page, no charting library, no
 scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
 the vault loses the pictures and nothing else. The only network reference is the Google
 Fonts stylesheet. Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
-**3,749,799 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
-rows and evidence) and ~1.2 KB for the rest; the two confusion lists add ~35 KB. With every
-post evaluated it would be about **7 MB**. JavaScript draws everything; without it the page says so.
+**3,762,648 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
+rows and evidence) and ~1.2 KB for the rest. The Topics tab's data is the two confusion lists
+(~18 KB of counts) and `post_sets` (~23 KB, ~80 bytes per evaluated post). With every post
+evaluated the page would be about **7.2 MB**. JavaScript draws everything; without it the page says so.
 
 ### The Topics tab
 
 **The index** (`#topics`) lists the vocabulary's topics with, per topic, the `per_topic` row of
-the report: *Enrich lo pone* (`assigned`), *Jev confirma* (`backed`), *Acuerdo* (`backed_pct`,
-`—` when enrich never put it), *Jev lo añadiría* (`missing`), *Discrepancias* (`disagreeing`),
-and *Principal según enrich / según Jev* (`enrich_primary` / `jev_primary`). Each header says
-what it counts in one line. By default the worst agreement comes first — the report's own order,
-by the exact ratio — among the topics enrich put on **at least 5 posts**; the rest follow, since
-an agreement rate over one or two posts is noise. Clicking a header sorts by it (click again to
-reverse); the URL keeps the order (`#topics?o=disagreeing&d=desc`). On a phone the headers fold
-into each row and the default order applies.
+the report: *Enrich lo pone* (`assigned`), *Jev confirma* (`backed`, at the threshold, which the
+header shows), *Acuerdo* (`backed_pct`, `—` when enrich never put it), *Jev lo añadiría*
+(`missing`), *Discrepancias* (`disagreeing`), and *Principal según enrich / según Jev*
+(`enrich_primary` / `jev_primary`). Each header says what it counts in one line (also the
+tooltip of every cell). Under the table, a line names the posts where Jev chose «otro»: they
+are not in the *Principal según Jev* column.
+
+By default the worst agreement comes first — the report's own order, by the exact ratio — among
+the topics enrich put on **at least 5 posts** (`TOPIC_MIN`, shipped as `topic_min`); the rest
+follow, marked *pocos datos*, since an agreement rate over one or two posts is noise. Clicking a
+header sorts by it (click again to reverse). *Acuerdo* sorts by the exact ratio, never the
+rounded percentage, and topics enrich never put go last in both directions. The URL keeps the
+order (`#topics?o=disagreeing&d=desc`) without adding a history entry per click, and the back
+link from a topic returns to it. On a phone the headers fold into each row and a drop-down
+offers the same orders.
 
 **A topic's page** (`#topics?t=<slug>`, bookmarkable) shows its description and numbers, then:
 
 - **Con qué se confunde**: from `topic_confusion`, what Jev put in its place where enrich put
-  this topic and Jev does not back it, and what enrich had where Jev adds it — top eight each,
-  with how many posts. *nada en su lugar* is a post where the other side put nothing instead.
+  this topic and Jev does not back it, and what enrich had where Jev adds it, with how many
+  posts. *nada en su lugar* is a post where the other side put nothing instead. The first eight
+  show; *ver todos* opens the rest.
 - **Topic principal**: from `primary_confusion`, what Jev chose where enrich picked this topic as
-  primary, and what enrich had where Jev picked it.
-- Each of those rows opens exactly its posts, as cards (`#topics?t=<slug>&cx=<enrich>~<jev>` or
-  `&px=…`, with `-` for "nothing"); *quitar este cruce* goes back.
+  primary, and what enrich had where Jev picked it. *sin principal* is a post enrich left
+  without one; *(ninguno del vocabulario)* is Jev's «otro»; *(ya no está en el vocabulario)* is a
+  primary enrich chose that has since left `vocab.yaml`.
+- When a side is empty, it says what the row says: *Enrich no lo pone en ningún post comparado*,
+  *Enrich / Jev nunca lo elige como principal*, or that the two always agree.
+- Each row opens exactly its posts, as cards (`#topics?t=<slug>&cx=<enrich>~<jev>` or `&px=…`,
+  with `-` for "nothing"), scrolled into view; *quitar este cruce* goes back. A pair that does
+  not involve the topic, or no longer exists in these data, says *Ese cruce ya no existe en
+  estos datos* and shows the topic's groups; a post of the pair missing from the page is
+  counted (*N de M posts no están en esta página*). An unknown topic says it is not in the
+  current vocabulary.
 - Otherwise its posts, as the same cards as the Posts tab, in three groups — **Coinciden**
   (`backed`), **Solo enrich** (`doubtful`), **Solo Jev** (`missing`) — twenty at a time, with
   buttons that jump to each group.
@@ -617,7 +639,7 @@ Links: *ver en Posts* opens the Posts tab on every post with this topic (`#posts
 *sus discrepancias en Posts* on the ones that disagree about it (`#posts?t=…`). On any card, a
 topic's name in the Jev vs enrich rows opens its page, and the Posts rail offers *ficha del
 topic* for the topic it is filtering by. Back and forward move between the index, a topic and a
-pair.
+pair. If the tab ever fails to draw, it says so inside the tab.
 
 Two more things the page cannot tell you itself:
 
