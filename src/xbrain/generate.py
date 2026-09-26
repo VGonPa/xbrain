@@ -61,7 +61,7 @@ _FAILURE_ES: dict[FailureReason, str] = {
 # `media_root` argument. The leading underscore keeps the directory at
 # the top of file listings and matches the convention used by static-
 # site generators (Hugo, Jekyll) for non-content assets.
-_VAULT_MEDIA_SUBDIR = "_media"
+VAULT_MEDIA_SUBDIR = "_media"
 
 
 def _broken_link_line(source: ContentSourceFailure, fetched_at: datetime) -> str:
@@ -217,7 +217,7 @@ def generate(
     for item in items:
         if _has_note(item) and _in_range(item, since, until):
             if media_root is not None:
-                vault_media_dir = output_dir / _VAULT_MEDIA_SUBDIR
+                vault_media_dir = output_dir / VAULT_MEDIA_SUBDIR
                 _mirror_item_media(item, media_root, vault_media_dir)
                 _mirror_item_frames(item, media_root, vault_media_dir)
                 _mirror_item_article_images(item, media_root, vault_media_dir)
@@ -414,7 +414,7 @@ def _render_media_lines(item: Item) -> list[str]:
     lines: list[str] = []
     for entry in item.media:
         if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed, MediaVideoDownloaded)):
-            lines.append(f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]")
+            lines.append(f"![[{VAULT_MEDIA_SUBDIR}/{entry.local_path}]]")
             # A described (non-decorative) photo carries a vision caption right
             # under the embed — plain note text, so Obsidian search finds it.
             # One `>` per physical line: Markdown blockquotes scope to a single
@@ -635,7 +635,7 @@ def _slide_embed_lines(frames: list[VideoFrame]) -> list[str]:
     """
     lines: list[str] = []
     for frame in frames:
-        lines.append(f"![[{_VAULT_MEDIA_SUBDIR}/{frame.local_path}]]")
+        lines.append(f"![[{VAULT_MEDIA_SUBDIR}/{frame.local_path}]]")
         if frame.description:
             # Collapse internal newlines to a space: a multi-line vision description
             # must stay ONE `> ...` line, else the tail spills out of the blockquote.
@@ -713,7 +713,7 @@ def _article_image_lines(block: ArticleImageBlock) -> list[str]:
     """
     entry = block.media
     if isinstance(entry, (MediaPhotoDownloaded, MediaPhotoDescribed)):
-        lines = [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]"]
+        lines = [f"![[{VAULT_MEDIA_SUBDIR}/{entry.local_path}]]"]
         lines += _article_caption_lines(block, entry)
         return lines
     if isinstance(entry, MediaPhotoFailed):
@@ -745,7 +745,7 @@ def _article_video_lines(block: ArticleVideoBlock) -> list[str]:
     entry = block.media
     caption = [f"> {line}" for line in block.alt.splitlines()] if block.alt else []
     if isinstance(entry, MediaVideoDownloaded):
-        return [f"![[{_VAULT_MEDIA_SUBDIR}/{entry.local_path}]]", *caption]
+        return [f"![[{VAULT_MEDIA_SUBDIR}/{entry.local_path}]]", *caption]
     if isinstance(entry, MediaVideoFailed):
         reason = _FAILURE_ES_MEDIA.get(entry.failure_reason, entry.failure_reason)
         return [f"> ⚠ Vídeo no disponible ({reason}): <{entry.url}>", *caption]

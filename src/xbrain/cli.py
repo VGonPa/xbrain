@@ -3210,6 +3210,9 @@ def jev_dashboard_cmd() -> None:
             fallback=jev.fallback,
             char_limit=jev.char_limit,
         ),
+        # The page is written HERE, next to the `_media/` mirror the notes embed from: its
+        # photos are relative paths into that folder, checked file by file.
+        page_dir=cfg.output_dir,
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     # Atomically, like the reports: a page half-written by a full disk or a Ctrl-C would
@@ -3219,10 +3222,11 @@ def jev_dashboard_cmd() -> None:
     # The SAME line `jev report` prints, from the same summary: the two commands recap one
     # side-car, and an operator who runs both must not have to reconcile two sets of numbers.
     typer.echo(_jev_report_line(data["summary"]))
-    rows = len(data["posts"])
+    posts = len(data["posts"])
+    compared = data["summary"]["items_compared"]
     typer.echo(
-        f"{plural(rows, 'post en el dashboard', 'posts en el dashboard')} "
-        f"→ {page.resolve().as_uri()}"
+        f"{plural(posts, 'post en el dashboard', 'posts en el dashboard')} "
+        f"({plural(compared, 'comparado', 'comparados')} con Jev) → {page.resolve().as_uri()}"
     )
 
 
