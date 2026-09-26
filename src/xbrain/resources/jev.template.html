@@ -113,8 +113,6 @@ details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;lette
 .tabs a:hover{color:var(--ink)}
 .tabs a[aria-current="page"]{color:var(--accent);border-bottom-color:var(--accent)}
 .tabs a:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-.soon{margin-top:22px;padding:28px 24px;border:1px dashed var(--hairline);border-radius:14px;color:var(--ink-muted);font-size:14px}
-.soon b{font-family:var(--display);font-weight:600;font-size:20px;color:var(--ink);display:block;margin-bottom:6px}
 
 /* posts: rail + list */
 .browse{display:grid;grid-template-columns:290px minmax(0,1fr);gap:26px;margin-top:22px;align-items:start}
@@ -286,6 +284,35 @@ details.saw[open]>summary{color:var(--ink)}
 .bandrow .n a{color:var(--accent);text-decoration:none}
 .otro-n{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-top:10px}
 
+/* config: what this page was built with, read-only */
+.cfg{margin-top:30px}
+.cfg>.muted,.cfg>.note{max-width:820px}
+.cfg .t{margin-top:12px}
+/* Outside a panel: the sticky header takes the page's background, not a panel's. */
+.cfg .t thead th{background:var(--bg)}
+.cfg .t td.cv{font-family:var(--mono);font-size:12px;min-width:120px}
+.cfg .t td.cv small{display:block;font-family:var(--ui);font-size:11.5px;color:var(--ink-faint);margin-top:3px}
+.cfg .t td.cw{color:var(--ink-muted);max-width:520px}
+.cfg .t td.ck code,.cfg .t td.cp code{font-family:var(--mono);font-size:11.5px;color:var(--ink-muted);overflow-wrap:anywhere}
+.cfg .t td a.tl{font-weight:600;color:var(--ink);text-decoration:none}
+.cfg .t td a.tl:hover{color:var(--accent)}
+.cfg .t td.ck .slug{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.qgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:12px}
+.q{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:14px 16px;min-width:0}
+.q .lab{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
+.q h4{font-family:var(--display);font-weight:600;font-size:17px;margin-top:4px}
+.q .gloss{font-size:13px;color:var(--ink-muted);margin-top:6px;line-height:1.5}
+.q details{margin-top:10px}
+.q details>summary{cursor:pointer;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;color:var(--ink-faint)}
+.wire{font-family:var(--mono);font-size:12px;line-height:1.55;background:var(--surface-2);border:1px solid var(--hairline-2);border-radius:8px;padding:10px 12px;margin-top:10px;overflow-wrap:anywhere;white-space:pre-wrap}
+.wire .wi{color:var(--ink)}
+.wire dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;margin-top:8px}
+.wire dt{color:var(--accent)}
+.wire dd{color:var(--ink-muted)}
+.digest{font-family:var(--mono);font-size:11px;color:var(--ink-muted);overflow-wrap:anywhere}
+.surf{margin:10px 0 0 22px;font-size:13.5px;line-height:1.7}
+.cfg code.marker{font-family:var(--mono);font-size:12px;color:var(--ink);overflow-wrap:anywhere}
+
 /* the failure banner: shown only when the page could not draw itself */
 .banner{margin-top:24px;padding:14px 18px;border-radius:10px;font-size:13.5px;line-height:1.6;
   background:rgba(181,83,63,.14);border:1px solid rgba(181,83,63,.55);color:var(--banner-ink)}
@@ -300,7 +327,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   .facts{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}.kpi{border-right:0;border-bottom:1px solid var(--hairline)}.kpi:last-child{border-bottom:0}
   .browse{grid-template-columns:1fr}
   .rail{position:static;max-height:none}
-  .kinds,.bands{grid-template-columns:1fr}
+  .kinds,.bands,.qgrid{grid-template-columns:1fr}
 }
 @media (max-width:640px){
   .wrap{padding:28px 16px 48px}
@@ -412,7 +439,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div id="compare-body"></div>
   </section>
   <section id="tab-config" class="tab" hidden>
-    <div class="soon"><b>Configuración</b>Umbral, modelo, preguntas exactas y vocabulario: llegan en un PR posterior.</div>
+    <div id="config-body"></div>
   </section>
 
   <footer>
@@ -1971,6 +1998,230 @@ function showCompare() {
 }
 /* end compare */
 
+/* ---------------------------------------------------------------- the Configuración tab */
+/* config */
+/** What each `[jev]` setting changes, in plain words, keyed by its config.toml key. The keys,
+    the values in effect and the defaults are `config.settings` (from `jev/defaults.py`); only
+    the words live here. */
+const CONFIG_SETTINGS = {
+  threshold: {name: 'Umbral', fmt: (v) => pfmt(v),
+    why: 'probabilidad desde la que un topic cuenta como «Jev lo ve». Mueve todos los números de esta página y de `xbrain jev report`; no cambia lo que se pregunta, así que no caduca ninguna evaluación.'},
+  model: {name: 'Modelo pedido', fmt: (v) => v,
+    why: 'el modelo que se pide a Jev. Un alias como jev-latest sigue sus actualizaciones; cada evaluación guarda el modelo que respondió. Cambiarlo no caduca evaluaciones.'},
+  fallback_option: {name: 'Opción de escape', fmt: (v) => '«' + v + '»',
+    why: 'la última opción de la elección del principal: «ningún topic de la lista». Cambiarla cambia las preguntas y caduca todas las evaluaciones.'},
+  concurrency: {name: 'Peticiones a la vez', fmt: (v) => nf(v),
+    why: 'cuántos posts pregunta a la vez `xbrain jev topics`. Solo cambia la velocidad de una pasada.'},
+  state_char_limit: {name: 'Límite de evidencia', fmt: (v) => pl(v, 'carácter', 'caracteres'),
+    why: 'cuánta evidencia de un post se envía; lo que pasa de ahí se corta por el final. Cambiarlo caduca solo los posts cuyo corte se mueve.'},
+};
+/** The files, by `config.files` key: what each one is. */
+const CONFIG_FILES = {
+  topics: ['topics.json', 'las evaluaciones de Jev (una por post): el side-car'],
+  runs: ['runs.jsonl', 'el registro de pasadas: una línea por `xbrain jev topics` que envió peticiones'],
+  vocab: ['vocab.yaml', 'el vocabulario: de aquí salen las preguntas'],
+  report_json: ['topics-report.json', 'el informe de `xbrain jev report`, para programas'],
+  report_md: ['topics-report.md', 'el mismo informe, para leer'],
+  page: ['jev.html', 'esta página, la escribe `xbrain jev dashboard`'],
+};
+
+function cfgSection(title, intro) {
+  const sec = el('section', 'cfg');
+  sec.appendChild(el('h3', 'tsec', title));
+  if (intro) sec.appendChild(el('p', 'muted', intro));
+  return sec;
+}
+
+/** A table whose cells name themselves (`data-h`), so a phone stacks each row. */
+function cfgTable(heads, rows) {
+  const t = el('table', 't');
+  const head = el('tr');
+  heads.forEach(h => head.appendChild(el('th', null, h[0])));
+  t.appendChild(el('thead')).appendChild(head);
+  const body = el('tbody');
+  rows.forEach(cells => {
+    const tr = el('tr');
+    cells.forEach((cell, i) => {
+      const td = el('td', heads[i][1]);
+      td.dataset.h = heads[i][0];
+      if (cell instanceof Node) td.appendChild(cell); else td.textContent = cell;
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  t.appendChild(body);
+  const wrap = el('div', 'twrap');
+  wrap.appendChild(t);
+  return wrap;
+}
+
+function valueCell(text, small) {
+  const box = el('div', null, text);
+  if (small) box.appendChild(el('small', null, small));
+  return box;
+}
+
+function configSettings(C) {
+  const sec = cfgSection('Ajustes', 'Con estos valores se hizo esta página. Se cambian en config.toml, nunca aquí.');
+  const models = Object.entries(C.models_answered).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const rows = C.settings.map(s => {
+    const spec = CONFIG_SETTINGS[s.key];
+    let small = s.value === s.default ? 'por defecto' : 'por defecto: ' + spec.fmt(s.default);
+    if (s.key === 'model') {
+      small += ' · respondieron: ' + (models.length
+        ? models.map(([m, n]) => m + ' (' + pl(n, 'evaluación', 'evaluaciones') + ')').join(', ')
+        : 'ninguna evaluación guardada');
+    }
+    return [spec.name, valueCell(spec.fmt(s.value), small), spec.why, el('code', null, '[jev].' + s.key)];
+  });
+  Object.entries(C.prices).sort().forEach(([provider, rate]) => {
+    rows.push(['Precio de entrada · ' + provider,
+      valueCell(Number(rate).toLocaleString('es-ES', {maximumFractionDigits: 6}) + ' $', 'por millón de tokens de entrada'),
+      'la tarifa de lista con la que esta página y `xbrain jev report` calculan todo coste. Es una estimación: el modelo pedido puede ser un alias.',
+      el('code', null, 'jev/defaults.py (no está en config.toml)')]);
+  });
+  sec.appendChild(cfgTable([['Ajuste', null], ['Valor', 'cv'], ['Qué cambia', 'cw'], ['Dónde', 'ck']], rows));
+  sec.appendChild(el('p', 'muted', 'Los tokens de salida son gratis.'));
+  return sec;
+}
+
+/** One question as it goes to Jev: its instructions, then each option and its criterion. */
+function wire(q, only) {
+  const box = el('div', 'wire');
+  box.appendChild(el('div', 'wi', q.instructions));
+  const dl = el('dl');
+  q.criteria.filter(([k]) => !only || only.includes(k)).forEach(([k, v]) => {
+    dl.appendChild(el('dt', null, k));
+    dl.appendChild(el('dd', null, v));
+  });
+  box.appendChild(dl);
+  return box;
+}
+
+function configQuestions(C) {
+  const yesNo = C.questions.filter(q => q.type === 'yes_no');
+  const choice = C.questions.find(q => q.type === 'choice');
+  const sec = cfgSection('Las preguntas exactas',
+    'Cada post es una petición a Jev con ' + pl(C.questions.length, 'pregunta', 'preguntas') +
+    ', en inglés tal como se envían; las descripciones van literales, en el idioma del vocabulario. ' +
+    'Lo que Jev lee del post va aparte, como `post` (ver «Qué ve Jev de cada post»).');
+  const grid = el('div', 'qgrid');
+  const yes = el('div', 'q');
+  yes.appendChild(el('span', 'lab', pl(yesNo.length, 'pregunta', 'preguntas') + ' sí/no'));
+  yes.appendChild(el('h4', null, 'Una por topic'));
+  yes.appendChild(el('p', 'gloss', 'Lectura: sí/no por topic = pertenencia, varios posibles. Cada respuesta es la probabilidad de que el post trate de ese topic, sin mirar las demás; el umbral decide cuáles cuentan. Todas son como esta, con otro slug y otra descripción:'));
+  yes.appendChild(wire(yesNo[0]));
+  const all = el('details');
+  all.appendChild(el('summary', null, 'ver las ' + pl(yesNo.length, 'pregunta', 'preguntas') + ' sí/no'));
+  yesNo.forEach(q => all.appendChild(wire(q)));
+  yes.appendChild(all);
+  grid.appendChild(yes);
+  const pick = el('div', 'q');
+  pick.appendChild(el('span', 'lab', '1 pregunta de elección'));
+  pick.appendChild(el('h4', null, 'El topic principal'));
+  pick.appendChild(el('p', 'gloss', 'Lectura: elección = el principal, uno solo; sus probabilidades suman 1. Las opciones son los ' +
+    pl(choice.criteria.length - 1, 'topic', 'topics') + ', cada uno con su descripción, y al final «' +
+    choice.criteria[choice.criteria.length - 1][0] + '»:'));
+  pick.appendChild(wire(choice, [choice.criteria[choice.criteria.length - 1][0]]));
+  const opts = el('details');
+  opts.appendChild(el('summary', null, 'ver las ' + pl(choice.criteria.length, 'opción', 'opciones')));
+  opts.appendChild(wire(choice));
+  pick.appendChild(opts);
+  grid.appendChild(pick);
+  sec.appendChild(grid);
+  const d = el('p', 'muted', 'Huella de las preguntas (sha256): ');
+  d.appendChild(el('span', 'digest', C.questions_digest));
+  d.appendChild(document.createTextNode('. Entra en el contrato de cada evaluación: si cambia una pregunta, cambia la huella y todas las evaluaciones guardadas caducan.'));
+  sec.appendChild(d);
+  return sec;
+}
+
+function configVocabulary() {
+  const sec = cfgSection('El vocabulario', pl(DATA.topics.length, 'topic', 'topics') +
+    ' de vocab.yaml. La descripción de cada uno es, literal, la respuesta «true» de su pregunta sí/no y su opción en la elección. Cada nombre abre su ficha en Topics.');
+  sec.appendChild(cfgTable([['Topic', 'ck'], ['Descripción', 'cw']], DATA.topics.map(t => {
+    const name = el('div');
+    name.appendChild(link(topicHref(t.slug), 'tl', t.label));
+    name.appendChild(el('span', 'slug', t.slug));
+    return [name, t.description];
+  })));
+  return sec;
+}
+
+function configEvidence(C, limit) {
+  const sec = cfgSection('Qué ve Jev de cada post',
+    'Un solo texto, `post`, con estas fuentes en este orden (cada una solo si el post la tiene):');
+  const ol = el('ol', 'surf');
+  C.surfaces.forEach(s => ol.appendChild(el('li', null, s.label)));
+  sec.appendChild(ol);
+  const cut = el('p', 'muted', 'El corte: si pasa de ' + pl(limit, 'carácter', 'caracteres') +
+    ', se corta por el final — el tweet va primero, así que nunca se pierde — y se añade una línea ');
+  cut.appendChild(el('code', 'marker', C.cut_marker));
+  cut.appendChild(document.createTextNode(' (N, los caracteres que quedaron fuera). Cada post dice en «Lo que vio Jev» qué fuentes llevaba y si se recortó. '));
+  const docs = httpUrl(DATA.docs_url);
+  if (docs) cut.appendChild(link(docs, 'lk', 'cómo se construye, en la documentación ↗'));
+  sec.appendChild(cut);
+  return sec;
+}
+
+function configFiles(C) {
+  const sec = cfgSection('Ficheros', null);
+  if (!C.files) {
+    sec.appendChild(el('p', 'muted', 'Esta página se generó sin rutas de ficheros.'));
+    return sec;
+  }
+  sec.appendChild(cfgTable([['Fichero', null], ['Ruta', 'cp'], ['Qué es', 'cw']], C.files.map(f => {
+    const spec = CONFIG_FILES[f.key] || [f.key, ''];
+    return [spec[0], el('code', null, f.path), spec[1]];
+  })));
+  sec.appendChild(el('p', 'note', 'data/ no está en git. topics.json y runs.jsonl, además, no entran en los snapshots (vocab.yaml sí): costaron dinero y `xbrain snapshot restore` no los devuelve.'));
+  return sec;
+}
+
+function estimateText(e) {
+  if (e.tokens == null) return pl(e.posts, 'post', 'posts') + ' · sin media que multiplicar';
+  return pl(e.posts, 'post', 'posts') + ' · ~' + nf(e.tokens) + ' tokens de entrada';
+}
+
+function configCost(C) {
+  const p = C.estimate.per_post;
+  const sec = cfgSection('Coste de una pasada (estimación)',
+    'Estimación: la media de las evaluaciones vigentes por un número de posts, a precio de lista. ' +
+    '«Lo que falta» son los posts que `xbrain jev topics` preguntaría ahora (nunca preguntados o caducados, con evidencia); ' +
+    '«todo el corpus», cada post con evidencia, como con --force.');
+  const facts = el('div', 'kinds');
+  const fact = (lab, big, why) => {
+    const k = el('div', 'kind');
+    k.appendChild(el('span', 'lab', lab));
+    k.appendChild(el('span', 'cnum', big));
+    k.appendChild(el('p', null, why));
+    facts.appendChild(k);
+  };
+  fact('Media por post', p.mean_tokens == null ? '—' : nf(Math.round(p.mean_tokens)) + ' tokens',
+    p.mean_tokens == null ? 'ninguna evaluación vigente trae recuento de tokens'
+      : 'de ' + nf(p.tokens_n) + ' de las ' + nf(p.of) + ' evaluaciones vigentes (las que traen recuento) · ' +
+        usd(p.mean_usd, 5) + ' de media' + (p.unpriced_providers.length ? ' · sin tarifa: ' + p.unpriced_providers.join(', ') : ''));
+  fact('Lo que falta', usd(C.estimate.pending.usd), estimateText(C.estimate.pending));
+  fact('Todo el corpus', usd(C.estimate.corpus.usd), estimateText(C.estimate.corpus));
+  sec.appendChild(facts);
+  return sec;
+}
+
+function renderConfig() {
+  const box = $('config-body');
+  try {
+    box.replaceChildren();
+    const C = DATA.config;
+    const limit = C.settings.find(s => s.key === 'state_char_limit').value;
+    [configSettings(C), configQuestions(C), configVocabulary(), configEvidence(C, limit), configFiles(C), configCost(C)]
+      .forEach(sec => box.appendChild(sec));
+  } catch (err) {
+    box.replaceChildren(el('p', 'empty', 'La pestaña Configuración no pudo dibujarse: ' +
+      (err && err.message ? err.message : err)));
+  }
+}
+/* end config */
+
 /** What the numbers leave out, one phrase each: stale and orphaned answers, and evaluated
     posts with no enrichment to compare against. The Posts footer and the Comparar tab say it. */
 function excludedParts() {
@@ -2008,6 +2259,7 @@ function boot() {
   }
   shownTopic = topicsView.t;
   if (view.tab === 'compare') showCompare();
+  if (view.tab === 'config') renderConfig();
   $('search').addEventListener('input', function () { view.q = this.value.trim(); update(); });
   $('sort').addEventListener('change', function () { view.s = this.value; update(); });
   $('more').addEventListener('click', drawMore);
@@ -2031,6 +2283,7 @@ function boot() {
     // Opening a list is what the reader asked to see; the same list again, or none, leaves the
     // scroll alone.
     if (view.tab === 'compare') showCompare();
+    if (view.tab === 'config') renderConfig();
   });
   document.addEventListener('keydown', onKey);
   if ('IntersectionObserver' in window) {
