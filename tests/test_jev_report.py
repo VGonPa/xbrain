@@ -2,13 +2,14 @@
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from xbrain.jev.assess import build_topic_state, questions_digest, topic_contract
-from xbrain.jev.models import PrimaryChoice, TopicAssessment
+from xbrain.jev.defaults import jev_cost_fragment, tokens_cost_usd
+from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import STATE_KEY, build_topic_questions
 from xbrain.jev.report import (
     THRESHOLD_DEPENDENT_KEYS,
@@ -17,7 +18,9 @@ from xbrain.jev.report import (
     build_report,
     compare_item,
     current_assessments,
+    history_fragment,
     render_report_markdown,
+    run_history,
     summarize,
     write_reports,
 )
@@ -1053,3 +1056,102 @@ def test_the_markdown_explains_why_a_section_can_count_less_than_the_headline():
     assert "### Jev eligió el fallback (0)" in text
     assert "### Primario sin juzgar (salió del vocabulario) (1)" in text
     assert "estas cifras pueden sumar menos que las de arriba" in text
+
+
+# ----------------------------------------------------------------------- the run history
+
+
+def _logged(started: datetime, *, requests=2, ok=2, tokens=None, unknown=0, interrupted=False):
+    by_provider = {PRICED_PROVIDER: 2000} if tokens is None else tokens
+    return JevRun(
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+        models=["jev-1.13.0"] if ok else [],
+        requests=requests,
+        ok=ok,
+        failed=requests - ok if not interrupted else 0,
+        input_tokens_by_provider=by_provider,
+        input_tokens=sum(by_provider.values()),
+        input_tokens_unknown=unknown,
+        interrupted=interrupted,
+    )
+
+
+def test_the_run_history_prices_every_pass_through_the_one_price_formula():
+    early = _logged(datetime(2026, 9, 25, 9, tzinfo=timezone.utc))
+    late = _logged(
+        datetime(2026, 9, 26, 9, tzinfo=timezone.utc),
+        requests=3,
+        ok=3,
+        tokens={PRICED_PROVIDER: 3000, "fake": 500},
+        unknown=1,
+    )
+
+    history = run_history([early, late], {})
+
+    # Newest first: the question is "what did the last pass cost".
+    assert [row["started_at"] for row in history["runs"]] == [
+        late.started_at.isoformat(),
+        early.started_at.isoformat(),
+    ]
+    newest = history["runs"][0]
+    assert newest["cost_usd"] == tokens_cost_usd(3000, PRICED_PROVIDER) + tokens_cost_usd(
+        500, "fake"
+    )
+    assert newest["unpriced_providers"] == ["fake"]
+    assert newest["providers"] == ["fake", PRICED_PROVIDER]
+    assert (newest["requests"], newest["ok"], newest["failed"]) == (3, 3, 0)
+    total = history["total"]
+    assert (total["runs"], total["requests"], total["input_tokens"]) == (2, 5, 5500)
+    assert total["input_tokens_unknown"] == 1
+    assert history["runs"][1]["cost_usd"] == tokens_cost_usd(2000, PRICED_PROVIDER)
+    assert total["cost_usd"] == pytest.approx(history["runs"][1]["cost_usd"] + newest["cost_usd"])
+    assert total["unpriced_providers"] == ["fake"]
+
+
+def test_assessments_older_than_the_log_are_counted_apart_not_silently_left_out():
+    """Runs made before the log existed are in the side-car and nowhere in the history. A
+    total that omitted them without saying so would under-quote the bill."""
+    before, after = _item("1"), _item("2")
+    old = _assessment(before, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, tokens=4000)
+    new = _assessment(after, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}).model_copy(
+        update={"asked_at": datetime(2026, 9, 26, 9, 0, 10, tzinfo=timezone.utc)}
+    )
+    run = _logged(datetime(2026, 9, 26, 9, tzinfo=timezone.utc))
+
+    history = run_history([run], {"1": old, "2": new})
+
+    assert history["before_log"]["assessments"] == 1  # `old` was asked on DT, before the log
+    assert history["before_log"]["input_tokens"] == 4000
+    assert history["before_log"]["cost_usd"] == tokens_cost_usd(4000, PRICED_PROVIDER)
+
+
+def test_with_no_log_every_stored_assessment_predates_it():
+    item = _item()
+    stored = {"1": _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1})}
+
+    history = run_history([], stored)
+
+    assert history["runs"] == []
+    assert history["total"]["runs"] == 0 and history["total"]["cost_usd"] == 0.0
+    assert history["before_log"]["assessments"] == 1
+
+
+def test_the_history_line_quotes_the_bill_in_the_shared_sentence():
+    run = _logged(datetime(2026, 9, 26, 9, tzinfo=timezone.utc))
+    history = run_history([run], {})
+
+    line = history_fragment(history)
+
+    assert line.startswith("1 pasada · 2 peticiones · ")
+    assert jev_cost_fragment(2000, 0, tokens_cost_usd(2000, PRICED_PROVIDER), ()) in line
+
+
+def test_the_history_line_names_what_predates_the_log():
+    item = _item()
+    stored = {"1": _assessment(item, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1})}
+
+    line = history_fragment(run_history([], stored))
+
+    assert line.startswith("0 pasadas · 0 peticiones")
+    assert "1 evaluación anterior al registro de pasadas" in line

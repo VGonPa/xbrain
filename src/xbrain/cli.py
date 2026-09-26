@@ -69,8 +69,14 @@ from xbrain.jev.defaults import (
     unpriced_providers,
 )
 from xbrain.jev.env import typesafe_api_key
-from xbrain.jev.report import build_report, cost_fragment, write_reports
-from xbrain.jev.store import append_run, load_assessments, save_assessments
+from xbrain.jev.report import (
+    build_report,
+    cost_fragment,
+    history_fragment,
+    run_history,
+    write_reports,
+)
+from xbrain.jev.store import append_run, load_assessments, load_runs, save_assessments
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -3283,6 +3289,10 @@ def jev_report_cmd(
     )
     json_path, md_path = write_reports(summary, comparisons, jev.store, cfg.jev_dir)
     typer.echo(_jev_report_line(summary))
+    # The line above prices the side-car (the latest answer per item); this one prices every
+    # pass the run log recorded, re-asks included.
+    history = run_history(load_runs(cfg.jev_runs_path), jev.assessments)
+    typer.echo(f"Histórico: {history_fragment(history)}")
     typer.echo(f"→ {md_path}\n→ {json_path}")
 
 

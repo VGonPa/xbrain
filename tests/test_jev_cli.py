@@ -1081,6 +1081,25 @@ def test_jev_report_writes_json_and_markdown(tmp_path: Path, monkeypatch):
     assert payload["summary"]["items_compared"] == 2
 
 
+def test_jev_report_prints_what_every_logged_pass_cost(tmp_path: Path, monkeypatch):
+    """The recap line prices the SIDE-CAR (latest answer per item); the history line prices
+    every pass the log recorded, re-asks included — the number that answers "what has Jev
+    cost me". Both through the one shared sentence."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    history = [line for line in result.stdout.splitlines() if line.startswith("Histórico: ")]
+    # The fake answers 100 tokens per call under the unpriced provider `fake`.
+    assert history == [
+        "Histórico: 1 pasada · 2 peticiones · 200 tokens de entrada "
+        "(~0.0000 $ · proveedor sin tarifa: fake)"
+    ]
+
+
 def test_jev_report_without_assessments_refuses_and_names_the_command_that_fixes_it(
     tmp_path: Path, monkeypatch
 ):

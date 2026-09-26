@@ -34,13 +34,15 @@ from typing import Any
 
 from xbrain.jev.assess import current_pairs
 from xbrain.jev.defaults import (
+    INPUT_USD_PER_MTOK,
     input_cost_usd,
     input_tokens_total,
     jev_cost_fragment,
     plural,
+    tokens_cost_usd,
     unpriced_providers,
 )
-from xbrain.jev.models import TopicAssessment
+from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.models import Item, Topic, _require_utc_aware
 from xbrain.store import _atomic_write
 
@@ -571,6 +573,92 @@ def _summarize(
         "primary_unranked": primary["unranked"],
         "per_topic": _per_topic(comparisons, vocab),
     }
+
+
+def _run_row(run: JevRun) -> dict[str, Any]:
+    """One logged pass as the page and the CLI read it, PRICED NOW from its tokens.
+
+    The log stores tokens and never dollars, so this is where a pass acquires a cost — through
+    `defaults.tokens_cost_usd`, the same formula a stored assessment is priced with.
+    """
+    by_provider = run.input_tokens_by_provider
+    return {
+        "started_at": run.started_at.isoformat(),
+        "finished_at": run.finished_at.isoformat(),
+        "requests": run.requests,
+        "ok": run.ok,
+        "failed": run.failed,
+        "input_tokens": run.input_tokens,
+        "input_tokens_unknown": run.input_tokens_unknown,
+        "cost_usd": sum(tokens_cost_usd(tokens, p) for p, tokens in by_provider.items()),
+        "providers": sorted(by_provider),
+        "unpriced_providers": sorted(p for p in by_provider if p not in INPUT_USD_PER_MTOK),
+        "models": list(run.models),
+        "interrupted": run.interrupted,
+    }
+
+
+def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
+    """What Jev has cost over time: every logged pass, their total, and what predates the log.
+
+    `runs` is `store.load_runs`; `assessments` is the RAW side-car, every record including
+    stale and orphaned ones — they were all paid for.
+
+    `before_log` exists because the log started after the side-car did. A record asked
+    before the first logged pass (all of them, when the log is empty) is in no line of the
+    history, and a total that left it out WITHOUT SAYING SO would under-quote the bill. It is
+    counted and priced from its own stored tokens, never folded into the total: the total is
+    what the log recorded, and the side-car holds only the LATEST answer per item, so it
+    cannot reconstruct the earlier passes anyway.
+    """
+    rows = [_run_row(run) for run in runs]
+    first = min((run.started_at for run in runs), default=None)
+    older = tuple(a for a in assessments.values() if first is None or a.asked_at < first)
+    older_tokens, older_unknown = input_tokens_total(older)
+    return {
+        "runs": sorted(rows, key=lambda row: row["started_at"], reverse=True),
+        "total": {
+            "runs": len(rows),
+            "requests": sum(row["requests"] for row in rows),
+            "ok": sum(row["ok"] for row in rows),
+            "failed": sum(row["failed"] for row in rows),
+            "input_tokens": sum(row["input_tokens"] for row in rows),
+            "input_tokens_unknown": sum(row["input_tokens_unknown"] for row in rows),
+            "cost_usd": float(sum(row["cost_usd"] for row in rows)),
+            "unpriced_providers": sorted({p for row in rows for p in row["unpriced_providers"]}),
+        },
+        "before_log": {
+            "assessments": len(older),
+            "input_tokens": older_tokens,
+            "input_tokens_unknown": older_unknown,
+            "cost_usd": input_cost_usd(older),
+            "unpriced_providers": list(unpriced_providers(older)),
+        },
+    }
+
+
+def history_fragment(history: dict[str, Any]) -> str:
+    """`N pasadas · M peticiones · <the shared cost sentence>` (+ what predates the log).
+
+    The bill itself is `defaults.jev_cost_fragment`, the one sentence every surface quotes;
+    this only prefixes the counts the history adds and names the records the log never saw.
+    """
+    total = history["total"]
+    line = (
+        f"{plural(total['runs'], 'pasada', 'pasadas')} · "
+        f"{plural(total['requests'], 'petición', 'peticiones')} · "
+        + jev_cost_fragment(
+            total["input_tokens"],
+            total["input_tokens_unknown"],
+            total["cost_usd"],
+            total["unpriced_providers"],
+        )
+    )
+    older = history["before_log"]["assessments"]
+    if older:
+        noun = plural(older, "evaluación anterior", "evaluaciones anteriores")
+        line += f" · {noun} al registro de pasadas"
+    return line
 
 
 def _escape_cell(text: str) -> str:
