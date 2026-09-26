@@ -1657,7 +1657,10 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     )
     intro, output = seen["settings_notes"][0], seen["settings_notes"][-1]
     assert intro.startswith("Umbral, Opción de escape, Límite de evidencia: con estos valores")
-    assert "Modelo que se pedirá y Peticiones a la vez: no cambian esta página" in intro
+    assert (
+        "Modelo que se pedirá, Peticiones a la vez y Tope por trabajo desde la página: "
+        "no cambian esta página" in intro
+    )
     assert output == "Los tokens de salida son gratis."
 
 

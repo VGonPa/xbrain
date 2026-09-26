@@ -171,6 +171,7 @@ def _settings(**over: Any) -> dict[str, Any]:
         "fallback_option": FALLBACK,
         "concurrency": CONCURRENCY,
         "state_char_limit": CHAR_LIMIT,
+        "serve_max_usd": 1.0,
     }
     settings.update(over)
     return settings
@@ -1843,6 +1844,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "fallback_option",
         "concurrency",
         "state_char_limit",
+        "serve_max_usd",
     ]
     assert set(JEV_DEFAULTS) == {row["key"] for row in settings}
     values = {row["key"]: row["value"] for row in settings}
@@ -1852,6 +1854,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "fallback_option": FALLBACK,
         "concurrency": CONCURRENCY,
         "state_char_limit": CHAR_LIMIT,
+        "serve_max_usd": 1.0,
     }
     assert {row["key"]: row["default"] for row in settings} == JEV_DEFAULTS
 
@@ -2129,7 +2132,10 @@ def test_the_config_words_that_carry_meaning_are_pinned():
         "como si se volviera a preguntar todo",
         "(aún no existe: lo crea ",
         "'Modelo que se pedirá'",
-        "no cambian esta página, son lo que usará la próxima `xbrain jev topics`",
+        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo "
+        "lanzado desde la página que sirve `xbrain jev serve`",
+        "'Tope por trabajo desde la página'",
+        "el servidor rechaza un trabajo cuya estimación lo pase",
         "las evaluaciones guardadas no registran qué modelo se pidió",
         "el $ solo promedia proveedores con tarifa",
         "la que ves la dibuja el servidor en vivo",

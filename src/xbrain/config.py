@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,7 @@ class Config:
     jev_fallback_option: str
     jev_concurrency: int
     jev_state_char_limit: int
+    jev_serve_max_usd: float
 
     @property
     def payload_dir(self) -> Path:
@@ -230,8 +232,19 @@ def _jev_text(jev: dict, key: str, default: str) -> str:
     return value.strip()
 
 
-def _jev_settings(settings: dict) -> tuple[str, float, str, int, int]:
-    """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit)`.
+def _jev_max_usd(jev: dict, default: float) -> float:
+    """`[jev].serve_max_usd`: a finite number above 0. `inf` would make the cap no cap, and
+    `nan` compares false with everything, so every estimate would pass under it."""
+    message = "[jev].serve_max_usd must be a number > 0"
+    value = _jev_number(jev, "serve_max_usd", default, message)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"config.toml: {message}")
+    return value
+
+
+def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float]:
+    """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit,
+    serve_max_usd)`.
 
     THE DEFAULTS ARE IMPORTED FROM `xbrain.jev.defaults`, NEVER RETYPED (rule 5) — the same
     rule `_index_settings` above shouts about, and the import is LOCAL for the same reason:
@@ -245,6 +258,7 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int]:
         DEFAULT_CONCURRENCY,
         DEFAULT_FALLBACK_OPTION,
         DEFAULT_MODEL,
+        DEFAULT_SERVE_MAX_USD,
         DEFAULT_STATE_CHAR_LIMIT,
         DEFAULT_THRESHOLD,
         JEV_DEFAULTS,
@@ -274,7 +288,9 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int]:
             raise ValueError(f"config.toml: {message}")
         counts.append(value)
     fallback = _jev_text(jev, "fallback_option", DEFAULT_FALLBACK_OPTION)
-    return _jev_text(jev, "model", DEFAULT_MODEL), threshold, fallback, counts[0], counts[1]
+    max_usd = _jev_max_usd(jev, DEFAULT_SERVE_MAX_USD)
+    model = _jev_text(jev, "model", DEFAULT_MODEL)
+    return model, threshold, fallback, counts[0], counts[1], max_usd
 
 
 def load_config(repo_root: Path) -> Config:
@@ -334,8 +350,8 @@ def load_config(repo_root: Path) -> Config:
         )
     data_dir = repo_root / paths["data_dir"]
     index_dir, index_max_matches, index_char_budget = _index_settings(settings, data_dir)
-    jev_model, jev_threshold, jev_fallback, jev_concurrency, jev_char_limit = _jev_settings(
-        settings
+    jev_model, jev_threshold, jev_fallback, jev_concurrency, jev_char_limit, jev_max_usd = (
+        _jev_settings(settings)
     )
     return Config(
         repo_root=repo_root,
@@ -369,4 +385,5 @@ def load_config(repo_root: Path) -> Config:
         jev_fallback_option=jev_fallback,
         jev_concurrency=jev_concurrency,
         jev_state_char_limit=jev_char_limit,
+        jev_serve_max_usd=jev_max_usd,
     )

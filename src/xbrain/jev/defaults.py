@@ -38,6 +38,11 @@ DEFAULT_FALLBACK_OPTION = "otro"
 DEFAULT_CONCURRENCY = 8
 #: Evidence text is cut here; assessments record the pre-cut length and `truncated`.
 DEFAULT_STATE_CHAR_LIMIT = 100_000
+#: The most one job started from the page (`xbrain jev serve`) may cost, in USD, by the same
+#: estimate the page shows before it is confirmed. Refused server-side above it, and the job
+#: is stopped if what it has really spent reaches it. The terminal's `xbrain jev topics` has
+#: no cap: its operator chose the selection on the command line.
+DEFAULT_SERVE_MAX_USD = 1.00
 #: THE `[jev]` keys `config.toml` accepts, each with its default, in the order the
 #: Configuración tab lists them. `config.py` refuses any other key by this list, and the page
 #: states each one's value next to this default — one list, so a sixth key cannot reach the
@@ -48,6 +53,7 @@ JEV_DEFAULTS: dict[str, str | float | int] = {
     "fallback_option": DEFAULT_FALLBACK_OPTION,
     "concurrency": DEFAULT_CONCURRENCY,
     "state_char_limit": DEFAULT_STATE_CHAR_LIMIT,
+    "serve_max_usd": DEFAULT_SERVE_MAX_USD,
 }
 
 #: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model

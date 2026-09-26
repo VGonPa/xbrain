@@ -154,7 +154,7 @@ command = "parakeet-mlx"
 #   article with its metadata: the common case does not paginate.
 
 [jev]
-# Jev (TypeSafe AI) topic assessment — `xbrain jev topics|report|dashboard`. See docs/jev.md.
+# Jev (TypeSafe AI) topic assessment — `xbrain jev topics|report|dashboard|serve`. See docs/jev.md.
 # Key: TYPESAFE_API_KEY in the environment or in <repo>/.env (see .env.example).
 # Model alias; "jev-latest" follows TypeSafe's updates. Each stored assessment
 # records the concrete model version the API answered with.
@@ -182,5 +182,10 @@ concurrency = 8
 # sends, so this setting is not the cost lever; the vocabulary size is. 100k chars is
 # ~25k tokens. Assessments record the pre-cut length and `truncated`. See docs/jev.md.
 state_char_limit = 100000
+# The most ONE job started from the page (`xbrain jev serve`) may cost, in USD, by the same
+# estimate the page shows before confirming (the mean cost of the answers already paid for ×
+# the posts it would ask). The server refuses a job whose estimate is above it, and stops a
+# job whose real spend reaches it. `xbrain jev topics` in the terminal has no cap.
+serve_max_usd = 1.0
 # Output: <data_dir>/jev/topics.json — a side-car, NOT part of the store and NOT snapshotted.
 # It costs money to regenerate and has no undo; see docs/jev.md.
