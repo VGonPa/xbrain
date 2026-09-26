@@ -676,7 +676,9 @@ generates an Obsidian wiki.
   base64). Which filter a card is in is decided in Python (`in` keys, tested equal to the
   report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
   disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
-  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Plus
+  headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Topics tab
+  (`#topics`, `#topics?t=<slug>`): numbers from `per_topic`, `topic_confusion`,
+  `primary_confusion` in report.py; the page never tallies cards into a number. Plus
   cost total / per pass / per post. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
