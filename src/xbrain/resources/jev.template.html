@@ -247,6 +247,10 @@ details.saw[open]>summary{color:var(--ink)}
 .pairs li a{color:var(--ink);text-decoration:none}
 .pairs li a:hover{color:var(--accent)}
 .pairs li .c{font-family:var(--mono);font-size:11px;color:var(--ink-faint);white-space:nowrap}
+.few{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;border:1px dashed var(--hairline);border-radius:999px;padding:0 7px;margin-left:8px;color:var(--ink-faint)}
+.tsort{display:none;margin:0 0 12px;background:var(--surface-2);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:7px 10px;font-family:var(--ui);font-size:13px}
+.phone-only{display:none}
+.more.small{margin:10px 0 0;padding:5px 10px;font-size:12px}
 .tgroup{margin-top:10px;scroll-margin-top:14px}
 .tjump{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:26px}
 .tjump .muted{margin:0}
@@ -283,6 +287,9 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   .tnums{grid-template-columns:1fr 1fr}
   .pgrid{grid-template-columns:1fr}
   .tt thead{display:none}
+  .tsort{display:block}
+  .phone-only{display:inline}
+  .desk-only{display:none}
   .t.tt tr{display:grid;grid-template-columns:1fr 1fr;column-gap:12px}
   .t.tt td.tn{min-width:0;max-width:none;grid-column:1 / -1}
   .bar{min-width:90px}
@@ -376,7 +383,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div class="soon"><b>Comparar Jev vs enrich</b>La comparación de decisiones (acuerdo por topic, cruces de topic principal, tipos de desacuerdo) llega en el siguiente PR.</div>
   </section>
   <section id="tab-config" class="tab" hidden>
-    <div class="soon"><b>Configuración</b>Umbral, modelo, preguntas exactas y vocabulario llega en el siguiente PR.</div>
+    <div class="soon"><b>Configuración</b>Umbral, modelo, preguntas exactas y vocabulario: llegan en un PR posterior.</div>
   </section>
 
   <footer>
@@ -665,8 +672,11 @@ function renderRail() {
       const field = TOPIC_COUNT[view.f];
       const note = document.createElement('p');
       note.className = 'legend';
+      // Named as the Topics tab names them, so the reader finds the same number there.
+      const where = {disagreeing: 'la columna «Discrepancias» del índice de topics',
+        doubtful: 'el grupo «Solo enrich» de su ficha', missing: 'la columna «Jev lo añadiría» del índice de topics'};
       note.textContent = field
-        ? 'con este filtro, la lista es la columna ' + (field === 'disagreeing' ? 'de discrepancias' : field === 'doubtful' ? '«enrich lo pone y Jev no»' : '«Jev lo añadiría»') + ': ' + nf(r[field] || 0) + ' posts'
+        ? 'con este filtro, la lista es ' + where[field] + ': ' + nf(r[field] || 0) + ' posts'
         : 'con este filtro, la lista cuenta todos los posts donde enrich o Jev lo tienen';
       note.appendChild(document.createTextNode(' · '));
       note.appendChild(link(topicHref(t.slug), 'lk', 'ficha del topic →'));
@@ -1126,15 +1136,15 @@ function onKey(e) {
 
 /* ---------------------------------------------------------------- the Topics tab */
 /* topics */
-/** Topics enrich put on fewer posts than this sort after the rest by default: an agreement
-    rate over two posts is noise, not a finding. */
-const TOPIC_MIN = 5;
+/** The floor below which a topic sorts last by default and is marked «pocos datos»: defined
+    once in `jev/dashboard.py` (`TOPIC_MIN`) and shipped. */
+const TOPIC_MIN = DATA.topic_min;
 /** The index columns. Every number is a `per_topic` field computed in `jev/report.py`; `key`
     is the field and the sort. */
 const TOPIC_COLUMNS = [
   {key: 'label', name: 'Topic', why: 'nombre, slug y descripción del vocabulario'},
   {key: 'assigned', name: 'Enrich lo pone', why: 'posts donde enrich puso este topic'},
-  {key: 'backed', name: 'Jev confirma', why: 'de esos, en cuántos lo ve también Jev (probabilidad ≥ umbral)'},
+  {key: 'backed', name: 'Jev confirma', why: 'de esos, en cuántos lo ve también Jev (probabilidad ≥ ' + dec(DATA.threshold, 2) + ')'},
   {key: 'backed_pct', name: 'Acuerdo', why: 'Jev confirma ÷ enrich lo pone'},
   {key: 'missing', name: 'Jev lo añadiría', why: 'posts donde Jev lo ve y enrich no lo puso'},
   {key: 'disagreeing', name: 'Discrepancias', why: 'enrich lo pone y Jev no, más los que Jev añadiría'},
@@ -1149,7 +1159,10 @@ const TOPIC_GROUPS = [
   {verdict: 'solo_jev', name: 'Solo Jev', field: 'missing', why: 'Jev lo ve y enrich no lo puso'},
 ];
 const TOPIC_PAGE = 20;
-const topicsView = {t: '', cx: null, px: null, o: '', d: ''};
+const TOPIC_PAIRS_SHOWN = 8;
+/** The Topics view, as the URL says it. Pair keys are kept RAW and resolved at render, so a
+    refreshed blob is read afresh rather than through a row captured earlier. */
+const topicsView = {t: '', unknownT: '', cx: '', px: '', o: '', d: ''};
 const topicRows = () => Object.fromEntries(DATA.summary.per_topic.map(r => [r.slug, r]));
 const postById = () => Object.fromEntries(DATA.posts.map(p => [p.id, p]));
 
@@ -1163,53 +1176,72 @@ function topicHref(slug) {
   return hashHref('topics', {t: slug});
 }
 
-/** `A~B` (with `-` for "nothing") → that row of `rows`, or null when no such pair exists. */
-function pairFrom(raw, rows) {
-  if (!raw || raw.indexOf('~') === -1) return null;
-  const [a, b] = raw.split('~').map(s => (s === '-' ? null : s));
-  return rows.find(r => r.enrich === a && r.jev === b) || null;
+/** The index as the reader left it: its sort travels with the back link and the tab link. */
+function indexHref() {
+  return hashHref('topics', topicsView.o ? {o: topicsView.o, d: topicsView.d} : {});
 }
 
+/** `enrich~jev` with `-` for "nothing" — `report.pair_key`'s format. */
 function pairKey(row) {
   return (row.enrich == null ? '-' : row.enrich) + '~' + (row.jev == null ? '-' : row.jev);
 }
 
+function defaultDirection(key) {
+  return key === 'label' ? 'asc' : 'desc';
+}
+
 function readTopicsHash(params) {
-  const t = params.get('t');
+  const t = params.get('t') || '';
   topicsView.t = LABEL[t] ? t : '';
-  topicsView.cx = topicsView.t ? pairFrom(params.get('cx'), DATA.summary.topic_confusion) : null;
-  topicsView.px = topicsView.t ? pairFrom(params.get('px'), DATA.summary.primary_confusion) : null;
+  topicsView.unknownT = t && !LABEL[t] ? t : '';
+  topicsView.cx = params.get('cx') || '';
+  topicsView.px = params.get('px') || '';
   const o = params.get('o');
   topicsView.o = TOPIC_COLUMNS.some(c => c.key === o) ? o : '';
   const d = params.get('d');
-  topicsView.d = d === 'asc' || d === 'desc' ? d : '';
+  // The direction is resolved HERE, so the arrow, aria-sort and the order read one value.
+  topicsView.d = topicsView.o ? (d === 'asc' || d === 'desc' ? d : defaultDirection(topicsView.o)) : '';
 }
 
 /** Sorting the index replaces the entry rather than adding one per click. */
 function writeTopicsSort(o, d) {
   topicsView.o = o;
-  topicsView.d = d;
-  history.replaceState(null, '', hashHref('topics', o ? {o: o, d: d} : {}));
+  topicsView.d = o ? d : '';
+  history.replaceState(null, '', indexHref());
   renderTopics();
 }
 
-/** The index's rows: `per_topic`'s own order (worst agreement first, by the exact ratio, in
-    report.py) with topics under `TOPIC_MIN` posts moved to the end — or the chosen column. */
+/** A pair named in the URL, if it exists in THESE data and involves the open topic. */
+function resolvePair() {
+  const kind = topicsView.cx ? 'cx' : topicsView.px ? 'px' : '';
+  if (!kind) return null;
+  const key = topicsView[kind];
+  const rows = kind === 'cx' ? DATA.summary.topic_confusion : DATA.summary.primary_confusion;
+  const row = rows.find(r => pairKey(r) === key);
+  const ids = (DATA.post_sets[kind] || {})[key];
+  if (!row || !ids || (row.enrich !== topicsView.t && row.jev !== topicsView.t)) return {kind: kind, stale: true};
+  return {kind: kind, key: key, row: row, ids: ids};
+}
+
+/** The index's rows: `per_topic`'s own order (worst agreement first, by the EXACT ratio, in
+    report.py) with topics under the floor moved to the end — or the chosen column. */
 function topicOrder() {
   const rows = topicRows();
   const base = DATA.summary.per_topic.map(r => r.slug);
-  if (!topicsView.o) {
+  const key = topicsView.o;
+  if (!key) {
     return base.filter(s => rows[s].assigned >= TOPIC_MIN).concat(base.filter(s => rows[s].assigned < TOPIC_MIN));
   }
-  const key = topicsView.o;
-  const dir = topicsView.d || (key === 'label' ? 'asc' : 'desc');
-  const sign = dir === 'asc' ? 1 : -1;
+  const asc = topicsView.d === 'asc';
+  if (key === 'backed_pct') {
+    // Never the rounded percentage: `per_topic` is already in exact-ratio order. A topic
+    // nobody assigned has no rate and goes last in both directions.
+    const rated = base.filter(s => rows[s].assigned > 0);
+    return (asc ? rated : rated.slice().reverse()).concat(base.filter(s => !rows[s].assigned));
+  }
+  const sign = asc ? 1 : -1;
   return base.slice().sort((a, b) => {
     if (key === 'label') return sign * label(a).localeCompare(label(b), 'es');
-    // A topic nobody assigned has no agreement rate: it sorts last either way.
-    if (key === 'backed_pct' && (!rows[a].assigned || !rows[b].assigned)) {
-      return (rows[a].assigned ? 0 : 1) - (rows[b].assigned ? 0 : 1);
-    }
     return sign * (rows[a][key] - rows[b][key]) || label(a).localeCompare(label(b), 'es');
   });
 }
@@ -1221,12 +1253,29 @@ function sortButton(col) {
   b.appendChild(el('span', null, col.name + (active ? (topicsView.d === 'asc' ? ' ↑' : ' ↓') : '')));
   b.appendChild(el('small', null, col.why));
   b.addEventListener('click', () => {
-    const numeric = col.key !== 'label';
-    const first = numeric ? 'desc' : 'asc';
-    const next = !active ? first : (topicsView.d || first) === 'asc' ? 'desc' : 'asc';
-    writeTopicsSort(col.key, next);
+    const first = defaultDirection(col.key);
+    writeTopicsSort(col.key, !active ? first : topicsView.d === 'asc' ? 'desc' : 'asc');
   });
   return b;
+}
+
+/** On a phone the headers fold away: the same sorts, as a list. */
+function sortSelect() {
+  const s = el('select', 'tsort');
+  s.setAttribute('aria-label', 'Ordenar los topics');
+  const add = (value, text) => { const o = el('option', null, text); o.value = value; s.appendChild(o); };
+  add('', 'Peor acuerdo primero (por defecto)');
+  TOPIC_COLUMNS.forEach(col => {
+    add(col.key + ':' + defaultDirection(col.key), col.name + (defaultDirection(col.key) === 'asc' ? ' ↑' : ' ↓'));
+    const other = defaultDirection(col.key) === 'asc' ? 'desc' : 'asc';
+    add(col.key + ':' + other, col.name + (other === 'asc' ? ' ↑' : ' ↓'));
+  });
+  s.value = topicsView.o ? topicsView.o + ':' + topicsView.d : '';
+  s.addEventListener('change', () => {
+    const [o, d] = s.value ? s.value.split(':') : ['', ''];
+    writeTopicsSort(o, d);
+  });
+  return s;
 }
 
 function renderTopicsIndex() {
@@ -1235,8 +1284,11 @@ function renderTopicsIndex() {
   const S = DATA.summary;
   const intro = el('p', 'about', 'Los ' + nf(DATA.topics.length) + ' topics del vocabulario, con lo que hacen enrich y Jev con cada uno, sobre los ' +
     nf(S.items_compared) + ' posts comparados. Por defecto, peor acuerdo primero entre los topics que enrich puso en al menos ' +
-    nf(TOPIC_MIN) + ' posts; los demás, al final. Pulsa una cabecera para ordenar por ella, y un topic para ver su ficha.');
+    nf(TOPIC_MIN) + ' posts; los demás, al final, marcados «pocos datos». ');
+  intro.appendChild(el('span', 'desk-only', 'Pulsa una cabecera para ordenar por ella, y un topic para ver su ficha.'));
+  intro.appendChild(el('span', 'phone-only', 'Elige el orden en el desplegable, y pulsa un topic para ver su ficha.'));
   box.appendChild(intro);
+  box.appendChild(sortSelect());
   const wrap = el('div', 'twrap');
   const table = el('table', 't tt');
   const head = el('thead');
@@ -1244,6 +1296,7 @@ function renderTopicsIndex() {
   TOPIC_COLUMNS.forEach(col => {
     const th = el('th');
     th.setAttribute('aria-sort', topicsView.o === col.key ? (topicsView.d === 'asc' ? 'ascending' : 'descending') : 'none');
+    th.title = col.why;
     th.appendChild(sortButton(col));
     hr.appendChild(th);
   });
@@ -1259,12 +1312,19 @@ function renderTopicsIndex() {
     name.dataset.h = 'Topic';
     name.appendChild(link(topicHref(slug), 'tl', label(slug)));
     name.appendChild(el('code', null, slug));
+    if (r.assigned < TOPIC_MIN) {
+      const few = el('span', 'few', 'pocos datos');
+      few.title = 'enrich lo puso en menos de ' + nf(TOPIC_MIN) + ' posts comparados';
+      name.appendChild(few);
+    }
     name.appendChild(el('p', null, DESC[slug] || ''));
     tr.appendChild(name);
     TOPIC_COLUMNS.slice(1).forEach(col => {
       const text = col.key === 'backed_pct' ? (r.assigned ? dec(r.backed_pct, 1) + ' %' : '—') : nf(r[col.key]);
       const td = el('td', 'n' + (col.key === 'disagreeing' && r.disagreeing ? ' dd' : ''), text);
       td.dataset.h = col.name;
+      td.title = col.why;
+      td.setAttribute('aria-label', col.name + ': ' + text);
       tr.appendChild(td);
     });
     body.appendChild(tr);
@@ -1272,6 +1332,10 @@ function renderTopicsIndex() {
   table.appendChild(body);
   wrap.appendChild(table);
   box.appendChild(wrap);
+  if (S.primary_fallback) {
+    box.appendChild(el('p', 'muted', 'Jev eligió «' + DATA.fallback + '» (ninguno del vocabulario) como principal en ' +
+      pl(S.primary_fallback, 'post', 'posts') + ': no suman en la columna «Principal según Jev».'));
+  }
 }
 
 function topicNumbers(r) {
@@ -1284,14 +1348,23 @@ function topicNumbers(r) {
     grid.appendChild(c);
   };
   cell('Enrich lo pone', nf(r.assigned), 'posts comparados donde enrich puso este topic');
-  cell('Jev confirma', nf(r.backed) + (r.assigned ? ' (' + dec(r.backed_pct, 1) + ' %)' : ''), 'de esos, los que Jev también ve');
+  cell('Jev confirma', nf(r.backed) + (r.assigned ? ' (' + dec(r.backed_pct, 1) + ' %)' : ''), 'de esos, los que Jev también ve (probabilidad ≥ ' + dec(DATA.threshold, 2) + ')');
   cell('Jev lo añadiría', nf(r.missing), 'Jev lo ve y enrich no lo puso');
   cell('Discrepancias', nf(r.disagreeing), 'solo enrich + solo Jev');
   cell('Principal', nf(r.enrich_primary) + ' / ' + nf(r.jev_primary), 'posts donde es el topic principal: enrich / Jev');
   return grid;
 }
 
-/** One list of confusion pairs for the topic: the OTHER side's topic and how many posts. */
+/** The OTHER side of a pair, in words. A primary enrich chose that has left the vocabulary is
+    not Jev's «none of these»: the two are labelled apart. */
+function otherName(value, kind, side) {
+  if (value == null) return kind === 'px' ? 'sin principal' : 'nada en su lugar';
+  if (LABEL[value]) return label(value);
+  return value + (side === 'enrich' ? ' (ya no está en el vocabulario)' : ' (ninguno del vocabulario)');
+}
+
+/** One list of confusion pairs for the topic: the other side's topic and how many posts. The
+    first eight show; "ver todos" opens the rest in place. */
 function pairsList(title, rows, other, kind, empty) {
   const slug = topicsView.t;
   const box = el('div', 'pairs');
@@ -1301,23 +1374,30 @@ function pairsList(title, rows, other, kind, empty) {
     return box;
   }
   const list = el('ol');
-  rows.slice(0, 8).forEach(row => {
+  rows.forEach((row, i) => {
     const li = el('li');
+    if (i >= TOPIC_PAIRS_SHOWN) li.hidden = true;
     const params = {t: slug};
     params[kind] = pairKey(row);
     const href = hashHref('topics', params);
-    const value = row[other];
-    const name = value == null
-      ? (kind === 'px' ? 'sin principal' : 'nada en su lugar')
-      : label(value) + (LABEL[value] ? '' : ' (ninguno del vocabulario)');
-    const a = link(href, null, name);
+    const a = link(href, null, otherName(row[other], kind, other));
     a.dataset.pair = kind + ':' + pairKey(row);
     li.appendChild(a);
     li.appendChild(el('span', 'c', pl(row.posts, 'post', 'posts')));
     list.appendChild(li);
   });
   box.appendChild(list);
-  if (rows.length > 8) box.appendChild(el('p', 'muted', 'y ' + pl(rows.length - 8, 'cruce más', 'cruces más')));
+  if (rows.length > TOPIC_PAIRS_SHOWN) {
+    const rest = rows.slice(TOPIC_PAIRS_SHOWN);
+    const more = el('button', 'more small', 'ver todos (' + pl(rest.length, 'cruce más', 'cruces más') + ', ' +
+      pl(rest.reduce((n, r) => n + r.posts, 0), 'post', 'posts') + ')');
+    more.type = 'button';
+    more.addEventListener('click', () => {
+      list.querySelectorAll('li[hidden]').forEach(li => { li.hidden = false; });
+      more.hidden = true;
+    });
+    box.appendChild(more);
+  }
   return box;
 }
 
@@ -1342,57 +1422,50 @@ function cardList(posts, cls) {
   return box;
 }
 
-function renderTopicDetail() {
-  const slug = topicsView.t;
-  const r = topicRows()[slug];
-  const S = DATA.summary;
-  const box = $('topic-detail');
-  box.replaceChildren();
+/** What the empty side of each confusion list truly means, read off the topic's own row. */
+function emptyStates(r) {
+  return {
+    cxEnrich: r.assigned === 0 ? 'Enrich no lo pone en ningún post comparado.' : 'Jev lo confirma siempre que enrich lo pone.',
+    cxJev: 'Jev no lo añade en ningún post donde enrich no lo puso.',
+    pxEnrich: r.enrich_primary === 0 ? 'Enrich nunca lo elige como principal.' : 'Cuando enrich lo elige como principal, Jev también.',
+    pxJev: r.jev_primary === 0 ? 'Jev nunca lo elige como principal.' : 'Cuando Jev lo elige como principal, enrich también.',
+  };
+}
+
+function detailNav(slug) {
   const nav = el('div', 'tnav');
-  const back = hashHref('topics', {});
-  const href = hashHref('posts', {f: 'all', t: slug});
+  const back = indexHref();
   nav.appendChild(link(back, 'lk', '← todos los topics'));
-  nav.appendChild(link(href, 'lk', 'ver en Posts →'));
-  const disc = hashHref('posts', {t: slug});
-  nav.appendChild(link(disc, 'lk', 'sus discrepancias en Posts →'));
-  box.appendChild(nav);
-  const h = el('h2', 'th2', label(slug));
-  h.appendChild(el('code', null, slug));
-  box.appendChild(h);
-  box.appendChild(el('p', 'tdesc', DESC[slug] || ''));
-  box.appendChild(topicNumbers(r));
-
-  box.appendChild(el('h3', 'tsec', 'Con qué se confunde'));
-  box.appendChild(el('p', 'muted', 'En los posts donde este topic está solo en un lado: qué topic puso el otro lado en su lugar. Pulsa un cruce para ver exactamente esos posts.'));
-  const conf = el('div', 'pgrid');
-  conf.appendChild(pairsList('Enrich lo pone; Jev pone en su lugar', S.topic_confusion.filter(p => p.enrich === slug), 'jev', 'cx', 'Jev confirma este topic siempre que enrich lo pone.'));
-  conf.appendChild(pairsList('Jev lo pone; enrich tenía en su lugar', S.topic_confusion.filter(p => p.jev === slug), 'enrich', 'cx', 'Jev nunca lo añade donde enrich no lo puso.'));
-  box.appendChild(conf);
-  box.appendChild(el('h3', 'tsec', 'Topic principal'));
-  const prim = el('div', 'pgrid');
-  prim.appendChild(pairsList('Enrich lo elige como principal; Jev elige', S.primary_confusion.filter(p => p.enrich === slug), 'jev', 'px', 'Cuando enrich lo elige, Jev también.'));
-  prim.appendChild(pairsList('Jev lo elige como principal; enrich tenía', S.primary_confusion.filter(p => p.jev === slug), 'enrich', 'px', 'Cuando Jev lo elige, enrich también.'));
-  box.appendChild(prim);
-
-  const pair = topicsView.cx || topicsView.px;
-  if (pair) {
-    const kind = topicsView.cx ? 'cx' : 'px';
-    const byId = postById();
-    const posts = pair.ids.map(id => byId[id]).filter(Boolean);
-    const other = (v, none) => (v == null ? none : label(v));
-    const title = kind === 'cx'
-      ? 'Enrich: ' + other(pair.enrich, 'nada') + ' · Jev: ' + other(pair.jev, 'nada')
-      : 'Principal · enrich: ' + other(pair.enrich, 'sin principal') + ' · Jev: ' + other(pair.jev, '—');
-    const sec = el('section', 'tgroup');
-    sec.id = 'topic-pair';
-    const gh = el('h3', 'tsec', title + ' · ' + pl(pair.posts, 'post', 'posts'));
-    sec.appendChild(gh);
-    const clear = hashHref('topics', {t: slug});
-    sec.appendChild(link(clear, 'lk', 'quitar este cruce ✕'));
-    sec.appendChild(cardList(posts));
-    box.appendChild(sec);
-    return;
+  if (slug) {
+    const href = hashHref('posts', {f: 'all', t: slug});
+    nav.appendChild(link(href, 'lk', 'ver en Posts →'));
+    const disc = hashHref('posts', {t: slug});
+    nav.appendChild(link(disc, 'lk', 'sus discrepancias en Posts →'));
   }
+  return nav;
+}
+
+function renderPair(box, slug, pair) {
+  const byId = postById();
+  const posts = pair.ids.map(id => byId[id]).filter(Boolean);
+  const kind = pair.kind;
+  const row = pair.row;
+  const title = kind === 'cx'
+    ? 'Enrich: ' + otherName(row.enrich, 'cx', 'enrich') + ' · Jev: ' + otherName(row.jev, 'cx', 'jev')
+    : 'Principal · enrich: ' + otherName(row.enrich, 'px', 'enrich') + ' · Jev: ' + otherName(row.jev, 'px', 'jev');
+  const sec = el('section', 'tgroup');
+  sec.id = 'topic-pair';
+  sec.appendChild(el('h3', 'tsec', title + ' · ' + pl(row.posts, 'post', 'posts')));
+  const clear = hashHref('topics', {t: slug});
+  sec.appendChild(link(clear, 'lk', 'quitar este cruce ✕'));
+  if (posts.length < pair.ids.length) {
+    sec.appendChild(el('p', 'note', nf(pair.ids.length - posts.length) + ' de ' + nf(pair.ids.length) + ' posts no están en esta página.'));
+  }
+  sec.appendChild(cardList(posts));
+  box.appendChild(sec);
+}
+
+function renderGroups(box, slug, r) {
   // Jump buttons, not `#` anchors: the hash is the router, a fragment would leave the topic.
   const jump = el('div', 'tjump');
   jump.appendChild(el('span', 'muted', 'Ir a:'));
@@ -1419,11 +1492,63 @@ function renderTopicDetail() {
   });
 }
 
+function renderTopicDetail() {
+  const box = $('topic-detail');
+  box.replaceChildren();
+  if (topicsView.unknownT) {
+    box.appendChild(detailNav(''));
+    box.appendChild(el('p', 'note', 'Ese topic («' + topicsView.unknownT + '») no está en el vocabulario actual.'));
+    return;
+  }
+  const slug = topicsView.t;
+  const r = topicRows()[slug];
+  const S = DATA.summary;
+  const empty = emptyStates(r);
+  box.appendChild(detailNav(slug));
+  const h = el('h2', 'th2', label(slug));
+  h.appendChild(el('code', null, slug));
+  box.appendChild(h);
+  box.appendChild(el('p', 'tdesc', DESC[slug] || ''));
+  box.appendChild(topicNumbers(r));
+
+  box.appendChild(el('h3', 'tsec', 'Con qué se confunde'));
+  box.appendChild(el('p', 'muted', 'En los posts donde este topic está solo en un lado: qué topic puso el otro lado en su lugar. Pulsa un cruce para ver exactamente esos posts.'));
+  const conf = el('div', 'pgrid');
+  conf.appendChild(pairsList('Enrich lo pone; Jev pone en su lugar', S.topic_confusion.filter(p => p.enrich === slug), 'jev', 'cx', empty.cxEnrich));
+  conf.appendChild(pairsList('Jev lo pone; enrich tenía en su lugar', S.topic_confusion.filter(p => p.jev === slug), 'enrich', 'cx', empty.cxJev));
+  box.appendChild(conf);
+  box.appendChild(el('h3', 'tsec', 'Topic principal'));
+  const prim = el('div', 'pgrid');
+  prim.appendChild(pairsList('Enrich lo elige como principal; Jev elige', S.primary_confusion.filter(p => p.enrich === slug), 'jev', 'px', empty.pxEnrich));
+  prim.appendChild(pairsList('Jev lo elige como principal; enrich tenía', S.primary_confusion.filter(p => p.jev === slug), 'enrich', 'px', empty.pxJev));
+  box.appendChild(prim);
+
+  const pair = resolvePair();
+  if (pair && !pair.stale) {
+    renderPair(box, slug, pair);
+    return;
+  }
+  if (pair && pair.stale) {
+    box.appendChild(el('p', 'note', 'Ese cruce ya no existe en estos datos; abajo, todos los posts del topic.'));
+  }
+  renderGroups(box, slug, r);
+}
+
+/** Draws the tab. Guarded: after boot, a throw here would otherwise leave an emptied tab. */
 function renderTopics() {
-  $('topics-index').hidden = !!topicsView.t;
-  $('topic-detail').hidden = !topicsView.t;
-  if (topicsView.t) renderTopicDetail();
-  else renderTopicsIndex();
+  document.querySelector('.tabs a[data-tab="topics"]').setAttribute('href', indexHref());
+  const detail = !!(topicsView.t || topicsView.unknownT);
+  try {
+    $('topics-index').hidden = detail;
+    $('topic-detail').hidden = !detail;
+    if (detail) renderTopicDetail();
+    else renderTopicsIndex();
+  } catch (err) {
+    $('topics-index').hidden = true;
+    $('topic-detail').hidden = false;
+    $('topic-detail').replaceChildren(el('p', 'empty', 'La pestaña Topics no pudo dibujarse: ' +
+      (err && err.message ? err.message : err)));
+  }
 }
 /* end topics */
 
@@ -1434,6 +1559,9 @@ function renderExcluded() {
   if (t.not_compared) parts.push(pl(t.not_compared, 'post evaluado sin enriquecer', 'posts evaluados sin enriquecer') + ' (nada con qué comparar)');
   $('excluded').textContent = parts.length ? 'Fuera de las cifras: ' + parts.join(' · ') + '.' : '';
 }
+
+/** The topic the Topics tab last drew, to tell a new topic from a return to the same one. */
+let shownTopic = '';
 
 /** Everything that touches the DOM at load. Its single call site is wrapped. */
 function boot() {
@@ -1446,7 +1574,12 @@ function boot() {
   $('search').value = view.q;
   $('sort').value = view.s;
   update();
-  if (view.tab === 'topics') renderTopics();
+  if (view.tab === 'topics') {
+    renderTopics();
+    const pair = $('topic-pair');
+    if (pair) pair.scrollIntoView({block: 'start'});
+  }
+  shownTopic = topicsView.t;
   $('search').addEventListener('input', function () { view.q = this.value.trim(); update(); });
   $('sort').addEventListener('change', function () { view.s = this.value; update(); });
   $('more').addEventListener('click', drawMore);
@@ -1457,9 +1590,14 @@ function boot() {
     $('sort').value = view.s;
     if (view.tab === 'posts') update();
     if (view.tab === 'topics') {
+      const before = shownTopic;
       renderTopics();
-      // A new topic (or back to the index) starts at the top of the tab, not mid-page.
-      $('tab-topics').scrollIntoView({block: 'start'});
+      shownTopic = topicsView.t;
+      // An opened pair is what the reader asked to see; a NEW topic starts at the tab's top.
+      // Otherwise (back to the same topic) the browser's own scroll restoration is left alone.
+      const pair = $('topic-pair');
+      if (pair) pair.scrollIntoView({block: 'start'});
+      else if (topicsView.t !== before) $('tab-topics').scrollIntoView({block: 'start'});
     }
   });
   document.addEventListener('keydown', onKey);

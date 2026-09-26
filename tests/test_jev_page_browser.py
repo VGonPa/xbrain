@@ -32,7 +32,11 @@ import pytest
 
 from tests.test_jev_dashboard import _assessment, _corpus, _data, _item
 from xbrain.jev.dashboard import render_jev_dashboard_html
-from xbrain.models import Author
+from datetime import datetime, timezone
+
+from xbrain.jev.dashboard import compute_jev_dashboard_data
+from xbrain.jev.models import PrimaryChoice
+from xbrain.models import Author, Topic
 
 _REQUIRED = os.environ.get("XBRAIN_REQUIRE_CHROME", "").strip() not in ("", "0", "false", "False")
 _MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -164,75 +168,6 @@ setTimeout(() => {
   pre.textContent = JSON.stringify({q: view.q, f: view.f, search: document.getElementById('search').value,
     banner_hidden: document.getElementById('banner').hidden, count: document.getElementById('count').textContent,
     more_shown: getComputedStyle(document.getElementById('more')).display !== 'none'});
-  document.body.appendChild(pre);
-}, 200);
-</script>
-"""
-
-
-#: The Topics tab, from its index: sort, open a topic, its groups, a pair, back and forward.
-_TOPICS_PROBE = r"""
-<script>
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const indexOrder = () => [...document.querySelectorAll('#topics-index tbody tr')].map(tr => tr.dataset.slug);
-const sortHeader = name => [...document.querySelectorAll('#topics-index th .th')].find(b => b.firstChild.textContent.startsWith(name));
-async function groups() {
-  const found = {};
-  for (const sec of document.querySelectorAll('#topic-detail section[data-group]')) {
-    for (;;) { const more = sec.querySelector('button.more'); if (!more || more.hidden) break; more.click(); await sleep(5); }
-    found[sec.dataset.group] = {shown: Number(sec.querySelector('h3').textContent.split(' · ')[1].replace(/\./g, '')),
-      cards: [...sec.querySelectorAll('.card')].map(c => c.dataset.id)};
-  }
-  return found;
-}
-const tabState = () => ({hash: location.hash, index: !document.getElementById('topics-index').hidden,
-  detail: !document.getElementById('topic-detail').hidden, pair: !!document.getElementById('topic-pair')});
-(async () => {
-  await sleep(100);
-  const out = {};
-  out.default_order = indexOrder();
-  sortHeader('Discrepancias').click(); await sleep(10);
-  out.by_disagreeing = indexOrder();
-  out.sort_hash = location.hash;
-  sortHeader('Discrepancias').click(); await sleep(10);
-  out.by_disagreeing_asc = indexOrder();
-  location.hash = '#topics'; await sleep(20);
-  document.querySelector('#topics-index a.tl[href="#topics?t=ai-coding"]').click(); await sleep(30);
-  out.detail = tabState();
-  out.groups = await groups();
-  out.pairs = [...document.querySelectorAll('#topic-detail a[data-pair]')].map(a => a.dataset.pair);
-  const first = document.querySelector('#topic-detail a[data-pair]');
-  first.click(); await sleep(30);
-  out.pair_clicked = first.dataset.pair;
-  out.pair_cards = [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id);
-  out.with_pair = tabState();
-  history.back(); await sleep(50); out.back1 = tabState();
-  history.back(); await sleep(50); out.back2 = tabState();
-  history.forward(); await sleep(50); out.forward = tabState();
-  // From a card on the Posts tab, its topic row jumps to the topic's page.
-  location.hash = '#posts?f=all'; await sleep(20);
-  const row = document.querySelector('#cards .rows a.tlink');
-  out.row_topic = row.getAttribute('href');
-  row.click(); await sleep(30);
-  out.from_card = tabState();
-  // A second topic whose three groups have different sizes.
-  location.hash = '#topics?t=startups'; await sleep(30);
-  out.groups_startups = await groups();
-  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
-  document.body.appendChild(pre);
-})();
-</script>
-"""
-
-#: A topics page opened at a given hash.
-_READ_TOPICS = r"""
-<script>
-setTimeout(() => {
-  const pre = document.createElement('pre'); pre.id = 'probe';
-  pre.textContent = JSON.stringify({detail: !document.getElementById('topic-detail').hidden,
-    title: (document.querySelector('#topic-detail .th2') || {}).textContent || null,
-    pair_cards: [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id),
-    banner_hidden: document.getElementById('banner').hidden});
   document.body.appendChild(pre);
 }, 200);
 </script>
@@ -448,12 +383,195 @@ def test_a_malformed_hash_opens_the_page_instead_of_breaking_it(tmp_path, hash_)
 
 # --------------------------------------------------------------------------- the Topics tab
 
+_TOPIC_VOCAB = [
+    Topic(slug="alpha", description="Alfa: el topic grande."),
+    Topic(slug="beta", description="Beta: justo en el suelo de cinco."),
+    Topic(slug="gamma", description="Gamma: a medias."),
+    Topic(slug="delta", description="Delta: pocos datos."),
+    Topic(slug="omega", description="Omega: solo lo pone Jev."),
+]
+
+
+def _topics_fixture() -> dict[str, Any]:
+    """Five topics that tell every ordering apart.
+
+    alpha 30 assigned / 25 backed (83 %), beta EXACTLY 5 / 1 (20 %), gamma 10 / 5 (50 %),
+    delta 2 / 0 (under the floor), omega never assigned but added by Jev on 25 posts. Default
+    order (floor, then exact ratio) = beta, gamma, alpha, delta, omega; alphabetical and
+    by-assigned orders differ from it. `-~omega` is a 22-post pair and alpha's Coinciden group
+    has 25 posts (both past a page of 20); `gamma~omega` is a real A~B pair of 3 posts.
+    """
+    specs: list[tuple[str, tuple[str, ...], dict[str, float], str]] = []
+    specs += [(f"a{n:02d}", ("alpha",), {"alpha": 0.9, "omega": 0.9}, "alpha") for n in range(22)]
+    specs += [(f"a{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(22, 25)]
+    specs += [(f"b{n:02d}", ("alpha",), {"alpha": 0.2}, "alpha") for n in range(5)]
+    specs += [(f"g{n:02d}", ("gamma",), {"gamma": 0.9}, "gamma") for n in range(5)]
+    specs += [(f"g{n:02d}", ("gamma",), {"gamma": 0.2, "omega": 0.9}, "omega") for n in range(5, 8)]
+    specs += [
+        ("g08", ("gamma",), {"gamma": 0.2}, "otro"),
+        ("g09", ("gamma",), {"gamma": 0.2}, "gamma"),
+    ]
+    specs += [("e00", ("beta",), {"beta": 0.9}, "beta")]
+    specs += [(f"e{n:02d}", ("beta",), {"beta": 0.1}, "beta") for n in range(1, 5)]
+    specs += [(f"d{n:02d}", ("delta",), {"delta": 0.1}, "delta") for n in range(2)]
+    items, assessments = [], {}
+    for item_id, topics, membership, choice in specs:
+        item = _item(item_id, text=f"post {item_id}", topics=topics)
+        full = {topic.slug: 0.05 for topic in _TOPIC_VOCAB} | membership
+        items.append(item)
+        # The contract hashes the state and the questions, not the answer: swapping in this
+        # vocabulary's Choice keeps the record current.
+        answer = _assessment(item, membership=full, vocab=_TOPIC_VOCAB)
+        probabilities = {choice: 0.7} | ({} if choice == "otro" else {"otro": 0.1})
+        primary = PrimaryChoice(choice=choice, confidence=0.7, probabilities=probabilities)
+        assessments[item_id] = answer.model_copy(update={"primary": primary})
+    return compute_jev_dashboard_data(
+        items,
+        assessments,
+        _TOPIC_VOCAB,
+        threshold=0.85,
+        fallback="otro",
+        char_limit=100_000,
+        id2note={},
+        updated="SEP 26, 2026",
+        runs=[],
+        now=datetime(2026, 9, 26, tzinfo=timezone.utc),
+    )
+
+
+#: The Topics tab, from its index. Every step records its own error, so one broken step names
+#: itself instead of leaving the whole probe silent.
+_TOPICS_PROBE = r"""
+<script>
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const indexOrder = () => [...document.querySelectorAll('#topics-index tbody tr')].map(tr => tr.dataset.slug);
+const sortHeader = name => [...document.querySelectorAll('#topics-index th .th')].find(b => b.firstChild.textContent.startsWith(name));
+const tabState = () => ({hash: location.hash, index: !document.getElementById('topics-index').hidden,
+  detail: !document.getElementById('topic-detail').hidden, pair: !!document.getElementById('topic-pair')});
+async function drawAll(root) {
+  for (;;) { const more = [...root.querySelectorAll('button.more')].find(b => !b.hidden); if (!more) return; more.click(); await sleep(5); }
+}
+(async () => {
+  const out = {errors: []};
+  const step = async (name, fn) => { try { await fn(); } catch (e) { out.errors.push(name + ': ' + e); } };
+  await sleep(100);
+  await step('default', async () => {
+    out.default_order = indexOrder();
+    out.few = [...document.querySelectorAll('#topics-index tbody tr')].filter(tr => tr.querySelector('.few')).map(tr => tr.dataset.slug);
+    out.acuerdo_cells = Object.fromEntries([...document.querySelectorAll('#topics-index tbody tr')].map(tr => [tr.dataset.slug, tr.children[3].textContent]));
+    out.footnote = [...document.querySelectorAll('#topics-index p.muted')].map(p => p.textContent).join(' ');
+  });
+  await step('sort', async () => {
+    const before = history.length;
+    sortHeader('Acuerdo').click(); await sleep(10);
+    out.acuerdo_desc = indexOrder();
+    sortHeader('Acuerdo').click(); await sleep(10);
+    out.acuerdo_asc = indexOrder();
+    sortHeader('Topic').click(); await sleep(10);
+    out.label_arrow = sortHeader('Topic').firstChild.textContent;
+    out.sort_hash = location.hash;
+    out.history_grew = history.length - before;
+  });
+  await step('open topic', async () => {
+    location.hash = '#topics'; await sleep(20);
+    document.querySelector('#topics-index a.tl[href="#topics?t=alpha"]').click(); await sleep(30);
+    out.detail = tabState();
+    const coinciden = document.querySelector('#topic-detail section[data-group="coinciden"]');
+    out.coinciden_first = coinciden.querySelectorAll('.card').length;
+    await drawAll(coinciden);
+    out.coinciden_all = coinciden.querySelectorAll('.card').length;
+    out.coinciden_shown = Number(coinciden.querySelector('h3').textContent.split(' · ')[1]);
+  });
+  await step('open omega and its big pair', async () => {
+    location.hash = '#topics?t=omega'; await sleep(30);
+    out.omega_pairs = [...document.querySelectorAll('#topic-detail a[data-pair]')].map(a => a.dataset.pair);
+    out.omega_empty = [...document.querySelectorAll('#topic-detail .pairs p.muted')].map(p => p.textContent);
+    document.querySelector('#topic-detail a[data-pair="cx:-~omega"]').click(); await sleep(30);
+    const pair = document.getElementById('topic-pair');
+    const top = pair.getBoundingClientRect().top;
+    out.pair_in_view = top >= 0 && top < innerHeight;
+    out.big_pair_first = pair.querySelectorAll('.card').length;
+    await drawAll(pair);
+    out.big_pair_all = [...pair.querySelectorAll('.card')].map(c => c.dataset.id);
+  });
+  await step('a real A~B pair', async () => {
+    location.hash = '#topics?t=gamma'; await sleep(30);
+    document.querySelector('#topic-detail a[data-pair="cx:gamma~omega"]').click(); await sleep(30);
+    out.ab_pair = [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id);
+    out.ab_hash = location.hash;
+  });
+  await step('back and forward', async () => {
+    history.back(); await sleep(50); out.back1 = tabState();
+    history.back(); await sleep(50); out.back2 = tabState();
+    history.forward(); await sleep(50); out.forward = tabState();
+  });
+  await step('ver en Posts', async () => {
+    location.hash = '#topics?t=alpha'; await sleep(30);
+    [...document.querySelectorAll('#topic-detail .tnav a')].find(a => a.textContent.startsWith('ver en Posts')).click(); await sleep(30);
+    out.posts_hash = location.hash;
+    out.posts_ids = shown.map(p => p.id);
+  });
+  await step('card row to topic', async () => {
+    const row = document.querySelector('#cards .rows a.tlink');
+    out.row_topic = row.getAttribute('href');
+    row.click(); await sleep(30);
+    out.from_card = tabState();
+  });
+  await step('pairs past eight', async () => {
+    const rows = Array.from({length: 11}, (_, i) => ({enrich: 'alpha', jev: 'x' + i, posts: 2}));
+    const list = pairsList('prueba', rows, 'jev', 'cx', '');
+    document.body.appendChild(list);
+    out.pairs_visible_before = [...list.querySelectorAll('li')].filter(li => !li.hidden).length;
+    const more = list.querySelector('button.more');
+    out.pairs_more = more.textContent;
+    more.click();
+    out.pairs_visible_after = [...list.querySelectorAll('li')].filter(li => !li.hidden).length;
+    list.remove();
+  });
+  await step('missing post', async () => {
+    const gone = DATA.post_sets.cx['gamma~omega'][0];
+    DATA.posts = DATA.posts.filter(p => p.id !== gone);
+    location.hash = '#topics?t=gamma&cx=gamma~omega'; await sleep(30);
+    out.missing_note = (document.querySelector('#topic-pair .note') || {}).textContent || null;
+  });
+  await step('guard', async () => {
+    DATA.summary.per_topic = null;
+    location.hash = '#topics?t=beta'; await sleep(30);
+    out.guard = document.getElementById('topic-detail').textContent;
+    out.guard_banner_hidden = document.getElementById('banner').hidden;
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>
+"""
+
+#: A topics page opened at a given hash.
+_READ_TOPICS = r"""
+<script>
+setTimeout(() => {
+  const pre = document.createElement('pre'); pre.id = 'probe';
+  pre.textContent = JSON.stringify({detail: !document.getElementById('topic-detail').hidden,
+    title: (document.querySelector('#topic-detail .th2') || {}).textContent || null,
+    notes: [...document.querySelectorAll('#topic-detail .note')].map(p => p.textContent),
+    groups: document.querySelectorAll('#topic-detail section[data-group]').length,
+    order: [...document.querySelectorAll('#topics-index tbody tr')].map(tr => tr.dataset.slug),
+    arrow: ([...document.querySelectorAll('#topics-index th[aria-sort="ascending"], #topics-index th[aria-sort="descending"]')][0] || {}).textContent || null,
+    pair_cards: [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id),
+    banner_hidden: document.getElementById('banner').hidden});
+  document.body.appendChild(pre);
+}, 200);
+</script>
+"""
+
 
 @pytest.fixture(scope="module")
 def topics_probed(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
     _need_chrome()
-    data = _fixture()
-    return data, _open(_page(tmp_path_factory.mktemp("jev-topics"), data, _TOPICS_PROBE), "#topics")
+    data = _topics_fixture()
+    seen = _open(_page(tmp_path_factory.mktemp("jev-topics"), data, _TOPICS_PROBE), "#topics")
+    assert seen["errors"] == [], seen["errors"]
+    return data, seen
 
 
 def _per_topic(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -461,88 +579,118 @@ def _per_topic(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 @_requires_chrome
-def test_the_topic_index_opens_worst_agreement_first_among_topics_with_enough_posts(topics_probed):
-    """`per_topic`'s order puts startups first (0 % backed), but enrich put it on ONE post:
-    under the five-post floor it goes to the end, and ai-coding leads."""
-    data, seen = topics_probed
+def test_the_fixture_tells_the_orders_apart():
+    data = _topics_fixture()
     rows = _per_topic(data)
-    base = [row["slug"] for row in data["summary"]["per_topic"]]
 
-    assert (
-        base[0] == "startups" and rows["startups"]["assigned"] < 5 <= rows["ai-coding"]["assigned"]
-    )
-    assert seen["default_order"] == ["ai-coding", "startups"]
+    assert {s: (rows[s]["assigned"], rows[s]["backed"]) for s in rows} == {
+        "alpha": (30, 25),
+        "beta": (5, 1),
+        "gamma": (10, 5),
+        "delta": (2, 0),
+        "omega": (0, 0),
+    }
+    assert data["summary"]["primary_fallback"] == 1
 
 
 @_requires_chrome
-def test_a_column_header_sorts_the_index_both_ways_and_the_url_keeps_it(topics_probed):
-    data, seen = topics_probed
-    rows = _per_topic(data)
-    desc = sorted(rows, key=lambda s: (-rows[s]["disagreeing"], s))
+def test_the_index_opens_worst_agreement_first_above_the_floor_then_the_rest(topics_probed):
+    """Not alphabetical (alpha first), not by size (alpha first): beta (20 %, exactly 5
+    posts) leads, delta (0 % but 2 posts) and never-assigned omega follow the floor."""
+    _data_, seen = topics_probed
 
-    assert seen["by_disagreeing"] == desc
-    assert seen["by_disagreeing_asc"] == sorted(rows, key=lambda s: (rows[s]["disagreeing"], s))
-    assert seen["sort_hash"] == "#topics?o=disagreeing&d=desc"
+    assert seen["default_order"] == ["beta", "gamma", "alpha", "delta", "omega"]
+    assert seen["few"] == ["delta", "omega"]
+    assert seen["acuerdo_cells"]["omega"] == "—"
 
 
 @_requires_chrome
-@pytest.mark.parametrize(
-    ("slug", "key"), [("ai-coding", "groups"), ("startups", "groups_startups")]
-)
-def test_a_topics_groups_hold_exactly_the_posts_their_numbers_count(topics_probed, slug, key):
-    """Coinciden / Solo enrich / Solo Jev: the number shown is `backed` / `doubtful` /
-    `missing`, and the cards under it are exactly that many — the cards whose row for the
-    topic carries that verdict."""
+def test_acuerdo_sorts_by_the_exact_order_and_keeps_unassigned_last_both_ways(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["acuerdo_desc"] == ["alpha", "gamma", "beta", "delta", "omega"]
+    assert seen["acuerdo_asc"] == ["delta", "beta", "gamma", "alpha", "omega"]
+
+
+@_requires_chrome
+def test_sorting_replaces_the_url_instead_of_adding_history(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["history_grew"] == 0
+    assert seen["sort_hash"] == "#topics?o=label&d=asc"
+    assert seen["label_arrow"].endswith("↑")
+
+
+@_requires_chrome
+def test_the_other_fallback_is_named_under_the_index(topics_probed):
+    _data_, seen = topics_probed
+
+    assert "Jev eligió «otro»" in seen["footnote"] and "1 post" in seen["footnote"]
+
+
+@_requires_chrome
+def test_a_group_past_one_page_reaches_its_number_with_mostrar_mas(topics_probed):
     data, seen = topics_probed
-    row = _per_topic(data)[slug]
 
     assert seen["detail"] == {
-        "hash": "#topics?t=ai-coding",
+        "hash": "#topics?t=alpha",
         "index": False,
         "detail": True,
         "pair": False,
     }
-    if slug == "startups":
-        assert len({row["backed"], row["doubtful"], row["missing"]}) == 3  # the mutant's net
-    for verdict, field in (
-        ("coinciden", "backed"),
-        ("solo_enrich", "doubtful"),
-        ("solo_jev", "missing"),
-    ):
-        expected = {
-            p["id"]
-            for p in data["posts"]
-            if p["jev"]
-            and p["jev"]["compared"]
-            and any(r["slug"] == slug and r["verdict"] == verdict for r in p["jev"]["topics"])
-        }
-        group = seen[key].get(verdict)
-        assert group is not None, verdict
-        assert group["shown"] == row[field] == len(group["cards"]), verdict
-        assert set(group["cards"]) == expected, verdict
+    assert seen["coinciden_first"] == 20
+    assert (
+        seen["coinciden_all"]
+        == seen["coinciden_shown"]
+        == _per_topic(data)["alpha"]["backed"]
+        == 25
+    )
 
 
 @_requires_chrome
-def test_a_confusion_pair_lists_exactly_its_posts(topics_probed):
+def test_a_pair_opens_in_view_and_lists_exactly_its_posts_past_one_page(topics_probed):
     data, seen = topics_probed
-    kind, key = seen["pair_clicked"].split(":", 1)
-    enrich, jev = (None if side == "-" else side for side in key.split("~"))
-    rows = data["summary"]["topic_confusion" if kind == "cx" else "primary_confusion"]
-    [row] = [r for r in rows if (r["enrich"], r["jev"]) == (enrich, jev)]
 
-    assert "ai-coding" in (enrich, jev)
-    assert seen["pair_cards"] == row["ids"]
-    assert seen["with_pair"]["pair"] is True
+    assert "cx:-~omega" in seen["omega_pairs"] and "cx:gamma~omega" in seen["omega_pairs"]
+    assert seen["pair_in_view"] is True
+    assert seen["big_pair_first"] == 20
+    assert seen["big_pair_all"] == data["post_sets"]["cx"]["-~omega"]
+    assert len(seen["big_pair_all"]) == 22
 
 
 @_requires_chrome
-def test_back_and_forward_walk_between_the_index_the_topic_and_the_pair(topics_probed):
+def test_a_real_two_topic_pair_lists_exactly_its_posts(topics_probed):
+    data, seen = topics_probed
+
+    assert seen["ab_hash"] == "#topics?t=gamma&cx=gamma%7Eomega"
+    assert seen["ab_pair"] == data["post_sets"]["cx"]["gamma~omega"] == ["g05", "g06", "g07"]
+
+
+@_requires_chrome
+def test_an_empty_confusion_side_says_what_the_row_says(topics_probed):
+    """omega: enrich never puts it and never picks it as primary — the copy says exactly that,
+    not "Jev confirms it whenever enrich puts it"."""
     _data_, seen = topics_probed
 
-    assert seen["back1"]["detail"] and not seen["back1"]["pair"]
-    assert seen["back1"]["hash"] == "#topics?t=ai-coding"
-    assert seen["back2"]["index"] and not seen["back2"]["detail"]
-    assert seen["forward"]["hash"] == "#topics?t=ai-coding" and seen["forward"]["detail"]
+    assert "Enrich no lo pone en ningún post comparado." in seen["omega_empty"]
+    assert "Enrich nunca lo elige como principal." in seen["omega_empty"]
+
+
+@_requires_chrome
+def test_back_and_forward_walk_between_the_topic_and_the_pair(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["back1"]["hash"] == "#topics?t=gamma" and not seen["back1"]["pair"]
+    assert seen["back2"]["hash"].startswith("#topics?t=omega")
+    assert seen["forward"]["hash"] == "#topics?t=gamma" and seen["forward"]["detail"]
+
+
+@_requires_chrome
+def test_ver_en_posts_opens_every_post_with_the_topic(topics_probed):
+    data, seen = topics_probed
+
+    assert seen["posts_hash"] == "#posts?f=all&t=alpha"
+    assert set(seen["posts_ids"]) == {p["id"] for p in data["posts"] if "alpha" in p["slugs"]}
 
 
 @_requires_chrome
@@ -554,28 +702,63 @@ def test_a_topic_row_on_a_post_card_opens_that_topics_page(topics_probed):
 
 
 @_requires_chrome
+def test_pairs_past_eight_open_with_ver_todos(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["pairs_visible_before"] == 8
+    assert seen["pairs_more"] == "ver todos (3 cruces más, 6 posts)"
+    assert seen["pairs_visible_after"] == 11
+
+
+@_requires_chrome
+def test_a_pair_whose_posts_are_missing_says_how_many(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["missing_note"] == "1 de 3 posts no están en esta página."
+
+
+@_requires_chrome
+def test_a_topics_tab_that_fails_after_boot_says_so_in_the_tab(topics_probed):
+    _data_, seen = topics_probed
+
+    assert "La pestaña Topics no pudo dibujarse" in seen["guard"]
+    assert seen["guard_banner_hidden"] is True
+
+
+@_requires_chrome
 @pytest.mark.parametrize(
-    ("hash_", "title", "pair"),
+    ("hash_", "expect"),
     [
-        ("#topics?t=startups", "Startups", False),
-        ("#topics?t=startups&cx=startups~-", "Startups", True),
-        ("#topics?t=no-existe", None, False),
-        ("#topics?t=startups&cx=%E0~", "Startups", False),
+        ("#topics?o=disagreeing&d=asc", {"order": ["delta", "beta", "alpha", "gamma", "omega"]}),
+        ("#topics?o=label", {"order": ["alpha", "beta", "delta", "gamma", "omega"], "arrow": "↑"}),
+        ("#topics?t=gamma&cx=gamma~omega", {"title": "Gamma", "pair_cards": ["g05", "g06", "g07"]}),
+        (
+            "#topics?t=gamma&cx=alpha~-",
+            {"title": "Gamma", "note": "Ese cruce ya no existe", "groups": 3},
+        ),
+        ("#topics?t=no-existe", {"note": "no está en el vocabulario actual"}),
+        ("#topics?t=gamma&cx=%E0~", {"title": "Gamma", "note": "Ese cruce ya no existe"}),
     ],
 )
-def test_a_topics_url_opened_fresh_shows_that_view(tmp_path, hash_, title, pair):
+def test_a_topics_url_opened_fresh_shows_that_view(tmp_path, hash_, expect):
     _need_chrome()
-    data = _fixture()
-    [row] = [
-        r
-        for r in data["summary"]["topic_confusion"]
-        if (r["enrich"], r["jev"]) == ("startups", None)
-    ]
+    data = _topics_fixture()
 
     seen = _open(_page(tmp_path, data, _READ_TOPICS), hash_)
 
     assert seen["banner_hidden"] is True
-    assert seen["detail"] is (title is not None)
-    if title:
-        assert seen["title"].startswith(title)
-    assert seen["pair_cards"] == (row["ids"] if pair else [])
+    if "order" in expect:
+        assert seen["order"] == expect["order"]
+    if "arrow" in expect:
+        assert (
+            seen["arrow"].split(" ")[-1].startswith(expect["arrow"])
+            or expect["arrow"] in seen["arrow"]
+        )
+    if "title" in expect:
+        assert seen["title"].startswith(expect["title"])
+    if "pair_cards" in expect:
+        assert seen["pair_cards"] == expect["pair_cards"]
+    if "note" in expect:
+        assert any(expect["note"] in note for note in seen["notes"]), seen["notes"]
+    if "groups" in expect:
+        assert seen["groups"] == expect["groups"] and seen["pair_cards"] == []
