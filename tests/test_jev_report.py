@@ -225,6 +225,12 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
     assert summary["doubtful_pairs"] == 1 and summary["missing_pairs"] == 1
     assert summary["primary_agree"] == 1 and summary["primary_agree_pct"] == 50.0
     assert summary["primary_fallback"] == 1
+    # The three disagreement kinds, counted in POSTS: "1" has an enrich-only topic (misc)
+    # and a Jev-only one (startups); "2" has Jev choosing the fallback as its primary.
+    assert summary["posts_enrich_only"] == 1
+    assert summary["posts_jev_only"] == 1
+    assert summary["posts_primary_differs"] == 1
+    assert summary["posts_with_disagreement"] == 2
     assert summary["input_tokens"] == 1500 and summary["cost_usd"] == 0.0001
     assert summary["models"] == {"jev-1.13.0": 2}
     by_slug = {row["slug"]: row for row in summary["per_topic"]}
@@ -240,6 +246,7 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "unjudged": 0,
         "backed_pct": 0.0,
         "missing": 0,
+        "disagreeing": 1,
     }
     assert by_slug["startups"] == {
         "slug": "startups",
@@ -249,8 +256,28 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "unjudged": 0,
         "backed_pct": 100.0,
         "missing": 1,
+        "disagreeing": 1,
     }
     assert [row["slug"] for row in summary["per_topic"]] == ["misc", "ai-coding", "startups"]
+
+
+def test_a_topics_disagreeing_posts_are_its_doubtful_plus_its_missing_ones():
+    """The topic navigator's "discrepancias": posts where enrich puts the topic and Jev does
+    not back it, plus posts where Jev backs it and enrich did not put it. One post cannot be
+    both for the same topic, so the sum counts POSTS."""
+    a, b, c = _item("1", topics=("ai-coding",)), _item("2", topics=("ai-coding",)), _item("3")
+    pairs = [
+        (a, _assessment(a, {"ai-coding": 0.2, "startups": 0.9, "misc": 0.1})),
+        (b, _assessment(b, {"ai-coding": 0.3, "startups": 0.1, "misc": 0.1})),
+        (c, _assessment(c, {"ai-coding": 0.9, "startups": 0.1, "misc": 0.9})),
+    ]
+
+    by_slug = {row["slug"]: row for row in summarize(pairs, VOCAB, 0.85)["per_topic"]}
+
+    assert (by_slug["ai-coding"]["doubtful"], by_slug["ai-coding"]["missing"]) == (2, 0)
+    assert by_slug["ai-coding"]["disagreeing"] == 2
+    assert by_slug["startups"]["disagreeing"] == by_slug["startups"]["missing"] == 1
+    assert by_slug["misc"]["disagreeing"] == 0
 
 
 def test_summarize_prices_each_record_by_its_own_provider_and_names_the_unpriced_one():

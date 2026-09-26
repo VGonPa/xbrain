@@ -331,6 +331,10 @@ def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
         "unjudged": unjudged,
         "backed_pct": _pct(assigned - doubtful - unjudged, assigned),
         "missing": counts["missing"][slug],
+        # The posts that disagree ABOUT this topic, both directions: enrich puts it and Jev
+        # does not back it, or Jev backs it and enrich did not put it. A post is at most one
+        # of the two for one topic, so the sum counts posts. The page's topic navigator.
+        "disagreeing": doubtful + counts["missing"][slug],
     }
 
 
@@ -547,6 +551,11 @@ def _summarize(
         "primary_unjudged": primary["unjudged"],
         "primary_unranked": primary["unranked"],
         "posts_with_disagreement": sum(1 for c in comparisons if c.disagreements),
+        # The same posts split by KIND of disagreement (a post may count in several): the
+        # three `ItemComparison` properties `disagreements` sums, counted in posts.
+        "posts_enrich_only": sum(1 for c in comparisons if c.enrich_only),
+        "posts_jev_only": sum(1 for c in comparisons if c.jev_only),
+        "posts_primary_differs": sum(1 for c in comparisons if c.primary_differs),
         "per_topic": _per_topic(comparisons, vocab),
     }
 

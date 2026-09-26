@@ -21,6 +21,7 @@ from xbrain.jev.assess import (
     questions_digest,
     run_assessments,
     select_items,
+    state_surfaces,
     topic_contract,
 )
 from xbrain.jev.client import ChoiceAnswer, ChoiceQuestion, JevError, NoulAnswer, NoulQuestion
@@ -105,6 +106,35 @@ def test_evidence_exactly_at_the_limit_is_not_truncated():
     assert state_chars == 62
     assert "recortada" not in state["post"]
     assert assess_topics(item, _questions(), FakeJevClient(), char_limit=62).truncated is False
+
+
+def test_the_state_surfaces_are_the_state_split_back_into_its_parts():
+    """What the page's "Lo que vio Jev" lists: the SAME surfaces, in the state's order (post
+    first), whose texts joined are exactly the state `build_topic_state` sends."""
+    item = _item(text="Claude Code ships hooks")
+
+    surfaces = state_surfaces(item, char_limit=100_000)
+
+    assert [s.key for s in surfaces] == ["tweet", "author"]
+    assert [s.label for s in surfaces] == ["[Tweet]", "[Author]"]
+    state, state_chars = build_topic_state(item, char_limit=100_000)
+    assert "\n".join(s.text for s in surfaces) == state["post"]
+    assert sum(s.chars for s in surfaces) + len(surfaces) - 1 == state_chars
+    assert [s.kept for s in surfaces] == [s.chars for s in surfaces]
+
+
+def test_the_state_surfaces_say_how_much_of_each_survived_the_cut():
+    """Tweet (50) + newline + "alice" + newline + "Alice": a cut at 53 keeps the whole tweet,
+    two characters of the author surface ("al"), and nothing after it."""
+    item = _item(text="x" * 50)
+
+    tweet, author = state_surfaces(item, char_limit=53)
+
+    assert (tweet.chars, tweet.kept) == (50, 50)
+    assert author.text == "alice\nAlice"
+    assert (author.chars, author.kept) == (11, 2)
+    assert [s.kept for s in state_surfaces(item, char_limit=10)] == [10, 0]
+    assert [s.kept for s in state_surfaces(item, char_limit=62)] == [50, 11]
 
 
 # --------------------------------------------------------------------------- contract

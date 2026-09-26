@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
-from xbrain.evidence import evidence_surfaces
+from xbrain.evidence import Surface, evidence_surfaces
 from xbrain.jev.client import (
     ChoiceAnswer,
     ChoiceQuestion,
@@ -63,8 +63,8 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _state_text(item: Item) -> str:
-    """Every admitted surface's atomic values, the post's OWN WORDS first.
+def _state_order(item: Item) -> list[Surface]:
+    """Every admitted surface, in the order the state carries them: the post's OWN WORDS first.
 
     `evidence_surfaces` returns the canonical reading order, in which `tweet` comes last and
     the unbounded video transcript comes third. Cutting that blob at `char_limit` therefore
@@ -73,11 +73,44 @@ def _state_text(item: Item) -> str:
     `post`" was about a topic with the post no longer in it. Leading with the tweet makes
     that structurally impossible — a cut can only ever reach the supporting surfaces.
     """
-    surfaces = evidence_surfaces(item, TARGET)
     # A stable sort on a boolean: the post surface moves to the front, everything else keeps
     # its canonical relative order.
-    ordered = sorted(surfaces, key=lambda surface: surface.key != _POST_SURFACE)
-    return "\n".join(value for surface in ordered for value in surface.values)
+    return sorted(evidence_surfaces(item, TARGET), key=lambda surface: surface.key != _POST_SURFACE)
+
+
+def _state_text(item: Item) -> str:
+    """Every admitted surface's atomic values, in `_state_order`, one per line."""
+    return "\n".join(value for surface in _state_order(item) for value in surface.values)
+
+
+@dataclass(frozen=True)
+class StateSurface:
+    """One surface of the state as Jev received it: its text, its length and how much of it
+    fell inside `char_limit`.
+
+    `text` is the surface's values joined exactly as `_state_text` joins them, so the
+    surfaces' texts joined by newlines ARE the uncut state. `kept` is how many of its `chars`
+    the cut left in (all of them when nothing was cut, 0 for a surface wholly past the cut).
+    """
+
+    key: str
+    label: str
+    text: str
+    chars: int
+    kept: int
+
+
+def state_surfaces(item: Item, char_limit: int) -> list[StateSurface]:
+    """The state `build_topic_state` sends, split back into its surfaces — for a page that
+    shows WHAT Jev read and WHERE the cut fell, without a second definition of either."""
+    parts: list[StateSurface] = []
+    offset = 0
+    for surface in _state_order(item):
+        text = "\n".join(surface.values)
+        kept = max(0, min(len(text), char_limit - offset))
+        parts.append(StateSurface(surface.key, surface.label, text, len(text), kept))
+        offset += len(text) + 1  # the newline `_state_text` puts between surfaces
+    return parts
 
 
 def build_topic_state(item: Item, char_limit: int) -> tuple[dict[str, str], int]:
