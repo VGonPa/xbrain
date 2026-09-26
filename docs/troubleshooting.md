@@ -484,8 +484,11 @@ Three that send people here first, because the symptom does not name Jev:
   re-bill; only a restore that leaves both the item's evidence and the vocabulary
   untouched leaves an assessment current. Retired records report as `caducadas` on the
   next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
-- **A red banner on `jev.html`.** The page's own arithmetic disagrees with the report
-  embedded in it. Trust `xbrain jev report`, not the page, and report it as a bug.
+- **A red *"La página no pudo dibujarse"* banner on `jev.html`.** The page's script failed
+  while drawing. The numbers are in `xbrain jev report`; report the banner's message as a bug.
+- **`registro de pasadas ilegible en la línea N`.** One line of `data/jev/runs.jsonl` does not
+  parse. Fix or delete that line by hand; the commands refuse rather than skip paid history.
+  [Details](jev.md#troubleshooting).
 
 `data/jev/topics.json` is **paid, gitignored and never snapshotted**. There is no
 `git checkout` and no `snapshot restore` back to a good copy. The one automatic copy is the

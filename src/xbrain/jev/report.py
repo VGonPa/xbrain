@@ -51,57 +51,6 @@ from xbrain.store import _atomic_write
 #: not emit them.
 _PAIR_FIELDS = frozenset({"doubtful", "missing"})
 
-#: Summary keys whose value MOVES when the threshold moves. The dashboard has a
-#: threshold slider and recomputes these client-side; everything else it may keep from the
-#: server-side summary. Without the split it has to guess, and a key it guesses wrong is a
-#: number on screen that the report would not print.
-#:
-#: `threshold` itself is in here: it IS the parameter, so a page showing another one has
-#: moved it. `assigned_pairs` and `assigned_unjudged` are NOT: what enrich assigned, and
-#: which of those slugs Jev was never asked about, are facts about the stored records.
-THRESHOLD_DEPENDENT_KEYS: frozenset[str] = frozenset(
-    {
-        "threshold",
-        "assigned_backed",
-        "enrich_backed_pct",
-        "jev_pairs",
-        "jev_backed",
-        "jev_backed_pct",
-        "doubtful_pairs",
-        "missing_pairs",
-        "per_topic",
-    }
-)
-
-#: The complement: every other summary key, unchanged by the slider. Exported rather than
-#: derived by the consumer so `THRESHOLD_DEPENDENT_KEYS | THRESHOLD_FREE_KEYS` can be
-#: asserted against `_summarize`'s actual output — a new key that lands in neither set is a
-#: red test here instead of a silent omission in the dashboard.
-THRESHOLD_FREE_KEYS: frozenset[str] = frozenset(
-    {
-        "generated_at",
-        "items_assessed",
-        "items_compared",
-        "assessments_stored",
-        "assessments_stale",
-        "assessments_orphaned",
-        "models",
-        "providers",
-        "truncated",
-        "input_tokens",
-        "input_tokens_unknown",
-        "cost_usd",
-        "unpriced_providers",
-        "assigned_pairs",
-        "assigned_unjudged",
-        "primary_agree",
-        "primary_agree_pct",
-        "primary_fallback",
-        "primary_unjudged",
-        "primary_unranked",
-    }
-)
-
 #: Why a primary does not coincide, in CLASSIFICATION PRIORITY order — the first that
 #: applies wins, so the five sections partition the non-agreeing comparisons. The enrich-side
 #: facts come first because they are the ones an operator acts on (re-enrich, or put the slug
@@ -200,12 +149,8 @@ def _pct(part: int, whole: int) -> float:
     return round(part / whole * 100, 1) if whole else 0.0
 
 
-def primary_rank(primary_topic: str | None, probabilities: dict[str, float]) -> int | None:
+def _primary_rank(primary_topic: str | None, probabilities: dict[str, float]) -> int | None:
     """1-based rank of `primary_topic` in the Choice distribution; `None` when it is absent.
-
-    PUBLIC because `jev/dashboard.py` imports it: a leading underscore says "module-private",
-    and a second module reaching past it either invites a copy — which is the one that drifts
-    — or leaves the name lying about its own contract.
 
     Ranked by descending probability, ties broken by option name so two runs of the same
     distribution can never report different ranks. The rank is what separates "Jev disagrees"
@@ -287,7 +232,7 @@ def compare_item(
         primary_topic=item.enriched.primary_topic,
         jev_primary=assessment.primary.choice,
         jev_confidence=assessment.primary.confidence,
-        primary_rank=primary_rank(item.enriched.primary_topic, assessment.primary.probabilities),
+        primary_rank=_primary_rank(item.enriched.primary_topic, assessment.primary.probabilities),
         doubtful=_doubtful(item.id, assigned, membership, threshold),
         missing=_missing(item.id, assigned, membership, threshold),
         jev_assigned=_jev_assigned(membership, threshold),
@@ -354,9 +299,8 @@ def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
         "backed": assigned - doubtful - unjudged,
         # The other two terms of the partition ride WITH the row. They cost nothing —
         # `_slug_counts` already built both Counters — and a consumer that shows them per
-        # topic (the dashboard's chart-01 tooltip does) otherwise displays a per-topic number whose
-        # only counterpart in this report is a corpus-wide sum. A number nothing can be
-        # checked against is a number free to be wrong.
+        # topic otherwise displays a per-topic number whose only counterpart in this report
+        # is a corpus-wide sum. A number nothing can be checked against is free to be wrong.
         "doubtful": doubtful,
         "unjudged": unjudged,
         "backed_pct": _pct(assigned - doubtful - unjudged, assigned),
@@ -598,6 +542,38 @@ def _run_row(run: JevRun) -> dict[str, Any]:
     }
 
 
+def _history_total(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The sum of every priced pass — the "Total" of the cost strip."""
+
+    def total(key: str) -> int:
+        return sum(row[key] for row in rows)
+
+    return {
+        "runs": len(rows),
+        "requests": total("requests"),
+        "ok": total("ok"),
+        "failed": total("failed"),
+        "input_tokens": total("input_tokens"),
+        "input_tokens_unknown": total("input_tokens_unknown"),
+        "cost_usd": float(sum(row["cost_usd"] for row in rows)),
+        "unpriced_providers": sorted({p for row in rows for p in row["unpriced_providers"]}),
+    }
+
+
+def _before_log(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
+    """The stored records asked before the first logged pass (all of them with no log)."""
+    first = min((run.started_at for run in runs), default=None)
+    older = tuple(a for a in assessments.values() if first is None or a.asked_at < first)
+    tokens, unknown = input_tokens_total(older)
+    return {
+        "assessments": len(older),
+        "input_tokens": tokens,
+        "input_tokens_unknown": unknown,
+        "cost_usd": input_cost_usd(older),
+        "unpriced_providers": list(unpriced_providers(older)),
+    }
+
+
 def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment]) -> dict[str, Any]:
     """What Jev has cost over time: every logged pass, their total, and what predates the log.
 
@@ -612,28 +588,10 @@ def run_history(runs: Sequence[JevRun], assessments: dict[str, TopicAssessment])
     cannot reconstruct the earlier passes anyway.
     """
     rows = [_run_row(run) for run in runs]
-    first = min((run.started_at for run in runs), default=None)
-    older = tuple(a for a in assessments.values() if first is None or a.asked_at < first)
-    older_tokens, older_unknown = input_tokens_total(older)
     return {
         "runs": sorted(rows, key=lambda row: row["started_at"], reverse=True),
-        "total": {
-            "runs": len(rows),
-            "requests": sum(row["requests"] for row in rows),
-            "ok": sum(row["ok"] for row in rows),
-            "failed": sum(row["failed"] for row in rows),
-            "input_tokens": sum(row["input_tokens"] for row in rows),
-            "input_tokens_unknown": sum(row["input_tokens_unknown"] for row in rows),
-            "cost_usd": float(sum(row["cost_usd"] for row in rows)),
-            "unpriced_providers": sorted({p for row in rows for p in row["unpriced_providers"]}),
-        },
-        "before_log": {
-            "assessments": len(older),
-            "input_tokens": older_tokens,
-            "input_tokens_unknown": older_unknown,
-            "cost_usd": input_cost_usd(older),
-            "unpriced_providers": list(unpriced_providers(older)),
-        },
+        "total": _history_total(rows),
+        "before_log": _before_log(runs, assessments),
     }
 
 

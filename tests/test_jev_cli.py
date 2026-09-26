@@ -1378,9 +1378,8 @@ def _page(vault: Path) -> Path:
 def _blob(page: Path) -> dict:
     """The JSON the page hands the browser, read back out of the rendered HTML.
 
-    `rsplit`, not `split`: the vendored ECharts is injected BEFORE the payload, so the same
-    literal occurring anywhere in a megabyte of minified library would make this helper read
-    the library instead of the blob — a failing test about a page that is perfectly fine.
+    `rsplit`, not `split`: the payload is the page's last `const DATA = `, whatever a template
+    comment or an earlier script might say.
     """
     html = page.read_text(encoding="utf-8")
     payload = html.rsplit("const DATA = ", 1)[1].split(";\n", 1)[0]
@@ -1409,16 +1408,16 @@ def test_jev_dashboard_writes_a_self_contained_page_without_asking_jev_anything(
     html = page.read_text(encoding="utf-8")
     assert "/*__DATA__*/" not in html and "/*__ECHARTS__*/" not in html
     assert '"ai-coding"' in html
-    assert "2 items en el dashboard" in result.stdout
+    # The rows of the table: every compared post, disagreement or not.
+    assert "2 posts en el dashboard" in result.stdout
     assert page.resolve().as_uri() in result.stdout
 
 
 def test_jev_dashboard_ships_the_same_numbers_jev_report_prints(tmp_path: Path, monkeypatch):
     """One side-car, two surfaces, ONE set of numbers.
 
-    The page carries the summary so the browser can check its own recompute against it; if
-    the CLI built that summary differently from `jev report`, the check would certify a
-    disagreement instead of catching one.
+    The page quotes the summary and computes nothing; if the CLI built it differently from
+    `jev report`, the two surfaces would disagree about one side-car.
     """
     vault = _setup_repo(tmp_path, monkeypatch)
     _seed(tmp_path)
@@ -1437,35 +1436,40 @@ def test_jev_dashboard_ships_the_same_numbers_jev_report_prints(tmp_path: Path, 
     }
 
 
-def test_jev_dashboard_threshold_moves_the_pages_default(tmp_path: Path, monkeypatch):
-    """`--threshold` is the umbral the page OPENS at, and the one its summary was built at.
-
-    Shipping a summary computed at one threshold beside a slider positioned at another would
-    make the page's own consistency check fire on the first paint.
-    """
-    vault = _setup_repo(tmp_path, monkeypatch)
+def test_jev_dashboard_compares_at_the_configured_threshold_and_has_no_flag(
+    tmp_path: Path, monkeypatch
+):
+    """The threshold is `[jev].threshold`, FIXED: the page shows the numbers `jev report`
+    prints at that umbral and offers nothing that moves it — the flag is gone too."""
+    vault = _setup_repo(tmp_path, monkeypatch, jev="threshold = 0.5\n")
     _seed(tmp_path)
     _assess_corpus(monkeypatch)
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
 
-    assert runner.invoke(app, ["jev", "dashboard", "--threshold", "0.5"]).exit_code == 0
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
     blob = _blob(_page(vault))
     assert blob["threshold"] == 0.5 and blob["summary"]["threshold"] == 0.5
+    flagged = runner.invoke(app, ["jev", "dashboard", "--threshold", "0.9"])
+    assert flagged.exit_code == 2  # click's usage error: no such option
+    assert "No such option" in flagged.output
 
 
-def test_jev_dashboard_refuses_a_threshold_outside_the_unit_interval(tmp_path: Path, monkeypatch):
-    """Refused BEFORE anything is written, the same guard `jev report` applies."""
+def test_jev_dashboard_shows_what_every_logged_pass_cost(tmp_path: Path, monkeypatch):
+    """The cost strip reads the run log the `jev topics` pass just wrote."""
     vault = _setup_repo(tmp_path, monkeypatch)
     _seed(tmp_path)
     _assess_corpus(monkeypatch)
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
 
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "1.5"])
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
-    assert result.exit_code == 1
-    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
-    assert not _page(vault).exists()
+    cost = _blob(_page(vault))["cost"]
+    [run] = cost["runs"]
+    assert (run["requests"], run["ok"], run["failed"]) == (2, 2, 0)
+    assert cost["total"]["requests"] == 2 and cost["total"]["input_tokens"] == 200
+    # Everything in the side-car was asked during that logged pass.
+    assert cost["before_log"]["assessments"] == 0
 
 
 def test_jev_dashboard_over_nothing_refuses_and_writes_no_page(tmp_path: Path, monkeypatch):
@@ -1510,51 +1514,15 @@ def test_jev_dashboard_links_the_notes_that_exist_and_not_the_ones_that_do_not(
 
     assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
-    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["items"]}
+    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["posts"]}
     assert notes == {"1": str(note.resolve()), "2": None}
-
-
-def test_jev_dashboard_refuses_a_negative_threshold_too(tmp_path: Path, monkeypatch):
-    """Below 0.0 every pair clears `noul >= t`: a page that reads as perfect agreement.
-
-    The opposite half of the guard has its own test — the two failures are opposites, so one
-    case cannot stand for both.
-    """
-    vault = _setup_repo(tmp_path, monkeypatch)
-    _seed(tmp_path)
-    _assess_corpus(monkeypatch)
-    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
-
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "-0.5"])
-
-    assert result.exit_code == 1
-    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
-    assert not _page(vault).exists()
-
-
-@pytest.mark.parametrize("value", ["0", "1"])
-def test_jev_dashboard_accepts_the_closed_interval(tmp_path: Path, monkeypatch, value: str):
-    """`t = 0` backs everything and `t = 1` backs only certainty. Both are legal.
-
-    A guard written `0.0 < t < 1.0` refuses two thresholds an operator may legitimately ask
-    for, and nothing else in the suite would notice.
-    """
-    vault = _setup_repo(tmp_path, monkeypatch)
-    _seed(tmp_path)
-    _assess_corpus(monkeypatch)
-    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
-
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", value])
-
-    assert result.exit_code == 0, result.output
-    assert _blob(_page(vault))["summary"]["threshold"] == float(value)
 
 
 def test_jev_dashboard_refuses_a_corpus_where_nothing_is_comparable(tmp_path: Path, monkeypatch):
     """The fifth empty state: current assessments whose items have no enrichment at all.
 
-    `report.compare_item` returns None for every one of them, so every bucket is 0 and
-    `selfCheck` agrees with a summary of zeros — a page that renders clean and says nothing.
+    `report.compare_item` returns None for every one of them, so every bucket is 0 and the
+    table is empty — a page that renders clean and says nothing.
     It is the same shape as the four states that already refuse, and it needs the same answer.
     """
     vault = _setup_repo(tmp_path, monkeypatch)
@@ -1597,8 +1565,12 @@ def test_jev_dashboard_leaves_the_last_good_page_alone_when_the_rename_dies(
     def _explode(src, dst):
         raise OSError("[Errno 28] No space left on device")
 
+    # A second pass in the log changes the page, so a non-atomic write would leave new bytes.
+    fake = FakeJevClient(nouls={"ai-coding": 0.93}, primary="ai-coding")
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+    assert runner.invoke(app, ["jev", "topics", "--force"]).exit_code == 0
     monkeypatch.setattr(store_module.os, "replace", _explode)
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "0.5"])
+    result = runner.invoke(app, ["jev", "dashboard"])
 
     assert result.exit_code != 0
     # Byte-identical: not merely "a page exists", but the one that was there before.

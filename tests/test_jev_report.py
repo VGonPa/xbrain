@@ -12,8 +12,6 @@ from xbrain.jev.defaults import jev_cost_fragment, tokens_cost_usd
 from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import STATE_KEY, build_topic_questions
 from xbrain.jev.report import (
-    THRESHOLD_DEPENDENT_KEYS,
-    THRESHOLD_FREE_KEYS,
     Pair,
     build_report,
     compare_item,
@@ -641,42 +639,6 @@ def test_a_lone_stale_record_agrees_in_number_and_grammar():
     assert "· 1 caducada" in render_report_markdown(summary, [], {})
     # Nothing orphaned: the segment has nothing to say and is not printed.
     assert "huérfana" not in render_report_markdown(summary, [], {})
-
-
-# ------------------------------------------------------------------ the threshold key sets
-
-
-def test_every_summary_key_is_declared_threshold_dependent_or_threshold_free():
-    """Task 5's slider recomputes the dependent keys client-side and keeps the rest.
-
-    A key in neither set is one the dashboard has to guess about, and a wrong guess is a
-    number on screen the report would not print. A key in BOTH is a contradiction.
-    """
-    item = _item()
-    summary = summarize(
-        [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.1, "misc": 0.1}))],
-        VOCAB,
-        0.85,
-    )
-
-    assert THRESHOLD_DEPENDENT_KEYS & THRESHOLD_FREE_KEYS == frozenset()
-    assert THRESHOLD_DEPENDENT_KEYS | THRESHOLD_FREE_KEYS == set(summary)
-
-
-def test_the_threshold_dependent_keys_are_the_ones_that_actually_move():
-    """Declared, then VERIFIED against two real thresholds: a key that moves while declared
-    free is exactly the drift the two sets exist to prevent."""
-    item = _item(topics=("ai-coding", "misc"))
-    pairs = [(item, _assessment(item, {"ai-coding": 0.95, "startups": 0.90, "misc": 0.20}))]
-    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
-
-    low = summarize(pairs, VOCAB, 0.10, now=now)
-    high = summarize(pairs, VOCAB, 0.99, now=now)
-
-    moved = {key for key in low if low[key] != high[key]}
-    assert moved <= THRESHOLD_DEPENDENT_KEYS
-    # And it is not a vacuous subset: the headline numbers really do move.
-    assert {"doubtful_pairs", "jev_pairs", "enrich_backed_pct"} <= moved
 
 
 # --------------------------------------------------------------------- per-topic ordering

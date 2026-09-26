@@ -197,7 +197,7 @@ if TYPE_CHECKING:
     # module-top `xbrain.jev` import list at the seven modules the CLI is meant to depend
     # on directly (assess, client, dashboard, defaults, env, report, store), so an eighth
     # is a visible decision rather than a drive-by.
-    from xbrain.jev.models import JevRun, TopicAssessment
+    from xbrain.jev.models import TopicAssessment
 
 logger = logging.getLogger(__name__)
 
@@ -2896,8 +2896,18 @@ def _release_jev_client(client: JevClient) -> None:
         )
 
 
-def _log_jev_run(path: Path, run: JevRun) -> None:
+def _log_jev_run(
+    path: Path,
+    client: CountingJevClient,
+    banked: tuple[TopicAssessment, ...],
+    started_at: datetime,
+    *,
+    interrupted: bool,
+) -> None:
     """Append the pass to the run log — or, if that fails, print the line to paste by hand.
+
+    Nothing is written when nothing was SENT (a Ctrl-C before the first call): the log is a
+    history of requests made, not of invocations.
 
     Runs from `jev_topics_cmd`'s `finally`, so it must never become the run's verdict: an
     exception here would REPLACE an interrupt's `Exit(130)` or the all-failed `JevError`
@@ -2905,6 +2915,16 @@ def _log_jev_run(path: Path, run: JevRun) -> None:
     the success path it would turn a paid, saved run into exit 1. The history line is not
     worth the side-car, but it is not thrown away either: it goes to stderr, whole.
     """
+    if not client.sent:
+        return
+    run = run_record(
+        banked,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        sent=client.sent,
+        finished=client.finished,
+        interrupted=interrupted,
+    )
     try:
         append_run(run, path)
     except OSError as exc:
@@ -3038,18 +3058,9 @@ def jev_topics_cmd(
         # EVERY exit path of a pass that sent something lands here: success, a partial
         # failure, the all-failed `JevError` (a 402 on every call is still requests made),
         # a side-car that could not be written, and Ctrl-C. `_log_jev_run` never raises.
-        if client.sent:
-            _log_jev_run(
-                cfg.jev_runs_path,
-                run_record(
-                    tuple(banked.values()),
-                    started_at=started_at,
-                    finished_at=datetime.now(timezone.utc),
-                    sent=client.sent,
-                    finished=client.finished,
-                    interrupted=interrupted,
-                ),
-            )
+        _log_jev_run(
+            cfg.jev_runs_path, client, tuple(banked.values()), started_at, interrupted=interrupted
+        )
         # LAST, and guarded. Releasing the pool is cleanup; it is never the run's verdict,
         # and on the interrupt path it runs while `Exit(130)` is in flight.
         _release_jev_client(client)
@@ -3203,9 +3214,10 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
 
 
 def _jev_threshold(cfg: Config, threshold: float | None) -> float:
-    """The umbral to compare at: the flag when given, `[jev].threshold` otherwise.
+    """The umbral `jev report` compares at: the flag when given, `[jev].threshold` otherwise.
 
-    ONE guard and ONE message for both commands. BOTH bounds earn their place, and they fail
+    (`jev dashboard` has no flag: it always compares at `[jev].threshold`, which the config
+    loader has already bounded.) BOTH bounds earn their place, and they fail
     in opposite directions: above 1.0 nothing is ever backed and every assignment is doubtful;
     below 0.0 `noul >= t` holds for every pair, so EVERYTHING is backed and every topic Jev was
     asked about becomes a missing candidate — an artifact that reads as near-perfect agreement.
@@ -3311,22 +3323,15 @@ def _jev_note_links(items: list[Item], items_dir: Path) -> dict[str, str]:
 
 @jev_app.command("dashboard")
 @_handle_cli_errors
-def jev_dashboard_cmd(
-    threshold: float | None = typer.Option(
-        # `\[` escapes the bracket for Rich — see `jev_report_cmd` for the whole argument.
-        None,
-        help=r"Umbral inicial del slider (por defecto \[jev].threshold)",
-    ),
-) -> None:
-    """Escribe `<output_dir>/jev.html`: Jev frente a enrich, con umbral movible y colas.
+def jev_dashboard_cmd() -> None:
+    r"""Escribe `<output_dir>/jev.html`: los posts donde enrich y Jev no coinciden, y el coste.
 
-    No llama a Jev ni gasta nada: recapitula el side-car que `xbrain jev topics` ya pagó. La
-    página recalcula en el navegador todo lo que depende del umbral, así que lleva dentro el
-    resumen de `xbrain jev report` a este umbral y avisa en rojo si su propio recálculo se
-    separa de él. Las evaluaciones caducadas se excluyen, igual que en el informe.
+    Compara al umbral de \[jev].threshold (fijo: la página no lo mueve ni recalcula nada), con
+    los mismos números que imprime `xbrain jev report`. Enseña el coste de cada pasada de
+    `xbrain jev topics` (del registro `runs.jsonl`) y el de cada post. No llama a Jev ni gasta
+    nada. Las evaluaciones caducadas se excluyen, igual que en el informe.
     """
     cfg = _config()
-    t = _jev_threshold(cfg, threshold)
     jev = _jev_pairs(cfg)
     page = cfg.output_dir / "jev.html"
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
@@ -3339,11 +3344,12 @@ def jev_dashboard_cmd(
         items,
         jev.assessments,
         jev.vocab,
-        threshold=t,
+        threshold=cfg.jev_threshold,
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
         id2note=_jev_note_links(items, cfg.output_dir / "items"),
         updated=f"{now:%b} {now.day}, {now.year}".upper(),
+        runs=load_runs(cfg.jev_runs_path),
         now=now,
         # `_jev_pairs` already decided currency to get here; recomputing it would be a second
         # `build_topic_state` and sha256 over the whole corpus, and a second chance for the
@@ -3366,9 +3372,9 @@ def jev_dashboard_cmd(
     # The SAME line `jev report` prints, from the same summary: the two commands recap one
     # side-car, and an operator who runs both must not have to reconcile two sets of numbers.
     typer.echo(_jev_report_line(data["summary"]))
-    current = data["totals"]["current"]
+    rows = len(data["posts"])
     typer.echo(
-        f"{plural(current, 'item en el dashboard', 'items en el dashboard')} "
+        f"{plural(rows, 'post en el dashboard', 'posts en el dashboard')} "
         f"→ {page.resolve().as_uri()}"
     )
 

@@ -1,182 +1,114 @@
-"""The `jev.html` page: a self-contained HTML report of Jev against `enrich`.
+"""The `jev.html` page: where enrich's topics and Jev disagree, post by post, and what it cost.
+
+ONE JOB. The page answers "which posts have topics I should fix, and what did Jev cost me to
+find out", in plain words. It does that at ONE threshold — `[jev].threshold` from config — and
+recomputes nothing in the browser: the browser filters, searches and sorts rows; it never
+decides whether a topic is backed.
+
+NOTHING HERE RE-IMPLEMENTS A NUMBER.
+
+* The comparison is `report.build_report`, the entry point `xbrain jev report` also goes
+  through, at the same threshold, over the same current pairs. The headline numbers are its
+  `summary`, shipped whole, and each post row is built from its `ItemComparison` — which
+  topics are doubtful, missing or unjudged is read off the comparison, never re-derived.
+* The cost is `report.run_history` (the run log, priced now from its tokens) and
+  `defaults.tokens_cost_usd` (a post's own stored tokens). One price formula for everything.
 
 Rendered through the same mechanism as `dashboard.html` — `render_dashboard_html` with a
-second template, the vendored ECharts injected through the same sentinels. Nothing is fetched
-at runtime except the Google Fonts stylesheet, exactly as `dashboard.html`: the data and the
-library are in the file.
-
-THE SLIDER IS THE REASON THIS MODULE SHIPS FACTS AND NOT VERDICTS. `jev report` prints one
-threshold; this page lets a reader move it, so every threshold-dependent number is recomputed
-in the browser from the raw probabilities. What `compute_jev_dashboard_data` ships is the
-membership row as Jev answered it, plus the server-side `summary` at the DEFAULT threshold so
-the page can check its own arithmetic against `jev/report.py` on load (see `selfCheck` in the
-template, and `report.THRESHOLD_DEPENDENT_KEYS`, which says exactly which numbers the slider
-invalidates).
-
-TWO THINGS ARE DELIBERATELY NOT RE-IMPLEMENTED HERE.
-
-* Every number comes from `report.build_report`. The comparison between Jev and `enrich` has
-  ONE definition, and a dashboard that recomputed it in Python would be a second one that
-  drifts — the browser's recompute is already one mirror too many, which is why it is checked
-  against the summary rather than trusted.
-* The bill is `report.cost_fragment`, the same Spanish sentence `jev topics`, `jev report` and
-  `topics-report.md` print. A KPI that formats it itself is a fourth definition of the bill.
-  The price is therefore a LOCALE SEAM: the fragment is formatted in Python with a decimal
-  point and no grouping, while every number the template formats goes through its own es-ES
-  `nf` (decimal comma, thousands point). One definition of the bill beats one separator, and
-  the next reader should not "fix" it by re-formatting the fragment in the template.
-
-MEMBERSHIP IS SHIPPED UNROUNDED. Rounding `m` for size would be a genuine divergence and not
-a cosmetic one: a noul of 0.8496 renders as 0.85 and then clears a 0.85 slider, so the page
-would call backed what the report calls doubtful — and the consistency banner would fire on
-the data instead of on the logic it exists to police. Display rounding is the template's job.
+second template — but without ECharts: the page is a table and a few numbers, so the library
+is not injected. Nothing is fetched at runtime except the Google Fonts stylesheet.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
 from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.jev.assess import CurrentPairs, current_pairs
-from xbrain.jev.models import TopicAssessment
-from xbrain.jev.report import (
-    THRESHOLD_DEPENDENT_KEYS,
-    build_report,
-    cost_fragment,
-    primary_rank,
-)
+from xbrain.jev.defaults import tokens_cost_usd
+from xbrain.jev.models import JevRun, TopicAssessment
+from xbrain.jev.report import ItemComparison, build_report, cost_fragment, run_history
 from xbrain.models import Item, Topic
 
-#: The post text carried into the blob, in characters. Long enough to recognise the post in a
-#: queue row, short enough that the whole corpus of them stays a fraction of the page: measured
-#: at 0.42 MB of the 4.53 MB page for 2,609 items (see `compute_jev_dashboard_data`).
+#: The post text carried into the blob, in characters: long enough to recognise the post in a
+#: row, short enough that the whole corpus of them stays a fraction of the page.
 _TEXT_CHARS = 240
-#: How much of the Choice distribution the drawer shows. `PrimaryChoice.probabilities` can
-#: carry one entry per vocabulary topic plus the fallback; the tail is noise.
-_TOP_CHOICES = 5
-
-#: The delimiters around the template's PURE half — the part that mirrors `jev/report.py` and
-#: touches neither the DOM nor ECharts. `tests/test_jev_dashboard.py` extracts exactly this
-#: region and runs it through node against the same fixture the summary was built from, which
-#: is what turns "the template is the one file pytest cannot test-drive" into a file whose
-#: load-bearing half is test-driven. They live here so the test and the template can never
-#: disagree about where the region starts.
-DERIVE_START = "/* ===== derive: mirrors jev/report.py ===== */"
-DERIVE_END = "/* ===== end derive ===== */"
-
-#: The delimiters around the template's BOOT GUARD — the first statements the script runs, and
-#: the only ones that may not depend on anything declared later. Extracted the same way, so the
-#: guard is exercised rather than merely read: a guard installed after the work it guards is not
-#: a guard, and one that calls a helper declared below it has the same hole again.
-GUARD_START = "/* ===== boot guard ===== */"
-GUARD_END = "/* ===== end boot guard ===== */"
+#: Where the page's "docs" link points: the operator guide, which explains every number here.
+DOCS_URL = "https://github.com/VGonPa/xbrain/blob/develop/docs/jev.md"
 
 
 def _snippet(text: str, width: int = _TEXT_CHARS) -> str:
     """The post on one line, cut to `width` — `width - 1` characters plus an ellipsis.
 
-    A post that simply stops mid-word reads as a BROKEN record rather than as a cut one, and
-    the drawer is the "see the whole item" surface, which makes the silent version worse here
-    than in a queue row.
-
-    THE RULE is `report._snippet`'s — cut to `width - 1`, then an ellipsis — applied at this
-    surface's OWN width: 80 characters in a markdown table cell, 240 in a queue row. A cell is
-    scanned, a row is read to recognise the post, so the budgets differ on purpose; what must
-    not differ is that both say when they cut.
-
-    MIRRORED RATHER THAN CALLED, and the reason is the half that does not travel:
-    `report._snippet` finishes by running `_escape_cell` over the result, doubling backslashes
-    and escaping pipes so the text survives a markdown table row. Shipping that into the JSON
-    blob would put a literal `a\\|b` on screen. Escaping belongs to the destination, and this
-    destination is HTML — the template escapes for it (`esc`), at render time.
+    `report._snippet`'s rule at this surface's own width. Not called, because that one also
+    escapes for a markdown table cell, and this destination is HTML: the template escapes.
     """
     one_line = " ".join(text.split())
     return one_line if len(one_line) <= width else one_line[: width - 1] + "…"
 
 
-def _row(
-    item: Item, assessment: TopicAssessment, slugs: list[str], id2note: dict[str, str]
+def _enrich_marks(comparison: ItemComparison, membership: dict[str, float]) -> list[dict[str, Any]]:
+    """Each topic enrich assigned, in enrich's order: backed (`True`), doubtful (`False`) or
+    never asked (`None`) — read off the comparison's own buckets."""
+    doubtful = {pair.slug for pair in comparison.doubtful}
+    unjudged = set(comparison.unjudged)
+
+    def mark(slug: str) -> bool | None:
+        if slug in unjudged:
+            return None
+        return slug not in doubtful
+
+    return [
+        {"slug": slug, "p": membership.get(slug), "ok": mark(slug)} for slug in comparison.assigned
+    ]
+
+
+def _post_row(
+    item: Item,
+    assessment: TopicAssessment,
+    comparison: ItemComparison,
+    slugs: set[str],
+    id2note: dict[str, str],
 ) -> dict[str, Any]:
-    """One item as the template consumes it: what `enrich` said, what Jev answered.
+    """One table row: what enrich said, where Jev disagrees, and what this post's answer cost.
 
-    `m` is POSITIONAL over the vocabulary and carries `null`, never `0.0`, for a slug absent
-    from `membership` — the same distinction `report._doubtful` draws by skipping it. A
-    fabricated zero would put a topic Jev was never asked about at the top of the "most
-    doubtful" queue as the strongest disagreement in the corpus.
-
-    `primary_rank` is IMPORTED rather than re-derived from `ranked` above, even though the
-    sort is already in hand: the rank rule (descending probability, ties by option name, so two
-    runs of one distribution can never report different ranks) is `report`'s, and a second copy
-    is the one that drifts.
-
-    `cmp` is whether the item can be compared at all (`report.compare_item` returns None
-    without an enrichment). It is shipped rather than inferred from `primary`, because an item
-    enrich left WITHOUT a primary topic is still compared — its assigned topics still have
-    memberships to back — and reading `primary === null` as "skip" would silently drop it.
+    `disagreements` is what the page sorts and filters on: each doubtful topic, each topic Jev
+    would add, and a primary that does not coincide (an enrich with no primary counts — there
+    is nothing for Jev to agree with, and that is itself worth fixing).
     """
-    enriched = item.enriched
-    ranked = sorted(assessment.primary.probabilities.items(), key=lambda kv: (-kv[1], kv[0]))
+    tokens = assessment.input_tokens
     return {
         "id": item.id,
         "handle": item.author.handle,
         "text": _snippet(item.text),
         "url": item.url,
         "note": id2note.get(item.id),
-        "cmp": enriched is not None,
-        "assigned": list(enriched.topics) if enriched else [],
-        "primary": enriched.primary_topic if enriched else None,
-        "m": [assessment.membership.get(slug) for slug in slugs],
-        "jp": assessment.primary.choice,
-        "jc": round(assessment.primary.confidence, 3),
-        "top": [[option, round(p, 3)] for option, p in ranked[:_TOP_CHOICES]],
-        # How many options the Choice actually offered, so the drawer can say `5 de 46`
-        # instead of presenting a cut as the whole distribution.
-        "options": len(assessment.primary.probabilities),
-        # enrich's primary, even when the cut left it out: its probability and its 1-based
-        # rank. Without them the section answers Jev's question and not the reader's — the
-        # bars show Jev's five favourites and nothing says whether enrich's pick came sixth
-        # or last, which is the distinction `report.primary_rank` exists to draw.
-        "pp": (
-            None
-            if enriched is None or enriched.primary_topic is None
-            else assessment.primary.probabilities.get(enriched.primary_topic)
-        ),
-        "pr": primary_rank(
-            None if enriched is None else enriched.primary_topic,
-            assessment.primary.probabilities,
-        ),
+        "enrich": _enrich_marks(comparison, assessment.membership),
+        "adds": [{"slug": pair.slug, "p": pair.noul} for pair in comparison.missing],
+        "primary": comparison.primary_topic,
+        "jev_primary": comparison.jev_primary,
+        "jev_fallback": comparison.jev_primary not in slugs,
+        "primary_agrees": comparison.primary_agrees,
+        "disagreements": len(comparison.doubtful)
+        + len(comparison.missing)
+        + (0 if comparison.primary_agrees else 1),
+        "tokens": tokens,
+        "cost_usd": None if tokens is None else tokens_cost_usd(tokens, assessment.provider),
         "truncated": assessment.truncated,
-        "model": assessment.model,
-        "provider": assessment.provider,
     }
 
 
-def _totals(
-    summary: dict[str, Any], items: int, assessed: int, current: CurrentPairs
-) -> dict[str, Any]:
-    """The header facts: how much of the side-car this page is about, and what it cost.
+def _per_post_usd(pairs: Sequence[tuple[Item, TopicAssessment]]) -> float | None:
+    """Mean cost of one stored answer, over the current posts whose usage is KNOWN.
 
-    `assessed`, `current`, `stale` and `orphans` are a real partition (`assessed == current +
-    stale + orphans`), and all four are shipped because a side-car retired by a vocabulary
-    edit must never render identically to one nobody ever wrote — the second reading sends an
-    operator to re-pay for the whole corpus.
+    `None` when none is known: an average over nothing is not zero.
     """
-    return {
-        "items": items,
-        "assessed": assessed,
-        "current": len(current.pairs),
-        "stale": current.stale,
-        "orphans": current.orphans,
-        "models": summary["models"],
-        "providers": summary["providers"],
-        "truncated": summary["truncated"],
-        "input_tokens": summary["input_tokens"],
-        "input_tokens_unknown": summary["input_tokens_unknown"],
-        "cost_usd": summary["cost_usd"],
-        "unpriced_providers": summary["unpriced_providers"],
-        "cost_text": cost_fragment(summary),
-    }
+    known = [a for _, a in pairs if a.input_tokens is not None]
+    if not known:
+        return None
+    return sum(tokens_cost_usd(a.input_tokens or 0, a.provider) for a in known) / len(known)
 
 
 def compute_jev_dashboard_data(
@@ -189,46 +121,22 @@ def compute_jev_dashboard_data(
     char_limit: int,
     id2note: dict[str, str],
     updated: str,
+    runs: Sequence[JevRun],
     now: datetime | None = None,
     current: CurrentPairs | None = None,
 ) -> dict[str, Any]:
-    """Pure: items + side-car + vocabulary in, the JSON blob the template consumes out.
+    """Pure: items + side-car + run log + vocabulary in, the JSON blob the template reads.
 
-    Currency is decided by `assess.current_pairs`, the same call `jev report` goes through, and
-    the counts it drops travel into `totals` rather than being discarded. Stale records are
-    EXCLUDED from `items`: a comparison against a question Jev is no longer asked is not a
-    weaker signal, it is a wrong one.
+    Currency is `assess.current_pairs`, the call `jev report` goes through; stale and orphaned
+    records are EXCLUDED from the rows and COUNTED in `totals`. `current` is that decision
+    handed in by a caller that already holds it (`cli._jev_pairs`); one computed under other
+    options is REFUSED, because the counts look the same whatever produced them.
 
-    `current` is that decision, HANDED IN. A caller that already holds it — `cli._jev_pairs`
-    computes it to decide whether to refuse at all — would otherwise pay a second
-    `build_topic_state` and sha256 over the whole corpus for an answer it has. Omitted, it is
-    computed here, which is what keeps this function callable with nothing but its arguments.
-    Both paths must produce the same blob, and a test asserts it.
+    `assessments` is the RAW side-car on purpose: the cost history prices every record that
+    was paid for, stale or not (`report.run_history`).
 
-    `char_limit` is then unused — it is an input to that computation and to nothing else —
-    but `fallback` is NOT: it ships into the blob, where the page names it. A hand-in
-    computed under other options is REFUSED rather than trusted, because the counts look
-    identical whatever they were decided with, so the swap has no symptom: the page would
-    show one fallback and a currency verdict reached under another.
-
-    `now` is the clock, threaded from the caller rather than read here: `_summarize` stamps
-    `generated_at`, and a function that reads the clock inside itself is not a pure function of
-    its arguments and cannot be asserted against.
-
-    SIZE, measured rather than asserted (2026-09-22, the live corpus): 4,531,327 bytes — about
-    4.53 MB — for 2,609 items × 45 topics. ECharts 1.03 MB, the JSON blob 3.43 MB, of which the
-    unrounded memberships are 1.16 MB, the note deep links 0.45 MB and the post text 0.42 MB.
-    (Rendered with synthetic six-decimal nouls, so the membership figure is an upper bound; a
-    provider that answers in two or three decimals ships less. The deep links are present only
-    where `xbrain generate` has written the note, so a vault without notes is ~0.45 MB lighter
-    — an earlier reading of 4.05 MB was this same page measured with none of them.) The
-    memberships are the deliberate cost and the module docstring says why; `_TEXT_CHARS` is the
-    cheap lever if the page ever has to shrink. ARCHITECTURE.md § jev quotes this measurement.
-
-    Each row's `m` ships the membership UNROUNDED — the page costs a few hundred KB more for
-    it, and rounding to three decimals would let a `0.8496` render as `0.85` and then clear a
-    `0.85` slider, so the browser would call backed what `report.py` calls doubtful and the
-    template's consistency banner would report a divergence in the DATA as one in the logic.
+    `now` is the clock, threaded from the caller so `summary["generated_at"]` is a function
+    of the arguments.
     """
     if current is None:
         current = current_pairs(items, assessments, vocab, fallback=fallback, char_limit=char_limit)
@@ -239,31 +147,48 @@ def compute_jev_dashboard_data(
             f"fallback={fallback!r} y char_limit={char_limit}"
         )
     pairs = list(current.pairs)
-    # `build_report` is the entry point, and the summary is the half this page needs: the rows
-    # a reader clicks are rebuilt in the browser at whatever threshold the slider is on, so the
-    # server-side comparisons would only be the default threshold's, redone.
-    summary, _comparisons = build_report(
+    summary, comparisons = build_report(
         pairs, vocab, threshold, now=now, stale=current.stale, orphans=current.orphans
     )
-    slugs = [topic.slug for topic in vocab]
+    by_id = {item.id: (item, assessment) for item, assessment in pairs}
+    slugs = {topic.slug for topic in vocab}
+    posts = [
+        _post_row(*by_id[comparison.item_id], comparison, slugs, id2note)
+        for comparison in comparisons
+    ]
+    # Most disagreement first; ties by id so two renders of one side-car are identical.
+    posts.sort(key=lambda post: (-post["disagreements"], post["id"]))
     return {
         "updated": updated,
         "threshold": threshold,
         "fallback": fallback,
+        "docs_url": DOCS_URL,
         "topics": [
             {"slug": t.slug, "label": humanize_topic(t.slug), "description": t.description}
             for t in vocab
         ],
-        "items": [_row(item, assessment, slugs, id2note) for item, assessment in pairs],
-        # The page's own oracle: the numbers `xbrain jev report` prints for this side-car at
-        # the DEFAULT threshold, and the split saying which of them the slider invalidates.
-        # Without both, the browser's recompute has nothing to be wrong against.
+        # `xbrain jev report`'s numbers, whole: the page quotes them and computes none.
         "summary": summary,
-        "threshold_dependent_keys": sorted(THRESHOLD_DEPENDENT_KEYS),
-        "totals": _totals(summary, len(items), len(assessments), current),
+        "totals": {
+            "items": len(items),
+            "assessed": len(assessments),
+            "current": len(pairs),
+            "stale": current.stale,
+            "orphans": current.orphans,
+            "compared": summary["items_compared"],
+            "not_compared": summary["items_assessed"] - summary["items_compared"],
+            "models": summary["models"],
+        },
+        "cost": {
+            **run_history(runs, assessments),
+            "per_post_usd": _per_post_usd(pairs),
+            # The side-car's own bill, in the shared sentence — what the rows below add up to.
+            "side_car_text": cost_fragment(summary),
+        },
+        "posts": posts,
     }
 
 
 def render_jev_dashboard_html(data: dict[str, Any]) -> str:
-    """Inject the blob and ECharts into `jev.template.html` (same sentinels as the dashboard)."""
-    return render_dashboard_html(data, template=_resource("jev.template.html"))
+    """Inject the blob into `jev.template.html` (same sentinel as the dashboard; no ECharts)."""
+    return render_dashboard_html(data, template=_resource("jev.template.html"), echarts="")

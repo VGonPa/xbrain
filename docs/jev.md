@@ -72,7 +72,7 @@ uv run xbrain jev topics --limit 20         # a small paid smoke run
 uv run xbrain jev topics                    # the whole backlog
 uv run xbrain jev report                    # data/jev/topics-report.{json,md} at [jev].threshold
 uv run xbrain jev report --threshold 0.95   # the same side-car, read more strictly
-uv run xbrain jev dashboard                 # <output_dir>/jev.html — open the printed URI
+uv run xbrain jev dashboard                 # <output_dir>/jev.html at [jev].threshold — open the printed URI
 ```
 
 `jev topics` is the only command that spends money. `report` and `dashboard` re-read the
@@ -84,7 +84,7 @@ The full option list:
 |---|---|
 | `xbrain jev topics` | `--id TEXT` (repeatable — only these items) · `--limit INTEGER` · `--force` · `--dry-run` |
 | `xbrain jev report` | `--threshold FLOAT` (default `[jev].threshold`) |
-| `xbrain jev dashboard` | `--threshold FLOAT` (default `[jev].threshold`) |
+| `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
 
 Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed) ·
 **130** interrupted with Ctrl-C.
@@ -193,6 +193,39 @@ cannot say which zero it is:
 
 The figure is an **estimate**, not an invoice: the rate is a list price for a concrete
 model version while `[jev].model` defaults to a moving alias. See [Vendor facts](#vendor-facts-with-their-dates).
+
+### It logs the pass: `data/jev/runs.jsonl`
+
+The side-car keeps only the **latest** answer per item, so it cannot say what Jev has cost
+over time. Every pass that **sent at least one request** appends one JSON line to
+`data/jev/runs.jsonl` and says so on its last line:
+
+```
+pasada registrada → data/jev/runs.jsonl
+```
+
+A `--dry-run`, or a pass with nothing to evaluate, writes nothing. Each line records:
+
+| Field | Meaning |
+|---|---|
+| `started_at` · `finished_at` | UTC; the page shows them in local time |
+| `requests` | calls xbrain **sent**, each item once. Retries inside the vendor SDK are invisible to xbrain and are not counted |
+| `ok` · `failed` | calls that came back with a kept answer, and the rest that came back (a provider error, or an answer xbrain refused) |
+| `input_tokens_by_provider` · `input_tokens` | tokens per provider that answered, and their sum. Empty and 0 when nothing answered |
+| `input_tokens_unknown` | answers that reported no usage |
+| `models` | the distinct models that answered, sorted |
+| `interrupted` | Ctrl-C. `requests - ok - failed` is then the number of calls still in flight |
+
+It stores **tokens, never dollars**: every report prices the history at read time with the
+same formula the side-car uses, so a price correction reprices every past pass.
+
+The line is written on **every** exit path of a pass that sent something: success, partial
+failure, the all-failed error (a 402 on every call is 20 requests made, and that is history
+too), a side-car that could not be written, and Ctrl-C (exit 130). If the log itself cannot
+be written, the pass keeps its exit code and its saved records, and the line is printed to
+stderr under `no se pudo registrar la pasada en …; añádela a mano:` so you can append it by
+hand. A line that does not parse is refused by `jev report` and `jev dashboard` with its
+path and line number, never skipped.
 
 ### What a pass actually costs
 
@@ -314,9 +347,16 @@ Two name pairs collide and are worth reading carefully: `summary.primary_unjudge
 the membership-side count is `summary.assigned_unjudged` while the per-item field is
 `items[].unjudged`.
 
-`report.THRESHOLD_DEPENDENT_KEYS` names the summary keys that move when the threshold
-moves. The dashboard reads it to know which numbers its slider invalidates; a test asserts
-it and its complement together cover every key the summary emits.
+Under the recap line, `jev report` prints the run history in the shared cost sentence:
+
+```text
+Histórico: 3 pasadas · 2640 peticiones · 15520000 tokens de entrada (~0.6518 $)
+```
+
+The recap line prices the side-car (the latest answer per item); this one prices every pass
+the log recorded, re-asks included. Records asked before the first logged pass are named at
+the end (`· 20 evaluaciones anteriores al registro de pasadas`) instead of being silently
+left out of the total.
 
 ### It refuses rather than overwrite a good report with zeros
 
@@ -356,70 +396,73 @@ topics` yet" apart from "a vocabulary edit just retired every paid record you ha
 ## `xbrain jev dashboard` — reading the page
 
 Writes `jev.html` into the vault's output directory, next to `dashboard.html`. It prints
-the same line `jev report` prints, then how many items reached the page and where it is:
+the same line `jev report` prints, then how many posts are in the table and where the page is:
 
 ```text
-2583 items en el dashboard → file:///…/x-knowledge/jev.html
+2565 posts en el dashboard → file:///…/x-knowledge/jev.html
 ```
 
 Open it with `open <uri>`.
 
-**That count is not the `2565` in the line above it, and the difference is the same one
-[§ items comparados](#items-comparados-25652583--two-different-populations) explains.** The
-page carries a row for every **current assessment** — 2,583 — because an item Jev has an
-opinion about is worth showing whether or not `enrich` has reached it. The report's ratio
-counts the **comparable** ones, the 2,565 that carry an enrichment. Same side-car, two
-questions.
+**The page has one job: show where enrich's topics and Jev disagree, post by post, so you
+can fix the wrong ones, and what finding out cost.** It compares at `[jev].threshold` (0,85
+by default), fixed: there is no control that moves it, and the page recomputes nothing. Every
+number on it comes from `jev/report.py` — the same `build_report` call and the same summary
+`xbrain jev report` prints — so the two surfaces always agree. To read the side-car at another
+threshold, use `xbrain jev report --threshold`.
 
-It is **one self-contained file**: the data as a JSON blob, ECharts vendored into the page.
-No external scripts; the only network reference is the Google Fonts stylesheet, which both
-pages carry — so offline `jev.html` renders in system fonts and nothing else is missing
-(`dashboard.html` also pulls X video posters; this page has none). Measured on this corpus
-on 2026-09-22 (2,609 items × 45 topics):
-**4,531,327 bytes, about 4.53 MB** — ECharts 1.03 MB and the JSON blob 3.43 MB, of which
-the memberships are 1.16 MB, the `obsidian://` deep links 0.45 MB and the post text
-0.42 MB. Rendered with synthetic six-decimal probabilities, so the membership term is an
-upper bound; a provider answering in two or three decimals ships less.
+Top to bottom:
 
-**The membership probabilities ship unrounded, on purpose.** Rounding them for size would
-be a real divergence: `0.8496` renders as `0.85` and then clears a `0.85` slider, so the
-page would call *backed* what the report calls *doubtful*.
+1. **Header** — when the page was written, the model that answered, the threshold with
+   `(config)` next to it, and a link to this document.
+2. **Qué es esto** — two sentences on what the page is for.
+3. **Coste y peticiones** — three figures and a table, all from the run log:
+   - **Total**: requests, input tokens and dollars across every logged pass.
+   - **Media por post**: what one stored answer cost on average, over the current posts
+     whose provider reported usage.
+   - **Evaluaciones guardadas**: how many answers the side-car holds, and their cost in the
+     shared sentence.
+   - **Histórico por pasada**: one row per `xbrain jev topics` pass, newest first — date,
+     requests, ok, failed, tokens, cost, model, and whether it was interrupted (with the
+     calls still in flight).
 
-What it shows: the KPI band and the side-car line (`N vigentes de M guardadas` — the
-number that says whether a vocabulary edit just retired paid work), a per-topic backing
-chart worst-first, a noul histogram on a log axis, three queues (doubtful, missing
-candidates, primary mismatches) and a per-item drawer with every membership as a bar and
-the five most probable options of the Choice (plus `enrich`'s own pick when the cut left it
-out — see the cuts below).
+   When the side-car holds answers asked before the first logged pass, one line says so
+   (`20 evaluaciones anteriores al registro de pasadas …`) with their cost from their own
+   stored tokens. They are not added to the total: the log never saw those passes, and the
+   side-car keeps only the latest answer per item, so it cannot reconstruct them.
+4. **Three numbers**, each with a one-line explanation:
+   - *Jev confirma X de Y topics de enrich (Z %)* — enrich's topics that Jev also sees at or
+     above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`).
+   - *Jev añadiría N topics que enrich no puso* — `missing_pairs`.
+   - *El topic principal coincide en P %* — `primary_agree_pct`.
+5. **The post table**, one row per compared post:
+   - the post (cut at 240 characters with an ellipsis), its author, `nota ↗` and `X ↗`;
+   - enrich's topics, each marked **✓** (Jev's probability ≥ threshold), **✗** (below) or
+     **·** (the topic left the vocabulary, so Jev was never asked), with the probability
+     beside it and the topic's description on hover;
+   - the topics Jev would add (**+**), with their probability;
+   - enrich's primary topic against Jev's, highlighted when they differ (`(ninguno)` when Jev
+     chose the fallback option);
+   - what that post's stored answer cost.
 
-**The page applies three cuts, and every one of them says so.** The queues stop at **200
-rows** and carry a cut note. The **post text is cut at 240 characters** in the blob itself
-and ends in an ellipsis — enough to recognise a post in a queue row, and carrying the whole
-corpus of full texts would add megabytes to a page that is already large (the 240 characters
-are the 0.42 MB above). Open the item's own note or its `X ↗` link for the full post;
-neither the drawer nor the queue has it. The **Choice distribution** is cut to the five most
-probable options, and the drawer labels that one (`5 más probables de 46`) — and when
-`enrich`'s own primary fell outside those five it is appended below them with its rank
-(`#29`), or `sin rango` when Jev omitted it from its distribution, so the section answers
-the reader's question and not only Jev's.
+   By default the table shows **only posts with a disagreement** — a ✗, a +, or a primary
+   that differs — ordered most disagreements first. Untick the box to see every post; the
+   search box filters by text, author or topic. Below the table, one line counts what is
+   not in it: stale and orphaned answers, and posts with no enrichment to compare against.
 
-**The threshold slider recomputes in the browser.** `jev report` prints one threshold; the
-page lets you move it, so every threshold-dependent number is re-derived client-side from
-the raw probabilities, by the same rules `jev/report.py` uses.
-
-> **If a red *"Inconsistencia entre el informe y el dashboard"* banner appears, do not
-> trust the page.** On load, the page recomputes the numbers at the report's own threshold
-> and compares them against the summary shipped inside it. The banner means its arithmetic
-> and `jev/report.py` have diverged. Trust `xbrain jev report`, and report the banner as a
-> bug. The banner also says so itself, and names the first few keys that disagreed.
+It is **one self-contained file**: the data as a JSON blob in the page, no charting library,
+no external scripts. The only network reference is the Google Fonts stylesheet, so offline
+the page renders in system fonts and nothing else is missing. Measured 2026-09-26 on the
+first paid run (20 posts): **55,829 bytes**. JavaScript draws the table and runs the filter
+and the search; without it the page says so.
 
 Two more things the page cannot tell you itself:
 
 - The **`nota ↗` deep link appears only for notes that exist** on disk. `jev dashboard`
   runs independently of `xbrain generate`, so run `generate` first or expect only `X ↗`.
-- It is **static**. It goes stale the moment the side-car, the corpus or `vocab.yaml`
-  moves. `dashboard.html` and `jev.html` are siblings — same directory, same template
-  mechanism, same visual language — but different commands write them and neither
+- It is **static**. It goes stale the moment the side-car, the run log, the corpus or
+  `vocab.yaml` moves. `dashboard.html` and `jev.html` are siblings — same directory, same
+  template mechanism, same visual language — but different commands write them and neither
   regenerates the other. Re-run `xbrain jev dashboard` to refresh.
 
 `xbrain generate` links `jev.html` from `_index.md` by absolute `file://` URI, exactly as
@@ -473,6 +516,7 @@ retires nothing and says nothing.
 |---|---|
 | `data/jev/topics.json` | the side-car: one `TopicAssessment` per item id |
 | `data/jev/topics.<UTC stamp>.bak` | a copy of the side-car, written before a `--force` run re-asks a current record. Never pruned |
+| `data/jev/runs.jsonl` | the run log: one line per `jev topics` pass that sent a request. Append-only |
 | `data/jev/topics-report.json` · `.md` | the comparison, rewritten on every `jev report` |
 | `<output_dir>/jev.html` | the page, rewritten on every `jev dashboard` |
 
@@ -483,6 +527,9 @@ The config key is the subdirectory; `<output_dir>` is the absolute path it resol
 > **`data/topics.json` and `data/jev/topics.json` are different files.** The first holds the
 > synthesised topic pages and is part of the store. The second holds Jev's assessments and
 > is a side-car. Only the first is snapshotted.
+
+The run log `data/jev/runs.jsonl` lives beside the side-car and shares its standing: not
+snapshotted, not in git (`data/` is gitignored), never rewritten — only appended to.
 
 **This file costs money to regenerate and `snapshot restore` will not bring it back.** Four
 consequences:
@@ -663,9 +710,23 @@ The vocabulary or the evidence moved and retired the stored contracts. See
 [Staleness](#staleness-when-an-assessment-stops-counting). The remedy is `xbrain jev
 topics`, and it is a re-bill.
 
-**A red banner on `jev.html`**
-The page's own arithmetic disagrees with the report embedded in it. Trust `xbrain jev
-report` and report it as a bug — see [the dashboard](#xbrain-jev-dashboard--reading-the-page).
+**`Error: <path>/runs.jsonl: registro de pasadas ilegible en la línea N (…)`**
+One line of the run log does not parse, usually a line cut short by a crash mid-write, or a
+hand edit. Fix or delete that line by hand; the others are untouched. The commands refuse
+rather than skip it, because each line is paid history and a skipped one under-quotes the bill.
+
+**`no se pudo registrar la pasada en …; añádela a mano:`**
+`jev topics` could not append to the run log (disk full, permissions). The pass itself is
+fine: its answers are saved and its exit code is unchanged. The next line on stderr is the
+JSON record; append it to `data/jev/runs.jsonl` once the disk is fixed.
+
+**A red *"La página no pudo dibujarse"* banner on `jev.html`**
+The page's script failed while drawing. The numbers are in `xbrain jev report`; report the
+message in the banner as a bug.
+
+**The dashboard shows `—` as the total cost**
+No pass has been logged yet: the side-car was filled before the run log existed. The line
+under the figures gives those answers' cost from their own tokens.
 
 **The dashboard numbers look old**
 It is a static page. Re-run `xbrain jev dashboard`.

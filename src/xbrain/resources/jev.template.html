@@ -28,6 +28,7 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
 .grain{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:.035;mix-blend-mode:overlay;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
 .wrap{position:relative;z-index:2;max-width:1360px;margin:0 auto;padding:56px 40px 72px}
+a{color:inherit}
 
 /* header */
 .masthead{display:flex;justify-content:space-between;align-items:flex-end;gap:32px;
@@ -38,156 +39,106 @@ body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;
 .brand h1 .dot{color:var(--accent)}
 .brand p{font-family:var(--display);font-style:italic;font-weight:400;font-size:18px;color:var(--ink-muted);margin-top:10px;letter-spacing:.01em}
 .stamp{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--ink-faint);text-transform:uppercase;
-  border:1px solid var(--hairline);border-radius:2px;padding:9px 14px;white-space:nowrap;line-height:1.7}
+  border:1px solid var(--hairline);border-radius:2px;padding:9px 14px;line-height:1.9;text-align:right}
 .stamp b{color:var(--ink-muted);font-weight:500}
+.stamp a{color:var(--accent);text-decoration:none}
+
+/* what this is */
+.about{margin-top:26px;max-width:860px;font-size:15.5px;line-height:1.65;color:var(--ink-muted)}
+.about b{color:var(--ink);font-weight:600}
 
 /* kpi band */
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);margin-top:34px;
-  border:1px solid var(--hairline);border-radius:12px;overflow:hidden;background:var(--surface);
-  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .14s forwards}
-.kpi{padding:22px 24px 20px;border-right:1px solid var(--hairline);border-bottom:1px solid var(--hairline);position:relative}
-.kpi:nth-child(4n){border-right:0}
-.kpi:nth-child(n+5){border-bottom:0}
-.kpi .lab{font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint);
-  min-height:31px}  /* two lines: a label that wraps must not drop its own number below its neighbours */
-.kpi .num{font-family:var(--display);font-weight:600;font-size:40px;line-height:1;margin-top:12px;letter-spacing:-.01em;
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);margin-top:14px;
+  border:1px solid var(--hairline);border-radius:12px;overflow:hidden;background:var(--surface)}
+.kpi{padding:22px 24px 20px;border-right:1px solid var(--hairline);position:relative}
+.kpi:last-child{border-right:0}
+.kpi .lab{font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
+.kpi .num{font-family:var(--display);font-weight:600;font-size:36px;line-height:1.05;margin-top:12px;letter-spacing:-.01em;
   font-variant-numeric:tabular-nums lining-nums;font-optical-sizing:auto}
 .kpi .num.accent{color:var(--accent)}
-.kpi .ctx{font-size:12.5px;color:var(--ink-muted);margin-top:9px}
-.kpi .ctx b{color:var(--sage);font-weight:600}
+.kpi .ctx{font-size:12.5px;color:var(--ink-muted);margin-top:9px;line-height:1.55}
 
 /* panels */
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}
-.panel{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:22px 24px 18px;
+.panel{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:22px 24px 18px;margin-top:22px;
   box-shadow:0 1px 0 rgba(0,0,0,.4), 0 18px 40px -30px rgba(0,0,0,.9);min-width:0;
-  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .22s forwards}
-.span2{grid-column:1 / -1}
+  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .15s forwards}
 .phead{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
   padding-bottom:14px;margin-bottom:12px;border-bottom:1px solid var(--hairline-2)}
 .phead .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);display:block;margin-bottom:7px}
-.phead h3{font-family:var(--display);font-weight:600;font-size:20px;letter-spacing:-.005em;line-height:1.1}
+.phead h2{font-family:var(--display);font-weight:600;font-size:22px;letter-spacing:-.005em;line-height:1.1}
 .phead .sub{font-size:12px;color:var(--ink-faint);text-align:right}
-.chart{width:100%;max-width:100%}
-/* the caveat line under the KPIs — the numbers above mean something else without it */
-.vnote{font-size:12.5px;color:var(--ink-muted);margin:14px 2px 0;line-height:1.7}
-.vnote b{color:var(--ink);font-weight:600}
-.vnote .stale{color:var(--sand)}
+.note{font-size:13px;color:var(--sand);margin:12px 2px 0;line-height:1.6}
+.muted{font-size:12.5px;color:var(--ink-faint);margin:10px 2px 0;line-height:1.6}
+
+/* the three numbers */
+.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.fact .big{font-family:var(--display);font-weight:600;font-size:21px;line-height:1.3}
+.fact .big em{font-style:normal;color:var(--accent)}
+.fact .why{font-size:13px;color:var(--ink-muted);margin-top:8px;line-height:1.55}
 
 /* controls */
-.controls{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:20px}
-.controls .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint)}
-.controls input[type=range]{flex:1;min-width:200px;accent-color:var(--accent);height:4px}
-.tval{font-family:var(--display);font-weight:600;font-size:26px;color:var(--accent);
-  font-variant-numeric:tabular-nums lining-nums;min-width:62px;text-align:right}
-.seg{display:inline-flex;border:1px solid var(--hairline);border-radius:8px;overflow:hidden}
-.seg button{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
-  background:transparent;color:var(--ink-muted);border:0;padding:7px 13px;cursor:pointer;border-right:1px solid var(--hairline)}
-.seg button:last-child{border-right:0}
-.seg button.on{background:var(--accent-soft);color:var(--accent)}
-/* A `<button>`, so it is focusable and Enter/Space work without a keydown handler. */
-.toggle{display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:12.5px;color:var(--ink-muted);
-  user-select:none;background:none;border:0;padding:0;font-family:inherit;text-align:left}
-.toggle:focus-visible,.q tr[data-id]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.toggle .sw{width:34px;height:19px;border-radius:20px;background:#2a251c;border:1px solid var(--hairline);position:relative;transition:.22s;flex:none}
-.toggle .sw::after{content:"";position:absolute;top:1.5px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink-faint);transition:.22s}
-.toggle.on .sw{background:var(--accent-soft);border-color:rgba(224,162,51,.5)}
-.toggle.on .sw::after{transform:translateX(15px);background:var(--accent)}
-.hint{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--ink-faint)}
+.controls{display:flex;align-items:center;gap:22px;flex-wrap:wrap;margin-bottom:14px}
+.controls label{display:inline-flex;align-items:center;gap:9px;font-size:13px;color:var(--ink-muted);cursor:pointer}
+.controls input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
+.controls input[type=search]{flex:1;min-width:220px;max-width:420px;background:var(--surface-2);color:var(--ink);
+  border:1px solid var(--hairline);border-radius:8px;padding:8px 12px;font-family:var(--ui);font-size:13.5px}
+.controls input[type=search]:focus-visible,.controls input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.count{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint)}
 
-/* the consistency banner: the page must never quietly show numbers the report would not */
+/* tables */
+.twrap{overflow:auto}
+.posts .twrap{max-height:760px}
+.t thead th{position:sticky;top:0;z-index:1;background:var(--surface)}
+.t{width:100%;border-collapse:collapse;font-size:13px}
+.t th{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--ink-faint);text-align:left;font-weight:400;padding:0 12px 9px 0;white-space:nowrap}
+.t td{padding:10px 12px 10px 0;border-top:1px solid var(--hairline-2);vertical-align:top;overflow-wrap:anywhere}
+.t .n{font-family:var(--mono);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.t .tx{color:var(--ink-muted);line-height:1.45;min-width:220px;max-width:460px}
+.t .hd{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:5px;display:flex;gap:14px;flex-wrap:wrap}
+.lk{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--ink-faint);text-decoration:none;white-space:nowrap}
+.lk:hover{color:var(--accent)}
+.tag{display:inline-block;margin:0 6px 5px 0;padding:2px 8px;border-radius:10px;font-size:12px;white-space:nowrap;
+  border:1px solid var(--hairline);color:var(--ink)}
+.tag small{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-left:5px}
+.tag.ok{border-color:rgba(124,154,142,.45)}
+.tag.ok b{color:var(--sage)}
+.tag.no{border-color:rgba(196,100,59,.6);background:rgba(196,100,59,.10)}
+.tag.no b{color:var(--sienna)}
+.tag.un{color:var(--ink-faint);border-style:dashed}
+.tag.add{border-color:rgba(224,162,51,.5);background:var(--accent-soft)}
+.tag.add b{color:var(--accent)}
+.prim{white-space:nowrap}
+.prim.diff{color:var(--sienna)}
+.prim .arrow{color:var(--ink-faint);margin:0 5px}
+.empty{font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:14px 0}
+
+/* the failure banner: shown only when the page could not draw itself */
 .banner{margin-top:24px;padding:14px 18px;border-radius:10px;font-size:13.5px;line-height:1.6;
   background:rgba(181,83,63,.14);border:1px solid rgba(181,83,63,.55);color:#F0C7BD}
 .banner b{color:#FFF;font-weight:600;display:block;font-family:var(--mono);font-size:10.5px;
   letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
 
-/* queues */
-.qwrap{overflow:auto;max-height:560px}
-.q thead th{position:sticky;top:0;z-index:1;background:var(--surface)}
-.q{width:100%;border-collapse:collapse;font-size:13px}
-.q th{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
-  color:var(--ink-faint);text-align:left;font-weight:400;padding:0 10px 9px 0;white-space:nowrap}
-.q td{padding:9px 10px 9px 0;border-top:1px solid var(--hairline-2);vertical-align:top;overflow-wrap:anywhere}
-.q tr[data-id]{cursor:pointer}
-.q tr[data-id]:hover td{background:var(--surface-2)}
-.q .nn{font-family:var(--mono);font-size:12px;color:var(--accent);white-space:nowrap;font-variant-numeric:tabular-nums}
-.q .tp{color:var(--ink);white-space:nowrap}
-.q .tx{color:var(--ink-muted);line-height:1.45;min-width:180px}
-.q .hd{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:4px;display:flex;gap:14px;flex-wrap:wrap}
-.empty{font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:10px 0}
-.cut{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding-top:12px;border-top:1px solid var(--hairline-2);margin-top:6px}
-.lk{font-family:var(--mono);font-size:10px;letter-spacing:.05em;color:var(--ink-faint);text-decoration:none;border-bottom:1px solid transparent;transition:.15s;white-space:nowrap}
-.lk:hover{color:var(--accent);border-color:rgba(224,162,51,.4)}
-
-/* drill-down drawer */
-.scrim{position:fixed;inset:0;background:rgba(6,5,4,.62);backdrop-filter:blur(2px);z-index:40;opacity:0;visibility:hidden;transition:.28s}
-.scrim.open{opacity:1;visibility:visible}
-/* `visibility:hidden` as well as the transform: parked off-screen alone, the drawer's close
-   button stayed in the tab order and in the accessibility tree while the drawer was shut. */
-.drawer{position:fixed;top:0;right:0;height:100vh;width:520px;max-width:94vw;z-index:41;
-  background:linear-gradient(180deg,var(--surface-2),var(--surface));border-left:1px solid var(--hairline);
-  box-shadow:-30px 0 80px -40px rgba(0,0,0,.9);transform:translateX(100%);visibility:hidden;
-  /* `visibility` is switched, never interpolated: 0s DELAYED to the end on the way out, so the
-     slide-out is still seen, and 0s immediate on the way in — transitioning it left the
-     computed value `hidden` on the opening frame, and an invisible button cannot take focus. */
-  transition:transform .34s cubic-bezier(.2,.7,.2,1),visibility 0s linear .34s;
-  display:flex;flex-direction:column;overflow:hidden}
-.drawer.open{transform:none;visibility:visible;
-  transition:transform .34s cubic-bezier(.2,.7,.2,1),visibility 0s}
-.dwtop{padding:30px 32px 22px;border-bottom:1px solid var(--hairline);position:relative}
-.dwtop .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent)}
-.dwtop h2{font-family:var(--display);font-weight:600;font-size:28px;line-height:1.05;margin-top:10px;letter-spacing:-.01em;overflow-wrap:anywhere}
-.dwtop .meta{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin-top:12px;letter-spacing:.05em;overflow-wrap:anywhere}
-.dwbody{padding:24px 32px 48px;overflow-y:auto}
-.dwbody .ov{font-size:14.5px;line-height:1.62;color:var(--ink-muted);overflow-wrap:anywhere}
-.dwsec{font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-faint);margin:26px 0 12px}
-.dwclose{position:absolute;top:26px;right:28px;z-index:2;width:32px;height:32px;border-radius:50%;
-  border:1px solid var(--hairline);background:transparent;color:var(--ink-muted);font-size:17px;cursor:pointer;line-height:1}
-.dwclose:hover{color:var(--ink);border-color:var(--ink-faint)}
-.sm-links{display:flex;gap:15px;margin-top:10px}
-/* membership bars in the drawer */
-.mini{display:flex;flex-direction:column;gap:7px}
-.mini .row{display:grid;grid-template-columns:1fr 120px 46px;align-items:center;gap:11px;font-size:12.5px;min-width:0}
-.mini .row .nm{color:var(--ink-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.mini .row.on .nm{color:var(--ink)}
-/* NO `overflow:hidden`: it clipped the `top/bottom:-3px` overhang `.cut-line` adds so the
-   umbral tick clears a filled bar. `.bar` carries its own radius, so nothing needs clipping. */
-.mini .row .track{height:7px;border-radius:4px;background:var(--surface-2);position:relative}
-.mini .row .bar{height:7px;border-radius:4px;background:var(--accent);opacity:.82;display:block}
-.mini .row.off .bar{background:var(--slate);opacity:.6}
-/* `--ink-muted` (6.9:1), not `--ink-faint` (3.2:1, below AA): this is the single number the
-   drawer exists to show, at 11px. The faint token stays on the furniture around it. */
-.mini .row .ct{font-family:var(--mono);font-size:11px;color:var(--ink-muted);text-align:right;
-  font-variant-numeric:tabular-nums}
-.mini .row .mark{color:var(--accent)}
-.cut-line{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--sienna);
-  box-shadow:0 0 0 1px rgba(14,13,11,.75)}
-
 footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
 
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-@media (max-width:900px){.grid{grid-template-columns:1fr}.span2{grid-column:auto}.kpis{grid-template-columns:repeat(2,1fr)}.kpi:nth-child(2n){border-right:0}.kpi:nth-child(n+5){border-bottom:1px solid var(--hairline)}.kpi:nth-child(n+7){border-bottom:0}}
+@media (max-width:900px){.facts{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}.kpi{border-right:0;border-bottom:1px solid var(--hairline)}.kpi:last-child{border-bottom:0}}
 @media (max-width:640px){
   .wrap{padding:28px 16px 48px}
-  /* A three-column queue does not fit a phone, and a pane that scrolls sideways hides the
-     one column a reader came for. Stack each row and give every cell its header back. */
-  .phead{flex-direction:column;align-items:flex-start;gap:4px}
-  .phead .sub{text-align:left}
-  .qwrap{max-height:520px;overflow-x:hidden}
-  .q thead{display:none}
-  .q tr[data-id]{display:block;padding:10px 0;border-top:1px solid var(--hairline-2)}
-  .q td{display:block;border:0;padding:2px 0}
-  .q td::before{content:attr(data-h);font-family:var(--mono);font-size:9px;letter-spacing:.16em;
-    text-transform:uppercase;color:var(--ink-faint);margin-right:8px}
-  .q .tx{min-width:0}
   .masthead{flex-direction:column;align-items:flex-start;gap:14px}
   .brand h1{font-size:38px}
-  .stamp{white-space:normal}
-  .kpi{padding:16px 16px 14px}
-  .kpi .num{font-size:30px}
+  .stamp{text-align:left}
   .panel{padding:18px 16px 14px}
-  .controls{gap:12px}
-  .mini .row{grid-template-columns:1fr 70px 44px}
+  .phead{flex-direction:column;align-items:flex-start;gap:4px}
+  .phead .sub{text-align:left}
+  /* A five-column table does not fit a phone: stack each row, each cell names itself. */
+  .t thead{display:none}
+  .t tr{display:block;padding:10px 0;border-top:1px solid var(--hairline-2)}
+  .t td{display:block;border:0;padding:3px 0}
+  .t td::before{content:attr(data-h);font-family:var(--mono);font-size:9px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--ink-faint);margin-right:8px}
+  .t .tx{min-width:0;max-width:none}
 }
 </style>
 </head>
@@ -198,103 +149,67 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   <header class="masthead">
     <div class="brand">
       <h1>XBrain<span class="dot">.</span> Jev</h1>
-      <p id="subtitle">Lo que Jev dice de cada post, frente a lo que asignó enrich</p>
+      <p>Dónde no coinciden los topics de enrich con los de Jev, post a post</p>
     </div>
     <div class="stamp" id="stamp">ACTUALIZADO · —</div>
   </header>
 
-  <section class="controls">
-    <span class="kick">Umbral</span>
-    <input type="range" id="threshold" min="0" max="1" step="0.01" aria-label="Umbral de pertenencia">
-    <span class="tval" id="threshold-value">—</span>
-    <div class="seg" id="presets"></div>
-    <button type="button" class="toggle on" id="show-fallback" role="switch" aria-checked="true">
-      <span class="sw"></span><span>Incluir «Jev eligió el fallback»</span>
-    </button>
-    <span class="hint" id="reset-hint"></span>
-  </section>
+  <p class="about"><b>Qué es esto.</b> <span id="about">Jev es un segundo juez que lee cada
+    post y dice, para cada topic del vocabulario, la probabilidad de que el post trate de él.
+    Esta página compara esa respuesta con los topics que puso enrich y lista los posts donde
+    no coinciden, para que corrijas los que están mal. Arriba, lo que ha costado preguntar.</span></p>
 
   <noscript><section class="banner">
-    <b>Esta página necesita JavaScript</b>Todos los números se calculan en el navegador a
-    partir del JSON incrustado más abajo. Sin JavaScript no falta nada del corpus: falta el
-    cálculo. Ábrela en un navegador con JS, o usa <code>xbrain jev report</code>.
+    <b>Esta página necesita JavaScript</b>Los datos están incrustados en la página, pero la
+    tabla se dibuja con JavaScript. Ábrela en un navegador con JS, o usa
+    <code>xbrain jev report</code>.
   </section></noscript>
   <section class="banner" id="banner" hidden></section>
 
-  <section class="kpis" id="kpis"></section>
-  <p class="vnote" id="sidecar"></p>
-
-  <section class="grid">
-    <div class="panel span2">
-      <div class="phead">
-        <div><span class="kick">01 · Respaldo</span><h3>Respaldo por topic</h3></div>
-        <div class="sub">peor primero · % de asignaciones de enrich con noul ≥ umbral</div>
-      </div>
-      <div class="chart" id="chart-topics" style="height:520px"></div>
+  <section class="panel" id="cost">
+    <div class="phead">
+      <div><span class="kick">01 · Coste</span><h2>Coste y peticiones</h2></div>
+      <div class="sub">estimación a precio de lista, calculada desde los tokens registrados</div>
     </div>
+    <div class="kpis" id="kpis"></div>
+    <p class="note" id="before-log" hidden></p>
+    <h3 class="phead" style="margin-top:22px;border:0;padding-bottom:0"><span class="kick">Histórico por pasada</span></h3>
+    <div class="twrap"><table class="t" id="runs"></table></div>
+  </section>
 
-    <div class="panel span2">
-      <div class="phead">
-        <div><span class="kick">02 · Distribución</span><h3>Distribución de nouls</h3></div>
-        <div class="sub" id="sub-hist">eje log · bins de 0,05 · la línea marca el umbral</div>
-      </div>
-      <div class="chart" id="chart-hist" style="height:320px"></div>
+  <section class="panel" id="numbers">
+    <div class="phead">
+      <div><span class="kick">02 · Resumen</span><h2>Lo que dice Jev, en tres números</h2></div>
+      <div class="sub" id="numbers-sub">—</div>
     </div>
+    <div class="facts" id="facts"></div>
+  </section>
 
-    <div class="panel span2">
-      <div class="phead">
-        <div><span class="kick">03 · Dudosas</span><h3>Dudosas</h3></div>
-        <div class="sub" id="sub-doubtful">asignadas por enrich, noul &lt; umbral</div>
-      </div>
-      <div id="q-doubtful"></div>
+  <section class="panel posts" id="posts">
+    <div class="phead">
+      <div><span class="kick">03 · Posts</span><h2>Posts donde enrich y Jev no coinciden</h2></div>
+      <div class="sub">✓ Jev lo confirma · ✗ Jev no lo ve · + Jev lo añadiría · pasa el ratón para ver la probabilidad</div>
     </div>
-
-    <div class="panel span2">
-      <div class="phead">
-        <div><span class="kick">04 · Candidatas</span><h3>Candidatas que faltan</h3></div>
-        <div class="sub" id="sub-missing">no asignadas, noul ≥ umbral</div>
-      </div>
-      <div id="q-missing"></div>
+    <div class="controls">
+      <label><input type="checkbox" id="only-disagreements" checked> Solo posts con desacuerdo</label>
+      <input type="search" id="search" placeholder="Buscar por texto, autor o topic" aria-label="Buscar posts">
+      <span class="count" id="count">—</span>
     </div>
-
-    <div class="panel span2">
-      <div class="phead">
-        <div><span class="kick">05 · Primario</span><h3>Primario que no coincide</h3></div>
-        <div class="sub" id="sub-primary">el primario de enrich frente al Choice de Jev</div>
-      </div>
-      <div id="q-primary"></div>
-    </div>
+    <div class="twrap"><table class="t" id="post-table"></table></div>
+    <p class="muted" id="excluded"></p>
   </section>
 
   <footer>
-    <span>XBRAIN · JEV vs ENRICH · <span id="foot-providers">—</span></span>
-    <span id="foot-note">—</span>
+    <span>XBRAIN · JEV vs ENRICH</span>
+    <span>DATOS EMPOTRADOS · TIPOGRAFÍAS DE GOOGLE FONTS</span>
   </footer>
 </main>
 
-<div class="scrim" id="scrim"></div>
-<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dw-title">
-  <button class="dwclose" id="dw-close" aria-label="Cerrar">✕</button>
-  <div class="dwtop">
-    <span class="kick">item</span>
-    <h2 id="dw-title">—</h2>
-    <div class="meta" id="dw-meta">—</div>
-  </div>
-  <div class="dwbody" id="dw-body"></div>
-</aside>
-
-<script>/*__ECHARTS__*/</script>
 <script>
 /* THE GUARD IS THE FIRST THING THE SCRIPT DOES, and everything that can throw is inside
-   `boot()` below — because a guard installed after the work it guards is not a guard. An
-   uncaught throw at script-evaluation time aborts the rest of the file and leaves the full
-   masthead, five titled panels and zero rows, with the banner element still `hidden`: a page
-   that reads as "the corpus is empty" or "nobody ran `xbrain jev topics`", both wrong and both
-   actionable in the direction of re-paying for the whole side-car.
-
-   The message goes in as a TEXT NODE, so this needs neither `esc` nor anything else declared
-   further down — a guard that depends on the code it is guarding has the same hole again. */
-/* ===== boot guard ===== */
+   `boot()` below — a guard installed after the work it guards is not a guard. An uncaught
+   throw would leave the header and an empty table, which reads as "nothing to fix". The
+   message goes in as a TEXT NODE, so the guard needs nothing declared further down. */
 function paintBootFailure(message) {
   const banner = document.getElementById('banner');
   if (!banner) return;
@@ -304,810 +219,210 @@ function paintBootFailure(message) {
     String(message) + '. No hay números que leer aquí: usa `xbrain jev report`.'));
 }
 addEventListener('error', (e) => paintBootFailure(e.message));
-/* ===== end boot guard ===== */
 
 const DATA = /*__DATA__*/;
 
-/* ===== derive: mirrors jev/report.py ===== */
-/* A PURE function of (DATA, t) — no DOM, no ECharts, no toggle state. That is what lets
-   tests/test_jev_dashboard.py lift this region out and run it through node against the same
-   fixture `build_report` summarised in Python, and it is why the queue filtering lives in
-   renderQueues and not here. Every rule below has a counterpart in jev/report.py:
-     backed / doubtful  -> _doubtful, and the partition in _pair_totals
-     unjudged           -> _unjudged   (a slug absent from `membership`, never a 0.0)
-     missing            -> _missing
-     jev_pairs          -> _jev_assigned
-     primary_agree      -> ItemComparison.primary_agrees                                   */
-const slugs = DATA.topics.map(t => t.slug);
-const slugAt = Object.fromEntries(slugs.map((s, i) => [s, i]));
-
-/** `enrich`'s side: each assigned topic lands in exactly ONE of backed / doubtful / unjudged. */
-function enrichSide(it, t, acc) {
-  for (const slug of it.assigned) {
-    acc.assignedPairs++;
-    const i = slugAt[slug];
-    if (i !== undefined) acc.perTopic[i].assigned++;
-    const noul = i === undefined ? null : it.m[i];
-    if (noul === null || noul === undefined) {
-      // Jev was never asked about this slug: it left the vocabulary after enrich wrote it.
-      acc.unjudged++;
-      if (i !== undefined) acc.perTopic[i].unjudged++;
-    } else if (noul >= t) {
-      acc.backed++;
-      acc.perTopic[i].backed++;
-    } else {
-      acc.doubtful.push({it: it, slug: slug, noul: noul});
-      acc.perTopic[i].doubtful++;
-    }
-  }
-}
-
-/** Jev's OWN assignment at `t`, and the half of it enrich does not have. */
-function jevSide(it, t, acc) {
-  const assigned = new Set(it.assigned);
-  it.m.forEach(function (noul, i) {
-    // The SAME guard `enrichSide` uses, spelled the same way: `null >= t` evaluates `null` as
-    // 0, so at `--threshold 0` (legal, and tested) an unanswered topic would silently become
-    // one of Jev's own assignments.
-    if (noul === null || noul === undefined) return;
-    if (!(noul >= t)) return;
-    acc.jevPairs++;
-    if (assigned.has(slugs[i])) {
-      acc.jevBacked++;
-    } else {
-      acc.missing.push({it: it, slug: slugs[i], noul: noul});
-      acc.perTopic[i].missing++;
-    }
-  });
-}
-
-/** True when Jev answered something outside the vocabulary — `report._primary_totals`' rule. */
-const choseFallback = (it) => slugAt[it.jp] === undefined;
-
-/** The primary axis. No primary at all is not agreement — there is nothing to agree with. */
-function primarySide(it, acc) {
-  // `report._primary_totals`' rule: Jev answering outside the vocabulary is the fallback, and
-  // it is counted INDEPENDENTLY of agreement (an item can be both). `renderQueues` filters the
-  // queue on the same predicate, so this counter is what puts that filter under the net.
-  if (choseFallback(it)) acc.fallback++;
-  if (it.primary !== null && it.jp === it.primary) acc.primaryAgree++;
-  else acc.primary.push(it);
-}
-
-function derive(t) {
-  const acc = {
-    // `t` travels WITH the result so `selfCheck(summary, d)` can tell whether `d` was derived
-    // at the threshold the summary was built at, without a second argument to keep in sync.
-    t: t,
-    perTopic: slugs.map(function () { return {assigned: 0, backed: 0, doubtful: 0, unjudged: 0, missing: 0}; }),
-    doubtful: [], missing: [], primary: [],
-    assignedPairs: 0, backed: 0, unjudged: 0, jevPairs: 0, jevBacked: 0,
-    primaryAgree: 0, fallback: 0, compared: 0,
-  };
-  for (const it of DATA.items) {
-    if (!it.cmp) continue;  // no enrichment: `report.compare_item` returns None for it
-    acc.compared++;
-    enrichSide(it, t, acc);
-    jevSide(it, t, acc);
-    primarySide(it, acc);
-  }
-  // Worst first, then item id, then SLUG. `_sorted_doubtful` keys on `(noul, item_id)` over
-  // a list `_doubtful` already ordered by `(noul, slug)` per item, and Python's sort is
-  // stable — so the effective rule is all three, and two pairs of the SAME item at the SAME
-  // noul would otherwise order differently here than in the markdown.
-  const bySlug = (a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
-  acc.doubtful.sort((a, b) => a.noul - b.noul || (a.it.id < b.it.id ? -1 : a.it.id > b.it.id ? 1 : 0) || bySlug(a, b));
-  acc.missing.sort((a, b) => b.noul - a.noul || (a.it.id < b.it.id ? -1 : a.it.id > b.it.id ? 1 : 0) || bySlug(a, b));
-  return acc;
-}
-
-/** `report._backing_order`: never-assigned rows last, then the EXACT ratio (never the %).
-
-    In the region because chart 01's row ORDER is a mirror of `report._per_topic` just as much
-    as its numbers are, and a mirror nothing executes is a mirror that drifts. No label here:
-    `labelOf` is display, and this has to stay callable with nothing but `DATA`. */
-function topicRows(d) {
-  return slugs.map(function (slug, i) {
-    const row = d.perTopic[i];
-    return {slug: slug, assigned: row.assigned, backed: row.backed, doubtful: row.doubtful,
-            unjudged: row.unjudged, missing: row.missing,
-            ratio: row.assigned ? row.backed / row.assigned : 0};
-  }).sort((a, b) => (a.assigned === 0) - (b.assigned === 0) || a.ratio - b.ratio ||
-                    (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
-}
-
-const BINS = 20;
-
-/** Every judged (item, topic) noul, binned, split by whether enrich assigned that topic.
-
-    Only COMPARABLE items, like every other count on the page: an item with no enrichment has
-    no assignment to be on either side of. The panel's sub-line says so when any were dropped. */
-function histogram() {
-  const assigned = new Array(BINS).fill(0), other = new Array(BINS).fill(0);
-  const bin = (noul) => Math.min(BINS - 1, Math.floor(noul * BINS));
-  for (const it of DATA.items) {
-    if (!it.cmp) continue;  // no enrichment: `report.compare_item` returns None for it
-    // enrich's side is a MULTISET, walked the way `report._pair_totals` walks it: an item that
-    // assigned a topic twice contributes two pairs. Binning through a `Set` dropped the
-    // duplicate, so the total came up short of `assigned_pairs - assigned_unjudged` and the
-    // page latched a red banner over a corpus that was fine — a false alarm from the check
-    // that exists to prevent false calm.
-    for (const slug of it.assigned) {
-      const i = slugAt[slug];
-      const noul = i === undefined ? null : it.m[i];
-      if (noul === null || noul === undefined) continue;  // never asked: nothing to bin
-      assigned[bin(noul)]++;
-    }
-    // Jev's side is the complement, and there a set is right: `m` has one slot per slug.
-    const set = new Set(it.assigned);
-    it.m.forEach(function (noul, i) {
-      if (noul === null || noul === undefined) return;
-      if (!set.has(slugs[i])) other[bin(noul)]++;
-    });
-  }
-  return {assigned: assigned, other: other};
-}
-
-const sum = (xs) => xs.reduce((a, b) => a + b, 0);
-
-/** `report._pct`'s rule, to the digit — one decimal, HALF TO EVEN, and 0.0 on an empty whole.
-
-    `toFixed` rounds half AWAY from zero, so one backed assignment out of sixteen printed
-    `6,3 %` here while `topics-report.md` printed `6.2 %` from the same side-car. 152 of the
-    80,199 (part, whole) pairs under whole<=400 diverge that way. Nothing sorts on a percentage
-    — `report._backing_order` keys on the exact ratio for that reason — but one side-car must
-    not quote two numbers. */
-function round1(x) {
-  // A TIE ONLY WHEN THE BINARY VALUE IS EXACTLY ONE: x must be a quarter (so `x * 20` is
-  // computed without error) and `x * 20` must be odd — that is exactly the set {…, 0.25, 0.75,
-  // 6.25, …} where the digit after the first decimal is a true 5. Deciding it on `x * 10`, as
-  // this first did, asks a multiplication that has already moved the value.
-  const twentieths = x * 20;
-  if (x * 4 === Math.floor(x * 4) && Math.abs(twentieths % 2) === 1) {
-    const tenths = Math.floor(x * 10);
-    return (tenths % 2 === 0 ? tenths : tenths + 1) / 10;
-  }
-  // Not a tie: `toFixed` rounds the EXACT binary value to nearest, which is what Python's
-  // `round` does too once the tie case is out of the way.
-  return Number(x.toFixed(1));
-}
-/** A percentage the SUMMARY already rounded, rendered es-ES. */
-const pctText = (x) => x.toFixed(1).replace('.', ',') + ' %';
-/** A percentage the PAGE computes. `_pct` scores an empty whole as 0.0, and so does this. */
-const pct1 = (part, whole) => pctText(round1(whole ? part / whole * 100 : 0));
-
-/** The counters `selfCheck` holds against the summary. Named as `_summarize` names them. */
-function buckets(d) {
-  return {
-    backed: d.backed, doubtful: d.doubtful.length, missing: d.missing.length,
-    unjudged: d.unjudged, jev_pairs: d.jevPairs, jev_backed: d.jevBacked,
-    primary_agree: d.primaryAgree, primary_fallback: d.fallback,
-    assigned_pairs: d.assignedPairs, items_compared: d.compared,
-  };
-}
-
-/* The page recomputes what the report computed. If the two ever disagree, say so ON SCREEN:
-   a dashboard quietly showing numbers `xbrain jev report` would not print is worse than no
-   dashboard.
-
-   EVERY NUMBER THE PAGE DERIVES FROM `DATA.items` IS IN ONE OF THESE TABLES — including the
-   three percentages in the KPI band, which are compared as the STRINGS they are rendered as,
-   and the per-topic rows behind chart 01, field by field. Two derived numbers are display-only
-   and say so here rather than pretending otherwise: the histogram's `no asignados` bins (the
-   summary has no counterpart for them; its `asignados` half IS checked) and the length of the
-   primary queue after the fallback toggle filters it (`primary_fallback` covers the predicate
-   the filter uses, which is the part that can be wrong). Numbers quoted VERBATIM from
-   `summary` — `truncated`, `cost_text`, the side-car counts — are not recomputed here, so
-   there is nothing for them to disagree with.
-
-   The split is `report.THRESHOLD_DEPENDENT_KEYS`: the threshold-FREE buckets must match at
-   EVERY threshold (report.py says they do not move), the dependent ones only at the threshold
-   the summary was built at — but see LOAD_MISMATCHES: a divergence found there is never
-   withdrawn afterwards.                                                                     */
-const DEPENDENT_CHECKS = [['assigned_backed','backed'], ['doubtful_pairs','doubtful'],
-                          ['missing_pairs','missing'], ['jev_pairs','jev_pairs'],
-                          ['jev_backed','jev_backed']];
-const FREE_CHECKS = [['assigned_unjudged','unjudged'], ['primary_agree','primary_agree'],
-                     ['primary_fallback','primary_fallback'],
-                     ['assigned_pairs','assigned_pairs'], ['items_compared','items_compared']];
-/* The KPI percentages, compared as rendered STRINGS: `pct1` must agree with `_pct` to the
-   DIGIT, not merely to within a float epsilon — half-to-even against half-away-from-zero is
-   exactly a last-digit disagreement. Split by the same rule as the counters, and the split is
-   `report.py`'s: the two backing rates move with the umbral, the primary agreement does not. */
-const PCT_DEPENDENT = [
-  ['enrich_backed_pct', (d) => pct1(d.backed, d.assignedPairs)],
-  ['jev_backed_pct', (d) => pct1(d.jevBacked, d.jevPairs)],
-];
-const PCT_FREE = [['primary_agree_pct', (d) => pct1(d.primaryAgree, d.compared)]];
-/** Summary keys that are whole LISTS rather than counters; checked row by row below. */
-const DEPENDENT_LISTS = ['per_topic'];
-/** Every field `report._topic_row` emits bar the derived `backed_pct`, which is a function of
-    three of them. Chart 01's tooltip displays `doubtful` and `unjudged` per topic, so matching
-    only `assigned`/`backed` would pin their SUM and let the split be wrong on screen. */
-const TOPIC_FIELDS = ['assigned', 'backed', 'doubtful', 'unjudged', 'missing'];
-
-/** The key split is itself a contract: a bucket that changed sides makes a table meaningless. */
-function keyContractProblems() {
-  const dependent = new Set(DATA.threshold_dependent_keys);
-  const bad = [];
-  const dependentKeys = DEPENDENT_CHECKS.concat(PCT_DEPENDENT, DEPENDENT_LISTS.map(k => [k]));
-  for (const [key] of dependentKeys) {
-    if (!dependent.has(key)) bad.push(key + ' ya no depende del umbral');
-  }
-  for (const [key] of FREE_CHECKS.concat(PCT_FREE)) {
-    if (dependent.has(key)) bad.push(key + ' ahora depende del umbral');
-  }
-  return bad;
-}
-
-/** Chart 01 is a per-topic number, so it is checked per topic, not via the corpus totals. */
-function perTopicProblems(summary, d) {
-  const bad = [];
-  if (summary.per_topic.length !== slugs.length) {
-    bad.push('per_topic: ' + slugs.length + ' topics aquí, ' + summary.per_topic.length + ' en el informe');
-  }
-  for (const row of summary.per_topic) {
-    const i = slugAt[row.slug];
-    if (i === undefined) { bad.push('per_topic[' + row.slug + ']: el informe lo trae, el vocabulario de la página no'); continue; }
-    for (const field of TOPIC_FIELDS) {
-      if (d.perTopic[i][field] !== row[field]) {
-        bad.push('per_topic[' + row.slug + '].' + field + ': ' + d.perTopic[i][field] + ' aquí, ' + row[field] + ' en el informe');
-      }
-    }
-  }
-  return bad;
-}
-
-/** The histogram's `asignados` half against the summary: every assigned pair Jev answered. */
-function histogramProblems(summary) {
-  const counted = sum(histogram().assigned);
-  const judged = summary.assigned_pairs - summary.assigned_unjudged;
-  return counted === judged
-    ? []
-    : ['histograma: ' + counted + ' asignaciones con noul aquí, ' + judged + ' en el informe'];
-}
-
-/** `report._pair_totals`: assigned = backed + doubtful + unjudged, with nothing left over.
-
-    Its own function rather than a line inside `selfCheck` because it reads only the page's OWN
-    buckets — no summary can make it fire, so corrupting one cannot observe it, and a check that
-    cannot be observed failing is indistinguishable from one that cannot fail. */
-function partitionProblems(mine) {
-  return mine.backed === mine.assigned_pairs - mine.doubtful - mine.unjudged
-    ? []
-    : ['las asignaciones no se reparten entre respaldadas, dudosas y sin juzgar'];
-}
-
-/** Every way the page can disagree with `summary`, NAMED. Empty means they agree. PURE. */
-function selfCheck(summary, d) {
-  const mine = buckets(d);
-  const bad = keyContractProblems();
-  const atReportThreshold = d.t === summary.threshold;
-  const checks = atReportThreshold ? DEPENDENT_CHECKS.concat(FREE_CHECKS) : FREE_CHECKS;
-  for (const [key, bucket] of checks) {
-    if (mine[bucket] !== summary[key]) {
-      bad.push(key + ': ' + mine[bucket] + ' aquí, ' + summary[key] + ' en el informe');
-    }
-  }
-  for (const [key, compute] of atReportThreshold ? PCT_DEPENDENT.concat(PCT_FREE) : PCT_FREE) {
-    const here = compute(d), there = pctText(summary[key]);
-    if (here !== there) bad.push(key + ': ' + here + ' aquí, ' + there + ' en el informe');
-  }
-  if (atReportThreshold) bad.push.apply(bad, perTopicProblems(summary, d));
-  // Threshold-free, so it runs at every umbral: the bins do not move with the slider.
-  bad.push.apply(bad, histogramProblems(summary));
-  bad.push.apply(bad, partitionProblems(mine));
-  return bad;
-}
-
-/* THE VERDICT AT THE REPORT'S UMBRAL, COMPUTED ONCE AND NEVER WITHDRAWN.
-
-   `selfCheck` is right that it may only compare the threshold-dependent keys at the threshold
-   the summary was built at. But a divergence found there is a fact about the PAGE, not about
-   `t`: the same arithmetic runs at every umbral. Re-running the check per render and showing
-   only its current output meant the banner said "no te fíes de los números de esta página" on
-   load and then withdrew it the moment the reader touched the slider — the page's entire
-   reason to exist — leaving the numbers just as wrong and the warning gone. Latched here,
-   unioned into every later render.                                                          */
-let LOAD_MISMATCHES = null;
-
-/** The load verdict, computed at the REPORT's umbral, once, on first use. */
-function loadMismatches() {
-  if (LOAD_MISMATCHES === null) LOAD_MISMATCHES = selfCheck(DATA.summary, derive(DATA.threshold));
-  return LOAD_MISMATCHES;
-}
-
-/** What the banner must say right now: what was found on load, plus anything found since. */
-function currentMismatches(d) {
-  const latched = loadMismatches();
-  const now = selfCheck(DATA.summary, d);
-  return latched.concat(now.filter(p => latched.indexOf(p) === -1));
-}
-/* ===== end derive ===== */
-
+/* ---------------------------------------------------------------- helpers
+   Nothing below COMPUTES a comparison or a price: every number is read from DATA, which
+   `jev/report.py` produced. These only format. */
 const $ = (id) => document.getElementById(id);
 const esc = (s) => (s == null ? '' : String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-/* ONE number formatter for the page, es-ES: decimal comma, thousands point. The exception is
-   `totals.cost_text`, which arrives already formatted from `defaults.jev_cost_fragment` (C
-   locale, decimal point) and is rendered as-is — one definition of the bill beats one decimal
-   separator, and `dashboard.py`'s module docstring records the seam. */
-const nf = (n) => n.toLocaleString('es-ES');
-/** `defaults.plural`, in the browser: the label agrees with the number in front of it. */
+const nf = (n) => Number(n).toLocaleString('es-ES');
+const dec = (n, d) => Number(n).toLocaleString('es-ES', {minimumFractionDigits: d, maximumFractionDigits: d});
 const pl = (n, one, many) => nf(n) + ' ' + (n === 1 ? one : many);
-const f2 = (x) => x.toFixed(2).replace('.', ',');
-/* THREE decimals wherever a noul is read against the umbral — the queue column, the drawer and
-   the umbral itself. At two, a pair at 0.8496 renders `0,85` under a heading that says
-   `noul < umbral` beside an umbral rendering `0,85`: 331 such rows on the real corpus. The
-   comparison was always exact (`m` ships unrounded); it was the DISPLAY that contradicted it. */
-const f3 = (x) => x.toFixed(3).replace('.', ',');
-const labelOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
-const descOf = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
-const name = (slug) => labelOf[slug] || slug;
-const C = {accent:'#E0A233', slate:'#6E8CA0', sienna:'#C4643B', sage:'#7C9A8E',
-           ink:'#ECE6DA', muted:'#A7A093', faint:'#6E685D', hair:'rgba(236,230,218,.05)', surface2:'#1C1811'};
-const UI = "'Hanken Grotesk',sans-serif", MONO = "'Spline Sans Mono',monospace";
-const TIP = {backgroundColor:C.surface2, borderColor:'rgba(236,230,218,.12)', borderWidth:1,
-  textStyle:{color:C.ink, fontFamily:UI, fontSize:12.5}, padding:[9,13],
-  extraCssText:'border-radius:8px;box-shadow:0 12px 30px -12px rgba(0,0,0,.8)'};
-const QUEUE_TOP = 200;
-
-let threshold = DATA.threshold;
-let showFallback = true;
-
-/* ----------------------------------------------------------------- self-check, on screen
-   `selfCheck` itself lives inside the derive region so the node harness can execute it; this
-   is only the half that touches the DOM. A fully diverging page would otherwise print a
-   hundred lines, so the banner shows the first few and counts the rest.                     */
-const BANNER_TOP = 6;
-
-function renderBanner(mismatches) {
-  const shown = mismatches.slice(0, BANNER_TOP).join(' · ');
-  const rest = mismatches.length - Math.min(mismatches.length, BANNER_TOP);
-  const moved = threshold !== DATA.threshold
-    ? ' Detectada con el umbral del informe (' + f3(DATA.threshold) + '); en otro umbral las ' +
-      'cifras que dependen de él no se pueden verificar contra el informe.'
-    : '';
-  $('banner').hidden = mismatches.length === 0;
-  $('banner').innerHTML = mismatches.length
-    ? '<b>Inconsistencia entre el informe y el dashboard</b>' + esc(shown) +
-      (rest ? esc(' · … y ' + rest + ' más') : '') +
-      '. No te fíes de los números de esta página: manda <code>xbrain jev report</code>.' +
-      esc(moved)
-    : '';
-}
-
-/* ----------------------------------------------------------------- kpis + side-car line */
-/** `lab` is escaped; `num` and `ctx` are RAW HTML — every call site below is a literal in
-    this file (`<b>`, `&lt;`). Nothing from `DATA` reaches them without `esc`. */
-function kpi(lab, num, ctx, accent) {
-  return '<div class="kpi"><div class="lab">' + esc(lab) + '</div><div class="num' +
-    (accent ? ' accent' : '') + '">' + num + '</div><div class="ctx">' + ctx + '</div></div>';
-}
-
-function renderKpis(d) {
-  const tot = DATA.totals;
-  $('kpis').innerHTML = [
-    kpi('items comparados', nf(d.compared),
-        'de <b>' + nf(tot.current) + '</b> ' +
-        (tot.current === 1 ? 'evaluación vigente' : 'evaluaciones vigentes'), true),
-    kpi('enrich respaldado por Jev', pct1(d.backed, d.assignedPairs),
-        nf(d.backed) + ' de ' + pl(d.assignedPairs, 'asignación', 'asignaciones')),
-    kpi('Jev respaldado por enrich', pct1(d.jevBacked, d.jevPairs),
-        nf(d.jevBacked) + ' de ' + pl(d.jevPairs, 'par de Jev', 'pares de Jev')),
-    kpi('primario coincide', pct1(d.primaryAgree, d.compared),
-        nf(d.primaryAgree) + ' de ' + pl(d.compared, 'item', 'items')),
-    kpi('dudosas', nf(d.doubtful.length), 'asignadas, noul &lt; umbral'),
-    kpi('sin juzgar', nf(d.unjudged), 'el topic salió del vocabulario'),
-    kpi('candidatas que faltan', nf(d.missing.length), 'no asignadas, noul ≥ umbral'),
-    kpi('truncados', nf(tot.truncated), 'el post se recortó al preguntar'),
-  ].join('');
-}
-
-/** `report._side_car_line` + the bill, in one line under the KPIs. */
-function renderSidecar() {
-  const tot = DATA.totals;
-  const tally = (counts, one, many) => {
-    const names = Object.keys(counts).sort();
-    return (names.length === 1 ? one : many) + ': ' +
-      (names.map(n => esc(n) + ' (' + nf(counts[n]) + ')').join(', ') || '—');
-  };
-  const stale = tot.stale ? ' <span class="stale">' + nf(tot.stale) +
-    (tot.stale === 1 ? ' caducada' : ' caducadas') + '</span>' : ' 0 caducadas';
-  const orphans = tot.orphans ? ' · <span class="stale">' + nf(tot.orphans) +
-    (tot.orphans === 1 ? ' huérfana' : ' huérfanas') + '</span>' : '';
-  $('sidecar').innerHTML =
-    'Evaluaciones: <b>' + nf(tot.current) + '</b> ' +
-    (tot.current === 1 ? 'vigente' : 'vigentes') + ' de ' + nf(tot.assessed) +
-    (tot.assessed === 1 ? ' guardada ·' : ' guardadas ·') +
-    stale + orphans + ' · ' + pl(tot.items, 'item en el corpus', 'items en el corpus') + ' · ' +
-    tally(tot.models, 'modelo', 'modelos') + ' · ' + tally(tot.providers, 'proveedor', 'proveedores') +
-    ' · Coste: ' + esc(tot.cost_text) + '.';
-}
-
-/* ----------------------------------------------------------------- charts */
-/* The two ECharts instances are built in `boot()`, not here: `echarts.init` throws if the
-   library failed to inline, and anything that throws at script-evaluation time has to sit
-   inside the guard. `topicRows` is NOT redeclared here — it lives in the derive region, which
-   is the copy the node harness pins. */
-let chartTopics = null, chartHist = null;
-
-const NARROW = 640;
-
-/* Chart 01 is the headline panel, and a 45-topic category axis does not fit a phone: the labels
-   claimed ~170 px and the right-hand value labels another ~40, leaving ~120 px of plot for a
-   fixed 0-100 % scale — every bar a stub, and the five x-axis ticks run together into
-   `0 %20 %40 %60 %80 %`. Below 640 px the labels truncate (the tooltip still carries the full
-   one), the value labels go, and the axis keeps three ticks. */
-function renderTopics(d) {
-  const rows = topicRows(d);
-  const narrow = window.innerWidth <= NARROW;
-  $('chart-topics').style.height = Math.max(320, rows.length * 22 + 40) + 'px';
-  chartTopics.resize();
-  chartTopics.setOption({
-    // 24, not 10: `containLabel` reserves for the CATEGORY labels, not for the last x tick,
-    //  and `100 %` was clipping against the panel edge.
-    grid: {left: 4, right: narrow ? 24 : 56, top: 6, bottom: 26, containLabel: true},
-    // No `%` on the narrow axis: the last tick is flush with the panel edge and the suffix
-    // clipped to `100`. The panel's own sub-line already says the scale is a percentage.
-    xAxis: {type: 'value', max: 100, splitNumber: narrow ? 2 : 5,
-            axisLabel: {formatter: narrow ? '{value}' : '{value} %',
-                        color: C.faint, fontFamily: MONO, fontSize: 11},
-            axisLine: {show: false}, axisTick: {show: false}, splitLine: {lineStyle: {color: C.hair}}},
-    yAxis: {type: 'category', inverse: true, data: rows.map(r => name(r.slug)),
-            axisLine: {show: false}, axisTick: {show: false},
-            axisLabel: {color: C.muted, fontFamily: UI, fontSize: narrow ? 11 : 12,
-                        width: narrow ? 92 : null, overflow: narrow ? 'truncate' : 'none'}},
-    tooltip: Object.assign({}, TIP, {formatter: function (p) {
-      const r = rows[p.dataIndex];
-      // The vocabulary's own description: a slug says what the topic is CALLED, not what it
-      // covers, and "which topic is enrich over-assigning" is unanswerable without the second.
-      // It also carries the full label back when the narrow axis truncated it.
-      const desc = descOf[r.slug] ? '<br><i>' + esc(descOf[r.slug]) + '</i>' : '';
-      if (!r.assigned) return esc(name(r.slug)) + desc + '<br>enrich no lo asignó nunca';
-      return esc(name(r.slug)) + desc + '<br>' + nf(r.backed) + ' de ' +
-             pl(r.assigned, 'asignación', 'asignaciones') + ' respaldadas · ' +
-             nf(r.doubtful) + ' dudosas · ' + nf(r.unjudged) + ' sin juzgar<br>faltan ' + nf(r.missing);
-    }}),
-    series: [{
-      type: 'bar', barMaxWidth: 13,
-      // `round1`, not `toFixed`: the bar label and `topics-report.md` quote one side-car.
-      data: rows.map(r => ({value: r.assigned ? round1(r.ratio * 100) : 0,
-                            itemStyle: {color: r.assigned ? C.accent : C.faint, opacity: r.assigned ? .88 : .35}})),
-      label: {show: !narrow, position: 'right',
-              formatter: p => rows[p.dataIndex].assigned
-                ? String(p.value).replace('.', ',') + ' %' : 'sin asignar',
-              color: C.faint, fontFamily: MONO, fontSize: 10},
-    }],
-  });
-}
-
-// The bins are a fact about the corpus, not about the slider: only the umbral MARK moves.
-// Recomputing 100k+ pairs on every input event is the difference between a slider that
-// drags and one that stutters. Filled by `boot()`, like the charts.
-let HIST = null;
-
-function renderHist(t) {
-  const h = HIST;
-  // Panel 02 reads as a fact about the side-car; it is a fact about the COMPARABLE subset, the
-  // same population every other count on the page uses. Say so when they differ.
-  const dropped = DATA.totals.current - DATA.summary.items_compared;
-  $('sub-hist').textContent = 'eje log · bins de 0,05 · la línea marca el umbral' +
-    (dropped ? ' · ' + pl(dropped, 'item sin enriquecer queda fuera',
-                          'items sin enriquecer quedan fuera') : '');
-  const labels = Array.from({length: BINS}, (_, i) => f2(i / BINS));
-  // A zero bin is shipped as null, not as 1: on a log axis `Math.max(v, 1)` would draw a bar
-  // where the corpus has nothing, which is a count the page invented.
-  //
-  // NOT STACKED, and on a log axis that is not a style choice: a stacked segment is drawn
-  // between log(a) and log(a+b), so its height encodes neither `b` nor a ratio — only the
-  // stack top reads correctly, and the two colours are not comparable across bins. Side by
-  // side, each bar measures from the axis and means what it looks like.
-  const series = (nm, data, color) => ({
-    name: nm, type: 'bar', data: data.map(v => v || null),
-    itemStyle: {color: color, opacity: .85},
-  });
-  chartHist.setOption({
-    grid: {left: 8, right: 16, top: 34, bottom: 26, containLabel: true},
-    legend: {data: ['asignados por enrich', 'no asignados'], right: 4, top: 0,
-             textStyle: {color: C.muted, fontFamily: UI, fontSize: 12}, inactiveColor: C.faint,
-             itemWidth: 16, itemHeight: 9, itemGap: 18},
-    tooltip: Object.assign({}, TIP, {trigger: 'axis', axisPointer: {type: 'shadow'}}),
-    xAxis: {type: 'category', data: labels, axisLine: {lineStyle: {color: 'rgba(236,230,218,.14)'}},
-            axisTick: {show: false}, axisLabel: {color: C.faint, fontFamily: MONO, fontSize: 10},
-            splitLine: {show: false}},
-    yAxis: {type: 'log', minorTick: {show: false}, axisLine: {show: false}, axisTick: {show: false},
-            axisLabel: {color: C.faint, fontFamily: MONO, fontSize: 11}, splitLine: {lineStyle: {color: C.hair}}},
-    series: [
-      series('asignados por enrich', h.assigned, C.accent),
-      Object.assign(series('no asignados', h.other, C.slate), {
-        markLine: {silent: true, symbol: 'none', label: {show: false},
-                   lineStyle: {color: C.sienna, width: 1.5, type: 'dashed'},
-                   data: [{xAxis: t * BINS - 0.5}]},
-      }),
-    ],
-  });
-}
-
-/* ----------------------------------------------------------------- queues */
-/** Only an http(s) URL becomes a link: `Item.url` is a bare `str` in the model, so the one
-    thing standing between a stored `javascript:` and an anchor is this test. The sibling page
-    has the same shape without the guard; the text is still shown either way. */
+/** Dollars: four decimals for a bill (the CLI's rule), five for one post, which is ~0,0003 $. */
+const usd = (x, d) => (x == null ? '—' : '~' + dec(x, d || 4) + ' $');
+const prob = (p) => (p == null ? '—' : dec(p, 2));
+const when = (iso) => new Date(iso).toLocaleString('es-ES', {dateStyle: 'medium', timeStyle: 'short'});
+const LABEL = Object.fromEntries(DATA.topics.map(t => [t.slug, t.label]));
+const DESC = Object.fromEntries(DATA.topics.map(t => [t.slug, t.description]));
+const label = (slug) => LABEL[slug] || slug;
+/** Only an http(s) URL becomes a link: `Item.url` is a bare `str` in the model. */
 const httpUrl = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : null);
 
-function links(it) {
-  const note = it.note ? '<a class="lk" href="obsidian://open?path=' + encodeURIComponent(it.note) + '">nota ↗</a>' : '';
-  const href = httpUrl(it.url);
-  return note + (href
-    ? '<a class="lk" href="' + esc(href) + '" target="_blank" rel="noopener">X ↗</a>'
-    : '<span class="lk">' + esc(it.url) + '</span>');
+/* ---------------------------------------------------------------- header */
+function renderStamp() {
+  const models = Object.keys(DATA.totals.models).sort();
+  $('stamp').innerHTML =
+    'ACTUALIZADO <b>' + esc(DATA.updated) + '</b><br>' +
+    (models.length === 1 ? 'MODELO ' : 'MODELOS ') + '<b>' + esc(models.join(', ') || '—') + '</b><br>' +
+    'UMBRAL <b>' + esc(dec(DATA.threshold, 2)) + '</b> (config)<br>' +
+    '<a href="' + esc(DATA.docs_url) + '" target="_blank" rel="noopener">DOCUMENTACIÓN ↗</a>';
 }
 
-function postCell(it) {
-  return '<div class="tx">' + esc(it.text) + '<div class="hd">@' + esc(it.handle) + links(it) + '</div></div>';
+/* ---------------------------------------------------------------- 01 cost */
+function kpi(lab, num, ctx) {
+  return '<div class="kpi"><div class="lab">' + esc(lab) + '</div><div class="num accent">' +
+    esc(num) + '</div><div class="ctx">' + ctx + '</div></div>';
 }
 
-/** A queue table, cut at QUEUE_TOP and SAYING SO — `report._cut_note`'s rule. */
-function queue(el, rows, columns) {
-  if (!rows.length) { el.innerHTML = '<div class="empty">nada aquí con este umbral</div>'; return; }
-  const head = columns.map(c => '<th>' + esc(c.h) + '</th>').join('');
-  const body = rows.slice(0, QUEUE_TOP).map(function (r) {
-    // `data-h` is the column header, repeated per cell: at phone width the header row is
-    // dropped and each cell re-states its own name, so "0,77" is never a bare number.
-    const cells = columns.map(c => '<td data-h="' + esc(c.h) + '">' + c.f(r) + '</td>').join('');
-    // Reachable by tab, and still a ROW: `role="button"` would make the cells invalid owned
-    // elements, so the topic/noul/post structure — the thing a screen reader needs here —
-    // would be announced as one run-together string. The table says it is a grid, the row
-    // carries its own action hint, and the cells stay cells.
-    return '<tr data-id="' + esc(r.it.id) + '" tabindex="0" aria-label="Abrir el detalle del item ' +
-      esc(r.it.id) + '">' + cells + '</tr>';
-  }).join('');
-  const dropped = rows.length - Math.min(rows.length, QUEUE_TOP);
-  el.innerHTML = '<div class="qwrap"><table class="q" role="grid"><thead><tr>' + head +
-    '</tr></thead><tbody>' + body + '</tbody></table></div>' +
-    // `report._cut_note`'s RULE, reworded for this surface: the markdown points at
-    // `topics-report.json`, and `jev dashboard` writes no JSON — the rows are all in the
-    // `DATA` blob inlined above, and "el JSON" is not how a reader names what they are
-    // already reading. A cut that does not say it cut is the failure `_cut_note` prevents.
-    (dropped ? '<div class="cut">… y ' + pl(dropped, 'fila más', 'filas más') +
-               ' (están todas en los datos de esta página)</div>' : '');
+function unpricedNote(names) {
+  return names.length ? ' · sin tarifa: ' + esc(names.join(', ')) : '';
 }
 
-/** ONE delegated listener per queue, wired once — not 200 re-attached on every slider event. */
-function wireQueue(el) {
-  const open = (e) => {
-    // A LINK INSIDE THE ROW IS ITS OWN CONTROL. Without this guard the delegation swallowed
-    // both anchors: Enter on `X ↗` was `preventDefault`ed and opened the drawer instead of
-    // the post — the link was unreachable by keyboard — and a mouse click fired both.
-    if (e.target.closest('a')) return;
-    const row = e.target.closest('tr[data-id]');
-    if (row) openDrawer(row.dataset.id);
-  };
-  el.addEventListener('click', open);
-  el.addEventListener('keydown', function (e) {
-    if (e.target.closest('a')) return;
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); }
-  });
-}
-
-function renderQueues(d) {
-  const topic = {h: 'topic', f: r => '<span class="tp">' + esc(name(r.slug)) + '</span>'};
-  const noul = {h: 'noul', f: r => '<span class="nn">' + f3(r.noul) + '</span>'};
-  const post = {h: 'post', f: r => postCell(r.it)};
-  queue($('q-doubtful'), d.doubtful, [topic, noul, post]);
-  queue($('q-missing'), d.missing, [topic, noul, post]);
-  const primary = d.primary.filter(it => showFallback || !choseFallback(it)).map(it => ({it: it}));
-  queue($('q-primary'), primary, [
-    {h: 'enrich', f: r => '<span class="tp">' + esc(r.it.primary === null ? '— sin primario' : name(r.it.primary)) + '</span>'},
-    {h: 'Jev', f: r => '<span class="tp">' + esc(name(r.it.jp)) + (choseFallback(r.it) ? ' ·fallback' : '') + '</span>'},
-    {h: 'conf.', f: r => '<span class="nn">' + f2(r.it.jc) + '</span>'},
-    post,
-  ]);
-  $('sub-doubtful').textContent = pl(d.doubtful.length, 'par', 'pares') +
-    ' · asignadas por enrich, noul < umbral';
-  $('sub-missing').textContent = pl(d.missing.length, 'par', 'pares') +
-    ' · no asignadas, noul ≥ umbral';
-  $('sub-primary').textContent = 'se muestran ' + nf(primary.length) + ' de ' +
-    pl(d.primary.length, 'item sin coincidencia', 'items sin coincidencia');
-}
-
-/* ----------------------------------------------------------------- drawer */
-const drawer = $('drawer'), scrim = $('scrim');
-
-/** Assigned topics with no noul to show: out of today's vocabulary, or in it and unanswered.
-
-    ONE list, because they are one fact to a reader — "Jev was never asked about this" — and
-    the drawer used to show a `sin juzgar` count it could not explain: `membershipRows` drops
-    a null noul and `unjudgedRows` listed only the out-of-vocabulary half. */
-function unjudgedSlugs(it) {
-  return it.assigned.filter(function (slug) {
-    const i = slugAt[slug];
-    return i === undefined || it.m[i] === null || it.m[i] === undefined;
-  });
-}
-
-function membershipRows(it) {
-  const assigned = new Set(it.assigned);
-  const ranked = slugs.map((slug, i) => ({slug: slug, noul: it.m[i]}))
-    .filter(r => r.noul !== null && r.noul !== undefined)
-    .sort((a, b) => b.noul - a.noul || (a.slug < b.slug ? -1 : 1));
-  return ranked.map(function (r) {
-    const on = assigned.has(r.slug);
-    const marks = (on ? ' <span class="mark">✓</span>' : '') + (r.slug === it.primary ? ' <span class="mark">★</span>' : '');
-    return '<div class="row ' + (on ? 'on' : 'off') + '"><span class="nm">' + esc(name(r.slug)) + marks +
-      '</span><span class="track"><span class="bar" style="width:' + (r.noul * 100).toFixed(1) + '%"></span>' +
-      '<span class="cut-line" style="left:' + (threshold * 100).toFixed(1) + '%"></span></span>' +
-      '<span class="ct">' + f3(r.noul) + '</span></div>';
-  }).join('');
-}
-
-function unjudgedRows(it) {
-  const missing = unjudgedSlugs(it);
-  if (!missing.length) return '';
-  return '<div class="dwsec">Sin juzgar · sin respuesta de Jev</div><p class="ov">' +
-    missing.map(esc).join(' · ') + ' — enrich las asignó, pero la evaluación guardada no ' +
-    'contiene respuesta para ellas (salieron del <code>vocab.yaml</code>, o nunca se ' +
-    'preguntó por ellas): esas asignaciones no son ni respaldadas ni dudosas.</p>';
-}
-
-/** `5 más probables de 46` — every other cut on this page says it cut, and so does this one. */
-function choiceLabel(it) {
-  return it.options > it.top.length
-    ? '(' + it.top.length + ' más probables de ' + it.options + ')'
-    : '(' + pl(it.options, 'opción', 'opciones') + ')';
-}
-
-/** The top options, PLUS enrich's primary when the cut left it out — with its rank.
-
-    Without it the section answers Jev's question and not the reader's: the bars show Jev's
-    five favourites, the sentence below says enrich picked X, and nothing says whether X came
-    sixth or last. `report.primary_rank` exists to separate a close call from a real conflict,
-    and this drawer is the surface where that distinction is worth the most. */
-function choiceRows(it) {
-  const shown = it.top.map(pair => choiceRow(it, pair[0], pair[1], null));
-  const inTop = it.top.some(pair => pair[0] === it.primary);
-  if (it.primary !== null && !inTop) {
-    shown.push(choiceRow(it, it.primary, it.pp, it.pr));
+function renderCost() {
+  const c = DATA.cost, T = c.total;
+  const unknown = T.input_tokens_unknown ? ' (+' + nf(T.input_tokens_unknown) + ' respuestas sin recuento)' : '';
+  $('kpis').innerHTML =
+    // No logged pass is not a free history: a bare ~0,0000 $ would read as one.
+    kpi('Total', T.runs ? usd(T.cost_usd) : '—',
+      pl(T.requests, 'petición', 'peticiones') + ' · ' + pl(T.input_tokens, 'token', 'tokens') +
+      ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') + unpricedNote(T.unpriced_providers)) +
+    kpi('Media por post', usd(c.per_post_usd, 5),
+      'lo que costó la evaluación guardada de un post (media de las ' +
+      nf(DATA.totals.current) + ' vigentes, las que tienen recuento de tokens)') +
+    kpi('Evaluaciones guardadas', nf(DATA.totals.assessed),
+      'coste de las guardadas: ' + esc(c.side_car_text));
+  const before = c.before_log;
+  if (before.assessments) {
+    $('before-log').hidden = false;
+    $('before-log').textContent =
+      pl(before.assessments, 'evaluación anterior', 'evaluaciones anteriores') +
+      ' al registro de pasadas: se pagaron antes de que existiera el registro, así que no ' +
+      'están en el total (' + usd(before.cost_usd) + ' según sus propios tokens).';
   }
-  return shown.join('');
+  renderRuns(c.runs);
 }
 
-function choiceRow(it, option, probability, rank) {
-  const tail = rank === null ? '' : ' <span class="ct">#' + rank + '</span>';
-  const bar = probability === null || probability === undefined
-    ? '<span class="track"></span><span class="ct">sin rango</span>'
-    : '<span class="track"><span class="bar" style="width:' + (probability * 100).toFixed(1) +
-      '%"></span></span><span class="ct">' + f2(probability) + '</span>';
-  return '<div class="row ' + (option === it.jp ? 'on' : 'off') + '"><span class="nm">' +
-    esc(name(option)) + (option === it.primary ? ' <span class="mark">★</span>' : '') + tail +
-    '</span>' + bar + '</div>';
-}
-
-/** Where focus was when the drawer opened, so closing it does not dump the reader at the top. */
-let focusBeforeDrawer = null;
-
-function openDrawer(id) {
-  const it = DATA.items.find(x => x.id === id);
-  if (!it) {
-    // The id came OFF a row that was built from `DATA.items`, so a miss means the blob is
-    // internally inconsistent — precisely what the banner exists to announce. Returning in
-    // silence made the row simply not respond, with nothing on screen and nothing in the log.
-    renderBanner(currentMismatches(derive(threshold)).concat(
-      ['no encuentro el item ' + id + ' en los datos de la página']));
+function renderRuns(runs) {
+  const t = $('runs');
+  if (!runs.length) {
+    t.outerHTML = '<div class="empty">Aún no hay pasadas registradas. La próxima `xbrain jev topics` ' +
+      'que envíe peticiones añadirá una fila aquí.</div>';
     return;
   }
-  focusBeforeDrawer = document.activeElement;
-  $('dw-title').textContent = '@' + it.handle;
-  $('dw-meta').textContent = 'ITEM ' + it.id + ' · modelo ' + it.model + ' (' + it.provider + ')' +
-    (it.truncated ? ' · TRUNCADO' : '');
-  $('dw-body').innerHTML =
-    '<p class="ov">' + esc(it.text) + '</p><div class="sm-links">' + links(it) + '</div>' +
-    '<div class="dwsec">Pertenencia (noul) · ✓ asignado por enrich · ★ primario</div>' +
-    '<div class="mini">' + membershipRows(it) + '</div>' +
-    unjudgedRows(it) +
-    '<div class="dwsec">Primario · distribución del Choice ' + choiceLabel(it) + '</div>' +
-    '<div class="mini">' + choiceRows(it) + '</div>' +
-    '<p class="ov" style="margin-top:14px">Jev eligió <b>' + esc(name(it.jp)) + '</b> con ' + f2(it.jc) +
-    ' de confianza; enrich dice <b>' + esc(it.primary === null ? 'nada' : name(it.primary)) + '</b>.</p>';
-  $('dw-body').scrollTop = 0;
-  drawer.classList.add('open');
-  scrim.classList.add('open');
-  // `inert` on the page behind: without it, Tab from the last drawer link walks back into the
-  // content the scrim is covering, which is the half of "modal" that CSS cannot express.
-  document.querySelector('main').inert = true;
-  // The reflow is load-bearing: `.drawer` is `visibility:hidden` until `.open` lands, and an
-  // invisible element cannot take focus. Reading a layout property forces the style recalc
-  // before the focus call, so the keyboard really does land inside the drawer it just opened.
-  void drawer.offsetWidth;
-  $('dw-close').focus();
+  const heads = ['Fecha', 'Peticiones', 'OK', 'Fallidas', 'Tokens', 'Coste', 'Modelo', 'Interrumpida'];
+  const row = (r) => [
+    esc(when(r.started_at)),
+    nf(r.requests), nf(r.ok), nf(r.failed),
+    nf(r.input_tokens) + (r.input_tokens_unknown ? ' (+' + nf(r.input_tokens_unknown) + ' sin recuento)' : ''),
+    usd(r.cost_usd) + unpricedNote(r.unpriced_providers),
+    esc(r.models.join(', ') || '—'),
+    r.interrupted ? 'sí (' + nf(r.requests - r.ok - r.failed) + ' en vuelo)' : 'no',
+  ];
+  t.innerHTML = '<thead><tr>' + heads.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
+    runs.map(r => '<tr>' + row(r).map((v, i) => '<td class="n" data-h="' + heads[i] + '">' + v + '</td>').join('') + '</tr>').join('') +
+    '</tbody>';
 }
 
-function closeDrawer() {
-  if (!drawer.classList.contains('open')) return;  // Escape with nothing open must not steal focus
-  drawer.classList.remove('open');
-  scrim.classList.remove('open');
-  document.querySelector('main').inert = false;
-  if (focusBeforeDrawer && focusBeforeDrawer.focus) focusBeforeDrawer.focus();
-  focusBeforeDrawer = null;
+/* ---------------------------------------------------------------- 02 the three numbers */
+function fact(big, why) {
+  return '<div class="fact"><div class="big">' + big + '</div><div class="why">' + why + '</div></div>';
 }
 
-/* ----------------------------------------------------------------- wiring */
-function render() {
-  const d = derive(threshold);
-  // The EXACT umbral, three decimals like the noul column: at two, a slider on 0,850 sits
-  // beside rows rendering 0,850 and the reader can compare them without guessing.
-  $('threshold-value').textContent = f3(threshold);
-  $('presets').querySelectorAll('button').forEach(b => b.classList.toggle('on', +b.dataset.t === threshold));
-  $('reset-hint').textContent = threshold === DATA.threshold ? 'umbral del informe' : 'informe: ' + f3(DATA.threshold);
-  renderBanner(currentMismatches(d));
-  renderKpis(d);
-  renderSidecar();
-  renderTopics(d);
-  renderHist(threshold);
-  renderQueues(d);
+function renderNumbers() {
+  const S = DATA.summary;
+  $('numbers-sub').textContent = 'mismos números que `xbrain jev report` · umbral ' + dec(DATA.threshold, 2) +
+    ' · ' + pl(S.items_compared, 'post comparado', 'posts comparados');
+  $('facts').innerHTML =
+    fact('Jev confirma <em>' + nf(S.assigned_backed) + '</em> de ' + nf(S.assigned_pairs) +
+      ' topics de enrich (<em>' + dec(S.enrich_backed_pct, 1) + ' %</em>)',
+      'De todos los topics que puso enrich, cuántos ve también Jev con probabilidad ≥ ' +
+      dec(DATA.threshold, 2) + '. Los que no, son candidatos a quitar.' +
+      (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está', 'topics ya no están') +
+        ' en el vocabulario y no se juzgan.' : '')) +
+    fact('Jev añadiría <em>' + nf(S.missing_pairs) + '</em> topics que enrich no puso',
+      'Topics que Jev ve con probabilidad ≥ ' + dec(DATA.threshold, 2) +
+      ' y que enrich no asignó. Son candidatos a añadir.') +
+    fact('El topic principal coincide en <em>' + dec(S.primary_agree_pct, 1) + ' %</em>',
+      'En cuántos posts el topic principal de enrich es el mismo que elige Jev.' +
+      (S.primary_fallback ? ' En ' + pl(S.primary_fallback, 'post', 'posts') + ' Jev eligió «' +
+        esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''));
 }
 
-/** One render per FRAME. `input` fires per pixel of drag; `derive` walks ~117k pairs. */
-let frame = null;
-function scheduleRender() {
-  if (frame !== null) return;
-  frame = requestAnimationFrame(function () { frame = null; render(); });
+/* ---------------------------------------------------------------- 03 the posts */
+let onlyDisagreements = true;
+let query = '';
+
+function tag(slug, cls, mark, p, hint) {
+  const title = esc((DESC[slug] ? DESC[slug] + ' — ' : '') + hint);
+  return '<span class="tag ' + cls + '" title="' + title + '"><b>' + mark + '</b> ' + esc(label(slug)) +
+    (p == null ? '' : '<small>' + prob(p) + '</small>') + '</span>';
 }
 
-function setThreshold(value) {
-  // Assigned VERBATIM. Rounding here to the slider's step looked harmless and was not: a
-  // configured `[jev].threshold` of 0.855 would come back as 0.86, so `t === DATA.threshold`
-  // would never hold again and `selfCheck` would silently stop running its threshold-
-  // dependent half — the half that checks the page against the report. The slider's own
-  // handler rounds its own reading; a preset carries an exact value and keeps it.
-  threshold = value;
-  $('threshold').value = threshold;
-  scheduleRender();
+function enrichCell(post) {
+  if (!post.enrich.length) return '<span class="empty">sin topics</span>';
+  return post.enrich.map(function (e) {
+    if (e.ok === null) return tag(e.slug, 'un', '·', null, 'Jev no evaluó este topic: ya no está en el vocabulario');
+    return e.ok
+      ? tag(e.slug, 'ok', '✓', e.p, 'Jev lo confirma: probabilidad ' + prob(e.p))
+      : tag(e.slug, 'no', '✗', e.p, 'Jev no lo ve: probabilidad ' + prob(e.p) + ', por debajo de ' + dec(DATA.threshold, 2));
+  }).join('');
 }
 
-/** Everything eager: the charts, the binned corpus, the wiring, the first paint.
+function addsCell(post) {
+  if (!post.adds.length) return '<span class="empty">—</span>';
+  return post.adds.map(a => tag(a.slug, 'add', '+', a.p, 'Jev lo añadiría: probabilidad ' + prob(a.p))).join('');
+}
 
-    Nothing above this line touches the DOM, ECharts or `DATA.items`, so `boot()` is the only
-    place a throw can come from — and its single call site is wrapped. */
+function primaryCell(post) {
+  const mine = post.primary === null ? '— sin principal' : label(post.primary);
+  const jev = label(post.jev_primary) + (post.jev_fallback ? ' (ninguno)' : '');
+  if (post.primary_agrees) return '<span class="prim">' + esc(mine) + ' ✓</span>';
+  return '<span class="prim diff" title="enrich → Jev">' + esc(mine) + '<span class="arrow">→</span>' + esc(jev) + '</span>';
+}
+
+function postCell(post) {
+  const note = post.note ? '<a class="lk" href="obsidian://open?path=' + encodeURIComponent(post.note) + '">nota ↗</a>' : '';
+  const href = httpUrl(post.url);
+  const x = href ? '<a class="lk" href="' + esc(href) + '" target="_blank" rel="noopener">X ↗</a>' : '';
+  const cut = post.truncated ? '<span title="el post era más largo que el límite y Jev leyó una parte">recortado</span>' : '';
+  return '<div class="tx">' + esc(post.text) + '<div class="hd">@' + esc(post.handle) + note + x + cut + '</div></div>';
+}
+
+function matches(post) {
+  if (onlyDisagreements && !post.disagreements) return false;
+  if (!query) return true;
+  const topics = post.enrich.map(e => e.slug).concat(post.adds.map(a => a.slug), [post.primary || '', post.jev_primary]);
+  const hay = [post.text, post.handle].concat(topics, topics.map(label)).join(' ').toLowerCase();
+  return hay.indexOf(query) !== -1;
+}
+
+function renderPosts() {
+  // DATA.posts is already ordered most-disagreement first by `jev/dashboard.py`.
+  const shown = DATA.posts.filter(matches);
+  const withDisagreement = DATA.posts.filter(p => p.disagreements).length;
+  $('count').textContent = 'mostrando ' + nf(shown.length) + ' de ' + nf(DATA.posts.length) + ' posts · ' +
+    pl(withDisagreement, 'con desacuerdo', 'con desacuerdo');
+  const heads = ['Post', 'Topics de enrich', 'Jev añadiría', 'Principal (enrich → Jev)', 'Coste'];
+  if (!shown.length) {
+    $('post-table').innerHTML = '<tbody><tr><td class="empty">' +
+      (onlyDisagreements && !query ? 'Ningún post con desacuerdo a este umbral.' : 'Ningún post coincide con la búsqueda.') +
+      '</td></tr></tbody>';
+    return;
+  }
+  const cells = (p) => [postCell(p), enrichCell(p), addsCell(p), primaryCell(p),
+    '<span class="n" title="' + (p.tokens == null ? 'sin recuento de tokens' : esc(nf(p.tokens) + ' tokens de entrada')) + '">' + usd(p.cost_usd, 5) + '</span>'];
+  $('post-table').innerHTML = '<thead><tr>' + heads.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
+    shown.map(p => '<tr>' + cells(p).map((v, i) => '<td data-h="' + heads[i] + '">' + v + '</td>').join('') + '</tr>').join('') +
+    '</tbody>';
+}
+
+function renderExcluded() {
+  const t = DATA.totals, parts = [];
+  if (t.stale) parts.push(pl(t.stale, 'evaluación caducada', 'evaluaciones caducadas') + ' (el post o el vocabulario cambió; `xbrain jev topics` las vuelve a pedir)');
+  if (t.orphans) parts.push(pl(t.orphans, 'evaluación huérfana', 'evaluaciones huérfanas') + ' (su post ya no está en el corpus)');
+  if (t.not_compared) parts.push(pl(t.not_compared, 'post sin enriquecer', 'posts sin enriquecer') + ' (nada con qué comparar)');
+  $('excluded').textContent = parts.length ? 'Fuera de la tabla: ' + parts.join(' · ') + '.' : '';
+}
+
+/** Everything that touches the DOM. Its single call site is wrapped. */
 function boot() {
-
-chartTopics = echarts.init($('chart-topics'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
-chartHist = echarts.init($('chart-hist'), null, {renderer: 'canvas', devicePixelRatio: 2.5});
-HIST = histogram();
-
-$('stamp').innerHTML = 'ACTUALIZADO ' + esc(DATA.updated) + ' · <b>' +
-  pl(DATA.totals.current, 'EVALUACIÓN', 'EVALUACIONES') + '</b>';
-$('foot-note').textContent = 'DATOS Y ECHARTS EMPOTRADOS · TIPOGRAFÍAS DE GOOGLE FONTS';
-// The provenance line is DATA: the side-car records which judge answered each record, and a
-// hardcoded vendor name goes stale the first time a second one does.
-$('foot-providers').textContent = Object.keys(DATA.totals.providers).sort().join(' · ').toUpperCase();
-$('presets').innerHTML = [0.5, 0.7, DATA.threshold, 0.95]
-  .filter((v, i, a) => a.indexOf(v) === i)
-  .sort((a, b) => a - b)
-  .map(v => '<button data-t="' + v + '">' + f3(v) + '</button>').join('');
-$('presets').addEventListener('click', e => { if (e.target.dataset.t) setThreshold(+e.target.dataset.t); });
-$('threshold').value = threshold;
-// The range reads back as 0.8500000000000001 often enough to matter: rounded to its own
-// step so a drag back to the report's umbral really lands on it.
-$('threshold').addEventListener('input', e => setThreshold(Math.round(+e.target.value * 100) / 100));
-['q-doubtful', 'q-missing', 'q-primary'].forEach(id => wireQueue($(id)));
-$('show-fallback').addEventListener('click', function () {
-  showFallback = !showFallback;
-  this.classList.toggle('on', showFallback);
-  this.setAttribute('aria-checked', String(showFallback));
-  render();
-});
-$('dw-close').addEventListener('click', closeDrawer);
-scrim.addEventListener('click', closeDrawer);
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
-// `renderTopics` re-reads `window.innerWidth`, so crossing the phone breakpoint re-lays the
-// category axis rather than merely rescaling a chart built for the other width.
-addEventListener('resize', () => { chartHist.resize(); scheduleRender(); });
-render();
-
+  renderStamp();
+  renderCost();
+  renderNumbers();
+  renderExcluded();
+  renderPosts();
+  $('only-disagreements').addEventListener('change', function () {
+    onlyDisagreements = this.checked;
+    renderPosts();
+  });
+  $('search').addEventListener('input', function () {
+    query = this.value.trim().toLowerCase();
+    renderPosts();
+  });
 }
 
-// The ONLY top-level call. The `error` listener above already covers an async throw; this
-// catches the synchronous one and still re-raises, so the failure reaches the console too.
 try {
   boot();
 } catch (err) {
