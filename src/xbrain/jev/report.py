@@ -300,6 +300,15 @@ def _slug_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
         "doubtful": Counter(pair.slug for c in comparisons for pair in c.doubtful),
         "missing": Counter(pair.slug for c in comparisons for pair in c.missing),
         "unjudged": Counter(slug for c in comparisons for slug in c.unjudged),
+        **_primary_counts(comparisons),
+    }
+
+
+def _primary_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
+    """Per-slug count of the posts each side picked it as primary on (enrich, then Jev)."""
+    return {
+        "enrich_primary": Counter(c.primary_topic for c in comparisons if c.primary_topic),
+        "jev_primary": Counter(c.jev_primary for c in comparisons),
     }
 
 
@@ -335,6 +344,10 @@ def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
         # does not back it, or Jev backs it and enrich did not put it. A post is at most one
         # of the two for one topic, so the sum counts posts. The page's topic navigator.
         "disagreeing": doubtful + counts["missing"][slug],
+        # How often each side made it THE topic of a post: the page's topic index puts the
+        # two side by side, and a topic Jev never picks as primary is a finding of its own.
+        "enrich_primary": counts["enrich_primary"][slug],
+        "jev_primary": counts["jev_primary"][slug],
     }
 
 
@@ -398,6 +411,47 @@ def _post_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
         "posts_jev_only": sum(1 for c in comparisons if c.jev_only),
         "posts_primary_differs": sum(1 for c in comparisons if c.primary_differs),
     }
+
+
+def _pair_rows(pairs: dict[tuple[str | None, str | None], list[str]]) -> list[dict[str, Any]]:
+    """`{(enrich, jev): [item ids]}` as rows, most posts first, ties by the two slugs (`None`
+    first) so two runs order identically."""
+    rows = [
+        {"enrich": enrich, "jev": jev, "posts": len(ids), "ids": sorted(ids)}
+        for (enrich, jev), ids in pairs.items()
+    ]
+    return sorted(rows, key=lambda row: (-row["posts"], row["enrich"] or "", row["jev"] or ""))
+
+
+def topic_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]:
+    """What each side put INSTEAD, post by post: every topic only enrich has (`doubtful`) ×
+    every topic only Jev has (`missing`) on the same post, with the posts.
+
+    A post where only one side has anything to its name pairs it with `None` — enrich put a
+    topic Jev does not back and Jev put nothing in its place, or Jev added one without enrich
+    having put anything it replaces. Counted in POSTS per pair; a post with two topics on one
+    side is in two pairs. The page's "se confunde con" list and its click-through."""
+    pairs: dict[tuple[str | None, str | None], list[str]] = {}
+    for c in comparisons:
+        if not (c.doubtful or c.missing):
+            continue
+        only_enrich: list[str | None] = [pair.slug for pair in c.doubtful] or [None]
+        only_jev: list[str | None] = [pair.slug for pair in c.missing] or [None]
+        for enrich in only_enrich:
+            for jev in only_jev:
+                pairs.setdefault((enrich, jev), []).append(c.item_id)
+    return _pair_rows(pairs)
+
+
+def primary_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]:
+    """Enrich's primary × Jev's Choice on every post where they differ (`primary_differs`),
+    with the posts. `None` is a post enrich left without a primary; the fallback is named as
+    Jev answered it. The rows' posts add up to `posts_primary_differs`."""
+    pairs: dict[tuple[str | None, str | None], list[str]] = {}
+    for c in comparisons:
+        if c.primary_differs:
+            pairs.setdefault((c.primary_topic, c.jev_primary), []).append(c.item_id)
+    return _pair_rows(pairs)
 
 
 def chose_fallback(comparison: ItemComparison, slugs: set[str]) -> bool:
@@ -572,6 +626,8 @@ def _summarize(
         "primary_unranked": primary["unranked"],
         **_post_totals(comparisons),
         "per_topic": _per_topic(comparisons, vocab),
+        "topic_confusion": topic_confusion(comparisons),
+        "primary_confusion": primary_confusion(comparisons),
     }
 
 
