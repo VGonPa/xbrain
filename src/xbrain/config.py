@@ -159,6 +159,11 @@ class Config:
         return self.jev_dir / "topics.json"
 
     @property
+    def jev_lock_path(self) -> Path:
+        """The pass lock (`jev/lock.pass_lock`): held by a paid pass from load to save."""
+        return self.jev_dir / ".lock"
+
+    @property
     def jev_runs_path(self) -> Path:
         """Append-only log of `jev topics` passes (`jev/store.append_run`), beside the side-car."""
         return self.jev_dir / "runs.jsonl"

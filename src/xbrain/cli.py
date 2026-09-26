@@ -11,6 +11,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,7 +73,8 @@ from xbrain.jev.report import (
     run_history,
     write_reports,
 )
-from xbrain.jev.run import run_topics
+from xbrain.jev.lock import pass_lock
+from xbrain.jev.run import RunOutcome, run_topics
 from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -2849,6 +2851,23 @@ def jev_topics_cmd(
     Nunca toca items.json.
     """
     cfg = _config()
+    # The pass lock covers LOAD → SAVE: a pass started while another one runs (a second
+    # terminal, or the page's job under `xbrain jev serve`) would save its own map over the
+    # other's paid records. `--dry-run` only reads, so it never waits on — or blocks — a pass.
+    with nullcontext() if dry_run else pass_lock(cfg.jev_lock_path, "xbrain jev topics"):
+        outcome = _jev_topics_pass(cfg, ids, limit, force=force, dry_run=dry_run)
+    if outcome is not None and outcome.interrupted:
+        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
+        # to checkpoint must not change the code the shell sees.
+        raise typer.Exit(code=130)
+
+
+def _jev_topics_pass(
+    cfg: Config, ids: list[str], limit: int | None, *, force: bool, dry_run: bool
+) -> RunOutcome | None:
+    """`jev topics` from loading the side-car to the end of the pass: the part the lock covers.
+
+    `None` when nothing was run (`--dry-run`, or nothing to ask)."""
     store = load_store(cfg.items_path)
     vocab = load_vocab(cfg.vocab_path)
     assessments = load_assessments(cfg.jev_topics_path)
@@ -2869,17 +2888,18 @@ def jev_topics_cmd(
         # followed by a real run that dies on the first thing it checks.
         configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
         typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
-        return
+        return None
     if not selection.items:
-        return
+        return None
 
     def _progress(done: int, total: int) -> None:
         if done % 50 == 0 or done == total:
             typer.echo(f"  {done}/{total}")
 
-    # THE run loop lives in `jev.run` so a local server can call the same one; this command
-    # only decides what to print, and when (`run_topics`' hooks fire at those moments).
-    outcome = run_topics(
+    # THE run loop lives in `jev.run` so the local server (`xbrain jev serve`) calls the same
+    # one; this command only decides what to print, and when (`run_topics`' hooks fire at
+    # those moments).
+    return run_topics(
         cfg,
         selection,
         assessments,
@@ -2893,10 +2913,6 @@ def jev_topics_cmd(
         ),
         on_logged=_echo_jev_logged,
     )
-    if outcome.interrupted:
-        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
-        # to checkpoint must not change the code the shell sees.
-        raise typer.Exit(code=130)
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,8 +30,16 @@ from pathlib import Path
 
 from xbrain.config import Config
 from xbrain.jev.assess import RunResult, Selection, run_assessments
-from xbrain.jev.client import CountingJevClient, JevClient, JevError, SeamCounts
+from xbrain.jev.client import (
+    CountingJevClient,
+    JevClient,
+    JevError,
+    JevResult,
+    Question,
+    SeamCounts,
+)
 from xbrain.jev.defaults import plural
+from xbrain.jev.lock import held
 from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.jev.store import append_run, save_assessments
 from xbrain.models import Topic
@@ -148,6 +157,50 @@ def _release(client: JevClient) -> None:
         )
 
 
+def _call_hook(name: str, hook: Callable[..., None] | None, *args: object) -> None:
+    """Call a display hook, and never let it cost a paid record.
+
+    `on_summary` and `on_interrupted` run BEFORE the save — on purpose, so the counters reach
+    the operator even when the save fails — and the CLI's hooks echo. `xbrain jev topics | head`
+    closes the pipe under that echo, and an exception here would skip the save and throw away
+    every record since the last checkpoint (up to `CHECKPOINT_EVERY - 1` paid answers). A hook
+    is display; the save is the pass. Same stance as `assess._report_progress`.
+    """
+    if hook is None:
+        return
+    try:
+        hook(*args)
+    except Exception as exc:
+        logger.warning(
+            "%s falló (%s: %s); la pasada continúa y guarda lo pagado",
+            name,
+            type(exc).__name__,
+            exc,
+        )
+
+
+class _Cancellable:
+    """The client `run_assessments` asks through when a pass can be cancelled from outside.
+
+    Once `cancel` is set, the next `ask` raises `KeyboardInterrupt` INSTEAD of sending: the
+    pass ends on its interrupt path (banked, saved, logged) exactly as a Ctrl-C would, and no
+    call is made after the cancel. It wraps the COUNTING client, never the other way round, so
+    a call it refuses is not counted as sent and the run log bills only what went out.
+    """
+
+    def __init__(self, inner: JevClient, cancel: threading.Event) -> None:
+        self._inner = inner
+        self._cancel = cancel
+
+    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
+        if self._cancel.is_set():
+            raise KeyboardInterrupt
+        return self._inner.ask(state, questions)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
 def _now() -> datetime:
     """The wall clock, in UTC — one seam, so a test can make it step backwards."""
     return datetime.now(timezone.utc)
@@ -254,6 +307,7 @@ def run_topics(
     on_summary: Callable[[RunResult], None] | None = None,
     on_interrupted: Callable[[tuple[TopicAssessment, ...], int], None] | None = None,
     on_logged: LoggedHook | None = None,
+    cancel: threading.Event | None = None,
 ) -> RunOutcome:
     """Ask Jev about `selection.items`, keeping everything that was paid for.
 
@@ -274,9 +328,26 @@ def run_topics(
       exit path of a pass that sent a request; `error` is set when it could not be appended
       (then `line` is what to append by hand). A hook that raises is logged, never raised.
 
+    `on_backup`, `on_summary` and `on_interrupted` are display: one that raises is logged and
+    the pass goes on (`_call_hook`) — a closed pipe must not cost the save.
+
+    `cancel`, when given and set, ends the pass on its interrupt path at the next call: what
+    was answered is saved and logged, nothing more is sent. It is how a caller with no Ctrl-C
+    of its own (the local server) interrupts a job.
+
+    THE CALLER HOLDS THE PASS LOCK (`jev.lock.pass_lock` on `cfg.jev_lock_path`), taken before
+    it loaded `assessments`: two passes that each load, ask and save the whole map lose each
+    other's paid records. Refused here, before any cost, when it is not held.
+
     There is no `force` argument: which items are re-asked, current ones included, is
     `selection`'s decision (`assess.select_items(force=...)`), already made.
     """
+    if not held(cfg.jev_lock_path):
+        raise JevError(
+            f"una pasada de Jev necesita el candado {cfg.jev_lock_path}, tomado antes de leer "
+            "el side-car (`jev.lock.pass_lock`); sin él, dos pasadas a la vez pierden "
+            "evaluaciones pagadas"
+        )
     if not selection.items:
         return RunOutcome(
             assessed=(), failed=(), stored=len(assessments), interrupted=False, logged=None
@@ -284,8 +355,8 @@ def run_topics(
     # BEFORE the client, so a backup that cannot be written stops a pass that has not yet
     # been billed — and before the first checkpoint, so the copy is the file as it was.
     backup = back_up_before_forced_overwrite(cfg.jev_topics_path, selection.forced)
-    if backup is not None and on_backup is not None:
-        on_backup(backup)
+    if backup is not None:
+        _call_hook("on_backup", on_backup, backup)
 
     # The records THIS pass paid for, in order of arrival. `assessments` also holds every
     # earlier pass's work, so reporting its length as the rescue would tell an operator who
@@ -307,6 +378,7 @@ def run_topics(
 
     # Wrapped so the run log can say how many calls were SENT, which nothing else observes.
     client = CountingJevClient(make_client())
+    asked: JevClient = client if cancel is None else _Cancellable(client, cancel)
     started_at = _now()
     interrupted = False
     logged: JevRun | None = None
@@ -314,7 +386,7 @@ def run_topics(
         result = run_assessments(
             list(selection.items),
             vocab,
-            client,
+            asked,
             fallback=cfg.jev_fallback_option,
             char_limit=cfg.jev_state_char_limit,
             concurrency=cfg.jev_concurrency,
@@ -325,8 +397,7 @@ def run_topics(
         interrupted = True
         # Summary first, then persist — the tally can never fail, so a save that does never
         # suppresses it.
-        if on_interrupted is not None:
-            on_interrupted(tuple(banked.values()), len(assessments))
+        _call_hook("on_interrupted", on_interrupted, tuple(banked.values()), len(assessments))
         if banked:
             # With nothing banked, saving would write `assessments` UNCHANGED — for a first
             # run that is `{}` over the side-car.
@@ -337,8 +408,7 @@ def run_topics(
         # here so the NORMAL path does not depend on a hook whose failures are swallowed.
         for assessment in result.assessed:
             assessments[assessment.item_id] = assessment
-        if on_summary is not None:
-            on_summary(result)
+        _call_hook("on_summary", on_summary, result)
         _save_side_car(assessments, cfg.jev_topics_path, paid=len(result.assessed))
         failed = result.failed
     finally:

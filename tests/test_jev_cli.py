@@ -1833,3 +1833,66 @@ def test_a_served_page_says_so_in_its_own_file_row(tmp_path: Path, monkeypatch):
 
     assert page["served"] is True
     assert all("served" not in f for f in page_files(cfg) if f["key"] != "page")
+
+
+# --------------------------------------------------------------------------- the pass lock
+
+
+def test_jev_topics_is_refused_while_another_pass_holds_the_lock(tmp_path: Path, monkeypatch):
+    """The terminal and the local server share the side-car: a second pass is refused before
+    it reads the file or builds a client, naming who holds it."""
+    from xbrain.jev.lock import pass_lock
+
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("a locked pass must cost nothing"))
+
+    with pass_lock(_jev_dir(tmp_path) / ".lock", "jev serve"):
+        result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 1
+    assert "otra pasada de Jev está en curso (jev serve" in result.output
+    assert not _topics_path(tmp_path).exists()
+
+
+def test_jev_topics_holds_the_lock_from_loading_the_side_car_to_the_end(
+    tmp_path: Path, monkeypatch
+):
+    from xbrain.jev.lock import held
+
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    lock = _jev_dir(tmp_path) / ".lock"
+    seen: list[tuple[str, bool]] = []
+    real_load = cli.load_assessments
+
+    def _load(path: Path):
+        seen.append(("load", held(lock)))
+        return real_load(path)
+
+    class _Watching(FakeJevClient):
+        def ask(self, state, questions):
+            seen.append(("ask", held(lock)))
+            return super().ask(state, questions)
+
+    monkeypatch.setattr(cli, "load_assessments", _load)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: _Watching())
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [("load", True), ("ask", True), ("ask", True)]
+    assert held(lock) is False
+
+
+def test_jev_topics_dry_run_only_reads_so_it_needs_no_lock(tmp_path: Path, monkeypatch):
+    from xbrain.jev.lock import pass_lock
+
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+
+    with pass_lock(_jev_dir(tmp_path) / ".lock", "jev serve"):
+        result = runner.invoke(app, ["jev", "topics", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "2 items por evaluar" in result.output
