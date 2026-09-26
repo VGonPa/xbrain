@@ -122,7 +122,7 @@ def append_run(run: JevRun, path: Path) -> None:
     * If the file does not end in a newline — a crash or a full disk tore the last write —
       a newline goes first, so this record starts on its own line. Glued onto the fragment
       it would be refused with it, and a paid pass would be hidden inside a broken line.
-    * If the write or the flush to disk fails, the file is truncated back to its size
+    * If the write fails, is short, or the flush to disk fails, the file is truncated back to its size
       before this call, then the error is raised: the log stays exactly as it was.
 
     Like the side-car, the log is not snapshotted and lives under the gitignored `data/`.
@@ -135,7 +135,10 @@ def append_run(run: JevRun, path: Path) -> None:
         if size and os.pread(fd, 1, size - 1) != b"\n":
             line = b"\n" + line
         try:
-            os.write(fd, line)
+            written = os.write(fd, line)
+            if written != len(line):
+                # A short write raises nothing on its own; a record cut short IS a torn line.
+                raise OSError(f"short write: {written} of {len(line)} bytes to {path}")
             os.fsync(fd)
         except OSError:
             os.ftruncate(fd, size)

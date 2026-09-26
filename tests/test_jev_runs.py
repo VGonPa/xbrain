@@ -257,3 +257,23 @@ def test_a_write_that_fails_leaves_the_log_byte_identical(tmp_path: Path, monkey
         append_run(_run(requests=3, ok=3, failed=0), path)
 
     assert path.read_bytes() == before
+
+
+def test_a_short_write_is_rolled_back_like_a_failed_one(tmp_path: Path, monkeypatch):
+    """`os.write` may write fewer bytes than asked without raising. A record cut short is a
+    torn line; the append treats it as a failure and truncates back."""
+    from xbrain.jev import store as jev_store
+
+    path = tmp_path / "runs.jsonl"
+    append_run(_run(), path)
+    before = path.read_bytes()
+    real_write = jev_store.os.write
+
+    def _short(fd: int, data: bytes) -> int:
+        return real_write(fd, data[:-1])
+
+    monkeypatch.setattr(jev_store.os, "write", _short)
+    with pytest.raises(OSError, match="short write"):
+        append_run(_run(requests=3, ok=3, failed=0), path)
+
+    assert path.read_bytes() == before
