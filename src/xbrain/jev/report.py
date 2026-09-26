@@ -120,14 +120,21 @@ def confidence_bands(threshold: float) -> tuple[Band, ...]:
     threshold the top band is the single point 1.0 — the one band allowed `lo == hi`."""
     bands = []
     for kind, key, label, lo, hi in _BAND_SPECS:
-        if kind == "enrich_only":
-            low, high = lo or 0.0, min(threshold if hi is None else hi, threshold)
-        else:
-            low, high = max(threshold if lo is None else lo, threshold), hi or 1.0
+        low, high = _band_edges(kind, lo, hi, threshold)
         top = kind == "jev_only" and high == 1.0
         if low < high or (top and low == high):
             bands.append(Band(kind, key, label, low, high, _BAND_TOTALS[kind], top=top))
     return tuple(bands)
+
+
+def _band_edges(
+    kind: str, lo: float | None, hi: float | None, threshold: float
+) -> tuple[float, float]:
+    """One spec's edges at this threshold (`None` = the threshold): enrich-side bands are cut
+    at it from above, Jev-side ones from below."""
+    if kind == "enrich_only":
+        return lo or 0.0, min(threshold if hi is None else hi, threshold)
+    return max(threshold if lo is None else lo, threshold), hi or 1.0
 
 
 def band_of(noul: float, kind: str, bands: Sequence[Band]) -> Band:
