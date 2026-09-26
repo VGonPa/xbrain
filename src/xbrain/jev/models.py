@@ -15,13 +15,14 @@ would carry a contract describing something else.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -38,6 +39,21 @@ _SHA256 = r"^[0-9a-f]{64}$"
 Probability = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
 #: An identifier that must actually identify something.
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+def _require_utc(name: str, value: datetime) -> datetime:
+    """Aware AND at offset zero.
+
+    We do NOT coerce — `xbrain.models._require_utc_aware` says why in as many words: "that
+    would mask the bug". Storing every instant as UTC is also what keeps two records written on
+    machines in different zones comparable by their string form.
+    """
+    _require_utc_aware(name, value)
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{name} must be UTC (offset +00:00), got {value.utcoffset()} in {value!r}"
+        )
+    return value
 
 
 class PrimaryChoice(BaseModel):
@@ -100,15 +116,88 @@ class TopicAssessment(BaseModel):
     @field_validator("asked_at")
     @classmethod
     def _utc(cls, value: datetime) -> datetime:
-        """Naive is refused by the shared helper; a non-UTC offset is refused here.
+        """Naive or non-UTC is refused (see `_require_utc`)."""
+        return _require_utc("asked_at", value)
 
-        We do NOT coerce — `xbrain.models._require_utc_aware` says why in as many words:
-        "that would mask the bug". Storing every instant as UTC is also what keeps two
-        records written on machines in different zones comparable by their string form.
-        """
-        _require_utc_aware("asked_at", value)
-        if value.utcoffset() != timedelta(0):
+
+#: A pass's token count for one provider: named, and never negative.
+ProviderTokens = dict[NonEmpty, Annotated[int, Field(ge=0)]]
+
+
+class JevRun(BaseModel):
+    """One pass that SENT at least one request to Jev — a line of `runs.jsonl`.
+
+    The side-car keeps only the latest assessment per item, so it cannot say what has been
+    billed over time; this record can. It stores TOKENS, never dollars: the cost is computed
+    at read time (`report.run_history`), so a price correction reprices the whole history.
+
+    `kind` says which command made the pass. Only `topics` exists today; the field exists now
+    so a later kind of pass can share the file, and a line written before it existed reads
+    as `topics`.
+
+    Every count is read at the CLIENT SEAM (`client.CountingJevClient`), because a call is
+    billed the moment it is answered, whatever xbrain then does with the answer:
+
+    * `requests` — calls SENT, each item once. The SDK retries internally and those retries
+      are invisible here, so they are not counted.
+    * `ok` — answers kept (banked into the side-car).
+    * `failed` — calls that raised, plus answers xbrain refused (a malformed answer set).
+    * `unsaved` — only on an interrupted pass: answers that came back but were never
+      drained into the side-car before Ctrl-C landed (a refused answer that was not yet
+      drained lands here too — it was not kept either way). Billed, not kept, not failed.
+    * `requests - ok - failed - unsaved` — on an interrupted pass, calls still in flight.
+      A worker that dequeues its item AFTER Ctrl-C can still send a call the log never sees;
+      SIGTERM or a kill logs nothing at all. Both show up in `report.run_history` as
+      assessments outside the log.
+
+    `input_tokens_by_provider` covers EVERY answer that came back — refused and unsaved ones
+    included — keyed by the provider that gave it, because the price is per provider
+    (`defaults.tokens_cost_usd`). It is EMPTY when nothing answered: a pass where every call
+    failed (a 402, a dead key) reports no provider at all, and is still history.
+    `input_tokens` is its sum; `input_tokens_unknown` counts answers with no usage.
+    """
+
+    model_config = _FROZEN
+
+    kind: Literal["topics"] = "topics"
+    started_at: datetime
+    finished_at: datetime
+    models: list[NonEmpty]
+    requests: int = Field(ge=0)
+    ok: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    unsaved: int = Field(default=0, ge=0)
+    input_tokens_by_provider: ProviderTokens
+    input_tokens: int = Field(ge=0)
+    input_tokens_unknown: int = Field(ge=0)
+    interrupted: bool
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def _utc(cls, value: datetime, info: ValidationInfo) -> datetime:
+        return _require_utc(str(info.field_name), value)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> JevRun:
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at is earlier than started_at")
+        if self.models != sorted(set(self.models)):
+            raise ValueError(f"models must be sorted and distinct, got {self.models!r}")
+        came_back = self.ok + self.failed + self.unsaved
+        if came_back > self.requests:
             raise ValueError(
-                f"asked_at must be UTC (offset +00:00), got {value.utcoffset()} in {value!r}"
+                f"ok + failed + unsaved ({came_back}) exceeds requests ({self.requests})"
             )
-        return value
+        if not self.interrupted and self.unsaved:
+            raise ValueError("unsaved answers exist only on an interrupted pass")
+        if not self.interrupted and came_back != self.requests:
+            raise ValueError(
+                f"a pass that was not interrupted accounts for every request: "
+                f"ok + failed = {self.ok + self.failed}, requests = {self.requests}"
+            )
+        if sum(self.input_tokens_by_provider.values()) != self.input_tokens:
+            raise ValueError(
+                f"input_tokens ({self.input_tokens}) is not the sum of "
+                f"input_tokens_by_provider {self.input_tokens_by_provider!r}"
+            )
+        return self

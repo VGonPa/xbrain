@@ -13,11 +13,13 @@ from typer.testing import CliRunner
 
 from tests.jev_fakes import FakeJevClient
 from xbrain import cli
+from xbrain.jev import run as jev_run
 from xbrain.cli import app
 from xbrain.config import Config
 from xbrain.jev.client import JevClient, JevResult, Question
+from xbrain.jev.defaults import plural
 from xbrain.jev.models import PrimaryChoice, TopicAssessment
-from xbrain.jev.store import load_assessments, save_assessments
+from xbrain.jev.store import load_assessments, load_runs, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.notes_io import note_filename
 from xbrain.rubrics import save_vocab
@@ -472,13 +474,13 @@ def test_jev_topics_passes_the_configured_concurrency_to_the_runner(tmp_path, mo
     _seed(tmp_path)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
     seen: list[int] = []
-    real = cli.run_assessments
+    real = jev_run.run_assessments
 
     def _spy(*args, **kwargs):
         seen.append(kwargs["concurrency"])
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "run_assessments", _spy)
+    monkeypatch.setattr(jev_run, "run_assessments", _spy)
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
     assert seen == [3]
 
@@ -672,14 +674,16 @@ def test_a_failing_close_never_costs_the_run_its_records(tmp_path: Path, monkeyp
     _seed(tmp_path)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: _ClosingFailsClient())
 
-    with caplog.at_level(logging.WARNING, logger="xbrain.cli"):
+    with caplog.at_level(logging.WARNING, logger="xbrain.jev.run"):
         result = runner.invoke(app, ["jev", "topics"])
 
     assert result.exit_code == 0, result.output
     assert list(load_assessments(_topics_path(tmp_path))) == ["1", "2"]
     assert "2 evaluadas · 0 fallidas" in result.stdout
     # Noise, but never silent noise.
-    assert "cerrar el cliente Jev falló" in caplog.text
+    # From the run loop, where teardown now lives — not merely somewhere in the log.
+    [record] = [r for r in caplog.records if "cerrar el cliente Jev falló" in r.getMessage()]
+    assert record.name == "xbrain.jev.run"
     assert "Connection reset by peer" in caplog.text
 
 
@@ -713,12 +717,12 @@ def test_a_failed_checkpoint_names_the_bill_like_the_final_save_does(tmp_path, m
     _seed(tmp_path)
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
     # Every record checkpoints, so the first answer hits the failing write.
-    monkeypatch.setattr(cli, "_CHECKPOINT_EVERY", 1)
+    monkeypatch.setattr(jev_run, "CHECKPOINT_EVERY", 1)
 
     def _boom(assessments, path):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(cli, "save_assessments", _boom)
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
 
     with caplog.at_level(logging.WARNING, logger="xbrain.jev.assess"):
         result = runner.invoke(app, ["jev", "topics"])
@@ -740,7 +744,7 @@ def test_jev_topics_names_the_bill_when_the_sidecar_cannot_be_written(tmp_path, 
     def _boom(assessments, path):
         raise OSError(13, "Permission denied")
 
-    monkeypatch.setattr(cli, "save_assessments", _boom)
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
 
     result = runner.invoke(app, ["jev", "topics"])
 
@@ -819,13 +823,13 @@ def test_the_sidecar_is_flushed_during_a_long_run_not_only_at_the_end(tmp_path, 
     )
     monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
     sizes: list[int] = []
-    real_save = cli.save_assessments
+    real_save = jev_run.save_assessments
 
     def _recording_save(assessments, path):
         sizes.append(len(assessments))
         real_save(assessments, path)
 
-    monkeypatch.setattr(cli, "save_assessments", _recording_save)
+    monkeypatch.setattr(jev_run, "save_assessments", _recording_save)
 
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
 
@@ -870,6 +874,184 @@ def test_an_interrupt_that_rescued_nothing_leaves_an_existing_sidecar_alone(
     assert result.exit_code == 130, result.output
     assert "Interrumpido: nada nuevo que guardar" in result.stderr
     assert _topics_path(tmp_path).read_bytes() == before
+
+
+# ------------------------------------------------------------------- the run log (runs.jsonl)
+
+
+def _runs_path(tmp_path: Path) -> Path:
+    return tmp_path / "data" / "jev" / "runs.jsonl"
+
+
+def test_a_successful_run_logs_one_line_with_what_it_sent_and_what_it_cost(
+    tmp_path: Path, monkeypatch
+):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(input_tokens=1_500))
+    before = datetime.now(timezone.utc)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok, run.failed, run.interrupted) == (2, 2, 0, False)
+    # Tokens per the provider that ANSWERED (the fake reports `fake`), never a dollar figure.
+    assert run.input_tokens_by_provider == {"fake": 3_000}
+    assert (run.input_tokens, run.input_tokens_unknown) == (3_000, 0)
+    assert run.models == ["jev-1.13.0"]
+    assert before <= run.started_at <= run.finished_at <= datetime.now(timezone.utc)
+    # The operator is told where the history went, after it was written.
+    assert f"pasada registrada → {_runs_path(tmp_path)}" in result.stdout
+
+
+def test_a_partial_failure_logs_the_failures_too(tmp_path: Path, monkeypatch):
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    fake = FakeJevClient(fail_when=lambda state: "Seed" in state["post"])
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok, run.failed) == (2, 1, 1)
+
+
+def test_a_run_where_every_call_failed_is_still_history(tmp_path: Path, monkeypatch):
+    """The 402 case: 2 requests sent, 2 failed, exit 1. Those requests were made, and the log
+    is the only place that remembers them — the side-car gained nothing."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(fail_when=lambda state: True))
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 1
+    assert "ninguna de las 2 evaluaciones terminó" in result.stderr
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok, run.failed, run.interrupted) == (2, 0, 2, False)
+    assert run.input_tokens_by_provider == {} and run.models == []
+
+
+def test_an_interrupted_run_logs_what_was_sent_including_the_call_in_flight(
+    tmp_path: Path, monkeypatch
+):
+    """Ctrl-C after one answer: two calls were SENT (the second is the one interrupted), one
+    came back. `requests` counts sends, so the in-flight call is visible as the difference."""
+    _setup_repo(tmp_path, monkeypatch, jev="concurrency = 1\n")
+    _seed(tmp_path)
+    fake = FakeJevClient(interrupt_after=1)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 130, result.output
+    [run] = load_runs(_runs_path(tmp_path))
+    assert run.interrupted is True
+    assert run.requests == len(fake.calls) == 2
+    assert (run.ok, run.failed) == (1, 0)
+    assert run.input_tokens == 100
+
+
+def test_an_interrupt_before_any_call_exits_130_and_logs_nothing(tmp_path: Path, monkeypatch):
+    """Ctrl-C before the first request: nothing was billed, so there is no history line."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+
+    def _interrupted_at_once(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(jev_run, "run_assessments", _interrupted_at_once)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 130, result.output
+    assert "Interrumpido: nada nuevo que guardar" in result.stderr
+    assert not _runs_path(tmp_path).exists()
+    assert "pasada registrada" not in result.stdout
+
+
+def test_the_logged_line_is_announced_after_the_side_car_is_saved(tmp_path: Path, monkeypatch):
+    """Summary, then the save, then "pasada registrada": the last line is only true once
+    everything before it has happened."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    real_save = jev_run.save_assessments
+
+    def _save_and_say_so(assessments, path):
+        real_save(assessments, path)
+        print("<<guardado>>")
+
+    monkeypatch.setattr(jev_run, "save_assessments", _save_and_say_so)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    out = result.stdout
+    assert out.index("2 evaluadas") < out.index("<<guardado>>") < out.index("pasada registrada")
+
+
+def test_a_dry_run_or_an_empty_backlog_logs_nothing(tmp_path: Path, monkeypatch):
+    """No request sent, no line: the log is a history of BILLED passes, not of invocations."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("--dry-run must not call Jev"))
+
+    assert runner.invoke(app, ["jev", "topics", "--dry-run"]).exit_code == 0
+    assert not _runs_path(tmp_path).exists()
+
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    monkeypatch.setattr(cli, "_jev_client", _refusing_client("nothing pending"))
+    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+
+    assert len(load_runs(_runs_path(tmp_path))) == 1  # the one pass that sent requests
+
+
+def test_the_run_is_logged_even_when_the_side_car_cannot_be_written(tmp_path, monkeypatch):
+    """The bill does not depend on the disk: the requests were sent whether or not the
+    answers could be kept, so the history records them either way."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+
+    def _boom(assessments, path):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 1
+    assert "2 evaluaciones pagadas sin guardar" in result.stderr
+    [run] = load_runs(_runs_path(tmp_path))
+    assert (run.requests, run.ok) == (2, 2)
+
+
+def test_a_log_that_cannot_be_written_never_costs_the_run_its_records_or_its_verdict(
+    tmp_path: Path, monkeypatch
+):
+    """Losing the history line is bad; losing the paid side-car over it is worse. The line
+    is printed to stderr so the operator can append it by hand."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+
+    def _boom(run, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(jev_run, "append_run", _boom)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 0, result.output
+    assert list(load_assessments(_topics_path(tmp_path))) == ["1", "2"]
+    assert f"no se pudo registrar la pasada en {_runs_path(tmp_path)}" in result.stderr
+    # The line itself, so it can be appended by hand: a JSON object with the request count.
+    logged = [line for line in result.stderr.splitlines() if line.startswith("{")]
+    assert logged and json.loads(logged[0])["requests"] == 2
+    assert "pasada registrada" not in result.stdout
 
 
 # ------------------------------------------------------------------- `xbrain jev report`
@@ -927,6 +1109,55 @@ def test_jev_report_writes_json_and_markdown(tmp_path: Path, monkeypatch):
     assert payload["summary"]["doubtful_pairs"] == 1
     assert payload["summary"]["missing_pairs"] == 1
     assert payload["summary"]["items_compared"] == 2
+
+
+def test_jev_report_prints_what_every_logged_pass_cost(tmp_path: Path, monkeypatch):
+    """The recap line prices the SIDE-CAR (latest answer per item); the history line prices
+    every pass the log recorded, re-asks included — the number that answers "what has Jev
+    cost me". Both through the one shared sentence."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 0, result.output
+    history = [line for line in result.stdout.splitlines() if line.startswith("Histórico: ")]
+    # The fake answers 100 tokens per call under the unpriced provider `fake`.
+    assert history == [
+        "Histórico: 1 pasada · 2 peticiones · 200 tokens de entrada "
+        "(~0.0000 $ · proveedor sin tarifa: fake)"
+    ]
+
+
+def test_jev_report_refuses_a_corrupt_run_log_before_writing_anything(tmp_path, monkeypatch):
+    """The log is read FIRST: a refusal after the reports were written would leave new
+    files behind an exit 1."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    with _runs_path(tmp_path).open("a", encoding="utf-8") as handle:
+        handle.write("{roto\n")
+
+    result = runner.invoke(app, ["jev", "report"])
+
+    assert result.exit_code == 1
+    assert "línea 2" in result.stderr
+    json_path, md_path = _report_paths(tmp_path)
+    assert not json_path.exists() and not md_path.exists()
+
+
+def test_jev_report_and_the_page_quote_the_same_disagreement_count(tmp_path, monkeypatch):
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+
+    report = runner.invoke(app, ["jev", "report"])
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
+
+    count = _blob(_page(vault))["summary"]["posts_with_disagreement"]
+    assert count > 0
+    assert plural(count, "post con desacuerdo", "posts con desacuerdo") in report.stdout
 
 
 def test_jev_report_without_assessments_refuses_and_names_the_command_that_fixes_it(
@@ -1207,9 +1438,8 @@ def _page(vault: Path) -> Path:
 def _blob(page: Path) -> dict:
     """The JSON the page hands the browser, read back out of the rendered HTML.
 
-    `rsplit`, not `split`: the vendored ECharts is injected BEFORE the payload, so the same
-    literal occurring anywhere in a megabyte of minified library would make this helper read
-    the library instead of the blob — a failing test about a page that is perfectly fine.
+    `rsplit`, not `split`: the payload is the page's last `const DATA = `, whatever a template
+    comment or an earlier script might say.
     """
     html = page.read_text(encoding="utf-8")
     payload = html.rsplit("const DATA = ", 1)[1].split(";\n", 1)[0]
@@ -1238,16 +1468,16 @@ def test_jev_dashboard_writes_a_self_contained_page_without_asking_jev_anything(
     html = page.read_text(encoding="utf-8")
     assert "/*__DATA__*/" not in html and "/*__ECHARTS__*/" not in html
     assert '"ai-coding"' in html
-    assert "2 items en el dashboard" in result.stdout
+    # The rows of the table: every compared post, disagreement or not.
+    assert "2 posts en el dashboard" in result.stdout
     assert page.resolve().as_uri() in result.stdout
 
 
 def test_jev_dashboard_ships_the_same_numbers_jev_report_prints(tmp_path: Path, monkeypatch):
     """One side-car, two surfaces, ONE set of numbers.
 
-    The page carries the summary so the browser can check its own recompute against it; if
-    the CLI built that summary differently from `jev report`, the check would certify a
-    disagreement instead of catching one.
+    The page quotes the summary and computes nothing; if the CLI built it differently from
+    `jev report`, the two surfaces would disagree about one side-car.
     """
     vault = _setup_repo(tmp_path, monkeypatch)
     _seed(tmp_path)
@@ -1266,35 +1496,57 @@ def test_jev_dashboard_ships_the_same_numbers_jev_report_prints(tmp_path: Path, 
     }
 
 
-def test_jev_dashboard_threshold_moves_the_pages_default(tmp_path: Path, monkeypatch):
-    """`--threshold` is the umbral the page OPENS at, and the one its summary was built at.
-
-    Shipping a summary computed at one threshold beside a slider positioned at another would
-    make the page's own consistency check fire on the first paint.
-    """
-    vault = _setup_repo(tmp_path, monkeypatch)
+def test_jev_dashboard_compares_at_the_configured_threshold_and_has_no_flag(
+    tmp_path: Path, monkeypatch
+):
+    """The threshold is `[jev].threshold`, FIXED: the page shows the numbers `jev report`
+    prints at that umbral and offers nothing that moves it — the flag is gone too."""
+    vault = _setup_repo(tmp_path, monkeypatch, jev="threshold = 0.5\n")
     _seed(tmp_path)
     _assess_corpus(monkeypatch)
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
 
-    assert runner.invoke(app, ["jev", "dashboard", "--threshold", "0.5"]).exit_code == 0
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
     blob = _blob(_page(vault))
     assert blob["threshold"] == 0.5 and blob["summary"]["threshold"] == 0.5
+    flagged = runner.invoke(app, ["jev", "dashboard", "--threshold", "0.9"])
+    assert flagged.exit_code == 2  # click's usage error: no such option
+    assert "No such option" in flagged.output
 
 
-def test_jev_dashboard_refuses_a_threshold_outside_the_unit_interval(tmp_path: Path, monkeypatch):
-    """Refused BEFORE anything is written, the same guard `jev report` applies."""
+def test_jev_dashboard_shows_what_every_logged_pass_cost(tmp_path: Path, monkeypatch):
+    """The cost strip reads the run log the `jev topics` pass just wrote."""
     vault = _setup_repo(tmp_path, monkeypatch)
     _seed(tmp_path)
     _assess_corpus(monkeypatch)
     assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
 
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "1.5"])
+    assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
-    assert result.exit_code == 1
-    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
-    assert not _page(vault).exists()
+    cost = _blob(_page(vault))["cost"]
+    [run] = cost["runs"]
+    assert (run["requests"], run["ok"], run["failed"]) == (2, 2, 0)
+    assert cost["total"]["requests"] == 2 and cost["total"]["input_tokens"] == 200
+    # Everything in the side-car was asked during that logged pass.
+    assert cost["out_of_log"]["assessments"] == 0
+
+
+def test_jev_dashboard_renders_the_page_when_the_run_log_is_corrupt(tmp_path, monkeypatch):
+    """One torn line replaces the cost strip with its own error; the table still renders."""
+    vault = _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    _assess_corpus(monkeypatch)
+    with _runs_path(tmp_path).open("a", encoding="utf-8") as handle:
+        handle.write("{roto\n")
+
+    result = runner.invoke(app, ["jev", "dashboard"])
+
+    assert result.exit_code == 0, result.output
+    blob = _blob(_page(vault))
+    assert "línea 2" in blob["cost"]["error"] and str(_runs_path(tmp_path)) in blob["cost"]["error"]
+    assert len(blob["posts"]) == 2
+    assert "línea 2" in result.stderr  # and the operator is told, not only the page
 
 
 def test_jev_dashboard_over_nothing_refuses_and_writes_no_page(tmp_path: Path, monkeypatch):
@@ -1339,51 +1591,15 @@ def test_jev_dashboard_links_the_notes_that_exist_and_not_the_ones_that_do_not(
 
     assert runner.invoke(app, ["jev", "dashboard"]).exit_code == 0
 
-    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["items"]}
+    notes = {row["id"]: row["note"] for row in _blob(_page(vault))["posts"]}
     assert notes == {"1": str(note.resolve()), "2": None}
-
-
-def test_jev_dashboard_refuses_a_negative_threshold_too(tmp_path: Path, monkeypatch):
-    """Below 0.0 every pair clears `noul >= t`: a page that reads as perfect agreement.
-
-    The opposite half of the guard has its own test — the two failures are opposites, so one
-    case cannot stand for both.
-    """
-    vault = _setup_repo(tmp_path, monkeypatch)
-    _seed(tmp_path)
-    _assess_corpus(monkeypatch)
-    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
-
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "-0.5"])
-
-    assert result.exit_code == 1
-    assert "Error: --threshold debe estar en [0.0, 1.0]" in result.stderr
-    assert not _page(vault).exists()
-
-
-@pytest.mark.parametrize("value", ["0", "1"])
-def test_jev_dashboard_accepts_the_closed_interval(tmp_path: Path, monkeypatch, value: str):
-    """`t = 0` backs everything and `t = 1` backs only certainty. Both are legal.
-
-    A guard written `0.0 < t < 1.0` refuses two thresholds an operator may legitimately ask
-    for, and nothing else in the suite would notice.
-    """
-    vault = _setup_repo(tmp_path, monkeypatch)
-    _seed(tmp_path)
-    _assess_corpus(monkeypatch)
-    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
-
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", value])
-
-    assert result.exit_code == 0, result.output
-    assert _blob(_page(vault))["summary"]["threshold"] == float(value)
 
 
 def test_jev_dashboard_refuses_a_corpus_where_nothing_is_comparable(tmp_path: Path, monkeypatch):
     """The fifth empty state: current assessments whose items have no enrichment at all.
 
-    `report.compare_item` returns None for every one of them, so every bucket is 0 and
-    `selfCheck` agrees with a summary of zeros — a page that renders clean and says nothing.
+    `report.compare_item` returns None for every one of them, so every bucket is 0 and the
+    table is empty — a page that renders clean and says nothing.
     It is the same shape as the four states that already refuse, and it needs the same answer.
     """
     vault = _setup_repo(tmp_path, monkeypatch)
@@ -1426,8 +1642,12 @@ def test_jev_dashboard_leaves_the_last_good_page_alone_when_the_rename_dies(
     def _explode(src, dst):
         raise OSError("[Errno 28] No space left on device")
 
+    # A second pass in the log changes the page, so a non-atomic write would leave new bytes.
+    fake = FakeJevClient(nouls={"ai-coding": 0.93}, primary="ai-coding")
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: fake)
+    assert runner.invoke(app, ["jev", "topics", "--force"]).exit_code == 0
     monkeypatch.setattr(store_module.os, "replace", _explode)
-    result = runner.invoke(app, ["jev", "dashboard", "--threshold", "0.5"])
+    result = runner.invoke(app, ["jev", "dashboard"])
 
     assert result.exit_code != 0
     # Byte-identical: not merely "a page exists", but the one that was there before.
@@ -1483,3 +1703,13 @@ def test_the_un_enriched_refusal_agrees_in_number(
 # whose help names a config key, by the ONE parametrized test for the whole class:
 # `tests/test_cli.py::test_command_help_renders_its_config_key_literally`. It lived here
 # first; it was moved rather than copied so the repo has a single place to strengthen.
+
+
+@pytest.mark.parametrize("command", ["topics", "report", "dashboard"])
+def test_every_jev_command_says_in_its_help_that_it_uses_the_run_log(command: str):
+    """`topics` appends to it, `report` and `dashboard` read it: an operator reading
+    `--help` should learn the file exists without opening docs/jev.md."""
+    result = runner.invoke(app, ["jev", command, "--help"])
+
+    assert result.exit_code == 0
+    assert "runs.jsonl" in result.output

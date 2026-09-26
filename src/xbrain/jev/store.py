@@ -28,7 +28,7 @@ side-car) and `data/` is gitignored in full, so there is no `git checkout` and n
   `topics.<UTC stamp>.bak` beside it before a run that re-asks a current one — the
   side-car's OWN reversibility, standing in for the snapshot it does not get. Those copies
   are never pruned, and nothing in THIS module writes them: the backup belongs to the
-  command that decided to overwrite (`cli._back_up_before_forced_overwrite`), not to the writer.
+  pass that decided to overwrite (`run.back_up_before_forced_overwrite`), not to the writer.
 * A corrupt file is repaired by hand or paid for again — which is why `load_assessments`
   refuses one instead of quietly starting from `{}`.
 """
@@ -36,12 +36,13 @@ side-car) and `data/` is gitignored in full, so there is no `git checkout` and n
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from xbrain.jev.client import JevError
-from xbrain.jev.models import TopicAssessment
+from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.store import _atomic_write
 
 
@@ -88,3 +89,59 @@ def save_assessments(assessments: dict[str, TopicAssessment], path: Path) -> Non
         for item_id, assessment in sorted(assessments.items())
     }
     _atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def load_runs(path: Path) -> list[JevRun]:
+    """Every logged pass, in file (= chronological) order; `[]` when the log does not exist.
+
+    Same stance as `load_assessments`: a line that does not parse or validate is REFUSED with
+    the path and its line number, never skipped. Each line is paid history, and a report that
+    silently dropped one would under-quote the bill. Blank lines are not records.
+    """
+    if not path.exists():
+        return []
+    runs: list[JevRun] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            runs.append(JevRun.model_validate_json(line))
+        except ValidationError as exc:
+            raise JevError(
+                f"{path}: registro de pasadas ilegible en la línea {number} ({exc})"
+            ) from exc
+    return runs
+
+
+def append_run(run: JevRun, path: Path) -> None:
+    """Append one line to the run log: never rewrite, never glue, never leave a fragment.
+
+    APPEND, never rewrite: earlier lines are paid history and this call must not be able to
+    touch them. Two guards make a single writer's append safe to trust:
+
+    * If the file does not end in a newline — a crash or a full disk tore the last write —
+      a newline goes first, so this record starts on its own line. Glued onto the fragment
+      it would be refused with it, and a paid pass would be hidden inside a broken line.
+    * If the write fails, is short, or the flush to disk fails, the file is truncated back to its size
+      before this call, then the error is raised: the log stays exactly as it was.
+
+    Like the side-car, the log is not snapshotted and lives under the gitignored `data/`.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = (run.model_dump_json() + "\n").encode("utf-8")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            line = b"\n" + line
+        try:
+            written = os.write(fd, line)
+            if written != len(line):
+                # A short write raises nothing on its own; a record cut short IS a torn line.
+                raise OSError(f"short write: {written} of {len(line)} bytes to {path}")
+            os.fsync(fd)
+        except OSError:
+            os.ftruncate(fd, size)
+            raise
+    finally:
+        os.close(fd)

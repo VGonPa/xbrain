@@ -9,6 +9,7 @@ from tests.jev_fakes import FakeJevClient
 from xbrain.jev.client import (
     ChoiceAnswer,
     ChoiceQuestion,
+    CountingJevClient,
     JevClient,
     JevError,
     NoulAnswer,
@@ -262,3 +263,44 @@ def test_fake_jev_client_refuses_a_question_type_it_does_not_model():
     error the real adapter would, not vanish into a silently wrong answer set."""
     with pytest.raises(JevError, match="tipo de pregunta"):
         FakeJevClient().ask({"post": "x"}, {"q": object()})  # type: ignore[dict-item]
+
+
+# --------------------------------------------------------------------------- the counting seam
+
+
+def test_the_counting_seam_folds_every_answer_it_forwards():
+    """Tokens, usage-less answers and models are read off EVERY returned result — including
+    answers xbrain later refuses — because each of them was billed."""
+    counting = CountingJevClient(FakeJevClient(input_tokens=120, model="jev-1.13.0"))
+    counting.ask({"post": "a"}, {"q": NoulQuestion(instructions="?")})
+    counting.ask({"post": "b"}, {"q": NoulQuestion(instructions="?")})
+
+    counts = counting.snapshot()
+
+    assert (counts.sent, counts.answered, counts.raised) == (2, 2, 0)
+    assert counts.input_tokens_by_provider == {"fake": 240}
+    assert counts.input_tokens_unknown == 0
+    assert counts.models == ("jev-1.13.0",)
+
+
+def test_the_counting_seam_counts_a_raised_call_and_an_answer_without_usage():
+    failing = CountingJevClient(FakeJevClient(fail_when=lambda state: True))
+    with pytest.raises(JevError):
+        failing.ask({"post": "a"}, {"q": NoulQuestion(instructions="?")})
+    silent = CountingJevClient(FakeJevClient(input_tokens=None))
+    silent.ask({"post": "a"}, {"q": NoulQuestion(instructions="?")})
+
+    assert (failing.snapshot().sent, failing.snapshot().raised) == (1, 1)
+    assert failing.snapshot().input_tokens_by_provider == {}
+    # The provider answered and reported no usage: its row exists at zero, and it is counted.
+    assert silent.snapshot().input_tokens_by_provider == {"fake": 0}
+    assert silent.snapshot().input_tokens_unknown == 1
+
+
+def test_a_keyboard_interrupt_inside_a_call_is_in_flight_not_raised():
+    counting = CountingJevClient(FakeJevClient(interrupt_after=0))
+    with pytest.raises(KeyboardInterrupt):
+        counting.ask({"post": "a"}, {"q": NoulQuestion(instructions="?")})
+
+    counts = counting.snapshot()
+    assert (counts.sent, counts.answered, counts.raised) == (1, 0, 0)

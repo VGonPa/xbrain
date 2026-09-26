@@ -137,6 +137,11 @@ class Config:
         return self.jev_dir / "topics.json"
 
     @property
+    def jev_runs_path(self) -> Path:
+        """Append-only log of `jev topics` passes (`jev/store.append_run`), beside the side-car."""
+        return self.jev_dir / "runs.jsonl"
+
+    @property
     def storage_state_path(self) -> Path:
         return self.repo_root / "auth" / "storage_state.json"
 
