@@ -294,7 +294,8 @@ def current_assessments(
 
 
 def _slug_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
-    """Per-slug `assigned` / `doubtful` / `missing` / `unjudged` counters over every comparison."""
+    """Per-slug counters over every comparison: `assigned` / `doubtful` / `missing` /
+    `unjudged`, and how often each side picked the slug as primary (`_primary_counts`)."""
     return {
         "assigned": Counter(slug for c in comparisons for slug in c.assigned),
         "doubtful": Counter(pair.slug for c in comparisons for pair in c.doubtful),
@@ -313,7 +314,8 @@ def _primary_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]
 
 
 def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
-    """One `per_topic` row: `assigned`, the three buckets that PARTITION it, and `missing`.
+    """One `per_topic` row: `assigned`, the three buckets that PARTITION it, `missing`,
+    `disagreeing` (doubtful + missing) and the two primary counts.
 
     `backed = assigned - doubtful - unjudged`, the same arithmetic as the corpus-wide total in
     `_pair_totals`, and not because a vocabulary row can carry an unjudged pair today. It
@@ -413,25 +415,19 @@ def _post_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
     }
 
 
-def _pair_rows(pairs: dict[tuple[str | None, str | None], list[str]]) -> list[dict[str, Any]]:
-    """`{(enrich, jev): [item ids]}` as rows, most posts first, ties by the two slugs (`None`
-    first) so two runs order identically."""
-    rows = [
-        {"enrich": enrich, "jev": jev, "posts": len(ids), "ids": sorted(ids)}
-        for (enrich, jev), ids in pairs.items()
-    ]
-    return sorted(rows, key=lambda row: (-row["posts"], row["enrich"] or "", row["jev"] or ""))
+def pair_key(enrich: str | None, jev: str | None) -> str:
+    """`enrich~jev`, with `-` for "nothing": the key of a confusion pair in `post_sets` and in
+    the page's URLs. Slugs are `[a-z0-9-]`, so neither `~` nor a lone `-` can be one."""
+    return f"{enrich or '-'}~{jev or '-'}"
 
 
-def topic_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]:
-    """What each side put INSTEAD, post by post: every topic only enrich has (`doubtful`) ×
-    every topic only Jev has (`missing`) on the same post, with the posts.
+PairPosts = dict[tuple[str | None, str | None], list[str]]
 
-    A post where only one side has anything to its name pairs it with `None` — enrich put a
-    topic Jev does not back and Jev put nothing in its place, or Jev added one without enrich
-    having put anything it replaces. Counted in POSTS per pair; a post with two topics on one
-    side is in two pairs. The page's "se confunde con" list and its click-through."""
-    pairs: dict[tuple[str | None, str | None], list[str]] = {}
+
+def _topic_pairs(comparisons: list[ItemComparison]) -> PairPosts:
+    """Every topic only enrich has × every topic only Jev has, per post (`None` for a side
+    that has nothing), with the posts."""
+    pairs: PairPosts = {}
     for c in comparisons:
         if not (c.doubtful or c.missing):
             continue
@@ -440,18 +436,55 @@ def topic_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]:
         for enrich in only_enrich:
             for jev in only_jev:
                 pairs.setdefault((enrich, jev), []).append(c.item_id)
-    return _pair_rows(pairs)
+    return pairs
+
+
+def _primary_pairs(comparisons: list[ItemComparison]) -> PairPosts:
+    """Enrich's primary × Jev's choice on every post where they differ, with the posts."""
+    pairs: PairPosts = {}
+    for c in comparisons:
+        if c.primary_differs:
+            pairs.setdefault((c.primary_topic, c.jev_primary), []).append(c.item_id)
+    return pairs
+
+
+def _pair_rows(pairs: PairPosts) -> list[dict[str, Any]]:
+    """`{enrich, jev, posts}` rows, most posts first, ties by the two slugs (`None` first) so
+    two runs order identically. Counts only: the posts are `post_sets`'."""
+    rows = [{"enrich": e, "jev": j, "posts": len(ids)} for (e, j), ids in pairs.items()]
+    return sorted(rows, key=lambda row: (-row["posts"], row["enrich"] or "", row["jev"] or ""))
+
+
+def topic_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]:
+    """What each side put INSTEAD, counted in posts: every topic only enrich has (`doubtful`) ×
+    every topic only Jev has (`missing`) on the same post.
+
+    A post where only one side has anything to its name pairs it with `None` — enrich put a
+    topic Jev does not back and Jev put nothing in its place, or Jev added one without enrich
+    having put anything it replaces. A post with two topics on one side is in two rows (a
+    PRODUCT: 2 × 2 puts one post in four). The page's "se confunde con" list."""
+    return _pair_rows(_topic_pairs(comparisons))
 
 
 def primary_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]:
     """Enrich's primary × Jev's Choice on every post where they differ (`primary_differs`),
-    with the posts. `None` is a post enrich left without a primary; the fallback is named as
+    counted in posts. `None` is a post enrich left without a primary; the fallback is named as
     Jev answered it. The rows' posts add up to `posts_primary_differs`."""
-    pairs: dict[tuple[str | None, str | None], list[str]] = {}
-    for c in comparisons:
-        if c.primary_differs:
-            pairs.setdefault((c.primary_topic, c.jev_primary), []).append(c.item_id)
-    return _pair_rows(pairs)
+    return _pair_rows(_primary_pairs(comparisons))
+
+
+def post_sets(comparisons: list[ItemComparison]) -> dict[str, dict[str, list[str]]]:
+    """THE index of the posts behind every confusion row: `{"cx": {pair_key: [ids]}, "px":
+    {…}}` for `topic_confusion` and `primary_confusion`.
+
+    Kept OUT of the summary on purpose: the summary holds counts, which are what the JSON
+    report is for and which stay small; these lists grow with every evaluated post, and only
+    the page needs them (to open a pair's posts). `build_page_data` ships them; `write_reports`
+    does not."""
+    return {
+        kind: {pair_key(e, j): sorted(ids) for (e, j), ids in pairs.items()}
+        for kind, pairs in (("cx", _topic_pairs(comparisons)), ("px", _primary_pairs(comparisons)))
+    }
 
 
 def chose_fallback(comparison: ItemComparison, slugs: set[str]) -> bool:

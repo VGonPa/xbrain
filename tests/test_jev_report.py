@@ -18,7 +18,9 @@ from xbrain.jev.report import (
     assessment_cost_usd,
     current_assessments,
     history_fragment,
+    pair_key,
     post_cost_view,
+    post_sets,
     render_report_markdown,
     run_history,
     summarize,
@@ -300,15 +302,17 @@ def test_the_summary_counts_the_posts_with_no_current_answer():
 
 
 def _confusion_corpus():
-    """Four posts covering every shape of a topic disagreement:
+    """Five posts covering every shape of a topic disagreement:
     "1" enrich misc (doubtful) → Jev startups (missing): one pair both sides named;
     "2" enrich misc+ai-coding both doubtful, Jev startups: two pairs;
     "3" enrich ai-coding doubtful, Jev adds nothing: enrich's topic with nothing instead;
-    "4" nothing doubtful, Jev adds startups: Jev's topic with nothing it replaced."""
+    "4" nothing doubtful, Jev adds startups: Jev's topic with nothing it replaced;
+    "5" agrees on everything, primary included: in no pair at all."""
     one = _item("1", topics=("misc",))
     two = _item("2", topics=("misc", "ai-coding"))
     three = _item("3", topics=("ai-coding",))
     four = _item("4", topics=("ai-coding",))
+    five = _item("5", topics=("ai-coding",))
     return [
         (
             one,
@@ -323,6 +327,7 @@ def _confusion_corpus():
             _assessment(three, {"misc": 0.1, "startups": 0.1, "ai-coding": 0.2}, choice="otro"),
         ),
         (four, _assessment(four, {"misc": 0.1, "startups": 0.9, "ai-coding": 0.9})),
+        (five, _assessment(five, {"misc": 0.1, "startups": 0.1, "ai-coding": 0.9})),
     ]
 
 
@@ -332,56 +337,100 @@ def test_per_topic_counts_how_often_each_side_picks_it_as_primary():
 
     assert (by_slug["misc"]["enrich_primary"], by_slug["misc"]["jev_primary"]) == (2, 0)
     assert (by_slug["startups"]["enrich_primary"], by_slug["startups"]["jev_primary"]) == (0, 2)
-    assert (by_slug["ai-coding"]["enrich_primary"], by_slug["ai-coding"]["jev_primary"]) == (2, 1)
+    assert (by_slug["ai-coding"]["enrich_primary"], by_slug["ai-coding"]["jev_primary"]) == (3, 2)
 
 
 def test_topic_confusion_pairs_what_enrich_put_with_what_jev_put_instead():
     """On each post, every topic only enrich has × every topic only Jev has — `None` on the
-    side that put nothing instead — counted in posts, with the posts, most frequent first."""
+    side that put nothing instead — counted in posts, most frequent first. COUNTS ONLY: the
+    posts behind them are `post_sets`, which the page ships and the JSON report does not."""
     confusion = summarize(_confusion_corpus(), VOCAB, 0.85)["topic_confusion"]
 
     assert confusion == [
-        {"enrich": "misc", "jev": "startups", "posts": 2, "ids": ["1", "2"]},
-        {"enrich": None, "jev": "startups", "posts": 1, "ids": ["4"]},
-        {"enrich": "ai-coding", "jev": None, "posts": 1, "ids": ["3"]},
-        {"enrich": "ai-coding", "jev": "startups", "posts": 1, "ids": ["2"]},
+        {"enrich": "misc", "jev": "startups", "posts": 2},
+        {"enrich": None, "jev": "startups", "posts": 1},
+        {"enrich": "ai-coding", "jev": None, "posts": 1},
+        {"enrich": "ai-coding", "jev": "startups", "posts": 1},
     ]
-
-
-def test_topic_confusion_is_a_brute_force_recount_of_the_comparisons():
-    pairs = _confusion_corpus()
-    summary, comparisons = build_report(pairs, VOCAB, 0.85)
-
-    expected: dict[tuple, set[str]] = {}
-    for c in comparisons:
-        only_enrich = [p.slug for p in c.doubtful] or [None]
-        only_jev = [p.slug for p in c.missing] or [None]
-        if c.doubtful or c.missing:
-            for a in only_enrich:
-                for b in only_jev:
-                    expected.setdefault((a, b), set()).add(c.item_id)
-    got = {(row["enrich"], row["jev"]): set(row["ids"]) for row in summary["topic_confusion"]}
-    assert got == expected
-    assert all(row["posts"] == len(row["ids"]) for row in summary["topic_confusion"])
 
 
 def test_primary_confusion_pairs_enrichs_primary_with_jevs_choice_where_they_differ():
-    """`None` is a post enrich left without a primary; Jev's fallback is named as it answered."""
+    """`None` is a post enrich left without a primary; Jev's fallback is named as it answered.
+    An agreeing post ("5", and "4" before its primary is removed) is in no row."""
     pairs = _confusion_corpus()
+    assert all(
+        row["enrich"] != row["jev"] for row in summarize(pairs, VOCAB, 0.85)["primary_confusion"]
+    )
     four = pairs[3][0]
     four.enriched.primary_topic = None
 
-    confusion = summarize(pairs, VOCAB, 0.85)["primary_confusion"]
+    summary = summarize(pairs, VOCAB, 0.85)
 
-    assert confusion == [
-        {"enrich": "misc", "jev": "startups", "posts": 2, "ids": ["1", "2"]},
-        {"enrich": None, "jev": "ai-coding", "posts": 1, "ids": ["4"]},
-        {"enrich": "ai-coding", "jev": "otro", "posts": 1, "ids": ["3"]},
+    assert summary["primary_confusion"] == [
+        {"enrich": "misc", "jev": "startups", "posts": 2},
+        {"enrich": None, "jev": "ai-coding", "posts": 1},
+        {"enrich": "ai-coding", "jev": "otro", "posts": 1},
     ]
     assert (
-        sum(row["posts"] for row in confusion)
-        == summarize(pairs, VOCAB, 0.85)["posts_primary_differs"]
+        sum(row["posts"] for row in summary["primary_confusion"])
+        == summary["posts_primary_differs"]
     )
+
+
+def test_post_sets_hold_the_posts_behind_every_confusion_row():
+    """One index, keyed `enrich~jev` with `-` for nothing: the posts each summary row counts."""
+    summary, comparisons = build_report(_confusion_corpus(), VOCAB, 0.85)
+
+    sets = post_sets(comparisons)
+
+    assert sets == {
+        "cx": {
+            "misc~startups": ["1", "2"],
+            "-~startups": ["4"],
+            "ai-coding~-": ["3"],
+            "ai-coding~startups": ["2"],
+        },
+        "px": {"misc~startups": ["1", "2"], "ai-coding~otro": ["3"]},
+    }
+    for kind, rows in (("cx", summary["topic_confusion"]), ("px", summary["primary_confusion"])):
+        assert {pair_key(r["enrich"], r["jev"]): r["posts"] for r in rows} == {
+            key: len(ids) for key, ids in sets[kind].items()
+        }
+
+
+def test_the_json_report_carries_the_counts_and_not_the_post_lists(tmp_path):
+    """The post lists grow with every evaluated post; the report file keeps the counts."""
+    pairs = _confusion_corpus()
+    summary, comparisons = build_report(pairs, VOCAB, 0.85)
+
+    json_path, _md = write_reports(summary, comparisons, {i.id: i for i, _ in pairs}, tmp_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "post_sets" not in payload and "post_sets" not in payload["summary"]
+    assert all(
+        set(row) == {"enrich", "jev", "posts"} for row in payload["summary"]["topic_confusion"]
+    )
+
+
+def test_the_primary_counts_account_for_every_compared_post():
+    """Every compared post has exactly one Jev primary: a vocabulary topic or the fallback."""
+    summary = summarize(_confusion_corpus(), VOCAB, 0.85)
+
+    jev_total = sum(row["jev_primary"] for row in summary["per_topic"])
+    assert jev_total + summary["primary_fallback"] == summary["items_compared"]
+
+
+def test_a_topics_primary_counts_differ_only_by_its_primary_confusion():
+    """Per topic: the posts where both sides pick it are `enrich_primary` minus the rows where
+    enrich picked it and Jev did not — and equally `jev_primary` minus the reverse rows."""
+    summary = summarize(_confusion_corpus(), VOCAB, 0.85)
+    rows = summary["primary_confusion"]
+
+    for row in summary["per_topic"]:
+        slug = row["slug"]
+        enrich_away = sum(r["posts"] for r in rows if r["enrich"] == slug)
+        jev_away = sum(r["posts"] for r in rows if r["jev"] == slug)
+        assert row["enrich_primary"] - enrich_away == row["jev_primary"] - jev_away, slug
 
 
 def test_a_topics_disagreeing_posts_are_its_doubtful_plus_its_missing_ones():

@@ -55,6 +55,7 @@ from xbrain.jev.report import (
     chose_fallback,
     jev_assigned,
     post_cost_view,
+    post_sets,
     run_history,
 )
 from xbrain.jev.store import load_runs
@@ -81,6 +82,10 @@ from xbrain.worksheet import link_content_source
 PAGE_SURFACE_CHARS = 600
 #: A photo's vision caption, as the page's alt text and tooltip, in characters.
 _CAPTION_CHARS = 280
+#: Topics enrich put on fewer posts than this sort after the rest in the Topics index, and are
+#: marked «pocos datos»: an agreement rate over one or two posts is noise. ONE definition, for
+#: every tab that ranks topics (shipped as `topic_min`).
+TOPIC_MIN = 5
 #: Photos and videos per card: the X grid shows four.
 _MEDIA_PER_CARD = 4
 #: Where the page's "docs" link points: the operator guide, which explains every number here.
@@ -574,6 +579,7 @@ def compute_jev_dashboard_data(
         "surface_chars": PAGE_SURFACE_CHARS,
         "char_limit": char_limit,
         "notes_dir": notes_dir,
+        "topic_min": TOPIC_MIN,
         "topics": [
             {"slug": t.slug, "label": humanize_topic(t.slug), "description": t.description}
             for t in vocab
@@ -591,6 +597,9 @@ def compute_jev_dashboard_data(
             "models": summary["models"],
         },
         "cost": _cost_block(runs, assessments, [a for _, a in pairs], runs_error),
+        # The posts behind every confusion row, for the Topics tab to open a pair. Page-only:
+        # the summary (and so `topics-report.json`) keeps the counts.
+        "post_sets": post_sets(comparisons),
         "posts": sorted((_card(item, corpus) for item in items), key=_order),
     }
 
