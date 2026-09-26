@@ -81,7 +81,7 @@ def load_jev_pairs(cfg: Config) -> JevPairs:
     empty `vocab` must say so itself rather than read the two zeros as "nothing was dropped".
     """
     store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    vocab = load_vocab(cfg.vocab_path)
     assessments = load_assessments(cfg.jev_topics_path)
     if not vocab:
         return JevPairs(

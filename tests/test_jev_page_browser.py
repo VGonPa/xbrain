@@ -30,7 +30,14 @@ from typing import Any
 
 import pytest
 
-from tests.test_jev_dashboard import _assessment, _compare_fixture, _corpus, _data, _item
+from tests.test_jev_dashboard import (
+    _assessment,
+    _compare_fixture,
+    _corpus,
+    _data,
+    _item,
+    _settings,
+)
 from xbrain.jev.dashboard import render_jev_dashboard_html
 from datetime import datetime, timezone
 
@@ -85,10 +92,12 @@ def test_chrome_is_available_where_the_page_tests_are_required():
 
 
 #: What a reader SEES: an element that is laid out (a `display:none` anywhere up its tree has
-#: no client rects) and not `visibility:hidden`. A probe that reads the DOM without this
+#: no client rects), not `visibility:hidden`, and not inside a closed `<details>` — Chrome
+#: folds those with `content-visibility: hidden`, which keeps client rects, so only
+#: `checkVisibility()` tells a folded question from an open one. A probe that reads the DOM without this
 #: certifies content nobody can see — the 9b pair list and a hidden tab both passed that way.
 _SEEN = r"""
-const seen = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+const seen = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && e.checkVisibility();
 const inView = e => { if (!seen(e)) return false; const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= -2 && r.top < innerHeight; };
 const txt = e => (seen(e) ? e.textContent : null);
 const seenCards = root => [...root.querySelectorAll('.card')].filter(seen).map(c => c.dataset.id);
@@ -450,9 +459,7 @@ def _topics_fixture() -> dict[str, Any]:
         items,
         assessments,
         _TOPIC_VOCAB,
-        threshold=0.85,
-        fallback="otro",
-        char_limit=100_000,
+        settings=_settings(model="jev-latest", concurrency=8),
         id2note={},
         updated="SEP 26, 2026",
         runs=[],
@@ -1384,3 +1391,463 @@ def test_the_edges_print_at_the_thresholds_own_precision(tmp_path):
 
     assert "UMBRAL 0,875" in seen["stamp"]
     assert "probabilidad 0,500 – 0,875" in seen["ranges"]
+
+
+# --------------------------------------------------------------------------- the Configuración tab
+
+#: Where the fixture's files live. The run log does not exist yet (no paid pass): the page
+#: must say so rather than list it as if it did.
+_CONFIG_FILES = [
+    {
+        "key": "topics",
+        "label": "jev/topics.json",
+        "path": "/repo/data/jev/topics.json",
+        "exists": True,
+        "snapshotted": False,
+    },
+    {
+        "key": "runs",
+        "label": "jev/runs.jsonl",
+        "path": "/repo/data/jev/runs.jsonl",
+        "exists": False,
+        "snapshotted": False,
+    },
+    {
+        "key": "vocab",
+        "label": "vocab.yaml",
+        "path": "/repo/data/vocab.yaml",
+        "exists": True,
+        "snapshotted": True,
+    },
+    {
+        "key": "report_json",
+        "label": "jev/topics-report.json",
+        "path": "/repo/data/jev/topics-report.json",
+        "exists": True,
+        "snapshotted": False,
+    },
+    {
+        "key": "report_md",
+        "label": "jev/topics-report.md",
+        "path": "/repo/data/jev/topics-report.md",
+        "exists": True,
+        "snapshotted": False,
+    },
+    {
+        # A first render is built before its file is written: the page must not call
+        # itself missing while the reader is looking at it.
+        "key": "page",
+        "label": "jev.html",
+        "path": "/vault/x-knowledge/jev.html",
+        "exists": False,
+        "snapshotted": False,
+        "served": False,
+    },
+]
+#: Every setting away from its default, so a value the template hard-codes cannot pass.
+_CONFIG_SETTINGS = {"threshold": 0.875, "fallback": "ninguno", "char_limit": 50_000}
+#: Four answers from one model and one from another, named so that name order and count
+#: order disagree.
+_MANY, _FEW = "jev-9.0.0", "jev-1.0.0"
+
+
+def _config_fixture(
+    files: list[dict[str, Any]] | None = _CONFIG_FILES, tokens=None
+) -> dict[str, Any]:
+    """Five current answers at the fixture's settings: one without a token count, one from a
+    provider nobody prices (so tokens average 4 answers and dollars 3), four never-asked posts
+    and one with no evidence."""
+    fallback, limit = _CONFIG_SETTINGS["fallback"], _CONFIG_SETTINGS["char_limit"]
+    specs = tokens or [
+        ("c0", "typesafe", 1000, _FEW),
+        ("c1", "typesafe", 3000, _MANY),
+        ("c2", "typesafe", None, _MANY),
+        ("c3", "fake", 5000, _MANY),
+        ("c4", "typesafe", 2000, _MANY),
+    ]
+    items, assessments = [], {}
+    for item_id, provider, n, model in specs:
+        item = _item(item_id, text=f"post {item_id}")
+        items.append(item)
+        answer = _assessment(
+            item, provider=provider, input_tokens=n, fallback=fallback, char_limit=limit
+        )
+        assessments[item_id] = answer.model_copy(update={"model": model})
+    items += [_item(f"n{n}") for n in range(4)]
+    empty = _item("vacio", text=" ")
+    empty.author = Author(handle="", name="")
+    items.append(empty)
+    return _data(items, assessments, files=files, **_CONFIG_SETTINGS)
+
+
+#: The Configuración tab, opened at #config: what a reader sees in each section, the questions
+#: before and after unfolding them, a vocabulary link followed, and the tab's error guard.
+_CONFIG_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const cfgBody = () => document.getElementById('config-body');
+const secs = () => [...cfgBody().querySelectorAll('section.cfg')];
+const sec = title => secs().find(s => s.querySelector('h3').textContent === title);
+const cells = tr => [...tr.querySelectorAll('td')].map(txt);
+const rows = s => [...s.querySelectorAll('tbody tr')].filter(seen).map(cells);
+const wireOf = w => ({instructions: txt(w.querySelector('.wi')),
+  criteria: [...w.querySelectorAll('dt')].map(dt => [txt(dt), txt(dt.nextElementSibling)])});
+const wires = root => [...root.querySelectorAll('.wire')].filter(seen).map(wireOf);
+let hashChanges = 0;
+addEventListener('hashchange', () => { hashChanges++; });
+async function travel(go) {
+  const before = hashChanges;
+  go();
+  for (let t = 0; hashChanges === before && t < 300; t++) await sleep(10);
+  if (hashChanges === before) throw new Error('no hashchange');
+  await sleep(0);
+}
+(async () => {
+  const out = {errors: []};
+  const step = async (name, fn) => { try { await fn(); } catch (e) { out.errors.push(name + ': ' + e); } };
+  await sleep(100);
+  await step('shell', async () => {
+    out.tab_seen = seen(document.getElementById('tab-config'));
+    out.posts_seen = seen(document.getElementById('tab-posts'));
+    out.titles = secs().filter(seen).map(s => txt(s.querySelector('h3')));
+  });
+  await step('settings', async () => {
+    const s = sec('Ajustes');
+    out.settings = rows(s);
+    out.settings_notes = [...s.querySelectorAll('p')].filter(seen).map(p => p.textContent);
+  });
+  await step('questions', async () => {
+    const s = sec('Las preguntas exactas');
+    const [yes, pick] = [...s.querySelectorAll('.q')];
+    out.yes_head = txt(yes.querySelector('.lab'));
+    out.yes_gloss = txt(yes.querySelector('.gloss'));
+    out.pick_gloss = txt(pick.querySelector('.gloss'));
+    out.yes_folded = wires(yes);
+    out.pick_folded = wires(pick);
+    yes.querySelector('summary').click(); pick.querySelector('summary').click(); await sleep(10);
+    out.yes_open = wires(yes.querySelector('details'));
+    out.pick_open = wires(pick.querySelector('details'));
+    out.intro = txt(s.querySelector('p.muted'));
+    out.digest = txt(s.querySelector('.digest'));
+  });
+  await step('vocab', async () => {
+    const s = sec('El vocabulario');
+    out.vocab = [...s.querySelectorAll('tbody tr')].filter(seen).map(tr => ({
+      label: txt(tr.querySelector('a')), href: tr.querySelector('a').getAttribute('href'),
+      slug: txt(tr.querySelector('.slug')), desc: txt(tr.querySelector('td.cw'))}));
+  });
+  await step('evidence', async () => {
+    const s = sec('Qué ve Jev de cada post');
+    out.surfaces = [...s.querySelectorAll('li')].map(txt);
+    out.marker = txt(s.querySelector('code.marker'));
+    out.cut = txt(s.querySelectorAll('p.muted')[1]);
+    const docs = s.querySelector('a.lk');
+    out.docs = {text: txt(docs), href: docs.getAttribute('href')};
+  });
+  await step('files', async () => {
+    const s = sec('Ficheros');
+    out.files = rows(s);
+    out.files_notes = [...s.querySelectorAll('p')].filter(seen).map(txt);
+  });
+  await step('cost', async () => {
+    const s = sec('Coste de una pasada (estimación)');
+    out.cost = [...s.querySelectorAll('.kind')].map(k => ({lab: txt(k.querySelector('.lab')),
+      big: txt(k.querySelector('.cnum')), why: txt(k.querySelector('p'))}));
+    out.cost_intro = txt(s.querySelector('p.muted'));
+  });
+  await step('link', async () => {
+    const a = sec('El vocabulario').querySelector('tbody a');
+    await travel(() => a.click());
+    out.after_link = {hash: location.hash, topics_seen: seen(document.getElementById('tab-topics')),
+      config_seen: seen(document.getElementById('tab-config')),
+      heading: txt(document.querySelector('#topic-detail .th2'))};
+    await travel(() => history.back());
+    out.back = {hash: location.hash, config_seen: seen(document.getElementById('tab-config')),
+      sections: secs().filter(seen).length};
+  });
+  await step('guard', async () => {
+    const saved = DATA.config;
+    DATA.config = null;
+    renderConfig();
+    out.guard = txt(cfgBody());
+    out.guard_banner_hidden = document.getElementById('banner').hidden;
+    DATA.config = saved;
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>
+"""
+)
+
+
+@pytest.fixture(scope="module")
+def config_probed(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
+    _need_chrome()
+    data = _config_fixture()
+    seen = _open(_page(tmp_path_factory.mktemp("jev-config"), data, _CONFIG_PROBE), "#config")
+    assert seen["errors"] == [], seen["errors"]
+    return data, seen
+
+
+def _wire_view(question: dict[str, Any], only: list[str] | None = None) -> dict[str, Any]:
+    """A shipped question as the probe reads it off the screen."""
+    return {
+        "instructions": question["instructions"],
+        "criteria": [[k, v] for k, v in question["criteria"] if only is None or k in only],
+    }
+
+
+def _nf(n: int) -> str:
+    """es-ES grouping as the page prints it: from five digits only (2000, but 12.000)."""
+    return str(n) if abs(n) < 10_000 else f"{n:,}".replace(",", ".")
+
+
+def _usd(x: float, decimals: int = 4) -> str:
+    return "~" + f"{x:.{decimals}f}".replace(".", ",") + " $"
+
+
+@_requires_chrome
+def test_the_config_tab_shows_its_six_sections(config_probed):
+    _data_, seen = config_probed
+
+    assert seen["tab_seen"] is True and seen["posts_seen"] is False
+    assert seen["titles"] == [
+        "Ajustes",
+        "Las preguntas exactas",
+        "El vocabulario",
+        "Qué ve Jev de cada post",
+        "Ficheros",
+        "Coste de una pasada (estimación)",
+    ]
+
+
+@_requires_chrome
+def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
+    """Every setting away from its default: the value shown is the one handed in, the default
+    is `JEV_DEFAULTS`' — so neither can be typed into the template."""
+    data, seen = config_probed
+    prices = data["config"]["prices"]
+
+    by_name = {row[0]: row for row in seen["settings"]}
+    assert list(by_name) == [
+        "Umbral",
+        "Modelo que se pedirá",
+        "Opción de escape",
+        "Peticiones a la vez",
+        "Límite de evidencia",
+        *[f"Precio de entrada · {p}" for p in sorted(prices)],
+    ]
+    assert by_name["Umbral"][1] == "0,875por defecto: 0,850"
+    assert by_name["Umbral"][3] == "[jev].threshold"
+    assert by_name["Opción de escape"][1] == "«ninguno»por defecto: «otro»"
+    assert by_name["Peticiones a la vez"][1] == "3por defecto: 8"
+    assert by_name["Límite de evidencia"][1] == "50.000 caracterespor defecto: 100.000 caracteres"
+    # Most answers first, then by name: here the reverse of name order.
+    assert by_name["Modelo que se pedirá"][1] == (
+        "jev-9.9.9por defecto: jev-latest · las evaluaciones guardadas no registran qué modelo "
+        f"se pidió, solo el que respondió: {_MANY} (4 evaluaciones vigentes), "
+        f"{_FEW} (1 evaluación vigente)"
+    )
+    assert data["config"]["models_answered"] == [[_MANY, 4], [_FEW, 1]]
+    assert by_name["Precio de entrada · typesafe"][1] == (
+        f"{str(prices['typesafe']).replace('.', ',')} $por millón de tokens de entrada"
+    )
+    intro, output = seen["settings_notes"][0], seen["settings_notes"][-1]
+    assert intro.startswith("Umbral, Opción de escape, Límite de evidencia: con estos valores")
+    assert "Modelo que se pedirá y Peticiones a la vez: no cambian esta página" in intro
+    assert output == "Los tokens de salida son gratis."
+
+
+@_requires_chrome
+def test_the_questions_on_screen_are_the_wire_text_the_blob_carries(config_probed):
+    """Folded: one sí/no example (the first in wire order) and the Choice with only its escape
+    option. Unfolded: every sí/no question and every option, exactly as shipped."""
+    data, seen = config_probed
+    questions = data["config"]["questions"]
+    yes_no = [q for q in questions if q["type"] == "yes_no"]
+    [choice] = [q for q in questions if q["type"] == "choice"]
+    fallback = choice["criteria"][-1][0]
+
+    assert fallback == "ninguno"
+    assert seen["yes_folded"] == [_wire_view(yes_no[0])]
+    assert seen["pick_folded"] == [_wire_view(choice, [fallback])]
+    assert seen["yes_open"] == [_wire_view(q) for q in yes_no]
+    assert seen["pick_open"] == [_wire_view(choice)]
+    assert seen["yes_head"] == f"{len(yes_no)} preguntas sí/no"
+    assert "sí/no por topic = pertenencia, varios posibles" in seen["yes_gloss"]
+    assert "elección = el principal, uno solo; sus probabilidades suman 1" in seen["pick_gloss"]
+    assert seen["pick_gloss"].endswith("y al final «ninguno»:")
+    assert f"con {len(questions)} preguntas" in seen["intro"]
+    assert seen["digest"] == data["config"]["questions_digest"]
+
+
+@_requires_chrome
+def test_the_vocabulary_lists_every_topic_and_links_its_topics_page(config_probed):
+    data, seen = config_probed
+
+    assert seen["vocab"] == [
+        {
+            "label": t["label"],
+            "href": f"#topics?t={t['slug']}",
+            "slug": t["slug"],
+            "desc": t["description"],
+        }
+        for t in data["topics"]
+    ]
+    first = data["topics"][0]
+    assert seen["after_link"]["hash"] == f"#topics?t={first['slug']}"
+    assert seen["after_link"]["topics_seen"] is True
+    assert seen["after_link"]["config_seen"] is False
+    assert seen["after_link"]["heading"].startswith(first["label"])
+    assert seen["back"] == {"hash": "#config", "config_seen": True, "sections": 6}
+
+
+@_requires_chrome
+def test_what_jev_reads_is_the_state_order_and_the_cut_quotes_the_real_marker(config_probed):
+    data, seen = config_probed
+    config = data["config"]
+
+    assert seen["surfaces"] == [s["label"] for s in config["surfaces"]]
+    assert seen["surfaces"][0] == "Tweet"
+    assert seen["marker"] == config["cut_marker"]
+    assert seen["cut"].startswith("El corte: si pasa de 50.000 caracteres, se corta")
+    assert "un corte solo llega a él si el propio tweet pasa del límite" in seen["cut"]
+    assert seen["docs"]["href"] == config["docs_url"]
+
+
+@_requires_chrome
+def test_the_files_say_where_each_lives_whether_it_exists_and_whether_snapshots_keep_it(
+    config_probed,
+):
+    data, seen = config_probed
+
+    [runs] = [row for row in seen["files"] if row[0] == "jev/runs.jsonl"]
+    assert runs[1] == (
+        "/repo/data/jev/runs.jsonl"
+        "(aún no existe: lo crea la primera `xbrain jev topics` que envíe peticiones)"
+    )
+    assert [(row[0], row[3]) for row in seen["files"]] == [
+        (f["label"], "sí" if f["snapshotted"] else "no") for f in data["config"]["files"]
+    ]
+    assert [row[1] for row in seen["files"] if row[0] != "jev/runs.jsonl"] == [
+        f["path"] for f in data["config"]["files"] if f["key"] != "runs"
+    ]
+    assert seen["files"][-1][1] == "/vault/x-knowledge/jev.html"
+    assert seen["files"][-1][2] == "esta página; la escribe `xbrain jev dashboard`"
+    assert seen["files_notes"] == [
+        "data/ no está en git. Las evaluaciones de Jev (jev/topics.json) y su registro "
+        "(jev/runs.jsonl) no entran en los snapshots; el topics.json de enrich y vocab.yaml sí.",
+        "Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo "
+        "devuelve; runs.jsonl es el histórico de costes.",
+    ]
+
+
+@_requires_chrome
+def test_the_cost_of_a_pass_is_the_estimate_python_computed(config_probed):
+    """Tokens average four answers and dollars three (one provider has no price): the line
+    names both, and the dollar figures say they leave that provider out."""
+    data, seen = config_probed
+    estimate = data["config"]["estimate"]
+    per_post = estimate["per_post"]
+
+    assert per_post["tokens_n"] == 4 and per_post["n"] == 3
+    assert per_post["unpriced_providers"] == ["fake"]
+    labs = [c["lab"] for c in seen["cost"]]
+    assert labs == ["Media por post", "Lo que falta", "Todo el corpus"]
+    mean, pending, corpus = seen["cost"]
+    assert mean["big"] == _nf(round(per_post["mean_tokens"])) + " tokens"
+    assert mean["why"] == (
+        "tokens: media de 4 de las 5 evaluaciones vigentes (las que traen recuento) · $: "
+        + _usd(per_post["mean_usd"], 5)
+        + ", media de 3 (las que además tienen tarifa) · sin tarifa: fake"
+    )
+    assert pending["big"] == _usd(estimate["pending"]["usd"])
+    assert corpus["big"] == _usd(estimate["corpus"]["usd"])
+    for shown, key in ((pending, "pending"), (corpus, "corpus")):
+        e = estimate[key]
+        assert shown["why"] == (
+            f"{e['posts']} posts · ~{_nf(e['tokens'])} tokens de entrada · el $ solo promedia "
+            "proveedores con tarifa (sin tarifa: fake)"
+        )
+    # Recounted from the cards: the posts that offer the `jev topics --id` command, and every
+    # post with evidence.
+    asks = [p for p in data["posts"] if p["status"] in ("stale", "unevaluated")]
+    assert estimate["pending"]["posts"] == sum(not p["no_evidence"] for p in asks) == 4
+    assert estimate["corpus"]["posts"] == len(data["posts"]) - 1
+    assert "como si se volviera a preguntar todo" in seen["cost_intro"]
+
+
+@_requires_chrome
+def test_a_config_tab_that_fails_after_boot_says_so_in_the_tab(config_probed):
+    _data_, seen = config_probed
+
+    assert seen["guard"].startswith("La pestaña Configuración no pudo dibujarse: ")
+    assert seen["guard_banner_hidden"] is True
+
+
+_READ_CONFIG = (
+    "<script>"
+    + _SEEN
+    + r"""
+setTimeout(() => {
+  const s = t => [...document.querySelectorAll('#config-body section.cfg')].find(x => x.querySelector('h3').textContent === t);
+  const pre = document.createElement('pre'); pre.id = 'probe';
+  pre.textContent = JSON.stringify({
+    files: [...s('Ficheros').querySelectorAll('p')].map(txt),
+    cost: [...s('Coste de una pasada (estimación)').querySelectorAll('.kind')].map(k =>
+      [txt(k.querySelector('.cnum')), txt(k.querySelector('p'))])});
+  document.body.appendChild(pre);
+}, 200);
+</script>
+"""
+)
+
+
+@_requires_chrome
+def test_a_page_without_paths_or_token_counts_says_so(tmp_path):
+    """A pure build ships no paths; answers with no token count leave nothing to average —
+    the page says both instead of printing zeros."""
+    _need_chrome()
+    no_tokens = [(f"c{n}", "typesafe", None, _MANY) for n in range(2)]
+    data = _config_fixture(files=None, tokens=no_tokens)
+
+    seen = _open(_page(tmp_path, data, _READ_CONFIG), "#config")
+
+    assert seen["files"] == ["Esta página se generó sin rutas de ficheros."]
+    assert seen["cost"] == [
+        ["—", "ninguna evaluación vigente trae recuento de tokens"],
+        ["—", "4 posts · sin media que multiplicar"],
+        ["—", f"{len(data['posts']) - 1} posts · sin media que multiplicar"],
+    ]
+
+
+_TO_CONFIG = (
+    "<script>"
+    + _SEEN
+    + r"""
+setTimeout(() => {
+  document.querySelector('.tabs a[data-tab="config"]').click();
+  setTimeout(() => {
+    const pre = document.createElement('pre'); pre.id = 'probe';
+    pre.textContent = JSON.stringify({hash: location.hash,
+      titles: [...document.querySelectorAll('#config-body section.cfg h3')].map(txt).filter(Boolean)});
+    document.body.appendChild(pre);
+  }, 100);
+}, 100);
+</script>
+"""
+)
+
+
+@_requires_chrome
+def test_the_config_tab_draws_when_reached_from_another_tab(tmp_path):
+    """Opened on Posts, then the tab link: the tab draws on the hash change, not only at boot."""
+    _need_chrome()
+
+    seen = _open(_page(tmp_path, _config_fixture(), _TO_CONFIG))
+
+    assert seen["hash"] == "#config"
+    assert len(seen["titles"]) == 6 and seen["titles"][0] == "Ajustes"

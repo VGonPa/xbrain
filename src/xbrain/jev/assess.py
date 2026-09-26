@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
-from xbrain.evidence import Surface, evidence_surfaces
+from xbrain.evidence import SURFACE_KEYS, Surface, evidence_surfaces
 from xbrain.jev.client import (
     ChoiceAnswer,
     ChoiceQuestion,
@@ -47,6 +47,20 @@ _CONTRACT_VERSION = "xbrain-jev-topics/v1"
 # The surface carrying the post's own words. It is LAST in the canonical evidence order and
 # FIRST in the state — see `_state_text`.
 _POST_SURFACE = "tweet"
+#: The line a cut state ends with, `{dropped}` the characters it left out. ONE wording: the
+#: Configuración tab quotes it, and a page that paraphrased it would describe a state nobody
+#: sends.
+CUT_MARKER = "[… evidencia recortada: {dropped} caracteres omitidos …]"
+
+
+#: THE ORDER THE STATE CARRIES ITS SURFACES IN: the post's own words first, then the
+#: target's surfaces in the canonical evidence order (a stable sort on "is it the post").
+#: `_state_order` sorts an item's surfaces by position here, and the Configuración tab lists
+#: it — one order, so the page cannot describe a state nobody sends.
+STATE_SURFACE_KEYS: tuple[str, ...] = tuple(
+    sorted(SURFACE_KEYS[TARGET], key=lambda key: key != _POST_SURFACE)
+)
+_STATE_POSITION = {key: n for n, key in enumerate(STATE_SURFACE_KEYS)}
 
 
 def _nfc(text: str) -> str:
@@ -70,12 +84,13 @@ def _state_order(item: Item) -> list[Surface]:
     the unbounded video transcript comes third. Cutting that blob at `char_limit` therefore
     eats the transcript and throws away the post: measured on the corpus, 7 of 7 items over
     the 100k default lost their own tweet, and Jev was then asked whether "the post in
-    `post`" was about a topic with the post no longer in it. Leading with the tweet makes
-    that structurally impossible — a cut can only ever reach the supporting surfaces.
+    `post`" was about a topic with the post no longer in it. Leading with the tweet means a cut
+    reaches the post's own words only when the tweet by itself is longer than `char_limit`;
+    every other cut falls on the supporting surfaces.
+
+    The order is `STATE_SURFACE_KEYS`, by position.
     """
-    # A stable sort on a boolean: the post surface moves to the front, everything else keeps
-    # its canonical relative order.
-    return sorted(evidence_surfaces(item, TARGET), key=lambda surface: surface.key != _POST_SURFACE)
+    return sorted(evidence_surfaces(item, TARGET), key=lambda s: _STATE_POSITION[s.key])
 
 
 def _state_text(item: Item) -> str:
@@ -136,7 +151,7 @@ def build_topic_state(item: Item, char_limit: int) -> tuple[dict[str, str], int]
     if len(text) <= char_limit:
         return {STATE_KEY: text}, len(text)
     dropped = len(text) - char_limit
-    cut = f"{text[:char_limit]}\n[… evidencia recortada: {dropped} caracteres omitidos …]"
+    cut = f"{text[:char_limit]}\n{CUT_MARKER.format(dropped=dropped)}"
     return {STATE_KEY: cut}, len(text)
 
 

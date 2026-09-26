@@ -68,6 +68,7 @@ from xbrain.jev.report import (
     build_report,
     cost_fragment,
     history_fragment,
+    report_paths,
     run_history,
     write_reports,
 )
@@ -2849,7 +2850,7 @@ def jev_topics_cmd(
     """
     cfg = _config()
     store = load_store(cfg.items_path)
-    vocab = load_vocab(cfg.data_dir / "vocab.yaml")
+    vocab = load_vocab(cfg.vocab_path)
     assessments = load_assessments(cfg.jev_topics_path)
     selection = select_items(
         store,
@@ -2927,8 +2928,7 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
     kept = f"No se sobrescribe {artifact}"
     if not jev.vocab:
         raise JevError(
-            f"el vocabulario está vacío o falta {cfg.data_dir / 'vocab.yaml'}: "
-            f"ejecuta `xbrain vocab`. {kept}"
+            f"el vocabulario está vacío o falta {cfg.vocab_path}: ejecuta `xbrain vocab`. {kept}"
         )
     if not jev.store:
         raise JevError(
@@ -2943,7 +2943,7 @@ def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
         raise JevError(
             f"0 evaluaciones vigentes de {len(jev.assessments)} guardadas "
             f"({jev.stale} caducadas, {jev.orphans} huérfanas): ejecuta `xbrain jev topics` "
-            f"(o revisa {cfg.data_dir / 'vocab.yaml'} si acabas de cambiarlo). {kept}"
+            f"(o revisa {cfg.vocab_path} si acabas de cambiarlo). {kept}"
         )
     if not any(item.enriched is not None for item, _ in jev.pairs):
         # The fifth state, and the quietest: the side-car is full and current, and
@@ -3040,7 +3040,7 @@ def jev_report_cmd(
     cfg = _config()
     t = _jev_threshold(cfg, threshold)
     jev = load_jev_pairs(cfg)
-    _refuse_empty_report(jev, cfg, cfg.jev_dir / "topics-report.json")
+    _refuse_empty_report(jev, cfg, report_paths(cfg.jev_dir)[0])
     # ONE comparison pass for both halves: the summary carries the numbers, the comparisons
     # carry the rows, and a second pass would be a second place the threshold has to match.
     # The clock is read HERE and handed down, so `build_report` stays a pure function of its
@@ -3079,7 +3079,7 @@ def jev_dashboard_cmd() -> None:
     """
     cfg = _config()
     jev = load_jev_pairs(cfg)
-    page = cfg.output_dir / "jev.html"
+    page = cfg.jev_page_path
     # A dashboard over nothing is not a dashboard of zeros. Same refusal as the report — it
     # names the missing input, the command that fixes it, and the artifact left alone, which
     # for THIS command is the page and not the report it never touches.

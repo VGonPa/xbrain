@@ -23,6 +23,10 @@ from xbrain.video_frames import (
 SUPPORTED_TOPIC_STYLES: tuple[str, ...] = ("wikilink", "hashtag")
 
 
+#: The Jev page's file name under `<output_dir>` (`Config.jev_page_path`).
+JEV_PAGE = "jev.html"
+
+
 @dataclass(frozen=True)
 class Config:
     repo_root: Path
@@ -128,6 +132,24 @@ class Config:
         return self.data_dir / "topics.json"
 
     @property
+    def vocab_path(self) -> Path:
+        return self.data_dir / "vocab.yaml"
+
+    @property
+    def jev_page_path(self) -> Path:
+        """`jev.html`, beside `dashboard.html`: where `jev dashboard` writes it and where
+        `generate` looks for it before linking it from `_index.md`."""
+        return self.output_dir / JEV_PAGE
+
+    def jev_settings(self) -> dict[str, str | float | int]:
+        """Every `[jev]` setting in effect, keyed and ordered like `jev.defaults.JEV_DEFAULTS`
+        — the one dict the dashboard is built from. A key the loader accepts but this cannot
+        read raises here instead of being shown as its default forever."""
+        from xbrain.jev.defaults import JEV_DEFAULTS
+
+        return {key: getattr(self, f"jev_{key}") for key in JEV_DEFAULTS}
+
+    @property
     def jev_dir(self) -> Path:
         """Side-car for Jev assessments and reports — never inside `items.json`."""
         return self.data_dir / "jev"
@@ -220,12 +242,13 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int]:
         DEFAULT_MODEL,
         DEFAULT_STATE_CHAR_LIMIT,
         DEFAULT_THRESHOLD,
+        JEV_DEFAULTS,
     )
 
     jev = settings.get("jev", {})
     if not isinstance(jev, dict):
         raise ValueError(f"config.toml: [jev] must be a table, got {jev!r}")
-    allowed = ("concurrency", "fallback_option", "model", "state_char_limit", "threshold")
+    allowed = tuple(sorted(JEV_DEFAULTS))
     unknown = sorted(jev.keys() - set(allowed))
     if unknown:
         raise ValueError(
