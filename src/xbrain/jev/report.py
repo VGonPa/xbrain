@@ -74,6 +74,61 @@ class Pair:
 
 
 @dataclass(frozen=True)
+class Band:
+    """One range of Jev's probability on a disagreement: `lo <= p < hi`, and `p == hi` too
+    when `top` (the last band reaches 1.0). `kind` is the direction it splits — `enrich_only`
+    (enrich assigns, Jev below the threshold) or `jev_only` (Jev at or above it, enrich did
+    not assign)."""
+
+    kind: str
+    key: str
+    label: str
+    lo: float
+    hi: float
+    top: bool = False
+
+    def holds(self, noul: float) -> bool:
+        return self.lo <= noul and (noul < self.hi or (self.top and noul == self.hi))
+
+
+#: THE band edges: how sure Jev was on each disagreement, in the words the page uses. `None`
+#: is the threshold, which ends the enrich-side bands and starts the Jev-side ones. Defined
+#: here once, shipped in the summary with each band's counts, and stated on the page.
+_BAND_SPECS: tuple[tuple[str, str, str, float | None, float | None], ...] = (
+    ("enrich_only", "e-lo", "Jev lo descarta claramente", 0.0, 0.2),
+    ("enrich_only", "e-mid", "Jev lo ve poco probable", 0.2, 0.5),
+    ("enrich_only", "e-near", "Casi: se queda justo por debajo del umbral", 0.5, None),
+    ("jev_only", "j-near", "Lo ve por encima del umbral, sin mucho margen", None, 0.95),
+    ("jev_only", "j-hi", "Jev lo ve claramente", 0.95, 1.0),
+)
+
+
+def confidence_bands(threshold: float) -> tuple[Band, ...]:
+    """The bands at this threshold: enrich-side ones cut at it from above, Jev-side ones from
+    below. A band the threshold leaves no room for (0.5–threshold at a threshold of 0.4) is
+    dropped rather than shipped empty with an inverted range."""
+    bands = []
+    for kind, key, label, lo, hi in _BAND_SPECS:
+        if kind == "enrich_only":
+            low, high = lo or 0.0, min(threshold if hi is None else hi, threshold)
+        else:
+            low, high = max(threshold if lo is None else lo, threshold), hi or 1.0
+        top = high == 1.0
+        if low < high or (top and low == high):
+            bands.append(Band(kind, key, label, low, high, top=top))
+    return tuple(bands)
+
+
+def band_of(noul: float, kind: str, bands: Sequence[Band]) -> Band:
+    """The `kind` band holding `noul`. A probability none holds is REFUSED, never dropped: a
+    disagreement missing from every band would make the bands sum short of their total."""
+    for band in bands:
+        if band.kind == kind and band.holds(noul):
+            return band
+    raise ValueError(f"la probabilidad {noul} no cae en ningún tramo de {kind}")
+
+
+@dataclass(frozen=True)
 class ItemComparison:
     """What Jev and `enrich` say about ONE item, at one threshold.
 
@@ -306,10 +361,12 @@ def _slug_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
 
 
 def _primary_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
-    """Per-slug count of the posts each side picked it as primary on (enrich, then Jev)."""
+    """Per-slug count of the posts each side picked it as primary on (enrich, then Jev), and
+    of the posts both picked it on."""
     return {
         "enrich_primary": Counter(c.primary_topic for c in comparisons if c.primary_topic),
         "jev_primary": Counter(c.jev_primary for c in comparisons),
+        "primary_both": Counter(c.jev_primary for c in comparisons if c.primary_agrees),
     }
 
 
@@ -350,6 +407,9 @@ def _topic_row(slug: str, counts: dict[str, Counter[str]]) -> dict[str, Any]:
         # two side by side, and a topic Jev never picks as primary is a finding of its own.
         "enrich_primary": counts["enrich_primary"][slug],
         "jev_primary": counts["jev_primary"][slug],
+        # Both sides picked it: the diagonal of the primary cross. `enrich_primary` minus the
+        # posts where enrich picked it and Jev did not (`primary_confusion`), counted directly.
+        "primary_both": counts["primary_both"][slug],
     }
 
 
@@ -473,18 +533,58 @@ def primary_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]
     return _pair_rows(_primary_pairs(comparisons))
 
 
-def post_sets(comparisons: list[ItemComparison]) -> dict[str, dict[str, list[str]]]:
-    """THE index of the posts behind every confusion row: `{"cx": {pair_key: [ids]}, "px":
-    {…}}` for `topic_confusion` and `primary_confusion`.
+def post_sets(
+    comparisons: list[ItemComparison], threshold: float
+) -> dict[str, dict[str, list[str]]]:
+    """THE index of the posts behind every count the page opens: `cx` and `px` by `pair_key`
+    (`topic_confusion`, `primary_confusion`), `pd` by topic (the posts both sides picked it as
+    primary on, `per_topic.primary_both`) and `bands` by band key (`confidence_bands`).
 
     Kept OUT of the summary on purpose: the summary holds counts, which are what the JSON
     report is for and which stay small; these lists grow with every evaluated post, and only
     the page needs them (to open a pair's posts). `build_page_data` ships them; `write_reports`
     does not."""
-    return {
+    sets = {
         kind: {pair_key(e, j): sorted(ids) for (e, j), ids in pairs.items()}
         for kind, pairs in (("cx", _topic_pairs(comparisons)), ("px", _primary_pairs(comparisons)))
     }
+    sets["pd"] = {slug: sorted(ids) for slug, ids in _agreeing_primaries(comparisons).items()}
+    sets["bands"] = {
+        band.key: sorted({pair.item_id for pair in pairs})
+        for band, pairs in _band_pairs(comparisons, threshold).items()
+    }
+    return sets
+
+
+def _band_pairs(comparisons: list[ItemComparison], threshold: float) -> dict[Band, list[Pair]]:
+    """Every disagreeing (post, topic) pair in its band: `doubtful` by the enrich-side bands,
+    `missing` by the Jev-side ones."""
+    bands = confidence_bands(threshold)
+    grouped: dict[Band, list[Pair]] = {band: [] for band in bands}
+    for c in comparisons:
+        for kind, pairs in (("enrich_only", c.doubtful), ("jev_only", c.missing)):
+            for pair in pairs:
+                grouped[band_of(pair.noul, kind, bands)].append(pair)
+    return grouped
+
+
+def confidence_rows(comparisons: list[ItemComparison], threshold: float) -> list[dict[str, Any]]:
+    """How sure Jev was on each disagreement: one row per band, its edges and label, the
+    pairs in it and the posts they are on (a post with two pairs in a band counts once).
+    Counts only: the posts are `post_sets`'."""
+    return [
+        {**asdict(band), "pairs": len(pairs), "posts": len({p.item_id for p in pairs})}
+        for band, pairs in _band_pairs(comparisons, threshold).items()
+    ]
+
+
+def _agreeing_primaries(comparisons: list[ItemComparison]) -> dict[str, list[str]]:
+    """The posts where both sides picked the same primary, by that topic."""
+    both: dict[str, list[str]] = {}
+    for c in comparisons:
+        if c.primary_agrees:
+            both.setdefault(c.jev_primary, []).append(c.item_id)
+    return both
 
 
 def chose_fallback(comparison: ItemComparison, slugs: set[str]) -> bool:
@@ -661,6 +761,7 @@ def _summarize(
         "per_topic": _per_topic(comparisons, vocab),
         "topic_confusion": topic_confusion(comparisons),
         "primary_confusion": primary_confusion(comparisons),
+        "confidence_bands": confidence_rows(comparisons, threshold),
     }
 
 

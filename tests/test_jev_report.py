@@ -12,8 +12,11 @@ from xbrain.jev.defaults import jev_cost_fragment, tokens_cost_usd
 from xbrain.jev.models import JevRun, PrimaryChoice, TopicAssessment
 from xbrain.jev.questions import STATE_KEY, build_topic_questions
 from xbrain.jev.report import (
+    Band,
     Pair,
+    band_of,
     build_report,
+    confidence_bands,
     compare_item,
     assessment_cost_usd,
     current_assessments,
@@ -251,6 +254,7 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "disagreeing": 1,
         "enrich_primary": 0,
         "jev_primary": 0,
+        "primary_both": 0,
     }
     assert by_slug["startups"] == {
         "slug": "startups",
@@ -263,6 +267,7 @@ def test_summarize_counts_pairs_topics_primary_and_cost():
         "disagreeing": 1,
         "enrich_primary": 1,
         "jev_primary": 0,
+        "primary_both": 0,
     }
     assert [row["slug"] for row in summary["per_topic"]] == ["misc", "ai-coding", "startups"]
 
@@ -381,9 +386,9 @@ def test_post_sets_hold_the_posts_behind_every_confusion_row():
     """One index, keyed `enrich~jev` with `-` for nothing: the posts each summary row counts."""
     summary, comparisons = build_report(_confusion_corpus(), VOCAB, 0.85)
 
-    sets = post_sets(comparisons)
+    sets = post_sets(comparisons, 0.85)
 
-    assert sets == {
+    assert {kind: sets[kind] for kind in ("cx", "px")} == {
         "cx": {
             "misc~startups": ["1", "2"],
             "-~startups": ["4"],
@@ -398,6 +403,159 @@ def test_post_sets_hold_the_posts_behind_every_confusion_row():
         }
 
 
+def _band_corpus():
+    """Every confidence band non-empty, each with its own (pairs, posts), and every edge hit
+    exactly once. Threshold 0.85; enrich's primary is its first topic.
+
+    "1" misc 0.0 + ai-coding 0.1999 doubtful → e-lo ×2 (one post, two pairs)
+    "2" misc 0.1 doubtful → e-lo; startups 0.95 EXACTLY → j-hi; Jev primary startups
+    "3" ai-coding 0.2 EXACTLY → e-mid; startups 0.85 = the threshold → j-near, not doubtful
+    "4" misc 0.5 EXACTLY + startups 0.8499 → e-near ×2; ai-coding 0.9 → j-near
+    "5" startups 0.7 → e-near; ai-coding 1.0 → j-hi (the top edge is inside); misc 0.9 → j-near
+    "7" agrees on everything
+    "8" misc 0.6 → e-near
+    "9" startups 0.99 → j-hi; misc 0.9 → j-near
+    e-lo 3/2 · e-mid 1/1 · e-near 4/3 · j-near 4/4 · j-hi 3/3 (pairs/posts)."""
+    specs = [
+        ("1", ("misc", "ai-coding"), {"misc": 0.0, "ai-coding": 0.1999, "startups": 0.1}, "misc"),
+        ("2", ("misc",), {"misc": 0.1, "startups": 0.95, "ai-coding": 0.3}, "startups"),
+        ("3", ("ai-coding",), {"ai-coding": 0.2, "startups": 0.85, "misc": 0.5}, "ai-coding"),
+        (
+            "4",
+            ("misc", "startups"),
+            {"misc": 0.5, "startups": 0.8499, "ai-coding": 0.9},
+            "ai-coding",
+        ),
+        ("5", ("startups",), {"startups": 0.7, "ai-coding": 1.0, "misc": 0.9}, "otro"),
+        ("7", ("ai-coding",), {"ai-coding": 0.9, "startups": 0.1, "misc": 0.1}, "ai-coding"),
+        ("8", ("misc",), {"misc": 0.6, "ai-coding": 0.1, "startups": 0.1}, "misc"),
+        ("9", ("ai-coding",), {"ai-coding": 0.9, "startups": 0.99, "misc": 0.9}, "ai-coding"),
+    ]
+    pairs = []
+    for item_id, topics, membership, choice in specs:
+        item = _item(item_id, topics=topics)
+        pairs.append((item, _assessment(item, membership, choice=choice)))
+    return pairs
+
+
+def test_the_band_edges_are_defined_once_and_cut_at_the_threshold():
+    """Below the threshold: < 0.2, 0.2–0.5, 0.5–threshold; at or above it: threshold–0.95 and
+    ≥ 0.95 (the top band keeps 1.0). A band the threshold leaves no room for is dropped."""
+    assert confidence_bands(0.85) == (
+        Band("enrich_only", "e-lo", "Jev lo descarta claramente", 0.0, 0.2),
+        Band("enrich_only", "e-mid", "Jev lo ve poco probable", 0.2, 0.5),
+        Band("enrich_only", "e-near", "Casi: se queda justo por debajo del umbral", 0.5, 0.85),
+        Band("jev_only", "j-near", "Lo ve por encima del umbral, sin mucho margen", 0.85, 0.95),
+        Band("jev_only", "j-hi", "Jev lo ve claramente", 0.95, 1.0, top=True),
+    )
+    assert [(b.key, b.lo, b.hi) for b in confidence_bands(0.4)] == [
+        ("e-lo", 0.0, 0.2),
+        ("e-mid", 0.2, 0.4),
+        ("j-near", 0.4, 0.95),
+        ("j-hi", 0.95, 1.0),
+    ]
+    assert [(b.key, b.lo, b.hi) for b in confidence_bands(0.97)] == [
+        ("e-lo", 0.0, 0.2),
+        ("e-mid", 0.2, 0.5),
+        ("e-near", 0.5, 0.97),
+        ("j-hi", 0.97, 1.0),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("noul", "kind", "key"),
+    [
+        (0.0, "enrich_only", "e-lo"),
+        (0.1999, "enrich_only", "e-lo"),
+        (0.2, "enrich_only", "e-mid"),
+        (0.4999, "enrich_only", "e-mid"),
+        (0.5, "enrich_only", "e-near"),
+        (0.8499, "enrich_only", "e-near"),
+        (0.85, "jev_only", "j-near"),
+        (0.9499, "jev_only", "j-near"),
+        (0.95, "jev_only", "j-hi"),
+        (1.0, "jev_only", "j-hi"),
+    ],
+)
+def test_each_edge_belongs_to_the_band_above_it(noul, kind, key):
+    assert band_of(noul, kind, confidence_bands(0.85)).key == key
+
+
+def test_a_probability_no_band_holds_is_refused_not_dropped():
+    with pytest.raises(ValueError, match="ningún tramo"):
+        band_of(0.9, "enrich_only", confidence_bands(0.85))
+
+
+def test_the_summary_counts_each_band_in_pairs_and_posts_and_the_index_names_the_posts():
+    summary, comparisons = build_report(_band_corpus(), VOCAB, 0.85)
+
+    rows = {row["key"]: row for row in summary["confidence_bands"]}
+    assert {key: (row["pairs"], row["posts"]) for key, row in rows.items()} == {
+        "e-lo": (3, 2),
+        "e-mid": (1, 1),
+        "e-near": (4, 3),
+        "j-near": (4, 4),
+        "j-hi": (3, 3),
+    }
+    assert rows["j-hi"] == {
+        "kind": "jev_only",
+        "key": "j-hi",
+        "label": "Jev lo ve claramente",
+        "lo": 0.95,
+        "hi": 1.0,
+        "top": True,
+        "pairs": 3,
+        "posts": 3,
+    }
+    assert post_sets(comparisons, 0.85)["bands"] == {
+        "e-lo": ["1", "2"],
+        "e-mid": ["3"],
+        "e-near": ["4", "5", "8"],
+        "j-near": ["3", "4", "5", "9"],
+        "j-hi": ["2", "5", "9"],
+    }
+
+
+def test_the_bands_partition_both_directions_of_disagreement():
+    """Every doubtful pair is in exactly one enrich-side band, every missing pair in one
+    Jev-side band — recounted from the comparisons, not from the band rows."""
+    summary, comparisons = build_report(_band_corpus(), VOCAB, 0.85)
+
+    for kind, total in (("enrich_only", "doubtful_pairs"), ("jev_only", "missing_pairs")):
+        rows = [row for row in summary["confidence_bands"] if row["kind"] == kind]
+        assert sum(row["pairs"] for row in rows) == summary[total] > 0, kind
+    doubtful_posts = {c.item_id for c in comparisons if c.doubtful}
+    band_posts = post_sets(comparisons, 0.85)["bands"]
+    assert set().union(*(band_posts[k] for k in ("e-lo", "e-mid", "e-near"))) == doubtful_posts
+
+
+def test_each_topic_counts_the_posts_where_both_sides_pick_it_as_primary():
+    """The diagonal of the primary cross, per topic, and the posts behind it (`pd`): with the
+    off-diagonal rows it accounts for every post each side picked the topic on."""
+    summary, comparisons = build_report(_band_corpus(), VOCAB, 0.85)
+    rows = {row["slug"]: row for row in summary["per_topic"]}
+
+    assert {slug: row["primary_both"] for slug, row in rows.items()} == {
+        "ai-coding": 3,
+        "startups": 0,
+        "misc": 2,
+    }
+    assert post_sets(comparisons, 0.85)["pd"] == {"ai-coding": ["3", "7", "9"], "misc": ["1", "8"]}
+    assert sum(row["primary_both"] for row in rows.values()) == summary["primary_agree"]
+    for slug, row in rows.items():
+        away = sum(r["posts"] for r in summary["primary_confusion"] if r["enrich"] == slug)
+        assert row["primary_both"] == row["enrich_primary"] - away, slug
+
+
+def test_the_fallback_row_of_the_primary_cross_counts_every_fallback_pick():
+    """Jev's «otro» posts, by the primary enrich had: the rows add up to `primary_fallback`."""
+    summary, _ = build_report(_band_corpus(), VOCAB, 0.85)
+
+    rows = [r for r in summary["primary_confusion"] if r["jev"] == FALLBACK]
+    assert rows == [{"enrich": "startups", "jev": "otro", "posts": 1}]
+    assert sum(r["posts"] for r in rows) == summary["primary_fallback"]
+
+
 def test_the_json_report_carries_the_counts_and_not_the_post_lists(tmp_path):
     """The post lists grow with every evaluated post; the report file keeps the counts."""
     pairs = _confusion_corpus()
@@ -407,6 +565,8 @@ def test_the_json_report_carries_the_counts_and_not_the_post_lists(tmp_path):
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert "post_sets" not in payload and "post_sets" not in payload["summary"]
+    # The bands ride as counts; their posts, like the pairs', stay in the page's index.
+    assert all("ids" not in row for row in payload["summary"]["confidence_bands"])
     assert all(
         set(row) == {"enrich", "jev", "posts"} for row in payload["summary"]["topic_confusion"]
     )
