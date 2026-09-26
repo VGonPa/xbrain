@@ -665,9 +665,11 @@ generates an Obsidian wiki.
   snapshot it does not get. ONE ASSESSMENT PER ITEM: the side-car is keyed by `item_id`
   alone, so a second judge OVERWRITES the first's records; `provider`/`model` are provenance,
   not a panel. Every pass that SENT a request appends one `JevRun` line to
-  `data/jev/runs.jsonl` (requests, ok, failed, tokens per provider, interrupted) from the
-  command's `finally` — every exit path, 402s and Ctrl-C included; tokens, never dollars
-  (priced at read time by `report.run_history`). `jev dashboard` compares at the FIXED
+  `data/jev/runs.jsonl` (requests, ok, failed, unsaved, tokens per provider, interrupted),
+  counted at the client seam (`CountingJevClient`) and appended from `jev.run.run_topics`'
+  `finally` — every exit path, 402s and Ctrl-C included, and the log step never becomes the
+  verdict; tokens, never dollars (priced at read time by `report.run_history`, which also
+  prices assessments no logged pass covers as "fuera del registro"). `jev dashboard` compares at the FIXED
   `[jev].threshold`, recomputes nothing in the browser (no slider, no JS mirror, no node in
   CI) and shows the disagreeing posts plus cost total / per pass / per post. `jev topics` is the
   only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from

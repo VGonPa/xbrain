@@ -198,34 +198,51 @@ model version while `[jev].model` defaults to a moving alias. See [Vendor facts]
 
 The side-car keeps only the **latest** answer per item, so it cannot say what Jev has cost
 over time. Every pass that **sent at least one request** appends one JSON line to
-`data/jev/runs.jsonl` and says so on its last line:
+`data/jev/runs.jsonl` and says so on its last line, after the side-car is saved:
 
 ```
-pasada registrada → data/jev/runs.jsonl
+pasada registrada → /…/data/jev/runs.jsonl
 ```
 
-A `--dry-run`, or a pass with nothing to evaluate, writes nothing. Each line records:
+A `--dry-run`, a pass with nothing to evaluate, or a Ctrl-C before the first request writes
+nothing. Every count is taken where the calls are made, so an answer counts the moment Jev
+returns it, whatever xbrain does with it next:
 
 | Field | Meaning |
 |---|---|
-| `started_at` · `finished_at` | UTC; the page shows them in local time |
+| `kind` | `topics` (the only kind today; a line without it reads as `topics`) |
+| `started_at` · `finished_at` | UTC. The page's history table shows the start, in local time |
 | `requests` | calls xbrain **sent**, each item once. Retries inside the vendor SDK are invisible to xbrain and are not counted |
-| `ok` · `failed` | calls that came back with a kept answer, and the rest that came back (a provider error, or an answer xbrain refused) |
-| `input_tokens_by_provider` · `input_tokens` | tokens per provider that answered, and their sum. Empty and 0 when nothing answered |
+| `ok` | answers kept in the side-car |
+| `failed` | calls that raised (a provider error, a 402) plus answers xbrain refused (a malformed answer set) |
+| `unsaved` | only after Ctrl-C: answers that came back but were not yet saved when the interrupt landed. Paid, not kept, not failed |
+| `input_tokens_by_provider` · `input_tokens` | tokens of **every** answer that came back — refused and unsaved ones included, because each was billed — per provider, and their sum. Empty and 0 when nothing answered |
 | `input_tokens_unknown` | answers that reported no usage |
 | `models` | the distinct models that answered, sorted |
-| `interrupted` | Ctrl-C. `requests - ok - failed` is then the number of calls still in flight |
+| `interrupted` | Ctrl-C. `requests - ok - failed - unsaved` is then the number of calls still in flight |
 
 It stores **tokens, never dollars**: every report prices the history at read time with the
 same formula the side-car uses, so a price correction reprices every past pass.
 
 The line is written on **every** exit path of a pass that sent something: success, partial
 failure, the all-failed error (a 402 on every call is 20 requests made, and that is history
-too), a side-car that could not be written, and Ctrl-C (exit 130). If the log itself cannot
-be written, the pass keeps its exit code and its saved records, and the line is printed to
+too), a side-car that could not be written, and Ctrl-C (exit 130). Writing it can never
+change how the pass ends: if the line cannot be built or appended, or the terminal is gone
+(`| head`), the pass keeps its exit code and its saved records, and the line is printed to
 stderr under `no se pudo registrar la pasada en …; añádela a mano:` so you can append it by
-hand. A line that does not parse is refused by `jev report` and `jev dashboard` with its
-path and line number, never skipped.
+hand.
+
+**What the log cannot see**, and how it still shows up: a worker that picks up its item
+just after Ctrl-C can send one more call that is never logged, and a pass killed by SIGTERM
+or `kill -9` logs nothing at all. The answers those calls stored are in the side-car with an
+`asked_at` that no logged pass covers, so the reports count and price them as **fuera del
+registro** (see below) instead of dropping them.
+
+**The file protects itself against a torn line.** A crash or a full disk in the middle of a
+write can leave the last line cut short. The next append starts on a new line instead of
+gluing its record onto the fragment, and an append whose write fails is rolled back to the
+file's size before it. A line that does not parse is refused by `jev report` and `jev
+dashboard` with its path and line number, never skipped.
 
 ### What a pass actually costs
 
@@ -337,7 +354,7 @@ the report says so above the tables.
 `unpriced_providers` · `assigned_pairs` · `assigned_backed` · `assigned_unjudged` ·
 `enrich_backed_pct` · `jev_pairs` · `jev_backed` · `jev_backed_pct` · `doubtful_pairs` ·
 `missing_pairs` · `primary_agree` · `primary_agree_pct` · `primary_fallback` ·
-`primary_unjudged` · `primary_unranked` · `per_topic`.
+`primary_unjudged` · `primary_unranked` · `posts_with_disagreement` · `per_topic`.
 
 `assessments_stored == items_assessed + assessments_stale + assessments_orphaned` — a real
 partition of the side-car, so "0 vigentes" can always be told apart from "0 guardadas".
@@ -347,16 +364,29 @@ Two name pairs collide and are worth reading carefully: `summary.primary_unjudge
 the membership-side count is `summary.assigned_unjudged` while the per-item field is
 `items[].unjudged`.
 
+`posts_with_disagreement` counts the compared posts with at least one disagreement — a
+topic enrich assigned that Jev does not back, a topic Jev backs that enrich did not assign,
+or a primary that differs (a post enrich left without a primary counts). The recap line
+prints it as `N posts con desacuerdo`, and the dashboard's table count is the same number.
+
 Under the recap line, `jev report` prints the run history in the shared cost sentence:
 
 ```text
 Histórico: 3 pasadas · 2640 peticiones · 15520000 tokens de entrada (~0.6518 $)
+Histórico: sin pasadas registradas · 20 evaluaciones fuera del registro de pasadas: 125548 tokens de entrada (~0.0053 $)
 ```
 
 The recap line prices the side-car (the latest answer per item); this one prices every pass
-the log recorded, re-asks included. Records asked before the first logged pass are named at
-the end (`· 20 evaluaciones anteriores al registro de pasadas`) instead of being silently
-left out of the total.
+the log recorded, re-asks included. A stored answer counts as logged only when its
+`asked_at` falls inside some logged pass. Everything else — answers from before the log
+existed, from a copy of xbrain that does not write it, from a pass whose line could not be
+appended or that was killed — is named and priced at the end
+(`· N evaluaciones fuera del registro de pasadas: …`) instead of being silently left out.
+With no logged pass at all the line says `sin pasadas registradas` rather than quoting a
+`~0.0000 $` that reads as free.
+
+`jev report` reads the run log **before** writing either report: a corrupt line refuses the
+command with the line number, and the previous reports are left alone.
 
 ### It refuses rather than overwrite a good report with zeros
 
@@ -406,30 +436,36 @@ Open it with `open <uri>`.
 
 **The page has one job: show where enrich's topics and Jev disagree, post by post, so you
 can fix the wrong ones, and what finding out cost.** It compares at `[jev].threshold` (0,85
-by default), fixed: there is no control that moves it, and the page recomputes nothing. Every
-number on it comes from `jev/report.py` — the same `build_report` call and the same summary
-`xbrain jev report` prints — so the two surfaces always agree. To read the side-car at another
+by default), fixed: there is no control that moves it, and the page recomputes nothing. The
+three headline numbers and the rows come from the same `build_report` call `xbrain jev
+report` makes, so the two surfaces always agree; the costs come from the same price formula
+(`report.run_history`, `report.post_cost_view`). The browser only filters and searches the
+rows, which arrive already ordered. To read the side-car at another
 threshold, use `xbrain jev report --threshold`.
 
 Top to bottom:
 
 1. **Header** — when the page was written, the model that answered, the threshold with
    `(config)` next to it, and a link to this document.
-2. **Qué es esto** — two sentences on what the page is for.
-3. **Coste y peticiones** — three figures and a table, all from the run log:
-   - **Total**: requests, input tokens and dollars across every logged pass.
-   - **Media por post**: what one stored answer cost on average, over the current posts
-     whose provider reported usage.
-   - **Evaluaciones guardadas**: how many answers the side-car holds, and their cost in the
-     shared sentence.
-   - **Histórico por pasada**: one row per `xbrain jev topics` pass, newest first — date,
-     requests, ok, failed, tokens, cost, model, and whether it was interrupted (with the
-     calls still in flight).
+2. **Qué es esto** — a short paragraph on what the page is for.
+3. **Coste y peticiones** — three figures and a table:
+   - **Total**: requests, input tokens and dollars across every logged pass; `—` and
+     `sin pasadas registradas` when none is logged yet.
+   - **Media por post**: what one current stored answer cost on average, labelled
+     `media de K de las N evaluaciones vigentes` — K is how many could be priced (the
+     provider reported usage and has a price). Unpriced providers are named, not averaged in.
+   - **Evaluaciones vigentes**: how many current answers the side-car holds and what exactly
+     those cost. Stale and orphaned answers are in the note under the table, not here.
+   - **Histórico por pasada**: one row per `xbrain jev topics` pass, newest first — start
+     date, requests, ok, failed, tokens, cost, model, and for an interrupted pass how many
+     calls were in flight and how many answers were not saved.
 
-   When the side-car holds answers asked before the first logged pass, one line says so
-   (`20 evaluaciones anteriores al registro de pasadas …`) with their cost from their own
-   stored tokens. They are not added to the total: the log never saw those passes, and the
-   side-car keeps only the latest answer per item, so it cannot reconstruct them.
+   Answers no logged pass covers are named in one line
+   (`N evaluaciones fuera del registro de pasadas (~X $ según sus propios tokens) …`) and are
+   not added to the total: the side-car keeps only the latest answer per item, so it cannot
+   reconstruct the passes the log missed. If `runs.jsonl` has a line that cannot be read,
+   the strip shows that error (with the line number) in place of the total and the history,
+   `jev dashboard` repeats it on stderr, and the rest of the page renders as usual.
 4. **Three numbers**, each with a one-line explanation:
    - *Jev confirma X de Y topics de enrich (Z %)* — enrich's topics that Jev also sees at or
      above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`).
@@ -443,7 +479,8 @@ Top to bottom:
    - the topics Jev would add (**+**), with their probability;
    - enrich's primary topic against Jev's, highlighted when they differ (`(ninguno)` when Jev
      chose the fallback option);
-   - what that post's stored answer cost.
+   - what that post's stored answer cost (`sin tarifa` when nobody prices its provider,
+     `—` when the provider reported no usage).
 
    By default the table shows **only posts with a disagreement** — a ✗, a +, or a primary
    that differs — ordered most disagreements first. Untick the box to see every post; the
@@ -452,9 +489,11 @@ Top to bottom:
 
 It is **one self-contained file**: the data as a JSON blob in the page, no charting library,
 no external scripts. The only network reference is the Google Fonts stylesheet, so offline
-the page renders in system fonts and nothing else is missing. Measured 2026-09-26 on the
-first paid run (20 posts): **55,829 bytes**. JavaScript draws the table and runs the filter
-and the search; without it the page says so.
+the page renders in system fonts and nothing else is missing. Measured 2026-09-26:
+**55,829 bytes** at 20 posts and **120,670 bytes** at 99, about **0.8 KB per post**, so the
+full ~2,600-post corpus comes to roughly **2.2 MB**. The table renders every matching row
+(there is no pagination). JavaScript draws the table and runs the filter and the search;
+without it the page says so.
 
 Two more things the page cannot tell you itself:
 
@@ -711,9 +750,12 @@ The vocabulary or the evidence moved and retired the stored contracts. See
 topics`, and it is a re-bill.
 
 **`Error: <path>/runs.jsonl: registro de pasadas ilegible en la línea N (…)`**
-One line of the run log does not parse, usually a line cut short by a crash mid-write, or a
-hand edit. Fix or delete that line by hand; the others are untouched. The commands refuse
-rather than skip it, because each line is paid history and a skipped one under-quotes the bill.
+One line of the run log does not parse: a line cut short by a crash mid-write, or a hand
+edit. **Split it, never delete it.** A file written before the torn-line guard existed can
+hold a fragment with a complete, valid record glued straight after it on the same line —
+that record is a paid pass. Put the record on its own line and delete only the fragment.
+`jev report` refuses until it is fixed (and writes nothing); `jev dashboard` still renders,
+with the error in place of the cost strip.
 
 **`no se pudo registrar la pasada en …; añádela a mano:`**
 `jev topics` could not append to the run log (disk full, permissions). The pass itself is
@@ -725,8 +767,9 @@ The page's script failed while drawing. The numbers are in `xbrain jev report`; 
 message in the banner as a bug.
 
 **The dashboard shows `—` as the total cost**
-No pass has been logged yet: the side-car was filled before the run log existed. The line
-under the figures gives those answers' cost from their own tokens.
+No pass has been logged yet: the side-car was filled before the run log existed (or by a
+copy of xbrain that does not write it). The `fuera del registro` line under the figures
+gives those answers' cost from their own tokens.
 
 **The dashboard numbers look old**
 It is a static page. Re-run `xbrain jev dashboard`.

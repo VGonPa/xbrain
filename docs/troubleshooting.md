@@ -487,7 +487,8 @@ Three that send people here first, because the symptom does not name Jev:
 - **A red *"La página no pudo dibujarse"* banner on `jev.html`.** The page's script failed
   while drawing. The numbers are in `xbrain jev report`; report the banner's message as a bug.
 - **`registro de pasadas ilegible en la línea N`.** One line of `data/jev/runs.jsonl` does not
-  parse. Fix or delete that line by hand; the commands refuse rather than skip paid history.
+  parse. Split it, never delete it: an old torn line can hold a valid record glued after the
+  fragment, and that record is a paid pass. The commands refuse rather than skip paid history.
   [Details](jev.md#troubleshooting).
 
 `data/jev/topics.json` is **paid, gitignored and never snapshotted**. There is no
