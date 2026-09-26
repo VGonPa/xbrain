@@ -616,6 +616,27 @@ def _compare_fixture() -> dict[str, Any]:
     )
 
 
+def test_a_vocabulary_holding_the_fallback_name_is_refused_before_anything_is_built():
+    """«otro» as a topic AND as Jev's «none of these» would make the page read one as the
+    other; the questions refuse it, and the page is built through them."""
+    item = _item("1", topics=("otro",))
+    vocab = [Topic(slug="otro", description="Otro topic.")]
+
+    with pytest.raises(ValueError, match="choca"):
+        compute_jev_dashboard_data(
+            [item],
+            {},
+            vocab,
+            threshold=0.85,
+            fallback=FALLBACK,
+            char_limit=CHAR_LIMIT,
+            id2note={},
+            updated="SEP 26, 2026",
+            runs=[],
+            now=NOW,
+        )
+
+
 def test_the_compare_fixture_tells_every_number_apart():
     data = _compare_fixture()
     s = data["summary"]

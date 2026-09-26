@@ -600,7 +600,7 @@ def compute_jev_dashboard_data(
         # The posts behind every pair, primary diagonal and confidence band, for the Topics and
         # Comparar tabs to open. Page-only: the summary (and so `topics-report.json`) keeps
         # the counts.
-        "post_sets": post_sets(comparisons, threshold),
+        "post_sets": post_sets(comparisons),
         "posts": sorted((_card(item, corpus) for item in items), key=_order),
     }
 

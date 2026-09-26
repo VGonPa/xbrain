@@ -46,10 +46,10 @@ from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.models import Item, Topic, _require_utc_aware
 from xbrain.store import _atomic_write
 
-#: `ItemComparison` fields holding `Pair` tuples. They are rendered by hand in the JSON
-#: record (item id dropped — the record already carries it as a field), so `asdict` must
-#: not emit them.
-_PAIR_FIELDS = frozenset({"doubtful", "missing"})
+#: `ItemComparison` fields the JSON record does not take from `asdict`: the two holding `Pair`
+#: tuples are rendered by hand (item id dropped — the record already carries it as a field),
+#: and `threshold` is the summary's, the same on every record.
+_RECORD_SKIP = frozenset({"doubtful", "missing", "threshold"})
 
 #: Why a primary does not coincide, in CLASSIFICATION PRIORITY order — the first that
 #: applies wins, so the five sections partition the non-agreeing comparisons. The enrich-side
@@ -85,6 +85,8 @@ class Band:
     label: str
     lo: float
     hi: float
+    #: The summary total this band's pairs add up to, with the other bands of its kind.
+    total: str
     top: bool = False
 
     def holds(self, noul: float) -> bool:
@@ -93,29 +95,38 @@ class Band:
 
 #: THE band edges: how sure Jev was on each disagreement, in the words the page uses. `None`
 #: is the threshold, which ends the enrich-side bands and starts the Jev-side ones. Defined
-#: here once, shipped in the summary with each band's counts, and stated on the page.
+#: here once, shipped in the summary with each band's counts, and stated on the page. The
+#: labels are part of the report's contract (they travel in `topics-report.json`), in Spanish
+#: like every other operator-facing word, and they read right for a HIGH threshold such as the
+#: default 0.85 — at 0.4 "entre 0,5 y el umbral" is a band that is simply dropped.
 _BAND_SPECS: tuple[tuple[str, str, str, float | None, float | None], ...] = (
     ("enrich_only", "e-lo", "Jev lo descarta claramente", 0.0, 0.2),
     ("enrich_only", "e-mid", "Jev lo ve poco probable", 0.2, 0.5),
-    ("enrich_only", "e-near", "Casi: se queda justo por debajo del umbral", 0.5, None),
-    ("jev_only", "j-near", "Lo ve por encima del umbral, sin mucho margen", None, 0.95),
+    ("enrich_only", "e-near", "Jev duda: entre 0,5 y el umbral", 0.5, None),
+    ("jev_only", "j-near", "Jev lo ve por encima del umbral, sin mucho margen", None, 0.95),
     ("jev_only", "j-hi", "Jev lo ve claramente", 0.95, 1.0),
 )
+#: The summary total each kind of band splits.
+_BAND_TOTALS = {"enrich_only": "doubtful_pairs", "jev_only": "missing_pairs"}
 
 
 def confidence_bands(threshold: float) -> tuple[Band, ...]:
     """The bands at this threshold: enrich-side ones cut at it from above, Jev-side ones from
     below. A band the threshold leaves no room for (0.5–threshold at a threshold of 0.4) is
-    dropped rather than shipped empty with an inverted range."""
+    dropped rather than shipped with an empty or inverted range.
+
+    Only the Jev side's last band is `top` (it holds 1.0): an enrich-side band ending at a
+    threshold of 1.0 still excludes 1.0, which is at the threshold and so not a doubt. At that
+    threshold the top band is the single point 1.0 — the one band allowed `lo == hi`."""
     bands = []
     for kind, key, label, lo, hi in _BAND_SPECS:
         if kind == "enrich_only":
             low, high = lo or 0.0, min(threshold if hi is None else hi, threshold)
         else:
             low, high = max(threshold if lo is None else lo, threshold), hi or 1.0
-        top = high == 1.0
+        top = kind == "jev_only" and high == 1.0
         if low < high or (top and low == high):
-            bands.append(Band(kind, key, label, low, high, top=top))
+            bands.append(Band(kind, key, label, low, high, _BAND_TOTALS[kind], top=top))
     return tuple(bands)
 
 
@@ -125,7 +136,9 @@ def band_of(noul: float, kind: str, bands: Sequence[Band]) -> Band:
     for band in bands:
         if band.kind == kind and band.holds(noul):
             return band
-    raise ValueError(f"la probabilidad {noul} no cae en ningún tramo de {kind}")
+    # English: no stored answer reaches here (a membership probability is in [0, 1] and the
+    # bands cover it); only a caller handing in the wrong kind or bands can.
+    raise ValueError(f"probability {noul} is in no {kind} band")
 
 
 @dataclass(frozen=True)
@@ -147,6 +160,9 @@ class ItemComparison:
     doubtful: tuple[Pair, ...]  # assigned by enrich, noul < threshold — ascending noul
     missing: tuple[Pair, ...]  # not assigned, noul >= threshold — descending noul
     jev_assigned: tuple[str, ...]  # noul >= threshold, descending — Jev's own assignment
+    #: The threshold this comparison was made at. Everything that re-reads the comparison at a
+    #: threshold (the confidence bands) takes it from here, so it cannot be handed another.
+    threshold: float
     #: Assigned topics that are NOT in `membership` — slugs Jev was never asked about.
     #:
     #: `enrich` validates topics against the vocabulary AT WRITE TIME, so an item enriched
@@ -172,8 +188,16 @@ class ItemComparison:
         False when enrich recorded no primary at all: "there is nothing to agree with" is
         not agreement, and folding the two together would let a corpus with no primaries
         report a perfect agreement rate.
+
+        False too when the primary left the vocabulary (`primary_unjudged`): Jev was never asked
+        about it, so the one way it can "match" is an old slug spelled like the fallback, where
+        "never asked" and "none of these" are the same string and opposite facts.
         """
-        return self.primary_topic is not None and self.jev_primary == self.primary_topic
+        return (
+            self.primary_topic is not None
+            and not self.primary_unjudged
+            and self.jev_primary == self.primary_topic
+        )
 
     @property
     def enrich_only(self) -> tuple[Pair, ...]:
@@ -317,6 +341,7 @@ def compare_item(
         doubtful=_doubtful(item.id, assigned, membership, threshold),
         missing=_missing(item.id, assigned, membership, threshold),
         jev_assigned=jev_assigned(membership, threshold),
+        threshold=threshold,
         unjudged=_unjudged(assigned, membership),
         primary_unjudged=_primary_unjudged(item.enriched.primary_topic, membership),
     )
@@ -350,7 +375,9 @@ def current_assessments(
 
 def _slug_counts(comparisons: list[ItemComparison]) -> dict[str, Counter[str]]:
     """Per-slug counters over every comparison: `assigned` / `doubtful` / `missing` /
-    `unjudged`, and how often each side picked the slug as primary (`_primary_counts`)."""
+    `unjudged`, how often each side picked the slug as primary and how often both did
+    (`_primary_counts`: `enrich_primary`, `jev_primary`, `primary_both`). The posts behind
+    `primary_both` are `post_sets`' `pd`; those behind the bands, its `bands`."""
     return {
         "assigned": Counter(slug for c in comparisons for slug in c.assigned),
         "doubtful": Counter(pair.slug for c in comparisons for pair in c.doubtful),
@@ -533,9 +560,7 @@ def primary_confusion(comparisons: list[ItemComparison]) -> list[dict[str, Any]]
     return _pair_rows(_primary_pairs(comparisons))
 
 
-def post_sets(
-    comparisons: list[ItemComparison], threshold: float
-) -> dict[str, dict[str, list[str]]]:
+def post_sets(comparisons: list[ItemComparison]) -> dict[str, dict[str, list[str]]]:
     """THE index of the posts behind every count the page opens: `cx` and `px` by `pair_key`
     (`topic_confusion`, `primary_confusion`), `pd` by topic (the posts both sides picked it as
     primary on, `per_topic.primary_both`) and `bands` by band key (`confidence_bands`).
@@ -549,11 +574,25 @@ def post_sets(
         for kind, pairs in (("cx", _topic_pairs(comparisons)), ("px", _primary_pairs(comparisons)))
     }
     sets["pd"] = {slug: sorted(ids) for slug, ids in _agreeing_primaries(comparisons).items()}
-    sets["bands"] = {
-        band.key: sorted({pair.item_id for pair in pairs})
-        for band, pairs in _band_pairs(comparisons, threshold).items()
-    }
+    threshold = comparisons_threshold(comparisons)
+    sets["bands"] = (
+        {}
+        if threshold is None
+        else {
+            band.key: sorted({pair.item_id for pair in pairs})
+            for band, pairs in _band_pairs(comparisons, threshold).items()
+        }
+    )
     return sets
+
+
+def comparisons_threshold(comparisons: Sequence[ItemComparison]) -> float | None:
+    """The one threshold the comparisons were made at; `None` for none. Two thresholds in one
+    list is a caller bug — the bands of one would be cut at the other's edges — and raises."""
+    thresholds = {c.threshold for c in comparisons}
+    if len(thresholds) > 1:
+        raise ValueError(f"comparisons made at more than one threshold: {sorted(thresholds)}")
+    return next(iter(thresholds), None)
 
 
 def _band_pairs(comparisons: list[ItemComparison], threshold: float) -> dict[Band, list[Pair]]:
@@ -571,7 +610,13 @@ def _band_pairs(comparisons: list[ItemComparison], threshold: float) -> dict[Ban
 def confidence_rows(comparisons: list[ItemComparison], threshold: float) -> list[dict[str, Any]]:
     """How sure Jev was on each disagreement: one row per band, its edges and label, the
     pairs in it and the posts they are on (a post with two pairs in a band counts once).
-    Counts only: the posts are `post_sets`'."""
+    Counts only: the posts are `post_sets`'.
+
+    `threshold` is the summary's; comparisons made at another one are refused rather than cut
+    at edges they were not compared against."""
+    made_at = comparisons_threshold(comparisons)
+    if made_at is not None and made_at != threshold:
+        raise ValueError(f"comparisons made at {made_at}, summary asked for {threshold}")
     return [
         {**asdict(band), "pairs": len(pairs), "posts": len({p.item_id for p in pairs})}
         for band, pairs in _band_pairs(comparisons, threshold).items()
@@ -1221,6 +1266,34 @@ def _primary_tables(
     return lines
 
 
+#: How the markdown names each kind of band — the Posts filter names.
+_BAND_KIND_NAMES = {"enrich_only": "enrich asigna y Jev no", "jev_only": "Jev añadiría"}
+
+
+def _band_range(band: dict[str, Any]) -> str:
+    """A band's edges at three decimals, like the umbral: `< lo` for the bottom band, `≥ lo`
+    for the top one, `lo – hi` otherwise (each band holds its lower edge)."""
+    if band["kind"] == "enrich_only" and band["lo"] == 0:
+        return f"< {band['hi']:.3f}"
+    if band["top"]:
+        return f"≥ {band['lo']:.3f}"
+    return f"{band['lo']:.3f} – {band['hi']:.3f}"
+
+
+def _bands_table(summary: dict[str, Any]) -> list[str]:
+    """How sure Jev was on the disagreements: `confidence_bands`, one row per band."""
+    rows = [
+        f"| {_BAND_KIND_NAMES[b['kind']]} | {b['label']} | {_band_range(b)} | {b['pairs']} | "
+        f"{b['posts']} |"
+        for b in summary["confidence_bands"]
+    ]
+    return _table(
+        "## Qué seguro estaba Jev en los desacuerdos",
+        ("desacuerdo", "tramo", "probabilidad", "desacuerdos", "posts"),
+        rows,
+    )
+
+
 def render_report_markdown(
     summary: dict[str, Any],
     comparisons: list[ItemComparison],
@@ -1250,6 +1323,7 @@ def render_report_markdown(
             for row in summary["per_topic"]
         ],
     )
+    lines += _bands_table(summary)
     lines += _pair_table(
         f"## Dudosas (top {top}, noul ascendente)", _sorted_doubtful(comparisons), items_by_id, top
     )
@@ -1273,7 +1347,7 @@ def _record(comparison: ItemComparison) -> dict[str, Any]:
     id repeated on every row.
     """
     return {
-        **{k: v for k, v in asdict(comparison).items() if k not in _PAIR_FIELDS},
+        **{k: v for k, v in asdict(comparison).items() if k not in _RECORD_SKIP},
         "assigned": list(comparison.assigned),
         "jev_assigned": list(comparison.jev_assigned),
         "unjudged": list(comparison.unjudged),
