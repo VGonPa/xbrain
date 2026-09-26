@@ -30,6 +30,7 @@ from xbrain.jev.dashboard import (
     ASK_COMMAND,
     DOCS_URL,
     SURFACE_LABELS,
+    TOPIC_MIN,
     MediaFiles,
     collect_jev_media,
     compute_jev_dashboard_data,
@@ -500,6 +501,64 @@ def test_per_topic_numbers_are_the_cards_topic_rows():
         assert verdicts.count("solo_jev") == row["missing"], row["slug"]
         assert verdicts.count("solo_enrich") == row["doubtful"], row["slug"]
         assert verdicts.count("solo_enrich") + verdicts.count("solo_jev") == row["disagreeing"]
+
+
+def test_each_confusion_pairs_posts_show_that_pair_on_their_cards():
+    """The Topics tab lists a pair's posts from `post_sets`: each of those cards must carry
+    the pair — enrich's topic as solo enrich, Jev's as solo Jev; for a primary pair, the two
+    primaries. The index ships in the page and nowhere in the summary."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+    cards = {post["id"]: post for post in data["posts"]}
+    sets = data["post_sets"]
+
+    assert sets["cx"] and sets["px"]
+    assert all("ids" not in row for row in data["summary"]["topic_confusion"])
+    for key, ids in sets["cx"].items():
+        enrich, jev = (None if side == "-" else side for side in key.split("~"))
+        for post_id in ids:
+            verdicts = {r["slug"]: r["verdict"] for r in cards[post_id]["jev"]["topics"]}
+            if enrich is not None:
+                assert verdicts[enrich] == "solo_enrich", (key, post_id)
+            if jev is not None:
+                assert verdicts[jev] == "solo_jev", (key, post_id)
+    for key, ids in sets["px"].items():
+        enrich, jev = (None if side == "-" else side for side in key.split("~"))
+        for post_id in ids:
+            card = cards[post_id]["jev"]
+            assert (card["primary"], card["jev_primary"]) == (enrich, jev)
+
+
+def test_the_topic_pairs_are_what_the_cards_rows_say_recounted_from_the_cards():
+    """An independent recount: from each card's rows (solo enrich × solo Jev, `-` for a side
+    with none), rebuild the pair index and the counts — they must equal the report's."""
+    items, assessments = _corpus()
+    data = _data(items, assessments)
+
+    recount: dict[str, set[str]] = {}
+    for post in data["posts"]:
+        if not (post["jev"] and post["jev"]["compared"]):
+            continue
+        rows = post["jev"]["topics"]
+        only_enrich = [r["slug"] for r in rows if r["verdict"] == "solo_enrich"]
+        only_jev = [r["slug"] for r in rows if r["verdict"] == "solo_jev"]
+        if not (only_enrich or only_jev):
+            continue
+        for enrich in only_enrich or ["-"]:
+            for jev in only_jev or ["-"]:
+                recount.setdefault(f"{enrich}~{jev}", set()).add(post["id"])
+
+    assert {k: set(v) for k, v in data["post_sets"]["cx"].items()} == recount
+    counts = {
+        f"{r['enrich'] or '-'}~{r['jev'] or '-'}": r["posts"]
+        for r in data["summary"]["topic_confusion"]
+    }
+    assert counts == {k: len(v) for k, v in recount.items()}
+
+
+def test_the_topic_floor_is_defined_once_and_shipped_to_the_page():
+    assert TOPIC_MIN == 5
+    assert _data([_item()], {})["topic_min"] == TOPIC_MIN
 
 
 def test_a_cards_slugs_are_every_topic_enrich_or_jev_has_on_it():
@@ -1191,7 +1250,9 @@ def test_the_page_has_four_hash_routed_tabs_and_fills_only_posts():
     for tab in ("posts", "topics", "compare", "config"):
         assert f'href="#{tab}"' in template, tab
         assert f'id="tab-{tab}"' in template, tab
-    assert template.count("llega en el siguiente PR") == 3
+    # Topics is built (9b); Comparar comes next (9c), Configuración after it (9d).
+    assert template.count("llega en el siguiente PR") == 1
+    assert "llegan en un PR posterior" in template
     assert "addEventListener('hashchange'" in template
 
 
@@ -1274,6 +1335,7 @@ def test_the_cards_are_built_from_text_nodes_never_from_html_strings():
         "url",
         "href",
         "'obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note)",
+        "topicHref(r.slug)",
     }
     assert "const x = httpUrl(p.url);" in cards and cards.count("const href = httpUrl(") == 2
     assert "text.replace(/https?:\\/\\/[^\\s]+/g" in cards
@@ -1286,6 +1348,103 @@ def test_an_unread_quoted_post_names_the_command_that_reads_it():
 
     assert "q.why === 'not_fetched'" in cards
     assert "Sin leer todavía: corre xbrain refresh-quoted" in cards
+
+
+def test_the_topic_index_reads_each_column_from_the_per_topic_row():
+    """Every number in the index is a `per_topic` field; the page computes none of them."""
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+    columns = _script_section(topics, "const TOPIC_COLUMNS = [", "];")
+
+    assert re.findall(r"key: '(\w+)'", columns) == [
+        "label",
+        "assigned",
+        "backed",
+        "backed_pct",
+        "missing",
+        "disagreeing",
+        "enrich_primary",
+        "jev_primary",
+    ]
+    assert "noul" not in topics.lower()
+
+
+def test_the_topic_index_opens_on_the_worst_agreement_among_topics_with_enough_posts():
+    """The default order is `per_topic`'s own (worst backing first, by the exact ratio),
+    with topics enrich put on fewer than `TOPIC_MIN` posts moved to the end — and the page
+    says what N is."""
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    assert "const TOPIC_MIN = DATA.topic_min;" in topics
+    assert "DATA.summary.per_topic.map(r => r.slug)" in topics
+    assert "nf(TOPIC_MIN)" in topics
+
+
+def test_the_topic_detail_reads_the_confusion_the_report_computed():
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    assert "DATA.summary.topic_confusion" in topics
+    assert "DATA.summary.primary_confusion" in topics
+    for words in ("Coinciden", "Solo enrich", "Solo Jev", "ver en Posts", "Con qué se confunde"):
+        assert words in topics, words
+
+
+def test_the_topics_code_builds_text_nodes_and_only_links_inside_the_page():
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in topics, sink
+    assert ".href = " not in topics
+    # Every link's href is `topicHref(slug)` or a variable built by `hashHref` — both
+    # `#<tab>?<URLSearchParams>`, so nothing scraped ever becomes a URL here.
+    for arg in set(re.findall(r"\blink\(([^,]+),", topics)):
+        assert (
+            arg == "topicHref(slug)"
+            or f"const {arg} = hashHref(" in topics
+            or f"const {arg} = indexHref();" in topics
+        ), arg
+    assert "return '#' + tab + (qs ? '?' + qs : '');" in topics
+
+
+def test_the_topics_words_that_carry_meaning_are_pinned():
+    """A pair's other side: nothing instead, no primary, Jev's «none of these», and an
+    enrich primary that has since left the vocabulary — four different facts, four labels."""
+    topics = _script_section(_resource("jev.template.html"), "/* topics */", "/* end topics */")
+
+    for words in (
+        "'sin principal'",
+        "'nada en su lugar'",
+        "' (ninguno del vocabulario)'",
+        "' (ya no está en el vocabulario)'",
+        "'Enrich no lo pone en ningún post comparado.'",
+        "'Enrich nunca lo elige como principal.'",
+        "'Jev nunca lo elige como principal.'",
+        "'Ese cruce ya no existe en estos datos; abajo, todos los posts del topic.'",
+        "no está en el vocabulario actual",
+        "'La pestaña Topics no pudo dibujarse: '",
+        "no suman en la columna «Principal según Jev».",
+        "'pocos datos'",
+    ):
+        assert words in topics, words
+
+
+def test_the_posts_rail_names_what_the_topics_tab_names():
+    """The rail says which Topics-tab number its list matches — by that tab's own names."""
+    template = _resource("jev.template.html")
+    rail = _script_section(template, "function renderRail(", "/* end rail */")
+    topics = _script_section(template, "/* topics */", "/* end topics */")
+
+    for name in ("Discrepancias", "Jev lo añadiría"):
+        assert f"«{name}»" in rail and f"name: '{name}'" in topics, name
+    assert "«Solo enrich»" in rail and "name: 'Solo enrich'" in topics
+    assert "ficha del topic →" in rail
+
+
+def test_the_topics_view_lives_in_the_hash():
+    template = _resource("jev.template.html")
+    reader = _script_section(template, "function readTopicsHash(", "function writeTopicsSort(")
+
+    for key in ("t", "cx", "px", "o", "d"):
+        assert f"get('{key}')" in reader, key
 
 
 def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():
