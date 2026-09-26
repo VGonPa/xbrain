@@ -170,10 +170,84 @@ setTimeout(() => {
 """
 
 
+#: The Topics tab, from its index: sort, open a topic, its groups, a pair, back and forward.
+_TOPICS_PROBE = r"""
+<script>
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const indexOrder = () => [...document.querySelectorAll('#topics-index tbody tr')].map(tr => tr.dataset.slug);
+const sortHeader = name => [...document.querySelectorAll('#topics-index th .th')].find(b => b.firstChild.textContent.startsWith(name));
+async function groups() {
+  const found = {};
+  for (const sec of document.querySelectorAll('#topic-detail section[data-group]')) {
+    for (;;) { const more = sec.querySelector('button.more'); if (!more || more.hidden) break; more.click(); await sleep(5); }
+    found[sec.dataset.group] = {shown: Number(sec.querySelector('h3').textContent.split(' · ')[1].replace(/\./g, '')),
+      cards: [...sec.querySelectorAll('.card')].map(c => c.dataset.id)};
+  }
+  return found;
+}
+const tabState = () => ({hash: location.hash, index: !document.getElementById('topics-index').hidden,
+  detail: !document.getElementById('topic-detail').hidden, pair: !!document.getElementById('topic-pair')});
+(async () => {
+  await sleep(100);
+  const out = {};
+  out.default_order = indexOrder();
+  sortHeader('Discrepancias').click(); await sleep(10);
+  out.by_disagreeing = indexOrder();
+  out.sort_hash = location.hash;
+  sortHeader('Discrepancias').click(); await sleep(10);
+  out.by_disagreeing_asc = indexOrder();
+  location.hash = '#topics'; await sleep(20);
+  document.querySelector('#topics-index a.tl[href="#topics?t=ai-coding"]').click(); await sleep(30);
+  out.detail = tabState();
+  out.groups = await groups();
+  out.pairs = [...document.querySelectorAll('#topic-detail a[data-pair]')].map(a => a.dataset.pair);
+  const first = document.querySelector('#topic-detail a[data-pair]');
+  first.click(); await sleep(30);
+  out.pair_clicked = first.dataset.pair;
+  out.pair_cards = [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id);
+  out.with_pair = tabState();
+  history.back(); await sleep(50); out.back1 = tabState();
+  history.back(); await sleep(50); out.back2 = tabState();
+  history.forward(); await sleep(50); out.forward = tabState();
+  // From a card on the Posts tab, its topic row jumps to the topic's page.
+  location.hash = '#posts?f=all'; await sleep(20);
+  const row = document.querySelector('#cards .rows a.tlink');
+  out.row_topic = row.getAttribute('href');
+  row.click(); await sleep(30);
+  out.from_card = tabState();
+  // A second topic whose three groups have different sizes.
+  location.hash = '#topics?t=startups'; await sleep(30);
+  out.groups_startups = await groups();
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>
+"""
+
+#: A topics page opened at a given hash.
+_READ_TOPICS = r"""
+<script>
+setTimeout(() => {
+  const pre = document.createElement('pre'); pre.id = 'probe';
+  pre.textContent = JSON.stringify({detail: !document.getElementById('topic-detail').hidden,
+    title: (document.querySelector('#topic-detail .th2') || {}).textContent || null,
+    pair_cards: [...document.querySelectorAll('#topic-pair .card')].map(c => c.dataset.id),
+    banner_hidden: document.getElementById('banner').hidden});
+  document.body.appendChild(pre);
+}, 200);
+</script>
+"""
+
+
 def _fixture() -> dict[str, Any]:
     """`_corpus`'s cases, plus 110 never-asked posts (so Todos needs a third page) and one
     post with no evidence at all."""
     items, assessments = _corpus()
+    # Two more posts where Jev adds startups, so its groups differ in size (1 · 1 · 3).
+    for extra in ("jev-only-2", "jev-only-3"):
+        item = _item(extra, topics=("ai-coding",))
+        items.append(item)
+        assessments[extra] = _assessment(item, membership={"ai-coding": 0.9, "startups": 0.9})
     items += [_item(f"z{n:03d}") for n in range(110)]
     empty = _item("vacio", text=" ")
     empty.author = Author(handle="", name="")
@@ -370,3 +444,138 @@ def test_a_malformed_hash_opens_the_page_instead_of_breaking_it(tmp_path, hash_)
     assert seen["count"].startswith("mostrando")
     # One post, all drawn: no "Mostrar 0 más" button left on screen.
     assert seen["more_shown"] is False
+
+
+# --------------------------------------------------------------------------- the Topics tab
+
+
+@pytest.fixture(scope="module")
+def topics_probed(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
+    _need_chrome()
+    data = _fixture()
+    return data, _open(_page(tmp_path_factory.mktemp("jev-topics"), data, _TOPICS_PROBE), "#topics")
+
+
+def _per_topic(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {row["slug"]: row for row in data["summary"]["per_topic"]}
+
+
+@_requires_chrome
+def test_the_topic_index_opens_worst_agreement_first_among_topics_with_enough_posts(topics_probed):
+    """`per_topic`'s order puts startups first (0 % backed), but enrich put it on ONE post:
+    under the five-post floor it goes to the end, and ai-coding leads."""
+    data, seen = topics_probed
+    rows = _per_topic(data)
+    base = [row["slug"] for row in data["summary"]["per_topic"]]
+
+    assert (
+        base[0] == "startups" and rows["startups"]["assigned"] < 5 <= rows["ai-coding"]["assigned"]
+    )
+    assert seen["default_order"] == ["ai-coding", "startups"]
+
+
+@_requires_chrome
+def test_a_column_header_sorts_the_index_both_ways_and_the_url_keeps_it(topics_probed):
+    data, seen = topics_probed
+    rows = _per_topic(data)
+    desc = sorted(rows, key=lambda s: (-rows[s]["disagreeing"], s))
+
+    assert seen["by_disagreeing"] == desc
+    assert seen["by_disagreeing_asc"] == sorted(rows, key=lambda s: (rows[s]["disagreeing"], s))
+    assert seen["sort_hash"] == "#topics?o=disagreeing&d=desc"
+
+
+@_requires_chrome
+@pytest.mark.parametrize(
+    ("slug", "key"), [("ai-coding", "groups"), ("startups", "groups_startups")]
+)
+def test_a_topics_groups_hold_exactly_the_posts_their_numbers_count(topics_probed, slug, key):
+    """Coinciden / Solo enrich / Solo Jev: the number shown is `backed` / `doubtful` /
+    `missing`, and the cards under it are exactly that many — the cards whose row for the
+    topic carries that verdict."""
+    data, seen = topics_probed
+    row = _per_topic(data)[slug]
+
+    assert seen["detail"] == {
+        "hash": "#topics?t=ai-coding",
+        "index": False,
+        "detail": True,
+        "pair": False,
+    }
+    if slug == "startups":
+        assert len({row["backed"], row["doubtful"], row["missing"]}) == 3  # the mutant's net
+    for verdict, field in (
+        ("coinciden", "backed"),
+        ("solo_enrich", "doubtful"),
+        ("solo_jev", "missing"),
+    ):
+        expected = {
+            p["id"]
+            for p in data["posts"]
+            if p["jev"]
+            and p["jev"]["compared"]
+            and any(r["slug"] == slug and r["verdict"] == verdict for r in p["jev"]["topics"])
+        }
+        group = seen[key].get(verdict)
+        assert group is not None, verdict
+        assert group["shown"] == row[field] == len(group["cards"]), verdict
+        assert set(group["cards"]) == expected, verdict
+
+
+@_requires_chrome
+def test_a_confusion_pair_lists_exactly_its_posts(topics_probed):
+    data, seen = topics_probed
+    kind, key = seen["pair_clicked"].split(":", 1)
+    enrich, jev = (None if side == "-" else side for side in key.split("~"))
+    rows = data["summary"]["topic_confusion" if kind == "cx" else "primary_confusion"]
+    [row] = [r for r in rows if (r["enrich"], r["jev"]) == (enrich, jev)]
+
+    assert "ai-coding" in (enrich, jev)
+    assert seen["pair_cards"] == row["ids"]
+    assert seen["with_pair"]["pair"] is True
+
+
+@_requires_chrome
+def test_back_and_forward_walk_between_the_index_the_topic_and_the_pair(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["back1"]["detail"] and not seen["back1"]["pair"]
+    assert seen["back1"]["hash"] == "#topics?t=ai-coding"
+    assert seen["back2"]["index"] and not seen["back2"]["detail"]
+    assert seen["forward"]["hash"] == "#topics?t=ai-coding" and seen["forward"]["detail"]
+
+
+@_requires_chrome
+def test_a_topic_row_on_a_post_card_opens_that_topics_page(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["row_topic"].startswith("#topics?t=")
+    assert seen["from_card"]["hash"] == seen["row_topic"] and seen["from_card"]["detail"]
+
+
+@_requires_chrome
+@pytest.mark.parametrize(
+    ("hash_", "title", "pair"),
+    [
+        ("#topics?t=startups", "Startups", False),
+        ("#topics?t=startups&cx=startups~-", "Startups", True),
+        ("#topics?t=no-existe", None, False),
+        ("#topics?t=startups&cx=%E0~", "Startups", False),
+    ],
+)
+def test_a_topics_url_opened_fresh_shows_that_view(tmp_path, hash_, title, pair):
+    _need_chrome()
+    data = _fixture()
+    [row] = [
+        r
+        for r in data["summary"]["topic_confusion"]
+        if (r["enrich"], r["jev"]) == ("startups", None)
+    ]
+
+    seen = _open(_page(tmp_path, data, _READ_TOPICS), hash_)
+
+    assert seen["banner_hidden"] is True
+    assert seen["detail"] is (title is not None)
+    if title:
+        assert seen["title"].startswith(title)
+    assert seen["pair_cards"] == (row["ids"] if pair else [])
