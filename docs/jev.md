@@ -354,7 +354,8 @@ the report says so above the tables.
 `unpriced_providers` · `assigned_pairs` · `assigned_backed` · `assigned_unjudged` ·
 `enrich_backed_pct` · `jev_pairs` · `jev_backed` · `jev_backed_pct` · `doubtful_pairs` ·
 `missing_pairs` · `primary_agree` · `primary_agree_pct` · `primary_fallback` ·
-`primary_unjudged` · `primary_unranked` · `posts_with_disagreement` · `per_topic`.
+`primary_unjudged` · `primary_unranked` · `posts_with_disagreement` · `posts_enrich_only` ·
+`posts_jev_only` · `posts_primary_differs` · `per_topic`.
 
 `assessments_stored == items_assessed + assessments_stale + assessments_orphaned` — a real
 partition of the side-car, so "0 vigentes" can always be told apart from "0 guardadas".
@@ -367,7 +368,10 @@ the membership-side count is `summary.assigned_unjudged` while the per-item fiel
 `posts_with_disagreement` counts the compared posts with at least one disagreement — a
 topic enrich assigned that Jev does not back, a topic Jev backs that enrich did not assign,
 or a primary that differs (a post enrich left without a primary counts). The recap line
-prints it as `N posts con desacuerdo`, and the dashboard's table count is the same number.
+prints it as `N posts con desacuerdo`, and the dashboard's "Con discrepancias" count is the same
+number. `posts_enrich_only`, `posts_jev_only` and `posts_primary_differs` split the same posts by
+KIND of disagreement (a post can count in more than one), and each `per_topic` row carries
+`disagreeing` = its `doubtful` + its `missing`: the posts that disagree about that topic.
 
 Under the recap line, `jev report` prints the run history in the shared cost sentence:
 
@@ -426,39 +430,39 @@ topics` yet" apart from "a vocabulary edit just retired every paid record you ha
 ## `xbrain jev dashboard` — reading the page
 
 Writes `jev.html` into the vault's output directory, next to `dashboard.html`. It prints
-the same line `jev report` prints, then how many posts are in the table and where the page is:
+the same line `jev report` prints, then how many posts the page carries and where it is:
 
 ```text
-2565 posts en el dashboard → file:///…/x-knowledge/jev.html
+2609 posts en el dashboard (293 comparados con Jev) → file:///…/XBrain/jev.html
 ```
 
 Open it with `open <uri>`.
 
-**The page has one job: show where enrich's topics and Jev disagree, post by post, so you
-can fix the wrong ones, and what finding out cost.** It compares at `[jev].threshold` (0,85
-by default), fixed: there is no control that moves it, and the page recomputes nothing. The
-three headline numbers and the rows come from the same `build_report` call `xbrain jev
-report` makes, so the two surfaces always agree; the costs come from the same price formula
-(`report.run_history`, `report.post_cost_view`). The browser only filters and searches the
-rows, which arrive already ordered. To read the side-car at another
-threshold, use `xbrain jev report --threshold`.
+**The page is a browser of the whole corpus that shows, post by post, what enrich put and
+what Jev sees, so you can find and fix the wrong topics, and what finding out cost.** It
+compares at `[jev].threshold` (0,85 by default), fixed: there is no control that moves it,
+and the page recomputes nothing. Every number comes from the same `build_report` call
+`xbrain jev report` makes, so the two surfaces always agree; the costs come from the same
+price formula (`report.run_history`, `report.post_cost_view`). The browser only filters,
+searches and orders the posts. To read the side-car at another threshold, use
+`xbrain jev report --threshold`.
 
 Top to bottom:
 
 1. **Header** — when the page was written, the model that answered, the threshold with
    `(config)` next to it, and a link to this document.
 2. **Qué es esto** — a short paragraph on what the page is for.
-3. **Coste y peticiones** — three figures and a table:
+3. **Coste y peticiones** — three figures and a folded table:
    - **Total**: requests, input tokens and dollars across every logged pass; `—` and
      `sin pasadas registradas` when none is logged yet.
    - **Media por post**: what one current stored answer cost on average, labelled
      `media de K de las N evaluaciones vigentes` — K is how many could be priced (the
      provider reported usage and has a price). Unpriced providers are named, not averaged in.
    - **Evaluaciones vigentes**: how many current answers the side-car holds and what exactly
-     those cost. Stale and orphaned answers are in the note under the table, not here.
-   - **Histórico por pasada**: one row per `xbrain jev topics` pass, newest first — start
-     date, requests, ok, failed, tokens, cost, model, and for an interrupted pass how many
-     calls were in flight and how many answers were not saved.
+     those cost.
+   - **Histórico por pasada** (click to unfold): one row per `xbrain jev topics` pass,
+     newest first — start date, requests, ok, failed, tokens, cost, model, and for an
+     interrupted pass how many calls were in flight and how many answers were not saved.
 
    Answers no logged pass covers are named in one line
    (`N evaluaciones fuera del registro de pasadas (~X $ según sus propios tokens) …`) and are
@@ -471,34 +475,74 @@ Top to bottom:
      above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`).
    - *Jev añadiría N topics que enrich no puso* — `missing_pairs`.
    - *El topic principal coincide en P %* — `primary_agree_pct`.
-5. **The post table**, one row per compared post:
-   - the post (cut at 240 characters with an ellipsis), its author, `nota ↗` and `X ↗`;
-   - enrich's topics, each marked **✓** (Jev's probability ≥ threshold), **✗** (below) or
-     **·** (the topic left the vocabulary, so Jev was never asked), with the probability
-     beside it and the topic's description on hover;
-   - the topics Jev would add (**+**), with their probability;
-   - enrich's primary topic against Jev's, highlighted when they differ (`(ninguno)` when Jev
-     chose the fallback option);
-   - what that post's stored answer cost (`sin tarifa` when nobody prices its provider,
-     `—` when the provider reported no usage).
+5. **Four tabs**: **Posts**, **Topics**, **Comparar Jev vs enrich** and **Configuración**.
+   Only Posts is built yet; the other three say that they arrive in the next PR.
 
-   By default the table shows **only posts with a disagreement** — a ✗, a +, or a primary
-   that differs — ordered most disagreements first. Untick the box to see every post; the
-   search box filters by text, author or topic. Below the table, one line counts what is
-   not in it: stale and orphaned answers, and posts with no enrichment to compare against.
+### The Posts tab
 
-It is **one self-contained file**: the data as a JSON blob in the page, no charting library,
-no external scripts. The only network reference is the Google Fonts stylesheet, so offline
-the page renders in system fonts and nothing else is missing. Measured 2026-09-26:
-**55,829 bytes** at 20 posts and **120,670 bytes** at 99, about **0.8 KB per post**, so the
-full ~2,600-post corpus comes to roughly **2.2 MB**. The table renders every matching row
-(there is no pagination). JavaScript draws the table and runs the filter and the search;
-without it the page says so.
+**Left, the filters.** Six views of the corpus, each with its count from the report:
+*Todos* (every post), *Con discrepancias* (the default: `posts_with_disagreement`), *Sin
+evaluar por Jev* (posts with no current answer, never asked or stale), *Jev añadiría topic*
+(`posts_jev_only`), *Primario distinto* (`posts_primary_differs`) and *Jev eligió «otro»*
+(`primary_fallback`, where Jev answered "none of these"). Under them, the vocabulary's
+topics, most disagreement first, each with three numbers over the compared posts: how many
+enrich put there (`assigned`), how many of those Jev confirms (`backed`) and how many
+disagree about it (`disagreeing`). Clicking a topic narrows the current view to posts where
+enrich or Jev has that topic; click it again (or its chip above the list) to drop it. On a
+narrow screen the topic list starts folded.
+
+**Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
+card is a share-style preview built from data XBrain already has, with nothing fetched from
+X:
+
+- the author, `@handle` and date, the whole text (a long one starts folded behind *ver
+  todo*), `X ↗` and `nota ↗`;
+- up to four photos, from the vault's `_media/` folder (the same files the notes embed) by
+  a path relative to the page, linked only when the file is on disk; a video shows its first
+  extracted frame with ▶; anything without a local file is a placeholder that says so;
+- the quoted post as a nested card (the same quoted post Jev read, cut at 600 characters);
+- the fetched linked page as a mini card with its domain and kind (`artículo`, or
+  `x_article · página de X` — some of those hold scraped replies rather than an article),
+  or else the first link in the post.
+
+Under the preview, **Jev vs enrich**: one row per topic either side has — enrich ✓ or —,
+Jev's probability as a bar (the tick is the threshold) and a number, and the verdict
+*coinciden* / *solo enrich* / *solo Jev* (or *sin juzgar* for a topic that left the
+vocabulary). Then both primary topics, highlighted when they differ, with Jev's
+probability for its choice; the number of discrepancies, `recortado` when the evidence was
+cut, the model, when it was asked, and what the answer cost. *Lo que vio Jev* (folded) lists
+each evidence surface Jev was sent — tweet, author, thread, quoted post, linked article,
+video transcript, image and frame descriptions — with its size and whether the cut reached
+it, from the same `state_surfaces` split of the state `jev topics` sends. The page ships at
+most **600 characters per surface**, and says so; the full text will come with
+`xbrain jev serve`.
+
+A post Jev has not answered for shows enrich's topics, a *sin evaluar por Jev* mark, and a
+**copiar comando** button with the exact line that asks for it:
+`xbrain jev topics --id <id>`. The static page never asks Jev anything.
+
+Search matches text, author, id and topics (slug or label); sort is *más discrepancias*
+(default), *más recientes* or *más caros*. Keys: **j** / **k** next / previous post, **n** /
+**p** next / previous post with a discrepancy. The filter, topic, search and sort live in
+the URL (`#posts?f=uneval&t=ai-coding&q=…&s=recent`), so a view can be bookmarked and
+survives a reload. The page follows the system's light or dark theme.
+
+Below the list, one line names what the numbers leave out: stale and orphaned answers, and
+evaluated posts with no enrichment to compare against.
+
+It is **one file**: the data as a JSON blob in the page, no charting library, no external
+scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
+the vault loses the pictures and nothing else. The only network reference is the Google
+Fonts stylesheet. Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
+**3,689,827 bytes**, about **1.4 KB per post** — ~2.9 KB for an evaluated post (its topic
+rows and evidence) and ~1.2 KB for the rest. JavaScript draws everything; without it the
+page says so.
 
 Two more things the page cannot tell you itself:
 
-- The **`nota ↗` deep link appears only for notes that exist** on disk. `jev dashboard`
-  runs independently of `xbrain generate`, so run `generate` first or expect only `X ↗`.
+- The **`nota ↗` deep link appears only for notes that exist** on disk, and photos only for
+  files in `_media/`. `jev dashboard` runs independently of `xbrain generate`, so run
+  `generate` first or expect only `X ↗` and placeholders.
 - It is **static**. It goes stale the moment the side-car, the run log, the corpus or
   `vocab.yaml` moves. `dashboard.html` and `jev.html` are siblings — same directory, same
   template mechanism, same visual language — but different commands write them and neither
