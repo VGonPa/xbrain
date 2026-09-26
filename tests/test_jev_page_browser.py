@@ -528,6 +528,28 @@ async function drawAll(root) {
     out.pairs_visible_after = [...list.querySelectorAll('li')].filter(li => !li.hidden).length;
     list.remove();
   });
+  await step('scroll kept on return', async () => {
+    const spacer = document.createElement('div'); spacer.style.height = '4000px'; document.body.appendChild(spacer);
+    const tabTop = () => Math.round(document.getElementById('tab-topics').getBoundingClientRect().top);
+    location.hash = '#topics?t=alpha'; await sleep(30);
+    window.scrollTo(0, document.getElementById('tab-topics').offsetTop + 900); await sleep(10);
+    document.querySelector('#topic-detail a[data-pair]').click(); await sleep(30);
+    history.back(); await sleep(50);
+    out.topic_tab_top_after_back = tabTop();
+    location.hash = '#topics'; await sleep(30);
+    window.scrollTo(0, document.getElementById('tab-topics').offsetTop + 600); await sleep(10);
+    document.querySelector('#topics-index a.tl').click(); await sleep(30);
+    out.entered_tab_top = tabTop();
+    history.back(); await sleep(50);
+    out.index_tab_top_after_back = tabTop();
+  });
+  await step('sort survives a topic', async () => {
+    location.hash = '#topics'; await sleep(30);
+    sortHeader('Discrepancias').click(); await sleep(10);
+    document.querySelector('#topics-index a.tl').click(); await sleep(30);
+    out.back_href = [...document.querySelectorAll('#topic-detail .tnav a')].find(a => a.textContent.startsWith('← todos')).getAttribute('href');
+    out.tab_href = document.querySelector('.tabs a[data-tab="topics"]').getAttribute('href');
+  });
   await step('missing post', async () => {
     const gone = DATA.post_sets.cx['gamma~omega'][0];
     DATA.posts = DATA.posts.filter(p => p.id !== gone);
@@ -708,6 +730,25 @@ def test_pairs_past_eight_open_with_ver_todos(topics_probed):
     assert seen["pairs_visible_before"] == 8
     assert seen["pairs_more"] == "ver todos (3 cruces más, 6 posts)"
     assert seen["pairs_visible_after"] == 11
+
+
+@_requires_chrome
+def test_returning_keeps_the_scroll_and_only_entering_a_topic_jumps_to_the_tab(topics_probed):
+    """Back from a pair to its topic, and back from a topic to the index, keep where the
+    reader was; opening a topic from the index starts at the tab's top."""
+    _data_, seen = topics_probed
+
+    assert abs(seen["entered_tab_top"]) <= 2
+    assert abs(seen["topic_tab_top_after_back"]) > 50
+    assert abs(seen["index_tab_top_after_back"]) > 50
+
+
+@_requires_chrome
+def test_the_sort_travels_with_the_back_link_and_the_tab_link(topics_probed):
+    _data_, seen = topics_probed
+
+    assert seen["back_href"] == "#topics?o=disagreeing&d=desc"
+    assert seen["tab_href"] == "#topics?o=disagreeing&d=desc"
 
 
 @_requires_chrome

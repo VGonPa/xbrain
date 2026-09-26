@@ -1196,6 +1196,9 @@ function readTopicsHash(params) {
   topicsView.unknownT = t && !LABEL[t] ? t : '';
   topicsView.cx = params.get('cx') || '';
   topicsView.px = params.get('px') || '';
+  // A topic's URL says nothing about the index's order: keep the one the reader chose, so the
+  // back link and the tab link return to it.
+  if (t) return;
   const o = params.get('o');
   topicsView.o = TOPIC_COLUMNS.some(c => c.key === o) ? o : '';
   const d = params.get('d');
@@ -1593,11 +1596,12 @@ function boot() {
       const before = shownTopic;
       renderTopics();
       shownTopic = topicsView.t;
-      // An opened pair is what the reader asked to see; a NEW topic starts at the tab's top.
-      // Otherwise (back to the same topic) the browser's own scroll restoration is left alone.
+      // An opened pair is what the reader asked to see; ENTERING a topic (from the index or from
+      // another topic) starts at the tab's top. Returning — to the same topic, or back to the
+      // index — leaves the browser's own scroll restoration alone.
       const pair = $('topic-pair');
       if (pair) pair.scrollIntoView({block: 'start'});
-      else if (topicsView.t !== before) $('tab-topics').scrollIntoView({block: 'start'});
+      else if (topicsView.t && topicsView.t !== before) $('tab-topics').scrollIntoView({block: 'start'});
     }
   });
   document.addEventListener('keydown', onKey);
