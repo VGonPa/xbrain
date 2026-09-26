@@ -527,7 +527,8 @@ X:
   generate* (downloaded, not mirrored yet), *imagen sin descargar*, *la descarga falló*,
   *el fichero ya no está*, or *vídeo sin fotograma extraído*;
 - the quoted post as a nested card (the same quoted post Jev read, cut at 600 characters),
-  or, when it could not be read, a *Post citado no disponible* box linking to it on X;
+  or a *Post citado no disponible* box linking to it on X — saying *no se pudo leer* when a
+  fetch failed, or *sin leer todavía: corre xbrain refresh-quoted* when none was tried;
 - the fetched linked page as a mini card with its domain and kind (`artículo`, or
   `x_article · página de X` — some of those hold scraped replies rather than an article),
   marked *no se pudo leer* when the fetch failed, or else the first link in the post.

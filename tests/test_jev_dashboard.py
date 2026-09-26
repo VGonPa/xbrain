@@ -672,6 +672,7 @@ def test_the_quoted_post_is_the_one_jev_read_cut_for_the_page():
         "text": "q" * 600,
         "cut": True,
         "missing": False,
+        "why": None,
     }
 
 
@@ -709,9 +710,12 @@ def test_a_quoted_post_that_could_not_be_read_is_still_shown_as_missing():
         "text": "",
         "cut": False,
         "missing": True,
+        "why": "failed",
     }
+    # Never fetched is a different next step from a fetch that failed.
     assert _post(data, "2")["quoted"]["url"] == "https://x.com/i/status/88"
     assert _post(data, "2")["quoted"]["missing"] is True
+    assert _post(data, "2")["quoted"]["why"] == "not_fetched"
 
 
 def test_the_link_card_is_the_fetched_article_labelled_with_its_kind():
@@ -1273,6 +1277,15 @@ def test_the_cards_are_built_from_text_nodes_never_from_html_strings():
     }
     assert "const x = httpUrl(p.url);" in cards and cards.count("const href = httpUrl(") == 2
     assert "text.replace(/https?:\\/\\/[^\\s]+/g" in cards
+
+
+def test_an_unread_quoted_post_names_the_command_that_reads_it():
+    """`not_fetched`: nothing has tried to read it yet, and `xbrain refresh-quoted` is the
+    command that fills quoted posts in (`xbrain fetch` fetches linked articles, not these)."""
+    cards = _script_section(_resource("jev.template.html"), "/* cards */", "/* end cards */")
+
+    assert "q.why === 'not_fetched'" in cards
+    assert "Sin leer todavía: corre xbrain refresh-quoted" in cards
 
 
 def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():

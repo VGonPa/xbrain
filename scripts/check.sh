@@ -262,8 +262,9 @@ print_github_summary() {
 # says ALL CRITICAL CHECKS PASSED having driven the page not at all.
 #
 # Locally that trade is fine and this banner just says what you are running. On a
-# runner it is not: quality.yml sets XBRAIN_REQUIRE_CHROME=1, which turns those
-# skips into a failure (test_chrome_is_available_where_the_page_tests_are_required).
+# runner it is not: quality.yml sets XBRAIN_REQUIRE_CHROME=1, which turns every
+# one of those skips into a failure (`_need_chrome` in that file), and
+# test_chrome_is_available_where_the_page_tests_are_required names the cause.
 # The tests look for XBRAIN_CHROME, then google-chrome / chromium on PATH, then the
 # macOS app bundle; this banner checks the same places, less XBRAIN_CHROME's.
 CHROME_BIN="${XBRAIN_CHROME:-}"

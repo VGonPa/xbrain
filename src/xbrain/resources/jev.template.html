@@ -647,13 +647,25 @@ function link(href, cls, text) {
   return a;
 }
 
+/** A URL as matched, less the sentence punctuation after it. A closing ")" is the URL's own
+    only while the URL has as many "(" (Wikipedia's `Foo_(bar)`); otherwise it closes an aside. */
+function trimUrl(m) {
+  let url = m;
+  for (;;) {
+    const last = url.slice(-1);
+    const unbalanced = last === ')' && url.split(')').length > url.split('(').length;
+    if (/[.,;:!?»"'\]]/.test(last) || unbalanced) url = url.slice(0, -1);
+    else return url;
+  }
+}
+
 /** The post's words with its URLs as links; everything else stays a text node. Punctuation
-    that ends a sentence right after a URL stays outside the link. */
+    that ends a sentence right after a URL stays outside the link (`trimUrl`). */
 function linkified(text) {
   const frag = document.createDocumentFragment();
   let last = 0;
   text.replace(/https?:\/\/[^\s]+/g, (m, at) => {
-    const url = m.replace(/[).,;:!?»"'\]]+$/, '');
+    const url = trimUrl(m);
     frag.appendChild(document.createTextNode(text.slice(last, at)));
     frag.appendChild(link(url, null, url.replace(/^https?:\/\//, '')));
     last = at + url.length;
@@ -748,7 +760,9 @@ function quotedCard(q) {
   h.appendChild(links);
   box.appendChild(h);
   if (q.missing) {
-    box.appendChild(el('p', 'twt', 'No se pudo leer: ábrelo en X. Jev no lo vio.'));
+    box.appendChild(el('p', 'twt', q.why === 'not_fetched'
+      ? 'Sin leer todavía: corre xbrain refresh-quoted (con --from-store no usa la red). Jev no lo vio.'
+      : 'No se pudo leer: ábrelo en X. Jev no lo vio.'));
     return box;
   }
   const t = el('p', 'twt');

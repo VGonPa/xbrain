@@ -12,7 +12,8 @@ clicks and presses keys, then writes what it saw into a `<pre id="probe">` as JS
 
 THE SKIP IS FAIL-CLOSED ON A RUNNER. A laptop without Chrome skips these tests; the gate job
 sets `XBRAIN_REQUIRE_CHROME` (tests/test_ci_workflow.py pins it), and then a missing Chrome
-FAILS `test_chrome_is_available_where_the_page_tests_are_required` instead of skipping.
+FAILS every page test (`_need_chrome`) instead of skipping it, and
+`test_chrome_is_available_where_the_page_tests_are_required` names the cause.
 """
 
 from __future__ import annotations
@@ -50,6 +51,18 @@ def _chrome() -> str | None:
 
 
 CHROME = _chrome()
+
+
+def _need_chrome() -> None:
+    """No Chrome: skip on a laptop, FAIL where the page tests are required (the gate). Every
+    page test goes through here, so none of them can turn a missing browser into a green
+    skip on a runner."""
+    if CHROME is None:
+        if _REQUIRED:
+            pytest.fail("XBRAIN_REQUIRE_CHROME está puesto y no hay Chrome (pon XBRAIN_CHROME)")
+        pytest.skip("sin Chrome")
+
+
 _requires_chrome = pytest.mark.skipif(
     CHROME is None and not _REQUIRED,
     reason="sin Chrome: las pruebas de la página en navegador se saltan",
@@ -135,6 +148,8 @@ const drawAll = async () => { while (!document.getElementById('more').hidden) { 
   out.banner_hidden_after_late_error = document.getElementById('banner').hidden;
   const frag = linkified('ver https://e.com/a). fin');
   out.link = frag.querySelector('a').getAttribute('href');
+  const wiki = linkified('(ver https://en.wikipedia.org/wiki/Foo_(bar)) fin');
+  out.wiki = wiki.querySelector('a').getAttribute('href');
   const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
   document.body.appendChild(pre);
 })();
@@ -198,8 +213,7 @@ def _page(tmp_path: Path, data: dict[str, Any], script: str) -> Path:
 
 @pytest.fixture(scope="module")
 def probed(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
-    if CHROME is None:
-        pytest.skip("sin Chrome")
+    _need_chrome()
     data = _fixture()
     return data, _open(_page(tmp_path_factory.mktemp("jev"), data, _PROBE))
 
@@ -325,6 +339,13 @@ def test_sentence_punctuation_after_a_url_stays_outside_the_link(probed):
 
 
 @_requires_chrome
+def test_a_balanced_parenthesis_is_part_of_the_url(probed):
+    """A Wikipedia URL ends in `(bar)`; inside a parenthesised aside, only the aside's
+    closing `)` stays outside the link."""
+    assert probed[1]["wiki"] == "https://en.wikipedia.org/wiki/Foo_(bar)"
+
+
+@_requires_chrome
 def test_a_search_with_escapable_characters_survives_a_reload(probed, tmp_path):
     """The hash the search wrote, opened fresh, restores the same search — `&`, `+`, `%`
     and `?` included."""
@@ -339,8 +360,7 @@ def test_a_search_with_escapable_characters_survives_a_reload(probed, tmp_path):
 @_requires_chrome
 @pytest.mark.parametrize("hash_", ["#posts?q=%E0", "#%E0%A", "#posts?q=a%"])
 def test_a_malformed_hash_opens_the_page_instead_of_breaking_it(tmp_path, hash_):
-    if CHROME is None:
-        pytest.skip("sin Chrome")
+    _need_chrome()
     item = _item("1")
     data = _data([item], {"1": _assessment(item)})
 

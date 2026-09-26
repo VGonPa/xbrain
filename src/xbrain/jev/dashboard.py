@@ -210,7 +210,8 @@ def _card_media(item: Item, files: MediaFiles) -> list[dict[str, Any]]:
 
 def _quoted_card(item: Item) -> dict[str, Any] | None:
     """The quoted post as the evidence carries it (`quoted_source`), cut for the page — or,
-    for a quote-tweet whose quoted post could not be read, a `missing` card linking to X."""
+    for a quote-tweet whose quoted post could not be read, a `missing` card linking to X,
+    with `why`: `failed` (a fetch was tried and failed) or `not_fetched` (never tried)."""
     source = quoted_source(item)
     if source is not None:
         return {
@@ -220,12 +221,22 @@ def _quoted_card(item: Item) -> dict[str, Any] | None:
             "text": source.text[:PAGE_SURFACE_CHARS],
             "cut": len(source.text) > PAGE_SURFACE_CHARS,
             "missing": False,
+            "why": None,
         }
     failed = _failed_source(item, QUOTED_CONTENT_KINDS)
     if failed is None and item.quoted_id is None:
         return None
     url = failed.url if failed else f"https://x.com/i/status/{item.quoted_id}"
-    return {"handle": None, "name": None, "url": url, "text": "", "cut": False, "missing": True}
+    why = "failed" if failed else "not_fetched"
+    return {
+        "handle": None,
+        "name": None,
+        "url": url,
+        "text": "",
+        "cut": False,
+        "missing": True,
+        "why": why,
+    }
 
 
 def _failed_source(item: Item, kinds: frozenset[str]) -> ContentSourceFailure | None:
