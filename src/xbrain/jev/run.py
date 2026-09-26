@@ -28,8 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from xbrain.config import Config
-from xbrain.jev.assess import RunResult, Selection, run_assessments, run_record
-from xbrain.jev.client import CountingJevClient, JevClient, JevError
+from xbrain.jev.assess import RunResult, Selection, run_assessments
+from xbrain.jev.client import CountingJevClient, JevClient, JevError, SeamCounts
 from xbrain.jev.defaults import plural
 from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.jev.store import append_run, save_assessments
@@ -148,40 +148,98 @@ def _release(client: JevClient) -> None:
         )
 
 
+def _now() -> datetime:
+    """The wall clock, in UTC — one seam, so a test can make it step backwards."""
+    return datetime.now(timezone.utc)
+
+
+def run_record(
+    counts: SeamCounts,
+    *,
+    kept: int,
+    started_at: datetime,
+    finished_at: datetime,
+    interrupted: bool,
+) -> JevRun:
+    """The `runs.jsonl` line for one pass, from what the seam saw and what was kept.
+
+    `kept` is what was BANKED into the side-car. Everything else that came back is either a
+    failure (`raised`, plus answers xbrain refused) or — on an interrupted pass only —
+    `unsaved`: answered but never drained. An interrupt cannot tell a refused answer that
+    was not yet drained from a good one, and neither was kept, so both land in `unsaved`.
+
+    `finished_at` is clamped to `started_at`: a wall clock that steps back (NTP, a laptop
+    waking) must not make the record invalid — this is built inside a `finally`.
+    """
+    answered_not_kept = counts.answered - kept
+    return JevRun(
+        started_at=started_at,
+        finished_at=max(finished_at, started_at),
+        models=list(counts.models),
+        requests=counts.sent,
+        ok=kept,
+        failed=counts.raised + (0 if interrupted else answered_not_kept),
+        unsaved=answered_not_kept if interrupted else 0,
+        input_tokens_by_provider=counts.input_tokens_by_provider,
+        input_tokens=sum(counts.input_tokens_by_provider.values()),
+        input_tokens_unknown=counts.input_tokens_unknown,
+        interrupted=interrupted,
+    )
+
+
+#: What `on_logged` receives: the log path, the line (the JSON record, or the raw seam counts
+#: when no valid record could be built), and the error that kept it out of the file, if any.
+LoggedHook = Callable[[Path, str, BaseException | None], None]
+
+
 def _log_pass(
     path: Path,
     client: CountingJevClient,
-    banked: tuple[TopicAssessment, ...],
+    kept: int,
     started_at: datetime,
     *,
     interrupted: bool,
-    on_logged: Callable[[JevRun, Path, OSError | None], None] | None,
+    on_logged: LoggedHook | None,
 ) -> JevRun | None:
-    """Append the pass to the run log; hand the line and any write error to `on_logged`.
+    """Append the pass to the run log. NEVER raises — it runs inside `run_topics`' `finally`.
 
     Nothing is written when nothing was SENT (a Ctrl-C before the first call): the log is a
-    history of requests made, not of invocations. Called from `run_topics`'s `finally`, so it
-    NEVER raises an `OSError`: the caller learns of it through the hook and can print the line
-    for the operator to append by hand.
+    history of requests made, not of invocations.
+
+    An exception out of a `finally` REPLACES the one in flight, so anything here — a record
+    that fails validation, a full disk, a hook whose echo hits a closed pipe — would turn an
+    interrupt or the all-failed `JevError` into a different error, or a paid, saved pass into
+    a failure, and skip the client's release. So every step is caught. The line is still
+    handed to `on_logged` with the error (the CLI prints it for the operator to append by
+    hand), and if the hook itself fails the line goes to the log as a warning.
     """
-    if not client.sent:
+    counts = client.snapshot()
+    if not counts.sent:
         return None
-    run = run_record(
-        banked,
-        started_at=started_at,
-        finished_at=datetime.now(timezone.utc),
-        sent=client.sent,
-        finished=client.finished,
-        interrupted=interrupted,
-    )
-    error: OSError | None = None
+    line = repr(counts)
+    error: BaseException | None = None
+    run: JevRun | None = None
     try:
+        run = run_record(
+            counts, kept=kept, started_at=started_at, finished_at=_now(), interrupted=interrupted
+        )
+        line = run.model_dump_json()
         append_run(run, path)
-    except OSError as exc:
+    except Exception as exc:
         error = exc
     if on_logged is not None:
-        on_logged(run, path, error)
-    return None if error else run
+        try:
+            on_logged(path, line, error)
+        except Exception as exc:
+            logger.warning(
+                "no se pudo informar del registro de pasadas (%s: %s); la línea: %s",
+                type(exc).__name__,
+                exc,
+                line,
+            )
+    elif error is not None:
+        logger.warning("no se pudo escribir el registro de pasadas (%s); la línea: %s", error, line)
+    return None if error is not None else run
 
 
 def run_topics(
@@ -195,7 +253,7 @@ def run_topics(
     on_progress: Callable[[int, int], None] | None = None,
     on_summary: Callable[[RunResult], None] | None = None,
     on_interrupted: Callable[[tuple[TopicAssessment, ...], int], None] | None = None,
-    on_logged: Callable[[JevRun, Path, OSError | None], None] | None = None,
+    on_logged: LoggedHook | None = None,
 ) -> RunOutcome:
     """Ask Jev about `selection.items`, keeping everything that was paid for.
 
@@ -212,8 +270,9 @@ def run_topics(
       counters reach the operator even when the save then fails.
     * `on_interrupted(banked, stored)` — Ctrl-C landed; called before the banked records are
       saved. `banked` may be empty (nothing to save, and nothing is written).
-    * `on_logged(run, path, error)` — the run-log line, after every other step, on EVERY exit
-      path of a pass that sent a request; `error` is set when it could not be appended.
+    * `on_logged(path, line, error)` — the run-log line, after every other step, on EVERY
+      exit path of a pass that sent a request; `error` is set when it could not be appended
+      (then `line` is what to append by hand). A hook that raises is logged, never raised.
 
     There is no `force` argument: which items are re-asked, current ones included, is
     `selection`'s decision (`assess.select_items(force=...)`), already made.
@@ -248,7 +307,7 @@ def run_topics(
 
     # Wrapped so the run log can say how many calls were SENT, which nothing else observes.
     client = CountingJevClient(make_client())
-    started_at = datetime.now(timezone.utc)
+    started_at = _now()
     interrupted = False
     logged: JevRun | None = None
     try:
@@ -289,7 +348,7 @@ def run_topics(
         logged = _log_pass(
             cfg.jev_runs_path,
             client,
-            tuple(banked.values()),
+            len(banked),
             started_at,
             interrupted=interrupted,
             on_logged=on_logged,

@@ -35,6 +35,7 @@ def _run(**overrides) -> JevRun:
         "input_tokens": 36_000,
         "input_tokens_unknown": 0,
         "interrupted": False,
+        "unsaved": 0,
     }
     fields.update(overrides)
     return JevRun(**fields)
@@ -184,3 +185,75 @@ def test_a_blank_trailing_line_is_not_a_record(tmp_path: Path):
         handle.write("\n")
 
     assert len(load_runs(path)) == 1
+
+
+# --------------------------------------------------------------------------- fix wave (PR 8)
+
+
+def test_a_run_is_a_topics_run_by_default_and_old_lines_still_load(tmp_path: Path):
+    """`kind` exists now so a second kind of pass (`jev ask`) can share the file; a line
+    written before the field existed reads as a topics pass."""
+    path = tmp_path / "runs.jsonl"
+    old = _run().model_dump(mode="json")
+    old.pop("kind")
+    old.pop("unsaved")
+    path.write_text(json.dumps(old) + "\n", encoding="utf-8")
+
+    [run] = load_runs(path)
+
+    assert run.kind == "topics" and run.unsaved == 0
+
+
+def test_answers_that_came_back_but_were_not_saved_are_their_own_bucket():
+    """Ctrl-C: an answer a worker received but the main loop never drained was billed and
+    not kept. It is not a failure, and it is not in flight."""
+    run = _run(requests=10, ok=4, failed=1, unsaved=2, interrupted=True)
+
+    assert run.requests - run.ok - run.failed - run.unsaved == 3  # in flight
+
+    with pytest.raises(ValidationError, match="unsaved"):
+        _run(requests=20, ok=18, failed=0, unsaved=2)  # only an interrupt leaves any
+    with pytest.raises(ValidationError, match="requests"):
+        _run(requests=5, ok=4, failed=1, unsaved=1, interrupted=True)
+
+
+def test_tokens_by_provider_refuse_a_blank_provider_or_a_negative_count():
+    with pytest.raises(ValidationError):
+        _run(input_tokens_by_provider={"": 10}, input_tokens=10)
+    with pytest.raises(ValidationError):
+        _run(input_tokens_by_provider={"typesafe": -1}, input_tokens=-1)
+
+
+def test_an_append_after_a_torn_last_line_starts_on_a_new_line(tmp_path: Path):
+    """A crash mid-write leaves a fragment without its newline. Gluing the next record onto
+    it would hide a paid pass inside a line the loader refuses."""
+    path = tmp_path / "runs.jsonl"
+    path.write_text('{"started_at": "2026-09-2', encoding="utf-8")  # torn, no newline
+    run = _run()
+
+    append_run(run, path)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert JevRun.model_validate_json(lines[1]) == run
+    with pytest.raises(JevError, match="línea 1"):  # only the fragment is refused
+        load_runs(path)
+
+
+def test_a_write_that_fails_leaves_the_log_byte_identical(tmp_path: Path, monkeypatch):
+    """The bytes are written, then the flush to disk fails: the partial line is rolled back
+    so the next append does not land on a fragment."""
+    from xbrain.jev import store as jev_store
+
+    path = tmp_path / "runs.jsonl"
+    append_run(_run(), path)
+    before = path.read_bytes()
+
+    def _fsync_fails(fd: int) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(jev_store.os, "fsync", _fsync_fails)
+    with pytest.raises(OSError):
+        append_run(_run(requests=3, ok=3, failed=0), path)
+
+    assert path.read_bytes() == before

@@ -952,17 +952,43 @@ def test_an_interrupted_run_logs_what_was_sent_including_the_call_in_flight(
     assert run.input_tokens == 100
 
 
-def test_answers_without_usage_are_counted_as_unknown_not_as_free(tmp_path: Path, monkeypatch):
+def test_an_interrupt_before_any_call_exits_130_and_logs_nothing(tmp_path: Path, monkeypatch):
+    """Ctrl-C before the first request: nothing was billed, so there is no history line."""
     _setup_repo(tmp_path, monkeypatch)
     _seed(tmp_path)
-    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient(input_tokens=None))
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
 
-    assert runner.invoke(app, ["jev", "topics"]).exit_code == 0
+    def _interrupted_at_once(*args, **kwargs):
+        raise KeyboardInterrupt
 
-    [run] = load_runs(_runs_path(tmp_path))
-    assert (run.input_tokens, run.input_tokens_unknown) == (0, 2)
-    # The provider answered; it just reported no usage. Its row is there, at zero counted.
-    assert run.input_tokens_by_provider == {"fake": 0}
+    monkeypatch.setattr(jev_run, "run_assessments", _interrupted_at_once)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    assert result.exit_code == 130, result.output
+    assert "Interrumpido: nada nuevo que guardar" in result.stderr
+    assert not _runs_path(tmp_path).exists()
+    assert "pasada registrada" not in result.stdout
+
+
+def test_the_logged_line_is_announced_after_the_side_car_is_saved(tmp_path: Path, monkeypatch):
+    """Summary, then the save, then "pasada registrada": the last line is only true once
+    everything before it has happened."""
+    _setup_repo(tmp_path, monkeypatch)
+    _seed(tmp_path)
+    monkeypatch.setattr(cli, "_jev_client", lambda cfg: FakeJevClient())
+    real_save = jev_run.save_assessments
+
+    def _save_and_say_so(assessments, path):
+        real_save(assessments, path)
+        print("<<guardado>>")
+
+    monkeypatch.setattr(jev_run, "save_assessments", _save_and_say_so)
+
+    result = runner.invoke(app, ["jev", "topics"])
+
+    out = result.stdout
+    assert out.index("2 evaluadas") < out.index("<<guardado>>") < out.index("pasada registrada")
 
 
 def test_a_dry_run_or_an_empty_backlog_logs_nothing(tmp_path: Path, monkeypatch):

@@ -114,7 +114,7 @@ def test_the_summary_hook_runs_before_the_save_and_the_log_hook_after(cfg: Confi
     def _summary(result: RunResult) -> None:
         events.append("summary")
 
-    def _logged(run: JevRun, path: Path, error: OSError | None) -> None:
+    def _logged(path: Path, line: str, error: BaseException | None) -> None:
         events.append("logged")
 
     _pass(cfg, FakeJevClient(), on_summary=_summary, on_logged=_logged)
@@ -204,3 +204,172 @@ def test_the_assessments_map_handed_in_is_updated_in_place(cfg: Config):
     run_topics(cfg, selection, assessments, VOCAB, FakeJevClient)
 
     assert set(assessments) == {"1", "2"}
+
+
+# --------------------------------------------------------------- every exit path, at the loop
+#
+# The run log's exit paths are asserted HERE, on `run_topics`, where the logic lives; the CLI
+# keeps one smoke test per path (`tests/test_jev_cli.py`, "the run log" section).
+
+
+def _only_run(cfg: Config) -> JevRun:
+    [run] = load_runs(cfg.jev_runs_path)
+    return run
+
+
+def test_success_logs_every_answer_at_the_seam(cfg: Config):
+    _pass(cfg, FakeJevClient(input_tokens=1_500))
+
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.failed, run.unsaved, run.interrupted) == (2, 2, 0, 0, False)
+    assert run.input_tokens_by_provider == {"fake": 3_000} and run.models == ["jev-1.13.0"]
+    assert run.kind == "topics"
+
+
+def test_a_partial_failure_logs_the_failed_call(cfg: Config):
+    _pass(cfg, FakeJevClient(fail_when=lambda state: "Seed" in state["post"]))
+
+    assert (_only_run(cfg).ok, _only_run(cfg).failed) == (1, 1)
+
+
+def test_refused_answers_are_failures_whose_tokens_are_still_logged(cfg: Config):
+    """Jev answered — and billed — but with a primary outside the options, so xbrain refused
+    every answer. The pass fails as a whole, and the log still carries the tokens."""
+    with pytest.raises(JevError, match="ninguna de las 2"):
+        _pass(cfg, FakeJevClient(primary="banana"))
+
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.failed) == (2, 0, 2)
+    assert run.input_tokens_by_provider == {"fake": 200}
+    assert run.models == ["jev-1.13.0"]
+
+
+def test_an_interrupt_logs_answers_it_never_saved_as_unsaved_not_failed(cfg: Config, monkeypatch):
+    """Two calls answered, one drained into the side-car, then Ctrl-C: the undrained answer
+    was billed and not kept. It is `unsaved`, never `failed`, and its tokens are logged."""
+    from xbrain.jev import run as jev_run
+
+    def _answer_twice_keep_one(items, vocab, client, *, on_result, **kwargs):
+        from xbrain.jev.assess import assess_topics
+        from xbrain.jev.questions import build_topic_questions
+
+        questions = build_topic_questions(vocab, "otro")
+        kept = assess_topics(items[0], questions, client, char_limit=100_000)
+        assess_topics(items[1], questions, client, char_limit=100_000)  # answered, not drained
+        on_result(kept)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(jev_run, "run_assessments", _answer_twice_keep_one)
+
+    outcome = _pass(cfg, FakeJevClient())
+
+    assert outcome.interrupted is True
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.failed, run.unsaved) == (2, 1, 0, 1)
+    assert run.input_tokens == 200
+
+
+def test_an_interrupt_before_any_call_logs_nothing(cfg: Config, monkeypatch):
+    from xbrain.jev import run as jev_run
+
+    def _interrupted_at_once(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(jev_run, "run_assessments", _interrupted_at_once)
+
+    outcome = _pass(cfg, FakeJevClient())
+
+    assert outcome.interrupted is True and outcome.logged is None
+    assert not cfg.jev_runs_path.exists()
+
+
+def test_a_side_car_that_cannot_be_written_still_logs_the_pass(cfg: Config, monkeypatch):
+    from xbrain.jev import run as jev_run
+
+    def _boom(assessments, path):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(jev_run, "save_assessments", _boom)
+
+    with pytest.raises(JevError, match="2 evaluaciones pagadas sin guardar"):
+        _pass(cfg, FakeJevClient())
+
+    assert (_only_run(cfg).requests, _only_run(cfg).ok) == (2, 2)
+
+
+# --------------------------------------------------------------- the log step is never the verdict
+
+
+def test_a_clock_that_steps_back_keeps_the_interrupt_and_the_teardown(cfg: Config, monkeypatch):
+    """`finished_at < started_at` would fail validation inside `finally` and replace the
+    interrupt. The finish is clamped to the start instead."""
+    from xbrain.jev import run as jev_run
+
+    ticks = iter(
+        [
+            datetime(2026, 9, 26, 12, tzinfo=timezone.utc),
+            datetime(2026, 9, 26, 11, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(jev_run, "_now", lambda: next(ticks))
+    client = FakeJevClient(interrupt_after=1)
+
+    outcome = _pass(cfg, client)
+
+    assert outcome.interrupted is True and client.closed is True
+    run = _only_run(cfg)
+    assert run.finished_at == run.started_at
+
+
+def test_a_log_that_cannot_be_appended_keeps_the_interrupt(cfg: Config, monkeypatch):
+    from xbrain.jev import run as jev_run
+
+    def _boom(run, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(jev_run, "append_run", _boom)
+    seen: list[BaseException | None] = []
+    client = FakeJevClient(interrupt_after=1)
+
+    outcome = _pass(cfg, client, on_logged=lambda path, line, error: seen.append(error))
+
+    assert outcome.interrupted is True and client.closed is True
+    assert isinstance(seen[0], OSError)
+    assert list(load_assessments(cfg.jev_topics_path)) == ["1"]
+
+
+def test_a_log_that_cannot_be_appended_keeps_the_all_failed_error(cfg: Config, monkeypatch):
+    from xbrain.jev import run as jev_run
+
+    def _boom(run, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(jev_run, "append_run", _boom)
+
+    with pytest.raises(JevError, match="ninguna de las 2"):
+        _pass(cfg, FakeJevClient(fail_when=lambda state: True))
+
+
+def test_a_log_hook_that_raises_never_replaces_the_verdict(cfg: Config, caplog):
+    """`xbrain jev topics | head` closes the pipe under the echo in the hook."""
+
+    def _broken_pipe(path, line, error):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    client = FakeJevClient()
+    outcome = _pass(cfg, client, on_logged=_broken_pipe)
+
+    assert outcome.interrupted is False and client.closed is True
+    assert len(load_runs(cfg.jev_runs_path)) == 1
+    assert "registro de pasadas" in caplog.text
+
+    with pytest.raises(JevError, match="ninguna de las 2"):
+        _pass(cfg, FakeJevClient(fail_when=lambda state: True), force=True, on_logged=_broken_pipe)
+
+
+def test_the_logged_line_is_handed_to_the_hook_as_json(cfg: Config):
+    lines: list[str] = []
+
+    _pass(cfg, FakeJevClient(), on_logged=lambda path, line, error: lines.append(line))
+
+    assert JevRun.model_validate_json(lines[0]) == _only_run(cfg)

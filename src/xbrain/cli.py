@@ -195,7 +195,7 @@ if TYPE_CHECKING:
     # module-top `xbrain.jev` import list at the eight modules the CLI is meant to depend
     # on directly (assess, client, dashboard, defaults, env, report, run, store), so a ninth
     # is a visible decision rather than a drive-by.
-    from xbrain.jev.models import JevRun, TopicAssessment
+    from xbrain.jev.models import TopicAssessment
 
 logger = logging.getLogger(__name__)
 
@@ -2821,7 +2821,7 @@ def _echo_jev_interrupt(
     typer.echo(f"  {_jev_cost_line(banked)}", err=True)
 
 
-def _echo_jev_logged(run: JevRun, path: Path, error: OSError | None) -> None:
+def _echo_jev_logged(path: Path, line: str, error: BaseException | None) -> None:
     """Where the pass went in the run log — or the line to append by hand when it could not.
 
     The failure is not an error of the command: the pass keeps its exit code and its saved
@@ -2831,7 +2831,7 @@ def _echo_jev_logged(run: JevRun, path: Path, error: OSError | None) -> None:
         typer.echo(f"pasada registrada → {path}")
         return
     typer.echo(f"no se pudo registrar la pasada en {path} ({error}); añádela a mano:", err=True)
-    typer.echo(run.model_dump_json(), err=True)
+    typer.echo(line, err=True)
 
 
 @jev_app.command("topics")

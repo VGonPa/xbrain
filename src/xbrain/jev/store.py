@@ -114,17 +114,31 @@ def load_runs(path: Path) -> list[JevRun]:
 
 
 def append_run(run: JevRun, path: Path) -> None:
-    """Append one line to the run log: one `write` of one line, then flush and fsync.
+    """Append one line to the run log: never rewrite, never glue, never leave a fragment.
 
     APPEND, never rewrite: earlier lines are paid history and this call must not be able to
-    touch them. A single writer (`jev topics` is one process) and one `write` per line is
-    atomic enough; a crash mid-write leaves at most a torn LAST line, which `load_runs`
-    names by number instead of hiding. Like the side-car, the log is not snapshotted and
-    lives under the gitignored `data/`.
+    touch them. Two guards make a single writer's append safe to trust:
+
+    * If the file does not end in a newline — a crash or a full disk tore the last write —
+      a newline goes first, so this record starts on its own line. Glued onto the fragment
+      it would be refused with it, and a paid pass would be hidden inside a broken line.
+    * If the write or the flush to disk fails, the file is truncated back to its size
+      before this call, then the error is raised: the log stays exactly as it was.
+
+    Like the side-car, the log is not snapshotted and lives under the gitignored `data/`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = run.model_dump_json() + "\n"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.flush()
-        os.fsync(handle.fileno())
+    line = (run.model_dump_json() + "\n").encode("utf-8")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            line = b"\n" + line
+        try:
+            os.write(fd, line)
+            os.fsync(fd)
+        except OSError:
+            os.ftruncate(fd, size)
+            raise
+    finally:
+        os.close(fd)
