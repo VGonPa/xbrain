@@ -389,6 +389,17 @@ def _pair_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
     }
 
 
+def _post_totals(comparisons: list[ItemComparison]) -> dict[str, int]:
+    """Posts with any disagreement, and the same posts split by KIND of disagreement (a post
+    may count in several): the three `ItemComparison` properties `disagreements` sums."""
+    return {
+        "posts_with_disagreement": sum(1 for c in comparisons if c.disagreements),
+        "posts_enrich_only": sum(1 for c in comparisons if c.enrich_only),
+        "posts_jev_only": sum(1 for c in comparisons if c.jev_only),
+        "posts_primary_differs": sum(1 for c in comparisons if c.primary_differs),
+    }
+
+
 def chose_fallback(comparison: ItemComparison, slugs: set[str]) -> bool:
     """Whether Jev's primary is outside the vocabulary — the fallback ("none of these")."""
     return comparison.jev_primary not in slugs
@@ -550,12 +561,7 @@ def _summarize(
         "primary_fallback": primary["fallback"],
         "primary_unjudged": primary["unjudged"],
         "primary_unranked": primary["unranked"],
-        "posts_with_disagreement": sum(1 for c in comparisons if c.disagreements),
-        # The same posts split by KIND of disagreement (a post may count in several): the
-        # three `ItemComparison` properties `disagreements` sums, counted in posts.
-        "posts_enrich_only": sum(1 for c in comparisons if c.enrich_only),
-        "posts_jev_only": sum(1 for c in comparisons if c.jev_only),
-        "posts_primary_differs": sum(1 for c in comparisons if c.primary_differs),
+        **_post_totals(comparisons),
         "per_topic": _per_topic(comparisons, vocab),
     }
 
