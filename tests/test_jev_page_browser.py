@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_jev_dashboard import _assessment, _corpus, _data, _item
+from tests.test_jev_dashboard import _assessment, _compare_fixture, _corpus, _data, _item
 from xbrain.jev.dashboard import render_jev_dashboard_html
 from datetime import datetime, timezone
 
@@ -803,3 +803,319 @@ def test_a_topics_url_opened_fresh_shows_that_view(tmp_path, hash_, expect):
         assert any(expect["note"] in note for note in seen["notes"]), seen["notes"]
     if "groups" in expect:
         assert seen["groups"] == expect["groups"] and seen["pair_cards"] == []
+
+
+# --------------------------------------------------------------------------- the Comparar tab
+
+#: The Comparar tab, from its top. Each click goes through the tab's own links and reads the
+#: list the page drew; every step records its own error.
+_COMPARE_PROBE = r"""
+<script>
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const cnum = t => Number(String(t).match(/[\d.]+/)[0].replace(/\./g, ''));
+const listIds = () => [...document.querySelectorAll('#compare-list .card')].map(c => c.dataset.id);
+async function drawAll(root) {
+  for (;;) { const more = [...root.querySelectorAll('button.more')].find(b => !b.hidden && b.textContent.startsWith('Mostrar')); if (!more) return; more.click(); await sleep(5); }
+}
+async function openList(a) {
+  a.click(); await sleep(30);
+  const list = document.getElementById('compare-list');
+  if (!list) return null;
+  const top = list.getBoundingClientRect().top;
+  const first = list.querySelectorAll('.card').length;
+  await drawAll(list);
+  return {hash: location.hash, head: cnum(list.querySelector('h3').textContent), first: first,
+    ids: listIds(), in_view: top >= -2 && top < innerHeight};
+}
+(async () => {
+  const out = {errors: [], kinds: {}, sentences: {}, bands: {}, px: {}, pd: {}};
+  const step = async (name, fn) => { try { await fn(); } catch (e) { out.errors.push(name + ': ' + e); } };
+  await sleep(100);
+  const home = async () => { location.hash = '#compare'; await sleep(30); };
+  await step('kinds', async () => {
+    for (const k of ['enrich_only', 'adds', 'prim']) {
+      await home();
+      const card = document.querySelector('#tab-compare [data-kind="' + k + '"]');
+      const shownCount = cnum(card.querySelector('.cnum').textContent);
+      card.querySelector('a').click(); await sleep(30);
+      out.kinds[k] = {shown: shownCount, hash: location.hash, list: shown.map(p => p.id)};
+    }
+  });
+  await step('sentences', async () => {
+    await home();
+    for (const a of document.querySelectorAll('#tab-compare [data-sec="resumen"] a[data-go]')) {
+      out.sentences[a.dataset.go] = {text: a.textContent, href: a.getAttribute('href')};
+    }
+    out.resumen = document.querySelector('#tab-compare [data-sec="resumen"]').textContent;
+  });
+  await step('topics table', async () => {
+    await home();
+    out.topic_rows = [...document.querySelectorAll('#tab-compare [data-sec="topics"] tbody tr')].map(tr => tr.dataset.slug);
+    out.topic_more = document.querySelector('#tab-compare [data-sec="topics"] a.all').textContent;
+    const disc = document.querySelector('#tab-compare [data-sec="topics"] tr[data-slug="gamma"] a.disc');
+    out.gamma_disc = cnum(disc.textContent);
+    disc.click(); await sleep(30);
+    out.gamma_disc_list = shown.map(p => p.id);
+    out.gamma_disc_hash = location.hash;
+  });
+  await step('bands', async () => {
+    await home();
+    const keys = [...document.querySelectorAll('#tab-compare a[data-band]')].map(a => a.dataset.band);
+    out.band_ranges = Object.fromEntries([...document.querySelectorAll('#tab-compare [data-band-row]')].map(r => [r.dataset.bandRow, r.querySelector('.range').textContent]));
+    for (const key of keys) {
+      await home();
+      const a = document.querySelector('#tab-compare a[data-band="' + key + '"]');
+      const row = a.closest('[data-band-row]');
+      out.bands[key] = Object.assign({shown: cnum(a.textContent), pairs: cnum(row.querySelector('.pairs-n').textContent)}, await openList(a));
+    }
+  });
+  await step('px', async () => {
+    await home();
+    const more = document.querySelector('#tab-compare [data-sec="cross"] button.more');
+    if (more) more.click();
+    const keys = [...document.querySelectorAll('#tab-compare [data-sec="cross"] a[data-px]')].map(a => a.dataset.px);
+    for (const key of keys) {
+      await home();
+      const m = document.querySelector('#tab-compare [data-sec="cross"] button.more'); if (m) m.click();
+      const a = document.querySelector('#tab-compare [data-sec="cross"] a[data-px="' + key + '"]');
+      out.px[key] = Object.assign({shown: cnum(a.parentNode.querySelector('.c').textContent), name: a.textContent}, await openList(a));
+    }
+  });
+  await step('pd', async () => {
+    await home();
+    const keys = [...document.querySelectorAll('#tab-compare a[data-pd]')].map(a => a.dataset.pd);
+    for (const key of keys) {
+      await home();
+      const a = document.querySelector('#tab-compare a[data-pd="' + key + '"]');
+      out.pd[key] = Object.assign({shown: cnum(a.parentNode.querySelector('.c').textContent)}, await openList(a));
+    }
+    await home();
+    out.agree_total = cnum(document.querySelector('#tab-compare [data-sec="cross"] .agree').textContent);
+  });
+  await step('otro', async () => {
+    await home();
+    const sec = document.querySelector('#tab-compare [data-sec="otro"]');
+    out.otro_shown = cnum(sec.querySelector('.cnum').textContent);
+    out.otro_rows = [...sec.querySelectorAll('a[data-px]')].map(a => a.dataset.px);
+    sec.querySelector('a.go').click(); await sleep(30);
+    out.otro_hash = location.hash;
+    out.otro_list = shown.map(p => p.id);
+  });
+  await step('tabs keep their state', async () => {
+    location.hash = '#compare?b=e-lo'; await sleep(30);
+    location.hash = '#posts?f=adds'; await sleep(30);
+    out.compare_tab_href = document.querySelector('.tabs a[data-tab="compare"]').getAttribute('href');
+    location.hash = '#compare'; await sleep(30);
+    out.posts_tab_href = document.querySelector('.tabs a[data-tab="posts"]').getAttribute('href');
+    out.posts_f_kept = view.f;
+  });
+  await step('clear', async () => {
+    location.hash = '#compare?b=e-lo'; await sleep(30);
+    document.querySelector('#compare-list a.clear').click(); await sleep(30);
+    out.cleared = {hash: location.hash, list: !!document.getElementById('compare-list')};
+  });
+  await step('missing post', async () => {
+    const gone = DATA.post_sets.bands['e-mid'][0];
+    DATA.posts = DATA.posts.filter(p => p.id !== gone);
+    location.hash = '#compare?b=e-mid'; await sleep(30);
+    out.missing_note = (document.querySelector('#compare-list .note') || {}).textContent || null;
+  });
+  await step('guard', async () => {
+    location.hash = '#posts'; await sleep(20);
+    DATA.summary.confidence_bands = null;
+    location.hash = '#compare'; await sleep(30);
+    out.guard = document.getElementById('tab-compare').textContent;
+    out.guard_banner_hidden = document.getElementById('banner').hidden;
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>
+"""
+
+#: A Comparar page opened at a given hash.
+_READ_COMPARE = r"""
+<script>
+setTimeout(() => {
+  const pre = document.createElement('pre'); pre.id = 'probe';
+  const list = document.getElementById('compare-list');
+  pre.textContent = JSON.stringify({tab: view.tab, visible: !document.getElementById('tab-compare').hidden,
+    list: list ? [...list.querySelectorAll('.card')].map(c => c.dataset.id) : null,
+    head: list ? list.querySelector('h3').textContent : null,
+    notes: [...document.querySelectorAll('#tab-compare .note')].map(p => p.textContent),
+    banner_hidden: document.getElementById('banner').hidden});
+  document.body.appendChild(pre);
+}, 200);
+</script>
+"""
+
+
+@pytest.fixture(scope="module")
+def compare_probed(tmp_path_factory) -> tuple[dict[str, Any], dict[str, Any]]:
+    _need_chrome()
+    data = _compare_fixture()
+    seen = _open(_page(tmp_path_factory.mktemp("jev-compare"), data, _COMPARE_PROBE), "#compare")
+    assert seen["errors"] == [], seen["errors"]
+    return data, seen
+
+
+_KIND_COUNTS = {
+    "enrich_only": "posts_enrich_only",
+    "adds": "posts_jev_only",
+    "prim": "posts_primary_differs",
+}
+
+
+@_requires_chrome
+def test_each_disagreement_kind_opens_exactly_the_posts_its_count_counts(compare_probed):
+    data, seen = compare_probed
+
+    for key, field in _KIND_COUNTS.items():
+        kind = seen["kinds"][key]
+        assert kind["shown"] == data["summary"][field] == len(kind["list"]), key
+        assert set(kind["list"]) == _ids(data, key), key
+        assert kind["hash"] == f"#posts?f={key}", key
+
+
+@_requires_chrome
+def test_the_three_sentences_quote_the_header_numbers_and_open_their_posts(compare_probed):
+    data, seen = compare_probed
+    s = data["summary"]
+
+    assert f"Jev confirma {s['assigned_backed']} de {s['assigned_pairs']}" in seen["resumen"]
+    assert f"Jev añadiría {s['missing_pairs']}" in seen["resumen"]
+    assert f"coincide en {s['primary_agree_pct']:.1f} %".replace(".", ",") in seen["resumen"]
+    assert {go: v["href"] for go, v in seen["sentences"].items()} == {
+        "enrich_only": "#posts?f=enrich_only",
+        "adds": "#posts?f=adds",
+        "prim": "#posts?f=prim",
+    }
+    assert str(s["posts_primary_differs"]) in seen["sentences"]["prim"]["text"]
+
+
+@_requires_chrome
+def test_the_topic_table_is_the_ten_worst_in_the_topics_tabs_order(compare_probed):
+    data, seen = compare_probed
+
+    assert seen["topic_rows"] == [
+        "gamma", "delta", "alpha", "beta", "f01", "f02", "f03", "f04", "f05", "f06"
+    ]
+    assert seen["topic_more"].startswith("ver los 12")
+    gamma = {r["slug"]: r for r in data["summary"]["per_topic"]}["gamma"]
+    assert seen["gamma_disc"] == gamma["disagreeing"] == len(seen["gamma_disc_list"]) == 5
+    assert seen["gamma_disc_hash"] == "#posts?t=gamma"
+
+
+@_requires_chrome
+def test_each_band_opens_exactly_its_posts_and_says_its_pairs(compare_probed):
+    data, seen = compare_probed
+    rows = {row["key"]: row for row in data["summary"]["confidence_bands"]}
+
+    assert set(seen["bands"]) == set(rows) == {"e-lo", "e-mid", "e-near", "j-near", "j-hi"}
+    for key, band in seen["bands"].items():
+        assert band["shown"] == band["head"] == rows[key]["posts"] == len(band["ids"]), key
+        assert band["pairs"] == rows[key]["pairs"], key
+        assert band["ids"] == data["post_sets"]["bands"][key], key
+        assert band["hash"] == f"#compare?b={key}", key
+        assert band["in_view"] is True, key
+    assert seen["bands"]["j-near"]["first"] == 20 and len(seen["bands"]["j-near"]["ids"]) == 22
+
+
+@_requires_chrome
+def test_the_band_edges_are_stated_as_probabilities(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["band_ranges"] == {
+        "e-lo": "probabilidad < 0,20",
+        "e-mid": "probabilidad 0,20 – 0,50",
+        "e-near": "probabilidad 0,50 – 0,85",
+        "j-near": "probabilidad 0,85 – 0,95",
+        "j-hi": "probabilidad ≥ 0,95",
+    }
+
+
+@_requires_chrome
+def test_each_primary_cross_pair_opens_exactly_its_posts(compare_probed):
+    data, seen = compare_probed
+
+    assert list(seen["px"]) == ["delta~otro", "gamma~omega", "-~alpha", "alpha~beta"]
+    for key, pair in seen["px"].items():
+        assert pair["shown"] == pair["head"] == len(pair["ids"]), key
+        assert pair["ids"] == data["post_sets"]["px"][key], key
+        assert pair["hash"] == "#compare?px=" + key.replace("~", "%7E"), key
+    assert "sin principal" in seen["px"]["-~alpha"]["name"]
+    assert "(ninguno del vocabulario)" in seen["px"]["delta~otro"]["name"]
+
+
+@_requires_chrome
+def test_the_diagonal_opens_the_posts_where_both_pick_the_topic(compare_probed):
+    data, seen = compare_probed
+
+    assert {k: v["shown"] for k, v in seen["pd"].items()} == {"alpha": 28, "beta": 4, "gamma": 2}
+    for key, pd in seen["pd"].items():
+        assert pd["ids"] == data["post_sets"]["pd"][key] and pd["head"] == len(pd["ids"]), key
+    assert seen["agree_total"] == data["summary"]["primary_agree"] == 34
+
+
+@_requires_chrome
+def test_the_other_fallback_is_counted_with_its_posts_and_what_enrich_had(compare_probed):
+    data, seen = compare_probed
+
+    assert seen["otro_shown"] == data["summary"]["primary_fallback"] == 4
+    assert seen["otro_rows"] == ["delta~otro"]
+    assert seen["otro_hash"] == "#posts?f=fallback"
+    assert set(seen["otro_list"]) == _ids(data, "fallback") and len(seen["otro_list"]) == 4
+
+
+@_requires_chrome
+def test_leaving_and_returning_keeps_each_tabs_view(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["compare_tab_href"] == "#compare?b=e-lo"
+    assert seen["posts_tab_href"] == "#posts?f=adds" and seen["posts_f_kept"] == "adds"
+    assert seen["cleared"] == {"hash": "#compare", "list": False}
+
+
+@_requires_chrome
+def test_a_compare_list_whose_posts_are_missing_says_how_many(compare_probed):
+    _data_, seen = compare_probed
+
+    assert seen["missing_note"] == "1 de 3 posts no están en esta página."
+
+
+@_requires_chrome
+def test_a_compare_tab_that_fails_after_boot_says_so_in_the_tab(compare_probed):
+    _data_, seen = compare_probed
+
+    assert "La pestaña Comparar no pudo dibujarse" in seen["guard"]
+    assert seen["guard_banner_hidden"] is True
+
+
+@_requires_chrome
+@pytest.mark.parametrize(
+    ("hash_", "expect"),
+    [
+        ("#compare?b=e-near", {"list": ["n00", "n01"]}),
+        ("#compare?px=gamma~omega", {"list": ["m00", "m01", "m02"]}),
+        ("#compare?px=-~alpha", {"list": ["s00", "s01"]}),
+        ("#compare?pd=gamma", {"list": ["n00", "n01"]}),
+        ("#compare?b=no-existe", {"note": "Ese grupo ya no existe en estos datos"}),
+        ("#compare?px=zz~yy", {"note": "Ese grupo ya no existe en estos datos"}),
+        ("#compare?pd=%E0", {"note": "Ese grupo ya no existe en estos datos"}),
+        # A key every JS object inherits must not open a list.
+        ("#compare?pd=constructor", {"note": "Ese grupo ya no existe en estos datos"}),
+        ("#compare?b=toString", {"note": "Ese grupo ya no existe en estos datos"}),
+    ],
+)
+def test_a_compare_url_opened_fresh_shows_that_view(tmp_path, hash_, expect):
+    _need_chrome()
+    data = _compare_fixture()
+
+    seen = _open(_page(tmp_path, data, _READ_COMPARE), hash_)
+
+    assert seen["banner_hidden"] is True and seen["tab"] == "compare" and seen["visible"]
+    if "list" in expect:
+        assert seen["list"] == expect["list"]
+    if "note" in expect:
+        assert seen["list"] is None
+        assert any(expect["note"] in note for note in seen["notes"]), seen["notes"]

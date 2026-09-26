@@ -556,6 +556,141 @@ def test_the_topic_pairs_are_what_the_cards_rows_say_recounted_from_the_cards():
     assert counts == {k: len(v) for k, v in recount.items()}
 
 
+#: The Comparar fixture's vocabulary: five topics that carry the data and seven never used,
+#: so the tab's "10 worst" table has more topics than it shows.
+COMPARE_VOCAB = [
+    Topic(slug="alpha", description="Alfa: el grande."),
+    Topic(slug="beta", description="Beta: bajo el suelo."),
+    Topic(slug="gamma", description="Gamma: el peor."),
+    Topic(slug="delta", description="Delta: el del «otro»."),
+    Topic(slug="omega", description="Omega: solo lo pone Jev."),
+] + [Topic(slug=f"f{n:02d}", description=f"Relleno {n}.") for n in range(1, 8)]
+
+
+def _compare_fixture() -> dict[str, Any]:
+    """Every Comparar number non-empty and DIFFERENT from its neighbours, threshold 0.85.
+
+    Bands (pairs/posts): e-lo 5/4 (l00 has two) · e-mid 3/3 · e-near 4/2 (n00, n01 two each) ·
+    j-near 22/22 (past one page of 20) · j-hi 2/1 (h00 two). Disagreement kinds (posts):
+    enrich asigna y Jev no 9 · Jev añadiría 23 · primario distinto 10. Primary cross, off the
+    diagonal: delta~otro 4 · gamma~omega 3 · -~alpha 2 (no enrich primary) · alpha~beta 1;
+    diagonal: alpha 28 · beta 4 · gamma 2. «otro» 4. Default topic order: gamma (0 %),
+    delta (80 %), alpha, then beta under the floor, then the never-assigned: 12 topics.
+    Plus two never-asked posts."""
+    specs: list[tuple[str, tuple[str, ...], dict[str, float], str]] = []
+    specs += [(f"c{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(6)]
+    specs += [("l00", ("beta", "delta"), {"beta": 0.1, "delta": 0.05}, "beta")]
+    specs += [(f"l{n:02d}", ("beta",), {"beta": 0.1}, "beta") for n in range(1, 4)]
+    specs += [(f"m{n:02d}", ("gamma",), {"gamma": 0.3}, "omega") for n in range(3)]
+    specs += [(f"n{n:02d}", ("gamma", "alpha"), {"gamma": 0.6, "alpha": 0.8}, "gamma") for n in range(2)]
+    specs += [(f"j{n:02d}", ("alpha",), {"alpha": 0.9, "omega": 0.9}, "alpha") for n in range(22)]
+    specs += [("h00", ("alpha",), {"alpha": 0.9, "omega": 0.97, "beta": 0.99}, "beta")]
+    specs += [(f"o{n:02d}", ("delta",), {"delta": 0.9}, FALLBACK) for n in range(4)]
+    specs += [(f"s{n:02d}", ("alpha",), {"alpha": 0.9}, "alpha") for n in range(2)]
+    items: list[Item] = []
+    assessments: dict[str, TopicAssessment] = {}
+    for item_id, topics, membership, choice in specs:
+        item = _item(item_id, text=f"post {item_id}", topics=topics)
+        if item_id.startswith("s"):
+            item.enriched.primary_topic = None
+        full = {topic.slug: 0.05 for topic in COMPARE_VOCAB} | membership
+        answer = _assessment(item, membership=full, vocab=COMPARE_VOCAB)
+        probabilities = {choice: 0.7} | ({} if choice == FALLBACK else {FALLBACK: 0.1})
+        primary = PrimaryChoice(choice=choice, confidence=0.7, probabilities=probabilities)
+        items.append(item)
+        assessments[item_id] = answer.model_copy(update={"primary": primary})
+    items += [_item(f"u{n:02d}", topics=("alpha",)) for n in range(2)]
+    return compute_jev_dashboard_data(
+        items,
+        assessments,
+        COMPARE_VOCAB,
+        threshold=0.85,
+        fallback=FALLBACK,
+        char_limit=CHAR_LIMIT,
+        id2note={},
+        updated="SEP 26, 2026",
+        runs=[],
+        now=NOW,
+    )
+
+
+def test_the_compare_fixture_tells_every_number_apart():
+    data = _compare_fixture()
+    s = data["summary"]
+
+    assert {r["key"]: (r["pairs"], r["posts"]) for r in s["confidence_bands"]} == {
+        "e-lo": (5, 4),
+        "e-mid": (3, 3),
+        "e-near": (4, 2),
+        "j-near": (22, 22),
+        "j-hi": (2, 1),
+    }
+    assert (s["posts_enrich_only"], s["posts_jev_only"], s["posts_primary_differs"]) == (9, 23, 10)
+    assert [(r["enrich"], r["jev"], r["posts"]) for r in s["primary_confusion"]] == [
+        ("delta", "otro", 4),
+        ("gamma", "omega", 3),
+        (None, "alpha", 2),
+        ("alpha", "beta", 1),
+    ]
+    both = {r["slug"]: r["primary_both"] for r in s["per_topic"] if r["primary_both"]}
+    assert both == {"alpha": 28, "beta": 4, "gamma": 2}
+    assert s["primary_fallback"] == 4 and len(data["topics"]) == 12
+
+
+def test_each_bands_posts_show_a_disagreement_in_that_band_on_their_cards():
+    """An independent recount from the cards: a solo-enrich row is an enrich-side
+    disagreement, a solo-Jev row a Jev-side one; its probability picks the band by the
+    edges the summary ships. The posts per band must be the index's, the rows its `pairs`."""
+    data = _compare_fixture()
+    bands = data["summary"]["confidence_bands"]
+    kind_of = {"solo_enrich": "enrich_only", "solo_jev": "jev_only"}
+
+    posts: dict[str, set[str]] = {band["key"]: set() for band in bands}
+    pairs = dict.fromkeys(posts, 0)
+    for post in data["posts"]:
+        for row in (post["jev"] or {}).get("topics", []):
+            if row["verdict"] not in kind_of:
+                continue
+            [band] = [
+                b
+                for b in bands
+                if b["kind"] == kind_of[row["verdict"]]
+                and b["lo"] <= row["p"]
+                and (row["p"] < b["hi"] or (b["top"] and row["p"] == b["hi"]))
+            ]
+            posts[band["key"]].add(post["id"])
+            pairs[band["key"]] += 1
+
+    assert {k: set(v) for k, v in data["post_sets"]["bands"].items()} == posts
+    assert {b["key"]: b["pairs"] for b in bands} == pairs
+    assert {b["key"]: b["posts"] for b in bands} == {k: len(v) for k, v in posts.items()}
+
+
+def test_each_topics_agreeing_primary_posts_are_the_cards_where_both_pick_it():
+    data = _compare_fixture()
+
+    recount: dict[str, set[str]] = {}
+    for post in data["posts"]:
+        jev = post["jev"]
+        if jev and jev["compared"] and not jev["primary_differs"]:
+            assert jev["primary"] == jev["jev_primary"]
+            recount.setdefault(jev["primary"], set()).add(post["id"])
+
+    assert {k: set(v) for k, v in data["post_sets"]["pd"].items()} == recount
+    rows = {r["slug"]: r["primary_both"] for r in data["summary"]["per_topic"]}
+    assert {k: len(v) for k, v in recount.items()} == {k: n for k, n in rows.items() if n}
+
+
+def test_the_fallback_posts_are_the_primary_cross_rows_that_end_in_the_fallback():
+    data = _compare_fixture()
+    fallback_posts = {p["id"] for p in data["posts"] if "fallback" in p["in"]}
+
+    rows = [r for r in data["summary"]["primary_confusion"] if r["jev"] == FALLBACK]
+    from_index = set().union(*(data["post_sets"]["px"][f"{r['enrich']}~{r['jev']}"] for r in rows))
+    assert from_index == fallback_posts
+    assert sum(r["posts"] for r in rows) == data["summary"]["primary_fallback"] == 4
+
+
 def test_the_topic_floor_is_defined_once_and_shipped_to_the_page():
     assert TOPIC_MIN == 5
     assert _data([_item()], {})["topic_min"] == TOPIC_MIN
@@ -1242,17 +1377,17 @@ def _script_section(template: str, start: str, end: str) -> str:
     return template[template.index(start) : template.index(end)]
 
 
-def test_the_page_has_four_hash_routed_tabs_and_fills_only_posts():
-    """#posts (default), #topics, #compare, #config — the shell for PRs 9b–9d, whose tabs
-    say they are coming instead of showing invented content."""
+def test_the_page_has_four_hash_routed_tabs_and_only_config_is_still_to_come():
+    """#posts (default), #topics, #compare, #config — the shell for PRs 9b–9d; the one tab
+    still to come says so instead of showing invented content."""
     template = _resource("jev.template.html")
 
     for tab in ("posts", "topics", "compare", "config"):
         assert f'href="#{tab}"' in template, tab
         assert f'id="tab-{tab}"' in template, tab
-    # Topics is built (9b); Comparar comes next (9c), Configuración after it (9d).
-    assert template.count("llega en el siguiente PR") == 1
-    assert "llegan en un PR posterior" in template
+    # Topics (9b) and Comparar (9c) are built; Configuración comes in 9d.
+    assert "llega en el siguiente PR" not in template
+    assert template.count('class="soon"') == 1 and "llegan en un PR posterior" in template
     assert "addEventListener('hashchange'" in template
 
 
@@ -1445,6 +1580,79 @@ def test_the_topics_view_lives_in_the_hash():
 
     for key in ("t", "cx", "px", "o", "d"):
         assert f"get('{key}')" in reader, key
+
+
+def _compare_code() -> str:
+    return _script_section(_resource("jev.template.html"), "/* compare */", "/* end compare */")
+
+
+def test_the_compare_code_builds_text_nodes_and_only_links_inside_the_page():
+    compare = _compare_code()
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in compare, sink
+    assert ".href = " not in compare
+    for arg in set(re.findall(r"\blink\(([^,]+),", compare)):
+        assert arg == "topicHref(slug)" or f"const {arg} = hashHref(" in compare, arg
+
+
+def test_the_compare_tab_reads_every_number_from_the_report():
+    """Counts from the summary (and the Posts filters' own counts), lists from `post_sets`,
+    the topic order from the Topics tab's default: nothing tallied from the cards."""
+    compare = _compare_code()
+
+    for source in (
+        "S.confidence_bands",
+        "S.primary_confusion",
+        "S.per_topic",
+        "r.primary_both",
+        "S.primary_fallback",
+        "sets.bands",
+        "sets.px",
+        "sets.pd",
+        "defaultTopicOrder()",
+        "f.count()",
+    ):
+        assert source in compare, source
+    assert "DATA.posts.filter" not in compare and ".jev.topics" not in compare
+
+
+def test_the_compare_words_that_carry_meaning_are_pinned():
+    compare = _compare_code()
+
+    for words in (
+        "'En tres frases'",
+        "'Los tres tipos de desacuerdo'",
+        "'Acuerdo por topic, peores primero'",
+        "'Cruce del topic principal'",
+        "'Qué seguro estaba Jev en los desacuerdos'",
+        "probable hueco del vocabulario",
+        "cada tramo incluye su borde inferior",
+        "'probabilidad < '",
+        "'probabilidad ≥ '",
+        "'Ese grupo ya no existe en estos datos; arriba, la comparación completa.'",
+        "'La pestaña Comparar no pudo dibujarse: '",
+    ):
+        assert words in compare, words
+
+
+def test_the_compare_view_lives_in_the_hash():
+    template = _resource("jev.template.html")
+    reader = _script_section(template, "function readCompareHash(", "function compareHref(")
+
+    for key in ("b", "px", "pd"):
+        assert f"get('{key}')" in reader, key
+    assert "if (view.tab === 'compare') readCompareHash(params);" in template
+
+
+def test_the_band_edges_the_page_states_are_the_ones_the_report_ships():
+    """The page prints `lo`/`hi` from each summary band; the edges themselves exist only in
+    `report.py`."""
+    compare = _compare_code()
+
+    assert "dec(b.lo, 2)" in compare and "dec(b.hi, 2)" in compare
+    for edge in ("0.2", "0.5", "0.95", "0,2", "0,5", "0,95"):
+        assert edge not in compare, edge
 
 
 def test_the_card_shows_jev_vs_enrich_in_plain_words_and_what_jev_read():
