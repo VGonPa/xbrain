@@ -1010,7 +1010,16 @@ def test_the_topic_table_is_the_ten_worst_in_the_topics_tabs_order(compare_probe
     data, seen = compare_probed
 
     assert seen["topic_rows"] == [
-        "gamma", "delta", "alpha", "beta", "f01", "f02", "f03", "f04", "f05", "f06"
+        "gamma",
+        "delta",
+        "alpha",
+        "beta",
+        "f01",
+        "f02",
+        "f03",
+        "f04",
+        "f05",
+        "f06",
     ]
     assert seen["topic_more"].startswith("ver los 12")
     gamma = {r["slug"]: r for r in data["summary"]["per_topic"]}["gamma"]

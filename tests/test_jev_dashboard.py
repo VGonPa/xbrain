@@ -582,7 +582,9 @@ def _compare_fixture() -> dict[str, Any]:
     specs += [("l00", ("beta", "delta"), {"beta": 0.1, "delta": 0.05}, "beta")]
     specs += [(f"l{n:02d}", ("beta",), {"beta": 0.1}, "beta") for n in range(1, 4)]
     specs += [(f"m{n:02d}", ("gamma",), {"gamma": 0.3}, "omega") for n in range(3)]
-    specs += [(f"n{n:02d}", ("gamma", "alpha"), {"gamma": 0.6, "alpha": 0.8}, "gamma") for n in range(2)]
+    specs += [
+        (f"n{n:02d}", ("gamma", "alpha"), {"gamma": 0.6, "alpha": 0.8}, "gamma") for n in range(2)
+    ]
     specs += [(f"j{n:02d}", ("alpha",), {"alpha": 0.9, "omega": 0.9}, "alpha") for n in range(22)]
     specs += [("h00", ("alpha",), {"alpha": 0.9, "omega": 0.97, "beta": 0.99}, "beta")]
     specs += [(f"o{n:02d}", ("delta",), {"delta": 0.9}, FALLBACK) for n in range(4)]
