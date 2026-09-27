@@ -76,7 +76,9 @@ const sQHistory = () => [...document.querySelectorAll('#ask-history li')].filter
 const sQResults = () => [...document.querySelectorAll('#ask-results .card')].filter(seen).map(c => {
   const bar = c.querySelector('.askr .apbar');
   const fill = bar && bar.firstElementChild;
-  return {id: c.dataset.id, p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
+  const slot = c.querySelector('.pv .xembed');
+  return {id: c.dataset.id, x: slot ? slot.dataset.id : null, local: txt(c.querySelector('.pv .twt')),
+    order: [...c.children].map(k => k.className), p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
     jev: txt(c.querySelector('.jev .badge')), meta: txt(c.querySelector('.askr .jh .meta')),
     bar: seen(bar) ? {width: fill.style.width, fill: fill.getBoundingClientRect().width,
       track: bar.getBoundingClientRect().width, label: bar.getAttribute('aria-label')} : null};
@@ -233,6 +235,12 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
     assert "0,85" not in view["head"]
     for result in view["results"]:
         assert re.fullmatch(r"Lo que vio Jev · 2 fuentes, \d+ caracteres", result["saw"])
+    # Each result is X's own view of the post (its frame is made near the viewport), with the
+    # answer strip between the card's head and it, and the Jev block under it.
+    for result in view["results"]:
+        assert result["x"] == result["id"]
+        assert result["local"] is None
+        assert result["order"] == ["twh", "askr", "pv", "jev"]
     # Each result's probability is drawn: the bar's fill is the number, over its track.
     for result, (_, p) in zip(view["results"], ranked(), strict=True):
         bar = result["bar"]

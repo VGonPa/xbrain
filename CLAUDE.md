@@ -674,7 +674,13 @@ generates an Obsidian wiki.
   `[jev].threshold`, recomputes nothing in the browser (no slider, no JS mirror, no node in
   CI) and is a post browser (every post as a card, Jev vs enrich under it, filters + topic
   navigator + j/k/n/p, view in the URL hash; photos by relative path into `_media/`, never
-  base64). Which filter a card is in is decided in Python (`in` keys, tested equal to the
+  base64). Each card shows the post through X's own embed: a sandboxed `<iframe>` to
+  `platform.twitter.com/embed/Tweet.html` (`dnt=true`, `no-referrer`), NEVER `widgets.js` (X's
+  script in the page origin, next to the serve token); ids must match `^\d{1,25}$`; resize
+  messages are matched by `event.source` from X's origin only; local copy per card, page-wide
+  «Vista: X | local» / `?embed=0`, auto fallback after 8 s or `no_results` (ARCHITECTURE.md,
+  jev · The X embed). Page tests run with no network (`_NO_NETWORK`); the embed tests run Chrome
+  in real time (virtual time starves the IntersectionObserver). Which filter a card is in is decided in Python (`in` keys, tested equal to the
   report counts); the page only tests membership. `compute_jev_dashboard_data` is pure —
   disk probes live in `collect_jev_media`, assembly in `build_page_data`; the page is driven in
   headless Chrome by tests/test_jev_page_browser.py (CI sets XBRAIN_REQUIRE_CHROME). Topics tab

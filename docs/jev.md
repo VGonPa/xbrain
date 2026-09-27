@@ -600,11 +600,28 @@ Click the topic again, or its chip above the list, to drop it. On a narrow scree
 list starts folded.
 
 **Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
-card is a share-style preview built from data XBrain already has, with nothing fetched from
-X:
+card shows **the post through X's own embed** — the post as X shows it, loaded from X when the
+card comes near the screen — under a head of ours (author, `@handle`, date, `X ↗`, `nota ↗` and
+the toggle). The embed is a plain frame to X's embed page: X's script never runs in this page,
+where the served page keeps the token that can spend money. X receives the post id and your
+IP (and its own cookies in your browser), never this page's address or data. See
+ARCHITECTURE.md (jev · *The X embed*).
 
-- the author, `@handle` and date, the whole text (a long one starts folded behind *ver
-  todo*), `X ↗` and `nota ↗`;
+**The local copy is always one click away.** *ver versión local* on a card swaps X's view for
+the copy XBrain saved (below), and *ver en X* swaps it back. The switch **Vista: X | local**
+at the right of the tabs sets every card at once; this browser remembers it. Opening the page
+with `?embed=0` (`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every
+card local. A card shows the local copy by itself, with one line saying why, when:
+
+- the post's id is not an X id (*Sin vista de X: el id de este post no es de X*);
+- X has not got the post — deleted, protected or a suspended account (*X no tiene este post*);
+- X did not answer within 8 seconds — no network, X blocked, the file opened offline (*X no
+  respondió en 8 s (¿sin red?)*). *ver en X* tries again.
+
+The local copy is a share-style preview built from data XBrain already has, with nothing
+fetched from X:
+
+- the whole text (a long one starts folded behind *ver todo*);
 - up to four photos, from the vault's `_media/` folder (the same files the notes embed) by a
   path relative to the page. A video shows the first extracted frame of **its own** video
   source with ▶. A picture the page cannot show says why: *falta en _media/: corre xbrain
@@ -654,8 +671,9 @@ evaluated posts with no enrichment to compare against.
 
 It is **one file**: the data as a JSON blob in the page, no charting library, no external
 scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
-the vault loses the pictures and nothing else. The only network reference is the Google
-Fonts stylesheet. Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
+the vault loses the pictures and nothing else. Two things come off the network: the Google
+Fonts stylesheet, and X's embed for each card near the screen (a frame from
+`platform.twitter.com`; offline, the cards fall back to the local copy after 8 s). Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
 **3,799,403 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
 rows and evidence) and ~1.2 KB for the rest. The Topics and Comparar tabs' data is the
 confusion lists and bands (~19 KB of counts) and `post_sets` (~38 KB, ~130 bytes per evaluated
