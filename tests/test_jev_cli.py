@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.conftest import plain_output
 from tests.jev_fakes import FakeJevClient
 from xbrain import cli
 from xbrain.jev import run as jev_run
@@ -1992,7 +1993,8 @@ def test_jev_serve_refuses_a_port_out_of_range(tmp_path: Path, monkeypatch, port
 
     result = runner.invoke(app, ["jev", "serve", "--port", port, "--no-open"])
 
-    assert result.exit_code == 2 and "--port" in result.output
+    # Rich colours the usage box under CI, splitting "--port" with escape codes.
+    assert result.exit_code == 2 and "--port" in plain_output(result.output)
 
 
 def test_jev_serve_refuses_before_binding_when_the_page_cannot_be_built(
