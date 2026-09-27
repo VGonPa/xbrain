@@ -2237,7 +2237,7 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
     )
     assert re.findall(r"\bapi\('", serve) == []
     assert sorted(set(re.findall(r"\bapi\((API[^,)]*)", serve))) == [
-        "API.ask.counts",
+        "API.ask.counts + (query ? '?' + query : ''",
         "API.cancel",
         "API.data",
         "API.job",

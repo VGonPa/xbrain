@@ -204,7 +204,7 @@ def _minimum(value: Any) -> float:
 
 
 def parse_filters(body: Any) -> AskFilters:
-    """The pre-filters a request body names, alone (`/api/ask/counts`), or a 400."""
+    """The pre-filters a request names, alone (`GET /api/ask/counts`'s query string), or a 400."""
     if not isinstance(body, dict):
         raise refuse("el cuerpo debe ser un objeto JSON")
     unknown = sorted(set(body) - set(FILTER_FIELDS))

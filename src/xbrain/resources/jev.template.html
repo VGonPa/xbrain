@@ -2919,7 +2919,8 @@ function askRecount() {
     const filters = askFilterBody();
     delete filters.topics;
     let counts = null;
-    try { counts = (await api(API.ask.counts, filters)).topic_counts; } catch (e) { counts = null; }
+    const query = new URLSearchParams(Object.entries(filters).map(([k, v]) => [k, String(v)])).toString();
+    try { counts = (await api(API.ask.counts + (query ? '?' + query : ''))).topic_counts; } catch (e) { counts = null; }
     if (seq !== askCountsSeq) return;
     askCounts = counts || {};
     document.querySelectorAll('#ask-topics .tcount').forEach(n => {

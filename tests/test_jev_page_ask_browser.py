@@ -961,6 +961,9 @@ _VICTOR_SERVE_PROBE = (
     + _REFINE_JS
     + r"""
 const sQForm = (fields) => { sQSet(fields); sPress(sId('ask-form'), 'Estimar lo que cuesta'); };
+let sCounts = 0;
+const sFetchCounts = window.fetch;
+window.fetch = function (u, init) { if (String(u).includes('/api/ask/counts')) sCounts++; return sFetchCounts.call(window, u, init); };
 const sTopics = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
   id: b.id, checked: b.checked, text: txt(b.parentNode), count: txt(b.parentNode.querySelector('.tcount'))}));
 const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 && sPanel().go !== null, what); return sLastEstimate; };
@@ -972,13 +975,13 @@ const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 &&
       form_title: txt(sId('ask-form').querySelector('h4')), min: sId('ask-min') ? 'HAY' : null, posts: sPosts});
   });
   await sStep('counts', async () => {
-    const posts0 = sPosts;
+    const posts0 = sPosts, counts0 = sCounts;
     const box = sId('ask-since');
     box.value = '2026-06-01';
     box.dispatchEvent(new Event('input', {bubbles: true}));
     box.dispatchEvent(new Event('change', {bubbles: true}));
     await sWait(() => sTopics().some(t => t.id === 'ask-topic-startups' && t.count === '220'), 'los recuentos con «desde»');
-    return {topics: sTopics(), posts: sPosts - posts0};
+    return {topics: sTopics(), posts: sPosts - posts0, counts: sCounts - counts0};
   });
   await sStep('one', async () => {
     const n0 = sEstimates;
@@ -997,7 +1000,7 @@ const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 &&
     return {estimate: e, panel: panel};
   });
   await sStep('refine', async () => {
-    const posts0 = sPosts, r0 = sRefreshed, e0 = sEstimates;
+    const posts0 = sPosts, r0 = sRefreshed, e0 = sEstimates, c0 = sCounts;
     sId('ask-more').click();
     await sWait(() => sQResults().length === 40, 'veinte más');
     const more = sQView();
@@ -1007,7 +1010,7 @@ const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 &&
     sQSet({'refine-topic-startups': true, 'refine-min': '0.3'});
     await sWait(() => (sQView().head || '').includes('que pasan el refinado'), 'el topic');
     return {more: more, min: min, topic: Object.assign(sQView(), {refine: sQRefine()}),
-      posts: sPosts - posts0, reloads: sRefreshed - r0, estimates: sEstimates - e0};
+      posts: sPosts - posts0, reloads: sRefreshed - r0, estimates: sEstimates - e0, counts: sCounts - c0};
   });
   await sStep('reopen', async () => {
     const posts0 = sPosts, r0 = sRefreshed;
@@ -1099,7 +1102,8 @@ def test_served_the_counts_follow_the_other_filters_from_the_server(victor_serve
 
     got = {t["id"].removeprefix("ask-topic-"): int(t["count"]) for t in counts_step["topics"]}
     assert got == expected and expected["agentic-engineering"] == 0
-    assert counts_step["posts"] >= 1  # asked the server (`/api/ask/counts`), not computed here
+    # Asked the server (`GET /api/ask/counts`), not computed here — and a GET: no POST.
+    assert counts_step["counts"] >= 1 and counts_step["posts"] == 0
 
 
 @_requires_chrome
@@ -1132,7 +1136,7 @@ def test_served_refining_changes_the_list_with_no_request_and_no_client(victor_s
     assert _probs(topic["results"]) == expected[:40]
     assert "min=0.3" in topic["hash"] and "t=startups" in topic["hash"]
     # Free: no POST, no estimate, no reload, and no client was ever built.
-    assert (step["posts"], step["estimates"], step["reloads"]) == (0, 0, 0)
+    assert (step["posts"], step["estimates"], step["reloads"], step["counts"]) == (0, 0, 0, 0)
     assert victor_served["built"] == 0
 
 
@@ -1143,3 +1147,28 @@ def test_served_reopening_a_query_from_the_history_costs_nothing_and_resets_refi
     assert (reopen["posts"], reopen["reloads"]) == (0, 0)
     assert len(reopen["results"]) == 20
     assert "min=" not in reopen["hash"] and "t=" not in reopen["hash"]
+
+
+_EXPLAIN_READ = (
+    "<script>"
+    + _SERVE_JS
+    + _ASK_JS
+    + r"""
+(async () => {
+  await sStep('explain', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-explain')), 'la explicación');
+    return txt(sId('ask-explain'));
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_served_the_explanation_says_the_configured_topic_bar(tmp_path):
+    """The «(≥ …)» of the explanation is `[jev].threshold` from the blob, never a literal."""
+    seen = _served_dump(tmp_path, _EXPLAIN_READ, client=_Asker(), jev="threshold = 0.9\n")
+
+    assert "Topic: posts que enrich o Jev (≥ 0,90) ponen en alguno" in seen["explain"]

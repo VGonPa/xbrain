@@ -915,7 +915,7 @@ any of them, and still every other filter), *Desde*, *Hasta*, *Autor*, *Como muc
 `--limit`) and *Solo posts con evaluación de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as every
 other button. Beside each topic is how many posts it keeps **under the other filters**: the
 blob's `asks.topic_counts` (`ask.topic_counts`, the whole corpus) until you type a filter,
-then the server's answer to `POST /api/ask/counts` — never counted in the browser. Under the
+then the server's answer to `GET /api/ask/counts` — never counted in the browser. Under the
 filters, one line says what they do and one tip:
 
 > Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan por lo
@@ -1053,10 +1053,11 @@ code:
   answers were paid, the job still ends `done`, with `history_error` and the answers' `file`.
 - The served cap for an ask is **`[jev].serve_max_usd`**, like any server job.
   `[jev].ask_max_usd` is the terminal's confirmation threshold and does not apply here.
-- `POST /api/ask/counts` takes the filters alone (`topics` ignored) and answers
-  `{posts, topic_counts}`: how many posts the filters keep, and how many each topic would keep
-  under them (`ask.topic_counts`, the same rule as `filter_posts` with that one topic). It
-  reads only and costs nothing; it is a POST because it has a body, so it takes the POST guards.
+- `GET /api/ask/counts?since=…&until=…&author=…&only_evaluated=true` takes the filters as a
+  query string (each at most once; `only_evaluated` is `true` or `false`; anything else is a
+  400) and answers `{posts, topic_counts}`: how many posts the filters keep, and how many each
+  topic would keep under them (`ask.topic_counts`, the same rule as `filter_posts` with that one
+  topic). It reads only and costs nothing, under the same guards as `/api/asks`.
 - `GET /api/asks` is the tab's data, `{history, surfaces, topic_counts, error}` (the blob's `asks`), and
   `GET /api/ask/<sha>` one query of it plus `surfaces`, what Jev read for each of its results
   (404 for a sha the history lacks). Both are read-only and cost nothing. The routes are

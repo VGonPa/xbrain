@@ -729,7 +729,7 @@ generates an Obsidian wiki.
   capped by `serve_max_usd`, not `ask_max_usd`; an all-cached query runs free and is still
   recorded), `GET /api/asks` and `/api/ask/<sha>` = the blob's `asks` (`dashboard.asks_view`:
   history, results recomputed at build, `report.ask_cost_by_query`, `topic_counts`);
-  `POST /api/ask/counts` (filters → per-topic counts, read-only). The page's Preguntar tab
+  `GET /api/ask/counts?since=&until=&author=&only_evaluated=` (per-topic counts, read-only). The page's Preguntar tab
   (`#ask`, `/* ask tab */`) draws only `DATA.asks` — static page included; the job panel is
   `#jobp`. `report` and `dashboard` re-read what was paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`

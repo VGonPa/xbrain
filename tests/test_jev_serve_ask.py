@@ -10,6 +10,7 @@ Every client is a `FakeJevClient`: no test reaches TypeSafe.
 from __future__ import annotations
 
 import threading
+from datetime import date
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,6 +28,8 @@ from xbrain.jev.lock import pass_lock
 from xbrain.jev.questions import ASK_KEY
 from xbrain.jev.store import load_ask_index, load_asks, load_runs
 from xbrain.store import load_store, save_store
+
+_DAY = date(2026, 9, 22)
 
 QUERY = "¿Cómo configuro hooks en Claude Code?"
 #: What the fake answers per post. Probability order is NOT id order (3 before 1), and 1 and
@@ -815,8 +818,12 @@ def test_a_confirmation_is_bound_to_its_minimum(served: _AskServed):
     assert status == 409, error
 
 
-def _counts(served: _AskServed, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    status, data, _ = served.request("POST", "/api/ask/counts", body)
+def _counts(served: _AskServed, params: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """`GET /api/ask/counts?…`: the other filters as query parameters (a read, like /api/asks)."""
+    from urllib.parse import urlencode
+
+    query = urlencode(params)
+    status, data, _ = served.request("GET", "/api/ask/counts" + ("?" + query if query else ""))
     return status, data
 
 
@@ -825,30 +832,41 @@ def test_the_topic_counts_are_the_filter_rule_under_the_other_filters(served: _A
     from xbrain.jev.load import load_jev_pairs
 
     jev = load_jev_pairs(served.cfg)
-    for body in ({}, {"author": "alice"}, {"only_evaluated": True}, {"topics": ["startups"]}):
-        status, data = _counts(served, body)
+    for params, filters in (
+        ({}, AskFilters()),
+        ({"author": "alice"}, AskFilters(author="alice")),
+        ({"only_evaluated": "true"}, AskFilters(only_evaluated=True)),
+        ({"since": "2026-09-22", "until": "2026-09-22"}, AskFilters(since=_DAY, until=_DAY)),
+    ):
+        status, data = _counts(served, params)
         assert status == 200, data
-        filters = AskFilters.from_json(body)
         expected = topic_counts(jev.store, filters, jev=jev, threshold=served.cfg.jev_threshold)
-        assert data["topic_counts"] == expected, body
+        assert data["topic_counts"] == expected, params
     assert _counts(served, {})[1]["topic_counts"] == served.service.blob()["asks"]["topic_counts"]
     assert served.built == 0 and not served.cfg.jev_asks_dir.exists()
 
 
 def test_the_topic_counts_refuse_what_is_not_a_filter(served: _AskServed):
-    for body, word in (
+    for params, word in (
         ({"query": QUERY}, "desconocido"),
         ({"since": "ayer"}, "since"),
-        ([1], "objeto"),
+        ({"only_evaluated": "quizás"}, "only_evaluated"),
+        ({"author": ["a", "b"]}, "author"),
     ):
-        status, data = _counts(served, body)
+        from urllib.parse import urlencode
+
+        status, data, _ = served.request("GET", "/api/ask/counts?" + urlencode(params, doseq=True))
         assert status == 400 and word in data["error"], data
 
 
 @pytest.mark.parametrize(
-    "refusal",
-    [{"token": False}, {"origin": "http://evil.example"}, {"headers": {"Host": "evil.example:1"}}],
+    "refusal", [{"headers": {"Host": "evil.example:1"}}, {"origin": "http://evil.example"}]
 )
-def test_the_topic_counts_have_the_post_guards(served: _AskServed, refusal: dict[str, Any]):
-    status, _, _ = served.request("POST", "/api/ask/counts", {}, **refusal)
+def test_the_topic_counts_are_only_read_by_this_page(served: _AskServed, refusal: dict[str, Any]):
+    status, _, _ = served.request("GET", "/api/ask/counts", **refusal)
     assert status == 403
+
+
+def test_the_topic_counts_are_a_get_not_a_post(served: _AskServed):
+    status, _, _ = served.request("POST", "/api/ask/counts", {})
+    assert status == 404

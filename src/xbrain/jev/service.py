@@ -613,6 +613,29 @@ class _AskKind:
         }
 
 
+#: The filters `/api/ask/counts` reads from its query string (topics are what it counts).
+_COUNT_PARAMS = ("since", "until", "author", "only_evaluated")
+
+
+def _filters_from_query(params: dict[str, list[str]]) -> dict[str, Any]:
+    """A query string as `AskFilters.from_json` data: one value per key, `only_evaluated` as
+    `true`/`false`; anything else is a 400 naming it."""
+    unknown = sorted(set(params) - set(_COUNT_PARAMS))
+    if unknown:
+        raise refuse(f"parámetro desconocido: {unknown[0]}")
+    data: dict[str, Any] = {}
+    for key, values in params.items():
+        if len(values) != 1:
+            raise refuse(f"el parámetro {key} va una sola vez")
+        data[key] = values[0]
+    if "only_evaluated" in data:
+        flag = {"true": True, "false": False}.get(data["only_evaluated"])
+        if flag is None:
+            raise refuse("el parámetro only_evaluated debe ser true o false")
+        data["only_evaluated"] = flag
+    return data
+
+
 def _post_price(plan: AskPlan) -> Callable[[dict[str, str]], float]:
     """Each post's own planned price, from the characters its call sends (the state as sent
     plus the question) by the plan's cost model — scaled so the posts selected add up to the
@@ -784,11 +807,12 @@ class JevService:
                 return {**row, "surfaces": _result_surfaces(row, blob)}
         raise ServeError(404, "esa consulta no está en el historial")
 
-    def ask_counts(self, body: Any) -> dict[str, Any]:
-        """How many posts each topic keeps under `body`'s other filters (`ask.topic_counts`,
-        the filter's own rule, its `topics` ignored) and how many the filters keep as they
-        are: what the Preguntar tab writes beside each topic. Reads only; costs nothing."""
-        filters = parse_filters(body)
+    def ask_counts(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        """How many posts each topic keeps under the filters in `params` (a query string:
+        `since`, `until`, `author`, `only_evaluated=true|false`; `ask.topic_counts`, the
+        filter's own rule) and how many those filters keep: what the Preguntar tab writes
+        beside each topic. A GET: reads only, costs nothing."""
+        filters = parse_filters(_filters_from_query(params))
         _, _, jev = self._built()
         threshold = self.cfg.jev_threshold
         try:
