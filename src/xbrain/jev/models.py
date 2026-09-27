@@ -120,6 +120,10 @@ class TopicAssessment(BaseModel):
         return _require_utc("asked_at", value)
 
 
+#: Which command made a pass: `xbrain jev topics` or `xbrain jev ask`. They share `runs.jsonl`,
+#: and every reader filters by it — a topics cost view never bills a query, and vice versa.
+RunKind = Literal["topics", "ask"]
+
 #: A pass's token count for one provider: named, and never negative.
 ProviderTokens = dict[NonEmpty, Annotated[int, Field(ge=0)]]
 
@@ -131,9 +135,10 @@ class JevRun(BaseModel):
     billed over time; this record can. It stores TOKENS, never dollars: the cost is computed
     at read time (`report.run_history`), so a price correction reprices the whole history.
 
-    `kind` says which command made the pass. Only `topics` exists today; the field exists now
-    so a later kind of pass can share the file, and a line written before it existed reads
-    as `topics`.
+    `kind` says which command made the pass (`RunKind`); a line written before the field
+    existed reads as `topics`. An `ask` pass also names its query by `query_sha` (the file
+    name of `data/jev/asks/<query_sha>.json`), so what one query has cost is a sum over the
+    log; a topics pass has none.
 
     Every count is read at the CLIENT SEAM (`client.CountingJevClient`), because a call is
     billed the moment it is answered, whatever xbrain then does with the answer:
@@ -159,7 +164,8 @@ class JevRun(BaseModel):
 
     model_config = _FROZEN
 
-    kind: Literal["topics"] = "topics"
+    kind: RunKind = "topics"
+    query_sha: str | None = Field(default=None, pattern=_SHA256)
     started_at: datetime
     finished_at: datetime
     models: list[NonEmpty]
@@ -179,6 +185,8 @@ class JevRun(BaseModel):
 
     @model_validator(mode="after")
     def _consistent(self) -> JevRun:
+        if (self.kind == "ask") != (self.query_sha is not None):
+            raise ValueError("query_sha is required on an ask pass and absent on a topics pass")
         if self.finished_at < self.started_at:
             raise ValueError("finished_at is earlier than started_at")
         if self.models != sorted(set(self.models)):

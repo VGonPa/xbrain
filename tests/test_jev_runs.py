@@ -277,3 +277,30 @@ def test_a_short_write_is_rolled_back_like_a_failed_one(tmp_path: Path, monkeypa
         append_run(_run(requests=3, ok=3, failed=0), path)
 
     assert path.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- PR 11: ask passes
+
+
+def test_an_ask_pass_is_its_own_kind_and_names_its_query(tmp_path: Path):
+    """`jev ask` shares the log: its line says `kind: "ask"` and WHICH query it paid for, so a
+    query's history can be billed from the log alone and the topics views can leave it out."""
+    path = tmp_path / "runs.jsonl"
+    append_run(_run(kind="ask", query_sha="a" * 64), path)
+    append_run(_run(), path)
+
+    ask, topics = load_runs(path)
+
+    assert (ask.kind, ask.query_sha) == ("ask", "a" * 64)
+    assert (topics.kind, topics.query_sha) == ("topics", None)
+
+
+def test_an_ask_line_needs_its_query_and_a_topics_line_has_none():
+    with pytest.raises(ValidationError, match="query_sha"):
+        _run(kind="ask")
+    with pytest.raises(ValidationError, match="query_sha"):
+        _run(kind="topics", query_sha="a" * 64)
+    with pytest.raises(ValidationError, match="query_sha"):
+        _run(kind="ask", query_sha="not-a-sha")
+    with pytest.raises(ValidationError, match="kind"):
+        _run(kind="search", query_sha="a" * 64)
