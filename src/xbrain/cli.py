@@ -3101,6 +3101,25 @@ def _confirm_ask_cost(usd: float, cap: float) -> bool:
     return True
 
 
+def _refuse_a_price_not_agreed(
+    cfg: Config, before: AskPlan, plan: AskPlan, *, yes: bool, confirmed: bool
+) -> None:
+    """Refuse the plan made under the lock when its price is not the one agreed: a prompted
+    yes agreed to the estimate it showed, never to whatever the lock finds; with no prompt
+    (under the cap) it must still be under `[jev].ask_max_usd`. `--yes` agreed to spend."""
+    if confirmed and not yes and over_cap(plan.estimate.usd, before.estimate.usd):
+        raise JevError(
+            f"la estimación subió de ~{before.estimate.usd:.4f} $ confirmados a "
+            f"~{plan.estimate.usd:.4f} $: no se ha preguntado nada; vuelve a lanzar la consulta"
+        )
+    if plan.selection.items and not (yes or confirmed) and plan.estimate.usd > cfg.jev_ask_max_usd:
+        raise JevError(
+            f"la estimación subió a ~{plan.estimate.usd:.4f} $, por encima de "
+            f"[jev].ask_max_usd = {cfg.jev_ask_max_usd} $: no se ha preguntado nada; "
+            "vuelve a lanzar la consulta"
+        )
+
+
 def _jev_ask_locked(
     cfg: Config,
     before: AskPlan,
@@ -3124,18 +3143,7 @@ def _jev_ask_locked(
             "la selección cambió desde la estimación (otra pasada o un cambio en los datos): "
             "no se ha preguntado nada; vuelve a lanzar la consulta"
         )
-    if confirmed and not yes and over_cap(plan.estimate.usd, before.estimate.usd):
-        # The prompt agreed to the price it showed, never to whatever the lock finds.
-        raise JevError(
-            f"la estimación subió de ~{before.estimate.usd:.4f} $ confirmados a "
-            f"~{plan.estimate.usd:.4f} $: no se ha preguntado nada; vuelve a lanzar la consulta"
-        )
-    if plan.selection.items and not (yes or confirmed) and plan.estimate.usd > cfg.jev_ask_max_usd:
-        raise JevError(
-            f"la estimación subió a ~{plan.estimate.usd:.4f} $, por encima de "
-            f"[jev].ask_max_usd = {cfg.jev_ask_max_usd} $: no se ha preguntado nada; "
-            "vuelve a lanzar la consulta"
-        )
+    _refuse_a_price_not_agreed(cfg, before, plan, yes=yes, confirmed=confirmed)
     outcome = _jev_ask_run(cfg, plan, lock) if plan.selection.items else None
     results = finish_ask(cfg, plan, outcome, threshold=threshold)
     if outcome is not None and outcome.interrupted:
