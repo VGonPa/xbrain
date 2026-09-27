@@ -2132,10 +2132,11 @@ def test_the_config_words_that_carry_meaning_are_pinned():
         "como si se volviera a preguntar todo",
         "(aún no existe: lo crea ",
         "'Modelo que se pedirá'",
-        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo "
-        "lanzado desde la página que sirve `xbrain jev serve`",
-        "'Tope por trabajo desde la página'",
+        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, "
+        "o un trabajo de `xbrain jev serve`",
+        "'Tope por trabajo de xbrain jev serve'",
         "el servidor rechaza un trabajo cuya estimación lo pase",
+        "no envía un post más cuando lo gastado y lo reservado",
         "las evaluaciones guardadas no registran qué modelo se pidió",
         "el $ solo promedia proveedores con tarifa",
         "la que ves la dibuja el servidor en vivo",
@@ -2210,13 +2211,18 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
 
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
         assert sink not in serve, sink
-    # Relative URLs only: the API is this page's own server, never another origin.
-    assert set(re.findall(r"api\('([^']+)'", serve)) == {
-        "/api/estimate",
-        "/api/evaluate",
-        "/api/job",
-        "/api/data",
-    }
+    # Relative URLs only, all in ONE table: the API is this page's own server.
+    assert (
+        "const API = {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate', "
+        "job: '/api/job', data: '/api/data'};" in serve
+    )
+    assert re.findall(r"\bapi\('", serve) == []
+    assert sorted(set(re.findall(r"\bapi\(API\.(\w+)", serve))) == [
+        "data",
+        "estimate",
+        "evaluate",
+        "job",
+    ]
     assert "'X-Xbrain-Token': DATA.serve.token" in serve
     assert "http" not in re.sub(r"//.*|/\*.*?\*/", "", serve, flags=re.S)
 

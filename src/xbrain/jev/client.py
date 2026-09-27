@@ -33,6 +33,15 @@ class JevError(RuntimeError):
     """
 
 
+class CallSkipped(Exception):
+    """A call the client decided NOT to send — the local server's cap refusing the next post.
+
+    Not a `JevError`: nothing failed, the post was simply not asked, and nothing was billed.
+    `CountingJevClient` does not count it as sent, and `assess.run_assessments` counts the
+    post as not asked, never as a failure.
+    """
+
+
 @dataclass(frozen=True)
 class NoulQuestion:
     """A yes/no question. `criteria` describes the two outcomes; either side may be left
@@ -183,6 +192,11 @@ class CountingJevClient:
             self._sent += 1
         try:
             result = self._inner.ask(state, questions)
+        except CallSkipped:
+            # Declined before sending: it never went out, so it is not a request made.
+            with self._lock:
+                self._sent -= 1
+            raise
         except Exception:
             with self._lock:
                 self._raised += 1

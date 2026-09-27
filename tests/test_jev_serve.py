@@ -21,9 +21,10 @@ import pytest
 from tests.jev_fakes import FakeJevClient
 from xbrain.config import Config, load_config
 from xbrain.jev.assess import select_items
-from xbrain.jev.lock import held, pass_lock
+from xbrain.jev.lock import PassLockBusy, pass_lock
 from xbrain.jev.run import run_topics
-from xbrain.jev.serve import TOKEN_HEADER, JevService, make_server, serve_until_interrupted
+from xbrain.jev.serve import TOKEN_HEADER, make_server, serve_until_interrupted
+from xbrain.jev.service import JevService
 from xbrain.jev.store import load_assessments, load_runs
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.rubrics import save_vocab
@@ -70,12 +71,21 @@ ITEMS = {
 ITEMS["6"].author = Author(handle="", name="")
 
 
+def _locked(path: Path) -> bool:
+    """Whether a pass holds the lock at `path` — asked by trying to take it, as a pass would."""
+    try:
+        with pass_lock(path, "probe"):
+            return False
+    except PassLockBusy:
+        return True
+
+
 def _repo(tmp_path: Path, monkeypatch, jev: str = "") -> Config:
     vault = tmp_path / "vault"
     (vault / "x" / "_media").mkdir(parents=True)
     (tmp_path / "config.toml").write_text(
         f'[paths]\nvault = "{vault}"\noutput_subdir = "x"\ndata_dir = "data"\n'
-        f'[x]\nhandle = "v"\n[jev]\nconcurrency = 1\n{jev}',
+        f'[x]\nhandle = "v"\n[jev]\n' + ("" if "concurrency" in jev else "concurrency = 1\n") + jev,
         encoding="utf-8",
     )
     (tmp_path / "data").mkdir()
@@ -89,7 +99,7 @@ def _repo(tmp_path: Path, monkeypatch, jev: str = "") -> Config:
 
 def _seed_pass(cfg: Config, ids: list[str]) -> None:
     """A priced pass over `ids`, so the page has a mean cost per post to estimate from."""
-    with pass_lock(cfg.jev_lock_path, "seed"):
+    with pass_lock(cfg.jev_lock_path, "seed") as lock:
         assessments = load_assessments(cfg.jev_topics_path)
         selection = select_items(
             ITEMS,
@@ -107,6 +117,7 @@ def _seed_pass(cfg: Config, ids: list[str]) -> None:
             assessments,
             VOCAB,
             lambda: FakeJevClient(provider="typesafe", nouls={"ai-coding": 0.95}),
+            lock=lock,
         )
 
 
@@ -180,12 +191,12 @@ class _Served:
         return response.status, (json.loads(data) if "json" in kind else data), response
 
     def estimate(self, body: dict[str, Any]) -> dict[str, Any]:
-        status, data, _ = self.request("POST", "/api/estimate", body)
+        status, data, _ = self.request("POST", "/api/topics/estimate", body)
         assert status == 200, data
         return data
 
     def evaluate(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        status, data, _ = self.request("POST", "/api/evaluate", body)
+        status, data, _ = self.request("POST", "/api/topics/evaluate", body)
         return status, data
 
     def wait_job(self, until: Callable[[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
@@ -318,14 +329,18 @@ def _estimate_body() -> dict[str, Any]:
 
 
 def test_a_post_without_the_token_is_refused(served: _Served):
-    status, error, _ = served.request("POST", "/api/estimate", _estimate_body(), token=False)
+    status, error, _ = served.request("POST", "/api/topics/estimate", _estimate_body(), token=False)
 
     assert status == 403 and "token" in error["error"]
 
 
 def test_a_post_with_a_wrong_token_is_refused(served: _Served):
     status, _, _ = served.request(
-        "POST", "/api/estimate", _estimate_body(), token=False, headers={TOKEN_HEADER: "x" * 43}
+        "POST",
+        "/api/topics/estimate",
+        _estimate_body(),
+        token=False,
+        headers={TOKEN_HEADER: "x" * 43},
     )
 
     assert status == 403
@@ -335,7 +350,9 @@ def test_a_post_with_a_wrong_token_is_refused(served: _Served):
     "origin", [None, "http://evil.example", "http://127.0.0.1:1", "null", "https://127.0.0.1"]
 )
 def test_a_post_from_another_origin_or_none_is_refused(served: _Served, origin: str | None):
-    status, error, _ = served.request("POST", "/api/estimate", _estimate_body(), origin=origin)
+    status, error, _ = served.request(
+        "POST", "/api/topics/estimate", _estimate_body(), origin=origin
+    )
 
     assert status == 403 and "Origin" in error["error"]
 
@@ -343,7 +360,7 @@ def test_a_post_from_another_origin_or_none_is_refused(served: _Served, origin: 
 def test_localhost_is_the_same_origin_as_127_0_0_1(served: _Served):
     status, _, _ = served.request(
         "POST",
-        "/api/estimate",
+        "/api/topics/estimate",
         _estimate_body(),
         origin=f"http://localhost:{served.port}",
         headers={"Host": f"localhost:{served.port}"},
@@ -353,7 +370,7 @@ def test_localhost_is_the_same_origin_as_127_0_0_1(served: _Served):
 
 
 @pytest.mark.parametrize(
-    "method,path", [("GET", "/api/data"), ("GET", "/"), ("POST", "/api/estimate")]
+    "method,path", [("GET", "/api/data"), ("GET", "/"), ("POST", "/api/topics/estimate")]
 )
 def test_a_foreign_host_header_is_refused_on_every_route(served: _Served, method: str, path: str):
     """DNS rebinding: a page on evil.example resolved to 127.0.0.1 sends `Host: evil.example`.
@@ -368,14 +385,14 @@ def test_a_foreign_host_header_is_refused_on_every_route(served: _Served, method
 
 def test_a_post_that_is_not_json_is_refused(served: _Served):
     status, _, _ = served.request(
-        "POST", "/api/estimate", raw=b"ids=3", headers={"Content-Type": "text/plain"}
+        "POST", "/api/topics/estimate", raw=b"ids=3", headers={"Content-Type": "text/plain"}
     )
 
     assert status == 415
 
 
 def test_a_body_too_large_is_refused_unread(served: _Served):
-    status, _, _ = served.request("POST", "/api/estimate", raw=b"{" + b" " * 70_000 + b"}")
+    status, _, _ = served.request("POST", "/api/topics/estimate", raw=b"{" + b" " * 70_000 + b"}")
 
     assert status == 413
 
@@ -423,7 +440,7 @@ def test_a_topic_with_no_posts_selects_nothing_never_the_whole_corpus(served: _S
 
 
 def test_an_unknown_topic_is_refused(served: _Served):
-    status, error, _ = served.request("POST", "/api/estimate", {"topic": "nope"})
+    status, error, _ = served.request("POST", "/api/topics/estimate", {"topic": "nope"})
 
     assert status == 400 and "nope" in error["error"]
 
@@ -472,13 +489,13 @@ def test_a_band_selects_the_posts_in_it(served: _Served):
     ],
 )
 def test_a_malformed_selection_is_refused(served: _Served, body: Any):
-    status, error, _ = served.request("POST", "/api/estimate", body)
+    status, error, _ = served.request("POST", "/api/topics/estimate", body)
 
     assert status == 400 and error["error"]
 
 
 def test_an_unknown_id_is_refused_by_name(served: _Served):
-    status, error, _ = served.request("POST", "/api/estimate", {"ids": ["3", "nope"]})
+    status, error, _ = served.request("POST", "/api/topics/estimate", {"ids": ["3", "nope"]})
 
     assert status == 400 and "nope" in error["error"]
 
@@ -544,7 +561,7 @@ def test_the_data_after_a_job_shows_the_new_answers(served: _Served):
 
 
 def test_evaluate_without_a_confirmation_is_refused_and_costs_nothing(served: _Served):
-    status, error, _ = served.request("POST", "/api/evaluate", {"ids": ["3"]})
+    status, error, _ = served.request("POST", "/api/topics/evaluate", {"ids": ["3"]})
 
     assert status == 400 and "confirm_token" in error["error"]
     assert served.built == 0
@@ -614,7 +631,9 @@ def test_a_job_stops_when_what_it_really_spent_reaches_the_cap(tmp_path: Path, m
         s.close()
 
     assert job["state"] == "interrupted" and job["reason"] == "tope"
-    assert client.asked == ["3", "4"]  # 2 × 1.05e-5 reached the cap: the third never went
+    # The first answer cost 1.05e-5 (2.5× the mean): the next post is reserved at THAT, and
+    # 1.05e-5 + 1.05e-5 would pass 1.5e-5 — so it is never sent.
+    assert client.asked == ["3"]
     assert load_runs(cfg.jev_runs_path)[-1].interrupted is True
 
 
@@ -642,7 +661,7 @@ def test_the_job_holds_the_pass_lock_and_releases_it(tmp_path: Path, monkeypatch
 
     class _Watching(_Recorder):
         def ask(self, state, questions):
-            seen.append(held(cfg.jev_lock_path))
+            seen.append(_locked(cfg.jev_lock_path))
             return super().ask(state, questions)
 
     s = _Served(cfg, _Watching())
@@ -654,7 +673,7 @@ def test_the_job_holds_the_pass_lock_and_releases_it(tmp_path: Path, monkeypatch
         s.close()
 
     assert seen == [True]
-    assert held(cfg.jev_lock_path) is False
+    assert _locked(cfg.jev_lock_path) is False
     with pass_lock(cfg.jev_lock_path, "after"):
         pass
 
@@ -698,8 +717,8 @@ def test_a_job_whose_key_is_missing_reports_it(tmp_path: Path, monkeypatch):
     )
     thread.start()
     try:
-        estimate = service.estimate({"ids": ["3"]})
-        service.evaluate({"ids": ["3"], "confirm_token": estimate["confirm_token"]})
+        estimate = service.estimate("topics", {"ids": ["3"]})
+        service.evaluate("topics", {"ids": ["3"], "confirm_token": estimate["confirm_token"]})
         service.wait()
         job = service.job_view()
     finally:
@@ -726,8 +745,8 @@ def test_ctrl_c_stops_accepting_lets_the_job_checkpoint_and_log_and_exits_130(
     service = JevService(cfg, lambda: client)
     server = make_server(service, 0)
     port = server.server_address[1]
-    estimate = service.estimate({"unevaluated": 10})
-    service.evaluate({"unevaluated": 10, "confirm_token": estimate["confirm_token"]})
+    estimate = service.estimate("topics", {"unevaluated": 10})
+    service.evaluate("topics", {"unevaluated": 10, "confirm_token": estimate["confirm_token"]})
 
     def _interrupted_after_one_answer() -> None:
         deadline = time.monotonic() + 10
@@ -737,15 +756,530 @@ def test_ctrl_c_stops_accepting_lets_the_job_checkpoint_and_log_and_exits_130(
 
     monkeypatch.setattr(server, "serve_forever", _interrupted_after_one_answer)
 
-    code = serve_until_interrupted(server, service)
+    code, last = serve_until_interrupted(server, service)
 
     assert code == 130
     job = service.job_view()
+    assert last == job
     assert job["state"] == "interrupted" and job["reason"] == "servidor parado"
     assert len(client.asked) < 3
     kept = set(load_assessments(cfg.jev_topics_path)) - {"1", "2"}
     assert kept == set(client.asked)
     assert load_runs(cfg.jev_runs_path)[-1].interrupted is True
-    assert held(cfg.jev_lock_path) is False
+    assert _locked(cfg.jev_lock_path) is False
     with pytest.raises(OSError):
         http.client.HTTPConnection("127.0.0.1", port, timeout=1).request("GET", "/api/job")
+
+
+# =========================================================================== PR 10a fix wave
+#
+# Every test above runs at concurrency 1, which hides what posts in flight do to a cap. These
+# run the default shape: several workers, more posts queued than workers.
+
+MEAN_USD = PER_POST_USD  # the seed pass: 100 tokens per answer, priced
+
+
+def _big_repo(tmp_path: Path, monkeypatch, *, posts: int, jev: str) -> Config:
+    """`_repo` with `posts` more unevaluated posts (`p00`, `p01`, …) and `jev` settings."""
+    cfg = _repo(tmp_path, monkeypatch, jev=jev)
+    extra = {
+        f"p{n:02d}": _item(f"p{n:02d}", f"Post número {n:02d} sobre agentes") for n in range(posts)
+    }
+    ITEMS.update(extra)
+    try:
+        save_store(ITEMS, cfg.items_path)
+    finally:
+        for key in extra:
+            ITEMS.pop(key)
+    return cfg
+
+
+class _Priced(FakeJevClient):
+    """A fake that sleeps a little (so workers overlap) and answers `tokens` per call."""
+
+    def __init__(self, *, delay: float = 0.02, **kwargs: Any) -> None:
+        kwargs.setdefault("provider", "typesafe")
+        super().__init__(**kwargs)
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.sent = 0
+
+    def ask(self, state, questions):
+        with self.lock:
+            self.sent += 1
+        time.sleep(self.delay)
+        return super().ask(state, questions)
+
+
+def _run_job(s: _Served, body: dict[str, Any]) -> dict[str, Any]:
+    estimate = s.estimate(body)
+    assert estimate["allowed"], estimate
+    status, job = s.evaluate({**body, "confirm_token": estimate["confirm_token"]})
+    assert status == 202, job
+    return s.wait_job()
+
+
+def test_the_cap_is_a_hard_bound_at_concurrency_with_posts_queued(tmp_path: Path, monkeypatch):
+    """4 workers, 10 posts estimated exactly at the cap, each really 1.5× the mean: the bill
+    passes the cap by at most what the posts in flight cost above their reservation — and
+    every answer that came back is stored, and logged with its tokens."""
+    cap = 10 * MEAN_USD
+    cfg = _big_repo(
+        tmp_path, monkeypatch, posts=12, jev=f"concurrency = 4\nserve_max_usd = {cap!r}\n"
+    )
+    client = _Priced(input_tokens=150)
+    s = _Served(cfg, client)
+    try:
+        job = _run_job(s, {"unevaluated": 10})
+    finally:
+        s.close()
+
+    per_post = 150 / 1e6 * 0.042
+    run = load_runs(cfg.jev_runs_path)[-1]
+    stored = set(load_assessments(cfg.jev_topics_path)) - {"1", "2"}
+    assert job["state"] == "interrupted" and job["reason"] == "tope"
+    assert client.sent < 10
+    assert len(stored) == client.sent == job["answered"] == run.ok == run.requests
+    assert run.input_tokens == 150 * client.sent == job["tokens"]
+    assert run.unsaved == 0 and run.interrupted is True
+    assert job["usd"] == pytest.approx(client.sent * per_post)
+    assert job["usd"] <= cap + (4 - 1) * (per_post - MEAN_USD) + 1e-12
+
+
+def test_a_job_that_finishes_every_post_at_the_cap_is_done_without_a_reason(
+    tmp_path: Path, monkeypatch
+):
+    cap = 3 * MEAN_USD
+    cfg = _big_repo(
+        tmp_path, monkeypatch, posts=0, jev=f"concurrency = 3\nserve_max_usd = {cap!r}\n"
+    )
+    s = _Served(cfg, _Priced(input_tokens=100))
+    try:
+        estimate = s.estimate({"unevaluated": 3})
+        job = _run_job(s, {"unevaluated": 3})
+    finally:
+        s.close()
+
+    assert estimate["usd"] == pytest.approx(cap) and estimate["allowed"] is True  # == is allowed
+    assert job["state"] == "done" and "reason" not in job
+    assert job["outcome"]["ok"] == 3
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"provider": "fake"}, {"input_tokens": None}], ids=["unpriced", "no-tokens"]
+)
+def test_answers_that_cannot_be_priced_are_charged_the_reservation_never_zero(
+    tmp_path: Path, monkeypatch, kwargs: dict[str, Any]
+):
+    """A provider with no price (`jev-latest` answering as a new one) or no usage reported
+    would otherwise spend at $0 under the cap forever."""
+    cfg = _big_repo(tmp_path, monkeypatch, posts=6, jev="concurrency = 2\n")
+    s = _Served(cfg, _Priced(**kwargs))
+    try:
+        job = _run_job(s, {"unevaluated": 5})
+    finally:
+        s.close()
+
+    assert job["usd"] == pytest.approx(5 * MEAN_USD)
+    assert job["charged_at_estimate"] == 5
+    if "provider" in kwargs:
+        assert job["unpriced_providers"] == ["fake"] and job["tokens"] == 500
+    else:
+        assert job["tokens_unknown"] == 5 and job["tokens"] == 0
+
+
+def test_unpriced_answers_count_against_the_cap(tmp_path: Path, monkeypatch):
+    """Charged at the reservation, unpriced answers fill the cap like priced ones: a job
+    whose own priced mean then rises stops instead of spending at $0."""
+    cap = 4 * MEAN_USD
+    cfg = _big_repo(
+        tmp_path, monkeypatch, posts=6, jev=f"concurrency = 1\nserve_max_usd = {cap!r}\n"
+    )
+
+    class _HalfUnpriced(_Priced):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            from dataclasses import replace
+
+            # The first answer is expensive and priced; the rest are unpriced.
+            if self.sent == 1:
+                return replace(result, input_tokens=300)
+            return replace(result, provider="fake")
+
+    client = _HalfUnpriced()
+    s = _Served(cfg, client)
+    try:
+        job = _run_job(s, {"unevaluated": 4})
+    finally:
+        s.close()
+
+    # 1 × 1.26e-5 (priced, 3× the mean) then each unpriced post reserved at that mean: the
+    # second would already pass 4 × 4.2e-6.
+    assert client.sent == 1 and job["reason"] == "tope"
+
+
+def test_a_server_stop_waits_for_the_calls_in_flight_and_keeps_every_one(
+    tmp_path: Path, monkeypatch
+):
+    cfg = _big_repo(tmp_path, monkeypatch, posts=12, jev="concurrency = 3\n")
+    client = _Priced(delay=0.1)
+    s = _Served(cfg, client)
+    try:
+        estimate = s.estimate({"unevaluated": 12})
+        s.evaluate({"unevaluated": 12, "confirm_token": estimate["confirm_token"]})
+        s.wait_job(lambda job: job.get("answered", 0) >= 1)
+        s.service.stop()
+        job = s.service.job_view()
+    finally:
+        s.close()
+
+    run = load_runs(cfg.jev_runs_path)[-1]
+    stored = set(load_assessments(cfg.jev_topics_path)) - {"1", "2"}
+    assert job["state"] == "interrupted" and job["reason"] == "servidor parado"
+    assert client.sent < 12
+    assert len(stored) == client.sent == run.ok == run.requests and run.unsaved == 0
+    assert run.input_tokens == 100 * client.sent
+
+
+def test_the_job_view_is_frozen_once_the_job_ends(served: _Served):
+    job = _run_job(served, {"ids": ["3"]})
+
+    time.sleep(0.05)
+    assert served.service.job_view() == job
+
+
+# --------------------------------------------------------------------------- stopping
+
+
+def test_a_stopping_server_refuses_new_jobs_with_503(served: _Served):
+    estimate = served.estimate({"ids": ["3"]})
+    served.service.stop()
+
+    status, error = served.evaluate({"ids": ["3"], "confirm_token": estimate["confirm_token"]})
+
+    assert status == 503 and error["error"] == "el servidor se está parando"
+    assert served.built == 0
+
+
+def test_a_stop_during_the_start_refuses_the_job_before_any_backup(served: _Served, monkeypatch):
+    """A forced job cancelled between taking the lock and asking must not have copied the
+    side-car (a `.bak` for a pass that never ran) or built a client."""
+    from contextlib import contextmanager
+
+    from xbrain.jev import service as service_module
+
+    real = service_module.pass_lock
+
+    @contextmanager
+    def _stopped_meanwhile(path, holder):
+        with real(path, holder) as lock:
+            served.service._starting.cancel.set()
+            yield lock
+
+    monkeypatch.setattr(service_module, "pass_lock", _stopped_meanwhile)
+    estimate = served.estimate({"ids": ["1"], "force": True})
+
+    status, error = served.evaluate(
+        {"ids": ["1"], "force": True, "confirm_token": estimate["confirm_token"]}
+    )
+
+    assert status == 409 and error["error"] == "el servidor se está parando"
+    assert list(served.cfg.jev_dir.glob("topics.*.bak")) == [] and served.built == 0
+
+
+# --------------------------------------------------------------------------- the job slot
+
+
+def test_a_refused_job_leaves_the_slot_idle_and_the_next_one_runs(served: _Served):
+    estimate = served.estimate({"ids": ["3"]})
+    with pass_lock(served.cfg.jev_lock_path, "xbrain jev topics"):
+        status, _ = served.evaluate({"ids": ["3"], "confirm_token": estimate["confirm_token"]})
+        _, job, _ = served.request("GET", "/api/job")
+
+    assert status == 409 and job == {"state": "idle"}
+    again = served.estimate({"ids": ["3"]})
+    status, _ = served.evaluate({"ids": ["3"], "confirm_token": again["confirm_token"]})
+    assert status == 202
+    assert served.wait_job()["state"] == "done"
+
+
+def test_a_thread_that_cannot_start_gives_the_confirmation_back(served: _Served, monkeypatch):
+    """Called on the service, not over HTTP: patching `Thread.start` would stop the HTTP
+    server's own request threads too."""
+    from xbrain.jev.picks import ServeError
+
+    service = served.service
+    estimate = service.estimate("topics", {"ids": ["3"]})
+    body = {"ids": ["3"], "confirm_token": estimate["confirm_token"]}
+
+    def _no_threads(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _no_threads)
+    with pytest.raises(ServeError) as refused:
+        service.evaluate("topics", body)
+    monkeypatch.undo()
+
+    assert refused.value.status == 503 and "no se pudo arrancar" in refused.value.message
+    assert service.job_view() == {"state": "idle"}
+    assert service.evaluate("topics", body)["state"] in ("running", "done")
+    served.wait_job()
+
+
+def test_two_evaluates_at_once_start_exactly_one_job(tmp_path: Path, monkeypatch):
+    s = _Served(_repo(tmp_path, monkeypatch), _Recorder(delay=0.1))
+    try:
+        first, second = s.estimate({"ids": ["3"]}), s.estimate({"ids": ["4"]})
+        barrier = threading.Barrier(2)
+        statuses: list[tuple[int, str]] = []
+
+        def _go(body: dict[str, Any]) -> None:
+            barrier.wait()
+            status, answer = s.evaluate(body)
+            statuses.append((status, answer.get("error", "")))
+
+        threads = [
+            threading.Thread(
+                target=_go, args=({"ids": ["3"], "confirm_token": first["confirm_token"]},)
+            ),
+            threading.Thread(
+                target=_go, args=({"ids": ["4"], "confirm_token": second["confirm_token"]},)
+            ),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        s.wait_job()
+    finally:
+        s.close()
+
+    # The slot refuses the second — not the pass lock, whose refusal would spend its
+    # confirmation (a job being STARTED holds the slot before it holds the lock).
+    assert sorted(status for status, _ in statuses) == [202, 409]
+    assert [e for status, e in statuses if status == 409] == [
+        "ya hay un trabajo en curso: espera a que termine"
+    ]
+
+
+def test_the_lock_is_released_after_a_job_that_failed(tmp_path: Path, monkeypatch):
+    cfg = _repo(tmp_path, monkeypatch)
+    s = _Served(cfg, _Recorder(fail_when=lambda state: True))
+    try:
+        _run_job(s, {"ids": ["3"]})
+    finally:
+        s.close()
+
+    assert _locked(cfg.jev_lock_path) is False
+
+
+# --------------------------------------------------------------------------- confirmations
+
+
+def test_a_confirmation_expires(served: _Served, monkeypatch):
+    from xbrain.jev import service as service_module
+
+    estimate = served.estimate({"ids": ["3"]})
+    later = service_module._monotonic() + service_module.CONFIRM_TTL_S + 1
+    monkeypatch.setattr(service_module, "_monotonic", lambda: later)
+
+    status, error = served.evaluate({"ids": ["3"], "confirm_token": estimate["confirm_token"]})
+
+    assert status == 409 and "caducó" in error["error"] and served.built == 0
+
+
+def test_a_price_that_rose_over_the_cap_since_the_estimate_is_refused(tmp_path: Path, monkeypatch):
+    cfg = _repo(tmp_path, monkeypatch, jev="serve_max_usd = 0.000005\n")
+    s = _Served(cfg, _Recorder())
+    try:
+        estimate = s.estimate({"ids": ["3"]})
+        # A terminal pass meanwhile: one very expensive answer lifts the mean past the cap.
+        with pass_lock(cfg.jev_lock_path, "seed") as lock:
+            assessments = load_assessments(cfg.jev_topics_path)
+            selection = select_items(
+                ITEMS,
+                assessments,
+                VOCAB,
+                ids=["5"],
+                limit=None,
+                force=False,
+                fallback=cfg.jev_fallback_option,
+                char_limit=cfg.jev_state_char_limit,
+            )
+            run_topics(
+                cfg,
+                selection,
+                assessments,
+                VOCAB,
+                lambda: FakeJevClient(provider="typesafe", input_tokens=10_000),
+                lock=lock,
+            )
+        status, error = s.evaluate({"ids": ["3"], "confirm_token": estimate["confirm_token"]})
+    finally:
+        s.close()
+
+    assert status == 409 and "precio estimado cambió" in error["error"] and s.built == 0
+
+
+@pytest.mark.parametrize(
+    "other",
+    [{"ids": ["3"], "force": True}, {"topic": "ai-coding"}],
+    ids=["force", "topic"],
+)
+def test_a_confirmation_is_for_its_force_and_its_kind_of_pick(served: _Served, other):
+    estimate = served.estimate({"ids": ["3"]})
+
+    status, _ = served.evaluate({**other, "confirm_token": estimate["confirm_token"]})
+
+    assert status == 409 and served.built == 0
+
+
+def test_the_estimate_and_the_job_say_which_kind_of_pass(served: _Served):
+    estimate = served.estimate({"ids": ["3"]})
+    job = _run_job(served, {"ids": ["3"]})
+
+    assert estimate["kind"] == job["kind"] == "topics"
+    assert estimate["pick"] == {"ids": ["3"], "force": False}
+
+
+def test_an_unknown_kind_of_pass_is_404(served: _Served):
+    status, _, _ = served.request("POST", "/api/ask/estimate", {"ids": ["3"]})
+
+    assert status == 404
+
+
+# --------------------------------------------------------------------------- the terminal log
+
+
+def test_a_failed_job_is_logged_as_an_error(tmp_path: Path, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    cfg = _repo(tmp_path, monkeypatch)
+    s = _Served(cfg, _Recorder(fail_when=lambda state: True))
+    try:
+        _run_job(s, {"ids": ["3"]})
+    finally:
+        s.close()
+
+    assert any(
+        r.levelno == logging.ERROR and "ninguna de las 1" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_run_log_line_that_could_not_be_written_reaches_the_terminal_whole(
+    served: _Served, monkeypatch, caplog
+):
+    import logging
+
+    from xbrain.jev import run as run_module
+
+    def _full_disk(run, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(run_module, "append_run", _full_disk)
+    job = _run_job(served, {"ids": ["3"]})
+
+    assert "No space left" in job["log_error"]
+    [record] = [r for r in caplog.records if "añádela a mano" in r.getMessage()]
+    assert record.levelno == logging.ERROR and '"requests":1' in record.getMessage()
+
+
+def test_an_interrupted_job_is_logged_as_a_warning(tmp_path: Path, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    cfg = _repo(tmp_path, monkeypatch, jev="serve_max_usd = 0.000015\n")
+    s = _Served(cfg, _Recorder(input_tokens=250))
+    try:
+        _run_job(s, {"unevaluated": 3})
+    finally:
+        s.close()
+
+    assert any(
+        r.levelno == logging.WARNING and "interrumpido (tope)" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+# --------------------------------------------------------------------------- HTTP minors
+
+
+@pytest.mark.parametrize("cut", ["drop-last", "first-char", "extra-char"])
+def test_a_token_that_is_almost_right_is_refused(served: _Served, cut: str):
+    token = served.service.token
+    sent = {"drop-last": token[:-1], "first-char": token[:1], "extra-char": token + "x"}[cut]
+
+    status, _, _ = served.request(
+        "POST", "/api/topics/estimate", {"ids": ["3"]}, token=False, headers={TOKEN_HEADER: sent}
+    )
+
+    assert status == 403
+
+
+def test_a_host_on_another_port_is_refused(served: _Served):
+    status, _, _ = served.request("GET", "/api/data", headers={"Host": "127.0.0.1:1"})
+
+    assert status == 403
+
+
+def test_a_get_from_a_foreign_origin_is_refused(served: _Served):
+    status, _, _ = served.request("GET", "/api/data", origin="http://evil.example")
+
+    assert status == 403
+
+
+def test_a_negative_content_length_is_refused_not_waited_on(served: _Served):
+    status, _, _ = served.request(
+        "POST", "/api/topics/estimate", raw=b"", headers={"Content-Length": "-1"}
+    )
+
+    assert status == 400
+
+
+@pytest.mark.parametrize(
+    "name,body",
+    [("x.svg", b"<svg onload='alert(1)'/>"), ("x.html", b"<script>1</script>"), ("x.txt", b"hi")],
+)
+def test_media_serves_only_images_and_videos(served: _Served, name: str, body: bytes):
+    (served.cfg.output_dir / "_media" / name).write_bytes(body)
+
+    status, _, _ = served.request("GET", f"/_media/{name}")
+
+    assert status == 404
+
+
+def test_media_answers_with_a_sandboxing_policy(served: _Served):
+    (served.cfg.output_dir / "_media" / "a.png").write_bytes(b"\x89PNG")
+
+    status, _, response = served.request("GET", "/_media/a.png")
+
+    assert status == 200 and response.getheader("Content-Security-Policy") == "sandbox"
+
+
+def test_a_nul_byte_in_a_media_path_is_a_404(served: _Served):
+    status, _, _ = served.request("GET", "/_media/a%00b.png")
+
+    assert status == 404
+
+
+def test_an_internal_error_says_so_without_its_detail(served: _Served, monkeypatch):
+    def _boom():
+        raise RuntimeError("secreto: /Users/alguien/.env")
+
+    monkeypatch.setattr(served.service, "blob", _boom)
+
+    status, error, _ = served.request("GET", "/api/data")
+
+    assert status == 500 and "secreto" not in error["error"]
+
+
+def test_the_job_view_counts_calls_that_failed(tmp_path: Path, monkeypatch):
+    cfg = _repo(tmp_path, monkeypatch)
+    s = _Served(cfg, _Recorder(fail_when=lambda state: "Cursor" in state["post"]))
+    try:
+        job = _run_job(s, {"ids": ["3", "4"]})
+    finally:
+        s.close()
+
+    assert (job["failed_calls"], job["answered"], job["outcome"]["failed"]) == (1, 1, 1)

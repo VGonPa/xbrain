@@ -34,12 +34,10 @@ from xbrain.jev.client import (
     CountingJevClient,
     JevClient,
     JevError,
-    JevResult,
-    Question,
     SeamCounts,
 )
 from xbrain.jev.defaults import plural
-from xbrain.jev.lock import held
+from xbrain.jev.lock import PassLock
 from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.jev.store import append_run, save_assessments
 from xbrain.models import Topic
@@ -179,28 +177,6 @@ def _call_hook(name: str, hook: Callable[..., None] | None, *args: object) -> No
         )
 
 
-class _Cancellable:
-    """The client `run_assessments` asks through when a pass can be cancelled from outside.
-
-    Once `cancel` is set, the next `ask` raises `KeyboardInterrupt` INSTEAD of sending: the
-    pass ends on its interrupt path (banked, saved, logged) exactly as a Ctrl-C would, and no
-    call is made after the cancel. It wraps the COUNTING client, never the other way round, so
-    a call it refuses is not counted as sent and the run log bills only what went out.
-    """
-
-    def __init__(self, inner: JevClient, cancel: threading.Event) -> None:
-        self._inner = inner
-        self._cancel = cancel
-
-    def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
-        if self._cancel.is_set():
-            raise KeyboardInterrupt
-        return self._inner.ask(state, questions)
-
-    def close(self) -> None:
-        self._inner.close()
-
-
 def _now() -> datetime:
     """The wall clock, in UTC — one seam, so a test can make it step backwards."""
     return datetime.now(timezone.utc)
@@ -302,6 +278,7 @@ def run_topics(
     vocab: list[Topic],
     make_client: Callable[[], JevClient],
     *,
+    lock: PassLock,
     on_backup: Callable[[Path], None] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     on_summary: Callable[[RunResult], None] | None = None,
@@ -331,18 +308,21 @@ def run_topics(
     `on_backup`, `on_summary` and `on_interrupted` are display: one that raises is logged and
     the pass goes on (`_call_hook`) — a closed pipe must not cost the save.
 
-    `cancel`, when given and set, ends the pass on its interrupt path at the next call: what
-    was answered is saved and logged, nothing more is sent. It is how a caller with no Ctrl-C
-    of its own (the local server) interrupts a job.
+    `cancel`, when given and set, is a SOFT stop (`assess.run_assessments`): nothing queued is
+    sent, every call already running is waited for, banked and saved, and the pass is logged
+    as interrupted after that drain — so the run log bills every answer that came back. It is
+    how a caller with no Ctrl-C of its own (the local server) stops a job. Ctrl-C keeps the
+    emergency path below.
 
-    THE CALLER HOLDS THE PASS LOCK (`jev.lock.pass_lock` on `cfg.jev_lock_path`), taken before
-    it loaded `assessments`: two passes that each load, ask and save the whole map lose each
-    other's paid records. Refused here, before any cost, when it is not held.
+    THE CALLER HOLDS THE PASS LOCK and hands its handle in as `lock` (`jev.lock.pass_lock` on
+    `cfg.jev_lock_path`), taken before it loaded `assessments`: two passes that each load, ask
+    and save the whole map lose each other's paid records. A released handle, or one for
+    another file, is refused here, before any cost.
 
     There is no `force` argument: which items are re-asked, current ones included, is
     `selection`'s decision (`assess.select_items(force=...)`), already made.
     """
-    if not held(cfg.jev_lock_path):
+    if not lock.covers(cfg.jev_lock_path):
         raise JevError(
             f"una pasada de Jev necesita el candado {cfg.jev_lock_path}, tomado antes de leer "
             "el side-car (`jev.lock.pass_lock`); sin él, dos pasadas a la vez pierden "
@@ -378,7 +358,6 @@ def run_topics(
 
     # Wrapped so the run log can say how many calls were SENT, which nothing else observes.
     client = CountingJevClient(make_client())
-    asked: JevClient = client if cancel is None else _Cancellable(client, cancel)
     started_at = _now()
     interrupted = False
     logged: JevRun | None = None
@@ -386,12 +365,13 @@ def run_topics(
         result = run_assessments(
             list(selection.items),
             vocab,
-            asked,
+            client,
             fallback=cfg.jev_fallback_option,
             char_limit=cfg.jev_state_char_limit,
             concurrency=cfg.jev_concurrency,
             on_progress=on_progress,
             on_result=_checkpoint,
+            cancel=cancel,
         )
     except KeyboardInterrupt:
         interrupted = True
@@ -404,6 +384,10 @@ def run_topics(
             _save_side_car(assessments, cfg.jev_topics_path, paid=len(banked))
         failed: tuple[tuple[str, str], ...] = ()
     else:
+        # A soft cancel (the server's cap or shutdown) waited for every call in flight, so
+        # everything paid is in `result` and saved below; the pass is still an interrupted
+        # one, and says so in the run log even when the save then fails.
+        interrupted = result.cancelled
         # The checkpoint has already put every one of these in `assessments`; the merge stays
         # here so the NORMAL path does not depend on a hook whose failures are swallowed.
         for assessment in result.assessed:

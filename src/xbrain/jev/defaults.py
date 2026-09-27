@@ -38,14 +38,15 @@ DEFAULT_FALLBACK_OPTION = "otro"
 DEFAULT_CONCURRENCY = 8
 #: Evidence text is cut here; assessments record the pre-cut length and `truncated`.
 DEFAULT_STATE_CHAR_LIMIT = 100_000
-#: The most one job started from the page (`xbrain jev serve`) may cost, in USD, by the same
-#: estimate the page shows before it is confirmed. Refused server-side above it, and the job
-#: is stopped if what it has really spent reaches it. The terminal's `xbrain jev topics` has
-#: no cap: its operator chose the selection on the command line.
+#: The most one job started through `xbrain jev serve`'s API may cost, in USD. The server
+#: refuses a job whose estimate is above it, and reserves each post's expected cost before
+#: sending, so it stops sending before the cap; the bill passes it only by what the posts in
+#: flight cost above their reservation. The terminal's `xbrain jev topics` has no cap: its
+#: operator chose the selection on the command line.
 DEFAULT_SERVE_MAX_USD = 1.00
 #: THE `[jev]` keys `config.toml` accepts, each with its default, in the order the
 #: Configuración tab lists them. `config.py` refuses any other key by this list, and the page
-#: states each one's value next to this default — one list, so a sixth key cannot reach the
+#: states each one's value next to this default — one list, so a new key cannot reach the
 #: loader without reaching the page.
 JEV_DEFAULTS: dict[str, str | float | int] = {
     "threshold": DEFAULT_THRESHOLD,

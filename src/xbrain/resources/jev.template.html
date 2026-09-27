@@ -2046,8 +2046,8 @@ const CONFIG_SETTINGS = {
     why: 'cuántos posts pregunta a la vez `xbrain jev topics`. Solo cambia la velocidad de una pasada.'},
   state_char_limit: {name: 'Límite de evidencia', page: true, fmt: (v) => pl(v, 'carácter', 'caracteres'),
     why: 'cuánta evidencia de un post se envía; lo que pasa de ahí se corta por el final. Cambiarlo caduca solo los posts cuyo corte se mueve.'},
-  serve_max_usd: {name: 'Tope por trabajo desde la página', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
-    why: 'lo más que puede costar un trabajo lanzado desde la página que sirve `xbrain jev serve`: el servidor rechaza un trabajo cuya estimación lo pase, y lo para si lo gastado de verdad lo alcanza. `xbrain jev topics` desde la terminal no tiene tope.'},
+  serve_max_usd: {name: 'Tope por trabajo de xbrain jev serve', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
+    why: 'lo más que puede costar un trabajo lanzado con la API de `xbrain jev serve`: el servidor rechaza un trabajo cuya estimación lo pase, y no envía un post más cuando lo gastado y lo reservado para los posts en curso lo pasarían. `xbrain jev topics` desde la terminal no tiene tope.'},
 };
 /** The files, by `config.files` key: what each one is, and the command that creates it. The
     name, path, whether it exists and whether a snapshot carries it are Python's. */
@@ -2107,7 +2107,7 @@ function configSettings(C) {
   const built = C.settings.filter(s => CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
   const next = C.settings.filter(s => !CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
   const sec = cfgSection('Ajustes', built.join(', ') + ': con estos valores se calculó esta página. ' +
-    andList(next) + ': no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo lanzado desde la página que sirve `xbrain jev serve`. ' +
+    andList(next) + ': no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo de `xbrain jev serve`. ' +
     'Todo se cambia en config.toml, nunca aquí.');
   // Shipped most answers first, then by name: drawn in that order.
   const models = C.models_answered;
@@ -2300,6 +2300,8 @@ function renderConfig() {
    `xbrain jev dashboard` writes has DATA.serve null and none of this: it keeps «copiar
    comando». Only relative paths are fetched — the API is this page's own server. */
 const SERVED = () => !!(DATA && DATA.serve);
+/** Every path this page calls, in one place: relative, so only its own server answers. */
+const API = {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate', job: '/api/job', data: '/api/data'};
 const EVAL_POST = 'Evaluar este post';
 const EVAL_AGAIN = 'Re-evaluar';
 const EVAL_THESE = 'Evaluar estos posts';
@@ -2452,7 +2454,7 @@ async function estimate() {
   P.est.textContent = 'Estimando…';
   const sent = selection();
   try {
-    const e = await api('/api/estimate', sent);
+    const e = await api(API.estimate, sent);
     if (asking !== mine) return;  // another button was pressed meanwhile
     mine.sent = sent;
     mine.estimate = e;
@@ -2484,7 +2486,7 @@ async function confirmAsk() {
   P.go.disabled = true;
   P.error.hidden = true;
   try {
-    const job = await api('/api/evaluate', Object.assign({}, asking.sent, {confirm_token: e.confirm_token}));
+    const job = await api(API.evaluate, Object.assign({}, asking.sent, {confirm_token: e.confirm_token}));
     follow(job);
   } catch (err) {
     showError('No se puede evaluar: ' + err.message);
@@ -2507,7 +2509,7 @@ function follow(job) {
 async function poll() {
   let job;
   try {
-    job = await api('/api/job');
+    job = await api(API.job);
   } catch (err) {
     following = false;
     showError('Se perdió el contacto con el servidor: ' + err.message);
@@ -2557,7 +2559,7 @@ async function finished(job) {
     P.progText.textContent = outcomeText(job);
   }
   try {
-    refresh(await api('/api/data'));
+    refresh(await api(API.data));
   } catch (err) {
     showError('No se pudieron recargar los datos: ' + err.message + ' (recarga la página)');
   }
@@ -2590,7 +2592,7 @@ function refresh(blob) {
     reloaded mid-job) picked up where it is. */
 function bootServe() {
   renderNextControl();
-  api('/api/job').then(job => {
+  api(API.job).then(job => {
     if (job.state === 'running' || job.state === 'starting') {
       panel().title.textContent = 'Trabajo en curso';
       follow(job);

@@ -688,17 +688,21 @@ generates an Obsidian wiki.
   `build_topic_questions` (never copied into the template), `STATE_SURFACE_KEYS`/`CUT_MARKER`
   from assess.py, the pass estimate from `report.estimate_selection` (topics-only means:
   `topics_pass_estimate`); settings through `Config.jev_settings()`. Plus
-  cost total / per pass / per post. `jev topics` spends, and so does a job confirmed from
-  `jev serve` (`jev/serve.py`: the page live on 127.0.0.1 ONLY; estimate = `select_items` +
-  `topics_pass_estimate` over the blob's `cost.per_post`; a single-use `confirm_token` bound
-  to the selection as asked; ONE background job calling `run_topics`, re-selected under the
-  lock and refused if the posts moved; `[jev].serve_max_usd` refused by estimate AND enforced
-  on real spend; Host on every route, Origin + token + JSON on every POST; Ctrl-C cancels the
-  job at its next call, exit 130; the page's buttons live in the template's `/* serve */`
-  section, behind `SERVED()` — `blob.serve` is null in the static file). A paid pass holds `data/jev/.lock` (`jev/lock.py`, `flock`)
-  from LOADING the side-car to saving it — `run_topics` refuses without it — so the terminal
-  and the page never lose each other's records. `report` and `dashboard` re-read what was
-  paid for, free. Key from
+  cost total / per pass / per post. `jev topics` spends, and so does a job started through
+  `jev serve`'s API (`jev/picks.py` → `jev/service.py` → `jev/serve.py`: the page live on
+  127.0.0.1 ONLY; routes `/api/<kind>/estimate|evaluate`, ONE job slot for every kind; the
+  estimate = `select_items` + `topics_pass_estimate` over the blob's `cost.per_post`; a
+  single-use, 10-minute confirmation bound to the pick as asked; the job re-selects and
+  re-prices under the lock; `[jev].serve_max_usd` is a HARD bound by reservation — each post's
+  expected cost reserved before sending, unpriced/None-token answers charged it, never $0;
+  every stop is SOFT: in-flight calls are waited for, saved and logged; Host on every route,
+  Origin + token + JSON on every POST; Ctrl-C → 503, drain, exit 130; the page's buttons live
+  in the template's `/* serve */` section, behind `SERVED()` — `blob.serve` is null in the
+  static file). A paid pass holds
+  `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
+  `run_topics` requires the `PassLock` handle — so the terminal and the server never lose
+  each other's records; `jev topics` refused by it exits 75. `report` and `dashboard` re-read
+  what was paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
   collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:
