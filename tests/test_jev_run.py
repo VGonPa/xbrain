@@ -83,8 +83,8 @@ def _pass(cfg: Config, client: FakeJevClient, *, force: bool = False, **hooks) -
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
     )
-    with pass_lock(cfg.jev_lock_path, "test"):
-        return run_topics(cfg, selection, assessments, VOCAB, lambda: client, **hooks)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        return run_topics(cfg, selection, assessments, VOCAB, lambda: client, lock=lock, **hooks)
 
 
 def test_a_pass_saves_logs_and_returns_what_it_did(cfg: Config):
@@ -172,8 +172,8 @@ def test_force_backs_up_the_side_car_before_the_client_is_built(cfg: Config):
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
     )
-    with pass_lock(cfg.jev_lock_path, "test"):
-        run_topics(cfg, selection, assessments, VOCAB, _client, on_backup=backups.append)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        run_topics(cfg, selection, assessments, VOCAB, _client, lock=lock, on_backup=backups.append)
 
     assert len(backups) == 1 and backups[0].exists()
     assert built == [True]
@@ -204,8 +204,8 @@ def test_the_assessments_map_handed_in_is_updated_in_place(cfg: Config):
         char_limit=cfg.jev_state_char_limit,
     )
 
-    with pass_lock(cfg.jev_lock_path, "test"):
-        run_topics(cfg, selection, assessments, VOCAB, FakeJevClient)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        run_topics(cfg, selection, assessments, VOCAB, FakeJevClient, lock=lock)
 
     assert set(assessments) == {"1", "2"}
 
@@ -450,15 +450,22 @@ def test_a_pass_without_the_lock_is_refused_before_any_client_is_built(cfg: Conf
         built.append(True)
         return FakeJevClient()
 
+    with pass_lock(cfg.jev_lock_path, "test") as released:
+        pass
+    with pass_lock(cfg.jev_lock_path.with_name("other.lock"), "test") as elsewhere:
+        with pytest.raises(JevError, match=r"\.lock"):
+            run_topics(cfg, _selection(cfg, {}), {}, VOCAB, _client, lock=elsewhere)
     with pytest.raises(JevError, match=r"\.lock"):
-        run_topics(cfg, _selection(cfg, {}), {}, VOCAB, _client)
+        run_topics(cfg, _selection(cfg, {}), {}, VOCAB, _client, lock=released)
 
     assert built == [] and not cfg.jev_topics_path.exists()
 
 
 def test_the_pass_lock_refuses_a_second_holder_and_names_the_first(cfg: Config):
+    from xbrain.jev.lock import PassLockBusy
+
     with pass_lock(cfg.jev_lock_path, "jev topics"):
-        with pytest.raises(JevError, match=r"otra pasada .*jev topics.*pid"):
+        with pytest.raises(PassLockBusy, match=r"otra pasada .*jev topics.*pid"):
             with pass_lock(cfg.jev_lock_path, "jev serve"):
                 pass  # pragma: no cover - never reached
 
@@ -504,8 +511,10 @@ def test_a_cancelled_pass_stops_asking_and_keeps_what_was_answered(cfg: Config):
 
     client = _CancelAfterFirst()
 
-    with pass_lock(cfg.jev_lock_path, "test"):
-        outcome = run_topics(cfg, _selection(cfg, {}), {}, VOCAB, lambda: client, cancel=cancel)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        outcome = run_topics(
+            cfg, _selection(cfg, {}), {}, VOCAB, lambda: client, lock=lock, cancel=cancel
+        )
 
     assert outcome.interrupted is True
     assert len(client.calls) == 1
@@ -513,3 +522,30 @@ def test_a_cancelled_pass_stops_asking_and_keeps_what_was_answered(cfg: Config):
     assert list(load_assessments(cfg.jev_topics_path)) == ["1"]
     run = _only_run(cfg)
     assert (run.requests, run.ok, run.interrupted) == (1, 1, True)
+
+
+def test_a_lock_that_cannot_be_taken_names_its_path(cfg: Config):
+    blocker = cfg.jev_dir
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("a file where the directory should be")
+
+    with pytest.raises(JevError, match=r"candado .*\.lock"):
+        with pass_lock(cfg.jev_lock_path, "test"):
+            pass  # pragma: no cover - never reached
+
+
+def test_a_failed_release_never_replaces_the_error_in_flight(cfg: Config, monkeypatch, caplog):
+    from xbrain.jev import lock as lock_module
+
+    def _boom(fd: int, length: int) -> None:
+        raise OSError(5, "Input/output error")
+
+    with pytest.raises(ValueError, match="la de verdad"):
+        with pass_lock(cfg.jev_lock_path, "test"):
+            monkeypatch.setattr(lock_module.os, "ftruncate", _boom)
+            raise ValueError("la de verdad")
+
+    assert "Input/output error" in caplog.text
+    monkeypatch.undo()
+    with pass_lock(cfg.jev_lock_path, "after"):
+        pass  # the flock was still released
