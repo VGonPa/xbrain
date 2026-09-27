@@ -3,421 +3,553 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#15202A" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F1F4F6" media="(prefers-color-scheme: light)">
 <title>XBrain — Jev · topics</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
 <style>
-/* Tokens, atmosphere and the shared furniture are `dashboard.template.html`'s, verbatim:
-   the two pages are siblings and a reader must not have to notice which one they are on.
-   This page also follows a LIGHT system theme (the block right after), with the same roles. */
+/* XBrain · Jev — the page's own system (PR 15, VGonPa/xbrain#211).
+   The subject: an archive of saved X posts, a librarian (enrich) who labelled them, and a
+   second reader (Jev) who checks the labels and answers questions over the archive. Colour
+   MEANS something everywhere, and only three things carry one:
+     verdigris  (--agree)  Jev agrees / how relevant a post is to a question
+     pencil     (--pencil) a disagreement: the copy-editor's violet pencil on a label
+     amber      (--money)  money: what was spent, what a button will spend
+   Everything else is ink on paper. Type: IBM Plex Sans for the interface and every number
+   (tabular figures); Source Serif 4 for words that come FROM the archive or the reader — a
+   post's text, a question asked of it — so quoted material reads as quoted material. Offline
+   the page falls back to the system's own sans and serif. The page follows the system's
+   light or dark theme (the light block right after). */
 :root{
-  --bg:#0E0D0B; --surface:#16130E; --surface-2:#1C1811;
-  --hairline:rgba(236,230,218,.09); --hairline-2:rgba(236,230,218,.05);
-  --ink:#ECE6DA; --ink-muted:#A7A093; --ink-faint:#6E685D;
-  --accent:#E0A233; --accent-soft:rgba(224,162,51,.14);
-  --sage:#7C9A8E; --sienna:#C4643B; --mauve:#9B8FB0; --slate:#6E8CA0; --sand:#C9A87C;
-  --saved:#7C9A8E; --failed:#B5533F;
-  --sage-line:rgba(124,154,142,.45); --sienna-line:rgba(196,100,59,.6); --sienna-soft:rgba(196,100,59,.10);
-  --accent-line:rgba(224,162,51,.5); --banner-ink:#F0C7BD; --banner-strong:#FFF;
-  --glow-a:rgba(224,162,51,.10); --glow-b:rgba(110,140,160,.06); --grain:.035;
-  --display:'Fraunces',Georgia,serif; --ui:'Hanken Grotesk',system-ui,sans-serif; --mono:'Spline Sans Mono',monospace;
+  color-scheme:dark;
+  --bg:#15202A; --surface:#1D2A35; --surface-2:#253543; --sunk:#111A22;
+  --line:rgba(214,226,235,.13); --line-2:rgba(214,226,235,.07);
+  /* a form control's edge: ≥ 3:1 on every background a control sits on (WCAG 1.4.11);
+     --line stays for hairlines, which only separate */
+  --ctl:#6B7F91;
+  --text:#E6EDF2; --muted:#A2B2BF; --faint:#8FA0AF;
+  --agree:#46B8A6; --agree-fill:#2E9C8C; --agree-soft:rgba(46,156,140,.16); --agree-line:rgba(70,184,166,.5);
+  --pencil:#B3A6F7; --pencil-soft:rgba(160,144,240,.15); --pencil-line:rgba(179,166,247,.5);
+  --money:#E6AE4E; --money-fill:#D99A2B; --money-ink:#1B1304; --money-soft:rgba(217,154,43,.14); --money-line:rgba(230,174,78,.5);
+  --error:#F08A80; --error-soft:rgba(213,83,75,.14); --error-line:rgba(240,138,128,.5);
+  --focus:#8CC8FF;
+  --ui:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  --read:'Source Serif 4','Iowan Old Style','Palatino Linotype',Georgia,serif;
+  --code:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --r-s:6px; --r-m:9px; --r-l:12px;
 }
 @media (prefers-color-scheme: light){
   :root{
-    --bg:#F6F2EA; --surface:#FFFDF9; --surface-2:#F1EBDF;
-    --hairline:rgba(40,34,24,.13); --hairline-2:rgba(40,34,24,.07);
-    --ink:#1F1B15; --ink-muted:#5C5548; --ink-faint:#8B8374;
-    --accent:#A8690F; --accent-soft:rgba(168,105,15,.11);
-    --sage:#3F6B5B; --sienna:#A8481F; --sand:#7D5E33;
-    --saved:#3F6B5B; --failed:#A23F2B;
-    --sage-line:rgba(63,107,91,.45); --sienna-line:rgba(168,72,31,.55); --sienna-soft:rgba(168,72,31,.08);
-    --accent-line:rgba(168,105,15,.45); --banner-ink:#6E2A1C; --banner-strong:#3D130A;
-    --glow-a:rgba(168,105,15,.08); --glow-b:rgba(63,107,91,.05); --grain:.02;
+    color-scheme:light;
+    --bg:#F1F4F6; --surface:#FFFFFF; --surface-2:#E8EDF1; --sunk:#E2E8ED;
+    --line:rgba(26,37,48,.15); --line-2:rgba(26,37,48,.08);
+    --ctl:#788794; /* 2.99:1 on --sunk: no control sits on --sunk */
+    --text:#1A2530; --muted:#4D5D6A; --faint:#56656F;
+    --agree:#1B7466; --agree-fill:#2E9C8C; --agree-soft:rgba(46,156,140,.13); --agree-line:rgba(27,116,102,.45);
+    --pencil:#5642BF; --pencil-soft:rgba(86,66,191,.09); --pencil-line:rgba(86,66,191,.42);
+    --money:#8A5808; --money-fill:#D99A2B; --money-ink:#1B1304; --money-soft:rgba(217,154,43,.15); --money-line:rgba(138,88,8,.45);
+    --error:#B0352C; --error-soft:rgba(213,83,75,.09); --error-line:rgba(176,53,44,.45);
+    --focus:#1B6FD1;
   }
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-body{background:var(--bg);color:var(--ink);font-family:var(--ui);font-size:15px;line-height:1.5;overflow-x:hidden;position:relative;min-height:100vh}
-.glow{position:fixed;inset:0;pointer-events:none;z-index:0;
-  background:radial-gradient(820px 520px at 12% -6%, var(--glow-a), transparent 60%),
-             radial-gradient(700px 700px at 108% 8%, var(--glow-b), transparent 55%);}
-.grain{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:var(--grain);mix-blend-mode:overlay;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
-.wrap{position:relative;z-index:2;max-width:1360px;margin:0 auto;padding:56px 40px 72px}
+html{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--text);font-family:var(--ui);font-size:16px;line-height:1.5;
+  font-variant-numeric:tabular-nums;overflow-x:hidden;min-height:100vh}
+.wrap{max-width:1400px;margin:0 auto;padding:36px 40px 64px}
 a{color:inherit}
-button{font:inherit;color:inherit}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+button,a,summary,.pillb{touch-action:manipulation}
+h1,h2,h3,h4,.tsec{text-wrap:balance}
+p{text-wrap:pretty}
+.skip{position:absolute;left:16px;top:-60px;z-index:50;background:var(--text);color:var(--bg);padding:8px 14px;border-radius:var(--r-m);font-weight:600;text-decoration:none}
+.skip:focus{top:12px}
+code{font-family:var(--code);font-size:.88em}
+[hidden]{display:none!important}
 
 /* header */
-.masthead{display:flex;justify-content:space-between;align-items:flex-end;gap:32px;
-  padding-bottom:26px;border-bottom:1px solid var(--hairline);
-  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .05s forwards}
-.brand h1{font-family:var(--display);font-weight:600;font-size:52px;line-height:.98;letter-spacing:-.02em;
-  font-optical-sizing:auto}
-.brand h1 .dot{color:var(--accent)}
-.brand p{font-family:var(--display);font-style:italic;font-weight:400;font-size:18px;color:var(--ink-muted);margin-top:10px;letter-spacing:.01em}
-.stamp{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--ink-faint);text-transform:uppercase;
-  border:1px solid var(--hairline);border-radius:2px;padding:9px 14px;line-height:1.9;text-align:right}
-.stamp b{color:var(--ink-muted);font-weight:500}
-.stamp a{color:var(--accent);text-decoration:none}
+.masthead{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-wrap:wrap}
+.brand h1{font-size:25px;font-weight:600;line-height:1.2;letter-spacing:-.01em}
+.brand p{font-size:15px;color:var(--muted);margin-top:4px;max-width:62ch}
+.stamp{display:flex;flex-wrap:wrap;gap:4px 18px;justify-content:flex-end;font-size:13px;color:var(--faint);padding-top:6px;max-width:560px}
+.stamp b{color:var(--text);font-weight:500}
+.stamp a{color:var(--muted);text-underline-offset:3px}
+.stamp a:hover{color:var(--text)}
+details.about{margin-top:10px;max-width:78ch;font-size:14px;color:var(--muted)}
+details.about>summary{cursor:pointer;color:var(--muted);width:max-content;text-underline-offset:3px}
+details.about>summary:hover{color:var(--text)}
+details.about p{margin-top:6px;line-height:1.6}
+p.about{margin:16px 0 14px;font-size:14px;line-height:1.6;color:var(--muted);max-width:92ch}
+details.about b{color:var(--text);font-weight:600}
 
-/* what this is */
-.about{margin-top:26px;max-width:860px;font-size:15.5px;line-height:1.65;color:var(--ink-muted)}
-.about b{color:var(--ink);font-weight:600}
+/* the three top tabs */
+.tabs.top{display:flex;gap:28px;margin-top:26px;border-bottom:1px solid var(--line)}
+.tabs.top a{position:relative;display:inline-flex;align-items:center;gap:8px;padding:10px 0 12px;font-size:16px;font-weight:500;
+  color:var(--muted);text-decoration:none;white-space:nowrap}
+.tabs.top a:hover{color:var(--text)}
+.tabs.top a[aria-current="page"]{color:var(--text);font-weight:600}
+.tabs.top a[aria-current="page"]::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--text);border-radius:2px}
+.tbadge{font-size:11.5px;font-weight:600;line-height:1;border-radius:999px;padding:4px 7px;background:var(--money-soft);color:var(--money);border:1px solid var(--money-line)}
+.toptab{margin-top:22px}
+.jobslot:empty{display:none}
 
-/* kpi band */
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);margin-top:14px;
-  border:1px solid var(--hairline);border-radius:12px;overflow:hidden;background:var(--surface)}
-.kpi{padding:22px 24px 20px;border-right:1px solid var(--hairline);position:relative}
-.kpi:last-child{border-right:0}
-.kpi .lab{font-family:var(--mono);font-size:10.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
-.kpi .num{font-family:var(--display);font-weight:600;font-size:36px;line-height:1.05;margin-top:12px;letter-spacing:-.01em;
-  font-variant-numeric:tabular-nums lining-nums;font-optical-sizing:auto}
-.kpi .num.accent{color:var(--accent)}
-.kpi .ctx{font-size:12.5px;color:var(--ink-muted);margin-top:9px;line-height:1.55}
+/* Revisar: the cost strip, one quiet row with the money in amber */
+.panel{min-width:0}
+#cost{padding:0 0 16px;border-bottom:1px solid var(--line-2)}
+.phead{display:flex;justify-content:space-between;align-items:baseline;gap:6px 16px;flex-wrap:wrap;margin-bottom:10px}
+.phead h2{font-size:16px;font-weight:600;line-height:1.3}
+.phead .sub{font-size:13px;color:var(--faint)}
+.kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 32px}
+.kpi .lab{font-size:13px;color:var(--muted)}
+.kpi .num{font-size:22px;font-weight:600;line-height:1.25;margin-top:2px;letter-spacing:-.005em}
+.kpi .num.accent{color:var(--money)}
+.kpi .ctx{font-size:13px;color:var(--faint);margin-top:3px;line-height:1.5}
+.note{font-size:14px;color:var(--muted);margin:12px 0 0;line-height:1.55;padding-left:12px;border-left:2px solid var(--money-line);max-width:90ch}
+.muted{font-size:13.5px;color:var(--faint);margin:8px 0 0;line-height:1.55}
+details.hist{margin-top:12px}
+details.hist>summary,.rail .tbox>summary,details.saw>summary,.q details>summary{cursor:pointer;font-size:13.5px;color:var(--muted);width:max-content;max-width:100%}
+details.hist>summary:hover,.rail .tbox>summary:hover,details.saw>summary:hover{color:var(--text)}
+details.hist[open]>summary{margin-bottom:8px}
 
-/* panels */
-.panel{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:22px 24px 18px;margin-top:22px;
-  box-shadow:0 1px 0 rgba(0,0,0,.4), 0 18px 40px -30px rgba(0,0,0,.9);min-width:0;
-  opacity:0;animation:rise .7s cubic-bezier(.2,.7,.2,1) .15s forwards}
-.phead{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
-  padding-bottom:14px;margin-bottom:12px;border-bottom:1px solid var(--hairline-2)}
-.phead .kick{font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);display:block;margin-bottom:7px}
-.phead h2{font-family:var(--display);font-weight:600;font-size:22px;letter-spacing:-.005em;line-height:1.1}
-.phead .sub{font-size:12px;color:var(--ink-faint);text-align:right}
-.note{font-size:13px;color:var(--sand);margin:12px 2px 0;line-height:1.6}
-.muted{font-size:12.5px;color:var(--ink-faint);margin:10px 2px 0;line-height:1.6}
-details.hist{margin-top:18px}
-details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:10px}
+/* the three numbers: three sentences, their figures in the colour of what they are */
+#numbers{padding:18px 0 4px}
+#numbers .phead h2{font-size:16px}
+.facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 32px}
+.fact{min-width:0}
+.fact .big{font-size:18px;font-weight:500;line-height:1.4}
+.fact .big em{font-style:normal;font-weight:600;color:var(--agree);white-space:nowrap}
+#facts .fact:nth-child(2) .big em,.csec .fact:nth-child(2) .big{color:inherit}
+#facts .fact:nth-child(2) .big em{color:var(--pencil)}
+.fact .why{font-size:14px;color:var(--muted);margin-top:6px;line-height:1.55}
 
-/* the three numbers */
-.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-.fact .big{font-family:var(--display);font-weight:600;font-size:21px;line-height:1.3}
-.fact .big em{font-style:normal;color:var(--accent)}
-.fact .why{font-size:13px;color:var(--ink-muted);margin-top:8px;line-height:1.55}
-
-/* tables (the per-pass history) */
+/* tables */
 .twrap{overflow:auto}
-.t thead th{position:sticky;top:0;z-index:1;background:var(--surface)}
-.t{width:100%;border-collapse:collapse;font-size:13px}
-.t th{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
-  color:var(--ink-faint);text-align:left;font-weight:400;padding:0 12px 9px 0;white-space:nowrap}
-.t td{padding:10px 12px 10px 0;border-top:1px solid var(--hairline-2);vertical-align:top;overflow-wrap:anywhere}
-.t .n{font-family:var(--mono);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
-.empty{font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:14px 0}
+.t{width:100%;border-collapse:collapse;font-size:14px}
+.t thead th{position:sticky;top:0;z-index:1;background:var(--bg)}
+.t th{font-size:13px;font-weight:600;color:var(--muted);text-align:left;padding:0 14px 8px 0;white-space:nowrap;vertical-align:bottom}
+.t td{padding:9px 14px 9px 0;border-top:1px solid var(--line-2);vertical-align:top;overflow-wrap:anywhere}
+.t .n{white-space:nowrap}
+.empty{font-size:14px;color:var(--faint);padding:14px 0}
 
-/* tabs */
-.tabbar{display:flex;align-items:flex-end;margin-top:30px;border-bottom:1px solid var(--hairline)}
-.tabs{display:flex;gap:4px;flex:1 1 auto;min-width:0;overflow-x:auto}
-.tabs a{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;text-decoration:none;
-  color:var(--ink-faint);padding:12px 16px 11px;border-bottom:2px solid transparent;white-space:nowrap}
-.tabs a:hover{color:var(--ink)}
-.tabs a[aria-current="page"]{color:var(--accent);border-bottom-color:var(--accent)}
-.tabs a:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+/* Revisar's sub-tabs: a segmented control, with the Vista switch beside it */
+.tabbar{display:flex;align-items:center;justify-content:space-between;gap:12px 20px;flex-wrap:wrap;margin-top:18px}
+.tabs.sub{display:inline-flex;gap:2px;padding:3px;background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r-m);min-width:0;overflow-x:auto}
+.tabs.sub a{padding:6px 16px;border-radius:7px;font-size:15px;font-weight:500;color:var(--muted);text-decoration:none;white-space:nowrap}
+.tabs.sub a:hover{color:var(--text)}
+.tabs.sub a[aria-current="page"]{background:var(--surface);color:var(--text);box-shadow:0 0 0 1px var(--line)}
+.vista-host:empty{display:none}
+.vista{display:flex;align-items:center;gap:2px;white-space:nowrap}
+.vista span{font-size:13.5px;color:var(--muted);margin-right:6px}
+.vista button{font-size:13.5px;background:none;border:1px solid var(--line);padding:4px 11px;cursor:pointer;color:var(--muted)}
+.vista button:first-of-type{border-radius:999px 0 0 999px}
+.vista button:last-of-type{border-radius:0 999px 999px 0;margin-left:-1px}
+.vista button[aria-pressed="true"]{background:var(--surface-2);color:var(--text);border-color:var(--line)}
 
-/* posts: rail + list */
-.browse{display:grid;grid-template-columns:290px minmax(0,1fr);gap:26px;margin-top:22px;align-items:start}
-.rail{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;padding-right:4px}
-.rail h3{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);font-weight:400;margin:4px 0 8px}
-.rail .tbox{margin-top:22px}
-.rail .tbox>summary{cursor:pointer;font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint);margin:0 0 8px}
-.rail .legend{font-size:11.5px;color:var(--ink-faint);line-height:1.5;margin:-2px 0 8px}
+/* Posts: the filter rail and the list */
+.browse{display:grid;grid-template-columns:232px minmax(0,1fr);gap:28px;margin-top:18px;align-items:start}
+.rail{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;overscroll-behavior:contain;padding:2px 4px 8px 2px}
+.rail h3{font-size:13px;font-weight:600;color:var(--muted);margin:2px 0 6px}
+.rail .tbox{margin-top:18px}
+.rail .tbox>summary{font-weight:600;margin:0 0 6px}
+.rail .legend{font-size:12.5px;color:var(--faint);line-height:1.5;margin:0 0 8px}
 .f{display:flex;justify-content:space-between;align-items:baseline;gap:10px;width:100%;text-align:left;cursor:pointer;
-  background:none;border:1px solid transparent;border-radius:8px;padding:6px 9px;font-size:13.5px;color:var(--ink-muted)}
-.f:hover{background:var(--surface);color:var(--ink)}
-.f[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--ink)}
-.f:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.f .c{font-family:var(--mono);font-size:11px;color:var(--ink-faint);white-space:nowrap;font-variant-numeric:tabular-nums}
-.f .c .d{color:var(--sienna)}
-.f .c .z{opacity:.5}
-.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
-.controls input[type=search]{flex:1;min-width:200px;background:var(--surface-2);color:var(--ink);
-  border:1px solid var(--hairline);border-radius:8px;padding:8px 12px;font-family:var(--ui);font-size:13.5px}
-.controls select{background:var(--surface-2);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:7px 10px;font-family:var(--ui);font-size:13px}
-.controls input:focus-visible,.controls select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.count{font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint)}
-.keys{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin:-4px 0 12px}
-.keys kbd{font-family:var(--mono);border:1px solid var(--hairline);border-radius:3px;padding:0 4px;margin:0 2px}
-.chipline{display:flex;gap:8px;flex-wrap:wrap;margin:-4px 0 12px}
-.chipx{font-size:12px;border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:999px;padding:2px 10px;cursor:pointer}
-.more{display:block;margin:18px auto 0;background:var(--surface);border:1px solid var(--hairline);border-radius:8px;padding:8px 16px;cursor:pointer;font-size:13px;color:var(--ink-muted)}
-.more:hover{color:var(--ink)}
-/* `display:block` above would override the `hidden` attribute and leave "Mostrar 0 más" on screen. */
-.more[hidden]{display:none}
+  background:none;border:0;border-radius:7px;padding:6px 9px;font-size:14px;color:var(--muted)}
+.f:hover{background:var(--surface);color:var(--text)}
+.f[aria-pressed="true"]{background:var(--surface-2);color:var(--text);font-weight:600}
+.f .c{font-size:12.5px;font-weight:400;color:var(--faint);white-space:nowrap}
+.f .c .ok{color:var(--agree)}
+.f .c .d{color:var(--pencil)}
+.f .c .dn{display:inline-block;min-width:1.6em;text-align:right}
+.rail .thead{font-size:12px;color:var(--faint);text-align:right;margin:0 9px 2px}
+.f .c .z{opacity:.55}
+.controls{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;margin-bottom:12px}
+.controls input[type=search]{flex:1;min-width:200px;background:var(--surface);color:var(--text);
+  border:1px solid var(--ctl);border-radius:var(--r-m);padding:8px 12px;font-size:15px}
+.controls select,.tsort{background:var(--surface);color:var(--text);border:1px solid var(--ctl);border-radius:var(--r-m);padding:7px 10px;font-size:14px}
+.count{font-size:13.5px;color:var(--faint)}
+.keys{font-size:12.5px;color:var(--faint);margin:-2px 0 12px}
+.keys kbd{font-family:var(--code);font-size:11.5px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;margin:0 1px}
+.chipline{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.chipline:empty{display:none}
+.chipx{font-size:13.5px;border:1px solid var(--line);background:var(--surface-2);border-radius:999px;padding:3px 11px;cursor:pointer}
+.chipx:hover{border-color:var(--muted)}
+.more{display:block;margin:16px auto 0;background:none;border:1px solid var(--line);border-radius:var(--r-m);padding:8px 16px;cursor:pointer;font-size:14px;color:var(--muted)}
+.more:hover{color:var(--text);border-color:var(--muted)}
 
-/* the card: an X-style share preview, then Jev vs enrich */
-.card{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:16px 18px 14px;margin-bottom:16px;
-  scroll-margin-top:14px;box-shadow:0 18px 40px -34px rgba(0,0,0,.9)}
-.card.cur{border-color:var(--accent-line);box-shadow:0 0 0 1px var(--accent-line)}
+/* The card. At a list width that leaves room beside X's 550 px frame, Jev's block sits beside
+   the post instead of under it (the list is the container, so every list gets it). */
+#cards,.glist>div,.asklist{container-type:inline-size}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:16px 20px 16px;margin-bottom:14px;scroll-margin-top:14px}
+.card.cur{border-color:var(--muted);box-shadow:0 0 0 1px var(--muted)}
 .card:focus{outline:none}
-.twh{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.av{width:36px;height:36px;border-radius:50%;background:var(--accent);color:var(--bg);display:grid;place-items:center;font-weight:700;flex:none}
+.card:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.card.asked{border-left:4px solid var(--agree-line);border-left-color:color-mix(in srgb,var(--agree-fill) calc(var(--p,.5) * 100%),var(--line))}
+@container (min-width: 1010px){
+  .card{display:grid;grid-template-columns:minmax(0,550px) minmax(0,1fr);column-gap:28px;align-items:start}
+  .card>.twh,.card>.askr,.card>.empty{grid-column:1 / -1}
+  .card>.pv{grid-column:1}
+  .card>.jev{grid-column:2;margin-top:0;padding:0 0 0 24px;border-top:0;border-left:1px solid var(--line-2);position:sticky;top:14px}
+  /* X's frame carries the author and date, so the head holds only our links: it goes to the
+     top of Jev's column and the frame starts at the card's top edge (no empty band above it). */
+  .card.x{grid-template-rows:auto 1fr}
+  .card.x>.twh{grid-column:2;grid-row:1;padding-left:24px;border-left:1px solid var(--line-2);margin-bottom:0}
+  .card.x>.pv{grid-row:1 / span 2}
+  .card.x>.pv>.xembed:first-child{margin-top:0}
+  .card.x>.jev{grid-row:2;padding-top:10px}
+}
+/* A Preguntar result's side is short (a score, a fold, a button): it goes beside the post at a
+   much narrower list than Posts' topic table needs. The last row takes the post's extra height,
+   so the strip and Jev's block stay together at the top. */
+@container (min-width: 780px){
+  .asklist .card{display:grid;grid-template-columns:minmax(0,550px) minmax(200px,1fr);grid-template-rows:auto auto auto 1fr;column-gap:24px;align-items:start}
+  .asklist .card>.twh{grid-column:1 / -1;grid-row:1;padding-left:0;border-left:0}
+  .asklist .card>.pv{grid-column:1;grid-row:2 / -1}
+  .asklist .card>.askr{grid-column:2;grid-row:2;margin-top:0}
+  .asklist .card>.jev{grid-column:2;grid-row:3;margin-top:12px;border-top:0;padding:0;border-left:0;position:static}
+  .asklist .card>.askr,.asklist .card>.jev{padding-left:20px;border-left:1px solid var(--line-2)}
+  /* X's frame carries the author: our links head the side column, the frame starts at the top */
+  .asklist .card.x>.twh{grid-column:2;grid-row:1;padding-left:20px;border-left:1px solid var(--line-2)}
+  .asklist .card.x>.pv{grid-row:1 / -1}
+  .asklist .card.x>.pv>.xembed:first-child{margin-top:0}
+}
+.jev>details>summary{cursor:pointer;font-size:13.5px;color:var(--muted);overflow-wrap:anywhere}
+.jev>details>summary:hover,.jev>details[open]>summary{color:var(--text)}
+.jev>details[open]>summary{margin-bottom:8px}
+.twh{display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-height:28px}
+.av{width:34px;height:34px;border-radius:50%;background:var(--surface-2);color:var(--muted);display:grid;place-items:center;font-weight:600;font-size:15px;flex:none}
 .who{min-width:0;line-height:1.3}
 .who b{font-weight:600}
-.who span{color:var(--ink-faint);font-size:13px}
-.links{margin-left:auto;display:flex;gap:12px;align-items:center}
-.lk{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--ink-faint);text-decoration:none;white-space:nowrap}
-.lk:hover{color:var(--accent)}
-.st{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px dashed var(--hairline);border-radius:999px;padding:1px 8px;color:var(--ink-faint)}
-.twt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15.5px;line-height:1.55;margin:10px 0 4px}
-.twt a{color:var(--accent)}
+.who span{color:var(--faint);font-size:14px}
+/* X's own embed shows the author and the date: the card's header keeps only what is ours. */
+.card.x>.twh .av,.card.x>.twh .who{display:none}
+.links{margin-left:auto;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.lk{font-size:13.5px;color:var(--muted);text-decoration:none;white-space:nowrap}
+.lk:hover{color:var(--text);text-decoration:underline;text-underline-offset:3px}
+.st{font-size:12.5px;border:1px dashed var(--line);border-radius:999px;padding:1px 9px;color:var(--muted)}
+.twt{font-family:var(--read);white-space:pre-wrap;overflow-wrap:anywhere;font-size:17px;line-height:1.55;margin:10px 0 4px;max-width:70ch}
+.twt a{color:var(--agree);text-underline-offset:3px}
 .artmore{display:flex;gap:14px;margin:6px 0 0}
-.twt.clamp{max-height:12.5em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
-.toggle{background:none;border:0;color:var(--accent);cursor:pointer;font-size:13px;padding:2px 0}
-.media{display:grid;gap:4px;border-radius:12px;overflow:hidden;margin-top:10px}
+.twt.clamp{max-height:12.5em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent);mask-image:linear-gradient(#000 70%,transparent)}
+.toggle{background:none;border:0;color:var(--muted);cursor:pointer;font-size:14px;padding:2px 0;text-decoration:underline;text-underline-offset:3px}
+.toggle:hover{color:var(--text)}
+.media{display:grid;gap:4px;border-radius:var(--r-m);overflow:hidden;margin-top:10px;max-width:550px}
 .media.n2,.media.n4{grid-template-columns:1fr 1fr}.media.n3{grid-template-columns:2fr 1fr}
 .media figure{margin:0;position:relative;background:var(--surface-2);min-height:110px}
 .media img{display:block;width:100%;height:100%;max-height:380px;object-fit:cover}
 .play{position:absolute;inset:0;display:grid;place-items:center;font-size:34px;color:#fff;text-shadow:0 2px 8px #000;pointer-events:none}
-.noimg{display:grid;place-items:center;height:110px;color:var(--ink-faint);font-family:var(--mono);font-size:11px}
-.tw.quoted{border:1px solid var(--hairline);border-radius:12px;padding:10px 12px;margin-top:10px;background:var(--surface-2)}
-.tw.quoted .twt{font-size:14px;margin:6px 0 0}
-.lc{display:flex;flex-direction:column;gap:2px;border:1px solid var(--hairline);border-radius:12px;padding:9px 12px;margin-top:10px;text-decoration:none;color:var(--ink)}
-.lc:hover{border-color:var(--accent-line)}
-.lc .dom{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
-.lc b{font-size:14px;font-weight:600;overflow-wrap:anywhere}
-.jev{margin-top:14px;padding-top:12px;border-top:1px solid var(--hairline-2)}
-.jh{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
-.jh .kick{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-faint)}
-.jh .meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-left:auto}
-.badge{font-family:var(--mono);font-size:10px;letter-spacing:.06em;border-radius:999px;padding:1px 8px;border:1px solid var(--hairline);color:var(--ink-muted)}
-.badge.d{border-color:var(--sienna-line);color:var(--sienna);background:var(--sienna-soft)}
-.badge.cut{border-color:var(--accent-line);color:var(--accent)}
-.rows{width:100%;border-collapse:collapse;font-size:13px}
-.rows td{padding:5px 10px 5px 0;border-top:1px solid var(--hairline-2);vertical-align:middle}
-.rows td.tp{width:40%;overflow-wrap:anywhere}
-.rows td.en{width:3em;text-align:center;font-family:var(--mono)}
-.rows td.en.y{color:var(--sage)}
-.rows td.en.n{color:var(--ink-faint)}
-.bar{display:flex;align-items:center;gap:8px;min-width:130px}
-.bar i{display:block;height:6px;border-radius:3px;background:var(--hairline);flex:1;position:relative;overflow:hidden}
-.bar i b{position:absolute;inset:0 auto 0 0;background:var(--slate)}
-.bar i s{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--ink-faint)}
-.bar span{font-family:var(--mono);font-size:11px;width:3.2em;text-align:right;font-variant-numeric:tabular-nums}
-.v{font-size:11.5px;border-radius:999px;padding:1px 9px;white-space:nowrap;border:1px solid var(--hairline)}
-.v.ok{border-color:var(--sage-line);color:var(--sage)}
-.v.en{border-color:var(--sienna-line);color:var(--sienna);background:var(--sienna-soft)}
-.v.jv{border-color:var(--accent-line);color:var(--accent);background:var(--accent-soft)}
-.v.un{border-style:dashed;color:var(--ink-faint)}
-.prim{font-size:13px;margin-top:9px;color:var(--ink-muted)}
-/* X's own embed (the frame is X's page; the note and the toggle are ours) */
+.noimg{display:grid;place-items:center;height:110px;color:var(--faint);font-size:13px;padding:0 10px;text-align:center}
+.tw.quoted{border:1px solid var(--line);border-radius:var(--r-m);padding:10px 12px;margin-top:10px;background:var(--bg);max-width:550px}
+.tw.quoted .twt{font-size:15.5px;margin:6px 0 0}
+.lc{display:flex;flex-direction:column;gap:2px;border:1px solid var(--line);border-radius:var(--r-m);padding:9px 12px;margin-top:10px;text-decoration:none;color:var(--text);max-width:550px}
+.lc:hover{border-color:var(--muted)}
+.lc .dom{font-size:12.5px;color:var(--faint)}
+.lc b{font-size:15px;font-weight:600;overflow-wrap:anywhere}
 .xembed{max-width:550px;margin-top:10px}
-.xembed:empty{height:220px;border-radius:12px;background:var(--surface-2)}
-.xembed iframe{display:block;width:100%;border:0;border-radius:12px}
-.xnote{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-top:10px}
-.vtog{background:none;border:0;cursor:pointer;padding:0}
-.vista{display:flex;align-items:center;gap:4px;padding:0 0 6px 12px;white-space:nowrap}
-.vista span{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);margin-right:4px}
-.vista button{font-family:var(--mono);font-size:11px;background:none;border:1px solid var(--hairline);border-radius:999px;padding:2px 10px;cursor:pointer;color:var(--ink-muted)}
-.vista button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--ink)}
-.vista button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.prim b{color:var(--ink);font-weight:600}
-.prim.diff b{color:var(--sienna)}
-details.saw{margin-top:10px}
-details.saw>summary{cursor:pointer;font-size:12.5px;color:var(--ink-muted)}
-details.saw[open]>summary{color:var(--ink)}
-.src{margin:10px 0 0;padding-left:10px;border-left:2px solid var(--hairline)}
-.src .sl{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
-.src .sl .cut{color:var(--sienna)}
-.src pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--ui);font-size:13px;color:var(--ink-muted);margin-top:3px}
-.ask{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
-.ask code{font-family:var(--mono);font-size:11.5px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere}
-.ask button{background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px}
-.ask button:hover{border-color:var(--accent-line)}
-/* Serve mode: the evaluate buttons and the estimate → confirm → progress panel. */
-.evalb{background:var(--surface-2);border:1px solid var(--accent-line);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;font-family:var(--ui)}
-.evalb:hover{background:var(--accent-soft)}
-.evalb:disabled{opacity:.45;cursor:default}
-.evalb.go{background:var(--accent);color:var(--bg);border-color:var(--accent)}
-.evalrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
-.evalnext{display:inline-flex;gap:6px;align-items:center}
-.evalnext[hidden]{display:none}
-.evalnext input{width:64px;background:var(--surface-2);border:1px solid var(--hairline);color:var(--ink);border-radius:6px;padding:3px 6px;font-size:12px}
-.askp{position:fixed;right:16px;bottom:16px;z-index:20;width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;
-  background:var(--surface);border:1px solid var(--accent-line);border-radius:10px;padding:14px 16px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.askp[hidden]{display:none}
-.askp .tsec{margin-top:0}
-.askp .est{margin:6px 0;font-size:13px}
-.askp .askf{display:flex;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--ink-muted);margin:6px 0}
-.askp .askf[hidden]{display:none}
-.askp .err{color:var(--failed);font-size:13px;margin:6px 0;overflow-wrap:anywhere}
-.askp .err[hidden]{display:none}
-.askp .prog[hidden]{display:none}
-.askp .pbar{display:block;height:6px;background:var(--hairline);border-radius:3px;overflow:hidden;margin:8px 0 4px}
-.askp .pbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
-.askp .askb{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
-.askp .askb button[hidden]{display:none}
-/* the Preguntar tab: form, results (the post cards, each with what it answers) and history */
-.askl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:26px;margin-top:22px;align-items:start}
-.askform{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:16px 18px;margin-bottom:18px}
-.askform textarea{display:block;width:100%;box-sizing:border-box;font:inherit;color:var(--ink);background:var(--surface-2);border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;resize:vertical}
-.askfs{display:flex;flex-wrap:wrap;gap:10px 14px;margin:10px 0}
-.askfld{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--ink-muted);min-width:0;max-width:100%}
-.askfld input,.askfld select{font:inherit;font-size:13px;color:var(--ink);background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 8px;max-width:100%;box-sizing:border-box}
-.askfld.chk{flex-direction:row;align-items:center;gap:6px;align-self:flex-end}
-.askform .muted{margin:8px 0 0}
-.askmain,.askres{min-width:0}
-.askmain>.note{margin:0 2px 18px}
-.askhead{margin-bottom:14px}
-.askhead .tsec{margin-top:0;overflow-wrap:anywhere}
-.askhead p{font-size:13px;color:var(--ink-muted);margin-top:4px}
-.askhead .err{color:var(--failed)}
-.askr{margin:10px 0 4px;padding:8px 10px;border:1px solid var(--accent-line);border-radius:10px;background:var(--accent-soft)}
-.askr .jh{margin-bottom:0}
-.askr .ap{font-family:var(--display);font-weight:600;font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}
-.askr .apbar{display:inline-block;flex:0 0 120px;width:120px;max-width:30vw;height:8px;background:var(--hairline);border-radius:4px;overflow:hidden;vertical-align:middle}
-.askr .apbar i{display:block;height:100%;background:var(--accent)}
-.asktopics{border:1px solid var(--hairline);border-radius:8px;padding:6px 8px;margin:10px 0 0;max-height:190px;overflow:auto;min-width:0}
-.asktopics legend{font-size:12px;color:var(--ink-muted);padding:0 4px}
-.asktopics label{display:inline-flex;align-items:center;gap:5px;margin:3px 12px 3px 0;font-size:12.5px;color:var(--ink);overflow-wrap:anywhere}
-.asktopics .tcount{color:var(--ink-faint);font-variant-numeric:tabular-nums}
-.asktopics .tcount::before{content:'('}
-.asktopics .tcount::after{content:')'}
-.askmore{margin:6px 0 12px}
-.askform h4{margin:0 0 8px;font-size:13.5px;font-weight:600}
-.askrefine{margin:12px 0 14px}
-.askside{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;min-width:0}
-.askside .tsec{margin-top:0}
-.askside ol{list-style:none;padding:0;margin:10px 0 0}
-.askside li a{display:block;padding:8px 10px;border:1px solid var(--hairline);border-radius:10px;margin-bottom:8px;text-decoration:none;color:var(--ink);background:var(--surface);overflow-wrap:anywhere}
-.askside li a:hover{border-color:var(--accent-line)}
-.askside li a[aria-current="true"]{border-color:var(--accent)}
-.askside li b{font-weight:600;font-size:13.5px}
-.askside li small{display:block;color:var(--ink-faint);font-size:11.5px;margin-top:3px}
-.echips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
-.echips span{font-size:12px;border:1px solid var(--hairline);border-radius:999px;padding:1px 9px}
+.xembed:empty{height:220px;border-radius:var(--r-l);background:var(--surface-2)}
+.xembed iframe{display:block;width:100%;border:0;border-radius:var(--r-l);color-scheme:normal}
+.xnote{font-size:13px;color:var(--faint);margin-top:10px}
+.vtog{background:none;border:0;cursor:pointer;padding:0;font-family:inherit}
 
-/* topics: index table and detail */
-.tt th{vertical-align:bottom}
-.tt th .th{background:none;border:0;cursor:pointer;text-align:left;padding:0;color:var(--ink-faint);font-family:var(--mono);
-  font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;display:flex;flex-direction:column;gap:4px;max-width:150px}
-.tt th .th small{font-family:var(--ui);letter-spacing:0;text-transform:none;font-size:11px;line-height:1.35;color:var(--ink-faint);white-space:normal}
-.tt th .th:hover span,.tt th[aria-sort="ascending"] .th span,.tt th[aria-sort="descending"] .th span{color:var(--accent)}
+/* Jev's block: what the second reader says about this post's labels */
+.jev{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-2);min-width:0}
+.jh{display:flex;gap:8px 10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
+.jh .kick{font-size:14px;font-weight:600;color:var(--text)}
+.jh .meta{font-size:12.5px;color:var(--faint);margin-left:auto}
+.badge{font-size:12.5px;border-radius:999px;padding:1px 9px;border:1px solid var(--line);color:var(--muted)}
+.badge.d{border-color:var(--pencil-line);color:var(--pencil);background:var(--pencil-soft)}
+.badge.cut{border-color:var(--line);color:var(--muted);border-style:dashed}
+.rows{width:100%;border-collapse:collapse;font-size:14px}
+.rows td{padding:5px 10px 5px 0;border-top:1px solid var(--line-2);vertical-align:middle}
+.rows tr:first-child td{border-top:0}
+.rows td.tp{width:auto;min-width:8.5em;overflow-wrap:break-word;hyphens:auto}
+.rows td.en{width:2.4em;text-align:center}
+.rows td.en.y{color:var(--agree);font-weight:600}
+.rows td.en.n{color:var(--faint)}
+.bar{display:flex;align-items:center;gap:8px;min-width:96px}
+.bar i{display:block;height:6px;border-radius:3px;background:var(--surface-2);flex:1;min-width:44px;position:relative;overflow:hidden}
+.bar i b{position:absolute;inset:0 auto 0 0;background:var(--agree-fill);border-radius:3px}
+.bar i s{position:absolute;top:0;bottom:0;width:2px;background:var(--text);opacity:.55}
+.bar span{font-size:13px;width:2.8em;text-align:right;color:var(--muted)}
+.v{font-size:12.5px;border-radius:999px;padding:1px 9px;white-space:nowrap;border:1px solid var(--line);color:var(--muted)}
+.v.ok{border-color:var(--agree-line);color:var(--agree)}
+.v.en{border-color:var(--pencil-line);color:var(--pencil);background:var(--pencil-soft)}
+.v.jv{border-color:var(--pencil-line);color:var(--pencil)}
+.v.un{border-style:dashed;color:var(--faint)}
+.prim{font-size:14px;margin-top:9px;color:var(--muted)}
+.prim b{color:var(--text);font-weight:600}
+.prim.diff b{color:var(--pencil)}
+details.saw{margin-top:10px}
+details.saw[open]>summary{color:var(--text)}
+.src{margin:10px 0 0;padding-left:12px;border-left:2px solid var(--line)}
+.src .sl{font-size:12.5px;color:var(--faint)}
+.src .sl .cut{color:var(--pencil)}
+.src pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--read);font-size:14.5px;line-height:1.5;color:var(--muted);margin-top:3px;max-width:75ch}
+.rows td.tp a.tlink{color:inherit;text-decoration:none;border-bottom:1px dotted var(--faint)}
+.rows td.tp a.tlink:hover{border-bottom-style:solid}
+.echips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.echips span{font-size:13px;border:1px solid var(--line);border-radius:999px;padding:1px 9px}
+.ask{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.ask code{font-size:12.5px;background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r-s);padding:4px 8px;overflow-wrap:anywhere}
+.ask button{background:none;border:1px solid var(--line);border-radius:var(--r-s);padding:4px 10px;cursor:pointer;font-size:13.5px;color:var(--muted)}
+.ask button:hover{color:var(--text);border-color:var(--muted)}
+
+/* buttons: secondary by default; «… y pagar» is the one amber button; a neutral primary */
+.evalb{background:none;border:1px solid var(--line);color:var(--text);border-radius:var(--r-m);padding:6px 13px;cursor:pointer;font-size:14px;font-weight:500;line-height:1.35}
+.evalb:hover{background:var(--surface-2);border-color:var(--muted)}
+.evalb:disabled{opacity:.45;cursor:default;background:none;border-color:var(--line)}
+.evalb.go{background:var(--money-fill);border-color:var(--money-fill);color:var(--money-ink);font-weight:600}
+.evalb.go:hover:not(:disabled){filter:brightness(1.06)}
+.evalb.go:disabled{background:var(--money-fill);border-color:var(--money-fill)}
+.evalb.primary{background:var(--text);border-color:var(--text);color:var(--bg);font-weight:600}
+.evalb.primary:hover{opacity:.9;background:var(--text)}
+.evalrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.evalnext{display:inline-flex;gap:6px;align-items:center}
+.evalnext input{width:64px;background:var(--surface);border:1px solid var(--ctl);color:var(--text);border-radius:var(--r-s);padding:5px 7px;font-size:14px}
+
+/* The estimate → confirm → progress block: in the page, under what opened it (never floating).
+   The amber edge says: this block is about money. */
+.jobp{margin:12px 0 16px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--money-fill);
+  border-radius:var(--r-m);padding:14px 18px;scroll-margin-top:14px;max-width:880px}
+.jobp .tsec{margin:0;font-size:15.5px;font-weight:600;overflow-wrap:anywhere}
+.jobp .tsec:focus{outline:none}
+.jobp .tsec:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.jobp .est{margin:6px 0;font-size:14px;line-height:1.55;color:var(--muted);max-width:78ch}
+.jobp .askf{display:flex;gap:8px;align-items:flex-start;font-size:14px;color:var(--muted);margin:8px 0}
+.jobp .askf input{margin-top:4px;accent-color:var(--money-fill)}
+.jobp .err{color:var(--error);font-size:14px;margin:6px 0;overflow-wrap:anywhere}
+.jobp .pbar{display:block;height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;margin:10px 0 6px}
+.jobp .pbar i{display:block;height:100%;width:0;background:var(--money-fill);transition:width .25s ease-out}
+.jobp .prog .muted{font-size:14px;color:var(--muted);margin:0}
+.jobp .askb{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+
+/* Preguntar */
+.askcost{font-size:13.5px;color:var(--muted);margin:4px 0 0}
+.askmain>.askcost{margin:0 0 12px}
+.money{color:var(--money);font-weight:600}
+/* Preguntar: the question is the page's one large thing; everything around it stays quiet */
+.askl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:32px;align-items:start}
+.askmain,.askres{min-width:0}
+.askform.hero{padding:4px 0 18px;border-bottom:1px solid var(--line-2);margin-bottom:6px}
+.asklabel{display:block;font-size:14px;font-weight:600;color:var(--muted);margin-bottom:8px}
+.askform textarea{display:block;width:100%;font-family:var(--read);font-size:23px;line-height:1.4;color:var(--text);
+  background:var(--surface);border:1px solid var(--ctl);border-radius:var(--r-l);padding:16px 18px;resize:vertical;min-height:96px}
+.askform textarea::placeholder{color:var(--faint);opacity:1}
+.askform textarea:focus-visible{outline:2px solid var(--focus);outline-offset:1px;border-color:transparent}
+.askform h4,.askrefine h4{font-size:13.5px;font-weight:600;color:var(--muted);margin:16px 0 8px}
+.pills{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.pill{position:relative}
+.pillb{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--ctl);border-radius:999px;
+  padding:5px 12px 5px 14px;font-size:14px;color:var(--muted);cursor:pointer;max-width:320px}
+.pillb .pn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pillb .chev{width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:translateY(-2px) rotate(45deg);opacity:.75;flex:none}
+.pillb[aria-expanded="true"] .chev{transform:translateY(1px) rotate(225deg)}
+.pillb:hover{color:var(--text);border-color:var(--muted)}
+.pillb.set{color:var(--text);background:var(--surface-2);border-color:var(--muted);font-weight:500}
+.pillb[aria-expanded="true"]{border-color:var(--text);color:var(--text)}
+.pop{position:absolute;z-index:30;top:calc(100% + 6px);left:0;min-width:260px;max-width:min(420px,calc(100vw - 32px));
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:12px 14px;
+  box-shadow:0 14px 34px -12px rgba(0,0,0,.45);overscroll-behavior:contain}
+.pop .find{width:100%;background:var(--bg);border:1px solid var(--ctl);border-radius:var(--r-s);padding:6px 9px;font-size:14px;margin-bottom:8px}
+.pop .muted{margin:8px 0 0;font-size:13px}
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.preset{background:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:13.5px;color:var(--muted);cursor:pointer}
+.preset:hover{color:var(--text);border-color:var(--muted)}
+.range{display:flex;gap:10px;flex-wrap:wrap}
+.askfld{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);min-width:0;max-width:100%}
+.askfld input,.askfld select{font-size:14.5px;color:var(--text);background:var(--bg);border:1px solid var(--ctl);border-radius:var(--r-s);padding:5px 8px;max-width:100%}
+.askfld.chk{flex-direction:row;align-items:center;gap:7px;font-size:14px;color:var(--muted);padding:5px 4px;cursor:pointer}
+.askfld.chk input{accent-color:var(--agree-fill);width:15px;height:15px}
+.askfld.inline{flex-direction:row;align-items:center;gap:7px;font-size:14px}
+.askfld.inline input{width:72px}
+.asktopics{border:0;padding:0;margin:0;max-height:280px;overflow:auto;min-width:0}
+.asktopics legend{font-size:12.5px;color:var(--faint);padding:0;margin-bottom:6px}
+.asktopics label{display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:14px;color:var(--text);overflow-wrap:anywhere;cursor:pointer}
+.asktopics label:hover{color:var(--text);background:var(--surface-2);border-radius:var(--r-s)}
+.asktopics input{accent-color:var(--agree-fill)}
+.asktopics .tcount{margin-left:auto;color:var(--faint);font-size:13px}
+.asktopics .err{color:var(--error);font-size:13px;margin:6px 0 0}
+#ask-explain{margin:12px 0 0;font-size:13.5px}
+.askgo{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;margin-top:14px}
+.askgo .muted{margin:0;font-size:13px}
+.askres{margin-top:14px}
+.askhead{margin:8px 0 14px}
+.askhead .tsec{margin-top:0;font-family:var(--read);font-size:25px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.askhead p{font-size:14px;color:var(--muted);margin-top:6px;max-width:80ch}
+.askhead p.reach{color:var(--text)}
+.askhead .err{color:var(--error)}
+#ask-vista-host{float:right;margin:2px 0 8px 16px}
+.askrefine{margin:0 0 18px;padding:12px 0 14px;border-top:1px solid var(--line-2);border-bottom:1px solid var(--line-2)}
+.askrefine h4{margin-top:0}
+.askrefine .evalb{padding:4px 12px;font-size:13.5px}
+.askr{display:flex;flex-direction:column;gap:2px;margin:8px 0 2px}
+.askr .jh{margin-bottom:0;align-items:center}
+.askr .jh .kick{font-weight:500;color:var(--muted);font-size:13.5px}
+.askr .ap{font-size:22px;font-weight:600;color:var(--agree);line-height:1}
+.askr .apbar{display:inline-block;flex:0 0 140px;width:140px;max-width:30vw;height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden}
+.askr .apbar i{display:block;height:100%;background:var(--agree-fill);border-radius:3px}
+.askr details.saw{margin-top:4px}
+.askmore{margin:6px 0 12px}
+.askside{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;min-width:0;padding-left:24px;border-left:1px solid var(--line-2)}
+.askside .tsec{margin-top:0;font-size:16px}
+.askside>.muted{font-size:13px}
+.askside ol{list-style:none;padding:0;margin:14px 0 0}
+.askside li a{display:block;padding:10px 12px;border-radius:var(--r-m);margin:0 -12px 2px;text-decoration:none;color:var(--text);overflow-wrap:anywhere}
+.askside li a:hover{background:var(--surface)}
+.askside li a[aria-current="true"]{background:var(--surface);box-shadow:inset 3px 0 0 var(--text)}
+.askside li b{display:block;font-family:var(--read);font-weight:600;font-size:16px;line-height:1.35}
+.askside li small{display:block;color:var(--faint);font-size:13px;margin-top:4px}
+.askside .err{color:var(--error);font-size:13.5px}
+#ask-launch{color:var(--muted);font-size:14.5px;margin:0 0 14px;padding:12px 14px;border:1px dashed var(--line);border-radius:var(--r-m)}
+#ask-launch code{background:var(--sunk);border-radius:4px;padding:1px 5px;white-space:nowrap}
+#ask-launch .cmd{display:block;margin-top:6px}
+@media (max-width:900px){
+  .askl{grid-template-columns:1fr}
+  .askside{position:static;max-height:none;padding-left:0;border-left:0;border-top:1px solid var(--line-2);padding-top:18px}
+}
+@media (max-width:640px){
+  .askform textarea{font-size:19px;padding:12px 14px;min-height:84px}
+  .askhead .tsec{font-size:21px}
+  #ask-vista-host{float:none;margin:0 0 10px}
+  .pop{position:fixed;left:16px;right:16px;top:auto;bottom:16px;max-width:none;max-height:70vh;overflow:auto}
+}
+
+
+/* Topics: the index and a topic's page */
+.tsec{font-size:18px;font-weight:600;line-height:1.3;margin-top:26px}
+.tt th .th{background:none;border:0;cursor:pointer;text-align:left;padding:0;color:var(--muted);
+  font-size:13px;font-weight:600;display:flex;flex-direction:column;gap:3px;max-width:150px}
+.tt th .th small{font-size:12px;font-weight:400;line-height:1.35;color:var(--faint);white-space:normal}
+.tt th .th:hover span,.tt th[aria-sort="ascending"] .th span,.tt th[aria-sort="descending"] .th span{color:var(--text)}
 .tt td.tn{min-width:220px;max-width:380px}
-.tt td.tn .tl{font-weight:600;color:var(--ink);text-decoration:none}
-.tt td.tn .tl:hover{color:var(--accent)}
-.tt td.tn code{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-left:8px}
-.tt td.tn p{font-size:12px;color:var(--ink-muted);margin-top:3px;line-height:1.45}
-.tt td.dd{color:var(--sienna)}
-.tnav{display:flex;gap:18px;flex-wrap:wrap;margin:22px 0 10px}
-.th2{font-family:var(--display);font-weight:600;font-size:30px;letter-spacing:-.01em}
-.th2 code{font-family:var(--mono);font-size:12px;color:var(--ink-faint);margin-left:12px;font-weight:400}
-.tdesc{color:var(--ink-muted);margin-top:6px;max-width:820px}
-.tnums{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;margin-top:16px;background:var(--hairline);border:1px solid var(--hairline);border-radius:12px;overflow:hidden}
-.tnum{background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:4px}
-.tnum .lab{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
-.tnum b{font-family:var(--display);font-size:24px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums}
-.tnum small{font-size:11.5px;color:var(--ink-muted);line-height:1.4}
-.tsec{font-family:var(--display);font-weight:600;font-size:19px;margin-top:26px}
+.tt td.tn .tl{font-weight:600;color:var(--text);text-decoration:none}
+.tt td.tn .tl:hover{text-decoration:underline;text-underline-offset:3px}
+.tt td.tn code{font-size:12px;color:var(--faint);margin-left:8px}
+.tt td.tn p{font-size:13px;color:var(--muted);margin-top:3px;line-height:1.45}
+.tt td.dd,.ct td a.disc{color:var(--pencil)}
+.ct td a.disc{text-decoration:none;border-bottom:1px dotted var(--pencil-line)}
+.ct td a.disc:hover{border-bottom-style:solid}
+.tnav{display:flex;gap:18px;flex-wrap:wrap;margin:18px 0 10px}
+.th2{font-size:25px;font-weight:600;letter-spacing:-.01em;line-height:1.2}
+.th2 code{font-size:13px;color:var(--faint);margin-left:12px;font-weight:400}
+.tdesc{color:var(--muted);margin-top:6px;max-width:75ch}
+.tnums{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;margin-top:16px;background:var(--line-2);border:1px solid var(--line-2);border-radius:var(--r-l);overflow:hidden}
+.tnum{background:var(--surface);padding:12px 16px;display:flex;flex-direction:column;gap:3px}
+.tnum .lab,.kind .lab,.q .lab{font-size:13px;color:var(--muted)}
+.tnum b{font-size:22px;font-weight:600}
+.tnum small{font-size:12.5px;color:var(--faint);line-height:1.4}
 .pgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:10px}
-.pairs{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:12px 16px}
-.pairs h4{font-size:13px;font-weight:600;margin-bottom:8px}
+.pairs{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:12px 16px}
+.pairs h4{font-size:14px;font-weight:600;margin-bottom:8px}
 .pairs ol{list-style:none}
-.pairs li{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-top:1px solid var(--hairline-2);font-size:13.5px}
+.pairs li{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-top:1px solid var(--line-2);font-size:14px}
 .pairs li:first-child{border-top:0}
-/* `display:flex` above would override the `hidden` attribute and show every row past the cut. */
-.pairs li[hidden]{display:none}
-.pairs li a{color:var(--ink);text-decoration:none}
-.pairs li a:hover{color:var(--accent)}
-.pairs li .c{font-family:var(--mono);font-size:11px;color:var(--ink-faint);white-space:nowrap}
-.few{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;border:1px dashed var(--hairline);border-radius:999px;padding:0 7px;margin-left:8px;color:var(--ink-faint)}
-.tsort{display:none;margin:0 0 12px;background:var(--surface-2);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:7px 10px;font-family:var(--ui);font-size:13px}
+.pairs li a{color:var(--text);text-decoration:none}
+.pairs li a:hover{text-decoration:underline;text-underline-offset:3px}
+.pairs li .c{font-size:13px;color:var(--faint);white-space:nowrap}
+.few{font-size:12px;border:1px dashed var(--line);border-radius:999px;padding:0 7px;margin-left:8px;color:var(--faint)}
+.tsort{display:none;margin:0 0 12px}
 .phone-only{display:none}
-.more.small{margin:10px 0 0;padding:5px 10px;font-size:12px}
+.more.small{margin:10px 0 0;padding:5px 10px;font-size:13px}
 .tgroup{margin-top:10px;scroll-margin-top:14px}
-.tjump{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:26px}
+.tjump{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:24px}
 .tjump .muted{margin:0}
 .tgroup .glist{margin-top:12px}
-.rows td.tp a.tlink{color:inherit;text-decoration:none;border-bottom:1px dotted var(--hairline)}
-.rows td.tp a.tlink:hover{color:var(--accent)}
 
-/* compare: the decision comparison */
+/* Comparar */
 .csec{margin-top:30px}
-.csec>.muted{max-width:820px}
+.csec>.muted{max-width:78ch}
 .csec .facts{margin-top:12px}
+.csec .twrap{margin-top:12px}
 .fact .go{display:inline-block;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
-.csec .fact{min-width:0}
 .otro-n+.pairs{margin-top:12px}
-.kinds{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:12px}
-.kind{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}
-.kind .lab{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
-.cnum{font-family:var(--display);font-size:30px;font-weight:600;line-height:1.1;color:var(--accent);font-variant-numeric:tabular-nums}
-.kind p{font-size:13px;color:var(--ink-muted);line-height:1.5}
-.kind .lk,.fact .lk{font-size:11.5px}
-.ct td a.disc{color:var(--sienna);text-decoration:none;border-bottom:1px dotted var(--sienna-line)}
-.ct td a.disc:hover{color:var(--accent)}
+/* flat, like the three numbers: three columns parted by hairlines, no boxes */
+.kinds{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px}
+.kind{padding:2px 24px 4px;border-left:1px solid var(--line-2);display:flex;flex-direction:column;gap:6px;min-width:0}
+.kind:first-child{padding-left:0;border-left:0}
+.cnum{font-size:25px;font-weight:600;line-height:1.15}
+.csec[data-sec="kinds"] .cnum,.csec[data-sec="otro"] .cnum{color:var(--pencil)}
+.cfg .kind .cnum{color:var(--money)}
+.kind p{font-size:14px;color:var(--muted);line-height:1.5}
+.kind .lk,.fact .lk{font-size:13.5px}
 .csec .all{display:inline-block;margin-top:10px}
-.agree{font-size:13.5px;color:var(--ink-muted);margin-bottom:6px}
-.agree b{color:var(--ink)}
+.agree{font-size:14.5px;color:var(--muted);margin-bottom:6px}
+.agree b{color:var(--agree)}
 .bands{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:12px}
-.bandrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 12px;padding:7px 0;border-top:1px solid var(--hairline-2);font-size:13.5px}
+.bandrow{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 12px;padding:7px 0;border-top:1px solid var(--line-2);font-size:14px}
 .pairs .bandrow:first-of-type{border-top:0}
-.bandrow .range{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);flex-basis:100%;order:2}
-.bandrow .n{font-family:var(--mono);font-size:11px;color:var(--ink-faint);white-space:nowrap}
-.bandrow .n a{color:var(--accent);text-decoration:none}
+.bandrow .range{font-size:12.5px;color:var(--faint);flex-basis:100%;order:2}
+.bandrow .n{font-size:13px;color:var(--faint);white-space:nowrap}
+.bandrow .n a{color:var(--text)}
 .otro-n{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-top:10px}
 
-/* config: what this page was built with, read-only */
+/* Configuración: what this page was built with, read-only */
 .cfg{margin-top:30px}
-.cfg>.muted,.cfg>.note{max-width:820px}
+.cfg:first-child{margin-top:4px}
+.cfg>.muted,.cfg>.note{max-width:78ch}
 .cfg .t{margin-top:12px}
-/* Outside a panel: the sticky header takes the page's background, not a panel's. */
-.cfg .t thead th{background:var(--bg)}
-.cfg .t td.cv{font-family:var(--mono);font-size:12px;min-width:120px}
-.cfg .t td.cv small{display:block;font-family:var(--ui);font-size:11.5px;color:var(--ink-faint);margin-top:3px}
-.cfg .t td.cw{color:var(--ink-muted);max-width:520px}
-.cfg .t td.cp small.missing{display:block;font-size:11.5px;color:var(--sand);margin-top:3px}
-.cfg .t td.ck code,.cfg .t td.cp code{font-family:var(--mono);font-size:11.5px;color:var(--ink-muted);overflow-wrap:anywhere}
-.cfg .t td a.tl{font-weight:600;color:var(--ink);text-decoration:none}
-.cfg .t td a.tl:hover{color:var(--accent)}
-.cfg .t td.ck .slug{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.cfg .t td.cv{min-width:120px;width:22%;font-weight:500}
+.cfg .t td.cv small{display:block;font-size:12.5px;font-weight:400;color:var(--faint);margin-top:3px}
+.cfg .t td.cw{color:var(--muted);width:38%}
+.cfg .t td.cp small.missing{display:block;font-size:12.5px;color:var(--money);margin-top:3px}
+.cfg .t td.ck code,.cfg .t td.cp code{font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
+.cfg .t td a.tl{font-weight:600;color:var(--text);text-decoration:none}
+.cfg .t td a.tl:hover{text-decoration:underline;text-underline-offset:3px}
+.cfg .t td.ck .slug{display:block;font-family:var(--code);font-size:12px;color:var(--faint)}
 .qgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:12px}
-.q{background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:14px 16px;min-width:0}
-.q .lab{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-faint)}
-.q h4{font-family:var(--display);font-weight:600;font-size:17px;margin-top:4px}
-.q .gloss{font-size:13px;color:var(--ink-muted);margin-top:6px;line-height:1.5}
+.q{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:14px 16px;min-width:0}
+.q h4{font-size:16px;font-weight:600;margin-top:2px}
+.q .gloss{font-size:14px;color:var(--muted);margin-top:6px;line-height:1.5}
 .q details{margin-top:10px}
-.q details>summary{cursor:pointer;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;color:var(--ink-faint)}
-.wire{font-family:var(--mono);font-size:12px;line-height:1.55;background:var(--surface-2);border:1px solid var(--hairline-2);border-radius:8px;padding:10px 12px;margin-top:10px;overflow-wrap:anywhere;white-space:pre-wrap}
-.wire .wi{color:var(--ink)}
+.wire{font-family:var(--code);font-size:12.5px;line-height:1.55;background:var(--sunk);border:1px solid var(--line-2);border-radius:var(--r-m);padding:10px 12px;margin-top:10px;overflow-wrap:anywhere;white-space:pre-wrap}
+.wire .wi{color:var(--text)}
 .wire dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;margin-top:8px}
-.wire dt{color:var(--accent)}
-.wire dd{color:var(--ink-muted)}
-.digest{font-family:var(--mono);font-size:11px;color:var(--ink-muted);overflow-wrap:anywhere}
-.surf{margin:10px 0 0 22px;font-size:13.5px;line-height:1.7}
-.cfg code.marker{font-family:var(--mono);font-size:12px;color:var(--ink);overflow-wrap:anywhere}
+.wire dt{color:var(--agree)}
+.wire dd{color:var(--muted)}
+.digest{font-family:var(--code);font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.surf{margin:10px 0 0 22px;font-size:14.5px;line-height:1.7}
+.cfg code.marker{font-size:12.5px;color:var(--text);overflow-wrap:anywhere}
 
 /* the failure banner: shown only when the page could not draw itself */
-.banner{margin-top:24px;padding:14px 18px;border-radius:10px;font-size:13.5px;line-height:1.6;
-  background:rgba(181,83,63,.14);border:1px solid rgba(181,83,63,.55);color:var(--banner-ink)}
-.banner b{color:var(--banner-strong);font-weight:600;display:block;font-family:var(--mono);font-size:10.5px;
-  letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px}
+.banner{margin-top:20px;padding:14px 18px;border-radius:var(--r-m);font-size:14.5px;line-height:1.6;
+  background:var(--error-soft);border:1px solid var(--error-line);color:var(--text)}
+.banner b{color:var(--error);font-weight:600;display:block;margin-bottom:4px}
 
-footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
-  font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--ink-faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--line-2);
+  font-size:13px;color:var(--faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px 20px}
 
-@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
+}
 @media (max-width:900px){
-  .facts{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}.kpi{border-right:0;border-bottom:1px solid var(--hairline)}.kpi:last-child{border-bottom:0}
+  .facts{grid-template-columns:1fr}
+  .kpis{grid-template-columns:1fr 1fr}
   .browse{grid-template-columns:1fr}
   .rail{position:static;max-height:none}
   .kinds,.bands,.qgrid{grid-template-columns:1fr}
-  .askl{grid-template-columns:1fr}
-  .askside{position:static;max-height:none}
+  .kind{padding:10px 0;border-left:0;border-top:1px solid var(--line-2)}
+  .kind:first-child{padding-top:2px;border-top:0}
+  .stamp{justify-content:flex-start;max-width:none}
 }
 @media (max-width:640px){
-  .wrap{padding:28px 16px 48px}
-  .masthead{flex-direction:column;align-items:flex-start;gap:14px}
-  .brand h1{font-size:38px}
-  .stamp{text-align:left}
-  .panel{padding:18px 16px 14px}
-  .phead{flex-direction:column;align-items:flex-start;gap:4px}
-  .phead .sub{text-align:left}
-  .card{padding:14px 14px 12px}
+  .wrap{padding:20px 16px 44px}
+  .brand h1{font-size:22px}
+  .kpis{grid-template-columns:1fr}
+  .tabs.top{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin-top:18px}
+  .tabs.top a{justify-content:center;flex-direction:column;gap:3px;font-size:14.5px;padding:9px 2px 11px;white-space:normal;text-align:center;line-height:1.2}
+  .tbadge{font-size:10.5px;padding:2px 6px}
+  .tabbar{flex-direction:column;align-items:stretch}
+  .vista{order:-1;flex:0 0 100%}
+  .tabs.sub{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+  .tabs.sub a{text-align:center;padding:7px 4px;font-size:14.5px}
+  /* X's frame needs every pixel a phone has: the card gives it 12 px, not 20 */
+  .card{padding:12px}
   .links{margin-left:0;width:100%}
-  .tabbar{flex-wrap:wrap}
-  .vista{order:-1;flex:0 0 100%;padding:0 0 8px}
-  .rows td.tp{width:auto}
+  .rows td.tp{width:auto;min-width:0}
+  .rows td{padding-right:6px}
+  .v{padding:1px 7px}
   .tnums{grid-template-columns:1fr 1fr}
   .pgrid{grid-template-columns:1fr}
   .tt thead{display:none}
@@ -426,32 +558,35 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   .desk-only{display:none}
   .t.tt tr{display:grid;grid-template-columns:1fr 1fr;column-gap:12px}
   .t.tt td.tn{min-width:0;max-width:none;grid-column:1 / -1}
-  .bar{min-width:90px}
+  .bar{min-width:64px;gap:5px}
+  .bar i{min-width:26px}
+  .bar span{width:2.4em}
+  .twt{font-size:16.5px}
   /* The history table does not fit a phone: stack each row, each cell names itself. */
   .t thead{display:none}
-  .t tr{display:block;padding:10px 0;border-top:1px solid var(--hairline-2)}
+  .t tr{display:block;padding:10px 0;border-top:1px solid var(--line-2)}
   .t td{display:block;border:0;padding:3px 0}
-  .t td::before{content:attr(data-h);font-family:var(--mono);font-size:9px;letter-spacing:.16em;
-    text-transform:uppercase;color:var(--ink-faint);margin-right:8px}
+  .t td::before{content:attr(data-h);font-size:12.5px;font-weight:600;color:var(--muted);margin-right:8px}
 }
 </style>
 </head>
 <body>
-<div class="glow"></div>
-<div class="grain"></div>
+<a class="skip" href="#toptabs">Saltar a las secciones</a>
 <main class="wrap">
   <header class="masthead">
     <div class="brand">
-      <h1>XBrain<span class="dot">.</span> Jev</h1>
-      <p>Qué topics pone enrich, cuáles ve Jev, y dónde no coinciden</p>
+      <h1>Jev, segundo lector de XBrain</h1>
+      <p>Revisa los topics que puso enrich a tus posts guardados y responde a lo que le preguntes sobre ellos.</p>
+      <details class="about"><summary>Qué es esto</summary>
+        <p id="about">Jev es un segundo juez que lee cada post y dice, para cada topic del
+        vocabulario, la probabilidad de que el post trate de él. <b>Revisar topics</b> pone al lado
+        lo que puso enrich y lo que ve Jev, post a post, para que encuentres y corrijas los topics
+        mal puestos, con lo que ha costado preguntar. <b>Preguntar</b> le hace una pregunta a tu
+        archivo y ordena los posts por lo bien que la responden.</p>
+      </details>
     </div>
-    <div class="stamp" id="stamp">ACTUALIZADO · —</div>
+    <div class="stamp" id="stamp">Actualizado —</div>
   </header>
-
-  <p class="about"><b>Qué es esto.</b> <span id="about">Jev es un segundo juez que lee cada
-    post y dice, para cada topic del vocabulario, la probabilidad de que el post trate de él.
-    Esta página pone al lado lo que puso enrich y lo que ve Jev, post a post, para que
-    encuentres y corrijas los topics mal puestos. Arriba, lo que ha costado preguntar.</span></p>
 
   <noscript><section class="banner">
     <b>Esta página necesita JavaScript</b>Los datos están incrustados en la página, pero los
@@ -460,9 +595,18 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   </section></noscript>
   <section class="banner" id="banner" hidden></section>
 
+  <!-- The three top tabs: reviewing the labels, asking the archive, how the page was built. -->
+  <nav class="tabs top" id="toptabs" aria-label="Secciones">
+    <a href="#revisar/posts" data-tab="revisar">Revisar topics<span class="tbadge" hidden></span></a>
+    <a href="#ask" data-tab="ask">Preguntar<span class="tbadge" hidden></span></a>
+    <a href="#config" data-tab="config">Configuración</a>
+  </nav>
+
+  <section id="top-revisar" class="toptab" aria-label="Revisar topics">
+  <div class="jobslot" id="jobslot-revisar"></div>
   <section class="panel" id="cost">
     <div class="phead">
-      <div><span class="kick">01 · Coste</span><h2>Coste y peticiones</h2></div>
+      <div><h2>Coste y peticiones</h2></div>
       <div class="sub">estimación a precio de lista, calculada desde los tokens registrados</div>
     </div>
     <div class="kpis" id="kpis"></div>
@@ -474,24 +618,24 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
 
   <section class="panel" id="numbers">
     <div class="phead">
-      <div><span class="kick">02 · Resumen</span><h2>Lo que dice Jev, en tres números</h2></div>
+      <div><h2>Lo que dice Jev, en tres números</h2></div>
       <div class="sub" id="numbers-sub">—</div>
     </div>
     <div class="facts" id="facts"></div>
   </section>
 
   <div class="tabbar">
-    <nav class="tabs" aria-label="Secciones">
-      <a href="#posts" data-tab="posts">Posts</a>
-      <a href="#topics" data-tab="topics">Topics</a>
-      <a href="#compare" data-tab="compare">Comparar Jev vs enrich</a>
-      <a href="#ask" data-tab="ask">Preguntar</a>
-      <a href="#config" data-tab="config">Configuración</a>
+    <nav class="tabs sub" id="subtabs" aria-label="Revisar">
+      <a href="#revisar/posts" data-tab="posts">Posts</a>
+      <a href="#revisar/topics" data-tab="topics">Topics</a>
+      <a href="#revisar/compare" data-tab="compare">Comparar</a>
     </nav>
+    <div class="vista-host" id="vista-host-revisar">
     <div class="vista" id="vista" role="group" aria-label="Cómo se ven los posts">
       <span>Vista</span>
       <button type="button" data-vista="x" aria-pressed="true">X</button>
       <button type="button" data-vista="local" aria-pressed="false">copia guardada</button>
+    </div>
     </div>
   </div>
 
@@ -500,7 +644,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
       <aside class="rail" id="rail" aria-label="Filtros y topics"></aside>
       <div>
         <div class="controls">
-          <input type="search" id="search" placeholder="Buscar por texto, autor, id o topic" aria-label="Buscar posts">
+          <input type="search" id="search" placeholder="Buscar por texto, autor, id o topic…" aria-label="Buscar posts">
           <select id="sort" aria-label="Ordenar">
             <option value="disc">Más discrepancias primero</option>
             <option value="recent">Más recientes primero</option>
@@ -525,16 +669,25 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   <section id="tab-compare" class="tab" hidden>
     <div id="compare-body"></div>
   </section>
+  </section>
+
+  <section id="top-ask" class="toptab" aria-label="Preguntar" hidden>
+  <div class="jobslot" id="jobslot-ask"></div>
   <section id="tab-ask" class="tab" hidden>
     <div id="ask-body"></div>
   </section>
+  </section>
+
+  <section id="top-config" class="toptab" aria-label="Configuración" hidden>
+  <div class="jobslot" id="jobslot-config"></div>
   <section id="tab-config" class="tab" hidden>
     <div id="config-body"></div>
   </section>
+  </section>
 
   <footer>
-    <span>XBRAIN · JEV vs ENRICH</span>
-    <span>DATOS EMPOTRADOS · IMÁGENES DE _media/ · TIPOGRAFÍAS DE GOOGLE FONTS</span>
+    <span>XBrain: Jev frente a enrich</span>
+    <span>Los datos van dentro de la página; las imágenes, de _media/; las tipografías, de Google Fonts (sin red, las del sistema).</span>
   </footer>
 </main>
 
@@ -579,6 +732,8 @@ let PDIGITS = 2;
 const pfmt = (x) => dec(x, PDIGITS);
 const label = (slug) => LABEL[slug] || slug;
 /** Only an http(s) URL becomes a link: `Item.url` is a bare `str` in the model. */
+/** How the page scrolls to what the reader asked for: instant when they asked for less motion. */
+const SCROLL = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
 const httpUrl = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : null);
 
 /** Every value the page derives from the blob, set from it: call before drawing. */
@@ -594,18 +749,37 @@ function loadData(blob) {
 }
 
 /* ---------------------------------------------------------------- header */
+/** A Configuración row to bring into view once that tab has drawn (`jumpToSetting`). */
+let cfgJump = null;
+
 function renderStamp() {
   const models = Object.keys(DATA.totals.models).sort();
+  // `DATA.updated` is the ISO day the page was built: worded like every other date here.
   $('stamp').innerHTML =
-    'ACTUALIZADO <b>' + esc(DATA.updated) + '</b><br>' +
-    (models.length === 1 ? 'MODELO ' : 'MODELOS ') + '<b>' + esc(models.join(', ') || '—') + '</b><br>' +
-    'UMBRAL <b>' + esc(pfmt(DATA.threshold)) + '</b> (config)<br>' +
-    '<a href="' + esc(DATA.docs_url) + '" target="_blank" rel="noopener">DOCUMENTACIÓN ↗</a>';
+    '<span>Actualizado <b>' + esc(DATA.updated ? day(DATA.updated + 'T12:00:00Z') : '—') + '</b></span>' +
+    '<span>' + (models.length === 1 ? 'Modelo ' : 'Modelos ') + '<b>' + esc(models.join(', ') || '—') + '</b></span>' +
+    // The threshold means something only where it is explained: the link opens that row.
+    '<a data-cfg="threshold" href="' + esc(hashHref('config')) + '">Umbral de topics ' + esc(pfmt(DATA.threshold)) + '</a>' +
+    '<a href="' + esc(DATA.docs_url) + '" target="_blank" rel="noopener">Documentación ↗</a>';
+  $('stamp').querySelector('a[data-cfg]').addEventListener('click', (e) => {
+    cfgJump = e.currentTarget.dataset.cfg;
+    // Already on Configuración: no hashchange will come, so bring the row into view now.
+    if (view.tab === 'config') { e.preventDefault(); jumpToSetting(); }
+  });
+}
+
+/** Brings the setting a header link asked for (`cfgJump`) into the middle of the screen, once,
+    at once — as any in-page link lands. */
+function jumpToSetting() {
+  const row = cfgJump && $('cfg-' + cfgJump);
+  cfgJump = null;
+  if (row && !row.closest('[hidden]')) row.scrollIntoView({block: 'center'});
 }
 
 /* ---------------------------------------------------------------- 01 cost */
-function kpi(lab, num, ctx) {
-  return '<div class="kpi"><div class="lab">' + esc(lab) + '</div><div class="num accent">' +
+/** One figure of the cost strip; `count` for a figure that is not money (not amber). */
+function kpi(lab, num, ctx, count) {
+  return '<div class="kpi"><div class="lab">' + esc(lab) + '</div><div class="num' + (count ? '' : ' accent') + '">' +
     esc(num) + '</div><div class="ctx">' + ctx + '</div></div>';
 }
 
@@ -621,30 +795,48 @@ function renderCost() {
     'media de ' + nf(c.per_post.n) + ' de las ' + nf(c.per_post.of) + ' evaluaciones vigentes: las que tienen recuento de tokens' +
     (c.per_post.unpriced_providers.length ? ' y tarifa (sin tarifa: ' +
       esc(c.per_post.unpriced_providers.join(', ')) + ')' : ''));
-  const stored = kpi('Evaluaciones vigentes', nf(cur.assessments),
-    'lo que costaron: ' + usd(cur.cost_usd) + ' · ' + pl(cur.input_tokens, 'token', 'tokens') + ' de entrada' +
-    curUnknown + unpricedNote(cur.unpriced_providers));
+  // What the current answers cost, unless the Total beside it already says that very figure.
+  const stored = (costWords) => kpi('Evaluaciones vigentes', nf(cur.assessments),
+    'lo que costaron: ' + costWords + ' · ' + pl(cur.input_tokens, 'token', 'tokens') + ' de entrada' +
+    curUnknown + unpricedNote(cur.unpriced_providers), true);
   if (c.error) {
     // The run log could not be read: say so where the total would be, keep everything else.
-    $('kpis').innerHTML = kpi('Total', '—', 'no se pudo leer el registro de pasadas: ' + esc(c.error)) + perPost + stored;
+    $('kpis').innerHTML = kpi('Total', '—', 'no se pudo leer el registro de pasadas: ' + esc(c.error)) + perPost +
+      stored(usd(cur.cost_usd));
     $('before-log').hidden = true;
     $('runs-box').innerHTML = '<div class="empty">Sin histórico: corrige la línea indicada arriba en runs.jsonl ' +
       '(si contiene un registro válido pegado tras un fragmento, sepáralo; no la borres).</div>';
     return;
   }
   const T = c.total;
-  const unknown = T.input_tokens_unknown ? ' (+' + nf(T.input_tokens_unknown) + ' respuestas sin recuento)' : '';
-  $('kpis').innerHTML =
-    // No logged pass is not a free history: a bare ~0,0000 $ would read as one.
-    kpi('Total', T.runs ? usd(T.cost_usd) : '—',
-      (T.runs ? pl(T.requests, 'petición', 'peticiones') + ' · ' + pl(T.input_tokens, 'token', 'tokens') +
-        ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') + unpricedNote(T.unpriced_providers)
-        : 'sin pasadas registradas')) +
-    perPost + stored;
   const out = c.out_of_log;
-  // Drawn again after a served job: a note that no longer applies goes away.
-  $('before-log').hidden = !out.assessments;
-  if (out.assessments) {
+  const unknown = T.input_tokens_unknown ? ' (+' + pl(T.input_tokens_unknown, 'respuesta', 'respuestas') + ' sin recuento)' : '';
+  // The strip opens on a number. Logged passes: their total. None logged but answers saved:
+  // what those answers cost, by their own tokens, named as such (no logged pass is not a free
+  // history, and a bare ~0,0000 $ would read as one). Nothing paid at all: «—», in ink.
+  let total;
+  if (T.runs) {
+    total = kpi('Total', usd(T.cost_usd), pl(T.requests, 'petición', 'peticiones') + ' · ' +
+      pl(T.input_tokens, 'token', 'tokens') + ' de entrada' + unknown + ' · ' + pl(T.runs, 'pasada', 'pasadas') +
+      unpricedNote(T.unpriced_providers));
+  } else if (out.assessments) {
+    total = kpi('Total', usd(out.cost_usd), 'sin pasadas registradas: ' +
+      (out.assessments === 1 ? 'lo que costó la evaluación guardada'
+        : 'lo que costaron las ' + nf(out.assessments) + ' evaluaciones guardadas') +
+      ', estimado por sus propios tokens' + unpricedNote(out.unpriced_providers || []));
+  } else {
+    total = kpi('Total', '—', 'sin pasadas registradas: aún no se ha pagado nada', true);
+  }
+  // No logged pass: the Total is what the saved answers cost. When the current ones cost the
+  // same figure (every saved answer is current), it is said once, in the Total.
+  const echo = !T.runs && out.assessments && usd(out.cost_usd) === usd(cur.cost_usd);
+  $('kpis').innerHTML = total + perPost + stored(echo ? 'el Total' : usd(cur.cost_usd));
+  // Answers out of the log beside a logged total: said apart, since they are not in it. With
+  // no logged pass the Total above already is their cost. Drawn again after a served job: a
+  // note that no longer applies goes away.
+  const apart = !!(T.runs && out.assessments);
+  $('before-log').hidden = !apart;
+  if (apart) {
     $('before-log').textContent =
       pl(out.assessments, 'evaluación', 'evaluaciones') +
       ' fuera del registro de pasadas (' + usd(out.cost_usd) + ' según sus propios tokens): se hicieron ' +
@@ -681,34 +873,62 @@ function renderRuns(runs) {
 }
 
 /* ---------------------------------------------------------------- 02 the three numbers */
-function fact(big, why) {
-  return '<div class="fact"><div class="big">' + big + '</div><div class="why">' + why + '</div></div>';
+/** One fact: the sentence, why it matters, and the Posts view listing the posts behind it
+    (`go`, a Posts filter). The three facts live here only: every Revisar sub-tab shows them. */
+function fact(big, why, go, words) {
+  return '<div class="fact"><div class="big">' + big + '</div><div class="why">' + why + '</div>' +
+    '<a class="lk go" data-go="' + esc(go) + '" href="' + esc(hashHref('posts', {f: go})) + '">' + esc(words) + '</a></div>';
 }
 
 function renderNumbers() {
   const S = DATA.summary;
-  $('numbers-sub').textContent = 'mismos números que `xbrain jev report` · umbral ' + pfmt(DATA.threshold) +
+  $('numbers-sub').textContent = 'los mismos números que xbrain jev report · umbral ' + pfmt(DATA.threshold) +
     ' · ' + pl(S.items_compared, 'post comparado', 'posts comparados');
   $('facts').innerHTML =
     fact('Jev confirma <em>' + nf(S.assigned_backed) + '</em> de ' + nf(S.assigned_pairs) +
       ' topics de enrich (<em>' + pct(S.enrich_backed_pct, S.assigned_pairs) + '</em>)',
       'De todos los topics que puso enrich, cuántos ve también Jev con probabilidad ≥ ' +
-      pfmt(DATA.threshold) + '. Los que no, son candidatos a quitar.' +
+      pfmt(DATA.threshold) + '. Los otros ' + nf(S.doubtful_pairs) + ' son candidatos a quitar.' +
       (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está en el vocabulario y no se juzga.',
-        'topics ya no están en el vocabulario y no se juzgan.') : '')) +
+        'topics ya no están en el vocabulario y no se juzgan.') : ''),
+      'enrich_only', 'ver los ' + pl(S.posts_enrich_only, 'post', 'posts') + ' con un topic que Jev no confirma →') +
     fact('Jev añadiría <em>' + nf(S.missing_pairs) + '</em> topics que enrich no puso',
       'Topics que Jev ve con probabilidad ≥ ' + pfmt(DATA.threshold) +
-      ' y que enrich no asignó. Son candidatos a añadir.') +
+      ' y que enrich no asignó. Son candidatos a añadir.',
+      'adds', 'ver los ' + pl(S.posts_jev_only, 'post', 'posts') + ' donde Jev añadiría →') +
     fact('El topic principal coincide en <em>' + pct(S.primary_agree_pct, S.items_compared) + '</em>',
-      'En cuántos posts el topic principal de enrich es el mismo que elige Jev.' +
+      'En ' + nf(S.primary_agree) + ' de ' + nf(S.items_compared) + ' posts comparados, el principal de enrich es el que elige Jev.' +
       (S.primary_fallback ? ' En ' + pl(S.primary_fallback, 'post', 'posts') + ' Jev eligió «' +
-        esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''));
+        esc(DATA.fallback) + '» (ninguno del vocabulario).' : ''),
+      'prim', 'ver los ' + pl(S.posts_primary_differs, 'post', 'posts') + ' donde no coincide →');
 }
 
 /* ---------------------------------------------------------------- tabs (hash-routed) */
 const TABS = ['posts', 'topics', 'compare', 'ask', 'config'];
+/** The three top tabs. «Revisar topics» holds the cost strip, the three numbers and its own
+    sub-tabs (Posts, Topics, Comparar); Preguntar and Configuración are one view each. */
+const TOP_TABS = ['revisar', 'ask', 'config'];
+const REVISAR = ['posts', 'topics', 'compare'];
+/** Each view's route: `#revisar/posts`, `#revisar/topics`, `#revisar/compare`, `#ask`, `#config`.
+    The old `#posts`, `#topics` and `#compare` are read as the same views and the URL is
+    rewritten in place (`readHash`), so a bookmark keeps working. */
+const ROUTE = {posts: 'revisar/posts', topics: 'revisar/topics', compare: 'revisar/compare', ask: 'ask', config: 'config'};
+const topOf = (tab) => (REVISAR.includes(tab) ? 'revisar' : tab);
 /** The whole Posts view: filter, topic, search, sort. The hash carries it (bookmarkable). */
 const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc'};
+/** The Revisar sub-tab last shown: a bare `#revisar` returns to it. */
+let lastSub = 'posts';
+
+/** The view a hash path names, and whether that path is an old one to rewrite. */
+function routeOf(path) {
+  const tab = Object.keys(ROUTE).find(k => ROUTE[k] === path);
+  if (tab) return {tab: tab, old: false};
+  // Old routes. `#posts` would reach Posts anyway (the default, which `writeHash` rewrites):
+  // this line is what `#topics` and `#compare` need.
+  if (REVISAR.includes(path)) return {tab: path, old: true};
+  if (path === 'revisar') return {tab: lastSub, old: true};
+  return {tab: 'posts', old: false};
+}
 
 function readHash() {
   // Split on the FIRST '?': the tab is the part before it, decoded on its own (a malformed
@@ -717,7 +937,11 @@ function readHash() {
   const cut = raw.indexOf('?');
   let tab = cut === -1 ? raw : raw.slice(0, cut);
   try { tab = decodeURIComponent(tab); } catch (err) { tab = ''; }
-  view.tab = TABS.includes(tab) ? tab : 'posts';
+  const route = routeOf(tab);
+  view.tab = route.tab;
+  // An old route (`#posts?f=all`) becomes the new one with the same query, in place: no
+  // history entry, and no second `hashchange`.
+  if (route.old) history.replaceState(null, '', '#' + ROUTE[view.tab] + (cut === -1 ? '' : raw.slice(cut)));
   const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
   if (view.tab === 'topics') readTopicsHash(params);
   if (view.tab === 'compare') readCompareHash(params);
@@ -737,21 +961,45 @@ function writeHash() {
   if (view.t) params.set('t', view.t);
   if (view.q) params.set('q', view.q);
   if (view.s !== 'disc') params.set('s', view.s);
-  const hash = '#posts' + (params.toString() ? '?' + params.toString() : '');
+  const hash = hashHref('posts', params);
   // The Posts tab link carries the view, so leaving for another tab and coming back keeps it.
-  document.querySelector('.tabs a[data-tab="posts"]').setAttribute('href', hash);
+  setTabHref('posts', hash);
   if (view.tab !== 'posts') return;
   // replaceState: typing in the search box must not push one history entry per keystroke.
   if (location.hash !== hash) history.replaceState(null, '', hash);
 }
 /* end hash */
 
+/** A tab link's href — a sub-tab keeps its own view in it — and «Revisar topics» follows the
+    sub-tab last shown, so leaving Revisar and coming back returns to where the reader was. */
+function setTabHref(tab, href) {
+  document.querySelector('.tabs a[data-tab="' + tab + '"]').setAttribute('href', href);
+  if (tab === lastSub) document.querySelector('.tabs a[data-tab="revisar"]').setAttribute('href', href);
+}
+
 function showTab() {
+  const top = topOf(view.tab);
+  if (top === 'revisar') lastSub = view.tab;
+  TOP_TABS.forEach(t => { $('top-' + t).hidden = t !== top; });
   TABS.forEach(tab => { $('tab-' + tab).hidden = tab !== view.tab; });
   document.querySelectorAll('.tabs a').forEach(a => {
-    if (a.dataset.tab === view.tab) a.setAttribute('aria-current', 'page');
+    if (a.dataset.tab === view.tab || a.dataset.tab === top) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
+  setTabHref(lastSub, document.querySelector('.tabs a[data-tab="' + lastSub + '"]').getAttribute('href'));
+  placeVista();
+  if (SERVED()) placePanel();
+}
+
+/** «Vista: X | copia guardada» sits where the post cards are: Revisar's sub-tab bar, or the
+    head of Preguntar's results. One switch, moved; Configuración shows no card. */
+let vistaBox = null;
+function placeVista() {
+  // Held by reference: Preguntar's host is redrawn with the tab, and a switch left in a
+  // detached host is no longer found by its id.
+  vistaBox = vistaBox || $('vista');
+  const host = view.tab === 'ask' ? $('ask-vista-host') : $('vista-host-revisar');
+  if (host && vistaBox.parentNode !== host) host.appendChild(vistaBox);
 }
 
 /* ---------------------------------------------------------------- the filter rail */
@@ -816,26 +1064,25 @@ function renderRail() {
   th.textContent = 'Topics';
   box.appendChild(th);
   rail.appendChild(box);
+  // One line to read the counts by; the full definition is the legend's title.
   const legend = document.createElement('p');
   legend.className = 'legend';
-  legend.textContent = 'Cada topic: posts donde lo puso enrich · de esos, los que Jev confirma · ' +
-    'posts que discrepan sobre él. Cuentan solo los ' + nf(S.items_compared) + ' posts comparados; ' +
+  legend.textContent = 'Solo los posts comparados, con el filtro de arriba.';
+  legend.title = 'Cada topic: de los posts donde lo puso enrich, los que Jev confirma / todos ellos; ' +
+    'después, los posts que discrepan sobre él. Cuentan solo los ' + nf(S.items_compared) + ' posts comparados; ' +
     'la lista usa además el filtro de arriba, y su total va en «mostrando».';
   box.appendChild(legend);
+  box.appendChild(el('p', 'thead', 'confirma/pone · discrepan'));
   const rows = Object.fromEntries(S.per_topic.map(r => [r.slug, r]));
   const topics = DATA.topics.slice().sort((a, b) =>
     ((rows[b.slug] || {}).disagreeing || 0) - ((rows[a.slug] || {}).disagreeing || 0) || a.label.localeCompare(b.label, 'es'));
   topics.forEach(t => {
     const r = rows[t.slug] || {assigned: 0, backed: 0, disagreeing: 0};
+    // «confirma/pone» in the colour of agreement, then the posts that disagree in the pencil's.
     const c = countSpan('');
-    const parts = [[nf(r.assigned), r.assigned ? '' : 'z'], [nf(r.backed), r.backed ? '' : 'z'], [nf(r.disagreeing), r.disagreeing ? 'd' : 'z']];
-    parts.forEach(([text, cls], i) => {
-      if (i) c.appendChild(document.createTextNode(' · '));
-      const s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = text;
-      c.appendChild(s);
-    });
+    c.appendChild(el('span', 'ok' + (r.assigned ? '' : ' z'), nf(r.backed) + '/' + nf(r.assigned)));
+    c.appendChild(document.createTextNode(' '));
+    c.appendChild(el('span', 'dn ' + (r.disagreeing ? 'd' : 'z'), nf(r.disagreeing)));
     box.appendChild(railButton(view.t === t.slug, t.label, c, () => {
       view.t = view.t === t.slug ? '' : t.slug;
       update();
@@ -904,9 +1151,13 @@ function linkified(text) {
   return frag;
 }
 
+/** What a card says about Jev's review of its topics — said ONCE per card: in the Jev block
+    when there is no answer to show (unevaluated, stale), in the head when there is one
+    (not_enriched). The words name what was not done, the TOPICS review, so they never
+    contradict a Preguntar score on the same card: Jev did read that post for the question. */
 const STATUS = {
-  unevaluated: 'sin evaluar por Jev',
-  stale: 'sin evaluar por Jev · evaluación caducada',
+  unevaluated: 'topics sin revisar por Jev',
+  stale: 'topics revisados con datos antiguos',
   not_enriched: 'sin enrich con el que comparar',
 };
 
@@ -917,7 +1168,7 @@ function header(p) {
   who.appendChild(el('b', null, p.author.name || p.author.handle));
   who.appendChild(el('span', null, ' @' + p.author.handle + ' · ' + day(p.created)));
   h.appendChild(who);
-  if (STATUS[p.status]) h.appendChild(el('span', 'st', STATUS[p.status]));
+  if (p.jev && STATUS[p.status]) h.appendChild(el('span', 'st', STATUS[p.status]));
   const links = el('div', 'links');
   const x = httpUrl(p.url);
   if (x) links.appendChild(link(x, 'lk', 'X ↗'));
@@ -1139,7 +1390,7 @@ function jevBlock(p) {
     if (SERVED()) box.appendChild(evalButton(EVAL_AGAIN, {ids: [p.id]}));
     return box;
   }
-  h.appendChild(el('span', 'badge', STATUS[p.status] || 'sin evaluar por Jev'));
+  h.appendChild(el('span', 'badge', STATUS[p.status] || STATUS.unevaluated));
   box.appendChild(h);
   if (p.enrich && p.enrich.topics.length) {
     const chips = el('div', 'echips');
@@ -1378,6 +1629,9 @@ function preview(a, p) {
   if (xObserver) xForgetSoon();
   if (shows.why) pv.appendChild(el('p', 'xnote', XNOTE[shows.why]));
   pv.appendChild(shows.x ? xSlot(p) : localView(p));
+  // X's embed shows the author and the date: the card's header then keeps only what is ours
+  // (status, links, the toggle), so they are not said twice.
+  a.classList.toggle('x', shows.x);
   const t = a.querySelector('.vtog');
   if (t) t.textContent = shows.x ? 'ver ' + SAVED : 'ver en X';
 }
@@ -1405,7 +1659,7 @@ function redrawPreviews(id) {
 }
 
 function renderVista() {
-  document.querySelectorAll('#vista button').forEach((b) => {
+  (vistaBox || $('vista')).querySelectorAll('button').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.vista === vista));
   });
 }
@@ -1527,6 +1781,7 @@ function update() {
   renderRail();
   renderActive();
   renderList();
+  if (SERVED()) placePanel();
 }
 
 /* ---------------------------------------------------------------- keyboard */
@@ -1539,7 +1794,7 @@ function goTo(index) {
   const node = $('post-' + shown[index].id);
   node.classList.add('cur');
   node.focus({preventScroll: true});
-  node.scrollIntoView({block: 'start', behavior: 'smooth'});
+  node.scrollIntoView({block: 'start', behavior: SCROLL});
 }
 
 function onKey(e) {
@@ -1598,10 +1853,11 @@ const postById = () => {
   return postMap;
 };
 
-/** A hash link inside the page: `#<tab>?<params>`, the params encoded by URLSearchParams. */
+/** A hash link inside the page: `#<route>?<params>` (`ROUTE`: `#revisar/topics?t=…`), the
+    params encoded by URLSearchParams. */
 function hashHref(tab, params) {
   const qs = new URLSearchParams(params).toString();
-  return '#' + tab + (qs ? '?' + qs : '');
+  return '#' + ROUTE[tab] + (qs ? '?' + qs : '');
 }
 
 function topicHref(slug) {
@@ -1928,7 +2184,7 @@ function renderGroups(box, slug, r) {
     b.type = 'button';
     b.addEventListener('click', () => {
       const target = box.querySelector('section[data-group="' + g.verdict + '"]');
-      if (target) target.scrollIntoView({block: 'start', behavior: 'smooth'});
+      if (target) target.scrollIntoView({block: 'start', behavior: SCROLL});
     });
     jump.appendChild(b);
   });
@@ -1991,13 +2247,14 @@ function renderTopicDetail() {
 
 /** Draws the tab. Guarded: after boot, a throw here would otherwise leave an emptied tab. */
 function renderTopics() {
-  document.querySelector('.tabs a[data-tab="topics"]').setAttribute('href', indexHref());
+  setTabHref('topics', indexHref());
   const detail = !!(topicsView.t || topicsView.unknownT);
   try {
     $('topics-index').hidden = detail;
     $('topic-detail').hidden = !detail;
     if (detail) renderTopicDetail();
     else renderTopicsIndex();
+    if (SERVED()) placePanel();
   } catch (err) {
     console.error(err);
     $('topics-index').hidden = true;
@@ -2088,38 +2345,6 @@ function csec(key, title, intro) {
   sec.dataset.sec = key;
   sec.appendChild(el('h3', 'tsec', title));
   if (intro) sec.appendChild(el('p', 'muted', intro));
-  return sec;
-}
-
-/** 1 · The header's three numbers, in words, each with the posts behind it. */
-function compareResumen() {
-  const S = DATA.summary;
-  const thr = pfmt(DATA.threshold);
-  const sec = csec('resumen', 'En tres frases', null);
-  const facts = el('div', 'facts');
-  const line = (big, why, go, words) => {
-    const box = el('div', 'fact');
-    box.appendChild(el('div', 'big', big));
-    box.appendChild(el('div', 'why', why));
-    const href = hashHref('posts', {f: go});
-    const a = link(href, 'lk go', words);
-    a.dataset.go = go;
-    box.appendChild(a);
-    facts.appendChild(box);
-  };
-  line('Jev confirma ' + nf(S.assigned_backed) + ' de ' + nf(S.assigned_pairs) + ' topics de enrich (' + pct(S.enrich_backed_pct, S.assigned_pairs) + ').',
-    'De los topics que puso enrich, los que Jev también ve con probabilidad ≥ ' + thr + '. Los otros ' + nf(S.doubtful_pairs) +
-    ' (probabilidad < ' + thr + ') son candidatos a quitar.' +
-    (S.assigned_unjudged ? ' ' + pl(S.assigned_unjudged, 'topic ya no está en el vocabulario y no se juzga.',
-      'topics ya no están en el vocabulario y no se juzgan.') : ''),
-    'enrich_only', 'ver los ' + pl(S.posts_enrich_only, 'post', 'posts') + ' con un topic que Jev no confirma →');
-  line('Jev añadiría ' + nf(S.missing_pairs) + ' topics que enrich no puso.',
-    'Topics que Jev ve con probabilidad ≥ ' + thr + ' y enrich no asignó. Son candidatos a añadir.',
-    'adds', 'ver los ' + pl(S.posts_jev_only, 'post', 'posts') + ' donde Jev añadiría →');
-  line('El topic principal coincide en ' + pct(S.primary_agree_pct, S.items_compared) + ' de los posts.',
-    'En ' + nf(S.primary_agree) + ' de ' + nf(S.items_compared) + ' posts comparados, el principal de enrich es el que elige Jev.',
-    'prim', 'ver los ' + pl(S.posts_primary_differs, 'post', 'posts') + ' donde no coincide →');
-  sec.appendChild(facts);
   return sec;
 }
 
@@ -2326,7 +2551,7 @@ function compareNothing(box) {
 
 /** Draws the tab. Guarded: after boot, a throw here would otherwise leave an emptied tab. */
 function renderCompare() {
-  document.querySelector('.tabs a[data-tab="compare"]').setAttribute('href', compareHref());
+  setTabHref('compare', compareHref());
   const box = $('compare-body');
   try {
     box.replaceChildren();
@@ -2338,13 +2563,14 @@ function renderCompare() {
     }
     const list = resolveCompareList();
     const sections = [
-      ['resumen', compareResumen], ['kinds', compareKinds], ['topics', compareTopics],
+      ['kinds', compareKinds], ['topics', compareTopics],
       ['cross', compareCross], ['otro', compareOtro], ['bands', compareBands],
     ];
     sections.forEach(([key, build]) => {
       box.appendChild(build());
       if (list && list.sec === key) box.appendChild(compareList(list));
     });
+    if (SERVED()) placePanel();
   } catch (err) {
     console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Comparar no pudo dibujarse: ' +
@@ -2405,10 +2631,27 @@ function andList(names) {
   return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' y ' + names[names.length - 1];
 }
 
+/** Words with commands in them: each `…` becomes a code span, the rest stays text (never
+    parsed as HTML). The tab's copy names commands and config keys this way. */
+function codeText(text) {
+  const frag = document.createDocumentFragment();
+  String(text).split('`').forEach((part, i) => {
+    if (part) frag.appendChild(i % 2 ? el('code', null, part) : document.createTextNode(part));
+  });
+  return frag;
+}
+
+/** A paragraph of `codeText`. */
+function codePara(cls, text) {
+  const p = el('p', cls);
+  p.appendChild(codeText(text));
+  return p;
+}
+
 function cfgSection(title, intro) {
   const sec = el('section', 'cfg');
   sec.appendChild(el('h3', 'tsec', title));
-  if (intro) sec.appendChild(el('p', 'muted', intro));
+  if (intro) sec.appendChild(codePara('muted', intro));
   return sec;
 }
 
@@ -2424,7 +2667,7 @@ function cfgTable(heads, rows) {
     cells.forEach((cell, i) => {
       const td = el('td', heads[i][1]);
       td.dataset.h = heads[i][0];
-      if (cell instanceof Node) td.appendChild(cell); else td.textContent = cell;
+      td.appendChild(cell instanceof Node ? cell : codeText(cell));
       tr.appendChild(td);
     });
     body.appendChild(tr);
@@ -2444,9 +2687,12 @@ function valueCell(text, small) {
 function configSettings(C) {
   const built = C.settings.filter(s => CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
   const next = C.settings.filter(s => !CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
-  const sec = cfgSection('Ajustes', built.join(', ') + ': con estos valores se calculó esta página. ' +
-    andList(next) + ': no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo de `xbrain jev serve`. ' +
-    'Todo se cambia en config.toml, nunca aquí.');
+  // Two short lines, one per kind of setting, then where they change.
+  const sec = cfgSection('Ajustes', null);
+  sec.appendChild(codePara('muted', 'Cambian lo que ves en esta página: ' + andList(built) + '.'));
+  sec.appendChild(codePara('muted', 'Se usan en la próxima pasada (`xbrain jev topics` o un trabajo de `xbrain jev serve`): ' +
+    andList(next) + '.'));
+  sec.appendChild(codePara('muted', 'Se cambian en config.toml, nunca aquí.'));
   // Shipped most answers first, then by name: drawn in that order.
   const models = C.models_answered;
   const rows = C.settings.map(s => {
@@ -2465,7 +2711,10 @@ function configSettings(C) {
       'la tarifa de lista con la que esta página y `xbrain jev report` calculan todo coste. Es una estimación: el modelo pedido puede ser un alias.',
       el('code', null, 'jev/defaults.py (no está en config.toml)')]);
   });
-  sec.appendChild(cfgTable([['Ajuste', null], ['Valor', 'cv'], ['Qué cambia', 'cw'], ['Dónde', 'ck']], rows));
+  const table = cfgTable([['Ajuste', null], ['Valor', 'cv'], ['Qué cambia', 'cw'], ['Dónde', 'ck']], rows);
+  // Each setting's row can be linked to (the header's «Umbral de topics» opens its row).
+  table.querySelectorAll('tbody tr').forEach((tr, i) => { if (C.settings[i]) tr.id = 'cfg-' + C.settings[i].key; });
+  sec.appendChild(table);
   sec.appendChild(el('p', 'muted', 'Los tokens de salida son gratis.'));
   return sec;
 }
@@ -2564,11 +2813,11 @@ function configFiles(C) {
     const where = el('div');
     where.appendChild(el('code', null, f.path));
     // The page's own file is written right after this blob is built: it is never «missing» here.
-    if (!f.exists && f.key !== 'page') where.appendChild(el('small', 'missing', '(aún no existe: lo crea ' + spec.by + ')'));
+    if (!f.exists && f.key !== 'page') { const why = el('small', 'missing'); why.appendChild(codeText('(aún no existe: lo crea ' + spec.by + ')')); where.appendChild(why); }
     return [f.label, where, f.served ? CONFIG_PAGE_SERVED : spec.what, f.snapshotted ? 'sí' : 'no'];
   })));
   sec.appendChild(el('p', 'note', 'data/ no está en git. Las evaluaciones de Jev (jev/topics.json) y su registro (jev/runs.jsonl) no entran en los snapshots; el topics.json de enrich y vocab.yaml sí.'));
-  sec.appendChild(el('p', 'note', 'Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo devuelve; runs.jsonl es el histórico de costes.'));
+  sec.appendChild(codePara('note', 'Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo devuelve; runs.jsonl es el histórico de costes.'));
   return sec;
 }
 
@@ -2705,6 +2954,86 @@ function openAskRow() {
 /** The query as the server files it: whitespace runs as one space, trimmed. */
 const askText = (q) => String(q || '').trim().split(/\s+/).join(' ');
 
+/** A filter as a compact pill that opens a small panel (a popover) under it: the pill names
+    the filter's current value (`summary()`), the panel holds its controls. Accessible:
+    `aria-expanded`/`aria-controls`, Escape closes it and gives focus back to the pill, Tab
+    stays inside while it is open, a click outside closes it. The tab is redrawn whole on every
+    refine (its state lives in the hash), so which panel was open and which control had the
+    focus are kept (`popsOpen`) and given back after the redraw (`restorePops`). */
+const popsOpen = new Set();
+function popPill(id, name, summary, build) {
+  const wrap = el('div', 'pill');
+  const b = el('button', 'pillb');
+  b.type = 'button';
+  b.id = id + '-open';
+  b.setAttribute('aria-expanded', 'false');
+  b.setAttribute('aria-controls', id + '-pop');
+  const pop = el('div', 'pop');
+  pop.id = id + '-pop';
+  pop.hidden = true;
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', name);
+  // `summary()`: '' (nothing set: the pill says its name), a string (the pill says it), or
+  // `{text, title}` when the pill's words are short and its title carries the whole of it.
+  const label = () => {
+    const now = summary();
+    const text = now && typeof now === 'object' ? now.text : now;
+    b.replaceChildren(el('span', 'pn', text || name));
+    b.classList.toggle('set', !!now);
+    const chev = el('span', 'chev');
+    chev.setAttribute('aria-hidden', 'true');
+    b.appendChild(chev);
+    b.title = now && typeof now === 'object' ? now.title : name + (now ? ': ' + now : '');
+  };
+  const show = (open) => {
+    pop.hidden = !open;
+    b.setAttribute('aria-expanded', String(open));
+    if (open) popsOpen.add(id); else popsOpen.delete(id);
+  };
+  b.addEventListener('click', () => {
+    const open = pop.hidden;
+    if (open) closePops(id);
+    show(open);
+    if (open) { const first = focusables(pop)[0]; if (first) first.focus(); }
+  });
+  pop.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); show(false); b.focus(); return; }
+    if (e.key !== 'Tab') return;
+    const f = focusables(pop);
+    if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+  });
+  build(pop, label);
+  label();
+  wrap.appendChild(b);
+  wrap.appendChild(pop);
+  wrap.dataset.pop = id;
+  wrap.show = show;
+  return wrap;
+}
+
+const focusables = (root) => [...root.querySelectorAll('input, button, select, textarea, a[href]')]
+  .filter(n => !n.disabled && n.getClientRects().length);
+
+/** Closes every open popover but `keep`. */
+function closePops(keep) {
+  document.querySelectorAll('.pill').forEach(w => { if (w.dataset.pop !== keep && w.show) w.show(false); });
+}
+
+/** After the tab is redrawn: the popovers that were open, open again, and the focus back on
+    the control that had it (by id). */
+function restorePops(focusId) {
+  document.querySelectorAll('.pill').forEach(w => { if (popsOpen.has(w.dataset.pop) && w.show) w.show(true); });
+  const f = focusId && document.getElementById(focusId);
+  if (f) f.focus({preventScroll: true});
+}
+
+addEventListener('click', (e) => {
+  if (!popsOpen.size || (e.target.closest && e.target.closest('.pill'))) return;
+  closePops(null);
+});
+
 function askField(text, input, cls) {
   const box = el('label', 'askfld' + (cls ? ' ' + cls : ''));
   if (cls === 'chk') {
@@ -2734,7 +3063,7 @@ function askInput(id, key, type, attrs) {
 
 /** The topics, as a multi-select: none ticked = every topic; several = posts in ANY of them.
     Beside each, how many posts it keeps under the other filters (`askCounts`). */
-function askTopicBoxes() {
+function askTopicBoxes(onChange) {
   const box = el('fieldset', 'asktopics');
   box.id = 'ask-topics';
   box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
@@ -2742,6 +3071,7 @@ function askTopicBoxes() {
   const offered = DATA.topics.map(t => t.slug).concat(Object.keys(counts).filter(k => !DATA.topics.some(t => t.slug === k)));
   offered.forEach(slug => {
     const item = el('label');
+    item.dataset.find = label(slug) + ' ' + slug;
     const input = el('input');
     input.type = 'checkbox';
     input.id = 'ask-topic-' + slug;
@@ -2749,6 +3079,7 @@ function askTopicBoxes() {
     input.checked = askForm.topics.includes(slug);
     const read = () => {
       askForm.topics = askForm.topics.filter(t => t !== slug).concat(input.checked ? [slug] : []);
+      if (onChange) onChange();
     };
     input.addEventListener('input', read);
     input.addEventListener('change', read);
@@ -2760,11 +3091,16 @@ function askTopicBoxes() {
     item.appendChild(n);
     box.appendChild(item);
   });
+  return box;
+}
+
+/** Why the server refused the last recount of the topics (a range that runs backwards), said
+    under the filters — never folded away inside the topics' panel. */
+function askCountsErrorLine() {
   const err = el('p', 'err', askCountsError || '');
   err.id = 'ask-topics-error';
   err.hidden = !askCountsError;
-  box.appendChild(err);
-  return box;
+  return err;
 }
 
 /** The filters as `AskFilters.from_json` reads them: only those set. */
@@ -2785,52 +3121,178 @@ function askBody() {
   return body;
 }
 
-/** Served: the query box and `xbrain jev ask`'s pre-filters; the button only ESTIMATES. */
+/** A calendar day as the reader reads it: «3 jun 2026». */
+const dayWords = (d) => (d ? day(d + 'T12:00:00Z') : '');
+/** The dates filter in words, «desde … hasta …», or '' when there is none. */
+function datesWords(since, until) {
+  if (since && until) return dayWords(since) + ' – ' + dayWords(until);
+  if (since) return 'Desde ' + dayWords(since);
+  if (until) return 'Hasta ' + dayWords(until);
+  return '';
+}
+/** The first day of a preset range ending today (UTC, as the filters compare): the last month,
+    the last three months, this year. */
+function presetSince(key) {
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (key === 'year') return d.getUTCFullYear() + '-01-01';
+  d.setUTCMonth(d.getUTCMonth() - (key === 'month' ? 1 : 3));
+  return d.toISOString().slice(0, 10);
+}
+const DATE_PRESETS = [['', 'Todas las fechas'], ['month', 'Último mes'], ['quarter', 'Últimos 3 meses'], ['year', 'Este año']];
+
+/** «Fechas»: presets and a range, both into the same two date inputs (`sinceId`, `untilId`).
+    `set(since, until)` stores them wherever the caller keeps them. Empty = every date: never
+    today by default. */
+function datesPill(id, sinceId, untilId, get, set) {
+  return popPill(id, 'Fechas', () => datesWords(get().since, get().until), (pop, label) => {
+    const presets = el('div', 'presets');
+    DATE_PRESETS.forEach(([key, words]) => {
+      const b = el('button', 'preset', words);
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        const since = key ? presetSince(key) : '';
+        pop.querySelector('#' + sinceId).value = since;
+        pop.querySelector('#' + untilId).value = '';
+        set(since, '');
+        label();
+      });
+      presets.appendChild(b);
+    });
+    pop.appendChild(presets);
+    const range = el('div', 'range');
+    [[sinceId, 'Desde', 'since'], [untilId, 'Hasta', 'until']].forEach(([inputId, words, key]) => {
+      const input = el('input');
+      input.type = 'date';
+      input.id = inputId;
+      input.value = get()[key];
+      const read = () => { const now = get(); now[key] = input.value; set(now.since, now.until); label(); };
+      input.addEventListener('change', read);
+      input.addEventListener('input', read);
+      range.appendChild(askField(words, input));
+    });
+    pop.appendChild(range);
+  });
+}
+
+/** Served: the question — the tab's one large thing — and `xbrain jev ask`'s pre-filters as
+    pills; the button only ESTIMATES (the price and «Preguntar y pagar» come in the block
+    under the form). */
 function askFormBox() {
-  const form = el('form', 'askform');
+  const form = el('form', 'askform hero');
   form.id = 'ask-form';
-  form.appendChild(el('h4', null, 'Qué posts preguntar'));
+  const qLabel = el('label', 'asklabel', 'Pregunta a tu archivo');
+  qLabel.htmlFor = 'ask-q';
+  form.appendChild(qLabel);
   const q = askInput('ask-q', 'query', 'textarea', {rows: '2', maxlength: '2000',
-    placeholder: '¿Qué posts explican cómo configurar hooks en Claude Code?', 'aria-label': 'La pregunta'});
+    placeholder: 'Posts que explican cómo configurar hooks en Claude Code…'});
   q.value = askForm.query;
+  // Enter asks for the estimate; Shift+Enter is a new line.
+  q.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+  });
   form.appendChild(q);
-  const fs = el('div', 'askfs');
-  const since = askInput('ask-since', 'since', 'date');
-  since.value = askForm.since;
-  const until = askInput('ask-until', 'until', 'date');
-  until.value = askForm.until;
-  const author = askInput('ask-author', 'author', 'text', {placeholder: '@handle', size: '12'});
-  author.value = askForm.author;
-  const limit = askInput('ask-limit', 'limit', 'number', {min: '1', placeholder: 'todos'});
-  limit.value = askForm.limit;
+  form.appendChild(el('h4', null, 'Qué posts preguntar'));
+  const pills = el('div', 'pills');
+  pills.appendChild(askTopicsPill());
+  pills.appendChild(datesPill('ask-dates', 'ask-since', 'ask-until', () => askForm,
+    (since, until) => { askForm.since = since; askForm.until = until; askRecount(); }));
+  pills.appendChild(popPill('ask-who', 'Autor', () => (askForm.author.trim() ? '@' + askForm.author.trim().replace(/^@+/, '') : ''), (pop, label) => {
+    const author = askInput('ask-author', 'author', 'text', {placeholder: '@handle', size: '16', autocomplete: 'off', spellcheck: 'false'});
+    author.value = askForm.author;
+    [['input', askRecount], ['change', askRecount], ['input', label]].forEach(([ev, fn]) => author.addEventListener(ev, fn));
+    pop.appendChild(askField('Autor', author));
+  }));
+  pills.appendChild(popPill('ask-cap', 'Límite', () => (String(askForm.limit).trim() ? 'Hasta ' + nf(Number(askForm.limit)) + ' posts' : ''), (pop, label) => {
+    const limit = askInput('ask-limit', 'limit', 'number', {min: '1', placeholder: 'todos'});
+    limit.value = askForm.limit;
+    limit.addEventListener('input', label);
+    pop.appendChild(askField('Como mucho (posts)', limit));
+  }));
   const evaluated = askInput('ask-evaluated', 'only_evaluated', 'checkbox');
   evaluated.checked = askForm.only_evaluated;
-  // Served: the counts beside the topics follow these filters (`askRecount`, the serve section's).
-  [since, until, author, evaluated].forEach(i => { i.addEventListener('input', askRecount); i.addEventListener('change', askRecount); });
-  [askField('Desde', since), askField('Hasta', until),
-    askField('Autor', author), askField('Como mucho (posts)', limit),
-    askField('Solo posts con evaluación de topics vigente', evaluated, 'chk')].forEach(f => fs.appendChild(f));
-  form.appendChild(askTopicBoxes());
-  form.appendChild(fs);
-  const explain = el('p', 'muted', 'Los filtros eligen qué posts se preguntan (y lo que cuesta); los ' +
-    'resultados se ordenan por lo seguro que está Jev de que el post responde. Topic: posts que enrich o ' +
-    'Jev (≥ ' + pfmt(DATA.threshold) + ') ponen en alguno de los topics marcados.');
+  evaluated.addEventListener('input', askRecount);
+  evaluated.addEventListener('change', askRecount);
+  pills.appendChild(askField('Solo posts con evaluación de topics vigente', evaluated, 'chk'));
+  form.appendChild(pills);
+  form.appendChild(askCountsErrorLine());
+  const explain = el('p', 'muted', 'Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después es gratis.');
   explain.id = 'ask-explain';
   form.appendChild(explain);
-  const tip = el('p', 'muted', 'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.');
-  tip.id = 'ask-tip';
-  form.appendChild(tip);
-  const go = el('button', 'evalb go', 'Estimar lo que cuesta');
+  const row = el('div', 'askgo');
+  const go = el('button', 'evalb primary', 'Estimar lo que cuesta');
   go.type = 'submit';
-  form.appendChild(go);
-  form.appendChild(el('p', 'muted', 'Nada se paga hasta que confirmes en el panel. Un post que ya ' +
-    'respondió a esta misma pregunta no se vuelve a pagar mientras su evidencia no cambie.'));
+  row.appendChild(go);
+  row.appendChild(el('span', 'muted', 'Nada se paga hasta que confirmes. Un post que ya respondió a esta pregunta no se vuelve a pagar.'));
+  form.appendChild(row);
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     openAsk('ask', askBody(), 'Preguntar: «' + askText(askForm.query) + '»', go);
   });
+  // The estimate block sits right under this form: an edit after the estimate holds its pay
+  // button (listened for on the form, after each control has updated `askForm`).
+  ['input', 'change', 'click'].forEach(ev => form.addEventListener(ev, askEstimateStill));
   return form;
 }
+
+const ASK_CHANGED = 'La pregunta cambió desde la estimación: vuelve a estimar.';
+/** Whether the open ask estimate is still for the form as it is. Not: the pay button is held
+    and the block says so. The same again (the edit undone): what the block said comes back. */
+function askEstimateStill() {
+  const mine = asking;
+  if (!mine || mine.kind !== 'ask' || following) return;
+  const same = JSON.stringify(askBody()) === JSON.stringify(mine.ask);
+  if (same === !mine.changed) return;
+  const P = panel();
+  if (!same) {
+    mine.changed = true;
+    mine.said = P.error.hidden ? null : P.error.textContent;
+    P.go.disabled = true;
+    showError(ASK_CHANGED);
+    return;
+  }
+  mine.changed = false;
+  if (mine.said) showError(mine.said); else P.error.hidden = true;
+  P.go.disabled = !(mine.estimate && mine.estimate.allowed);
+}
+
+/** The form's topics: a pill whose panel lists every topic with its count under the other
+    filters (none ticked = every topic; several = posts in ANY of them), a box to find one, and
+    the rule a topic filter follows. */
+function askTopicsPill() {
+  return popPill('ask-topics', 'Topics', () => askTopicsWords(askForm.topics), (pop, label) => {
+    const find = el('input', 'find');
+    find.type = 'search';
+    find.id = 'ask-topics-find';
+    find.placeholder = 'Buscar un topic…';
+    find.setAttribute('aria-label', 'Buscar un topic');
+    pop.appendChild(find);
+    const box = askTopicBoxes(label);
+    find.addEventListener('input', () => filterTopicList(box, find.value));
+    pop.appendChild(box);
+    const rule = el('p', 'muted', 'Un post está en un topic si enrich o Jev (≥ ' + pfmt(DATA.threshold) + ') lo ponen en él.');
+    rule.id = 'ask-topics-rule';
+    pop.appendChild(rule);
+  });
+}
+
+/** A Topics pill's words: «Topics: AI Coding», «Topics: AI Coding +2» (the filter keeps its
+    name), the whole list in its title — or '' with none ticked. */
+function askTopicsWords(topics) {
+  if (!topics.length) return '';
+  return {text: 'Topics: ' + label(topics[0]) + (topics.length > 1 ? ' +' + nf(topics.length - 1) : ''),
+    title: 'Topics: ' + andList(topics.map(label))};
+}
+
+/** Hides the topics whose name or slug does not contain `text` (case and accents ignored). */
+function filterTopicList(box, text) {
+  const fold = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const want = fold(text.trim());
+  box.querySelectorAll('label').forEach(l => {
+    l.hidden = !!want && !fold(l.dataset.find || '').includes(want);
+  });
+}
+
 
 /** Static: nothing is asked from here; the command that would. */
 function askLaunchLine() {
@@ -2838,9 +3300,14 @@ function askLaunchLine() {
   line.id = 'ask-launch';
   line.appendChild(document.createTextNode('Para preguntar desde esta página, ábrela con '));
   line.appendChild(el('code', null, 'xbrain jev serve'));
-  line.appendChild(document.createTextNode('. Desde la terminal: '));
-  line.appendChild(el('code', null, 'xbrain jev ask "tu pregunta" --dry-run'));
-  line.appendChild(document.createTextNode(' (estima sin pagar; sin --dry-run, pregunta).'));
+  line.appendChild(document.createTextNode('.'));
+  // The terminal's command on its own line, never broken inside (`white-space: nowrap`).
+  const cmd = el('span', 'cmd', 'Desde la terminal, ');
+  cmd.appendChild(el('code', null, 'xbrain jev ask "tu pregunta" --dry-run'));
+  cmd.appendChild(document.createTextNode(' estima sin pagar; sin '));
+  cmd.appendChild(el('code', null, '--dry-run'));
+  cmd.appendChild(document.createTextNode(', pregunta.'));
+  line.appendChild(cmd);
   return line;
 }
 
@@ -2850,8 +3317,9 @@ function askFiltersText(f) {
   const parts = [];
   const topics = f.topics || [];
   if (topics.length) parts.push((topics.length === 1 ? 'topic ' : 'topics ') + topics.map(label).join(' o '));
-  if (f.since) parts.push('desde ' + f.since);
-  if (f.until) parts.push('hasta ' + f.until);
+  // Dates in the page's words («desde 7 may 2026»), as the rest of the line says them.
+  const dates = datesWords(f.since, f.until);
+  if (dates) parts.push(dates.charAt(0).toLowerCase() + dates.slice(1));
   if (f.author) parts.push('autor @' + String(f.author).replace(/^@/, ''));
   if (f.only_evaluated) parts.push('solo posts con evaluación de topics');
   return parts.length ? 'Filtros: ' + parts.join(', ') : 'Sin filtros: todo el corpus';
@@ -2868,6 +3336,9 @@ function askCostText(cost) {
 function askCard(p, r) {
   const a = safeCard(p);
   a.id = 'ask-post-' + p.id;
+  // The card's left edge is the answer's relevance: verdigris, as strong as the probability.
+  a.classList.add('asked');
+  a.style.setProperty('--p', String(r.p));
   const strip = el('div', 'askr');
   const top = el('div', 'jh');
   top.appendChild(el('span', 'kick', 'Responde a la pregunta'));
@@ -2889,7 +3360,25 @@ function askCard(p, r) {
   const chars = askKeys()[r.id].n;
   strip.appendChild(whatJevSaw({surfaces: surfaces, state_chars: chars, truncated: chars > DATA.char_limit}));
   a.insertBefore(strip, a.children[1] || null);
+  foldJev(a, p);
   return a;
+}
+
+/** On a result, the question is the context, not the topics audit: the card's Jev block folds
+    behind one line naming the post's topics and what Jev made of them. */
+function foldJev(a, p) {
+  const block = a.querySelector(':scope > .jev');
+  if (!block) return;
+  const fold = el('details');
+  const topics = (p.enrich && p.enrich.topics.length ? p.enrich.topics : (p.jev ? p.jev.topics.map(t => t.slug) : []));
+  const j = p.jev;
+  const state = !j ? STATUS[p.status] || STATUS.unevaluated
+    : j.compared ? (j.disagreements ? pl(j.disagreements, 'discrepancia', 'discrepancias') : 'sin discrepancias')
+    : STATUS[p.status] || '';
+  fold.appendChild(el('summary', null, (topics.length ? 'Topics: ' + topics.map(label).join(', ') : 'Topics') +
+    (state ? ' · ' + state : '')));
+  fold.append(...block.childNodes);
+  block.appendChild(fold);
 }
 
 /** Each result post's refine keys and state size (`dashboard.asks_view`: `ask.answer_view`'s
@@ -2918,6 +3407,9 @@ function askResults(row) {
     box.appendChild(none);
     return box;
   }
+  const vh = el('div', 'vista-host');
+  vh.id = 'ask-vista-host';
+  box.appendChild(vh);
   const head = el('div', 'askhead');
   head.id = 'ask-head';
   head.appendChild(el('h3', 'tsec', '«' + row.query + '»'));
@@ -2935,7 +3427,7 @@ function askResults(row) {
   const refine = askEffective(row, askView.refine);
   box.appendChild(askRefineBar(row, refine));
   const list = askResultList(askAnswers(row), refine, {answered: row.answered, sha: row.sha});
-  head.appendChild(el('p', null, list.reach));
+  head.appendChild(el('p', 'reach', list.reach));
   box.appendChild(list.el);
   return box;
 }
@@ -3040,12 +3532,11 @@ function askRefineTo(sha, change) {
 /** «Refinar resultados (gratis)»: top, minimum, topics, days and author over this query's
     saved answers. Every change is a new hash; nothing is asked or paid. */
 function askRefineBar(row, refine) {
-  const bar = el('section', 'askform askrefine');
+  const bar = el('section', 'askrefine');
   bar.id = 'ask-refine';
   bar.appendChild(el('h4', null, 'Refinar resultados (gratis)'));
-  bar.appendChild(el('p', 'muted', 'Sobre las respuestas ya guardadas de esta consulta: no se pregunta nada ni se ' +
-    'paga, y el enlace de la página guarda el refinado.'));
-  const fs = el('div', 'askfs');
+  const pills = el('div', 'pills');
+  const numOrNull = (v) => (String(v).trim() === '' ? null : Number(v));
   const field = (id, type, value, attrs, key, read) => {
     const input = el('input');
     input.type = type;
@@ -3055,37 +3546,51 @@ function askRefineBar(row, refine) {
     input.addEventListener('change', () => askRefineTo(row.sha, {[key]: read(input.value)}));
     return input;
   };
-  const numOrNull = (v) => (String(v).trim() === '' ? null : Number(v));
-  fs.appendChild(askField('Mostrar', field('refine-top', 'number', String(refine.top), {min: '1', step: '1'}, 'top', (v) => { const n = numOrNull(v); return n && n >= 1 ? Math.floor(n) : null; })));
-  fs.appendChild(askField('Relevancia mínima (0–1)', field('refine-min', 'number', refine.min > 0 ? String(refine.min) : '', {min: '0', max: '1', step: '0.05', placeholder: 'sin mínimo'}, 'min', (v) => { const n = numOrNull(v); return n === null ? 0 : Math.min(1, Math.max(0, n)); })));
-  fs.appendChild(askField('Desde', field('refine-since', 'date', refine.since, {}, 'since', (v) => v)));
-  fs.appendChild(askField('Hasta', field('refine-until', 'date', refine.until, {}, 'until', (v) => v)));
-  fs.appendChild(askField('Autor', field('refine-author', 'text', refine.author, {placeholder: '@handle', size: '12'}, 'author', (v) => v.trim())));
-  bar.appendChild(fs);
+  pills.appendChild(askField('Mostrar', field('refine-top', 'number', String(refine.top), {min: '1', step: '1'}, 'top',
+    (v) => { const n = numOrNull(v); return n && n >= 1 ? Math.floor(n) : null; }), 'inline'));
+  pills.appendChild(popPill('refine-rel', 'Relevancia', () => (refine.min > 0 ? 'Relevancia ≥ ' + dec(refine.min, 2) : ''), (pop) => {
+    pop.appendChild(askField('Relevancia mínima (0–1)', field('refine-min', 'number', refine.min > 0 ? String(refine.min) : '',
+      {min: '0', max: '1', step: '0.05', placeholder: 'sin mínimo'}, 'min',
+      (v) => { const n = numOrNull(v); return n === null ? 0 : Math.min(1, Math.max(0, n)); })));
+  }));
   // Topics among this query's answers (and every one ticked), each with how many it keeps
   // under the rest of the refine.
   const keys = askKeys();
   const answers = askAnswers(row);
   const counts = askTopicCounts(answers, refine, keys);
   const inAnswers = new Set(answers.flatMap(r => (keys[r.id] ? keys[r.id].t : [])));
-  const box = el('fieldset', 'asktopics');
-  box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
-  Object.keys(counts).sort((a, b) => label(a).localeCompare(label(b))).forEach(slug => {
-    const item = el('label');
-    const input = el('input');
-    input.type = 'checkbox';
-    input.id = 'refine-topic-' + slug;
-    input.checked = refine.topics.includes(slug);
-    input.addEventListener('change', () => askRefineTo(row.sha, {topics: input.checked
-      ? refine.topics.concat([slug]) : refine.topics.filter(t => t !== slug)}));
-    item.appendChild(input);
-    item.appendChild(el('span', null, label(slug)));
-    const n = el('span', 'tcount', nf(counts[slug]));
-    n.title = 'respuestas de este topic con el resto del refinado';
-    item.appendChild(n);
-    box.appendChild(item);
-  });
-  bar.appendChild(box);
+  pills.appendChild(popPill('refine-topics', 'Topics', () => askTopicsWords(refine.topics), (pop) => {
+    const box = el('fieldset', 'asktopics');
+    box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
+    Object.keys(counts).sort((a, b) => label(a).localeCompare(label(b))).forEach(slug => {
+      const item = el('label');
+      const input = el('input');
+      input.type = 'checkbox';
+      input.id = 'refine-topic-' + slug;
+      input.checked = refine.topics.includes(slug);
+      input.addEventListener('change', () => askRefineTo(row.sha, {topics: input.checked
+        ? refine.topics.concat([slug]) : refine.topics.filter(t => t !== slug)}));
+      item.appendChild(input);
+      item.appendChild(el('span', null, label(slug)));
+      const n = el('span', 'tcount', nf(counts[slug]));
+      n.title = 'respuestas de este topic con el resto del refinado';
+      item.appendChild(n);
+      box.appendChild(item);
+    });
+    pop.appendChild(box);
+  }));
+  pills.appendChild(datesPill('refine-dates', 'refine-since', 'refine-until', () => ({since: refine.since, until: refine.until}),
+    (since, until) => askRefineTo(row.sha, {since: since, until: until})));
+  pills.appendChild(popPill('refine-who', 'Autor', () => (String(refine.author || '').trim() ? '@' + refine.author.trim().replace(/^@+/, '') : ''), (pop) => {
+    pop.appendChild(askField('Autor', field('refine-author', 'text', refine.author, {placeholder: '@handle', size: '16', autocomplete: 'off', spellcheck: 'false'}, 'author', (v) => v.trim())));
+  }));
+  const clear = el('button', 'evalb', 'Quitar el refinado');
+  clear.type = 'button';
+  clear.id = 'refine-clear';
+  // The state is reset NOW, like any other refine change: a change right after builds on it.
+  clear.addEventListener('click', () => askRefineTo(row.sha, askNoRefine()));
+  pills.appendChild(clear);
+  bar.appendChild(pills);
   const absent = refine.topics.filter(t => !inAnswers.has(t));
   if (absent.length) {
     const note = el('p', 'muted', 'Ninguna respuesta de esta consulta está en ' +
@@ -3093,12 +3598,6 @@ function askRefineBar(row, refine) {
     note.id = 'refine-absent';
     bar.appendChild(note);
   }
-  const clear = el('button', 'evalb', 'Quitar el refinado');
-  clear.type = 'button';
-  clear.id = 'refine-clear';
-  // The state is reset NOW, like any other refine change: a change right after builds on it.
-  clear.addEventListener('click', () => askRefineTo(row.sha, askNoRefine()));
-  bar.appendChild(clear);
   return bar;
 }
 
@@ -3113,11 +3612,37 @@ function askHistoryCount(row) {
   return nf(shown) + ' de ' + answered;
 }
 
+/** What asking has cost, every query together: the report's total (`asks.cost`,
+    `report.ask_cost_total`) — never added up here; «—» and why when the run log is unreadable. */
+function askCostLine() {
+  const c = (DATA.asks && DATA.asks.cost) || null;
+  const line = el('p', 'askcost');
+  line.id = 'ask-cost';
+  if (!c) return line;
+  if (c.error) {
+    line.textContent = 'Lo que ha costado preguntar: — (' + c.error + ')';
+  } else if (!c.runs) {
+    line.textContent = 'Aún no se ha pagado ninguna pregunta.';
+  } else {
+    line.appendChild(document.createTextNode('Lo que ha costado preguntar: '));
+    line.appendChild(el('b', 'money', usd(c.cost_usd)));
+    // As the topics strip's Total says it: answers with no token count, named as answers.
+    const unknown = c.input_tokens_unknown ? ' (+' + pl(c.input_tokens_unknown, 'respuesta', 'respuestas') + ' sin recuento)' : '';
+    line.appendChild(document.createTextNode(' en ' + pl(c.runs, 'pasada', 'pasadas') + ' y ' +
+      pl(c.requests, 'petición', 'peticiones') + unpricedWords(c.unpriced_providers) + unknown + '.'));
+  }
+  return line;
+}
+
+/** «, sin tarifa: a, b» — the providers a bill could not price. */
+const unpricedWords = (names) => (names && names.length ? ', sin tarifa: ' + names.join(', ') : '');
+
 function askHistory(open) {
   const side = el('aside', 'askside');
-  side.setAttribute('aria-label', 'Consultas hechas');
-  side.appendChild(el('h3', 'tsec', 'Consultas hechas'));
-  side.appendChild(el('p', 'muted', 'Reabrir una consulta no cuesta nada: sus respuestas están guardadas.'));
+  side.setAttribute('aria-label', 'Tus preguntas');
+  side.appendChild(el('h3', 'tsec', 'Tus preguntas'));
+  side.appendChild(askCostLine());
+  side.appendChild(el('p', 'muted', 'Reabrir una no cuesta nada: sus respuestas están guardadas.'));
   if (DATA.asks && DATA.asks.error) {
     const banner = el('p', 'err', 'No se pudo leer el historial: ' + DATA.asks.error);
     banner.id = 'ask-history-error';
@@ -3143,6 +3668,9 @@ function askHistory(open) {
 function renderAsk() {
   document.querySelector('.tabs a[data-tab="ask"]').setAttribute('href', askHref(askView.q, askView.refine));
   const box = $('ask-body');
+  // The tab is redrawn whole on every refine: the open filter panel and the focused control
+  // are given back after it (`restorePops`).
+  const focusId = box.contains(document.activeElement) ? document.activeElement.id : '';
   try {
     const row = openAskRow();
     const grid = el('div', 'askl');
@@ -3152,12 +3680,28 @@ function renderAsk() {
     grid.appendChild(main);
     grid.appendChild(askHistory(row));
     box.replaceChildren(grid);
+    placeAskCost();
+    placeVista();
+    if (SERVED()) placePanel();
+    restorePops(focusId);
   } catch (err) {
     console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Preguntar no pudo dibujarse: ' +
       (err && err.message ? err.message : err)));
   }
 }
+/** One column (≤ 900 px) puts the history under the results; what asking has cost then opens
+    the tab instead of trailing every result. Beside the results, it heads the history. */
+const ONE_COLUMN = matchMedia('(max-width: 900px)');
+function placeAskCost() {
+  const line = $('ask-cost');
+  const main = document.querySelector('#ask-body .askmain');
+  const title = document.querySelector('#ask-body .askside > .tsec');
+  if (!line || !main || !title) return;
+  if (ONE_COLUMN.matches) { if (main.firstChild !== line) main.prepend(line); }
+  else if (title.nextElementSibling !== line) title.after(line);
+}
+ONE_COLUMN.addEventListener('change', placeAskCost);
 /* end ask tab */
 
 /* ---------------------------------------------------------------- serve mode */
@@ -3214,6 +3758,10 @@ let PANEL = null;
 let ESTIMATES = 0;
 /** The button that opened the panel: focus goes back to it when the panel closes. */
 let opener = null;
+/** Where the panel lives: the top tab it belongs to, and the place in it (a CSS selector, found
+    again after every redraw) it sits right under — the card whose button opened it, the list or
+    the form. With no such place on screen it sits in its top tab's own slot (`#jobslot-…`). */
+let panelHome = {top: 'revisar', anchor: null};
 /** The last finished job whose files this page's data includes, by its `number` (`/api/job`'s):
     its `finished_at` is a time to the second, and two jobs can end in the same one. */
 let seenFinish = null;
@@ -3227,6 +3775,7 @@ let watchLostShown = false;
 function watchLost() {
   const P = panel();
   asking = null;
+  panelHome = {top: topOf(view.tab), anchor: null};
   watchLostShown = true;
   P.title.textContent = 'Sin contacto con el servidor';
   P.est.textContent = '';
@@ -3236,6 +3785,7 @@ function watchLost() {
   P.reload.hidden = false;
   P.box.hidden = false;
   showError('Se perdió el contacto con el servidor; recarga la página.');
+  placePanel();
 }
 
 function watchFound() {
@@ -3243,6 +3793,7 @@ function watchFound() {
   watchLostShown = false;
   P.error.hidden = true;
   P.box.hidden = true;
+  renderBadges();
 }
 
 /** A call to this page's server: GET without a body, POST (JSON, with the page's token) with
@@ -3340,14 +3891,69 @@ function panelButton(id, cls, text, onClick) {
   return b;
 }
 
+/** The place a job of `kind` goes when no button of this page opened it: an ask under the
+    Preguntar form, a topics pass at the top of Revisar. */
+const kindHome = (kind) => (kind === 'ask' ? {top: 'ask', anchor: '#ask-form'} : {top: 'revisar', anchor: null});
+
+/** The place right under the button that opened the panel, as a selector found again after a
+    redraw: the card (the block goes after it, never inside: a card is swapped whole when its
+    post is re-evaluated), the Posts toolbar, the topic chip, a list's or topic's row of
+    buttons, the Preguntar form. */
+function panelAnchor(from) {
+  if (!from || !from.isConnected) return null;
+  const card = from.closest('.card');
+  if (card && card.id) return '#' + card.id;
+  if (from.closest('#evalnext')) return '#tab-posts .controls';
+  if (from.closest('#active')) return '#active';
+  if (from.closest('#ask-form')) return '#ask-form';
+  for (const id of ['topic-pair', 'compare-list', 'topic-detail']) {
+    if (from.closest('#' + id)) return '#' + id + ' > .evalrow';
+  }
+  return null;
+}
+
+/** Puts the panel in its place (`panelHome`): under its anchor where one is on screen — else,
+    while its top tab is not the one shown, under any copy of it — else in its top tab's slot.
+    Called after every draw that can replace what it sat under. */
+function placePanel() {
+  if (!PANEL) return;
+  const box = PANEL.box;
+  const found = panelHome.anchor ? [...document.querySelectorAll(panelHome.anchor)] : [];
+  const shownTop = topOf(view.tab);
+  const spot = found.find(n => !n.closest('[hidden]')) || (panelHome.top !== shownTop ? found[0] : null);
+  if (spot) {
+    if (spot.nextElementSibling !== box) spot.after(box);
+  } else {
+    const slot = $('jobslot-' + panelHome.top);
+    if (box.parentNode !== slot) slot.appendChild(box);
+  }
+  renderBadges();
+}
+
+/** A small badge on a top tab whose panel is out of sight: a job running there, or an end
+    there that needs reading. */
+function renderBadges() {
+  document.querySelectorAll('#toptabs a[data-tab]').forEach(a => {
+    const badge = a.querySelector('.tbadge');
+    if (!badge) return;
+    const box = PANEL && PANEL.box;
+    const there = !!box && panelHome.top === a.dataset.tab && topOf(view.tab) !== a.dataset.tab &&
+      (following || !box.hidden);
+    badge.hidden = !there;
+    badge.textContent = there ? (following ? 'en curso' : 'aviso') : '';
+  });
+}
+
 function panel() {
   if (PANEL) return PANEL;
-  const box = el('section', 'askp');
+  const box = el('section', 'jobp');
   box.id = 'jobp';
   box.hidden = true;
-  box.setAttribute('role', 'dialog');
+  box.setAttribute('role', 'region');
   box.setAttribute('aria-labelledby', 'ask-title');
-  box.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
+  // Escape closes it — never while a job runs: «Ocultar» is the word for that, and a running
+  // job's block is the one place its spending is shown.
+  box.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !following) closePanel(); });
   const title = el('h3', 'tsec');
   title.id = 'ask-title';
   title.tabIndex = -1;
@@ -3385,7 +3991,7 @@ function panel() {
   const buttons = el('div', 'askb');
   [go, stop, reload, cancel].forEach(b => buttons.appendChild(b));
   [title, est, forceRow, error, prog, buttons].forEach(n => box.appendChild(n));
-  document.body.appendChild(box);
+  $('jobslot-revisar').appendChild(box);
   PANEL = {box, title, est, forceRow, force, error, prog, track, fill, progText, go, stop, reload, cancel};
   return PANEL;
 }
@@ -3395,7 +4001,13 @@ function panel() {
 function closePanel() {
   const P = panel();
   P.box.hidden = true;
-  if (!following) asking = null;
+  // Closed with no job followed: nothing of where it was opened is kept, so a job another tab
+  // starts later goes to its own place (`kindHome`), never under this card or list.
+  if (!following) {
+    asking = null;
+    panelHome = {top: topOf(view.tab), anchor: null};
+  }
+  renderBadges();
   if (opener && document.body.contains(opener)) opener.focus();
 }
 
@@ -3420,7 +4032,9 @@ function openAsk(kind, ask, title, from) {
   const P = panel();
   watchLostShown = false;  // the panel is the reader's now
   opener = from || null;
+  if (!following) panelHome = {top: from ? topOf(view.tab) : kindHome(kind).top, anchor: panelAnchor(from) || kindHome(kind).anchor};
   P.box.hidden = false;
+  placePanel();
   P.title.focus();
   if (following) return;  // the running job's panel, as it is
   asking = {kind: kind, ask: ask, title: title, sent: null, estimate: null, seq: 0};
@@ -3470,19 +4084,26 @@ async function estimate() {
     mine.estimate = e;
     P.est.textContent = mine.kind === 'ask' ? askPickText(e) : pickText(e);
     if (e.allowed) {
-      P.go.disabled = false;
+      // Answered after the form was edited: priced, but not payable until estimated again.
+      P.go.disabled = !!mine.changed;
       // A query every post already answered asks nobody: it only opens the results.
       P.go.textContent = e.posts ? words.go + ' ' + usd(e.usd, 5) : 'Ver resultados (gratis)';
     } else {
-      showError(words.cant + e.refusal);
+      estimateError(mine, words.cant + e.refusal);
     }
   } catch (err) {
     if (!latest(mine, seq)) return;
     P.est.textContent = '';
-    showError(words.cant + err.message);
+    estimateError(mine, words.cant + err.message);
   } finally {
     if (latest(mine, seq)) P.force.disabled = false;
   }
+}
+
+/** Why an estimate cannot be paid, for the form as it was sent. Edited meanwhile: the block
+    keeps saying the question changed, and the reason is kept for when the edit is undone. */
+function estimateError(mine, text) {
+  if (mine.changed) mine.said = text; else showError(text);
 }
 
 function pickText(e) {
@@ -3539,7 +4160,7 @@ function capText(max) {
 async function confirmAsk() {
   const mine = asking;
   const e = mine && mine.estimate;
-  if (!e || !e.allowed || following) return;
+  if (!e || !e.allowed || following || mine.changed) return;
   const P = panel();
   if ('force' in mine.sent && mine.sent.force !== P.force.checked) {
     P.go.disabled = true;
@@ -3572,6 +4193,7 @@ function follow(job) {
   P.forceRow.hidden = true;
   P.prog.hidden = false;
   panelMode('follow');
+  placePanel();
   progress(job);
   setTimeout(() => poll(0), POLL_MS);
 }
@@ -3580,6 +4202,10 @@ function follow(job) {
 function resume(job) {
   const P = panel();
   asking = null;
+  // Another tab's job (or this page's, after a reload): in its kind's place — under the button
+  // that was pressed here, when a refused confirm led to it and it is of the same kind.
+  const home = kindHome(job.kind);
+  panelHome = {top: home.top, anchor: panelHome.top === home.top && panelHome.anchor ? panelHome.anchor : home.anchor};
   P.title.textContent = KIND_RUNNING[job.kind] || 'Trabajo en curso';
   P.est.textContent = 'Empezó ' + when(job.started_at) + ' · ' + pl(job.total, 'post', 'posts') +
     '. ' + capText(job.max_usd);
@@ -3612,6 +4238,7 @@ function lost(err) {
   const P = panel();
   following = false;
   P.box.hidden = false;
+  renderBadges();
   panelMode('done');
   P.reload.hidden = false;
   showError('Se perdió el contacto con el servidor (' + err.message + '). El trabajo puede seguir ' +
@@ -3694,6 +4321,7 @@ function showEnd(job) {
   panelMode('done');
   P.prog.hidden = false;
   if (!endedCleanly(job)) P.box.hidden = false;
+  renderBadges();
   if (job.state === 'error') {
     P.progText.textContent = spentText(job);
     showError('El trabajo falló: ' + job.error);
@@ -3728,6 +4356,8 @@ async function endedElsewhere(job) {
   if (!endedCleanly(job)) {
     const P = panel();
     asking = null;
+    panelHome = kindHome(job.kind);
+    placePanel();
     P.title.textContent = KIND_ENDED[job.kind] || 'Un trabajo lanzado en otra pestaña';
     P.est.textContent = 'Empezó ' + when(job.started_at || job.finished_at) + ' · ' + pl(job.total, 'post', 'posts') + '.';
     P.forceRow.hidden = true;
@@ -3773,6 +4403,7 @@ function refresh(blob) {
   if (view.tab === 'compare') renderCompare();
   if (view.tab === 'ask') renderAsk();
   if (view.tab === 'config') renderConfig();
+  placePanel();
 }
 
 /** Whether a job this page is not following is running or has ended, asked at load and then
@@ -3872,11 +4503,16 @@ function boot() {
     // scroll alone.
     if (view.tab === 'compare') showCompare();
     if (view.tab === 'ask') renderAsk();
-    if (view.tab === 'config') renderConfig();
+    if (view.tab === 'config') { renderConfig(); jumpToSetting(); }
   });
   document.addEventListener('keydown', onKey);
+  // The skip link moves the focus to the current top tab: its `#` is not a route.
+  document.querySelector('.skip').addEventListener('click', (e) => {
+    e.preventDefault();
+    document.querySelector('#toptabs a[aria-current="page"]').focus();
+  });
   renderVista();
-  document.querySelectorAll('#vista button').forEach((b) => b.addEventListener('click', () => setVista(b.dataset.vista)));
+  vistaBox.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setVista(b.dataset.vista)));
   // A frame takes the theme it was drawn in: the system theme changing redraws them.
   // Every card again (an argument would be read as a post id): the frames take the new theme.
   matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => redrawPreviews());

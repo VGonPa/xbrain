@@ -61,6 +61,30 @@ _MEDIA_TYPES = ("image/", "video/")
 _MEDIA_REFUSED = frozenset({"image/svg+xml"})
 
 
+#: The served page holds the per-start spending token, so what may run and load beside it is
+#: pinned: its own inline script and nothing from any host (X's embed is a sandboxed frame,
+#: never X's script); requests only to this server; X's frame the only other origin it frames,
+#: and no other origin may frame it (its money buttons; `'self'` on both keeps the page able to
+#: hold a copy of itself, as the 375 px test does); the fonts from Google Fonts; pictures and
+#: videos from its own `/_media/`. The static `jev.html` carries no policy (a `file://` page has no header).
+PAGE_POLICY = "; ".join(
+    (
+        "default-src 'none'",
+        "script-src 'unsafe-inline'",
+        "style-src 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src https://fonts.gstatic.com",
+        "img-src 'self'",
+        "media-src 'self'",
+        "connect-src 'self'",
+        "frame-src 'self' https://platform.twitter.com",
+        "frame-ancestors 'self'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "object-src 'none'",
+    )
+)
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     service: JevService
@@ -163,7 +187,12 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         service = self.server.service
         if url.path in ("/", "/jev.html"):
-            self._send(200, service.page_html().encode("utf-8"), "text/html; charset=utf-8")
+            self._send(
+                200,
+                service.page_html().encode("utf-8"),
+                "text/html; charset=utf-8",
+                ("Content-Security-Policy", PAGE_POLICY),
+            )
         elif url.path.startswith(f"/{VAULT_MEDIA_SUBDIR}/"):
             self._media(url.path)
         elif url.path == "/api/ask/counts":

@@ -535,12 +535,24 @@ searches and orders the posts. To read the side-car at another threshold, use
 
 Top to bottom:
 
-1. **Header** — when the page was written, the model that answered, the threshold with
-   `(config)` next to it, and a link to this document.
+1. **Header** — the day the page was written (*Actualizado 27 sept 2026*: Python ships the
+   ISO day, the page words it like every other date), the model that answered, *Umbral de
+   topics 0,85* — a link that opens Configuración at the threshold's row, where it is
+   explained — and a link to this document.
 2. **Qué es esto** — a short paragraph on what the page is for.
-3. **Coste y peticiones** — three figures and a folded table:
-   - **Total**: requests, input tokens and dollars across every logged pass; `—` and
-     `sin pasadas registradas` when none is logged yet.
+3. **Three top tabs**: **Revisar topics** (`#revisar/…`, the default), **Preguntar** (`#ask`)
+   and **Configuración** (`#config`). Everything below, down to the sub-tabs, is inside
+   *Revisar topics*: the cost of asking the corpus is Preguntar's own line, not this strip.
+   The URL keeps the tab and its view, so a view survives a reload; the old `#posts`,
+   `#topics` and `#compare` links still open the same views (the URL is rewritten to
+   `#revisar/posts`, `#revisar/topics`, `#revisar/compare` in place, with no extra history
+   entry). *Revisar topics* returns to the sub-tab and view you left it on.
+4. **Coste y peticiones** — three figures and a folded table:
+   - **Total**: requests, input tokens and dollars across every logged pass. With none
+     logged yet but answers stored, the total is what those answers cost by their own tokens,
+     named as such (*sin pasadas registradas: lo que costaron las N evaluaciones guardadas,
+     estimado por sus propios tokens*); `—`, in ink rather than amber, only when nothing was
+     ever paid (*sin pasadas registradas: aún no se ha pagado nada*).
    - **Media por post**: what one current stored answer cost on average, labelled
      `media de K de las N evaluaciones vigentes` — K is how many could be priced (the
      provider reported usage and has a price). Unpriced providers are named, not averaged in.
@@ -552,19 +564,27 @@ Top to bottom:
      calls were in flight and how many answers were not saved (a pass whose final save
      failed shows its unsaved answers too). Asks are billed in the Preguntar tab instead.
 
-   Answers no logged pass covers are named in one line
+   Beside a logged total, answers no logged pass covers are named in one line
    (`N evaluaciones fuera del registro de pasadas (~X $ según sus propios tokens) …`) and are
    not added to the total: the side-car keeps only the latest answer per item, so it cannot
    reconstruct the passes the log missed. If `runs.jsonl` has a line that cannot be read,
    the strip shows that error (with the line number) in place of the total and the history,
    `jev dashboard` repeats it on stderr, and the rest of the page renders as usual.
-4. **Three numbers**, each with a one-line explanation:
+5. **Three numbers**, each with a one-line explanation and a link to its posts in the Posts
+   tab. This is their one home: every Revisar sub-tab shows them, and Comparar does not repeat
+   them.
    - *Jev confirma X de Y topics de enrich (Z %)* — enrich's topics that Jev also sees at or
-     above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`).
-   - *Jev añadiría N topics que enrich no puso* — `missing_pairs`.
-   - *El topic principal coincide en P %* — `primary_agree_pct`.
-5. **Five tabs**: **Posts**, **Topics**, **Comparar Jev vs enrich**, **Preguntar** and
-   **Configuración**, each described below.
+     above the threshold (`assigned_backed` of `assigned_pairs`, `enrich_backed_pct`); *los
+     otros N* (`doubtful_pairs`) are candidates to remove, and the topics that left the
+     vocabulary are named. *ver los N posts con un topic que Jev no confirma* opens *Enrich
+     asigna y Jev no*.
+   - *Jev añadiría N topics que enrich no puso* — `missing_pairs`; *ver los N posts donde Jev
+     añadiría* opens *Jev añadiría topic*.
+   - *El topic principal coincide en P %* — `primary_agree_pct`, with *En K de N posts
+     comparados…*; *ver los N posts donde no coincide* opens *Primario distinto*.
+6. **Three sub-tabs**: **Posts**, **Topics** and **Comparar**, each described below, with
+   the page-wide *Vista* switch beside them. Preguntar and Configuración are described after
+   them.
 
 ### The Posts tab
 
@@ -582,10 +602,13 @@ card, from the same comparison the report counts:
 | *Jev eligió «otro»* | posts where Jev answered "none of these" | `primary_fallback` |
 | *Sin evaluar por Jev* | posts with no current answer, never asked or stale | `items_unassessed` |
 
-Under them, the vocabulary's topics, most disagreement first, each with three numbers counted
-over the **compared** posts only: how many enrich put there (`assigned`), how many of those
-Jev confirms (`backed`) and how many disagree about it (`disagreeing` = enrich puts it and Jev
-does not back it, plus Jev backs it and enrich did not put it). Clicking a topic narrows the
+Under them, the vocabulary's topics, most disagreement first, each read as *confirma/pone ·
+discrepan* (the list's header), counted over the **compared** posts only: *18/24* — of the
+posts enrich put there (`assigned`), how many Jev confirms (`backed`), in the colour of
+agreement — then how many disagree about it (`disagreeing` = enrich puts it and Jev does not
+back it, plus Jev backs it and enrich did not put it), in the pencil's. One line under the
+header, *Solo los posts comparados, con el filtro de arriba.*, carries the full definition as
+its tooltip. Clicking a topic narrows the
 current view, and a line under it says what the list now counts:
 
 - under *Con discrepancias*, the posts that disagree about that topic — exactly its
@@ -601,8 +624,10 @@ list starts folded.
 
 **Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
 card shows **the post through X's own embed** — the post as X shows it, loaded from X when the
-card comes near the screen — under a head of ours (author, `@handle`, date, `X ↗`, `nota ↗` and
-the toggle). The embed is a plain frame to X's embed page: X's script never runs in this page,
+card comes near the screen — under a head of ours with `X ↗`, `nota ↗` and the toggle (X's
+embed already shows the author and date, so the head adds them only on the saved copy). On a
+wide screen Jev's block sits beside the post instead of under it, and stays in view while a
+long post scrolls; on a narrow one it goes under. The embed is a plain frame to X's embed page: X's script never runs in this page,
 where the served page keeps the token that can spend money. X receives the post id and your
 IP (and its own cookies in your browser). It gets no referrer: at most the page's origin
 (`file://` or the local port), never its path or data. See ARCHITECTURE.md (jev · *The X
@@ -611,7 +636,7 @@ embed*).
 **The saved copy is always one click away.** *ver copia guardada* on a card swaps X's view for
 the copy XBrain saved (below), and *ver en X* swaps it back. The choice is per post: when the
 same post is on screen twice (Posts and a Preguntar result), both cards follow. The switch
-**Vista: X | copia guardada** beside the tabs (on a phone, on its own row above them) sets
+**Vista: X | copia guardada** beside the sub-tabs, and at the head of Preguntar's results (on a phone, on its own row) sets
 every card at once; this browser remembers it. Opening the page with `?embed=0`
 (`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every card on the
 saved copy. A card shows the saved copy by itself, with one line saying why (*… · se muestra
@@ -667,15 +692,17 @@ surface shows at most **600 characters**, and the page says so when one is longe
 
 A post Jev evaluated but enrich never enriched shows what Jev sees (its topics at the
 threshold and its primary), with nothing to compare. A post Jev has not answered for shows
-enrich's topics, a *sin evaluar por Jev* mark (plus *evaluación caducada* when its answer is
-stale), and a **copiar comando** button with the exact line that asks for it:
+enrich's topics, the mark *topics sin revisar por Jev* (*topics revisados con datos antiguos*
+when its answer is stale) — once, in its Jev block; the words name what was not done, so on a
+Preguntar result, whose post Jev did read for the question, they never contradict its score —
+and a **copiar comando** button with the exact line that asks for it:
 `xbrain jev topics --id <id>`. A post with no evidence at all says *sin evidencia* instead,
 because `jev topics` skips it. The page never asks Jev anything.
 
 Search matches text, author, id and topics (slug or label); sort is *más discrepancias*
 (default), *más recientes* or *más caros*. Keys: **j** / **k** next / previous post, **n** /
 **p** next / previous post with a discrepancy. The filter, topic, search and sort live in the
-URL (`#posts?f=uneval&t=ai-coding&q=…&s=recent`), so a view can be bookmarked and survives a
+URL (`#revisar/posts?f=uneval&t=ai-coding&q=…&s=recent`), so a view can be bookmarked and survives a
 reload, including searches with `&`, `+`, `%` or `?`. The page follows the system's light or
 dark theme. If one post cannot be drawn, its card says so in one line and the rest draw.
 
@@ -696,7 +723,7 @@ would be about **7.3 MB**. JavaScript draws everything; without it the page says
 
 ### The Topics tab
 
-**The index** (`#topics`) lists the vocabulary's topics with, per topic, the `per_topic` row of
+**The index** (`#revisar/topics`) lists the vocabulary's topics with, per topic, the `per_topic` row of
 the report: *Enrich lo pone* (`assigned`), *Jev confirma* (`backed`, at the threshold, which the
 header shows), *Acuerdo* (`backed_pct`, `—` when enrich never put it), *Jev lo añadiría*
 (`missing`), *Discrepancias* (`disagreeing`), and *Principal según enrich / según Jev*
@@ -709,11 +736,11 @@ the topics enrich put on **at least 5 posts** (`TOPIC_MIN`, shipped as `topic_mi
 follow, marked *pocos datos*, since an agreement rate over one or two posts is noise. Clicking a
 header sorts by it (click again to reverse). *Acuerdo* sorts by the exact ratio, never the
 rounded percentage, and topics enrich never put go last in both directions. The URL keeps the
-order (`#topics?o=disagreeing&d=desc`) without adding a history entry per click, and the back
+order (`#revisar/topics?o=disagreeing&d=desc`) without adding a history entry per click, and the back
 link from a topic returns to it. On a phone the headers fold into each row and a drop-down
 offers the same orders.
 
-**A topic's page** (`#topics?t=<slug>`, bookmarkable) shows its description and numbers, then:
+**A topic's page** (`#revisar/topics?t=<slug>`, bookmarkable) shows its description and numbers, then:
 
 - **Con qué se confunde**: from `topic_confusion`, what Jev put in its place where enrich put
   this topic and Jev does not back it, and what enrich had where Jev adds it, with how many
@@ -725,7 +752,7 @@ offers the same orders.
   primary enrich chose that has since left `vocab.yaml`.
 - When a side is empty, it says what the row says: *Enrich no lo pone en ningún post comparado*,
   *Enrich / Jev nunca lo elige como principal*, or that the two always agree.
-- Each row opens exactly its posts, as cards (`#topics?t=<slug>&cx=<enrich>~<jev>` or `&px=…`,
+- Each row opens exactly its posts, as cards (`#revisar/topics?t=<slug>&cx=<enrich>~<jev>` or `&px=…`,
   with `-` for "nothing"), scrolled into view; *quitar este cruce* goes back. A pair that does
   not involve the topic, or no longer exists in these data, says *Ese cruce ya no existe en
   estos datos* and shows the topic's groups; a post of the pair missing from the page is
@@ -735,45 +762,42 @@ offers the same orders.
   (`backed`), **Solo enrich** (`doubtful`), **Solo Jev** (`missing`) — twenty at a time, with
   buttons that jump to each group.
 
-Links: *ver en Posts* opens the Posts tab on every post with this topic (`#posts?f=all&t=…`);
-*sus discrepancias en Posts* on the ones that disagree about it (`#posts?t=…`). On any card, a
+Links: *ver en Posts* opens the Posts tab on every post with this topic (`#revisar/posts?f=all&t=…`);
+*sus discrepancias en Posts* on the ones that disagree about it (`#revisar/posts?t=…`). On any card, a
 topic's name in the Jev vs enrich rows opens its page, and the Posts rail offers *ficha del
 topic* for the topic it is filtering by. Back and forward move between the index, a topic and a
 pair. If the tab ever fails to draw, it says so inside the tab.
 
 ### The Comparar tab
 
-`#compare` compares Jev's decisions with enrich's in plain words. Every number is a report
+`#revisar/compare` compares Jev's decisions with enrich's in plain words. Every number is a report
 count, and every number opens the posts behind it.
 
-1. **En tres frases**: the header's three numbers, each with what it means and a link to its
-   posts in the Posts tab: *ver los N posts con un topic que Jev no confirma* (the *Enrich asigna
-   y Jev no* view), *ver los N posts donde Jev añadiría* (*Jev añadiría topic*) and *ver los N
-   posts donde no coincide* (*Primario distinto*). The first names the others as *los otros N
-   (probabilidad < umbral)* — `doubtful_pairs` — and, when there are any, the topics that have
-   left the vocabulary and are not judged.
-2. **Los tres tipos de desacuerdo**: one card per kind with its post count
+The three headline numbers are above the sub-tabs, with their links (see *Three numbers*);
+this tab does not say them a second time.
+
+1. **Los tres tipos de desacuerdo**: one column per kind with its post count
    (`posts_enrich_only`, `posts_jev_only`, `posts_primary_differs`), the topic count behind the
    first two (`doubtful_pairs`, `missing_pairs`), and *ver los posts*. A post can be in more than
    one, so they do not add up.
-3. **Acuerdo por topic, peores primero**: the ten first topics in the Topics index's default
+2. **Acuerdo por topic, peores primero**: the ten first topics in the Topics index's default
    order (worst agreement first among the topics enrich put on at least 5 posts; the rest after,
    marked *pocos datos*) with *Enrich lo pone*, *Jev confirma*, *Acuerdo* and *Discrepancias*,
-   which opens the Posts tab on the posts that disagree about the topic (`#posts?t=…`). *ver los
+   which opens the Posts tab on the posts that disagree about the topic (`#revisar/posts?t=…`). *ver los
    N en Topics* opens the full index.
-4. **Cruce del topic principal**: enrich's primary against Jev's. On the left, where they
+3. **Cruce del topic principal**: enrich's primary against Jev's. On the left, where they
    coincide, per topic (`primary_both`); on the right, every pair where they do not
    (`primary_confusion`), most posts first, with *sin principal* for a post enrich left without
    one and *«otro» (ninguno del vocabulario)* for Jev's fallback. Ten show; *ver todos* opens
    the rest (*ver todos (N topics más…)* on the left, *(N cruces más…)* on the right). A row
-   opens exactly its posts (`#compare?pd=<slug>`, `#compare?px=<enrich>~<jev>`).
-5. **Jev eligió «otro»**: `primary_fallback`, a link to those posts, and what primary enrich
+   opens exactly its posts (`#revisar/compare?pd=<slug>`, `#revisar/compare?px=<enrich>~<jev>`).
+4. **Jev eligió «otro»**: `primary_fallback`, a link to those posts, and what primary enrich
    had on them; each of those rows opens its posts under this section, including when it is
    opened from the cross above. Read it as a likely hole in the vocabulary: a subject no topic
    covers.
-6. **Qué seguro estaba Jev en los desacuerdos**: the `confidence_bands`, each with its
+5. **Qué seguro estaba Jev en los desacuerdos**: the `confidence_bands`, each with its
    edges written as *probabilidad* at the threshold's own precision (the threshold is the one in
-   the header), its disagreements and its posts; the posts open as cards (`#compare?b=<key>`).
+   the header), its disagreements and its posts; the posts open as cards (`#revisar/compare?b=<key>`).
 
 One list is open at a time. A list opens under its section, as the same cards as the Posts tab,
 twenty at a time, scrolled into view (only when it is a different list from the one already
@@ -801,7 +825,13 @@ sit between the threshold and 0.95 and 69 at 0.95 or above.
 (`dashboard.asks_view`), built from `data/jev/asks/`: nothing on the tab calls Jev, and
 reopening a query costs nothing.
 
-- **Consultas hechas** (right; below on a narrow screen): every query in
+- **Tus preguntas** (right; below on a narrow screen) opens with what asking has cost, every
+  query together: *Lo que ha costado preguntar: ~X $ en N pasadas y M peticiones* — plus
+  *(+K respuestas sin recuento)* when some answers came back without a token count, as the
+  *Consultas* line says it (`asks.cost`, `report.ask_cost_total` — the same total as `jev
+  report`'s *Consultas* line; *—* and why when `runs.jsonl` cannot be read; *Aún no se ha
+  pagado ninguna pregunta.* when none was). In one column (≤ 900 px, where the history goes
+  under the results) that line opens the tab instead, above the form. Then every query in
   `data/jev/asks/index.json` (read as `jev ask` reads it: an entry the index lost is rebuilt
   from its answer file and marked *reconstruida*), the last asked first. Each row has the
   query, the day, how many of its results its default view shows (*20 de 808 leídos por Jev*;
@@ -823,13 +853,17 @@ reopening a query costs nothing.
   yes/no to an open question rarely reaches that, and the first real query showed *0 de 808*.
   Entries written then reopen ranked, for free.)
   **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers: *Mostrar*
-  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), *Relevancia
-  mínima* (by default the query's `last_min`, set only by `jev ask --min` — none for most), the
-  topics among its answers (checkboxes, each with how many answers it keeps under the rest of
+  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), then
+  pills that each open a small panel and name what is set: *Relevancia* (the minimum; by
+  default the query's `last_min`, set only by `jev ask --min` — none for most), *Topics* (the
+  topics among its answers, as checkboxes, each with how many answers it keeps under the rest of
   the refine — `askTopicCounts`, the one counting function, tested against Python topic by
   topic; a topic ticked in the link that no answer is in is still listed, at 0, and named),
-  *Desde*, *Hasta* and *Autor* (read like the filter: spaces and a leading `@` dropped, case
-  ignored); **Quitar el refinado** goes back to the defaults. It
+  *Fechas* (presets — every date, the last month, the last three months, this year — or a
+  range; empty means every date, never today) and *Autor* (read like the filter: spaces and a
+  leading `@` dropped, case ignored); **Quitar el refinado** goes back to the defaults. A panel
+  opens with the focus inside, keeps Tab inside, and closes on Escape (focus back on its pill)
+  or a click outside; one left open stays open while the refine redraws the list. It
   asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
   computed in Python per result post by `ask.refine_keys` (its day in UTC, its handle by
   `ask.normalise_author`, its topics by `ask.post_topics`) plus `n`, the size of the state Jev
@@ -846,10 +880,15 @@ reopening a query costs nothing.
   with their own Jev block), each with a strip on top: *Responde a la pregunta*, the
   probability as a number and a **bar** (its fill is the probability), the model and when, and
   **Lo que vio Jev** — the same state a topics pass sends, surface by surface, so it is there
-  for a post topics never asked. When nothing passes the refine, the tab says so and that
+  for a post topics never asked. Here the question is the context, not the topics audit: the
+  card's Jev block is folded behind one line, *Topics: A, B · 1 discrepancia* (or *· topics sin
+  revisar por Jev*). Where the list is at least 780 px wide, the strip and that fold sit
+  beside the post rather than above and below it. The results head writes dates as the rest
+  of the page does (*Filtros: desde 7 may 2026*). When nothing passes the refine, the tab says so and that
   changing it is free.
 - **Launching** needs the server. The static `jev.html` says *Para preguntar desde esta
-  página, ábrela con `xbrain jev serve`* and gives the terminal command; served, the tab has
+  página, ábrela con `xbrain jev serve`* and, on its own line, the terminal command (never
+  broken inside a command); served, the tab has
   the query box and the filters (see [`xbrain jev serve`](#xbrain-jev-serve--the-page-live-with-a-way-to-ask)).
 
 ### The Configuración tab
@@ -864,11 +903,14 @@ edit `config.toml` and re-run `xbrain jev dashboard`.
    value in effect, its default (*por defecto* or *por defecto: X*), one line on what changing
    it does (the threshold moves every number but retires nothing; a new fallback retires every
    answer; a new char limit only the posts whose cut moves; the model and concurrency retire
-   nothing) and its key. The intro separates the two kinds: the threshold, the fallback, the
-   char limit and `ask_top` (*Resultados que se muestran de una pregunta*) built this page; the model (*Modelo que se pedirá*), the concurrency,
-   `serve_max_usd` (*Tope por trabajo de xbrain jev serve*) and `ask_max_usd` (*Tope sin
-   preguntar de xbrain jev ask*) only matter to the next pass, from the terminal or through
-   `xbrain jev serve`'s API. Under the model, the models that answered the
+   nothing) and its key. Each row can be linked to (`#cfg-<key>`; the header's *Umbral de
+   topics* opens the threshold's). The intro is three short lines, one per kind, then where
+   they change: *Cambian lo que ves en esta página:* the threshold, the fallback, the char
+   limit and `ask_top` (*Resultados que se muestran de una pregunta*); *Se usan en la próxima
+   pasada …:* the model (*Modelo que se pedirá*), the concurrency, `serve_max_usd` (*Tope por
+   trabajo de xbrain jev serve*) and `ask_max_usd` (*Tope sin preguntar de xbrain jev ask*),
+   from the terminal or through `xbrain jev serve`'s API; *Se cambian en config.toml, nunca
+   aquí.* Under the model, the models that answered the
    current answers, most answers first, and the reminder that a stored answer does not record
    which model was *requested*. Then the input price per provider from `INPUT_USD_PER_MTOK`
    (not a config key) and *Los tokens de salida son gratis.*
@@ -949,22 +991,26 @@ it starts, so photos mirrored later show after a restart.
 - **Evaluar estos posts** on a pair in Topics and on each list the Comparar tab opens (a band,
   a primary pair).
 
-**The Preguntar tab**, served, adds **Qué posts preguntar**: a **query box** and `jev ask`'s
-pre-filters — the **topics as a multi-select** (none ticked = every topic; several = posts in
-any of them, and still every other filter), *Desde*, *Hasta*, *Autor*, *Como mucho (posts)* (the
-`--limit`) and *Solo posts con evaluación de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as every
-other button. Beside each topic is how many posts it keeps **under the other filters**: the
+**The Preguntar tab**, served, opens on the question: a large box, **Pregunta a tu archivo**
+(Enter estimates; Shift+Enter is a new line), and under it **Qué posts preguntar** — `jev
+ask`'s pre-filters as pills: *Topics* (a panel with a search box and every topic as a
+checkbox; none ticked = every topic; several = posts in any of them, and still every other
+filter; the pill keeps its name and says what is ticked, *Topics: AI Coding +1*, the whole
+list in its tooltip), *Fechas* (presets or a range, into *Desde* / *Hasta*), *Autor*, *Límite* (*Como
+mucho (posts)*, the `--limit`) and the checkbox *Solo posts con evaluación de topics
+vigente* — and one button, **Estimar lo que cuesta**, whose estimate opens in the block under
+the form. Beside each topic is how many posts it keeps **under the other filters**: the
 blob's `asks.topic_counts` (`ask.topic_counts`, the whole corpus) until you type a filter,
 then the server's answer to `GET /api/ask/counts` — never counted in the browser. When the
 server refuses a count (a range that runs backwards), the counts read *—* and the reason is
-said under the topics; new data (a job's end) asks again for the filters typed. Under the
-filters, one line says what they do and one tip:
+said under the pills; new data (a job's end) asks again for the filters typed. Under the
+pills, one line:
 
-> Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan por lo
-> seguro que está Jev de que el post responde. Topic: posts que enrich o Jev (≥ 0,85) ponen en
-> alguno de los topics marcados.
->
-> Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.
+> Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después es gratis.
+
+and in the Topics panel, the rule a topic filter follows: *Un post está en un topic si enrich
+o Jev (≥ 0,85) lo ponen en él.* The box's placeholder is the kind of question that works best
+— about content, not topics (*Posts que explican cómo configurar hooks en Claude Code…*).
 
 These filters change the posts asked, and so the price: tick a second topic and the
 estimate's post count and cost grow with it. Everything about which results are SHOWN — how
@@ -988,10 +1034,19 @@ When an ask you followed from the tab ends and was recorded, the tab opens its r
 stopped before keeping any answer stays where it is and says *no quedó en el historial*. A
 history that could not be written after the answers were paid says *N respuestas pagadas y
 guardadas en <fichero>; el historial no se pudo escribir: …*. Reopening a query from
-**Consultas hechas** asks the server nothing.
+**Tus preguntas** asks the server nothing.
 
-A button opens a panel in the corner (Escape closes it; focus goes back to the button). The
-panel shows the server's estimate first: *«Coste estimado: ~X $ (coste medio por post de las
+A button opens a block **in the page, right under it** — under the card whose *Evaluar este
+post* you pressed, under the Posts toolbar, the topic, the list, or the Preguntar form — never a
+panel floating over the page. Focus moves into it; Escape closes it (not while a job runs:
+*Ocultar* is the word for that) and focus goes back to the button. When the place it sat under
+is redrawn away (another filter, another list), the block moves to the top of its tab
+(*Revisar topics* for a topics pass, under the form in *Preguntar* for an ask). A block closed
+with no job followed forgets where it was opened, so a job another tab starts later goes to its
+own place. An ask's estimate is for the form as it was: editing the question or a filter
+afterwards holds **Preguntar y pagar** and says *La pregunta cambió desde la estimación: vuelve
+a estimar.*; undoing the edit gives the estimate back. The block
+shows the server's estimate first: *«Coste estimado: ~X $ (coste medio por post de las
 N evaluaciones ya pagadas × M posts). Tope: <cap> $. Al llegar se para; lo que ya esté en
 vuelo termina y puede pasarlo por poco (como mucho <concurrency> posts).»*, with
 what it skips. The button that spends says so and how much: **Evaluar y pagar ~X $**. It only
@@ -1020,11 +1075,16 @@ redrawn. A page opened or reloaded while a job runs, or left open in another tab
 job too, and an idle page loads the new data when a job it did not follow ends (it asks
 `/api/job` every few seconds); when that job did not end cleanly, the panel opens and says how
 (*Una evaluación de topics lanzada en otra pestaña* / *Una pregunta lanzada en otra pestaña*).
+Such a block opens in the job's own tab — a topics pass in *Revisar topics*, an ask in
+*Preguntar* — and when you are on another tab, that tab's name carries a small badge:
+*en curso* while a job runs there, *aviso* when an end there needs reading.
 After a refused **Evaluar y pagar**, the button comes back only when the confirmation is still
 good: a malformed request (400) or a job thread that could not start (503 *no se pudo
 arrancar*); never while the server is stopping. A refusal because another job runs (409)
 follows that job. The static `jev.html` never shows these buttons (its data says it is not
-served) and keeps «copiar comando».
+served) and keeps «copiar comando». The served page is sent with a content security policy: no script from
+any host, requests only to its own server, X's embed the only outside frame, and no other site
+can put the page in a frame of its own.
 
 Those buttons call a small JSON API to run a topics pass over chosen posts, or an ask over
 the corpus; anything else on this machine that has the page's token can call it too (`curl`
@@ -1396,8 +1456,8 @@ today gives the same value.
 
 Stale records are **excluded from every number** in the report and the dashboard, never
 compared as if they were current, and **counted** (`caducadas`) so the exclusion is visible.
-On the dashboard their post is still a card, marked *evaluación caducada*, under *Sin evaluar
-por Jev*. An *orphaned*
+On the dashboard their post is still a card, marked *topics revisados con datos antiguos*,
+under *Sin evaluar por Jev*. An *orphaned*
 record — one whose item is no longer in the store — gets its own counter (`huérfanas`): a
 different event with the same symptom. `xbrain jev topics` re-asks exactly the stale ones.
 

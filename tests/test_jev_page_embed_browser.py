@@ -187,6 +187,9 @@ const sCard = (id, root) => {
     note: txt(c.querySelector('.xnote')),
     toggle: txt(c.querySelector('.vtog')),
     jev: seen(c.querySelector('.jev')),
+    // The card's own header: who and when, only when X's embed is not showing them.
+    who: txt(c.querySelector('.twh .who')),
+    head_links: [...c.querySelectorAll('.twh .links > *')].filter(seen).map(e => e.textContent),
   };
 };
 /** What X's frame would post: a real `message` event on this window, through the page's own
@@ -385,6 +388,10 @@ def test_a_post_with_an_x_id_is_xs_own_embed_in_a_sandboxed_frame(embedded):
     assert a["local"] is None
     assert a["jev"] is True
     assert a["toggle"] == "ver copia guardada"
+    # X's embed shows the author and the date: the card's header does not say them twice, and
+    # keeps what is ours — the links and the toggle.
+    assert a["who"] is None
+    assert a["head_links"][-1] == "ver copia guardada" and "X ↗" in a["head_links"]
 
 
 @_requires_chrome
@@ -397,6 +404,8 @@ def test_a_post_whose_id_x_cannot_have_is_the_saved_copy_and_says_why(embedded):
     for post_id, card in zip((BAD, *ODD), (start["bad"], *start["odd"]), strict=True):
         assert card["frame"] is None, post_id
         assert card["slot"] is False, post_id
+        # The saved copy has no author line of its own: the card's header carries it.
+        assert card["who"] is not None and "@" in card["who"], post_id
         assert card["local"] == f"texto local de {post_id}"
         assert card["note"] == why
         assert card["toggle"] is None
@@ -625,7 +634,7 @@ _PHONE_PROBE = (
   });
   const w = (sel) => Math.round(doc().querySelector(sel).getBoundingClientRect().width);
   done({width: win.innerWidth, page: doc().documentElement.scrollWidth, buttons: boxes,
-    tabs: w('.tabs'), bar: w('.tabbar')});
+    tabs: w('.tabs.sub'), bar: w('.tabbar')});
 })();
 </script>"""
 )

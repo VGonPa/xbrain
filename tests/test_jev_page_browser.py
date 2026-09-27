@@ -137,12 +137,18 @@ const cards = async () => { await drawAll(); return seenCards(document.getElemen
   }
   railButtons().find(b => b.firstChild.textContent === 'Con discrepancias').click(); await sleep(10);
   for (const b of topicButtons()) {
-    const parts = b.lastChild.textContent.split(' · ').map(num);
+    // «confirma/pone» then the posts that disagree about it: read as the reader reads them.
+    const c = b.lastChild;
+    // (Read as text: on this narrow window the Topics list starts folded.)
+    const rail = {text: c.textContent, ok: c.querySelector('.ok').textContent, d: c.querySelector('.dn').textContent};
     const name = b.firstChild.textContent;
     b.click(); await sleep(10);
-    out.topics[name] = {disagreeing: parts[2], list: count(), ids: await cards()};
+    out.topics[name] = {disagreeing: num(rail.d), rail: rail, list: count(), ids: await cards()};
     b.click(); await sleep(10);
   }
+  document.querySelector('#rail .tbox').open = true; await sleep(10);
+  out.rail_head = txt(document.querySelector('#rail .tbox .thead'));
+  out.rail_legend = [...document.querySelectorAll('#rail .tbox > .legend')].filter(seen).map(p => ({text: p.textContent, title: p.title}));
   out.one_way = {};
   for (const view_ of ['Enrich asigna y Jev no', 'Jev añadiría topic']) {
     railButtons().find(b => b.firstChild.textContent === view_).click(); await sleep(10);
@@ -174,7 +180,36 @@ const cards = async () => { await drawAll(); return seenCards(document.getElemen
   await drawAll();
   out.copy_ids = [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && seen(c.querySelector('.ask button'))).map(c => c.dataset.id);
   out.no_evidence_ids = [...document.querySelectorAll('#cards .card')].filter(c => seen(c) && c.textContent.includes('sin evidencia')).map(c => c.dataset.id);
+  // What a card says about Jev's review of its topics, and where: its head and its Jev block.
+  out.status = Object.fromEntries(['stale', 'never'].map(id => {
+    const c = document.getElementById('post-' + id);
+    return [id, {text: c.textContent, head: txt(c.querySelector('.twh .st')), block: txt(c.querySelector('.jev .badge'))}];
+  }));
   out.commands = [...document.querySelectorAll('#cards .ask code')].filter(seen).map(c => c.textContent).slice(0, 2);
+  // The cost strip's first number in its three cases, drawn from the same data reworked.
+  const saved = JSON.stringify(DATA.cost);
+  const totalOf = () => { const n = document.querySelector('#kpis .kpi .num');
+    return {num: txt(n), amber: n.classList.contains('accent'), ctx: txt(document.querySelector('#kpis .kpi .ctx')),
+      note: txt(document.getElementById('before-log'))}; };
+  DATA.cost.total = Object.assign({}, DATA.cost.total, {runs: 1, requests: 3, cost_usd: 0.0123, input_tokens: 900});
+  DATA.cost.out_of_log = {assessments: 2, cost_usd: 0.0002, input_tokens: 10, input_tokens_unknown: 0, unpriced_providers: []};
+  renderCost(); out.cost_logged = totalOf();
+  DATA.cost.total = Object.assign({}, DATA.cost.total, {runs: 0, requests: 0, cost_usd: 0, input_tokens: 0});
+  renderCost(); out.cost_unlogged = totalOf();
+  DATA.cost.out_of_log = Object.assign({}, DATA.cost.out_of_log, {assessments: 0, cost_usd: 0});
+  renderCost(); out.cost_nothing = totalOf();
+  // Each figure once: with no logged pass and every saved answer current, the Total already is
+  // what the current answers cost, so their tile does not say the number again.
+  const storedCtx = () => txt(document.querySelectorAll('#kpis .kpi .ctx')[2]);
+  DATA.cost.out_of_log = Object.assign({}, DATA.cost.out_of_log, {assessments: 2, cost_usd: 0.0769});
+  DATA.cost.current = Object.assign({}, DATA.cost.current, {assessments: 2, cost_usd: 0.0769});
+  renderCost(); out.cost_echo = {kpis: txt(document.getElementById('kpis')), stored: storedCtx()};
+  DATA.cost.current = Object.assign({}, DATA.cost.current, {cost_usd: 0.05});
+  renderCost(); out.cost_apart = {stored: storedCtx()};
+  // One answer with no token count, in a logged total: the noun agrees with the number.
+  DATA.cost.total = Object.assign({}, DATA.cost.total, {runs: 1, requests: 3, cost_usd: 0.0123, input_tokens: 900, input_tokens_unknown: 1});
+  renderCost(); out.cost_one_unknown = totalOf();
+  DATA.cost = JSON.parse(saved); renderCost();
   // The URL keeps a search with characters that need escaping.
   const box = document.getElementById('search');
   box.value = 'R&D c++ 50% ¿qué?'; box.dispatchEvent(new Event('input')); await sleep(10);
@@ -211,6 +246,42 @@ setTimeout(() => {
 )
 
 
+#: The page's tabs as a reader sees them: which top tab and which Revisar sub-tab are current,
+#: the URL it settled on, and WHERE the cost strip and Preguntar's cost line are (their top tab),
+#: each only when seen. `history.length` says a rewritten old route added no entry. Then, from
+#: a topic's page, Preguntar and back through «Revisar topics»: the sub-tab's view is kept.
+_ROUTE_PROBE = (
+    "<script>"
+    + _SEEN
+    + r"""
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const cur = (id) => { const a = document.querySelector('#' + id + ' a[aria-current="page"]'); return seen(a) ? a.dataset.tab : null; };
+const topOfEl = (e) => (seen(e) ? e.closest('.toptab').id : null);
+const read = () => ({hash: location.hash, top: cur('toptabs'), sub: cur('subtabs'),
+  cost: topOfEl(document.getElementById('cost')), numbers: topOfEl(document.getElementById('numbers')),
+  ask_cost: topOfEl(document.getElementById('ask-cost')), ask_cost_text: txt(document.getElementById('ask-cost')),
+  shown: [...document.querySelectorAll('.toptab')].filter(seen).map(e => e.id),
+  history: history.length});
+(async () => {
+  await sleep(150);
+  const out = {opened: read()};
+  location.hash = '#revisar/posts?f=all&t=startups'; await sleep(60);
+  document.querySelector('#toptabs a[data-tab="ask"]').click(); await sleep(60);
+  out.on_ask = read();
+  document.querySelector('#toptabs a[data-tab="revisar"]').click(); await sleep(60);
+  out.back = read();
+  // A bare «#revisar» after another sub-tab was shown returns to that sub-tab.
+  location.hash = '#revisar/compare'; await sleep(60);
+  location.hash = '#revisar'; await sleep(60);
+  out.bare = read();
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>
+"""
+)
+
+
 def _fixture() -> dict[str, Any]:
     """`_corpus`'s cases, plus 110 never-asked posts (so Todos needs a third page) and one
     post with no evidence at all."""
@@ -231,7 +302,8 @@ def _open(page: Path, hash_: str = "") -> dict[str, Any]:
     return _dump(page.as_uri() + hash_)
 
 
-def _dump(url: str, budget_ms: int = 8000) -> dict[str, Any]:
+def _dump(url: str, budget_ms: int = 8000, window: str = "") -> dict[str, Any]:
+    """`window` ("1280,900") sets the window's size; left empty, Chrome's own default."""
     assert CHROME is not None
     result = subprocess.run(  # nosec B603 - fixed argv, a file or local server this test made
         [
@@ -241,6 +313,7 @@ def _dump(url: str, budget_ms: int = 8000) -> dict[str, Any]:
             "--no-sandbox",
             _NO_NETWORK,
             f"--virtual-time-budget={budget_ms}",
+            *([f"--window-size={window}"] if window else []),
             "--dump-dom",
             url,
         ],
@@ -284,6 +357,65 @@ _KEYS = {
 }
 
 
+@pytest.fixture(scope="module")
+def route_page(tmp_path_factory) -> Path:
+    _need_chrome()
+    return _page(tmp_path_factory.mktemp("routes"), _fixture(), _ROUTE_PROBE)
+
+
+@pytest.fixture(scope="module")
+def route_history(route_page) -> int:
+    """`history.length` of a page opened at a current route: headless Chrome's own start."""
+    return _open(route_page, "#revisar/compare")["opened"]["history"]
+
+
+_ROUTES = {
+    # opened at (a reload there) → the URL it settles on, the top tab, the sub-tab
+    "": ("#revisar/posts", "revisar", "posts"),
+    "#revisar/posts?f=all": ("#revisar/posts?f=all", "revisar", "posts"),
+    "#revisar/topics?t=startups": ("#revisar/topics?t=startups", "revisar", "topics"),
+    "#revisar/compare": ("#revisar/compare", "revisar", "compare"),
+    "#ask": ("#ask", "ask", None),
+    "#config": ("#config", "config", None),
+    # Old bookmarks: the same view, the URL rewritten in place.
+    "#posts?f=all": ("#revisar/posts?f=all", "revisar", "posts"),
+    "#topics?t=startups": ("#revisar/topics?t=startups", "revisar", "topics"),
+    "#compare": ("#revisar/compare", "revisar", "compare"),
+    "#revisar": ("#revisar/posts", "revisar", "posts"),
+}
+
+
+@_requires_chrome
+@pytest.mark.parametrize("opened", list(_ROUTES))
+def test_three_top_tabs_and_their_sub_tabs_route_and_survive_a_reload(
+    route_page, route_history, opened
+):
+    seen = _open(route_page, opened)["opened"]
+    hash_, top, sub = _ROUTES[opened]
+
+    assert (seen["hash"], seen["top"], seen["sub"]) == (hash_, top, sub)
+    assert seen["shown"] == [f"top-{top}"]
+    # An old route is rewritten in place: no history entry more than a current route opens with.
+    assert seen["history"] == route_history
+    # The cost strip and the three numbers live in Revisar only; Preguntar has its own line.
+    in_revisar = "top-revisar" if top == "revisar" else None
+    assert (seen["cost"], seen["numbers"]) == (in_revisar, in_revisar)
+    assert seen["ask_cost"] == ("top-ask" if top == "ask" else None)
+
+
+@_requires_chrome
+def test_leaving_revisar_and_coming_back_through_its_tab_keeps_the_sub_tabs_view(route_page):
+    seen = _open(route_page, "#config")
+
+    assert (seen["on_ask"]["top"], seen["on_ask"]["hash"]) == ("ask", "#ask")
+    assert seen["on_ask"]["ask_cost_text"] == "Aún no se ha pagado ninguna pregunta."
+    assert (seen["back"]["top"], seen["back"]["sub"]) == ("revisar", "posts")
+    assert seen["back"]["hash"] == "#revisar/posts?f=all&t=startups"
+    # A bare «#revisar» goes back to the sub-tab last shown, not always to Posts.
+    assert (seen["bare"]["top"], seen["bare"]["sub"]) == ("revisar", "compare")
+    assert seen["bare"]["hash"].startswith("#revisar/compare")
+
+
 @_requires_chrome
 def test_the_page_opens_on_the_disagreements(probed):
     data, seen = probed
@@ -300,7 +432,9 @@ def test_each_view_lists_exactly_the_posts_its_number_counts(probed):
         view = seen["filters"][name]
         assert view["rail"] == view["list"], name
         assert set(view["ids"]) == _ids(data, key), name
-        assert view["hash"] == ("#posts" if key == "disc" else f"#posts?f={key}"), name
+        assert view["hash"] == ("#revisar/posts" if key == "disc" else f"#revisar/posts?f={key}"), (
+            name
+        )
 
 
 @_requires_chrome
@@ -312,6 +446,25 @@ def test_a_topic_under_con_discrepancias_lists_its_disagreeing_posts(probed):
     assert seen["topics"]
     for name, view in seen["topics"].items():
         assert view["list"] == view["disagreeing"] == rows[labels[name]]["disagreeing"], name
+
+
+@_requires_chrome
+def test_each_rail_topic_reads_confirmed_of_placed_then_its_disagreements(probed):
+    data, seen = probed
+    rows = {r["slug"]: r for r in data["summary"]["per_topic"]}
+    labels = {t["slug"]: t["label"] for t in data["topics"]}
+
+    for slug, label in labels.items():
+        r = rows.get(slug, {"assigned": 0, "backed": 0, "disagreeing": 0})
+        rail = seen["topics"][label]["rail"]
+        # Confirmed of placed — never a bigger third number that reads as a count gone wrong.
+        assert rail["ok"] == f"{r['backed']}/{r['assigned']}", label
+        assert rail["d"] == str(r["disagreeing"]), label
+        assert "·" not in rail["text"], label
+    assert seen["rail_head"] == "confirma/pone · discrepan"
+    [legend] = seen["rail_legend"]
+    assert legend["text"] == "Solo los posts comparados, con el filtro de arriba."
+    assert "posts que discrepan sobre él" in legend["title"]
 
 
 @_requires_chrome
@@ -374,6 +527,53 @@ def test_unevaluated_and_stale_posts_offer_the_command_and_an_empty_one_says_why
     assert {"stale", "never", "z000"} <= set(seen["copy_ids"])
     assert "vacio" not in seen["copy_ids"] and seen["no_evidence_ids"] == ["vacio"]
     assert all(cmd.startswith("xbrain jev topics --id ") for cmd in seen["commands"])
+
+
+@_requires_chrome
+def test_the_cost_strip_opens_on_a_number_and_an_amber_dash_never(probed):
+    _data_, seen = probed
+    logged, unlogged, nothing = seen["cost_logged"], seen["cost_unlogged"], seen["cost_nothing"]
+
+    # Logged passes: their total, and the answers out of the log said apart, not in it.
+    assert logged["num"] == "~0,0123 $" and logged["amber"] is True
+    assert logged["note"].startswith("2 evaluaciones fuera del registro de pasadas (~0,0002 $")
+    assert logged["note"].endswith("No están en el total.")
+    # None logged: what the saved answers cost is the total, named as an estimate (no note).
+    assert unlogged["num"] == "~0,0002 $" and unlogged["amber"] is True
+    assert unlogged["ctx"].startswith(
+        "sin pasadas registradas: lo que costaron las 2 evaluaciones guardadas, estimado"
+    )
+    assert unlogged["note"] is None
+    # Nothing paid at all: «—», in ink, not in the colour of money.
+    assert nothing["num"] == "—" and nothing["amber"] is False
+    assert nothing["ctx"] == "sin pasadas registradas: aún no se ha pagado nada"
+
+
+@_requires_chrome
+def test_the_cost_strip_says_each_figure_once(probed):
+    _data_, seen = probed
+
+    # No logged pass, every saved answer current: 0,0769 is said once, by the Total.
+    echo = seen["cost_echo"]
+    assert echo["kpis"].count("0,0769") == 1
+    assert echo["stored"].startswith("lo que costaron: el Total · ")
+    # Current answers that cost something else: their own figure.
+    assert seen["cost_apart"]["stored"].startswith("lo que costaron: ~0,0500 $ · ")
+    # «+1 respuesta», as the Preguntar line says it.
+    assert "(+1 respuesta sin recuento)" in seen["cost_one_unknown"]["ctx"]
+
+
+@_requires_chrome
+def test_a_card_says_once_that_jev_has_not_reviewed_its_topics(probed):
+    _data_, seen = probed
+
+    # Once per card, in the Jev block it qualifies; the head does not repeat it. The words say
+    # what was not done — the topics were not reviewed — so they cannot contradict an ask's score.
+    never, stale = seen["status"]["never"], seen["status"]["stale"]
+    assert never["block"] == "topics sin revisar por Jev" and never["head"] is None
+    assert never["text"].count("sin revisar por Jev") == 1
+    assert stale["block"] == "topics revisados con datos antiguos" and stale["head"] is None
+    assert "sin revisar por Jev" not in stale["text"] and "caducada" not in stale["text"]
 
 
 @_requires_chrome
@@ -473,7 +673,7 @@ def _topics_fixture() -> dict[str, Any]:
         _TOPIC_VOCAB,
         settings=_settings(model="jev-latest", concurrency=8),
         id2note={},
-        updated="SEP 26, 2026",
+        updated="2026-09-26",
         runs=[],
         now=datetime(2026, 9, 26, tzinfo=timezone.utc),
     )
@@ -527,7 +727,7 @@ async function travel(go) {
   });
   await step('open topic', async () => {
     location.hash = '#topics'; await sleep(20);
-    document.querySelector('#topics-index a.tl[href="#topics?t=alpha"]').click(); await sleep(30);
+    document.querySelector('#topics-index a.tl[href="#revisar/topics?t=alpha"]').click(); await sleep(30);
     out.detail = tabState();
     const coinciden = document.querySelector('#topic-detail section[data-group="coinciden"]');
     out.coinciden_first = seenCards(coinciden).length;
@@ -698,7 +898,7 @@ def test_sorting_replaces_the_url_instead_of_adding_history(topics_probed):
     _data_, seen = topics_probed
 
     assert seen["history_grew"] == 0
-    assert seen["sort_hash"] == "#topics?o=label&d=asc"
+    assert seen["sort_hash"] == "#revisar/topics?o=label&d=asc"
     assert seen["label_arrow"].endswith("↑")
 
 
@@ -714,7 +914,7 @@ def test_a_group_past_one_page_reaches_its_number_with_mostrar_mas(topics_probed
     data, seen = topics_probed
 
     assert seen["detail"] == {
-        "hash": "#topics?t=alpha",
+        "hash": "#revisar/topics?t=alpha",
         "index": False,
         "detail": True,
         "pair": False,
@@ -743,7 +943,7 @@ def test_a_pair_opens_in_view_and_lists_exactly_its_posts_past_one_page(topics_p
 def test_a_real_two_topic_pair_lists_exactly_its_posts(topics_probed):
     data, seen = topics_probed
 
-    assert seen["ab_hash"] == "#topics?t=gamma&cx=gamma%7Eomega"
+    assert seen["ab_hash"] == "#revisar/topics?t=gamma&cx=gamma%7Eomega"
     assert seen["ab_pair"] == data["post_sets"]["cx"]["gamma~omega"] == ["g05", "g06", "g07"]
 
 
@@ -761,16 +961,16 @@ def test_an_empty_confusion_side_says_what_the_row_says(topics_probed):
 def test_back_and_forward_walk_between_the_topic_and_the_pair(topics_probed):
     _data_, seen = topics_probed
 
-    assert seen["back1"]["hash"] == "#topics?t=gamma" and not seen["back1"]["pair"]
-    assert seen["back2"]["hash"].startswith("#topics?t=omega")
-    assert seen["forward"]["hash"] == "#topics?t=gamma" and seen["forward"]["detail"]
+    assert seen["back1"]["hash"] == "#revisar/topics?t=gamma" and not seen["back1"]["pair"]
+    assert seen["back2"]["hash"].startswith("#revisar/topics?t=omega")
+    assert seen["forward"]["hash"] == "#revisar/topics?t=gamma" and seen["forward"]["detail"]
 
 
 @_requires_chrome
 def test_ver_en_posts_opens_every_post_with_the_topic(topics_probed):
     data, seen = topics_probed
 
-    assert seen["posts_hash"] == "#posts?f=all&t=alpha"
+    assert seen["posts_hash"] == "#revisar/posts?f=all&t=alpha"
     assert set(seen["posts_ids"]) == {p["id"] for p in data["posts"] if "alpha" in p["slugs"]}
 
 
@@ -778,7 +978,7 @@ def test_ver_en_posts_opens_every_post_with_the_topic(topics_probed):
 def test_a_topic_row_on_a_post_card_opens_that_topics_page(topics_probed):
     _data_, seen = topics_probed
 
-    assert seen["row_topic"].startswith("#topics?t=")
+    assert seen["row_topic"].startswith("#revisar/topics?t=")
     assert seen["from_card"]["hash"] == seen["row_topic"] and seen["from_card"]["detail"]
 
 
@@ -806,8 +1006,8 @@ def test_returning_keeps_the_scroll_and_only_entering_a_topic_jumps_to_the_tab(t
 def test_the_sort_travels_with_the_back_link_and_the_tab_link(topics_probed):
     _data_, seen = topics_probed
 
-    assert seen["back_href"] == "#topics?o=disagreeing&d=desc"
-    assert seen["tab_href"] == "#topics?o=disagreeing&d=desc"
+    assert seen["back_href"] == "#revisar/topics?o=disagreeing&d=desc"
+    assert seen["tab_href"] == "#revisar/topics?o=disagreeing&d=desc"
 
 
 @_requires_chrome
@@ -910,10 +1110,17 @@ async function openList(a) {
     }
   });
   await step('sentences', async () => {
+    // The three facts have one home, «Lo que dice Jev», above every Revisar sub-tab; Comparar
+    // does not say them a second time.
     await home();
-    for (const box of sec('resumen').querySelectorAll('.fact')) {
+    out.headings = [...document.querySelectorAll('#top-revisar h2, #top-revisar h3')].filter(seen).map(h => h.textContent);
+    for (const go of ['enrich_only', 'adds', 'prim']) {
+      await home();
+      const box = [...document.querySelectorAll('#numbers .fact')].find(b => b.querySelector('a[data-go="' + go + '"]'));
       const a = box.querySelector('a[data-go]');
-      out.sentences[a.dataset.go] = {big: txt(box.querySelector('.big')), why: txt(box.querySelector('.why')), link: txt(a), href: a.getAttribute('href')};
+      const read = {big: txt(box.querySelector('.big')), why: txt(box.querySelector('.why')), link: txt(a), href: a.getAttribute('href')};
+      a.click(); await sleep(30);
+      out.sentences[go] = Object.assign(read, {opened: location.hash}, await postsList());
     }
   });
   await step('topics table', async () => {
@@ -1088,7 +1295,7 @@ def test_the_tab_and_its_six_sections_are_on_screen(compare_probed):
     _data_, seen = compare_probed
 
     assert seen["tab_seen"] is True
-    assert seen["sections"] == ["resumen", "kinds", "topics", "cross", "otro", "bands"]
+    assert seen["sections"] == ["kinds", "topics", "cross", "otro", "bands"]
 
 
 @_requires_chrome
@@ -1101,39 +1308,45 @@ def test_each_disagreement_kind_says_its_numbers_and_opens_exactly_its_posts(com
         assert kind["shown"] == str(s[posts]), key
         assert set(kind["ids"]) == _ids(data, key) and len(kind["ids"]) == s[posts], key
         assert kind["count"].startswith(f"mostrando {s[posts]} de"), key
-        assert kind["hash"] == f"#posts?f={key}" and kind["link"] == "ver los posts →", key
+        assert kind["hash"] == f"#revisar/posts?f={key}" and kind["link"] == "ver los posts →", key
         if pairs:
             assert kind["why"].endswith(f": {s[pairs]} topics en total."), key
 
 
 @_requires_chrome
-def test_the_three_sentences_quote_the_header_numbers_and_open_their_posts(compare_probed):
+def test_the_three_numbers_are_said_once_and_open_their_posts(compare_probed):
     data, seen = compare_probed
     s = data["summary"]
     one, add, prim = (seen["sentences"][k] for k in ("enrich_only", "adds", "prim"))
 
-    assert one["big"] == "Jev confirma 39 de 58 topics de enrich (67,2 %)."
+    # Said once, above the sub-tabs: Comparar has no second, reworded copy of them.
+    assert "En tres frases" not in seen["headings"]
+    assert seen["headings"].count("Lo que dice Jev, en tres números") == 1
+    assert one["big"] == "Jev confirma 39 de 58 topics de enrich (67,2 %)"
     assert (s["assigned_backed"], s["assigned_pairs"], s["enrich_backed_pct"]) == (39, 58, 67.2)
     assert one["why"].endswith(
-        f"Los otros {s['doubtful_pairs']} (probabilidad < 0,85) son candidatos a quitar. "
+        f"Los otros {s['doubtful_pairs']} son candidatos a quitar. "
         f"{s['assigned_unjudged']} topic ya no está en el vocabulario y no se juzga."
     )
     assert (
         one["link"] == f"ver los {s['posts_enrich_only']} posts con un topic que Jev no confirma →"
     )
-    assert add["big"] == f"Jev añadiría {s['missing_pairs']} topics que enrich no puso."
+    assert add["big"] == f"Jev añadiría {s['missing_pairs']} topics que enrich no puso"
     assert add["link"] == f"ver los {s['posts_jev_only']} posts donde Jev añadiría →"
-    assert prim["big"] == "El topic principal coincide en 71,7 % de los posts."
+    assert prim["big"] == "El topic principal coincide en 71,7 %"
     assert s["primary_agree_pct"] == 71.7
     assert prim["why"].startswith(
         f"En {s['primary_agree']} de {s['items_compared']} posts comparados"
     )
     assert prim["link"] == f"ver los {s['posts_primary_differs']} posts donde no coincide →"
     assert {k: v["href"] for k, v in seen["sentences"].items()} == {
-        "enrich_only": "#posts?f=enrich_only",
-        "adds": "#posts?f=adds",
-        "prim": "#posts?f=prim",
+        "enrich_only": "#revisar/posts?f=enrich_only",
+        "adds": "#revisar/posts?f=adds",
+        "prim": "#revisar/posts?f=prim",
     }
+    for key, sentence in seen["sentences"].items():
+        assert sentence["opened"] == f"#revisar/posts?f={key}", key
+        assert set(sentence["ids"]) == _ids(data, key) and sentence["ids"], key
 
 
 @_requires_chrome
@@ -1158,7 +1371,7 @@ def test_the_topic_table_is_the_ten_worst_in_the_topics_tabs_order(compare_probe
     # Never assigned: no agreement to be 0 % of.
     assert seen["f01_cells"] == ["F01pocos datos", "0", "0", "—", "0"]
     assert gamma["disagreeing"] == 10 == len(seen["gamma_disc"]["ids"])
-    assert seen["gamma_disc"]["hash"] == "#posts?t=gamma"
+    assert seen["gamma_disc"]["hash"] == "#revisar/posts?t=gamma"
 
 
 @_requires_chrome
@@ -1183,7 +1396,7 @@ def test_each_band_says_its_numbers_and_opens_exactly_its_posts(compare_probed):
             and len(band["ids"]) == rows[key]["posts"]
         ), key
         assert band["head"].startswith(row["link"] + " · " + rows[key]["label"]), key
-        assert band["hash"] == f"#compare?b={key}" and band["under"] == "bands", key
+        assert band["hash"] == f"#revisar/compare?b={key}" and band["under"] == "bands", key
         assert band["in_view"] is True, key
     assert seen["bands"]["j-near"]["first"] == 20 and len(seen["bands"]["j-near"]["ids"]) == 22
 
@@ -1218,7 +1431,7 @@ def test_each_primary_cross_pair_is_ranked_named_and_opens_exactly_its_posts(com
         assert pair["ids"] == data["post_sets"]["px"][key], key
         assert pair["count"] == f"{n} post" + ("s" if n != 1 else ""), key
         assert pair["head"].startswith(pair["count"] + " · Principal · enrich: "), key
-        assert pair["hash"] == "#compare?px=" + key.replace("~", "%7E"), key
+        assert pair["hash"] == "#revisar/compare?px=" + key.replace("~", "%7E"), key
     assert seen["px"]["delta~otro"]["under"] == "otro"
     assert seen["px"]["gamma~omega"]["under"] == "cross"
 
@@ -1251,7 +1464,7 @@ def test_the_other_fallback_is_counted_with_its_posts_and_what_enrich_had(compar
     assert seen["otro_rows"] == [["delta~otro", "Delta", "5 posts"]]
     assert seen["otro_open"]["under"] == "otro"
     assert seen["otro_open"]["ids"] == data["post_sets"]["px"]["delta~otro"]
-    assert seen["otro_posts"]["hash"] == "#posts?f=fallback"
+    assert seen["otro_posts"]["hash"] == "#revisar/posts?f=fallback"
     assert (
         set(seen["otro_posts"]["ids"]) == _ids(data, "fallback")
         and len(seen["otro_posts"]["ids"]) == 5
@@ -1274,14 +1487,14 @@ def test_leaving_and_returning_keeps_each_tabs_view(compare_probed):
 
     assert seen["round"] == {
         "#compare?px=gamma~omega": {
-            "hash": "#compare?px=gamma%7Eomega",
+            "hash": "#revisar/compare?px=gamma%7Eomega",
             "ids": sets["px"]["gamma~omega"],
         },
-        "#compare?pd=delta": {"hash": "#compare?pd=delta", "ids": sets["pd"]["delta"]},
-        "#compare?b=e-lo": {"hash": "#compare?b=e-lo", "ids": sets["bands"]["e-lo"]},
+        "#compare?pd=delta": {"hash": "#revisar/compare?pd=delta", "ids": sets["pd"]["delta"]},
+        "#compare?b=e-lo": {"hash": "#revisar/compare?b=e-lo", "ids": sets["bands"]["e-lo"]},
     }
-    assert seen["posts_tab_href"] == "#posts?f=adds" and seen["posts_f_kept"] == "adds"
-    assert seen["cleared"] == {"hash": "#compare", "list": False}
+    assert seen["posts_tab_href"] == "#revisar/posts?f=adds" and seen["posts_f_kept"] == "adds"
+    assert seen["cleared"] == {"hash": "#revisar/compare", "list": False}
 
 
 @_requires_chrome
@@ -1289,7 +1502,7 @@ def test_one_list_at_a_time_band_first_and_the_tab_link_says_which(compare_probe
     data, seen = compare_probed
 
     assert seen["order_ids"] == data["post_sets"]["bands"]["e-near"]
-    assert seen["order_tab_href"] == "#compare?b=e-near"
+    assert seen["order_tab_href"] == "#revisar/compare?b=e-near"
 
 
 @_requires_chrome
@@ -1401,7 +1614,7 @@ def test_the_edges_print_at_the_thresholds_own_precision(tmp_path):
 
     seen = _open(_page(tmp_path, data, _READ_COMPARE), "#compare")
 
-    assert "UMBRAL 0,875" in seen["stamp"]
+    assert "Umbral de topics 0,875" in seen["stamp"]
     assert "probabilidad 0,500 – 0,875" in seen["ranges"]
 
 
@@ -1586,6 +1799,25 @@ async function travel(go) {
     out.back = {hash: location.hash, config_seen: seen(document.getElementById('tab-config')),
       sections: secs().filter(seen).length};
   });
+  await step('stamp', async () => {
+    // The header names the threshold and links to where it is explained: from another tab,
+    // the link opens Configuración at that row; on Configuración, it scrolls there.
+    out.stamp = txt(document.getElementById('stamp'));
+    await travel(() => { location.hash = '#revisar/posts'; });
+    const a = document.querySelector('#stamp a[data-cfg]');
+    out.stamp_link = {text: txt(a), href: a.getAttribute('href')};
+    // Centred: the row is where the eye lands, not merely somewhere on screen.
+    const centred = () => { const r = document.getElementById('cfg-threshold').getBoundingClientRect();
+      return Math.abs((r.top + r.bottom) / 2 - innerHeight / 2) < 40; };
+    await travel(() => a.click());
+    await sleep(600);
+    out.stamp_opened = {hash: location.hash, config_seen: seen(document.getElementById('tab-config')),
+      row: centred(), row_text: txt(document.querySelector('#cfg-threshold td'))};
+    scrollTo(0, 0); await sleep(10);
+    out.stamp_same_tab_before = centred();
+    a.click(); await sleep(600);
+    out.stamp_same_tab = centred();
+  });
   await step('guard', async () => {
     const saved = DATA.config;
     DATA.config = null;
@@ -1663,6 +1895,17 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
         *[f"Precio de entrada · {p}" for p in sorted(prices)],
     ]
     assert by_name["Umbral"][1] == "0,875por defecto: 0,850"
+    # The header: the day in the page's words, the threshold as a link to its row here.
+    assert seen["stamp"].startswith("Actualizado 22 sept 2026")
+    assert "(config)" not in seen["stamp"]
+    assert seen["stamp_link"] == {"text": "Umbral de topics 0,875", "href": "#config"}
+    assert seen["stamp_opened"] == {
+        "hash": "#config",
+        "config_seen": True,
+        "row": True,
+        "row_text": "Umbral",
+    }
+    assert seen["stamp_same_tab_before"] is False and seen["stamp_same_tab"] is True
     assert by_name["Umbral"][3] == "[jev].threshold"
     assert by_name["Opción de escape"][1] == "«ninguno»por defecto: «otro»"
     assert by_name["Peticiones a la vez"][1] == "3por defecto: 8"
@@ -1683,16 +1926,19 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     assert by_name["Precio de entrada · typesafe"][1] == (
         f"{str(prices['typesafe']).replace('.', ',')} $por millón de tokens de entrada"
     )
-    intro, output = seen["settings_notes"][0], seen["settings_notes"][-1]
-    assert intro.startswith(
-        "Umbral, Opción de escape, Límite de evidencia, Resultados que se muestran de una "
-        "pregunta: con estos valores"
+    # Two short lines and where they change, not eight names run into one sentence.
+    built, next_, where = seen["settings_notes"][:3]
+    assert built == (
+        "Cambian lo que ves en esta página: Umbral, Opción de escape, Límite de evidencia y "
+        "Resultados que se muestran de una pregunta."
     )
-    assert (
+    assert next_ == (
+        "Se usan en la próxima pasada (xbrain jev topics o un trabajo de xbrain jev serve): "
         "Modelo que se pedirá, Peticiones a la vez, Tope por trabajo de xbrain jev serve y "
-        "Tope sin preguntar de xbrain jev ask: no cambian esta página" in intro
+        "Tope sin preguntar de xbrain jev ask."
     )
-    assert output == "Los tokens de salida son gratis."
+    assert where == "Se cambian en config.toml, nunca aquí."
+    assert seen["settings_notes"][-1] == "Los tokens de salida son gratis."
 
 
 @_requires_chrome
@@ -1725,14 +1971,14 @@ def test_the_vocabulary_lists_every_topic_and_links_its_topics_page(config_probe
     assert seen["vocab"] == [
         {
             "label": t["label"],
-            "href": f"#topics?t={t['slug']}",
+            "href": f"#revisar/topics?t={t['slug']}",
             "slug": t["slug"],
             "desc": t["description"],
         }
         for t in data["topics"]
     ]
     first = data["topics"][0]
-    assert seen["after_link"]["hash"] == f"#topics?t={first['slug']}"
+    assert seen["after_link"]["hash"] == f"#revisar/topics?t={first['slug']}"
     assert seen["after_link"]["topics_seen"] is True
     assert seen["after_link"]["config_seen"] is False
     assert seen["after_link"]["heading"].startswith(first["label"])
@@ -1761,7 +2007,7 @@ def test_the_files_say_where_each_lives_whether_it_exists_and_whether_snapshots_
     [runs] = [row for row in seen["files"] if row[0] == "jev/runs.jsonl"]
     assert runs[1] == (
         "/repo/data/jev/runs.jsonl"
-        "(aún no existe: lo crea la primera `xbrain jev topics` que envíe peticiones)"
+        "(aún no existe: lo crea la primera xbrain jev topics que envíe peticiones)"
     )
     assert [(row[0], row[3]) for row in seen["files"]] == [
         (f["label"], "sí" if f["snapshotted"] else "no") for f in data["config"]["files"]
@@ -1770,11 +2016,11 @@ def test_the_files_say_where_each_lives_whether_it_exists_and_whether_snapshots_
         f["path"] for f in data["config"]["files"] if f["key"] != "runs"
     ]
     assert seen["files"][-1][1] == "/vault/x-knowledge/jev.html"
-    assert seen["files"][-1][2] == "esta página; la escribe `xbrain jev dashboard`"
+    assert seen["files"][-1][2] == "esta página; la escribe xbrain jev dashboard"
     assert seen["files_notes"] == [
         "data/ no está en git. Las evaluaciones de Jev (jev/topics.json) y su registro "
         "(jev/runs.jsonl) no entran en los snapshots; el topics.json de enrich y vocab.yaml sí.",
-        "Cuidado: rehacer jev/topics.json cuesta dinero, y `xbrain snapshot restore` no lo "
+        "Cuidado: rehacer jev/topics.json cuesta dinero, y xbrain snapshot restore no lo "
         "devuelve; runs.jsonl es el histórico de costes.",
     ]
 
@@ -1943,6 +2189,10 @@ const sPanel = () => ({
   close: txt(sId('ask-cancel')),
   progress: txt(sId('ask-progress')),
 });
+// The top tabs whose job block is out of sight, and what their badge says («tab:words»).
+const sBadges = () => [...document.querySelectorAll('#toptabs .tbadge')].filter(seen).map(b => b.parentNode.dataset.tab + ':' + b.textContent);
+// Which top tab the job block is in (`top-revisar`, `top-ask`, `top-config`).
+const sPanelTop = () => { const t = sId('jobp') && sId('jobp').closest('.toptab'); return t ? t.id : null; };
 const sBar = () => {
   const t = document.querySelector('#jobp [role=progressbar]');
   const f = t && t.firstElementChild;
@@ -1953,7 +2203,8 @@ const sHeader = () => {
   sId('hist').open = true;
   return {kpis: txt(sId('kpis')), numbers: txt(sId('numbers-sub')), runs: txt(sId('hist')),
     runs_rows: [...document.querySelectorAll('#hist tbody tr')].filter(seen).length,
-    before_log: txt(sId('before-log')), count: txt(sId('count'))};
+    before_log: txt(sId('before-log')), count: txt(sId('count')),
+    total: txt(document.querySelector('#kpis .kpi .num')), total_amber: document.querySelector('#kpis .kpi .num').classList.contains('accent')};
 };
 let sRefreshed = 0;
 const sRefresh0 = refresh;
@@ -2072,11 +2323,16 @@ _SERVE_PROBE = (
     const open = sPanel().shown;
     const onTitle = document.activeElement === sId('ask-title');
     const opener = [...sCard('4').querySelectorAll('button.evalb')].find(b => b.textContent === 'Evaluar este post');
+    // In the page, right under the card whose button opened it — not floating over it.
+    const box = sId('jobp'), r = box.getBoundingClientRect(), card = sCard('4').getBoundingClientRect();
+    const placed = {position: getComputedStyle(box).position, top: sPanelTop(), tab: box.closest('.tab').id,
+      after: box.previousElementSibling && box.previousElementSibling.id, below_card: r.top >= card.bottom - 1,
+      in_flow: box.offsetParent !== null && getComputedStyle(box).position === 'static'};
     sId('jobp').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     await sFetch0.call(window, '/probe-wait');
-    return {open, closed: !seen(sId('jobp')), on_title: onTitle,
+    return {open, placed, closed: !seen(sId('jobp')), on_title: onTitle,
       focus_back: document.activeElement === opener, roles: {
-      dialog: sId('jobp').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
+      region: sId('jobp').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
       live: sId('ask-progress').getAttribute('aria-live'),
       bar: !!document.querySelector('#jobp [role=progressbar][aria-valuemin="0"][aria-valuemax="100"]')}};
   });
@@ -2094,9 +2350,29 @@ _SERVE_PROBE = (
       topic_pair: await go('#topics?t=ai-coding&cx=' + encodeURIComponent(cx), 'topic-pair'),
       band: await go('#compare?b=' + encodeURIComponent(band), 'compare-list'),
     };
-    sPress(sId('compare-list'), 'Evaluar estos posts');
-    await sWait(() => (sPanel().error || '').includes('nada que evaluar'), 'la estimación de la banda');
+    // Where the block opens for each origin: right under the row of buttons it came from.
+    const where = () => { const box = sId('jobp'), prev = box.previousElementSibling;
+      return {in: box.parentNode.id, after: prev ? prev.id || prev.className : null, shown: seen(box)}; };
+    const pressIn = async (hash, root) => {
+      location.hash = hash;
+      await sWait(() => sButtons(sId(root)).length > 0, hash);
+      [...sId(root).querySelectorAll('button.evalb')].find(seen).click();
+      await sWait(() => sPanel().go || sPanel().error, 'la estimación de ' + root);
+      return where();
+    };
+    places.placed = {};
+    places.placed.active = await pressIn('#posts?f=all&t=startups', 'active');
+    sId('ask-cancel').click();
+    places.placed.topic = await pressIn('#topics?t=startups', 'topic-detail');
+    sId('ask-cancel').click();
+    places.placed.topic_pair = await pressIn('#topics?t=ai-coding&cx=' + encodeURIComponent(cx), 'topic-pair');
+    sId('ask-cancel').click();
+    places.placed.band = await pressIn('#compare?b=' + encodeURIComponent(band), 'compare-list');
     places.band_panel = sPanel();
+    // Its row no longer on screen (another sub-tab): the block goes to the top of Revisar.
+    location.hash = '#revisar/topics';
+    await sWait(() => seen(sId('tab-topics')), 'Topics');
+    places.placed.hidden_anchor = where();
     sId('ask-cancel').click();
     return places;
   });
@@ -2424,13 +2700,25 @@ def test_served_a_late_estimate_reply_never_overwrites_the_last_one(serve_probed
 
 
 @_requires_chrome
-def test_served_panel_is_a_labelled_dialog_that_escape_closes(serve_probed):
+def test_served_panel_is_a_labelled_region_that_escape_closes(serve_probed):
     escape = serve_probed["escape"]
 
     assert escape["open"] is True and escape["closed"] is True
     # Focus is on the panel while it is open, and back on the very button that opened it.
     assert escape["on_title"] is True and escape["focus_back"] is True
-    assert escape["roles"] == {"dialog": "dialog", "error": "alert", "live": "polite", "bar": True}
+    assert escape["roles"] == {"region": "region", "error": "alert", "live": "polite", "bar": True}
+
+
+@_requires_chrome
+def test_served_the_estimate_block_is_in_the_page_right_under_the_card_that_opened_it(
+    serve_probed,
+):
+    placed = serve_probed["escape"]["placed"]
+
+    # Víctor, 2026-09-27: «que esté integrado en la página» — never the floating corner panel.
+    assert placed["position"] == "static" and placed["in_flow"] is True
+    assert (placed["top"], placed["tab"], placed["after"]) == ("top-revisar", "tab-posts", "post-4")
+    assert placed["below_card"] is True
 
 
 @_requires_chrome
@@ -2448,6 +2736,15 @@ def test_served_topic_pair_and_band_views_offer_to_evaluate_their_posts(serve_pr
     assert "la casilla «Volver a evaluar también…»" in places["band_panel"]["error"]
     # Nothing to ask costs nothing: no «Coste estimado» of zero posts.
     assert "Coste estimado" not in places["band_panel"]["est"]
+    # Each origin opens the block right under its own row of buttons, never elsewhere; with
+    # that row off screen (another sub-tab), the block is at the top of Revisar.
+    assert places["placed"] == {
+        "active": {"in": "", "after": "active", "shown": True},
+        "topic": {"in": "topic-detail", "after": "evalrow", "shown": True},
+        "topic_pair": {"in": "topic-pair", "after": "evalrow", "shown": True},
+        "band": {"in": "compare-list", "after": "evalrow", "shown": True},
+        "hidden_anchor": {"in": "jobslot-revisar", "after": None, "shown": True},
+    }
 
 
 # --------------------------------------------------------------------------- one job, followed
@@ -2466,7 +2763,13 @@ _PROGRESS_PROBE = (
   await sStep('mid', async () => {
     sId('ask-go').click();
     await sWait(() => /^[12] de 3 posts/.test(sPanel().progress || ''), 'la mitad del trabajo');
-    return Object.assign(sPanel(), sBar());
+    // Escape does not close a running job's block; and the block sits under the Posts toolbar
+    // whose button started it.
+    sId('jobp').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    const kept = sPanel().shown;
+    const after = sId('jobp').previousElementSibling;
+    return Object.assign(sPanel(), sBar(), {escape_kept: kept, top: sPanelTop(),
+      under_toolbar: !!after && after.classList.contains('controls')});
   });
   await sStep('end', async () => {
     await sWait(() => sRefreshed > 0, 'la recarga');
@@ -2551,12 +2854,29 @@ def test_served_progress_mid_job_shows_the_share_done(progress_probed):
 
 
 @_requires_chrome
+def test_served_a_running_job_stays_under_the_toolbar_that_started_it_and_escape_keeps_it(
+    progress_probed,
+):
+    mid = progress_probed["mid"]
+
+    assert mid["escape_kept"] is True and mid["shown"] is True
+    assert mid["top"] == "top-revisar" and mid["under_toolbar"] is True
+
+
+@_requires_chrome
 def test_served_a_job_without_a_run_log_redraws_the_header_and_the_history(progress_probed):
     before, end = progress_probed["before"], progress_probed["end"]
 
     assert "sin pasadas registradas" in before["kpis"]
     assert "Aún no hay pasadas registradas" in before["runs"]
-    assert before["before_log"].startswith("2 evaluaciones fuera del registro de pasadas")
+    # No logged pass, but 2 paid evaluations: the first number is what they cost, said as an
+    # estimate from their own tokens — never an amber «—» with the cost in a note below it.
+    assert before["total"] == "~0,0001 $" and before["total_amber"] is True
+    assert (
+        "sin pasadas registradas: lo que costaron las 2 evaluaciones guardadas, "
+        "estimado por sus propios tokens" in before["kpis"]
+    )
+    assert before["before_log"] is None
     assert end["error"] is None
     assert end["progress"].startswith("3 evaluaciones guardadas · ~0,00013 $ gastado")
     assert end["bar"]["now"] == "100"
@@ -2680,9 +3000,15 @@ const sAsk = async (body) => {
     return {idle, status, card3: sButtons(sCard('3'))};
   });
   await sStep('running_elsewhere', async () => {
+    // An estimate opened here under card 5 and cancelled: nothing of it is kept, so another
+    // tab's job is never placed under that card.
+    sPress(sCard('5'), 'Evaluar este post');
+    await sWait(() => sPanel().go, 'la estimación del 5');
+    sId('ask-cancel').click();
     const status = await sAsk({ids: ['4']});
     await sWait(() => sPanel().shown && (sPanel().progress || '').includes('de 1 post '), 'el panel del trabajo de otra pestaña');
-    const during = sPanel();
+    const box = sId('jobp'), prev = box.previousElementSibling;
+    const during = Object.assign(sPanel(), {placed: {in: box.parentNode.id, after: prev ? prev.id : null}});
     await sWait(() => sButtons(sCard('4')).includes('Re-evaluar'), 'la tarjeta 4 recargada');
     return {status, during, after: sPanel(), card4: sButtons(sCard('4'))};
   });
@@ -2726,6 +3052,8 @@ def test_served_an_idle_page_follows_a_job_another_tab_started(watch_probed):
     assert running["status"] == 202
     assert running["during"]["title"] == "Evaluación de topics en curso"
     assert re.match(r"^0 de 1 post · ", running["during"]["progress"])
+    # Not under card 5, whose estimate was opened here and cancelled: at the top of Revisar.
+    assert running["during"]["placed"] == {"in": "jobslot-revisar", "after": None}
     assert running["card4"] == ["Re-evaluar"]
     assert running["after"]["progress"].startswith("1 evaluación guardada")
 
@@ -2754,6 +3082,11 @@ const sScenario = /*SCENARIO*/;
     return {hidden};
   });
   await sStep('end', async () => {
+    // A lost server is declared only after POLL_MS + ΣRETRY_MS of retries on the PAGE's clock,
+    // which a request in flight holds still — and each look of `sWait` is one. So the page's
+    // clock runs first, idle, past every retry; then the look. (A scenario that ends sooner
+    // is simply there on the first look.)
+    await new Promise(r => setTimeout(r, POLL_MS + RETRY_MS.reduce((a, b) => a + b, 0) + 500));
     await sWait(() => sRefreshed > 0 || sPanel().reload !== null, 'el final');
     return sPanel();
   });

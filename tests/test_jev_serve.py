@@ -259,6 +259,32 @@ def test_the_page_is_the_live_page_with_its_token_and_the_served_flag(served: _S
     assert sorted(p["id"] for p in blob["posts"] if p["status"] == "compared") == ["1", "2"]
 
 
+@pytest.mark.parametrize("path", ["/", "/jev.html"])
+def test_the_served_page_carries_a_policy_that_admits_no_third_party_script(
+    served: _Served, path: str
+):
+    """The served page holds the spending token: no script but its own inline one may run, no
+    frame but X's embed, no page may frame IT (the money buttons), and it talks only to its own
+    server. Fonts and X's frame are the only other hosts (PR 15, arch review M7). Both paths
+    serve that page, token and all, so both carry it."""
+    status, html, response = served.request("GET", path)
+    assert status == 200 and b"X-Xbrain-Token" in html
+    policy = dict(
+        part.strip().split(" ", 1)
+        for part in response.getheader("Content-Security-Policy").split(";")
+    )
+
+    assert policy["default-src"] == "'none'"
+    assert policy["script-src"] == "'unsafe-inline'"  # the page's own script; no host at all
+    assert policy["connect-src"] == "'self'"
+    assert policy["frame-src"] == "'self' https://platform.twitter.com"
+    assert policy["frame-ancestors"] == "'self'"  # no other origin frames the money buttons
+    assert policy["img-src"] == "'self'" and policy["media-src"] == "'self'"
+    assert policy["style-src"] == "'unsafe-inline' https://fonts.googleapis.com"
+    assert policy["font-src"] == "https://fonts.gstatic.com"
+    assert (policy["base-uri"], policy["form-action"], policy["object-src"]) == ("'none'",) * 3
+
+
 def test_api_data_is_the_same_blob_the_page_carries(served: _Served):
     _, html, _ = served.request("GET", "/")
     page_blob = json.loads(html.decode().split("let DATA = ", 1)[1].split(";\n", 1)[0])

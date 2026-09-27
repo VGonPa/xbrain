@@ -932,11 +932,18 @@ def ask_cost(runs: Sequence[JevRun], query_sha: str) -> dict[str, Any]:
     return ask_cost_by_query(runs).get(query_sha, _history_total([]))
 
 
+def ask_cost_total(runs: Sequence[JevRun]) -> dict[str, Any]:
+    """What every `jev ask` query together has cost: each logged ask pass, priced through the
+    same row and total as the topics history (the page's Preguntar cost line and
+    `jev report`'s `Consultas` line). Topics passes are not in it."""
+    return _history_total([_run_row(run) for run in runs if run.kind == "ask"])
+
+
 def ask_history_fragment(runs: Sequence[JevRun]) -> str | None:
     """`N pasadas · M peticiones · <the shared cost sentence>` over every `jev ask` pass, or
     `None` when there is none — a line BESIDE the topics history, never inside its numbers."""
-    rows = [_run_row(run) for run in runs if run.kind == "ask"]
-    return cost_line(_history_total(rows)) if rows else None
+    total = ask_cost_total(runs)
+    return cost_line(total) if total["runs"] else None
 
 
 def cost_line(total: dict[str, Any]) -> str:

@@ -48,7 +48,7 @@ from xbrain.jev.load import load_jev_pairs
 from xbrain.jev.lock import PassLockBusy, pass_lock
 from xbrain.jev.models import AskAssessment, AskCalibration, JevRun
 from xbrain.jev.questions import ASK_KEY, build_ask_questions, normalize_query
-from xbrain.jev.report import ask_cost, ask_cost_by_query, run_history
+from xbrain.jev.report import ask_cost, ask_cost_by_query, ask_cost_total, run_history
 from xbrain.jev.run import run_ask
 from xbrain.jev.store import (
     ASK_INDEX,
@@ -893,6 +893,57 @@ def test_what_each_query_has_cost_comes_from_the_run_log(cfg: Config):
     assert ask_cost(runs, "d" * 64)["runs"] == 0
 
 
+def test_what_every_query_has_cost_is_one_report_total_of_the_ask_passes(cfg: Config):
+    """The Preguntar tab's cost line: every logged ask pass, summed and priced by the report
+    (`ask_cost_total`), never added up in the page. Topics passes are not in it."""
+    first, _, _ = _run(cfg, _ByText(input_tokens=1_000))
+    _run(cfg, _ByText(input_tokens=2_000), "otra consulta")
+    topics = JevRun(
+        started_at=DT,
+        finished_at=DT,
+        models=["jev-1.13.0"],
+        requests=7,
+        ok=7,
+        failed=0,
+        input_tokens_by_provider={"typesafe": 70},
+        input_tokens=70,
+        input_tokens_unknown=0,
+        interrupted=False,
+    )
+    append_run(topics, cfg.jev_runs_path)
+    runs = load_runs(cfg.jev_runs_path)
+
+    total = ask_cost_total(runs)
+
+    by_query = ask_cost_by_query(runs).values()
+    assert total["runs"] == 2 == sum(q["runs"] for q in by_query)
+    assert total["requests"] == sum(q["requests"] for q in by_query) == 6
+    assert total["input_tokens"] == 9_000
+    assert total["unpriced_providers"] == ["fake"]
+    assert ask_cost_total([])["runs"] == 0
+
+
+def test_the_page_ships_the_asks_total_and_no_zero_when_the_log_is_unreadable(cfg: Config):
+    from xbrain.jev.dashboard import build_page_data
+
+    _run(cfg, _ByText(provider="typesafe", input_tokens=200_000))
+    runs = load_runs(cfg.jev_runs_path)
+
+    assert _asks(cfg)["cost"] == ask_cost_total(runs)
+    assert _asks(cfg)["cost"]["cost_usd"] > 0.01
+    with cfg.jev_runs_path.open("a", encoding="utf-8") as log:
+        log.write("{roto\n")
+    cost = build_page_data(cfg, now=DT)["asks"]["cost"]
+    assert set(cost) == {"error"} and "runs.jsonl" in cost["error"]
+
+
+def test_the_page_ships_the_day_it_was_built_as_an_iso_date(cfg: Config):
+    """The page words it («27 sept 2026», as every other date on it); Python only says which day."""
+    from xbrain.jev.dashboard import build_page_data
+
+    assert build_page_data(cfg, now=DT)["updated"] == DT.date().isoformat()
+
+
 # --------------------------------------------------------------------------- the CLI
 
 
@@ -1484,6 +1535,7 @@ def test_a_page_built_without_asks_has_an_empty_tab():
         "surfaces": {},
         "keys": {},
         "topic_counts": {},
+        "cost": ask_cost_total([]),
         "error": None,
     }
 

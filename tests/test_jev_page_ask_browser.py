@@ -81,6 +81,7 @@ const sQResults = () => [...document.querySelectorAll('#ask-results .card')].fil
   return {id: c.dataset.id, x: slot ? slot.dataset.id : null, local: txt(c.querySelector('.pv .twt')),
     order: [...c.children].map(k => k.className), p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
     jev: txt(c.querySelector('.jev .badge')), meta: txt(c.querySelector('.askr .jh .meta')),
+    fold: txt(c.querySelector('.jev > details > summary')), folded: !(c.querySelector('.jev > details') || {}).open,
     bar: seen(bar) ? {width: fill.style.width, fill: fill.getBoundingClientRect().width,
       track: bar.getBoundingClientRect().width, label: bar.getAttribute('aria-label')} : null};
 });
@@ -93,6 +94,7 @@ const sQView = () => ({
   banner: txt(document.getElementById('ask-history-error')),
   form: seen(document.getElementById('ask-form')),
   launch: txt(document.getElementById('ask-launch')),
+  launch_tops: [...document.querySelectorAll('#ask-launch code')].filter(seen).map(c => c.getClientRects().length),
   history: sQHistory(),
   results: sQResults(),
   more: txt(document.getElementById('ask-more')),
@@ -117,6 +119,22 @@ _ASK_STATIC_PROBE = (
     const d = document.querySelector('#ask-results .card[data-id="3"] .askr details.saw');
     d.open = true; await sleep(10);
     return txt(d);
+  });
+  await step('fold3', async () => {
+    const d = document.querySelector('#ask-results .card[data-id="3"] .jev > details');
+    d.open = true; await sleep(10);
+    return {badge: txt(d.querySelector('.badge')), summary: txt(d.querySelector('summary'))};
+  });
+  await step('costline', async () => {
+    // The line formats the report's total, with what the CLI's «Consultas» says too: answers
+    // that came back without a token count.
+    const saved = DATA.asks.cost;
+    const with_ = (over) => { DATA.asks.cost = Object.assign({}, saved, over); return askCostLine().textContent; };
+    const out_ = {three: with_({runs: 2, requests: 5, cost_usd: 0.0123, input_tokens_unknown: 3, unpriced_providers: []}),
+      one: with_({runs: 1, requests: 1, cost_usd: 0.0123, input_tokens_unknown: 1, unpriced_providers: ['x']}),
+      none: with_({runs: 1, requests: 1, cost_usd: 0.0123, input_tokens_unknown: 0, unpriced_providers: []})};
+    DATA.asks.cost = saved;
+    return out_;
   });
   await step('broken', async () => { sQOpen('creatina'); await sleep(80); return sQView(); });
   await step('elsewhere', async () => {
@@ -254,11 +272,74 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
 def test_static_what_jev_saw_is_there_for_a_post_topics_never_asked(ask_static):
     seen, _ = ask_static
 
-    # Post 3 has no topics answer (its card says so), and the ask still shows what Jev read.
-    assert (
-        next(r for r in seen["hooks"]["results"] if r["id"] == "3")["jev"] == "sin evaluar por Jev"
+    # Post 3 has no topics answer (its card says so, folded: the question is the context here,
+    # not the topics audit), and the ask still shows what Jev read.
+    three = next(r for r in seen["hooks"]["results"] if r["id"] == "3")
+    assert three["folded"] is True and three["jev"] is None
+    assert three["fold"].startswith("Topics: ") and three["fold"].endswith(
+        " · topics sin revisar por Jev"
     )
+    assert seen["fold3"]["badge"] == "topics sin revisar por Jev"
     assert "= el texto del post, arriba" in seen["saw3"]
+
+
+#: Where a result's parts sit: the post, the answer strip and the Jev block, as boxes.
+_ASK_LAYOUT_PROBE = (
+    "<script>"
+    + _SEEN
+    + _ASK_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  location.hash = '#ask'; await sleep(80);
+  sQOpen('hooks'); await sleep(120);
+  const box = e => { const r = e.getBoundingClientRect(); return {left: r.left, right: r.right, top: r.top, bottom: r.bottom}; };
+  const c = [...document.querySelectorAll('#ask-results .card')].find(seen);
+  const out = {list: document.querySelector('.asklist').getBoundingClientRect().width,
+    pv: box(c.querySelector(':scope > .pv')), askr: box(c.querySelector(':scope > .askr')),
+    jev: box(c.querySelector(':scope > .jev')), twh: box(c.querySelector(':scope > .twh')),
+    cost_in: document.getElementById('ask-cost').closest('.askside') ? 'side' : 'main'};
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+@pytest.mark.parametrize("window", ["1280,900", "700,900"])
+def test_a_result_puts_the_answer_beside_the_post_when_the_list_has_room(tmp_path, window):
+    page, _ = _static_page(tmp_path, _ASK_LAYOUT_PROBE)
+    seen = _dump(page.as_uri(), window=window)
+
+    pv, askr, jev = seen["pv"], seen["askr"], seen["jev"]
+    if seen["list"] >= 780:
+        # Two columns: the relevance and Jev's block sit beside the post, where the eye compares.
+        assert window == "1280,900"
+        assert askr["left"] >= pv["right"] and jev["left"] >= pv["right"]
+        assert seen["cost_in"] == "side"
+        assert askr["top"] < pv["bottom"] and jev["top"] >= askr["bottom"]
+    else:
+        # Too narrow for two: stacked, the strip above the post and Jev under it.
+        assert window == "700,900"
+        assert askr["bottom"] <= pv["top"] and jev["top"] >= pv["bottom"]
+        # One column, the history under the results: the cost line opens the tab instead.
+        assert seen["cost_in"] == "main"
+
+
+@_requires_chrome
+def test_static_the_ask_cost_line_names_answers_without_a_token_count(ask_static):
+    line = ask_static[0]["costline"]
+
+    assert line["three"] == (
+        "Lo que ha costado preguntar: ~0,0123 $ en 2 pasadas y 5 peticiones "
+        "(+3 respuestas sin recuento)."
+    )
+    assert line["one"] == (
+        "Lo que ha costado preguntar: ~0,0123 $ en 1 pasada y 1 petición, sin tarifa: x "
+        "(+1 respuesta sin recuento)."
+    )
+    assert line["none"] == "Lo que ha costado preguntar: ~0,0123 $ en 1 pasada y 1 petición."
 
 
 @_requires_chrome
@@ -275,10 +356,12 @@ def test_static_launching_needs_the_server_and_says_how(ask_static):
     view = ask_static[0]["default"]
 
     assert view["form"] is False
-    assert view["launch"].startswith(
-        "Para preguntar desde esta página, ábrela con xbrain jev serve. Desde la terminal: "
+    assert view["launch"] == (
+        "Para preguntar desde esta página, ábrela con xbrain jev serve.Desde la terminal, "
+        'xbrain jev ask "tu pregunta" --dry-run estima sin pagar; sin --dry-run, pregunta.'
     )
-    assert 'xbrain jev ask "' in view["launch"]
+    # Each command is one unbroken line box: never split mid-token.
+    assert view["launch_tops"] == [1, 1, 1]
 
 
 @_requires_chrome
@@ -311,6 +394,29 @@ _ASK_SERVE_PROBE = (
     + _SERVE_JS
     + _ASK_JS
     + r"""
+// Holds the page's next ask estimate until the probe lets it answer: the answer arrives
+// after whatever the probe does while the block says «Estimando…».
+let sHold = null;
+const sFetchHeld = window.fetch;
+window.fetch = function (u, init) {
+  const p = sFetchHeld.call(window, u, init);
+  if (sHold && String(u).includes('/api/ask/estimate')) {
+    const h = sHold;
+    sHold = null;
+    h.sent = true;
+    return p.then(r => h.gate.then(() => r));
+  }
+  return p;
+};
+const sHoldNext = () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  sHold = {gate, release, sent: false};
+  return sHold;
+};
+const sEstimating = (h) => sWait(() => h.sent && sPanel().est === 'Estimando…', 'la estimación en vuelo');
+const sAnswered = () => sWait(() => sPanel().est && sPanel().est !== 'Estimando…', 'la respuesta tardía');
+const sQEdit = (value) => { const q = sId('ask-q'); q.value = value; q.dispatchEvent(new Event('input', {bubbles: true})); };
 const sQForm = (fields) => {
   for (const [id, value] of Object.entries(fields)) {
     const box = sId(id);
@@ -329,7 +435,26 @@ const sQForm = (fields) => {
   await sStep('estimate', async () => {
     sQForm({'ask-q': '  ¿Cómo configuro   hooks en Claude Code? ', 'ask-evaluated': true});
     await sWait(() => sPanel().go, 'la estimación');
-    return Object.assign(sPanel(), {estimate: sLastEstimate});
+    const box = sId('jobp'), form = sId('ask-form').getBoundingClientRect();
+    const placed = {position: getComputedStyle(box).position, top: sPanelTop(),
+      after: box.previousElementSibling && box.previousElementSibling.id,
+      below_form: box.getBoundingClientRect().top >= form.bottom - 1};
+    return Object.assign(sPanel(), {estimate: sLastEstimate, placed});
+  });
+  await sStep('edited', async () => {
+    // The block sits under the form: editing the question (or a filter) after the estimate
+    // must not leave «… y pagar» live for the old one.
+    const q = sId('ask-q'), was = q.value;
+    const edit = (value) => { q.value = value; q.dispatchEvent(new Event('input', {bubbles: true})); };
+    edit(was + ' y skills');
+    const changed = sPanel();
+    edit(was);
+    const back = sPanel();
+    const author = sId('ask-author');
+    author.value = 'alguien'; author.dispatchEvent(new Event('input', {bubbles: true}));
+    const filter = sPanel();
+    author.value = ''; author.dispatchEvent(new Event('input', {bubbles: true}));
+    return {changed, back, filter, after: sPanel()};
   });
   await sStep('done', async () => {
     sId('ask-go').click();
@@ -383,6 +508,46 @@ const sQForm = (fields) => {
     sId('ask-cancel').click();
     return panel;
   });
+  await sStep('inflight', async () => {
+    // Edited while the estimate is out: the answer, for the old question, arrives priced and
+    // allowed, and «… y pagar» must stay held — a click would pay for the question as sent.
+    let h = sHoldNext();
+    sQForm({'ask-q': 'hooks en vuelo', 'ask-evaluated': true, 'ask-author': ''});
+    await sEstimating(h);
+    sQEdit('hooks en vuelo y skills');
+    const during = sPanel();
+    h.release();
+    await sAnswered();
+    const late = Object.assign(sPanel(), {allowed: !!(sLastEstimate && sLastEstimate.allowed)});
+    const posts0 = sPosts;
+    await confirmAsk();  // what a click would run, were the button not held
+    late.paid = sPosts - posts0;
+    // Estimated again, then edited and undone while that estimate is out: nothing is payable
+    // until it answers, and then it is.
+    h = sHoldNext();
+    sPress(sId('ask-form'), 'Estimar lo que cuesta');
+    await sEstimating(h);
+    sQEdit('hooks en vuelo');
+    sQEdit('hooks en vuelo y skills');
+    const undone = sPanel();
+    h.release();
+    await sAnswered();
+    const answered = sPanel();
+    sId('ask-cancel').click();
+    // Refused while edited: the block keeps saying the question changed, and the refusal is
+    // what it says once the edit is undone.
+    h = sHoldNext();
+    sQForm({'ask-q': 'otra', 'ask-evaluated': false, 'ask-author': 'nadie'});
+    await sEstimating(h);
+    sQEdit('otra más');
+    h.release();
+    await sWait(() => sLastEstimate && sLastEstimate.allowed === false && sPanel().est !== 'Estimando…', 'la negativa tardía');
+    const refused = sPanel();
+    sQEdit('otra');
+    const refused_undone = sPanel();
+    sId('ask-cancel').click();
+    return {during, late, undone, answered, refused, refused_undone};
+  });
   sDone();
 })();
 </script>"""
@@ -415,6 +580,13 @@ def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_ser
     money = f"~{e['usd']:.5f}".replace(".", ",") + " $"
 
     assert estimate["title"] == "Preguntar: «¿Cómo configuro hooks en Claude Code?»"
+    # In Preguntar, right under the form that asked for it — never the floating corner panel.
+    assert estimate["placed"] == {
+        "position": "static",
+        "top": "top-ask",
+        "after": "ask-form",
+        "below_form": True,
+    }
     assert e["kind"] == "ask" and e["ids"] == ["1", "2"]
     assert e["pick"] == {"query": AskQuery.of(QUERY).text, "only_evaluated": True}
     assert estimate["force"] is None
@@ -431,6 +603,44 @@ def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_ser
         "mucho 1 post)."
     )
     assert "Aún sin preguntas pagadas: cifras de partida." in estimate["est"]
+
+
+@_requires_chrome
+def test_served_editing_the_form_after_an_estimate_holds_the_pay_button(ask_served):
+    edited = _step(ask_served, "edited")
+    said = "La pregunta cambió desde la estimación: vuelve a estimar."
+
+    assert edited["changed"]["go"] is False and edited["changed"]["error"] == said
+    assert edited["filter"]["go"] is False and edited["filter"]["error"] == said
+    # Back to what was estimated: the estimate holds again, and the payment is offered again.
+    assert edited["back"]["go"] is True and edited["back"]["error"] is None
+    assert edited["after"]["go"] is True and edited["after"]["error"] is None
+    assert edited["after"]["go_text"] == edited["back"]["go_text"]
+
+
+@_requires_chrome
+def test_served_an_estimate_that_answers_after_an_edit_leaves_nothing_to_pay(ask_served):
+    step = _step(ask_served, "inflight")
+    said = "La pregunta cambió desde la estimación: vuelve a estimar."
+
+    assert step["during"]["go"] is False and step["during"]["error"] == said
+    # The old question's estimate came back payable, and still nothing can be paid.
+    assert step["late"]["allowed"] is True
+    assert step["late"]["go"] is False and step["late"]["error"] == said
+    assert step["late"]["paid"] == 0
+    # An edit undone while the estimate is out: held until it answers, then offered.
+    assert step["undone"]["go"] is False and step["undone"]["error"] is None
+    assert step["answered"]["go"] is True and step["answered"]["error"] is None
+
+
+@_requires_chrome
+def test_served_a_refusal_that_answers_after_an_edit_comes_back_on_undo(ask_served):
+    step = _step(ask_served, "inflight")
+
+    assert step["refused"]["go"] is False
+    assert step["refused"]["error"] == "La pregunta cambió desde la estimación: vuelve a estimar."
+    assert step["refused_undone"]["go"] is False
+    assert step["refused_undone"]["error"].startswith("No se puede preguntar: ningún post")
 
 
 @_requires_chrome
@@ -657,8 +867,13 @@ _ASK_RESUME_PROBE = (
     + r"""
 (async () => {
   await sStep('resumed', async () => {
+    // Opened on Revisar: the running ask is announced on Preguntar's tab, and its block is there.
+    await sWait(() => sBadges().includes('ask:en curso'), 'el aviso en la pestaña Preguntar');
+    const badges = sBadges(), top = sPanelTop();
+    location.hash = '#ask';
     await sWait(() => sPanel().shown && /de 5 posts/.test(sPanel().progress || ''), 'el panel de la pregunta en curso');
-    return sPanel();
+    const prev = sId('jobp').previousElementSibling;
+    return Object.assign(sPanel(), {badges, top, after: prev && prev.id});
   });
   await sStep('end', async () => {
     await sWait(() => sRefreshed > 0, 'la recarga');
@@ -696,6 +911,9 @@ def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed)
     resumed, end = _step(ask_resumed, "resumed"), _step(ask_resumed, "end")
 
     assert resumed["title"] == "Pregunta en curso"
+    assert resumed["badges"] == ["ask:en curso"] and resumed["top"] == "top-ask"
+    # An ask this page did not start still goes where an ask's block goes: under the form.
+    assert resumed["after"] == "ask-form"
     assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
     assert end["panel"]["progress"].startswith("5 respuestas guardadas · 5 resultados")
     assert [h["text"].split(" · ")[0] for h in end["history"]] == [QUERY]
@@ -746,6 +964,9 @@ _REFINE_JS = r"""
 const sQRefine = () => {
   const box = document.getElementById('ask-refine');
   if (!seen(box)) return null;
+  // The refine's topics are in their pill's panel: opened, as a reader would, to be read.
+  const pill = document.getElementById('refine-topics-open');
+  if (pill && pill.getAttribute('aria-expanded') !== 'true') pill.click();
   const val = id => document.getElementById(id).value;
   return {title: txt(box.querySelector('h4')), top: val('refine-top'), min: val('refine-min'),
     since: val('refine-since'), until: val('refine-until'), author: val('refine-author'),
@@ -876,7 +1097,7 @@ def test_static_victors_ask_opens_on_the_first_20_ranked_not_on_nothing(victor_s
     assert _probs(first["results"]) == order[:20]
     assert [p for _, p in order[:3]] == ["0,80", "0,79", "0,79"]
     assert first["head"].startswith("«En qué topics hablo de agentic engineering?»")
-    assert "Filtros: desde 2026-05-07" in first["head"]
+    assert "Filtros: desde 7 may 2026" in first["head"]
     assert "Mostrando 20 de 808 leídos por Jev, de mayor a menor probabilidad." in first["head"]
     assert "0,85" not in first["head"] and first["empty"] is None
     assert first["more"] == "Ver 20 más (quedan 788)"
@@ -1134,14 +1355,19 @@ const sQForm = (fields) => { sQSet(fields); sPress(sId('ask-form'), 'Estimar lo 
 let sCounts = 0;
 const sFetchCounts = window.fetch;
 window.fetch = function (u, init) { if (String(u).includes('/api/ask/counts')) sCounts++; return sFetchCounts.call(window, u, init); };
-const sTopics = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
+// The topics live in the Topics pill's panel: opened (as a reader would) before they are read.
+const sOpenPop = (id) => { const b = sId(id + '-open'); if (b && b.getAttribute('aria-expanded') !== 'true') b.click(); };
+const sTopics = () => { sOpenPop('ask-topics'); return sTopicsSeen(); };
+const sTopicsSeen = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
   id: b.id, checked: b.checked, text: txt(b.parentNode), count: txt(b.parentNode.querySelector('.tcount'))}));
 const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 && sPanel().go !== null, what); return sLastEstimate; };
 (async () => {
   await sStep('form', async () => {
     location.hash = '#ask';
     await sWait(() => seen(sId('ask-form')) && sQResults().length > 0, 'el formulario y los resultados');
-    return Object.assign(sQView(), {topics: sTopics(), explain: txt(sId('ask-explain')), tip: txt(sId('ask-tip')),
+    const closed = sTopicsSeen().length;
+    return Object.assign(sQView(), {topics: sTopics(), closed_topics: closed, rule: txt(sId('ask-topics-rule')),
+      explain: txt(sId('ask-explain')), placeholder: sId('ask-q').getAttribute('placeholder'),
       form_title: txt(sId('ask-form').querySelector('h4')), min: sId('ask-min') ? 'HAY' : null, posts: sPosts});
   });
   await sStep('counts', async () => {
@@ -1258,13 +1484,15 @@ def test_served_the_tab_splits_what_is_asked_from_what_is_refined(victor_served)
     assert form["form_title"] == "Qué posts preguntar"
     assert form["min"] is None  # the minimum is a free refine, never part of what is paid
     assert form["explain"] == (
-        "Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan "
-        "por lo seguro que está Jev de que el post responde. Topic: posts que enrich o Jev "
-        "(≥ 0,85) ponen en alguno de los topics marcados."
+        "Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después "
+        "es gratis."
     )
-    assert form["tip"] == (
-        'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.'
-    )
+    # How a topic filter decides, said where the topics are: in their panel.
+    assert form["rule"] == "Un post está en un topic si enrich o Jev (≥ 0,85) lo ponen en él."
+    # The question box shows the kind of question that works: about content, not topics.
+    assert form["placeholder"] == "Posts que explican cómo configurar hooks en Claude Code…"
+    # Folded until the reader opens the pill: no wall of checkboxes over the form.
+    assert form["closed_topics"] == 0
 
 
 @_requires_chrome
@@ -1362,8 +1590,10 @@ _EXPLAIN_READ = (
 (async () => {
   await sStep('explain', async () => {
     location.hash = '#ask';
-    await sWait(() => seen(sId('ask-explain')), 'la explicación');
-    return txt(sId('ask-explain'));
+    await sWait(() => seen(sId('ask-topics-open')), 'el filtro de topics');
+    sId('ask-topics-open').click();
+    await sWait(() => seen(sId('ask-topics-rule')), 'la regla de los topics');
+    return txt(sId('ask-topics-rule'));
   });
   sDone();
 })();
@@ -1373,7 +1603,92 @@ _EXPLAIN_READ = (
 
 @_requires_chrome
 def test_served_the_explanation_says_the_configured_topic_bar(tmp_path):
-    """The «(≥ …)» of the explanation is `[jev].threshold` from the blob, never a literal."""
+    """The «(≥ …)» of the topics' rule is `[jev].threshold` from the blob, never a literal."""
     seen = _served_dump(tmp_path, _EXPLAIN_READ, client=_Asker(), jev="threshold = 0.9\n")
 
-    assert "Topic: posts que enrich o Jev (≥ 0,90) ponen en alguno" in _step(seen, "explain")
+    assert _step(seen, "explain") == (
+        "Un post está en un topic si enrich o Jev (≥ 0,90) lo ponen en él."
+    )
+
+
+# --------------------------------------------------------------------------- PR 15: the filter pills
+# Víctor, 2026-09-27: «esto no es una interfaz bonita» — the ~45 topic checkboxes were a wall
+# over the form. They are a pill's panel now; the panel must be as usable as the wall was.
+
+_POP_PROBE = (
+    "<script>"
+    + _SEEN
+    + _ASK_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const pill = () => document.getElementById('refine-topics-open');
+  const pop = () => document.getElementById('refine-topics-pop');
+  const inPop = () => !!pop() && pop().contains(document.activeElement);
+  await sleep(150);
+  out.closed = {expanded: pill().getAttribute('aria-expanded'), shown: seen(pop()),
+    controls: pill().getAttribute('aria-controls'), role: pop().getAttribute('role'),
+    boxes: [...document.querySelectorAll('#ask-refine input[type=checkbox]')].filter(seen).length};
+  pill().click(); await sleep(20);
+  out.opened = {expanded: pill().getAttribute('aria-expanded'), shown: seen(pop()), focus_inside: inPop(),
+    boxes: [...document.querySelectorAll('#ask-refine input[type=checkbox]')].filter(seen).length};
+  // Tab from the last control comes back to the first: the focus stays in the panel.
+  const f = [...pop().querySelectorAll('input')].filter(seen);
+  f[f.length - 1].focus();
+  f[f.length - 1].dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, cancelable: true}));
+  out.trapped = document.activeElement === f[0];
+  // And back: Shift+Tab from the first control goes round to the last.
+  f[0].dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', shiftKey: true, bubbles: true, cancelable: true}));
+  out.trapped_back = document.activeElement === f[f.length - 1];
+  f[0].focus();
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  await sleep(20);
+  out.escaped = {shown: seen(pop()), expanded: pill().getAttribute('aria-expanded'), focus_on_pill: document.activeElement === pill()};
+  pill().click(); await sleep(20);
+  document.getElementById('ask-head').click(); await sleep(20);
+  out.outside = {shown: seen(pop())};
+  // A refine redraws the tab: the panel stays open and the box keeps the focus.
+  pill().click(); await sleep(20);
+  const box = [...pop().querySelectorAll('input[type=checkbox]')][0];
+  const id = box.id;
+  box.focus(); box.checked = true; box.dispatchEvent(new Event('change', {bubbles: true}));
+  await sleep(120);
+  out.refined = {hash_has_t: /[?&]t=/.test(location.hash), shown: seen(pop()),
+    focus: document.activeElement && document.activeElement.id, id: id,
+    pill: txt(pill()), label: LABEL[id.replace('refine-topic-', '')]};
+  const second = [...pop().querySelectorAll('input[type=checkbox]')].find(b => !b.checked);
+  second.checked = true; second.dispatchEvent(new Event('change', {bubbles: true}));
+  await sleep(120);
+  out.refined_two = {pill: txt(pill()), title: pill().title};
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_the_refine_topics_are_a_pill_whose_panel_opens_traps_focus_and_closes(tmp_path):
+    page, _, _ = _victor_page(tmp_path, _POP_PROBE)
+    seen = _dump(page.as_uri() + "#ask")
+
+    assert seen["closed"] == {
+        "expanded": "false",
+        "shown": False,
+        "controls": "refine-topics-pop",
+        "role": "dialog",
+        "boxes": 0,
+    }
+    assert seen["opened"]["expanded"] == "true" and seen["opened"]["shown"] is True
+    assert seen["opened"]["focus_inside"] is True and seen["opened"]["boxes"] > 0
+    assert seen["trapped"] is True and seen["trapped_back"] is True
+    assert seen["escaped"] == {"shown": False, "expanded": "false", "focus_on_pill": True}
+    assert seen["outside"] == {"shown": False}
+    refined = seen["refined"]
+    assert refined["hash_has_t"] is True and refined["shown"] is True
+    assert refined["focus"] == refined["id"]
+    # The pill keeps the filter's name and says what is ticked, readable with its panel closed.
+    assert refined["label"] and refined["pill"] == f"Topics: {refined['label']}"
+    assert seen["refined_two"]["pill"] == f"Topics: {refined['label']} +1"
+    assert seen["refined_two"]["title"].startswith(f"Topics: {refined['label']} y ")
