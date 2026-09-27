@@ -234,6 +234,31 @@ details.saw[open]>summary{color:var(--ink)}
 .askp .pbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
 .askp .askb{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
 .askp .askb button[hidden]{display:none}
+/* the Preguntar tab: form, results (the post cards, each with what it answers) and history */
+.askl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:26px;margin-top:22px;align-items:start}
+.askform{background:var(--surface);border:1px solid var(--hairline);border-radius:14px;padding:16px 18px;margin-bottom:18px}
+.askform textarea{display:block;width:100%;box-sizing:border-box;font:inherit;color:var(--ink);background:var(--surface-2);border:1px solid var(--hairline);border-radius:8px;padding:8px 10px;resize:vertical}
+.askfs{display:flex;flex-wrap:wrap;gap:10px 14px;margin:10px 0}
+.askfld{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--ink-muted);min-width:0;max-width:100%}
+.askfld input,.askfld select{font:inherit;font-size:13px;color:var(--ink);background:var(--surface-2);border:1px solid var(--hairline);border-radius:6px;padding:4px 8px;max-width:100%;box-sizing:border-box}
+.askfld.chk{flex-direction:row;align-items:center;gap:6px;align-self:flex-end}
+.askform .muted{margin:8px 0 0}
+.askmain,.askres{min-width:0}
+.askhead{margin-bottom:14px}
+.askhead .tsec{margin-top:0;overflow-wrap:anywhere}
+.askhead p{font-size:13px;color:var(--ink-muted);margin-top:4px}
+.askhead .err{color:var(--failed)}
+.askr{margin:10px 0 4px;padding:8px 10px;border:1px solid var(--accent-line);border-radius:10px;background:var(--accent-soft)}
+.askr .jh{margin-bottom:0}
+.askr .ap{font-family:var(--display);font-weight:600;font-size:20px;color:var(--accent);font-variant-numeric:tabular-nums}
+.askside{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;min-width:0}
+.askside .tsec{margin-top:0}
+.askside ol{list-style:none;padding:0;margin:10px 0 0}
+.askside li a{display:block;padding:8px 10px;border:1px solid var(--hairline);border-radius:10px;margin-bottom:8px;text-decoration:none;color:var(--ink);background:var(--surface);overflow-wrap:anywhere}
+.askside li a:hover{border-color:var(--accent-line)}
+.askside li a[aria-current="true"]{border-color:var(--accent)}
+.askside li b{font-weight:600;font-size:13.5px}
+.askside li small{display:block;color:var(--ink-faint);font-size:11.5px;margin-top:3px}
 .echips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .echips span{font-size:12px;border:1px solid var(--hairline);border-radius:999px;padding:1px 9px}
 
@@ -352,6 +377,8 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   .browse{grid-template-columns:1fr}
   .rail{position:static;max-height:none}
   .kinds,.bands,.qgrid{grid-template-columns:1fr}
+  .askl{grid-template-columns:1fr}
+  .askside{position:static;max-height:none}
 }
 @media (max-width:640px){
   .wrap{padding:28px 16px 48px}
@@ -430,6 +457,7 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <a href="#posts" data-tab="posts">Posts</a>
     <a href="#topics" data-tab="topics">Topics</a>
     <a href="#compare" data-tab="compare">Comparar Jev vs enrich</a>
+    <a href="#ask" data-tab="ask">Preguntar</a>
     <a href="#config" data-tab="config">Configuración</a>
   </nav>
 
@@ -462,6 +490,9 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   </section>
   <section id="tab-compare" class="tab" hidden>
     <div id="compare-body"></div>
+  </section>
+  <section id="tab-ask" class="tab" hidden>
+    <div id="ask-body"></div>
   </section>
   <section id="tab-config" class="tab" hidden>
     <div id="config-body"></div>
@@ -638,7 +669,7 @@ function renderNumbers() {
 }
 
 /* ---------------------------------------------------------------- tabs (hash-routed) */
-const TABS = ['posts', 'topics', 'compare', 'config'];
+const TABS = ['posts', 'topics', 'compare', 'ask', 'config'];
 /** The whole Posts view: filter, topic, search, sort. The hash carries it (bookmarkable). */
 const view = {tab: 'posts', f: 'disc', t: '', q: '', s: 'disc'};
 
@@ -653,6 +684,7 @@ function readHash() {
   const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1));
   if (view.tab === 'topics') readTopicsHash(params);
   if (view.tab === 'compare') readCompareHash(params);
+  if (view.tab === 'ask') readAskHash(params);
   // Another tab's hash says nothing about the Posts view: keep it for when the reader returns.
   if (view.tab !== 'posts') return;
   const f = params.get('f');
@@ -2304,6 +2336,244 @@ function renderConfig() {
 }
 /* end config */
 
+/* ---------------------------------------------------------------- the Preguntar tab */
+/* ask tab */
+/* What was asked of the corpus (`xbrain jev ask`, or this tab when served): the query history
+   and, for the query open, the posts whose CURRENT answer reaches the threshold it was asked
+   at, best first — the same cards as Posts, each with its probability and what Jev read.
+   Everything is `DATA.asks` (`dashboard.asks_view`): reopening a query costs nothing. The
+   static page shows it all; launching a query needs `xbrain jev serve`. */
+/** The query open: its sha, or '' for the last one asked. The hash carries it. */
+const askView = {q: ''};
+/** What the reader typed, kept across re-draws (a job's end re-draws the tab). */
+const askForm = {query: '', topic: '', since: '', until: '', author: '', only_evaluated: false, limit: ''};
+
+function readAskHash(params) {
+  askView.q = params.get('q') || '';
+}
+
+function askHref(sha) {
+  return hashHref('ask', sha ? {q: sha} : {});
+}
+
+const askRows = () => (DATA.asks && DATA.asks.history) || [];
+
+/** The row the tab shows: the one the hash names, else the last query asked. */
+function openAskRow() {
+  const rows = askRows();
+  return rows.find(r => r.sha === askView.q) || rows[0] || null;
+}
+
+/** The query as the server files it: whitespace runs as one space, trimmed. */
+const askText = (q) => String(q || '').trim().split(/\s+/).join(' ');
+
+function askField(text, input, cls) {
+  const box = el('label', 'askfld' + (cls ? ' ' + cls : ''));
+  if (cls === 'chk') {
+    box.appendChild(input);
+    box.appendChild(el('span', null, text));
+  } else {
+    box.appendChild(el('span', null, text));
+    box.appendChild(input);
+  }
+  return box;
+}
+
+/** One form control bound to `askForm[key]`. */
+function askInput(id, key, type, attrs) {
+  const input = el(type === 'textarea' || type === 'select' ? type : 'input');
+  if (input.tagName === 'INPUT') input.type = type;
+  input.id = id;
+  Object.entries(attrs || {}).forEach(([k, v]) => input.setAttribute(k, v));
+  const read = () => { askForm[key] = type === 'checkbox' ? input.checked : input.value; };
+  input.addEventListener('input', read);
+  input.addEventListener('change', read);
+  return input;
+}
+
+function askTopicSelect() {
+  const select = askInput('ask-topic', 'topic', 'select');
+  select.appendChild(new Option('Cualquier topic', ''));
+  DATA.topics.forEach(t => select.appendChild(new Option(t.label, t.slug)));
+  select.value = askForm.topic;
+  return select;
+}
+
+/** The body `/api/ask/estimate` receives: the query and only the filters that are set. */
+function askBody() {
+  const body = {query: askForm.query};
+  ['topic', 'since', 'until'].forEach(k => { if (askForm[k]) body[k] = askForm[k]; });
+  if (askForm.author.trim()) body.author = askForm.author.trim();
+  if (askForm.only_evaluated) body.only_evaluated = true;
+  if (String(askForm.limit).trim() !== '') body.limit = Number(askForm.limit);
+  return body;
+}
+
+/** Served: the query box and `xbrain jev ask`'s pre-filters; the button only ESTIMATES. */
+function askFormBox() {
+  const form = el('form', 'askform');
+  form.id = 'ask-form';
+  const q = askInput('ask-q', 'query', 'textarea', {rows: '2', maxlength: '2000',
+    placeholder: '¿Qué posts explican cómo configurar hooks en Claude Code?', 'aria-label': 'La pregunta'});
+  q.value = askForm.query;
+  form.appendChild(q);
+  const fs = el('div', 'askfs');
+  const since = askInput('ask-since', 'since', 'date');
+  since.value = askForm.since;
+  const until = askInput('ask-until', 'until', 'date');
+  until.value = askForm.until;
+  const author = askInput('ask-author', 'author', 'text', {placeholder: '@handle', size: '12'});
+  author.value = askForm.author;
+  const limit = askInput('ask-limit', 'limit', 'number', {min: '1', placeholder: 'todos'});
+  limit.value = askForm.limit;
+  const evaluated = askInput('ask-evaluated', 'only_evaluated', 'checkbox');
+  evaluated.checked = askForm.only_evaluated;
+  [askField('Topic', askTopicSelect()), askField('Desde', since), askField('Hasta', until),
+    askField('Autor', author), askField('Como mucho (posts)', limit),
+    askField('Solo posts con evaluación de topics vigente', evaluated, 'chk')].forEach(f => fs.appendChild(f));
+  form.appendChild(fs);
+  const go = el('button', 'evalb go', 'Estimar lo que cuesta');
+  go.type = 'submit';
+  form.appendChild(go);
+  form.appendChild(el('p', 'muted', 'Nada se paga hasta que confirmes en el panel. Un post que ya ' +
+    'respondió a esta misma pregunta no se vuelve a pagar mientras su evidencia no cambie.'));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    openAsk('ask', askBody(), 'Preguntar: «' + askText(askForm.query) + '»', go);
+  });
+  return form;
+}
+
+/** Static: nothing is asked from here; the command that would. */
+function askLaunchLine() {
+  const line = el('p', 'note');
+  line.id = 'ask-launch';
+  line.appendChild(document.createTextNode('Para preguntar desde esta página, ábrela con '));
+  line.appendChild(el('code', null, 'xbrain jev serve'));
+  line.appendChild(document.createTextNode('. Desde la terminal: '));
+  line.appendChild(el('code', null, 'xbrain jev ask "tu pregunta" --dry-run'));
+  line.appendChild(document.createTextNode(' (estima sin pagar; sin --dry-run, pregunta).'));
+  return line;
+}
+
+/** The filters a query was asked with, in words. */
+function askFiltersText(f) {
+  const parts = [];
+  if (f.topic) parts.push('topic ' + label(f.topic));
+  if (f.since) parts.push('desde ' + f.since);
+  if (f.until) parts.push('hasta ' + f.until);
+  if (f.author) parts.push('autor @' + String(f.author).replace(/^@/, ''));
+  if (f.only_evaluated) parts.push('solo posts con evaluación de topics');
+  return parts.length ? 'Filtros: ' + parts.join(', ') : 'Sin filtros: todo el corpus';
+}
+
+/** A result: the post's own card, with what it answers and what Jev read on top. */
+function askCard(p, r) {
+  const a = safeCard(p);
+  a.id = 'ask-post-' + p.id;
+  const strip = el('div', 'askr');
+  const top = el('div', 'jh');
+  top.appendChild(el('span', 'kick', 'Responde a la pregunta'));
+  const ap = el('span', 'ap', prob(r.p));
+  ap.title = 'probabilidad según Jev de que el post responda a la pregunta';
+  top.appendChild(ap);
+  top.appendChild(el('span', 'meta', r.model + ' · ' + when(r.asked_at)));
+  strip.appendChild(top);
+  strip.appendChild(whatJevSaw({surfaces: DATA.asks.surfaces[r.id] || [], state_chars: r.state_chars,
+    truncated: r.truncated}));
+  a.insertBefore(strip, a.children[1] || null);
+  return a;
+}
+
+function askResults(row) {
+  const box = el('div', 'askres');
+  box.id = 'ask-results';
+  if (!row) {
+    const none = el('p', 'empty', 'Aún no se ha preguntado nada.');
+    none.id = 'ask-empty';
+    box.appendChild(none);
+    return box;
+  }
+  const head = el('div', 'askhead');
+  head.id = 'ask-head';
+  head.appendChild(el('h3', 'tsec', '«' + row.query + '»'));
+  const cost = row.cost;
+  head.appendChild(el('p', null, 'Preguntada ' + when(row.last_asked_at) +
+    (row.times > 1 ? ' (' + nf(row.times) + ' veces)' : '') + ' · ' + askFiltersText(row.filters) +
+    ' · ' + pl(cost.requests, 'petición', 'peticiones') + ', ' + usd(cost.cost_usd) +
+    (cost.unpriced_providers.length ? ' · sin tarifa: ' + cost.unpriced_providers.join(', ') : '')));
+  const edge = dec(row.threshold, 2);
+  if (!row.error) {
+    head.appendChild(el('p', null, nf(row.results.length) + ' de ' +
+      pl(row.answered, 'post con respuesta vigente', 'posts con respuesta vigente') + ' ' +
+      (row.results.length === 1 ? 'llega' : 'llegan') + ' a ' + edge + ', de mayor a menor probabilidad.'));
+  }
+  box.appendChild(head);
+  if (row.error) {
+    const err = el('p', 'err', 'No se pudieron leer las respuestas de esta consulta: ' + row.error);
+    err.id = 'ask-row-error';
+    head.appendChild(err);
+    return box;
+  }
+  if (!row.results.length) {
+    const none = el('p', 'empty', 'Ningún post llega a ' + edge + ': Jev no ve una respuesta a esta ' +
+      'pregunta en ' + (row.answered === 1 ? 'el post' : 'los ' + nf(row.answered) + ' posts') +
+      ' con respuesta vigente.');
+    none.id = 'ask-empty';
+    box.appendChild(none);
+    return box;
+  }
+  const byId = postById();
+  row.results.forEach(r => { if (byId[r.id]) box.appendChild(askCard(byId[r.id], r)); });
+  return box;
+}
+
+function askHistory(open) {
+  const side = el('aside', 'askside');
+  side.setAttribute('aria-label', 'Consultas hechas');
+  side.appendChild(el('h3', 'tsec', 'Consultas hechas'));
+  side.appendChild(el('p', 'muted', 'Reabrir una consulta no cuesta nada: sus respuestas están guardadas.'));
+  if (DATA.asks && DATA.asks.error) {
+    side.appendChild(el('p', 'err', 'No se pudo leer el historial: ' + DATA.asks.error));
+  }
+  const list = el('ol');
+  list.id = 'ask-history';
+  askRows().forEach(row => {
+    const li = el('li');
+    const a = link(askHref(row.sha), null, '');
+    a.appendChild(el('b', null, row.query));
+    a.appendChild(el('small', null, day(row.last_asked_at) + ' · ' +
+      pl(row.results.length, 'resultado', 'resultados') + ' · ' +
+      pl(row.answered, 'post con respuesta', 'posts con respuesta') + ' · ' + usd(row.cost.cost_usd) +
+      (row.times > 1 ? ' · ' + nf(row.times) + ' veces' : '') + (row.error ? ' · ilegible' : '')));
+    if (open && row.sha === open.sha) a.setAttribute('aria-current', 'true');
+    li.appendChild(a);
+    list.appendChild(li);
+  });
+  side.appendChild(list);
+  return side;
+}
+
+function renderAsk() {
+  document.querySelector('.tabs a[data-tab="ask"]').setAttribute('href', askHref(askView.q));
+  const box = $('ask-body');
+  try {
+    const row = openAskRow();
+    const grid = el('div', 'askl');
+    const main = el('div', 'askmain');
+    main.appendChild(SERVED() ? askFormBox() : askLaunchLine());
+    main.appendChild(askResults(row));
+    grid.appendChild(main);
+    grid.appendChild(askHistory(row));
+    box.replaceChildren(grid);
+  } catch (err) {
+    console.error(err);
+    box.replaceChildren(el('p', 'empty', 'La pestaña Preguntar no pudo dibujarse: ' +
+      (err && err.message ? err.message : err)));
+  }
+}
+/* end ask tab */
+
 /* ---------------------------------------------------------------- serve mode */
 /* serve */
 /* The page as `xbrain jev serve` serves it (DATA.serve is set): buttons that ask the server
@@ -2317,10 +2587,19 @@ const SERVED = () => !!(DATA && DATA.serve);
     kind of pass has its estimate and evaluate; the job slot is one for every kind. */
 const API = {
   topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},
+  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate'},
   job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',
 };
 /** What the panel calls a job of each kind when it did not start it (a reload, another tab). */
-const KIND_RUNNING = {topics: 'Evaluación de topics en curso'};
+const KIND_RUNNING = {topics: 'Evaluación de topics en curso', ask: 'Pregunta en curso'};
+/** The same, for a job that ended in another tab and did not end cleanly. */
+const KIND_ENDED = {topics: 'Una evaluación de topics lanzada en otra pestaña', ask: 'Una pregunta lanzada en otra pestaña'};
+/** The panel's words that depend on the kind of pass: its refusal, its button, what it saves. */
+const KIND_WORDS = {
+  topics: {cant: 'No se puede evaluar: ', go: 'Evaluar y pagar', saved: ['evaluación guardada', 'evaluaciones guardadas']},
+  ask: {cant: 'No se puede preguntar: ', go: 'Preguntar y pagar', saved: ['respuesta guardada', 'respuestas guardadas']},
+};
+const kindWords = (kind) => KIND_WORDS[kind] || KIND_WORDS.topics;
 const EVAL_POST = 'Evaluar este post';
 const EVAL_AGAIN = 'Re-evaluar';
 const EVAL_THESE = 'Evaluar estos posts';
@@ -2425,7 +2704,7 @@ function panelButton(id, cls, text, onClick) {
 function panel() {
   if (PANEL) return PANEL;
   const box = el('section', 'askp');
-  box.id = 'ask';
+  box.id = 'jobp';
   box.hidden = true;
   box.setAttribute('role', 'dialog');
   box.setAttribute('aria-labelledby', 'ask-title');
@@ -2508,18 +2787,19 @@ function openAsk(kind, ask, title, from) {
   P.title.textContent = title;
   // Never ticked for the reader: re-asking what is current is paid again, so it is a choice.
   P.force.checked = false;
-  // «Los N siguientes sin evaluar» is never forced (the server refuses it).
-  P.forceRow.hidden = 'unevaluated' in ask;
+  // «Los N siguientes sin evaluar» is never forced (the server refuses it); an ask never is.
+  P.forceRow.hidden = kind !== 'topics' || 'unevaluated' in ask;
   P.prog.hidden = true;
   P.error.hidden = true;
   panelMode('ask');
   estimate();
 }
 
-/** The selection as it will be sent: what the button asked, with the checkbox's `force`. */
+/** The selection as it will be sent: what the button asked, with the checkbox's `force` for a
+    topics pass (an ask is never forced). */
 function selection() {
   const sent = Object.assign({}, asking.ask);
-  if (!('unevaluated' in sent)) sent.force = panel().force.checked;
+  if (asking.kind === 'topics' && !('unevaluated' in sent)) sent.force = panel().force.checked;
   return sent;
 }
 
@@ -2535,9 +2815,10 @@ async function estimate() {
   mine.seq = seq;
   mine.sent = null;
   mine.estimate = null;
+  const words = kindWords(mine.kind);
   P.error.hidden = true;
   P.go.disabled = true;
-  P.go.textContent = 'Evaluar y pagar';
+  P.go.textContent = words.go;
   // Held while this estimate is out: the answer must be for the box as it is.
   P.force.disabled = true;
   P.est.textContent = 'Estimando…';
@@ -2547,17 +2828,18 @@ async function estimate() {
     if (!latest(mine, seq)) return;
     mine.sent = sent;
     mine.estimate = e;
-    P.est.textContent = pickText(e);
+    P.est.textContent = mine.kind === 'ask' ? askPickText(e) : pickText(e);
     if (e.allowed) {
       P.go.disabled = false;
-      P.go.textContent = 'Evaluar y pagar ' + usd(e.usd, 5);
+      // A query every post already answered asks nobody: it only opens the results.
+      P.go.textContent = e.posts ? words.go + ' ' + usd(e.usd, 5) : 'Ver resultados (gratis)';
     } else {
-      showError('No se puede evaluar: ' + e.refusal);
+      showError(words.cant + e.refusal);
     }
   } catch (err) {
     if (!latest(mine, seq)) return;
     P.est.textContent = '';
-    showError('No se puede evaluar: ' + err.message);
+    showError(words.cant + err.message);
   } finally {
     if (latest(mine, seq)) P.force.disabled = false;
   }
@@ -2574,6 +2856,24 @@ function pickText(e) {
     const paid = e.per_post.n === 1 ? 'la evaluación ya pagada' : 'las ' + nf(e.per_post.n) + ' evaluaciones ya pagadas';
     t += ' Coste estimado: ' + usd(e.usd, 5) + ' (coste medio por post de ' + paid + ' × ' +
       pl(e.posts, 'post', 'posts') + ').';
+  }
+  return t + ' ' + capText(e.max_usd);
+}
+
+/** An ask's estimate: the command's funnel line, then its price and where the price comes
+    from — the characters that will be sent at the measured characters per token. */
+function askPickText(e) {
+  const parts = [pl(e.posts, 'post por preguntar', 'posts por preguntar')];
+  if (e.skipped_current) parts.push(pl(e.skipped_current, 'ya respondido', 'ya respondidos') + ' (gratis)');
+  if (e.skipped_no_evidence) parts.push(nf(e.skipped_no_evidence) + ' sin evidencia');
+  if (e.remaining) parts.push(nf(e.remaining) + ' quedan para otra vez');
+  if (e.dropped) parts.push(pl(e.dropped, 'descartado por los filtros', 'descartados por los filtros'));
+  let t = parts.join(' · ') + '.';
+  if (e.posts) {
+    const ratio = e.chars_per_token;
+    t += ' Coste estimado: ' + usd(e.usd, 5) + ' (' + nf(e.chars) + ' caracteres a ' + dec(ratio.value, 2) +
+      ' por token, ' + (ratio.measured ? 'medido en ' + pl(ratio.measured, 'respuesta pagada', 'respuestas pagadas')
+        : 'sin medir todavía: una estimación alta a propósito') + ').';
   }
   return t + ' ' + capText(e.max_usd);
 }
@@ -2603,12 +2903,13 @@ async function confirmAsk() {
     follow(job);
   } catch (err) {
     if (asking !== mine || following) return;
-    showError('No se puede evaluar: ' + err.message);
-    // A job already running (409) is followed. A refusal before the confirmation was spent
-    // (bad body, the server stopping or failing to start) leaves it valid: Confirmar again.
+    showError(kindWords(mine.kind).cant + err.message);
+    // A job already running (409) is followed. Only two refusals give the confirmation back:
+    // a bad body (400) and a job thread that could not start (503 «no se pudo arrancar»); a
+    // server that is stopping (503) never runs it, whatever is pressed.
     const job = await api(API.job).catch(() => null);
     if (job && job.state === 'running') resume(job);
-    else if (err.status === 400 || err.status === 503) P.go.disabled = false;
+    else if (err.status === 400 || (err.status === 503 && /^no se pudo arrancar/.test(err.message))) P.go.disabled = false;
   }
 }
 
@@ -2707,7 +3008,9 @@ function progress(job) {
 function outcomeText(job) {
   const o = job.outcome;
   if (!o) return 'No se guardó nada.';
-  let t = pl(o.ok, 'evaluación guardada', 'evaluaciones guardadas') + ' · ' + spentText(job);
+  const saved = kindWords(job.kind).saved;
+  let t = pl(o.ok, saved[0], saved[1]) +
+    (o.results == null ? '' : ' · ' + pl(o.results, 'resultado', 'resultados')) + ' · ' + spentText(job);
   if (o.failed) t += ' · ' + pl(o.failed, 'fallida', 'fallidas') + ': ' + o.failures.map(f => f[0] + ' (' + f[1] + ')').join('; ');
   if (o.unsaved) t += ' · ' + pl(o.unsaved, 'respuesta pagada sin guardar', 'respuestas pagadas sin guardar');
   if (job.backup) t += ' · copia previa de las evaluaciones: ' + job.backup;
@@ -2725,18 +3028,49 @@ function endedCleanly(job) {
   return job.state === 'done' && !!o && !o.failed && !o.unsaved && o.logged && !job.log_error && !job.failed_calls;
 }
 
-async function finished(job) {
+/** The panel says how `job` ended: its outcome, or why it failed. Shown by itself when the
+    job did not end cleanly, even if the reader hid it. */
+function showEnd(job) {
   const P = panel();
-  following = false;
-  asking = null;
-  seenFinish = job.finished_at;
   panelMode('done');
+  P.prog.hidden = false;
   if (!endedCleanly(job)) P.box.hidden = false;
   if (job.state === 'error') {
     P.progText.textContent = spentText(job);
     showError('El trabajo falló: ' + job.error);
   } else {
     P.progText.textContent = outcomeText(job);
+  }
+}
+
+async function finished(job) {
+  following = false;
+  asking = null;
+  seenFinish = job.finished_at;
+  showEnd(job);
+  await reloadData();
+  showAskResults(job);
+}
+
+/** An ask that saved answers, followed from the Preguntar tab: the tab opens its results. */
+function showAskResults(job) {
+  if (job.kind !== 'ask' || !job.query_sha || !job.outcome || view.tab !== 'ask') return;
+  const href = askHref(job.query_sha);
+  if (location.hash !== href) location.hash = href;
+}
+
+/** Another tab's job ended while this page was idle: new data, and — when it did not end
+    cleanly (the cap, a failure, answers unsaved or unlogged) — the panel saying how. */
+async function endedElsewhere(job) {
+  seenFinish = job.finished_at;
+  if (!endedCleanly(job)) {
+    const P = panel();
+    asking = null;
+    P.title.textContent = KIND_ENDED[job.kind] || 'Un trabajo lanzado en otra pestaña';
+    P.est.textContent = 'Empezó ' + when(job.started_at || job.finished_at) + ' · ' + pl(job.total, 'post', 'posts') + '.';
+    P.forceRow.hidden = true;
+    P.error.hidden = true;
+    showEnd(job);
   }
   await reloadData();
 }
@@ -2773,6 +3107,7 @@ function refresh(blob) {
   }
   if (view.tab === 'topics') renderTopics();
   if (view.tab === 'compare') renderCompare();
+  if (view.tab === 'ask') renderAsk();
   if (view.tab === 'config') renderConfig();
 }
 
@@ -2787,10 +3122,7 @@ function watch(delay) {
         // `following` again: asked before this page confirmed a job and answered after, the
         // answer is about the job `poll` already has — neither followed twice nor reloaded.
         if (!following && job.state === 'running') resume(job);
-        else if (!following && job.finished_at && job.finished_at !== seenFinish) {
-          seenFinish = job.finished_at;
-          await reloadData();
-        }
+        else if (!following && job.finished_at && job.finished_at !== seenFinish) await endedElsewhere(job);
       } catch (err) {
         console.warn('jev serve: no se pudo leer /api/job', err);
       }
@@ -2846,6 +3178,7 @@ function boot() {
   }
   shownTopic = topicsView.t;
   if (view.tab === 'compare') showCompare();
+  if (view.tab === 'ask') renderAsk();
   if (view.tab === 'config') renderConfig();
   $('search').addEventListener('input', function () { view.q = this.value.trim(); update(); });
   $('sort').addEventListener('change', function () { view.s = this.value; update(); });
@@ -2870,6 +3203,7 @@ function boot() {
     // Opening a list is what the reader asked to see; the same list again, or none, leaves the
     // scroll alone.
     if (view.tab === 'compare') showCompare();
+    if (view.tab === 'ask') renderAsk();
     if (view.tab === 'config') renderConfig();
   });
   document.addEventListener('keydown', onKey);

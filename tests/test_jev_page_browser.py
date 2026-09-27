@@ -1891,7 +1891,11 @@ _SERVE_JS = (
     + r"""
 const sOut = {};
 const sId = id => document.getElementById(id);
-// Bounded by REAL time — the server's `Date` header — since the page's clock is virtual.
+// Bounded by REAL time — the server's `Date` header — since the page's clock is virtual: 30 s
+// for one wait, and one deadline for the WHOLE probe (from its first wait), so a probe whose
+// first step fails names that step instead of running out Chrome's own timeout.
+const sBudgetMs = /*BUDGET*/90000;
+let sDeadline = null;
 const sWait = async (cond, what) => {
   let start = null;
   for (;;) {
@@ -1899,6 +1903,8 @@ const sWait = async (cond, what) => {
     const r = await sFetch0.call(window, '/probe-wait');
     const now = Date.parse(r.headers.get('Date'));
     if (start === null) start = now;
+    if (sDeadline === null) sDeadline = now + sBudgetMs;
+    if (now > sDeadline) throw new Error('nunca (se acabó el plazo del probe): ' + what);
     if (now - start > 30000) throw new Error('nunca: ' + what + ' · ' + JSON.stringify(sPanel()));
   }
 };
@@ -1907,7 +1913,7 @@ const sCard = id => sId('post-' + id);
 const sButtons = (root) => (root ? [...root.querySelectorAll('button.evalb')].filter(seen).map(b => b.textContent) : []);
 const sPress = (root, text) => [...root.querySelectorAll('button.evalb')].find(b => seen(b) && b.textContent === text).click();
 const sPanel = () => ({
-  shown: seen(sId('ask')),
+  shown: seen(sId('jobp')),
   title: txt(sId('ask-title')),
   est: txt(sId('ask-est')),
   error: txt(sId('ask-error')),
@@ -1921,7 +1927,7 @@ const sPanel = () => ({
   progress: txt(sId('ask-progress')),
 });
 const sBar = () => {
-  const t = document.querySelector('#ask [role=progressbar]');
+  const t = document.querySelector('#jobp [role=progressbar]');
   const f = t && t.firstElementChild;
   return {now: t && t.getAttribute('aria-valuenow'), width: f && f.style.width,
     fill: seen(f) ? f.getBoundingClientRect().width : null, track: seen(t) ? t.getBoundingClientRect().width : null};
@@ -1951,6 +1957,16 @@ const sNext = async (n) => {
   input.value = String(n);
   input.dispatchEvent(new Event('input'));
   sPress(box, 'Evaluar los ' + n + ' siguientes sin evaluar');
+  await sWait(() => sPanel().go, 'la estimación');
+};
+const sQuery = async (n) => {
+  location.hash = '#ask';
+  await sWait(() => seen(sId('ask-form')), 'el formulario de Preguntar');
+  for (const [id, value] of [['ask-q', 'hooks'], ['ask-limit', String(n)]]) {
+    sId(id).value = value;
+    sId(id).dispatchEvent(new Event('input', {bubbles: true}));
+  }
+  sPress(sId('ask-form'), 'Estimar lo que cuesta');
   await sWait(() => sPanel().go, 'la estimación');
 };
 const sDone = () => {
@@ -2021,7 +2037,7 @@ _SERVE_PROBE = (
     await sWait(() => sRefreshed > r0, 'el trabajo forzado');
     const ran = sPanel();
     sId('ask-cancel').click();
-    return {unforced, forced, mismatch, raced, ran, closed: !seen(sId('ask'))};
+    return {unforced, forced, mismatch, raced, ran, closed: !seen(sId('jobp'))};
   });
   await sStep('escape', async () => {
     sPress(sCard('4'), 'Evaluar este post');
@@ -2029,13 +2045,13 @@ _SERVE_PROBE = (
     const open = sPanel().shown;
     const onTitle = document.activeElement === sId('ask-title');
     const opener = [...sCard('4').querySelectorAll('button.evalb')].find(b => b.textContent === 'Evaluar este post');
-    sId('ask').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+    sId('jobp').dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
     await sFetch0.call(window, '/probe-wait');
-    return {open, closed: !seen(sId('ask')), on_title: onTitle,
+    return {open, closed: !seen(sId('jobp')), on_title: onTitle,
       focus_back: document.activeElement === opener, roles: {
-      dialog: sId('ask').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
+      dialog: sId('jobp').getAttribute('role'), error: sId('ask-error').getAttribute('role'),
       live: sId('ask-progress').getAttribute('aria-live'),
-      bar: !!document.querySelector('#ask [role=progressbar][aria-valuemin="0"][aria-valuemax="100"]')}};
+      bar: !!document.querySelector('#jobp [role=progressbar][aria-valuemin="0"][aria-valuemax="100"]')}};
   });
   await sStep('places', async () => {
     const go = async (hash, root) => {
@@ -2439,8 +2455,8 @@ _RESUME_PROBE = (
 )
 
 
-def _start_job(service: Any, port: int, body: dict[str, Any]) -> None:
-    """Start a job over HTTP, as another tab would."""
+def _start_job(service: Any, port: int, body: dict[str, Any], kind: str = "topics") -> None:
+    """Start a job of `kind` over HTTP, as another tab would."""
     import http.client
 
     from xbrain.jev.serve import TOKEN_HEADER
@@ -2451,7 +2467,7 @@ def _start_job(service: Any, port: int, body: dict[str, Any]) -> None:
         "Origin": f"http://127.0.0.1:{port}",
     }
     replies = []
-    for path, sent in (("/api/topics/estimate", body), ("/api/topics/evaluate", None)):
+    for path, sent in ((f"/api/{kind}/estimate", body), (f"/api/{kind}/evaluate", None)):
         if sent is None:
             sent = {**body, "confirm_token": replies[-1]["confirm_token"]}
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
@@ -2577,7 +2593,10 @@ _END_PROBE = (
     + r"""
 const sScenario = /*SCENARIO*/;
 (async () => {
-  await sStep('estimate', async () => { await sNext(sScenario.n); return sPanel(); });
+  await sStep('estimate', async () => {
+    await (sScenario.kind === 'ask' ? sQuery : sNext)(sScenario.n);
+    return sPanel();
+  });
   await sStep('run', async () => {
     sId('ask-go').click();
     await sWait(() => sPanel().stop !== null || sPanel().close === 'Cerrar', 'el trabajo');
@@ -2585,7 +2604,7 @@ const sScenario = /*SCENARIO*/;
     if (sScenario.hide) { sId('ask-cancel').click(); hidden = !sPanel().shown; }
     if (sScenario.stop) {
       await sWait(() => /[1-9]\d* respuesta/.test(sPanel().progress || ''), 'la primera respuesta');
-      sPress(sId('ask'), 'Parar (se guarda lo ya pagado)');
+      sPress(sId('jobp'), 'Parar (se guarda lo ya pagado)');
     }
     return {hidden};
   });
@@ -2599,13 +2618,17 @@ const sScenario = /*SCENARIO*/;
 )
 
 
-def _end_probe(n: int, *, hide: bool = False, stop: bool = False) -> str:
-    return _END_PROBE.replace("/*SCENARIO*/", json.dumps({"n": n, "hide": hide, "stop": stop}))
+def _ended(tmp_path: Path, scenario: str, kind: str = "topics") -> dict[str, Any]:
+    """One job of `kind` (a topics pass from the Posts toolbar, or an ask from the Preguntar
+    tab) that ends in `scenario`, the panel hidden by the reader right after Confirmar (except
+    `stop`, which presses «Parar»). The ask's posts are 1–5 in store order, the topics' 3–5."""
 
+    def _end_probe(n: int, *, hide: bool = False, stop: bool = False) -> str:
+        if kind == "ask" and n == 3 and not stop:
+            n = 5  # the failing post (4) and the unpriced one (5) are the ask's 4th and 5th
+        scenario_ = {"n": n, "hide": hide, "stop": stop, "kind": kind}
+        return _END_PROBE.replace("/*SCENARIO*/", json.dumps(scenario_))
 
-def _ended(tmp_path: Path, scenario: str) -> dict[str, Any]:
-    """One job that ends in `scenario`, the panel hidden by the reader right after Confirmar
-    (except `stop`, which presses «Parar»)."""
     import threading
     from dataclasses import replace
 
@@ -2615,12 +2638,13 @@ def _ended(tmp_path: Path, scenario: str) -> dict[str, Any]:
     from xbrain.jev.service import JevService
 
     def _outcome(change: Any) -> Any:
-        real = service_module.run_topics
+        name = "run_ask" if kind == "ask" else "run_topics"
+        real = getattr(service_module, name)
 
         def run(*args: Any, **kwargs: Any) -> Any:
             return change(real(*args, **kwargs))
 
-        return lambda monkeypatch: monkeypatch.setattr(service_module, "run_topics", run)
+        return lambda monkeypatch: monkeypatch.setattr(service_module, name, run)
 
     if scenario == "tope":
         # Answers cost 3× the mean: after the first, the next one's reservation passes the cap.
@@ -2808,14 +2832,14 @@ _STATIC_PROBE = (
   const band = Object.keys(DATA.post_sets.bands).find(k => DATA.post_sets.bands[k].length);
   const cx = Object.keys(DATA.post_sets.cx)[0];
   const views = ['#posts?f=all', '#posts?f=all&t=' + slug, '#posts?f=uneval', '#topics', '#topics?t=' + slug,
-    '#topics?t=' + slug + '&cx=' + encodeURIComponent(cx), '#compare', '#compare?b=' + encodeURIComponent(band), '#config'];
+    '#topics?t=' + slug + '&cx=' + encodeURIComponent(cx), '#compare', '#compare?b=' + encodeURIComponent(band), '#ask', '#config'];
   const out = {};
   for (const hash of views) {
     location.hash = hash;
     await sleep(60);
     out[hash.split('?')[0].slice(1) + (hash.includes('?') ? '?' + hash.split('?')[1] : '')] = {
-      evaluate: [...document.querySelectorAll('button')].filter(b => seen(b) && /^(Evaluar|Re-evaluar)/.test(b.textContent)).map(b => b.textContent),
-      next: seen(document.getElementById('evalnext')),
+      evaluate: [...document.querySelectorAll('button')].filter(b => seen(b) && /^(Evaluar|Re-evaluar|Estimar|Preguntar)/.test(b.textContent)).map(b => b.textContent),
+      next: seen(document.getElementById('evalnext')) || seen(document.getElementById('ask-form')),
       copy: [...document.querySelectorAll('#cards .ask button')].filter(b => seen(b) && b.textContent === 'copiar comando').length,
     };
   }
@@ -2837,7 +2861,7 @@ def test_the_static_page_has_no_evaluate_control_on_any_tab(tmp_path):
     seen = _open(_page(tmp_path, data, _STATIC_PROBE))
 
     assert data["serve"] is None
-    assert len(seen) == 9
+    assert len(seen) == 10 and "ask" in seen
     for view, found in seen.items():
         assert found["evaluate"] == [], view
         assert found["next"] is False, view
