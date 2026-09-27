@@ -2260,8 +2260,9 @@ def test_the_serve_words_that_carry_meaning_are_pinned():
         "'Ver resultados (gratis)'",
         "'No se puede preguntar: '",
         "' (gratis)'",
-        "'sin medir todavía: la estimación de partida'",
-        "' tokens fijos + '",
+        "'Aún sin preguntas pagadas: cifras de partida.'",
+        "' tokens por llamada, más el texto de los posts ('",
+        "'; el historial no se pudo escribir: '",
         "'Pregunta en curso'",
         "'Cancelar'",
         "' Coste estimado: '",
@@ -2289,6 +2290,8 @@ def test_the_ask_tab_builds_text_nodes_and_calls_no_server_itself():
     assert "fetch(" not in ask and "api(" not in ask
     assert "SERVED() ? askFormBox() : askLaunchLine()" in ask
     assert "openAsk('ask', askBody()" in ask
+    assert "'Esta consulta no está en el historial.'" in ask
+    assert "{missing: askView.q}" in ask
 
 
 def test_the_page_draws_serve_controls_only_when_served():

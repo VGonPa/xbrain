@@ -31,11 +31,13 @@ from tests.test_jev_page_browser import (
     _served_dump,
     _start_job,
 )
-from tests.test_jev_serve_ask import PROBS, QUERY, _Asker
+from tests.test_jev_serve_ask import PROBS, QUERY, _Asker, ranked
 from xbrain.config import Config
 from xbrain.jev.ask import AskFilters, AskQuery, finish_ask, plan_ask
 from xbrain.jev.lock import pass_lock
+from xbrain.jev.report import ask_cost_by_query
 from xbrain.jev.run import run_ask
+from xbrain.jev.store import load_runs
 
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
 #: A query asked only over «startups»: its posts (2, 4) answer 0.1 and 0.2 — no result.
@@ -49,7 +51,8 @@ def _asked(cfg: Config, text: str, *, when: datetime, **filters: Any) -> AskQuer
     query = AskQuery.of(text)
     with pass_lock(cfg.jev_lock_path, "xbrain jev ask") as lock:
         plan = plan_ask(cfg, query, AskFilters(**filters), None)
-        outcome = run_ask(cfg, plan, lambda: _Asker(), lock=lock)
+        # Enough tokens that a query's cost shows at four decimals.
+        outcome = run_ask(cfg, plan, lambda: _Asker(input_tokens=200_000), lock=lock)
         finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold, now=when)
     return query
 
@@ -140,6 +143,10 @@ def _static_page(root: Path, probe: str) -> tuple[Path, dict[str, str]]:
         cfg = _repo(root, monkeypatch)
         shas = _asked_repo(cfg)
         data = build_page_data(cfg, now=DT)
+        costs = ask_cost_by_query(load_runs(cfg.jev_runs_path))
+        shas.update(
+            {f"cost:{name}": _usd4(costs[sha]["cost_usd"]) for name, sha in list(shas.items())}
+        )
     finally:
         monkeypatch.undo()
     assert data["serve"] is None
@@ -152,13 +159,22 @@ def ask_static(tmp_path_factory) -> tuple[dict[str, Any], dict[str, str]]:
     return _dump(page.as_uri()), shas
 
 
+def _usd4(x: float) -> str:
+    return f"~{x:.4f}".replace(".", ",") + " $"
+
+
+def _shown(expected: list[tuple[str, float]]) -> list[tuple[str, str]]:
+    """`ranked()` as the page prints it: two decimals, a comma."""
+    return [(post, f"{p:.2f}".replace(".", ",")) for post, p in expected]
+
+
 def _probs(results: list[dict[str, Any]]) -> list[tuple[str, str]]:
     return [(r["id"], r["p"]) for r in results]
 
 
 @_requires_chrome
 def test_static_the_tab_lists_every_query_last_asked_first(ask_static):
-    seen, _ = ask_static
+    seen, shas = ask_static
     view = seen["default"]
 
     assert view["tab"] == "Preguntar"
@@ -167,12 +183,10 @@ def test_static_the_tab_lists_every_query_last_asked_first(ask_static):
         QUERY,
         BROKEN_QUERY,
     ]
-    assert re.search(
-        r"0 resultados · 2 posts con respuesta · ~0,0000 \$", view["history"][0]["text"]
-    )
-    assert re.search(
-        r"2 resultados · 5 posts con respuesta · ~0,0000 \$", view["history"][1]["text"]
-    )
+    seed_cost, hooks_cost = shas["cost:seed"], shas["cost:hooks"]
+    assert seed_cost != "~0,0000 $" and hooks_cost != seed_cost
+    assert f"0 resultados · 2 posts con respuesta · {seed_cost}" in view["history"][0]["text"]
+    assert f"3 resultados · 5 posts con respuesta · {hooks_cost}" in view["history"][1]["text"]
     assert view["history"][0]["current"] is True
 
 
@@ -197,9 +211,9 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
     view = seen["hooks"]
 
     assert view["hash"] == f"#ask?q={shas['hooks']}"
-    assert _probs(view["results"]) == [("1", "0,97"), ("3", "0,90")]
+    assert _probs(view["results"]) == _shown(ranked())
     assert [h["current"] for h in view["history"]] == [False, True, False]
-    assert "2 de 5 posts con respuesta vigente llegan a 0,85" in view["head"]
+    assert "3 de 5 posts con respuesta vigente llegan a 0,85" in view["head"]
     for result in view["results"]:
         assert re.fullmatch(r"Lo que vio Jev · 2 fuentes, \d+ caracteres", result["saw"])
 
@@ -250,7 +264,7 @@ def test_static_a_query_url_opened_fresh_shows_that_query(tmp_path):
     hooks = _dump(page.as_uri() + f"#ask?q={shas['hooks']}")
     unknown = _dump(page.as_uri() + "#ask?q=" + "0" * 64)
 
-    assert _probs(hooks["results"]) == [("1", "0,97"), ("3", "0,90")]
+    assert _probs(hooks["results"]) == _shown(ranked())
     assert hooks["history"][1]["current"] is True
     # A sha the history does not have opens the last query asked, never an empty tab.
     assert unknown["head"].startswith(f"«{SEED_QUERY}»")
@@ -369,7 +383,7 @@ def test_served_an_ask_job_ends_on_its_results_and_its_history(ask_served):
 
     assert sorted(ask_served["asked"]) == ["1", "2"]
     assert done["hash"] == f"#ask?q={sha}"
-    assert _probs(done["results"]) == [("1", "0,97")]
+    assert _probs(done["results"]) == _shown(ranked(posts="12"))
     assert done["panel"]["progress"].startswith("2 respuestas guardadas · 1 resultado · ")
     assert [h["text"].split(" · ")[0] for h in done["history"]] == [QUERY]
     assert done["history"][0]["current"] is True
@@ -386,7 +400,7 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
     assert again["panel"]["go_text"] == "Ver resultados (gratis)"
     assert sorted(ask_served["asked"]) == ["1", "2"]
     assert "2 veces" in again["history"][0]["text"]
-    assert _probs(again["results"]) == [("1", "0,97")]
+    assert _probs(again["results"]) == _shown(ranked(posts="12"))
 
 
 @_requires_chrome
@@ -554,11 +568,11 @@ def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed)
 
     assert resumed["title"] == "Pregunta en curso"
     assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
-    assert end["panel"]["progress"].startswith("5 respuestas guardadas · 2 resultados")
+    assert end["panel"]["progress"].startswith("5 respuestas guardadas · 3 resultados")
     assert [h["text"].split(" · ")[0] for h in end["history"]] == [QUERY]
 
 
 def test_the_fake_answers_what_the_assertions_expect():
-    """The probabilities the browser tests read are `PROBS`: 1 and 3 above 0.85, 5 below."""
-    assert {post for post, p in PROBS.items() if p >= 0.85} == {"1", "3"}
+    """The results the browser tests read: probability order is not id order, and 1 and 5 tie."""
+    assert ranked() == [("3", 0.97), ("1", 0.9), ("5", 0.9)]
     assert json.dumps(PROBS)

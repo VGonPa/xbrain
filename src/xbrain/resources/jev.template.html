@@ -2362,7 +2362,9 @@ const askRows = () => (DATA.asks && DATA.asks.history) || [];
 /** The row the tab shows: the one the hash names, else the last query asked. */
 function openAskRow() {
   const rows = askRows();
-  return rows.find(r => r.sha === askView.q) || rows[0] || null;
+  if (!askView.q) return rows[0] || null;
+  // A query the history does not have is said so — never replaced by another query's results.
+  return rows.find(r => r.sha === askView.q) || {missing: askView.q};
 }
 
 /** The query as the server files it: whitespace runs as one space, trimmed. */
@@ -2468,6 +2470,13 @@ function askFiltersText(f) {
   return parts.length ? 'Filtros: ' + parts.join(', ') : 'Sin filtros: todo el corpus';
 }
 
+/** What a query has cost, from the run log — or «—» and why, never a zero that reads as paid. */
+function askCostText(cost) {
+  if (cost.error) return 'coste: — (' + cost.error + ')';
+  return pl(cost.requests, 'petición', 'peticiones') + ', ' + usd(cost.cost_usd) +
+    (cost.unpriced_providers.length ? ' · sin tarifa: ' + cost.unpriced_providers.join(', ') : '');
+}
+
 /** A result: the post's own card, with what it answers and what Jev read on top. */
 function askCard(p, r) {
   const a = safeCard(p);
@@ -2480,8 +2489,9 @@ function askCard(p, r) {
   top.appendChild(ap);
   top.appendChild(el('span', 'meta', r.model + ' · ' + when(r.asked_at)));
   strip.appendChild(top);
-  strip.appendChild(whatJevSaw({surfaces: DATA.asks.surfaces[r.id] || [], state_chars: r.state_chars,
-    truncated: r.truncated}));
+  // The same state a topics answer is asked with: the card's own block carries it when it has one.
+  const surfaces = DATA.asks.surfaces[r.id] || (p.jev && p.jev.surfaces) || [];
+  strip.appendChild(whatJevSaw({surfaces: surfaces, state_chars: r.state_chars, truncated: r.truncated}));
   a.insertBefore(strip, a.children[1] || null);
   return a;
 }
@@ -2489,8 +2499,8 @@ function askCard(p, r) {
 function askResults(row) {
   const box = el('div', 'askres');
   box.id = 'ask-results';
-  if (!row) {
-    const none = el('p', 'empty', 'Aún no se ha preguntado nada.');
+  if (!row || row.missing) {
+    const none = el('p', 'empty', row ? 'Esta consulta no está en el historial.' : 'Aún no se ha preguntado nada.');
     none.id = 'ask-empty';
     box.appendChild(none);
     return box;
@@ -2501,8 +2511,8 @@ function askResults(row) {
   const cost = row.cost;
   head.appendChild(el('p', null, 'Preguntada ' + when(row.last_asked_at) +
     (row.times > 1 ? ' (' + nf(row.times) + ' veces)' : '') + ' · ' + askFiltersText(row.filters) +
-    ' · ' + pl(cost.requests, 'petición', 'peticiones') + ', ' + usd(cost.cost_usd) +
-    (cost.unpriced_providers.length ? ' · sin tarifa: ' + cost.unpriced_providers.join(', ') : '')));
+    ' · ' + askCostText(cost) +
+    (row.rebuilt ? ' · reconstruida desde sus respuestas (el historial la había perdido)' : '')));
   const edge = dec(row.threshold, 2);
   if (!row.error) {
     head.appendChild(el('p', null, nf(row.results.length) + ' de ' +
@@ -2511,7 +2521,7 @@ function askResults(row) {
   }
   box.appendChild(head);
   if (row.error) {
-    const err = el('p', 'err', 'No se pudieron leer las respuestas de esta consulta: ' + row.error);
+    const err = el('p', 'err', row.error);
     err.id = 'ask-row-error';
     head.appendChild(err);
     return box;
@@ -2545,8 +2555,9 @@ function askHistory(open) {
     a.appendChild(el('b', null, row.query));
     a.appendChild(el('small', null, day(row.last_asked_at) + ' · ' +
       pl(row.results.length, 'resultado', 'resultados') + ' · ' +
-      pl(row.answered, 'post con respuesta', 'posts con respuesta') + ' · ' + usd(row.cost.cost_usd) +
-      (row.times > 1 ? ' · ' + nf(row.times) + ' veces' : '') + (row.error ? ' · ilegible' : '')));
+      pl(row.answered, 'post con respuesta', 'posts con respuesta') + ' · ' +
+      (row.cost.error ? '—' : usd(row.cost.cost_usd)) + (row.times > 1 ? ' · ' + nf(row.times) + ' veces' : '') +
+      (row.rebuilt ? ' · reconstruida' : '') + (row.error ? ' · ilegible' : '')));
     if (open && row.sha === open.sha) a.setAttribute('aria-current', 'true');
     li.appendChild(a);
     list.appendChild(li);
@@ -2631,6 +2642,8 @@ let ESTIMATES = 0;
 let opener = null;
 /** The last finished job whose files this page's data includes (`/api/job`'s `finished_at`). */
 let seenFinish = null;
+/** Consecutive failed looks at `/api/job` by the idle watch. */
+let watchFailures = 0;
 
 /** A call to this page's server: GET without a body, POST (JSON, with the page's token) with
     one. The server's Spanish error, when it gives one, is the message; `status` is kept. */
@@ -2872,10 +2885,15 @@ function askPickText(e) {
   let t = parts.join(' · ') + '.';
   if (e.posts) {
     const m = e.cost_model;
-    t += ' Coste estimado: ' + usd(e.usd, 5) + ' (' + pl(e.posts, 'llamada', 'llamadas') + ' × ' + nf(Math.round(m.per_call)) +
-      ' tokens fijos + ' + nf(e.chars) + ' caracteres a ' + dec(m.chars_per_token, 2) + ' por token; ' +
-      (m.measured ? 'medido en ' + pl(m.answers, 'respuesta pagada', 'respuestas pagadas')
-        : 'sin medir todavía: la estimación de partida') + ').';
+    const grouped = (n) => Math.round(n).toLocaleString('es-ES', {useGrouping: 'always'});
+    const perToken = Number(m.chars_per_token).toLocaleString('es-ES', {maximumFractionDigits: 2});
+    t += ' Coste estimado: ' + usd(e.usd, 5) + ' — ' + pl(e.posts, 'post', 'posts') + ' × ~' + grouped(m.per_call) +
+      ' tokens por llamada, más el texto de los posts (' + grouped(e.chars) + ' caracteres ≈ ' +
+      grouped(e.chars / m.chars_per_token) + ' tokens, a ' + perToken + ' caracteres por token). ' +
+      (m.measured ? 'Cifras ajustadas con ' + pl(m.answers, 'respuesta ya pagada', 'respuestas ya pagadas') + '.'
+        : 'Aún sin preguntas pagadas: cifras de partida.');
+  } else if (e.skipped_current) {
+    t += ' No se paga nada; se anota como una consulta más en el historial.';
   }
   if (e.similar && e.similar.length) {
     t += ' Ya preguntaste algo casi igual (cambia solo en mayúsculas, puntuación o espacios, y se paga ' +
@@ -3023,7 +3041,13 @@ function outcomeText(job) {
   if (job.state === 'interrupted') {
     t = 'Interrumpido (' + (STOP_REASONS[job.reason] || job.reason || 'sin motivo') + '): ' + t;
   }
-  if (!o.logged) t += ' · la pasada no quedó en runs.jsonl' + (job.log_error ? ' (' + job.log_error + ')' : '');
+  if (!o.logged && o.sent) t += ' · la pasada no quedó en runs.jsonl' + (job.log_error ? ' (' + job.log_error + ')' : '');
+  if (o.history_error) {
+    t += ' · ' + pl(o.ok, 'respuesta pagada y guardada', 'respuestas pagadas y guardadas') + ' en ' + o.file +
+      '; el historial no se pudo escribir: ' + o.history_error;
+  } else if (o.recorded === false) {
+    t += ' · no quedó en el historial: no se guardó ninguna respuesta';
+  }
   return t;
 }
 
@@ -3031,7 +3055,9 @@ function outcomeText(job) {
     the panel back even if the reader hid it. */
 function endedCleanly(job) {
   const o = job.outcome;
-  return job.state === 'done' && !!o && !o.failed && !o.unsaved && o.logged && !job.log_error && !job.failed_calls;
+  // A use that sent nothing (every answer cached) has nothing to log: that is not a failure.
+  return job.state === 'done' && !!o && !o.failed && !o.unsaved && (o.logged || !o.sent) &&
+    !job.log_error && !job.failed_calls && !o.history_error;
 }
 
 /** The panel says how `job` ended: its outcome, or why it failed. Shown by itself when the
@@ -3060,7 +3086,8 @@ async function finished(job) {
 
 /** An ask that saved answers, followed from the Preguntar tab: the tab opens its results. */
 function showAskResults(job) {
-  if (job.kind !== 'ask' || !job.query_sha || !job.outcome || view.tab !== 'ask') return;
+  // Only a use the history recorded has a row to open: never another query's results.
+  if (job.kind !== 'ask' || !job.query_sha || !job.outcome || !job.outcome.recorded || view.tab !== 'ask') return;
   const href = askHref(job.query_sha);
   if (location.hash !== href) location.hash = href;
 }
@@ -3129,8 +3156,11 @@ function watch(delay) {
         // answer is about the job `poll` already has — neither followed twice nor reloaded.
         if (!following && job.state === 'running') resume(job);
         else if (!following && job.finished_at && job.finished_at !== seenFinish) await endedElsewhere(job);
+        watchFailures = 0;
       } catch (err) {
         console.warn('jev serve: no se pudo leer /api/job', err);
+        // Once, after as many tries as a followed job gets: a server that went away is said.
+        if (++watchFailures === RETRY_MS.length + 1) lost(err);
       }
     }
     watch(WATCH_MS);

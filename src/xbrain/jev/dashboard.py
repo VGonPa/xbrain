@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,7 +46,7 @@ from xbrain.config import Config
 from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.executors.api import quoted_source
 from xbrain.generate import VAULT_MEDIA_SUBDIR
-from xbrain.jev.ask import AskFilters, AskQuery, ask_results, filter_posts
+from xbrain.jev.ask import AskFilters, AskQuery, load_history, saved_results
 from xbrain.jev.assess import (
     CUT_MARKER,
     STATE_SURFACE_KEYS,
@@ -77,7 +77,7 @@ from xbrain.jev.report import (
     report_paths,
     run_history,
 )
-from xbrain.jev.questions import build_topic_questions
+from xbrain.jev.questions import STATE_KEY, build_topic_questions
 from xbrain.jev.store import ASK_INDEX, load_ask_index, load_asks, load_runs
 from xbrain.models import (
     LINK_CONTENT_KINDS,
@@ -772,17 +772,71 @@ class SavedAsk:
     error: str | None = None
 
 
-def _ask_row(
-    saved: SavedAsk,
-    jev: JevPairs,
-    costs: dict[str, dict[str, Any]],
-    char_limit: int,
-    surfaces: dict[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
-    """One query as the «Preguntar» tab lists it. Its results are recomputed NOW, over the
-    filters and threshold it was asked with: an answer whose post changed since is not a
-    result (`ask.ask_results`). What Jev read for each result goes in `surfaces`, once per
-    post whatever the number of queries it answers."""
+@dataclass
+class _AskPage:
+    """What every row of one build shares: the corpus, THE topic bar, the run log's costs (or
+    why it could not be read), and each post's state built at most once."""
+
+    jev: JevPairs
+    topic_threshold: float
+    char_limit: int
+    costs: dict[str, dict[str, Any]] | None
+    runs_error: str | None
+    #: Posts whose card already carries what Jev read (a current topics answer).
+    carded: frozenset[str]
+    states: dict[str, str] = field(default_factory=dict)
+    surfaces: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+    def state_text(self, item: Item) -> str:
+        if item.id not in self.states:
+            self.states[item.id] = build_topic_state(item, self.char_limit)[0][STATE_KEY]
+        return self.states[item.id]
+
+
+def _ask_cost(page: _AskPage, sha: str) -> dict[str, Any]:
+    """A query's bill from the run log, or `{error}` when the log could not be read — never a
+    zero that reads as «nothing was paid»."""
+    if page.costs is None:
+        return {"error": page.runs_error or "no se pudo leer runs.jsonl"}
+    return page.costs.get(sha, _NO_COST)
+
+
+def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]], int]:
+    """The rows of one query: `ask.saved_results` over its last filters, `[jev].threshold` as
+    the topic bar and its own last threshold as the results bar."""
+    entry = saved.entry
+    found = saved_results(
+        page.jev.store,
+        page.jev,
+        AskQuery.of(entry.query),
+        AskFilters.from_json(entry.last_filters),
+        saved.records,
+        topic_threshold=page.topic_threshold,
+        threshold=entry.last_threshold,
+        state_text=page.state_text,
+    )
+    rows = []
+    for item, record in found.ranked:
+        rows.append(
+            {
+                "id": item.id,
+                "p": record.probability,
+                "model": record.model,
+                "asked_at": record.asked_at.isoformat(),
+                "state_chars": record.state_chars,
+                "truncated": record.truncated,
+            }
+        )
+        # A post whose card has a Jev block already shows what Jev read: sent once.
+        if item.id not in page.carded and item.id not in page.surfaces:
+            page.surfaces[item.id] = _surfaces(item, page.char_limit)
+    return rows, found.answered
+
+
+def _ask_row(saved: SavedAsk, page: _AskPage) -> dict[str, Any]:
+    """One query as the «Preguntar» tab lists it. Its results are recomputed NOW: an answer
+    whose post changed since is not a result. A row the history rebuilt from the answer file
+    (`AskHistoryEntry.rebuilt`) says so; a row that cannot be computed says why."""
     entry = saved.entry
     row: dict[str, Any] = {
         "sha": entry.query_sha,
@@ -792,73 +846,66 @@ def _ask_row(
         "times": entry.times,
         "threshold": entry.last_threshold,
         "filters": entry.last_filters,
+        "rebuilt": entry.rebuilt,
         "answered": 0,
         "results": [],
-        "cost": costs.get(entry.query_sha, _NO_COST),
+        "cost": _ask_cost(page, entry.query_sha),
     }
-    error = saved.error
-    if error is None:
-        try:
-            query = AskQuery.of(entry.query)
-            candidates, _ = filter_posts(
-                jev.store,
-                AskFilters.from_json(entry.last_filters),
-                jev=jev,
-                threshold=entry.last_threshold,
-            )
-            found = ask_results(
-                candidates,
-                saved.records,
-                query,
-                char_limit=char_limit,
-                threshold=entry.last_threshold,
-            )
-        except (JevError, ValueError) as exc:
-            error = str(exc)
-        else:
-            row["answered"] = found.answered
-            for item, record in found.ranked:
-                row["results"].append(
-                    {
-                        "id": item.id,
-                        "p": record.probability,
-                        "model": record.model,
-                        "asked_at": record.asked_at.isoformat(),
-                        "state_chars": record.state_chars,
-                        "truncated": record.truncated,
-                    }
-                )
-                if item.id not in surfaces:
-                    surfaces[item.id] = _surfaces(item, char_limit)
-    if error is not None:
-        row["error"] = error
+    if saved.error is not None:
+        row["error"] = f"No se pudieron leer las respuestas de esta consulta: {saved.error}"
+        return row
+    try:
+        row["results"], row["answered"] = _ask_results(saved, page)
+    except JevError as exc:
+        # A filter the corpus no longer supports (a topic removed from the vocabulary).
+        row["error"] = f"El filtro con el que se preguntó ya no aplica: {exc}"
+    except ValueError as exc:
+        row["error"] = f"No se pudieron leer los filtros de esta consulta: {exc}"
     return row
 
 
 def asks_view(
     saved: Sequence[SavedAsk],
     jev: JevPairs,
-    runs: Sequence[JevRun],
+    runs: Sequence[JevRun] | None,
     *,
+    topic_threshold: float,
     char_limit: int,
     error: str | None = None,
+    runs_error: str | None = None,
 ) -> dict[str, Any]:
     """The «Preguntar» tab's data: every query asked, the last asked first, each with its
-    results and cost. `error` is why the history itself could not be read."""
-    surfaces: dict[str, list[dict[str, Any]]] = {}
+    results and cost. `runs` is `None` when the run log could not be read (`runs_error`);
+    `error` is why the history itself could not be read."""
+    page = _AskPage(
+        jev=jev,
+        topic_threshold=topic_threshold,
+        char_limit=char_limit,
+        costs=ask_cost_by_query(runs) if runs is not None else None,
+        runs_error=runs_error,
+        carded=frozenset(item.id for item, _ in jev.current().pairs),
+    )
     ordered = sorted(saved, key=lambda s: (s.entry.last_asked_at, s.entry.query_sha), reverse=True)
-    costs = ask_cost_by_query(runs)
-    history = [_ask_row(one, jev, costs, char_limit, surfaces) for one in ordered]
-    return {"history": history, "surfaces": surfaces, "error": error}
+    history = [_ask_row(one, page) for one in ordered]
+    return {"history": history, "surfaces": page.surfaces, "error": error}
 
 
 def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:
-    """The history and each query's answers. A query whose file cannot be read costs its own
-    row (`error`), never the page; a history that cannot be read is the tab's `error`."""
+    """The history as `jev ask` reads it (`ask.load_history`: an entry the index lost is rebuilt
+    from its answer file, so paid answers are never hidden), and each query's answers. A query
+    whose file cannot be read costs its own row; a history that cannot be read is the tab's
+    `error`."""
+    error: str | None = None
     try:
-        index = load_ask_index(cfg.jev_asks_dir / ASK_INDEX)
+        index = load_history(cfg)
     except JevError as exc:
-        return [], str(exc)
+        # An answer file it cannot read stops the rebuild, not the page: the stored index
+        # still lists every query, and that file's row says what is wrong with it.
+        try:
+            index = load_ask_index(cfg.jev_asks_dir / ASK_INDEX)
+        except JevError as stored:
+            return [], str(stored)
+        error = f"el historial no se pudo completar desde las respuestas: {exc}"
     saved: list[SavedAsk] = []
     for entry in index.queries.values():
         try:
@@ -872,7 +919,23 @@ def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:
             saved.append(SavedAsk(entry, {}, str(exc)))
         else:
             saved.append(SavedAsk(entry, records))
-    return saved, None
+    return saved, error
+
+
+def ask_page_data(
+    cfg: Config, jev: JevPairs, runs: Sequence[JevRun] | None, runs_error: str | None = None
+) -> dict[str, Any]:
+    """`asks` for a page built from `cfg`: the history loaded, viewed at `[jev].threshold`."""
+    saved, error = load_saved_asks(cfg)
+    return asks_view(
+        saved,
+        jev,
+        runs,
+        topic_threshold=cfg.jev_threshold,
+        char_limit=cfg.jev_state_char_limit,
+        error=error,
+        runs_error=runs_error,
+    )
 
 
 def note_links(items: Sequence[Item], items_dir: Path) -> tuple[str, dict[str, str]]:
@@ -950,8 +1013,7 @@ def build_page_data(
     except JevError as exc:
         runs, runs_error = [], str(exc)
     notes_dir, id2note = note_links(items, cfg.output_dir / "items")
-    saved, asks_error = load_saved_asks(cfg)
-    asks = asks_view(saved, jev, runs, char_limit=cfg.jev_state_char_limit, error=asks_error)
+    asks = ask_page_data(cfg, jev, None if runs_error else runs, runs_error)
     return compute_jev_dashboard_data(
         items,
         jev.assessments,

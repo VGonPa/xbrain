@@ -29,8 +29,15 @@ from xbrain.jev.store import load_ask_index, load_asks, load_runs
 from xbrain.store import load_store, save_store
 
 QUERY = "¿Cómo configuro hooks en Claude Code?"
-#: What the fake answers per post: 1 and 3 answer the query, 5 is at 0.5, the rest do not.
-PROBS = {"1": 0.97, "2": 0.1, "3": 0.9, "4": 0.2, "5": 0.5}
+#: What the fake answers per post. Probability order is NOT id order (3 before 1), and 1 and
+#: 5 tie, so a ranking by id or without its tie-break shows.
+PROBS = {"1": 0.9, "2": 0.1, "3": 0.97, "4": 0.2, "5": 0.9}
+
+
+def ranked(threshold: float = 0.85, posts: str = "12345") -> list[tuple[str, float]]:
+    """THE expected results: every surface's order is compared with this one source."""
+    kept = [(post, PROBS[post]) for post in posts if PROBS[post] >= threshold]
+    return sorted(kept, key=lambda pair: (-pair[1], pair[0]))
 
 
 class _Asker(FakeJevClient):
@@ -244,7 +251,7 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
     assert job["query_sha"] == query.sha
     assert sorted(served.client.asked) == ["1", "2", "3", "4", "5"]
     assert job["outcome"]["ok"] == 5 and job["outcome"]["logged"] is True
-    assert job["outcome"]["results"] == 2
+    assert job["outcome"]["results"] == len(ranked()) == 3
     assert job["outcome"]["recorded"] is True
     assert job["usd"] == pytest.approx(5 * tokens_cost_usd(100, "typesafe"))
     records = load_asks(served.cfg.jev_asks_dir / f"{query.sha}.json", query)
@@ -256,7 +263,7 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
         query.text,
         1,
         5,
-        2,
+        3,
     )
     assert entry.last_threshold == served.cfg.jev_threshold
     assert not _locked(served.cfg.jev_lock_path)
@@ -282,6 +289,9 @@ def test_asking_again_costs_nothing_builds_no_client_and_still_counts_in_the_his
     assert (again["posts"], again["skipped_current"], again["usd"]) == (0, 5, 0.0)
     assert again["allowed"] is True
     assert job["state"] == "done" and job["total"] == 0 and job["usd"] == 0
+    # Nothing was sent, so nothing was logged — and that is a clean end, not a missing line.
+    assert (job["outcome"]["sent"], job["outcome"]["logged"]) == (0, False)
+    assert job["outcome"]["recorded"] is True
     assert served.built == built
     assert len([r for r in load_runs(served.cfg.jev_runs_path) if r.kind == "ask"]) == 1
     entry = _entry(served.cfg)
@@ -431,7 +441,15 @@ def test_the_history_and_one_querys_results_are_the_blob_the_page_carries(served
     assert history == blob["asks"]
     assert one == blob["asks"]["history"][0]
     assert one["sha"] == query.sha and one["query"] == query.text
-    assert [(r["id"], r["p"]) for r in one["results"]] == [("1", 0.97), ("3", 0.9)]
+    assert (
+        [(r["id"], r["p"]) for r in one["results"]]
+        == ranked()
+        == [
+            ("3", 0.97),
+            ("1", 0.9),
+            ("5", 0.9),
+        ]
+    )
     assert one["answered"] == 5
     assert one["cost"]["cost_usd"] == pytest.approx(5 * tokens_cost_usd(100, "typesafe"))
     assert one["cost"]["requests"] == 5
@@ -481,7 +499,7 @@ def test_the_results_follow_a_querys_answers_file_even_without_the_history(serve
     query = AskQuery.of(QUERY)
     # Read once, so the server holds this data; only the answers file changes after.
     _, before, _ = served.request("GET", f"/api/ask/{query.sha}")
-    assert [r["id"] for r in before["results"]] == ["1", "3"]
+    assert [r["id"] for r in before["results"]] == ["3", "1", "5"]
     path = served.cfg.jev_asks_dir / f"{query.sha}.json"
     records = load_asks(path, query)
     records["3"] = records["3"].model_copy(update={"probability": 0.1})
@@ -489,4 +507,128 @@ def test_the_results_follow_a_querys_answers_file_even_without_the_history(serve
 
     _, one, _ = served.request("GET", f"/api/ask/{query.sha}")
 
-    assert [r["id"] for r in one["results"]] == ["1"]
+    assert [r["id"] for r in one["results"]] == ["1", "5"]
+
+
+# --------------------------------------------------------------------------- the fix wave
+
+
+def test_a_history_that_cannot_be_written_keeps_the_paid_answers_in_view(
+    served: _AskServed, monkeypatch
+):
+    """The answers are paid, saved and logged when `finish_ask` runs: its failure is said,
+    beside the outcome, and never turns the job into «El trabajo falló» with nothing shown."""
+    from xbrain.jev import service as service_module
+
+    def _full_disk(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(service_module, "finish_ask", _full_disk)
+
+    job = served.ask_run({"query": QUERY})
+
+    query = AskQuery.of(QUERY)
+    assert job["state"] == "done"
+    outcome = job["outcome"]
+    assert (outcome["ok"], outcome["logged"], outcome["recorded"]) == (5, True, False)
+    assert "No space left on device" in outcome["history_error"]
+    assert outcome["file"] == str(served.cfg.jev_asks_dir / f"{query.sha}.json")
+    assert len(load_asks(served.cfg.jev_asks_dir / f"{query.sha}.json", query)) == 5
+
+
+def test_a_query_the_history_lost_is_rebuilt_on_the_tab(served: _AskServed):
+    served.ask_run({"query": QUERY})
+    (served.cfg.jev_asks_dir / "index.json").unlink()
+
+    _, asks, _ = served.request("GET", "/api/asks")
+
+    [row] = asks["history"]
+    assert row["rebuilt"] is True and row["sha"] == AskQuery.of(QUERY).sha
+    assert [(r["id"], r["p"]) for r in row["results"]] == ranked()
+
+
+class _FailsAfterStop(_Asker):
+    """Its one call waits for «Parar», then fails: the use ends interrupted with nothing kept."""
+
+    def ask(self, state, questions):
+        from xbrain.jev.client import JevError
+
+        self.asked.append("?")
+        assert self.gate is not None and self.gate.wait(10)
+        raise JevError("respuesta ilegible")
+
+
+def test_an_ask_stopped_before_keeping_anything_is_not_recorded(tmp_path: Path, monkeypatch):
+    gate = threading.Event()
+    s = _served(tmp_path, monkeypatch, _FailsAfterStop(gate=gate), jev="concurrency = 1\n")
+    try:
+        estimate = s.ask_estimate({"query": QUERY})
+        assert (
+            s.ask_evaluate({"query": QUERY, "confirm_token": estimate["confirm_token"]})[0] == 202
+        )
+        s.wait_job(lambda job: len(s.client.asked) >= 1)
+        s.request("POST", "/api/job/cancel", {})
+        gate.set()
+        job = s.wait_job()
+    finally:
+        gate.set()
+        s.close()
+
+    assert (job["state"], job["reason"]) == ("interrupted", "cancelado")
+    assert (job["outcome"]["ok"], job["outcome"]["recorded"]) == (0, False)
+    assert not (s.cfg.jev_asks_dir / "index.json").exists()
+
+
+def test_an_ask_without_a_price_is_refused():
+    from xbrain.jev.assess import Selection
+    from xbrain.jev.service import _AskKind, _Priced
+
+    priced = _Priced(
+        Selection(items=(), skipped_current=0, skipped_no_evidence=0),
+        ("1",),
+        None,
+        None,
+        {"candidates": 1},
+    )
+
+    refusal = _AskKind().refusal(None, priced)  # type: ignore[arg-type]
+
+    assert refusal is not None and "precio" in refusal
+
+
+class _PerChar(_Asker):
+    """Bills what the prior cost model says: 1,000 tokens a call plus a token per 4
+    characters sent — so the plan's per-post prices are the real ones."""
+
+    def ask(self, state, questions):
+        from dataclasses import replace
+
+        from xbrain.jev.ask import question_chars
+
+        result = super().ask(state, questions)
+        chars = len(state["post"]) + question_chars(questions)
+        return replace(result, input_tokens=round(1000 + chars / 4))
+
+
+def test_a_long_post_first_does_not_stop_an_ask_its_estimate_fits(tmp_path: Path, monkeypatch):
+    """The reservation is each post's own planned price: a long post first no longer makes
+    every later post look as dear as it (the job's mean), which stopped at «tope» a job whose
+    estimate fitted the cap."""
+    from xbrain.config import load_config
+
+    cfg = _repo(tmp_path, monkeypatch)
+    items = load_store(cfg.items_path)
+    items["1"].text = "Claude Code hooks " + "x" * 60_000
+    save_store(items, cfg.items_path)
+    cap = _plan(cfg).estimate.usd * 1.01
+    config = cfg.repo_root / "config.toml"
+    config.write_text(config.read_text() + f"serve_max_usd = {cap!r}\n", encoding="utf-8")
+    s = _AskServed(load_config(cfg.repo_root), _PerChar())
+    try:
+        job = s.ask_run({"query": QUERY})
+    finally:
+        s.close()
+
+    assert s.client.asked[0] == "1"
+    assert job["state"] == "done" and "reason" not in job, job
+    assert job["outcome"]["ok"] == 5 and job["usd"] <= cap

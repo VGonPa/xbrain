@@ -8,6 +8,7 @@ by `test_jev_run.py` and `test_jev_assess.py`.
 from __future__ import annotations
 
 import json
+from typing import Any
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,7 @@ from xbrain.jev.ask import (
     select_ask_items,
 )
 from xbrain.jev.assess import assess_topics, build_topic_state, topic_contract
-from xbrain.jev.dashboard import NO_ASKS, asks_view, load_saved_asks
+from xbrain.jev.dashboard import NO_ASKS, ask_page_data
 from xbrain.jev.client import JevError, JevResult, NoulAnswer, NoulQuestion, Question
 from xbrain.jev.defaults import (
     DEFAULT_ASK_TOKENS_PER_CALL,
@@ -1301,11 +1302,28 @@ def test_a_file_older_than_the_history_is_not_counted_twice(cfg: Config):
 # from the run log, what Jev read once per result post, an unreadable file costing its row.
 
 
-def _asks(cfg: Config) -> dict[str, object]:
-    saved, error = load_saved_asks(cfg)
-    return asks_view(
-        saved, load_jev_pairs(cfg), load_runs(cfg.jev_runs_path), char_limit=100_000, error=error
-    )
+def _asks(cfg: Config) -> dict[str, Any]:
+    return ask_page_data(cfg, load_jev_pairs(cfg), load_runs(cfg.jev_runs_path))
+
+
+def test_the_page_filters_by_topic_at_the_jev_threshold_like_the_command(cfg: Config):
+    """`--topic` judges Jev at `[jev].threshold`; the results bar (here 0.5) only ranks. Post
+    1 is enrich's ai-coding with Jev's «startups» at 0.7: not a startups post at 0.85."""
+    _jev_with_topics(cfg, {"startups": 0.7})
+    _run(cfg, _ByText())  # every post answered, post 1 (0.95) included
+    query = AskQuery.of(QUERY)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        plan = plan_ask(cfg, query, AskFilters(topic="startups"), None)
+        outcome = run_ask(cfg, plan, lambda: _ByText(), lock=lock)
+        found = finish_ask(cfg, plan, outcome, threshold=0.05)
+
+    [row] = _asks(cfg)["history"]
+
+    cli = [(item.id, record.probability) for item, record in found.ranked]
+    assert "1" not in [item.id for item in plan.candidates]
+    assert "1" in plan.records and plan.records["1"].probability == 0.95
+    assert [(r["id"], r["p"]) for r in row["results"]] == cli
+    assert row["answered"] == found.answered and row["threshold"] == 0.05
 
 
 def test_the_page_lists_each_query_with_its_current_results_best_first(cfg: Config):
@@ -1376,7 +1394,8 @@ def test_an_unreadable_query_file_costs_its_row_never_the_page(cfg: Config):
     _run(cfg, _ByText(), query_text="otra")
     _ask_path(cfg, plan.query).write_text("{", encoding="utf-8")
 
-    rows = {row["query"]: row for row in _asks(cfg)["history"]}
+    view = _asks(cfg)
+    rows = {row["query"]: row for row in view["history"]}
 
     assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["results"] == []
     assert "error" not in rows["otra"]

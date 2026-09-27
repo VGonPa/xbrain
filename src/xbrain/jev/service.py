@@ -51,7 +51,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from xbrain.config import Config
-from xbrain.jev.ask import AskPlan, AskQuery, finish_ask, plan_ask, same_selection
+from xbrain.jev.ask import (
+    AskPlan,
+    AskQuery,
+    ask_path,
+    finish_ask,
+    plan_ask,
+    question_chars,
+    same_selection,
+)
 from xbrain.jev.assess import Selection, select_items
 from xbrain.jev.client import CallSkipped, JevClient, JevError, JevResult, Question
 from xbrain.jev.dashboard import (
@@ -60,9 +68,10 @@ from xbrain.jev.dashboard import (
     collect_jev_media,
     render_jev_dashboard_html,
 )
-from xbrain.jev.defaults import tokens_cost_usd, unpriced
+from xbrain.jev.defaults import DEFAULT_PROVIDER, tokens_cost_usd, unpriced
 from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.lock import PassLock, pass_lock
+from xbrain.jev.questions import STATE_KEY
 from xbrain.jev.picks import (
     AskPick,
     ServeError,
@@ -134,6 +143,12 @@ class _Job:
     extra: dict[str, Any] = field(default_factory=dict)
     #: What the confirmed estimate selected, for the re-check under the lock (`_PassKind.same`).
     confirmed: Any = None
+    #: A kind that prices each post on its own (the ask: its planned characters) reserves that
+    #: price for the post instead of the job's mean. `None` for topics.
+    post_price: Callable[[dict[str, str]], float] | None = None
+    #: What the priced answers were planned to cost, to scale the next reservations when the
+    #: answers turn out dearer than planned.
+    planned_usd: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
     cancel: threading.Event = field(default_factory=threading.Event)
     ready: threading.Event = field(default_factory=threading.Event)
@@ -167,11 +182,20 @@ class _Job:
     started_at: str | None = None
     finished_at: str | None = None
 
-    def reservation(self) -> float:
-        """What the next post is expected to cost: the estimate's mean, or this job's own
-        priced mean once it is higher (the corpus may be pricier than its past)."""
-        own = self.priced_usd / self.priced_answers if self.priced_answers else 0.0
-        return max(self.per_post_usd, own)
+    def planned(self, state: dict[str, str]) -> float:
+        """What this post was planned to cost: its own price when the kind knows it, else the
+        estimate's mean."""
+        return self.post_price(state) if self.post_price is not None else self.per_post_usd
+
+    def reservation(self, planned: float) -> float:
+        """What the next post is expected to cost: its planned price, raised once this job's
+        answers turn out dearer than planned (the corpus may be pricier than its past) — by
+        their mean for a flat estimate, by their ratio to plan for a per-post one."""
+        if not self.priced_answers:
+            return planned
+        if self.post_price is None:
+            return max(planned, self.priced_usd / self.priced_answers)
+        return planned * max(1.0, self.priced_usd / self.planned_usd if self.planned_usd else 1.0)
 
     def view(self) -> dict[str, Any]:
         with self.lock:
@@ -218,12 +242,12 @@ class _Metered:
         self._inner = inner
         self._job = job
 
-    def _reserve(self) -> float:
+    def _reserve(self, planned: float) -> float:
         job = self._job
         with job.lock:
             if job.terminal or job.cancel.is_set():
                 raise CallSkipped("el trabajo se está parando")
-            reserve = job.reservation()
+            reserve = job.reservation(planned)
             if over_cap(job.usd + job.in_flight_usd + reserve, job.max_usd):
                 job.cap_hit = True
                 job.cancel.set()
@@ -231,7 +255,7 @@ class _Metered:
             job.in_flight_usd += reserve
             return reserve
 
-    def _settle(self, reserve: float, result: JevResult) -> None:
+    def _settle(self, reserve: float, planned: float, result: JevResult) -> None:
         job = self._job
         with job.lock:
             job.in_flight_usd -= reserve
@@ -253,9 +277,11 @@ class _Metered:
             job.usd += cost
             job.priced_usd += cost
             job.priced_answers += 1
+            job.planned_usd += planned
 
     def ask(self, state: dict[str, str], questions: dict[str, Question]) -> JevResult:
-        reserve = self._reserve()
+        planned = self._job.planned(state)
+        reserve = self._reserve(planned)
         try:
             result = self._inner.ask(state, questions)
         except Exception:
@@ -272,7 +298,7 @@ class _Metered:
             with self._job.lock:
                 self._job.in_flight_usd -= reserve
             raise
-        self._settle(reserve, result)
+        self._settle(reserve, planned, result)
         return result
 
     def close(self) -> None:
@@ -309,6 +335,9 @@ def _finish(job: _Job, outcome: RunOutcome, extra: dict[str, Any]) -> None:
             "unsaved": logged.unsaved if logged is not None else 0,
             "stored": outcome.stored,
             "logged": logged is not None,
+            # Calls that reached the vendor: 0 for a use every answer of which was cached,
+            # which has nothing to log and is not a failure to log.
+            "sent": job.answered + job.failed_calls,
             **extra,
         }
         job.terminal = True
@@ -508,7 +537,9 @@ class _AskKind:
                 f"ningún post que preguntar: los filtros dejan {priced.reply['candidates']} "
                 f"posts y {selection.skipped_no_evidence} no tienen evidencia"
             )
-        return _cap_refusal(priced.usd or 0.0, cfg.jev_serve_max_usd, "xbrain jev ask")
+        if priced.usd is None:
+            return "no hay precio con el que estimar esta pregunta, así que el tope no se puede comprobar"
+        return _cap_refusal(priced.usd, cfg.jev_serve_max_usd, "xbrain jev ask")
 
     def view(self, pick: AskPick) -> dict[str, Any]:
         return {"query_sha": AskQuery.of(pick.query).sha}
@@ -529,13 +560,40 @@ class _AskKind:
         that function's one rule, its line in the history. With every answer current no
         client is built and nothing is logged."""
         plan: AskPlan = priced.context
+        job.post_price = _post_price(plan)
         outcome = run_ask(cfg, plan, lambda: _Metered(make_client(), job), lock=lock, **_hooks(job))
-        found = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+        try:
+            found = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+        except Exception as exc:
+            # The answers are paid, saved and logged by now: a history that cannot be written
+            # must not turn them into «El trabajo falló» with nothing to show.
+            logger.error("no se pudo escribir el historial de consultas: %s", exc)
+            return outcome, {
+                "recorded": False,
+                "file": str(ask_path(cfg, plan.query)),
+                "history_error": str(exc),
+            }
         return outcome, {
             "results": len(found.ranked),
             "answered": found.answered,
             "recorded": found.recorded,
         }
+
+
+def _post_price(plan: AskPlan) -> Callable[[dict[str, str]], float]:
+    """Each post's own planned price, from the characters its call sends (the state as sent
+    plus the question) by the plan's cost model — scaled so the posts selected add up to the
+    estimate confirmed, so a job at exactly the cap is never refused its last post."""
+    model = plan.estimate.model
+    question = question_chars(plan.query.questions)
+    per_token = tokens_cost_usd(1_000_000, DEFAULT_PROVIDER) / 1e6
+
+    def raw(chars: int) -> float:
+        return (model.per_call + chars / model.chars_per_token) * per_token
+
+    total = sum(raw(len(plan.states[item.id]) + question) for item in plan.selection.items)
+    scale = plan.estimate.usd / total if total else 1.0
+    return lambda state: raw(len(state[STATE_KEY]) + question) * scale
 
 
 def _signature(paths: list[Path]) -> tuple[tuple[int, int] | None, ...]:
