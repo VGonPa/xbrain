@@ -304,3 +304,20 @@ def test_a_keyboard_interrupt_inside_a_call_is_in_flight_not_raised():
 
     counts = counting.snapshot()
     assert (counts.sent, counts.answered, counts.raised) == (1, 0, 0)
+
+
+def test_a_call_the_inner_client_skipped_was_never_sent():
+    """`CallSkipped` means the call did not go out (the server's cap refused it): not sent,
+    not raised, not billed — the run log must not count it."""
+    from xbrain.jev.client import CallSkipped
+
+    class _Skipping(FakeJevClient):
+        def ask(self, state, questions):
+            raise CallSkipped("tope")
+
+    counting = CountingJevClient(_Skipping())
+    with pytest.raises(CallSkipped):
+        counting.ask({"post": "x"}, {"q": NoulQuestion(instructions="?")})
+
+    counts = counting.snapshot()
+    assert (counts.sent, counts.answered, counts.raised) == (0, 0, 0)

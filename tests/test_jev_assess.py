@@ -893,3 +893,95 @@ def test_an_interrupt_cancels_the_queued_calls_instead_of_paying_for_them():
     with pytest.raises(KeyboardInterrupt):
         run_assessments(items, _vocab(), client, fallback="otro", char_limit=100, concurrency=2)
     assert len(client.calls) < len(items)
+
+
+# --------------------------------------------------------------------------- soft cancel
+#
+# A cancel from outside (the local server's cap, its shutdown) is NOT a Ctrl-C: nothing
+# queued is sent, and every call already running is WAITED FOR and delivered — it was paid
+# for. Ctrl-C keeps its emergency path above.
+
+
+def test_a_soft_cancel_sends_nothing_queued_and_delivers_every_call_in_flight():
+    import threading
+
+    cancel = threading.Event()
+    started = threading.Barrier(2)
+
+    class _Slow(FakeJevClient):
+        def ask(self, state, questions):
+            if len(self.calls) < 2:
+                started.wait(timeout=5)  # both workers are inside a paid call
+                cancel.set()
+                time.sleep(0.05)
+            return super().ask(state, questions)
+
+    items = [_item(f"{n:02d}") for n in range(10)]
+    client = _Slow()
+    delivered: list[str] = []
+
+    result = run_assessments(
+        items,
+        _vocab(),
+        client,
+        fallback="otro",
+        char_limit=100,
+        concurrency=2,
+        on_result=lambda a: delivered.append(a.item_id),
+        cancel=cancel,
+    )
+
+    assert result.cancelled is True
+    assert len(client.calls) == 2
+    assert sorted(delivered) == sorted(a.item_id for a in result.assessed)
+    assert len(result.assessed) == 2 and result.failed == ()
+    assert result.not_asked == 8
+
+
+def test_a_call_the_client_skips_is_neither_a_failure_nor_asked():
+    """`CallSkipped` is the client declining to send (the server's cap): not a failure of the
+    post, and no bill."""
+    from xbrain.jev.client import CallSkipped
+
+    class _SkipsTheSecond(FakeJevClient):
+        def ask(self, state, questions):
+            if "Fundraising" in state["post"]:
+                raise CallSkipped("tope")
+            return super().ask(state, questions)
+
+    store = _store()
+    result = run_assessments(
+        [store["1"], store["2"]],
+        _vocab(),
+        _SkipsTheSecond(),
+        fallback="otro",
+        char_limit=100,
+        concurrency=1,
+    )
+
+    assert [a.item_id for a in result.assessed] == ["1"]
+    assert result.failed == () and result.not_asked == 1
+
+
+def test_a_cancel_before_any_answer_is_an_empty_result_not_an_all_failed_error():
+    import threading
+
+    cancel = threading.Event()
+    cancel.set()
+
+    result = run_assessments(
+        [_item("1")],
+        _vocab(),
+        FakeJevClient(),
+        fallback="otro",
+        char_limit=100,
+        concurrency=1,
+        cancel=cancel,
+    )
+
+    assert (result.assessed, result.failed, result.cancelled, result.not_asked) == (
+        (),
+        (),
+        True,
+        1,
+    )

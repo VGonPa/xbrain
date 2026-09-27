@@ -9,8 +9,10 @@ import logging
 import os
 import re
 import sys
+import webbrowser
 from collections import Counter
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,7 +74,10 @@ from xbrain.jev.report import (
     run_history,
     write_reports,
 )
-from xbrain.jev.run import run_topics
+from xbrain.jev.lock import PassLock, PassLockBusy, pass_lock
+from xbrain.jev.run import RunOutcome, run_topics
+from xbrain.jev.serve import make_server, serve_until_interrupted
+from xbrain.jev.service import JevService
 from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -2849,6 +2854,37 @@ def jev_topics_cmd(
     Nunca toca items.json.
     """
     cfg = _config()
+    # The pass lock covers LOAD → SAVE: a pass started while another one runs (a second
+    # terminal, or the page's job under `xbrain jev serve`) would save its own map over the
+    # other's paid records. `--dry-run` only reads, so it never waits on — or blocks — a pass.
+    try:
+        with (
+            nullcontext() if dry_run else pass_lock(cfg.jev_lock_path, "xbrain jev topics") as lock
+        ):
+            outcome = _jev_topics_pass(cfg, ids, limit, force=force, dry_run=dry_run, lock=lock)
+    except PassLockBusy as exc:
+        # 75 = EX_TEMPFAIL: nothing is wrong except the timing (a job of `xbrain jev serve`, or
+        # another terminal, is mid-pass). A script can tell it from a real failure and retry.
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=75) from exc
+    if outcome is not None and outcome.interrupted:
+        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
+        # to checkpoint must not change the code the shell sees.
+        raise typer.Exit(code=130)
+
+
+def _jev_topics_pass(
+    cfg: Config,
+    ids: list[str],
+    limit: int | None,
+    *,
+    force: bool,
+    dry_run: bool,
+    lock: PassLock | None,
+) -> RunOutcome | None:
+    """`jev topics` from loading the side-car to the end of the pass: the part the lock covers.
+
+    `None` when nothing was run (`--dry-run`, or nothing to ask)."""
     store = load_store(cfg.items_path)
     vocab = load_vocab(cfg.vocab_path)
     assessments = load_assessments(cfg.jev_topics_path)
@@ -2869,22 +2905,24 @@ def jev_topics_cmd(
         # followed by a real run that dies on the first thing it checks.
         configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
         typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
-        return
-    if not selection.items:
-        return
+        return None
+    if not selection.items or lock is None:
+        return None
 
     def _progress(done: int, total: int) -> None:
         if done % 50 == 0 or done == total:
             typer.echo(f"  {done}/{total}")
 
-    # THE run loop lives in `jev.run` so a local server can call the same one; this command
-    # only decides what to print, and when (`run_topics`' hooks fire at those moments).
-    outcome = run_topics(
+    # THE run loop lives in `jev.run` so the local server (`xbrain jev serve`) calls the same
+    # one; this command only decides what to print, and when (`run_topics`' hooks fire at
+    # those moments).
+    return run_topics(
         cfg,
         selection,
         assessments,
         vocab,
         lambda: _jev_client(cfg),
+        lock=lock,
         on_backup=lambda backup: typer.echo(f"Copia de seguridad: {backup}"),
         on_progress=_progress,
         on_summary=lambda result: _echo_jev_outcome(result, cfg.jev_topics_path),
@@ -2893,10 +2931,6 @@ def jev_topics_cmd(
         ),
         on_logged=_echo_jev_logged,
     )
-    if outcome.interrupted:
-        # 130 is what an uncaught SIGINT already exits with; catching the interrupt in order
-        # to checkpoint must not change the code the shell sees.
-        raise typer.Exit(code=130)
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:
@@ -3105,6 +3139,77 @@ def jev_dashboard_cmd() -> None:
         f"{plural(posts, 'post en el dashboard', 'posts en el dashboard')} "
         f"({plural(compared, 'comparado', 'comparados')} con Jev) → {page.resolve().as_uri()}"
     )
+
+
+@jev_app.command("serve")
+@_handle_cli_errors
+def jev_serve_cmd(
+    port: int = typer.Option(
+        8765, "--port", min=0, max=65535, help="Puerto en 127.0.0.1 (0 = uno libre cualquiera)"
+    ),
+    no_open: bool = typer.Option(False, "--no-open", help="No abrir el navegador"),
+) -> None:
+    r"""Sirve la página de Jev en 127.0.0.1, en vivo, con una API local para evaluar.
+
+    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local
+    (POST /api/topics/estimate → /api/topics/evaluate) para pedir a Jev unos posts, un topic,
+    los N siguientes sin evaluar, los posts de un cruce o de una banda: primero una
+    estimación (posts y $), después la confirmación, y un único trabajo en segundo plano que
+    corre la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Cada
+    trabajo tiene un tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para:
+    deja que el trabajo guarde lo pagado y sale con 130.
+    """
+    cfg = _config()
+    service = JevService(cfg, lambda: _jev_client(cfg))
+    # Built once BEFORE binding: a corrupt side-car or run log refuses here, like `jev
+    # dashboard`, instead of on the first page load. Nothing is asked and no key is needed.
+    data = service.blob()
+    if "error" in data["cost"]:
+        typer.echo(f"Aviso: {data['cost']['error']}", err=True)
+    try:
+        server = make_server(service, port)
+    except OSError as exc:
+        raise JevError(
+            f"el puerto {port} está ocupado o no se puede usar ({exc}): elige otro con --port"
+        ) from exc
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    typer.echo(f"Página de Jev en {url} (solo este equipo) · Ctrl-C para parar")
+    if not no_open:
+        webbrowser.open(url)
+    code, job = serve_until_interrupted(server, service)
+    _echo_last_job(job)
+    if code:
+        typer.echo("Servidor parado.", err=True)
+        raise typer.Exit(code=code)
+
+
+def _echo_last_job(job: dict[str, Any]) -> None:
+    """The last job the server ran, in the terminal, like `jev topics` ends: what it saved,
+    what it could not, the backup, and a run-log line that has to be appended by hand."""
+    if job["state"] == "idle":
+        return
+    outcome = job.get("outcome") or {}
+    line = f"Último trabajo: {job['state']}"
+    if job.get("reason"):
+        line += f" ({job['reason']})"
+    if outcome:
+        line += (
+            f" · {plural(outcome['ok'], 'evaluación guardada', 'evaluaciones guardadas')}"
+            f" · {plural(outcome['failed'], 'fallida', 'fallidas')}"
+        )
+        if outcome["unsaved"]:
+            line += f" · {outcome['unsaved']} sin guardar"
+    typer.echo(line, err=True)
+    if job.get("backup"):
+        typer.echo(f"  Copia de seguridad: {job['backup']}", err=True)
+    if job.get("error"):
+        typer.echo(f"  Error: {job['error']}", err=True)
+    if job.get("log_error"):
+        typer.echo(
+            f"  no se pudo registrar la pasada ({job['log_error']}): la línea está en el registro "
+            "del servidor, añádela a mano a runs.jsonl",
+            err=True,
+        )
 
 
 snapshot_app = typer.Typer(help="Gestionar snapshots de data/")

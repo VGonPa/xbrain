@@ -16,6 +16,7 @@ from tests.jev_fakes import FakeJevClient
 from xbrain.config import Config, load_config
 from xbrain.jev.assess import RunResult, select_items
 from xbrain.jev.client import JevError
+from xbrain.jev.lock import pass_lock
 from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.jev.run import RunOutcome, run_topics
 from xbrain.jev.store import load_assessments, load_runs
@@ -82,7 +83,8 @@ def _pass(cfg: Config, client: FakeJevClient, *, force: bool = False, **hooks) -
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
     )
-    return run_topics(cfg, selection, assessments, VOCAB, lambda: client, **hooks)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        return run_topics(cfg, selection, assessments, VOCAB, lambda: client, lock=lock, **hooks)
 
 
 def test_a_pass_saves_logs_and_returns_what_it_did(cfg: Config):
@@ -170,7 +172,8 @@ def test_force_backs_up_the_side_car_before_the_client_is_built(cfg: Config):
         fallback=cfg.jev_fallback_option,
         char_limit=cfg.jev_state_char_limit,
     )
-    run_topics(cfg, selection, assessments, VOCAB, _client, on_backup=backups.append)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        run_topics(cfg, selection, assessments, VOCAB, _client, lock=lock, on_backup=backups.append)
 
     assert len(backups) == 1 and backups[0].exists()
     assert built == [True]
@@ -201,7 +204,8 @@ def test_the_assessments_map_handed_in_is_updated_in_place(cfg: Config):
         char_limit=cfg.jev_state_char_limit,
     )
 
-    run_topics(cfg, selection, assessments, VOCAB, FakeJevClient)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        run_topics(cfg, selection, assessments, VOCAB, FakeJevClient, lock=lock)
 
     assert set(assessments) == {"1", "2"}
 
@@ -373,3 +377,203 @@ def test_the_logged_line_is_handed_to_the_hook_as_json(cfg: Config):
     _pass(cfg, FakeJevClient(), on_logged=lambda path, line, error: lines.append(line))
 
     assert JevRun.model_validate_json(lines[0]) == _only_run(cfg)
+
+
+# --------------------------------------------------------------- hooks are never the verdict
+#
+# PR 8 re-review Minor 2: `on_summary` and `on_interrupted` ran unguarded BEFORE the save, so
+# `xbrain jev topics | head` closing the pipe under their echo threw away up to 24 paid
+# records that had not reached a checkpoint. They are display, like `on_progress`.
+
+
+def test_a_summary_hook_that_raises_still_saves_every_paid_record(cfg: Config, caplog):
+    def _broken_pipe(result: RunResult) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    outcome = _pass(cfg, FakeJevClient(), on_summary=_broken_pipe)
+
+    assert set(load_assessments(cfg.jev_topics_path)) == {"1", "2"}
+    assert [a.item_id for a in outcome.assessed] == ["1", "2"]
+    assert "on_summary" in caplog.text and "Broken pipe" in caplog.text
+
+
+def test_an_interrupt_hook_that_raises_still_saves_the_banked_records(cfg: Config, caplog):
+    def _broken_pipe(banked, stored) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    outcome = _pass(cfg, FakeJevClient(interrupt_after=1), on_interrupted=_broken_pipe)
+
+    assert outcome.interrupted is True
+    assert list(load_assessments(cfg.jev_topics_path)) == ["1"]
+    assert "on_interrupted" in caplog.text
+
+
+def test_a_backup_hook_that_raises_does_not_stop_the_pass(cfg: Config, caplog):
+    _pass(cfg, FakeJevClient())
+
+    def _broken_pipe(path: Path) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    outcome = _pass(cfg, FakeJevClient(), force=True, on_backup=_broken_pipe)
+
+    assert [a.item_id for a in outcome.assessed] == ["1", "2"]
+    assert len(list(cfg.jev_dir.glob("topics.*.bak"))) == 1
+    assert "on_backup" in caplog.text
+
+
+# --------------------------------------------------------------- the pass lock
+#
+# PR 8 arch M7: two passes at once (a terminal and the local server) each load the side-car,
+# each save their own map, and the second save drops the first pass's paid records. The lock
+# covers LOAD → SAVE, so it is the caller's to take; the loop refuses to run without it.
+
+
+def _selection(cfg: Config, assessments: dict[str, TopicAssessment], *, force: bool = False):
+    from xbrain.store import load_store
+
+    return select_items(
+        load_store(cfg.items_path),
+        assessments,
+        VOCAB,
+        ids=[],
+        limit=None,
+        force=force,
+        fallback=cfg.jev_fallback_option,
+        char_limit=cfg.jev_state_char_limit,
+    )
+
+
+def test_a_pass_without_the_lock_is_refused_before_any_client_is_built(cfg: Config):
+    built: list[bool] = []
+
+    def _client() -> FakeJevClient:
+        built.append(True)
+        return FakeJevClient()
+
+    with pass_lock(cfg.jev_lock_path, "test") as released:
+        pass
+    with pass_lock(cfg.jev_lock_path.with_name("other.lock"), "test") as elsewhere:
+        with pytest.raises(JevError, match=r"\.lock"):
+            run_topics(cfg, _selection(cfg, {}), {}, VOCAB, _client, lock=elsewhere)
+    with pytest.raises(JevError, match=r"\.lock"):
+        run_topics(cfg, _selection(cfg, {}), {}, VOCAB, _client, lock=released)
+
+    assert built == [] and not cfg.jev_topics_path.exists()
+
+
+def test_the_pass_lock_refuses_a_second_holder_and_names_the_first(cfg: Config):
+    from xbrain.jev.lock import PassLockBusy
+
+    with pass_lock(cfg.jev_lock_path, "jev topics"):
+        with pytest.raises(PassLockBusy, match=r"otra pasada .*jev topics.*pid"):
+            with pass_lock(cfg.jev_lock_path, "jev serve"):
+                pass  # pragma: no cover - never reached
+
+    with pass_lock(cfg.jev_lock_path, "jev serve"):
+        pass  # released: a later pass takes it
+
+
+def test_the_pass_lock_refuses_another_process(cfg: Config):
+    """flock is per open file, so the refusal is real across processes, not a Python flag."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    sys.exit(3)\n"
+    )
+    with pass_lock(cfg.jev_lock_path, "jev topics"):
+        held = subprocess.run([sys.executable, "-c", probe, str(cfg.jev_lock_path)], check=False)
+    free = subprocess.run([sys.executable, "-c", probe, str(cfg.jev_lock_path)], check=False)
+
+    assert (held.returncode, free.returncode) == (3, 0)
+
+
+# --------------------------------------------------------------- cancelling a pass from outside
+
+
+def test_a_cancelled_pass_stops_asking_and_keeps_what_was_answered(cfg: Config):
+    """A server has no Ctrl-C of its own: `cancel` is how it interrupts a job. Nothing more is
+    SENT once it is set, and the pass ends on the interrupt path — banked, saved, logged."""
+    import threading
+
+    cancel = threading.Event()
+
+    class _CancelAfterFirst(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            cancel.set()
+            return result
+
+    client = _CancelAfterFirst()
+
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        outcome = run_topics(
+            cfg, _selection(cfg, {}), {}, VOCAB, lambda: client, lock=lock, cancel=cancel
+        )
+
+    assert outcome.interrupted is True
+    assert len(client.calls) == 1
+    assert [a.item_id for a in outcome.assessed] == ["1"]
+    assert list(load_assessments(cfg.jev_topics_path)) == ["1"]
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.interrupted) == (1, 1, True)
+
+
+def test_a_lock_that_cannot_be_taken_names_its_path(cfg: Config):
+    blocker = cfg.jev_dir
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("a file where the directory should be")
+
+    with pytest.raises(JevError, match=r"candado .*\.lock"):
+        with pass_lock(cfg.jev_lock_path, "test"):
+            pass  # pragma: no cover - never reached
+
+
+def test_a_failed_release_never_replaces_the_error_in_flight(cfg: Config, monkeypatch, caplog):
+    from xbrain.jev import lock as lock_module
+
+    def _boom(fd: int, length: int) -> None:
+        raise OSError(5, "Input/output error")
+
+    with pytest.raises(ValueError, match="la de verdad"):
+        with pass_lock(cfg.jev_lock_path, "test"):
+            monkeypatch.setattr(lock_module.os, "ftruncate", _boom)
+            raise ValueError("la de verdad")
+
+    assert "Input/output error" in caplog.text
+    monkeypatch.undo()
+    with pass_lock(cfg.jev_lock_path, "after"):
+        pass  # the flock was still released
+
+
+def test_a_cancelled_pass_books_refused_answers_as_failed_not_unsaved(cfg: Config):
+    """After a soft cancel every answer was drained: a refused one is a failure."""
+    import threading
+
+    cancel = threading.Event()
+
+    class _Refused(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            cancel.set()
+            return result
+
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        outcome = run_topics(
+            cfg,
+            _selection(cfg, {}),
+            {},
+            VOCAB,
+            lambda: _Refused(primary="banana"),
+            lock=lock,
+            cancel=cancel,
+        )
+
+    run = _only_run(cfg)
+    assert outcome.interrupted is True
+    assert (run.requests, run.ok, run.failed, run.unsaved) == (1, 0, 1, 0)

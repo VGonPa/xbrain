@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,8 +30,14 @@ from pathlib import Path
 
 from xbrain.config import Config
 from xbrain.jev.assess import RunResult, Selection, run_assessments
-from xbrain.jev.client import CountingJevClient, JevClient, JevError, SeamCounts
+from xbrain.jev.client import (
+    CountingJevClient,
+    JevClient,
+    JevError,
+    SeamCounts,
+)
 from xbrain.jev.defaults import plural
+from xbrain.jev.lock import PassLock
 from xbrain.jev.models import JevRun, TopicAssessment
 from xbrain.jev.store import append_run, save_assessments
 from xbrain.models import Topic
@@ -50,8 +57,9 @@ CHECKPOINT_EVERY = 25
 class RunOutcome:
     """What one pass did. `assessed` is what THIS pass banked, never the whole side-car.
 
-    `failed` is empty on an interrupted pass: `run_assessments` discards its own collection
-    when interrupted, and the run log's `requests - ok - failed` says how many were in flight.
+    `failed` is empty after Ctrl-C: `run_assessments` discards its own collection on that
+    emergency path, and the run log's `requests - ok - failed - unsaved` says how many were in
+    flight. After a SOFT cancel (`cancel`) every call was drained, so `failed` is complete.
     `logged` is the run-log line written, or `None` when nothing was sent or the write failed.
     """
 
@@ -129,9 +137,10 @@ def _release(client: JevClient) -> None:
     `original_error` is read BEFORE the `try`: inside an `except` block `sys.exc_info()`
     reports the exception being handled here, not the one that was already travelling.
 
-    On the interrupt path this can close the transport while a worker is still in flight —
+    On the Ctrl-C path this can close the transport while a worker is still in flight —
     `run_assessments` shuts its pool down with `wait=False`, so a call already issued is
-    cancelled rather than awaited. That worker's exception lands in a future nobody reads,
+    cancelled rather than awaited (a SOFT cancel waits for them, so it never gets here with
+    one running). That worker's exception lands in a future nobody reads,
     which makes it noise and not a lost record: every record that completed was handed to
     the checkpoint and written before this runs.
     """
@@ -148,6 +157,28 @@ def _release(client: JevClient) -> None:
         )
 
 
+def _call_hook(name: str, hook: Callable[..., None] | None, *args: object) -> None:
+    """Call a display hook, and never let it cost a paid record.
+
+    `on_summary` and `on_interrupted` run BEFORE the save — on purpose, so the counters reach
+    the operator even when the save fails — and the CLI's hooks echo. `xbrain jev topics | head`
+    closes the pipe under that echo, and an exception here would skip the save and throw away
+    every record since the last checkpoint (up to `CHECKPOINT_EVERY - 1` paid answers). A hook
+    is display; the save is the pass. Same stance as `assess._report_progress`.
+    """
+    if hook is None:
+        return
+    try:
+        hook(*args)
+    except Exception as exc:
+        logger.warning(
+            "%s falló (%s: %s); la pasada continúa y guarda lo pagado",
+            name,
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _now() -> datetime:
     """The wall clock, in UTC — one seam, so a test can make it step backwards."""
     return datetime.now(timezone.utc)
@@ -160,6 +191,7 @@ def run_record(
     started_at: datetime,
     finished_at: datetime,
     interrupted: bool,
+    drained: bool = False,
 ) -> JevRun:
     """The `runs.jsonl` line for one pass, from what the seam saw and what was kept.
 
@@ -172,14 +204,17 @@ def run_record(
     waking) must not make the record invalid — this is built inside a `finally`.
     """
     answered_not_kept = counts.answered - kept
+    # `unsaved` is Ctrl-C's word: answered, never drained. A SOFT cancel drained every call, so
+    # an answer it did not keep was refused — a failure, as on a pass that ran to the end.
+    lost_in_flight = interrupted and not drained
     return JevRun(
         started_at=started_at,
         finished_at=max(finished_at, started_at),
         models=list(counts.models),
         requests=counts.sent,
         ok=kept,
-        failed=counts.raised + (0 if interrupted else answered_not_kept),
-        unsaved=answered_not_kept if interrupted else 0,
+        failed=counts.raised + (0 if lost_in_flight else answered_not_kept),
+        unsaved=answered_not_kept if lost_in_flight else 0,
         input_tokens_by_provider=counts.input_tokens_by_provider,
         input_tokens=sum(counts.input_tokens_by_provider.values()),
         input_tokens_unknown=counts.input_tokens_unknown,
@@ -199,6 +234,7 @@ def _log_pass(
     started_at: datetime,
     *,
     interrupted: bool,
+    drained: bool,
     on_logged: LoggedHook | None,
 ) -> JevRun | None:
     """Append the pass to the run log. NEVER raises — it runs inside `run_topics`' `finally`.
@@ -221,7 +257,12 @@ def _log_pass(
     run: JevRun | None = None
     try:
         run = run_record(
-            counts, kept=kept, started_at=started_at, finished_at=_now(), interrupted=interrupted
+            counts,
+            kept=kept,
+            started_at=started_at,
+            finished_at=_now(),
+            interrupted=interrupted,
+            drained=drained,
         )
         line = run.model_dump_json()
         append_run(run, path)
@@ -249,11 +290,13 @@ def run_topics(
     vocab: list[Topic],
     make_client: Callable[[], JevClient],
     *,
+    lock: PassLock,
     on_backup: Callable[[Path], None] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     on_summary: Callable[[RunResult], None] | None = None,
     on_interrupted: Callable[[tuple[TopicAssessment, ...], int], None] | None = None,
     on_logged: LoggedHook | None = None,
+    cancel: threading.Event | None = None,
 ) -> RunOutcome:
     """Ask Jev about `selection.items`, keeping everything that was paid for.
 
@@ -274,9 +317,29 @@ def run_topics(
       exit path of a pass that sent a request; `error` is set when it could not be appended
       (then `line` is what to append by hand). A hook that raises is logged, never raised.
 
+    `on_backup`, `on_summary` and `on_interrupted` are display: one that raises is logged and
+    the pass goes on (`_call_hook`) — a closed pipe must not cost the save.
+
+    `cancel`, when given and set, is a SOFT stop (`assess.run_assessments`): nothing queued is
+    sent, every call already running is waited for, banked and saved, and the pass is logged
+    as interrupted after that drain — so the run log bills every answer that came back. It is
+    how a caller with no Ctrl-C of its own (the local server) stops a job. Ctrl-C keeps the
+    emergency path below.
+
+    THE CALLER HOLDS THE PASS LOCK and hands its handle in as `lock` (`jev.lock.pass_lock` on
+    `cfg.jev_lock_path`), taken before it loaded `assessments`: two passes that each load, ask
+    and save the whole map lose each other's paid records. A released handle, or one for
+    another file, is refused here, before any cost.
+
     There is no `force` argument: which items are re-asked, current ones included, is
     `selection`'s decision (`assess.select_items(force=...)`), already made.
     """
+    if not lock.covers(cfg.jev_lock_path):
+        raise JevError(
+            f"una pasada de Jev necesita el candado {cfg.jev_lock_path}, tomado antes de leer "
+            "el side-car (`jev.lock.pass_lock`); sin él, dos pasadas a la vez pierden "
+            "evaluaciones pagadas"
+        )
     if not selection.items:
         return RunOutcome(
             assessed=(), failed=(), stored=len(assessments), interrupted=False, logged=None
@@ -284,8 +347,8 @@ def run_topics(
     # BEFORE the client, so a backup that cannot be written stops a pass that has not yet
     # been billed — and before the first checkpoint, so the copy is the file as it was.
     backup = back_up_before_forced_overwrite(cfg.jev_topics_path, selection.forced)
-    if backup is not None and on_backup is not None:
-        on_backup(backup)
+    if backup is not None:
+        _call_hook("on_backup", on_backup, backup)
 
     # The records THIS pass paid for, in order of arrival. `assessments` also holds every
     # earlier pass's work, so reporting its length as the rescue would tell an operator who
@@ -309,6 +372,8 @@ def run_topics(
     client = CountingJevClient(make_client())
     started_at = _now()
     interrupted = False
+    # False only on Ctrl-C's path, where calls in flight are abandoned rather than awaited.
+    drained = True
     logged: JevRun | None = None
     try:
         result = run_assessments(
@@ -320,25 +385,29 @@ def run_topics(
             concurrency=cfg.jev_concurrency,
             on_progress=on_progress,
             on_result=_checkpoint,
+            cancel=cancel,
         )
     except KeyboardInterrupt:
         interrupted = True
+        drained = False
         # Summary first, then persist — the tally can never fail, so a save that does never
         # suppresses it.
-        if on_interrupted is not None:
-            on_interrupted(tuple(banked.values()), len(assessments))
+        _call_hook("on_interrupted", on_interrupted, tuple(banked.values()), len(assessments))
         if banked:
             # With nothing banked, saving would write `assessments` UNCHANGED — for a first
             # run that is `{}` over the side-car.
             _save_side_car(assessments, cfg.jev_topics_path, paid=len(banked))
         failed: tuple[tuple[str, str], ...] = ()
     else:
+        # A soft cancel (the server's cap or shutdown) waited for every call in flight, so
+        # everything paid is in `result` and saved below; the pass is still an interrupted
+        # one, and says so in the run log even when the save then fails.
+        interrupted = result.cancelled
         # The checkpoint has already put every one of these in `assessments`; the merge stays
         # here so the NORMAL path does not depend on a hook whose failures are swallowed.
         for assessment in result.assessed:
             assessments[assessment.item_id] = assessment
-        if on_summary is not None:
-            on_summary(result)
+        _call_hook("on_summary", on_summary, result)
         _save_side_car(assessments, cfg.jev_topics_path, paid=len(result.assessed))
         failed = result.failed
     finally:
@@ -351,6 +420,7 @@ def run_topics(
             len(banked),
             started_at,
             interrupted=interrupted,
+            drained=drained,
             on_logged=on_logged,
         )
         # LAST, and guarded: releasing the pool is cleanup, never the pass's verdict.

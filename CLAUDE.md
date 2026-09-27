@@ -645,7 +645,7 @@ generates an Obsidian wiki.
   LLM executor is intentionally in pause (spec §9)") is retired: it was false for the entire
   life of the corpus it described, and it is the worst kind of wrong in this file, because
   this file is read first and acted on.
-- Jev topic assessment (`xbrain jev topics|report|dashboard`, `src/xbrain/jev/`) — a SIDE-CAR,
+- Jev topic assessment (`xbrain jev topics|report|dashboard|serve`, `src/xbrain/jev/`) — a SIDE-CAR,
   not a pipeline stage. One TypeSafe call per item carries one Noul per vocabulary slug plus a
   primary Choice with an escape option; the probabilities land in `data/jev/topics.json` and
   `jev report` compares them with `enrich` at `[jev].threshold` (default `0.85`), both
@@ -688,8 +688,19 @@ generates an Obsidian wiki.
   `build_topic_questions` (never copied into the template), `STATE_SURFACE_KEYS`/`CUT_MARKER`
   from assess.py, the pass estimate from `report.estimate_selection` (topics-only means:
   `topics_pass_estimate`); settings through `Config.jev_settings()`. Plus
-  cost total / per pass / per post. `jev topics` is the
-  only command that spends: `report` and `dashboard` re-read what it paid for, free. Key from
+  cost total / per pass / per post. `jev topics` spends, and so does a job started through
+  `jev serve`'s API (`jev/picks.py` → `jev/service.py` → `jev/serve.py`: the page live on
+  127.0.0.1 ONLY; routes `/api/<kind>/estimate|evaluate`, ONE job slot for every kind; the
+  estimate = `select_items` + `topics_pass_estimate` over the blob's `cost.per_post`; a
+  single-use, 10-minute confirmation bound to the pick as asked; the job re-selects and
+  re-prices under the lock; `[jev].serve_max_usd` is a HARD bound by reservation — each post's
+  expected cost reserved before sending, unpriced/None-token answers charged it, never $0;
+  every stop is SOFT: in-flight calls are waited for, saved and logged; Host on every route,
+  Origin + token + JSON on every POST; Ctrl-C → 503, drain, exit 130). A paid pass holds
+  `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
+  `run_topics` requires the `PassLock` handle — so the terminal and the server never lose
+  each other's records; `jev topics` refused by it exits 75. `report` and `dashboard` re-read
+  what was paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`
   never loads it. `jev/typesafe.py` is the ONLY importer of the vendor SDK. Note the name
   collision: `data/topics.json` is topic pages, `data/jev/topics.json` is assessments. Docs:

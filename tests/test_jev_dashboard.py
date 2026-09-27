@@ -171,6 +171,7 @@ def _settings(**over: Any) -> dict[str, Any]:
         "fallback_option": FALLBACK,
         "concurrency": CONCURRENCY,
         "state_char_limit": CHAR_LIMIT,
+        "serve_max_usd": 1.0,
     }
     settings.update(over)
     return settings
@@ -188,7 +189,7 @@ def _data(
 ) -> dict[str, Any]:
     over = {
         _SETTING_NAMES.get(key, key): kwargs.pop(key)
-        for key in ("threshold", "fallback", "char_limit", "model", "concurrency")
+        for key in ("threshold", "fallback", "char_limit", "model", "concurrency", "serve_max_usd")
         if key in kwargs
     }
     options: dict[str, Any] = {
@@ -1843,6 +1844,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "fallback_option",
         "concurrency",
         "state_char_limit",
+        "serve_max_usd",
     ]
     assert set(JEV_DEFAULTS) == {row["key"] for row in settings}
     values = {row["key"]: row["value"] for row in settings}
@@ -1852,6 +1854,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "fallback_option": FALLBACK,
         "concurrency": CONCURRENCY,
         "state_char_limit": CHAR_LIMIT,
+        "serve_max_usd": 1.0,
     }
     assert {row["key"]: row["default"] for row in settings} == JEV_DEFAULTS
 
@@ -2129,7 +2132,11 @@ def test_the_config_words_that_carry_meaning_are_pinned():
         "como si se volviera a preguntar todo",
         "(aún no existe: lo crea ",
         "'Modelo que se pedirá'",
-        "no cambian esta página, son lo que usará la próxima `xbrain jev topics`",
+        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, "
+        "o un trabajo de `xbrain jev serve`",
+        "'Tope por trabajo de xbrain jev serve'",
+        "el servidor rechaza un trabajo cuya estimación lo pase",
+        "no envía un post más cuando lo gastado y lo reservado",
         "las evaluaciones guardadas no registran qué modelo se pidió",
         "el $ solo promedia proveedores con tarifa",
         "la que ves la dibuja el servidor en vivo",

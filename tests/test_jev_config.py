@@ -31,10 +31,13 @@ def test_jev_defaults(tmp_path: Path):
     assert cfg.jev_fallback_option == "otro"
     assert cfg.jev_concurrency == 8
     assert cfg.jev_state_char_limit == 100_000
+    assert cfg.jev_serve_max_usd == 1.0
     assert cfg.jev_dir == tmp_path / "data" / "jev"
     assert cfg.jev_topics_path == tmp_path / "data" / "jev" / "topics.json"
     # The run log sits beside the side-car: same directory, same gitignored `data/`.
     assert cfg.jev_runs_path == tmp_path / "data" / "jev" / "runs.jsonl"
+    # The pass lock sits beside the side-car it protects (`jev.lock.pass_lock`).
+    assert cfg.jev_lock_path == tmp_path / "data" / "jev" / ".lock"
 
 
 def test_jev_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypatch):
@@ -49,6 +52,7 @@ def test_jev_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypat
     monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_FALLBACK_OPTION", "moved-otro")
     monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_CONCURRENCY", 3)
     monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_STATE_CHAR_LIMIT", 4242)
+    monkeypatch.setattr("xbrain.jev.defaults.DEFAULT_SERVE_MAX_USD", 0.33)
     _write_repo(tmp_path)
     cfg = load_config(tmp_path)
     assert cfg.jev_model == "moved-model"
@@ -56,6 +60,7 @@ def test_jev_defaults_are_the_owning_modules_constants(tmp_path: Path, monkeypat
     assert cfg.jev_fallback_option == "moved-otro"
     assert cfg.jev_concurrency == 3
     assert cfg.jev_state_char_limit == 4242
+    assert cfg.jev_serve_max_usd == 0.33
 
 
 def test_config_example_jev_block_is_the_documented_default(tmp_path: Path):
@@ -68,6 +73,7 @@ def test_config_example_jev_block_is_the_documented_default(tmp_path: Path):
     assert cfg.jev_fallback_option == defaults.DEFAULT_FALLBACK_OPTION
     assert cfg.jev_concurrency == defaults.DEFAULT_CONCURRENCY
     assert cfg.jev_state_char_limit == defaults.DEFAULT_STATE_CHAR_LIMIT
+    assert cfg.jev_serve_max_usd == defaults.DEFAULT_SERVE_MAX_USD
 
 
 def test_jev_section_round_trips(tmp_path: Path):
@@ -96,6 +102,8 @@ def test_jev_section_round_trips(tmp_path: Path):
         ("threshold = 1", "jev_threshold", 1.0),
         ("concurrency = 1", "jev_concurrency", 1),
         ("state_char_limit = 1", "jev_state_char_limit", 1),
+        ("serve_max_usd = 0.0001", "jev_serve_max_usd", 0.0001),
+        ("serve_max_usd = 5", "jev_serve_max_usd", 5.0),
     ],
 )
 def test_jev_accepts_the_edges_of_every_range(tmp_path: Path, jev: str, attr: str, expected):
@@ -125,6 +133,12 @@ def test_jev_accepts_the_edges_of_every_range(tmp_path: Path, jev: str, attr: st
         ('model = ""', "[jev].model must be a non-empty string"),
         ('model = "   "', "[jev].model must be a non-empty string"),
         ("model = 113", "[jev].model must be a non-empty string"),
+        ("serve_max_usd = 0", "[jev].serve_max_usd must be a number > 0"),
+        ("serve_max_usd = -1", "[jev].serve_max_usd must be a number > 0"),
+        ("serve_max_usd = true", "[jev].serve_max_usd must be a number > 0"),
+        ('serve_max_usd = "1"', "[jev].serve_max_usd must be a number > 0"),
+        ("serve_max_usd = inf", "[jev].serve_max_usd must be a number > 0"),
+        ("serve_max_usd = nan", "[jev].serve_max_usd must be a number > 0"),
     ],
 )
 def test_jev_section_rejects_bad_values(tmp_path: Path, bad: str, message: str):
@@ -177,6 +191,7 @@ def test_config_toml_accepts_exactly_the_keys_the_defaults_name(tmp_path: Path):
         "fallback_option",
         "concurrency",
         "state_char_limit",
+        "serve_max_usd",
     }
 
 
@@ -187,6 +202,7 @@ _NON_DEFAULT = {
     "fallback_option": "ninguno",
     "concurrency": 3,
     "state_char_limit": 5000,
+    "serve_max_usd": 0.25,
 }
 
 

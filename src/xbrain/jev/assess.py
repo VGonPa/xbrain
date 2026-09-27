@@ -11,9 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import unicodedata
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -21,6 +22,7 @@ from pydantic import ValidationError
 
 from xbrain.evidence import SURFACE_KEYS, Surface, evidence_surfaces
 from xbrain.jev.client import (
+    CallSkipped,
     ChoiceAnswer,
     ChoiceQuestion,
     JevClient,
@@ -537,6 +539,12 @@ class RunResult:
 
     assessed: tuple[TopicAssessment, ...]
     failed: tuple[tuple[str, str], ...]  # (item_id, reason)
+    #: The run was cancelled from outside (`cancel` set): what was running was waited for and
+    #: is in `assessed`/`failed`; `not_asked` posts were never sent.
+    cancelled: bool = False
+    #: Posts never sent: dropped from the queue by a cancel, or declined by the client
+    #: (`CallSkipped`). Neither a failure nor a bill.
+    not_asked: int = 0
 
 
 def _report_progress(on_progress: Callable[[int, int], None] | None, done: int, total: int) -> None:
@@ -582,6 +590,83 @@ def _deliver_result(
         )
 
 
+def _land(
+    future: Future[TopicAssessment],
+    item: Item,
+    assessed: list[TopicAssessment],
+    failed: list[tuple[str, str]],
+    on_result: Callable[[TopicAssessment], None] | None,
+) -> bool:
+    """One finished call into `assessed` or `failed`; False when it was never sent
+    (`CallSkipped`)."""
+    try:
+        assessment = future.result()
+    except CallSkipped:
+        return False
+    except JevError as exc:
+        failed.append((item.id, str(exc)))
+    except Exception as exc:
+        failed.append((item.id, f"{type(exc).__name__}: {exc}"))
+    else:
+        # Stored first, delivered second: the checkpoint is told about a record that is
+        # already in `assessed`, never the other way round.
+        assessed.append(assessment)
+        _deliver_result(on_result, assessment)
+    return True
+
+
+def _collect(
+    futures: dict[Future[TopicAssessment], Item],
+    cancel: threading.Event | None,
+    assessed: list[TopicAssessment],
+    failed: list[tuple[str, str]],
+    on_result: Callable[[TopicAssessment], None] | None,
+    on_progress: Callable[[int, int], None] | None,
+) -> int:
+    """Land every call as it finishes; returns how many posts were never sent. Once `cancel`
+    is set, whatever is still queued is dropped — what is running finishes and lands here."""
+    not_asked = 0
+    done = 0
+    for future in as_completed(futures):
+        if cancel is not None and cancel.is_set():
+            for queued in futures:
+                queued.cancel()
+        if future.cancelled() or not _land(future, futures[future], assessed, failed, on_result):
+            not_asked += 1
+            continue
+        done += 1
+        _report_progress(on_progress, done, len(futures))
+    return not_asked
+
+
+def _all_failed(asked: int, failed: list[tuple[str, str]]) -> JevError:
+    """Every call failed. The DISTINCT reason count is the diagnosis, and one quoted reason
+    cannot carry it: N failures with one reason is a key, a quota or an outage — fix one thing
+    and re-run — while N failures with forty is the corpus, and every one has to be read."""
+    reasons = {reason for _, reason in failed}
+    return JevError(
+        f"ninguna de las {asked} evaluaciones terminó: "
+        f"{plural(len(failed), 'fallo', 'fallos')}, "
+        f"{plural(len(reasons), 'motivo distinto', 'motivos distintos')}; "
+        f"primero: {failed[0][1]}"
+    )
+
+
+def _ask_unless_cancelled(
+    item: Item,
+    questions: dict[str, Question],
+    client: JevClient,
+    char_limit: int,
+    digest: str,
+    cancel: threading.Event | None,
+) -> TopicAssessment:
+    """A worker's unit: nothing is sent once `cancel` is set — a queued post a worker picks up
+    in the instant between the cancel and the queue being emptied is skipped, not asked."""
+    if cancel is not None and cancel.is_set():
+        raise CallSkipped("cancelado antes de enviar")
+    return assess_topics(item, questions, client, char_limit=char_limit, digest=digest)
+
+
 def run_assessments(
     items: list[Item],
     vocab: list[Topic],
@@ -592,6 +677,7 @@ def run_assessments(
     concurrency: int,
     on_progress: Callable[[int, int], None] | None = None,
     on_result: Callable[[TopicAssessment], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> RunResult:
     """Ask about every item, `concurrency` at a time.
 
@@ -602,18 +688,23 @@ def run_assessments(
     EVERY worker exception is recorded as that item's failure and the run continues — a
     `JevError` keeps its operator message, anything else is stamped with its type. A run
     where every item failed raises, so a dead key is an error and not an empty success; an
-    empty `items` is simply an empty result and never reaches the client.
+    empty `items` is simply an empty result and never reaches the client. A post the client
+    declines to send (`CallSkipped`) is counted in `not_asked`, never as a failure.
 
-    An interrupt discards THIS FUNCTION'S collection, by design. `KeyboardInterrupt` cancels
-    every queued call — every item is submitted up front, so a plain shutdown would drain the
-    whole queue and the operator's Ctrl-C would still pay the full bill — and then propagates
-    without a `RunResult`.
+    TWO WAYS TO STOP, and they differ on purpose:
+
+    * `cancel` (the local server's cap, its shutdown) is SOFT: once set, every queued post is
+      dropped unsent, and every call already running is WAITED FOR and delivered — it was
+      paid for. The result says `cancelled`, and a cancel before any answer is an empty
+      result, not the all-failed error.
+    * `KeyboardInterrupt` (Ctrl-C in a terminal) is the EMERGENCY path: it cancels every
+      queued call — every item is submitted up front, so a plain shutdown would drain the
+      whole queue and the operator's Ctrl-C would still pay the full bill — and propagates
+      without a `RunResult`, without waiting for the calls in flight.
 
     What survives an interrupt is whatever `on_result` was already handed. Every successful
     record is delivered to it the moment it is stored, in arrival order, so a caller that
-    checkpoints there keeps the work it has paid for; a caller that passes none keeps
-    nothing, which is the same bargain as before. Holding the records back to deliver them
-    sorted at the end would make the hook useless for the one event it exists for.
+    checkpoints there keeps the work it has paid for.
 
     `client.ask` is called from `concurrency` threads at once and must be safe to do so; see
     the `JevClient` protocol.
@@ -628,40 +719,23 @@ def run_assessments(
     try:
         futures = {
             pool.submit(
-                assess_topics, item, questions, client, char_limit=char_limit, digest=digest
+                _ask_unless_cancelled, item, questions, client, char_limit, digest, cancel
             ): item
             for item in items
         }
-        for done, future in enumerate(as_completed(futures), start=1):
-            item = futures[future]
-            try:
-                assessment = future.result()
-            except JevError as exc:
-                failed.append((item.id, str(exc)))
-            except Exception as exc:
-                failed.append((item.id, f"{type(exc).__name__}: {exc}"))
-            else:
-                # Stored first, delivered second: the checkpoint is told about a record
-                # that is already in `assessed`, never the other way round.
-                assessed.append(assessment)
-                _deliver_result(on_result, assessment)
-            _report_progress(on_progress, done, len(items))
+        not_asked = _collect(futures, cancel, assessed, failed, on_result, on_progress)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     # Sorted, not completion-ordered: the same corpus must produce the same file whatever
     # order the pool happened to finish in, or every run would show a spurious diff.
     assessed.sort(key=lambda assessment: assessment.item_id)
     failed.sort(key=lambda failure: failure[0])
-    if not assessed:
-        # The DISTINCT reason count is the diagnosis, and one quoted reason cannot carry it:
-        # N failures with one reason is a key, a quota or an outage — fix one thing and
-        # re-run — while N failures with forty is the corpus, and every one has to be read.
-        # Showing `failed[0][1]` alone reads as the first case whichever it is.
-        reasons = {reason for _, reason in failed}
-        raise JevError(
-            f"ninguna de las {len(items)} evaluaciones terminó: "
-            f"{plural(len(failed), 'fallo', 'fallos')}, "
-            f"{plural(len(reasons), 'motivo distinto', 'motivos distintos')}; "
-            f"primero: {failed[0][1]}"
-        )
-    return RunResult(assessed=tuple(assessed), failed=tuple(failed))
+    cancelled = cancel is not None and cancel.is_set()
+    if not assessed and failed and not cancelled:
+        raise _all_failed(len(items), failed)
+    return RunResult(
+        assessed=tuple(assessed),
+        failed=tuple(failed),
+        cancelled=cancelled,
+        not_asked=not_asked,
+    )
