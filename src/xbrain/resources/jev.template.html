@@ -2573,7 +2573,15 @@ function pickText(e) {
     t += ' Coste estimado: ' + usd(e.usd, 5) + ' (coste medio por post de ' + paid + ' × ' +
       pl(e.posts, 'post', 'posts') + ').';
   }
-  return t + ' Nunca se gastará más de ' + dec(e.max_usd, 2) + ' $ en esta tanda.';
+  return t + ' ' + capText(e.max_usd);
+}
+
+/** The cap as the code keeps it: nothing is sent past it, but the posts already in flight
+    finish, so the bill can pass it by a little — at most `concurrency` posts (10a ruling 1). */
+function capText(max) {
+  const n = DATA.config.settings.find(s => s.key === 'concurrency').value;
+  return 'Tope: ' + dec(max, 2) + ' $. Al llegar se para; lo que ya esté en vuelo termina y puede ' +
+    'pasarlo por poco (como mucho ' + pl(n, 'post', 'posts') + ').';
 }
 
 async function confirmAsk() {
@@ -2620,7 +2628,7 @@ function resume(job) {
   asking = null;
   P.title.textContent = KIND_RUNNING[job.kind] || 'Trabajo en curso';
   P.est.textContent = 'Empezó ' + when(job.started_at) + ' · ' + pl(job.total, 'post', 'posts') +
-    '. Nunca se gastará más de ' + dec(job.max_usd, 2) + ' $ en esta tanda.';
+    '. ' + capText(job.max_usd);
   P.error.hidden = true;
   follow(job);
 }
@@ -2774,8 +2782,10 @@ function watch(delay) {
     if (!following) {
       try {
         const job = await api(API.job);
-        if (job.state === 'running') resume(job);
-        else if (job.finished_at && job.finished_at !== seenFinish) {
+        // `following` again: asked before this page confirmed a job and answered after, the
+        // answer is about the job `poll` already has — neither followed twice nor reloaded.
+        if (!following && job.state === 'running') resume(job);
+        else if (!following && job.finished_at && job.finished_at !== seenFinish) {
           seenFinish = job.finished_at;
           await reloadData();
         }

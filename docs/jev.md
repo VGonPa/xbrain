@@ -837,7 +837,8 @@ it starts, so photos mirrored later show after a restart.
 
 A button opens a panel in the corner (Escape closes it; focus goes back to the button). The
 panel shows the server's estimate first: *«Coste estimado: ~X $ (coste medio por post de las
-N evaluaciones ya pagadas × M posts). Nunca se gastará más de <cap> $ en esta tanda.»*, with
+N evaluaciones ya pagadas × M posts). Tope: <cap> $. Al llegar se para; lo que ya esté en
+vuelo termina y puede pasarlo por poco (como mucho <concurrency> posts).»*, with
 what it skips. The button that spends says so and how much: **Evaluar y pagar ~X $**. It only
 works when the server allows the job. The checkbox *Volver a evaluar también los posts que ya
 tienen evaluación vigente: se pagan otra vez y se sustituye su evaluación (antes se guarda una

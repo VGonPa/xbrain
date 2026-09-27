@@ -2198,7 +2198,8 @@ def test_served_estimate_says_what_it_will_pay_before_anything_is_spent(serve_pr
     # Post 2 is stale: the mean is the one current priced answer's.
     assert estimate["est"] == (
         "1 post por evaluar. Coste estimado: ~0,00000 $ (coste medio por post de la "
-        "evaluación ya pagada × 1 post). Nunca se gastará más de 1,00 $ en esta tanda."
+        "evaluación ya pagada × 1 post). Tope: 1,00 $. Al llegar se para; lo que ya esté en "
+        "vuelo termina y puede pasarlo por poco (como mucho 1 post)."
     )
     assert estimate["go_text"] == "Evaluar y pagar ~0,00000 $"
     assert (estimate["force"], estimate["go"], estimate["error"]) == (False, True, None)
@@ -2350,7 +2351,7 @@ def progress_probed(tmp_path_factory) -> dict[str, Any]:
         _PROGRESS_PROBE,
         client=_HalfWay(input_tokens=1000),
         base=watched,
-        jev="serve_max_usd = 0.25\n",
+        jev="serve_max_usd = 0.25\nconcurrency = 2\n",
         seed_tokens=1000,
         prepare=_no_run_log,
     )
@@ -2366,7 +2367,8 @@ def test_served_money_in_the_panel_is_the_servers_estimate_and_cap(progress_prob
     assert estimate["go_text"] == "Evaluar y pagar ~0,00013 $"
     assert (
         "Coste estimado: ~0,00013 $ (coste medio por post de las 2 evaluaciones ya pagadas × "
-        "3 posts). Nunca se gastará más de 0,25 $ en esta tanda."
+        "3 posts). Tope: 0,25 $. Al llegar se para; lo que ya esté en vuelo termina y puede "
+        "pasarlo por poco (como mucho 2 posts)."
     ) in estimate["est"]
     assert estimate["est"].startswith("3 posts por evaluar")
 
@@ -2484,6 +2486,10 @@ def test_served_a_page_opened_mid_job_follows_it(resume_probed):
 
     assert resumed["title"] == "Evaluación de topics en curso"
     assert re.match(r"^[0-2] de 3 posts · ", resumed["progress"])
+    assert resumed["est"].endswith(
+        "Tope: 1,00 $. Al llegar se para; lo que ya esté en vuelo termina y puede pasarlo por "
+        "poco (como mucho 1 post)."
+    )
     assert resumed["stop"] == "Parar (se guarda lo ya pagado)" and resumed["go"] is None
     assert end["progress"].startswith("3 evaluaciones guardadas")
     assert end["cards"] == [["Re-evaluar"]] * 3
