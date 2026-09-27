@@ -33,8 +33,10 @@ from xbrain.jev.client import (
     NoulQuestion,
     Question,
 )
+from xbrain.jev.defaults import DEFAULT_PROVIDER
 
-PROVIDER = "typesafe"
+#: Defined once in `defaults` so an estimate can be priced without importing this module.
+PROVIDER = DEFAULT_PROVIDER
 #: Retries for a call that failed transiently. The budget below is derived from it.
 MAX_RETRIES = 3
 #: Slack for the backoff delays between attempts, in seconds.

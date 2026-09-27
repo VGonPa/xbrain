@@ -188,5 +188,10 @@ state_char_limit = 100000
 # reserved before it is sent, and no post is sent that would pass the cap; the bill passes it
 # only by what the posts in flight cost above that mean. `xbrain jev topics` has no cap.
 serve_max_usd = 1.0
+# `xbrain jev ask "<query>"` asks before spending when its estimate is above this, in USD
+# (`--yes` answers for you). The estimate is the characters that will be sent (each post's
+# evidence + the question) over the characters per token measured on paid ask answers.
+# A query over the whole corpus is a few cents; see docs/jev.md.
+ask_max_usd = 0.25
 # Output: <data_dir>/jev/topics.json — a side-car, NOT part of the store and NOT snapshotted.
 # It costs money to regenerate and has no undo; see docs/jev.md.

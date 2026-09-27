@@ -16,6 +16,8 @@ not would call an assessment current after the question had visibly changed.
 
 from __future__ import annotations
 
+import unicodedata
+
 from xbrain.jev.client import ChoiceQuestion, NoulQuestion, Question
 from xbrain.models import Topic
 
@@ -74,3 +76,37 @@ def build_topic_questions(vocab: list[Topic], fallback: str) -> dict[str, Questi
         criteria=criteria,
     )
     return questions
+
+
+#: The one key of an ask (`xbrain jev ask`): does this post answer the user's request?
+ASK_KEY = "answers"
+_ASK_INSTRUCTIONS = f"Does the post in `{STATE_KEY}` answer or directly address the user's request?"
+_ASK_FALSE_CRITERION = "The post does not address this request."
+
+
+def normalize_query(query: str) -> str:
+    """The query as it is asked and filed: NFC, runs of whitespace as one space, trimmed.
+
+    Case and punctuation are KEPT — the query travels to Jev verbatim as the criterion, so they
+    are part of the question; spacing and Unicode normal form are not, and must not turn one
+    query into two paid ones. A query with nothing left is refused (`ValueError`).
+    """
+    text = " ".join(unicodedata.normalize("NFC", query).split())
+    if not text:
+        raise ValueError("la consulta está vacía")
+    return text
+
+
+def build_ask_questions(query: str) -> dict[str, Question]:
+    """`{"answers": Noul}`: the user's query, verbatim in any language, as the TRUE criterion.
+
+    A Noul and not a Choice over the posts: each post is judged ALONE against the request, so
+    its probability does not depend on which other posts happened to be asked with it. The
+    instructions are English (Jev's primary language, as for topics); the query is data.
+    """
+    return {
+        ASK_KEY: NoulQuestion(
+            instructions=_ASK_INSTRUCTIONS,
+            criteria={"true": normalize_query(query), "false": _ASK_FALSE_CRITERION},
+        )
+    }

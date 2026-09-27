@@ -14,12 +14,16 @@ item XBrain asks one yes/no question per vocabulary topic ("is this post about
 verdict is derived, no topic assignment moves, and no note is re-rendered. You can run it,
 read it, and throw it away without touching the corpus.
 
+The same judge also searches: [`xbrain jev ask`](#xbrain-jev-ask--ask-the-corpus-a-question)
+puts a question of yours to every post and returns the posts that answer it.
+
 - [Setup](#setup)
 - [Daily use](#daily-use)
 - [`xbrain jev topics` — what a run does](#xbrain-jev-topics--what-a-run-does)
 - [`xbrain jev report` — reading the comparison](#xbrain-jev-report--reading-the-comparison)
 - [`xbrain jev dashboard` — reading the page](#xbrain-jev-dashboard--reading-the-page)
 - [`xbrain jev serve` — the page, live, with a way to ask](#xbrain-jev-serve--the-page-live-with-a-way-to-ask)
+- [`xbrain jev ask` — ask the corpus a question](#xbrain-jev-ask--ask-the-corpus-a-question)
 - [Staleness: when an assessment stops counting](#staleness-when-an-assessment-stops-counting)
 - [Where the files live, and what protects them](#where-the-files-live-and-what-protects-them)
 - [Vendor facts, with their dates](#vendor-facts-with-their-dates)
@@ -76,9 +80,11 @@ uv run xbrain jev report                    # data/jev/topics-report.{json,md} a
 uv run xbrain jev report --threshold 0.95   # the same side-car, read more strictly
 uv run xbrain jev dashboard                 # <output_dir>/jev.html at [jev].threshold — open the printed URI
 uv run xbrain jev serve                     # the same page, live on http://127.0.0.1:8765/
+uv run xbrain jev ask "posts con datos sobre creatina" --dry-run   # what a query would cost
+uv run xbrain jev ask "posts con datos sobre creatina"             # the posts that answer it
 ```
 
-`jev topics` spends money, and so does a job started through `jev serve`'s API. `report` and
+`jev topics` spends money, and so do `jev ask` and a job started through `jev serve`'s API. `report` and
 `dashboard` re-read the side-car already paid for: no API call, no key needed, no cost, any
 number of times. `jev serve` costs nothing until a job is confirmed.
 
@@ -90,13 +96,15 @@ The full option list:
 | `xbrain jev report` | `--threshold FLOAT` (default `[jev].threshold`) |
 | `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
 | `xbrain jev serve` | `--port INTEGER` (default 8765; 0 = any free port) · `--no-open` (do not open the browser) |
+| `xbrain jev ask QUERY` | `--topic` · `--since` · `--until` · `--author` · `--only-evaluated` · `--limit` · `--threshold` · `--top` · `--yes` · `--dry-run` ([details](#xbrain-jev-ask--ask-the-corpus-a-question)) |
 
 Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed, a busy
-port) · **75** `jev topics` refused because another pass holds the lock (EX_TEMPFAIL: nothing
-is wrong but the timing; a script can retry) · **130** interrupted with Ctrl-C (`jev topics`,
-and `jev serve` when you stop it).
+port, a `jev ask` confirmation answered no) · **75** `jev topics` or `jev ask` refused because
+another pass holds the lock (EX_TEMPFAIL: nothing is wrong but the timing; a script can
+retry) · **130** interrupted with Ctrl-C (`jev topics`, `jev ask`, and `jev serve` when you
+stop it).
 
-**One pass at a time.** `jev topics` and a job started through `jev serve` both hold
+**One pass at a time.** `jev topics`, `jev ask` and a job started through `jev serve` all hold
 `data/jev/.lock` from the moment they read the side-car to the moment they have saved it. A
 second pass started meanwhile is refused before it reads anything or spends anything, and
 the message says who holds the lock:
@@ -233,7 +241,8 @@ returns it, whatever xbrain does with it next:
 
 | Field | Meaning |
 |---|---|
-| `kind` | `topics` (the only kind today; a line without it reads as `topics`) |
+| `kind` | `topics` or `ask` (a [`jev ask`](#xbrain-jev-ask--ask-the-corpus-a-question) pass). A line without it reads as `topics` |
+| `query_sha` | an `ask` pass only: which query it paid for (the name of `data/jev/asks/<sha>.json`) |
 | `started_at` · `finished_at` | UTC. The page's history table shows the start, in local time |
 | `requests` | calls xbrain **sent**, each item once. Retries inside the vendor SDK are invisible to xbrain and are not counted |
 | `ok` | answers kept in the side-car |
@@ -954,6 +963,149 @@ vocabulary is refused the way `jev dashboard` refuses it. Unlike `jev dashboard`
 corpus with **no answers yet**: that is where a first job can start, once a terminal pass has
 given it a mean to estimate from.
 
+## `xbrain jev ask` — ask the corpus a question
+
+```bash
+uv run xbrain jev ask "¿qué posts explican cómo configurar hooks en Claude Code?"
+```
+
+You write a question in any language, and Jev says **post by post** whether each post
+answers it. The results are the posts at or above the threshold, best first. Jev writes no
+answer text. It filters and scores; reading the posts is up to you.
+
+**What each post is asked.** One call per post, with the same `state` a topics pass sends
+(the post, its thread, the quoted post, the article, the transcript, the image descriptions:
+see [What Jev reads](#it-asks-once-per-item-in-parallel)) and one yes/no question:
+
+| | |
+|---|---|
+| instructions | ``Does the post in `post` answer or directly address the user's request?`` |
+| true | your query, verbatim |
+| false | `The post does not address this request.` |
+
+Each post is judged **alone** against your request, so a post's probability does not depend
+on which other posts were asked with it. The query is normalised before it is sent and
+filed: Unicode NFC, and runs of spaces or newlines become one space. Case and punctuation
+are kept, because they reach Jev.
+
+### Flags
+
+| Flag | What it does |
+|---|---|
+| `--topic SLUG` | only posts that enrich put in that topic (primary or not) **or** whose current Jev topics answer backs it at the threshold. A slug that is neither in the vocabulary nor used by enrich is refused |
+| `--since AAAA-MM-DD` · `--until AAAA-MM-DD` | only posts created in those days, both days included (UTC) |
+| `--author HANDLE` | only posts by that account (`@` and case ignored) |
+| `--only-evaluated` | only posts with a current Jev topics answer |
+| `--limit N` | ask at most N posts (the ones not asked are counted as `fuera del límite`) |
+| `--threshold T` | the lowest probability that counts as a result. Default `[jev].threshold` |
+| `--top N` | how many results to print (default 20; the rest are counted) |
+| `--yes` | do not ask for confirmation above `[jev].ask_max_usd` |
+| `--dry-run` | count and estimate, then stop. Needs no key and writes nothing |
+
+The filters decide what is **paid for**. Narrow a query with them before asking the whole
+corpus.
+
+### What it prints
+
+```text
+1843 posts por preguntar · 12 sin evidencia · 754 descartados por los filtros
+estimación: ~1523604 tokens de entrada (~0.0640 $) · 4570812 caracteres a 3.00 por token
+  50/1843
+  …
+1843 evaluadas · 0 fallidas · 1498210 tokens de entrada (~0.0629 $) · modelo jev-1.13.0 → …/data/jev/asks/9f2c….json
+pasada registrada → …/data/jev/runs.jsonl
+Resultados (≥ 0.85): 14 de 1843 posts con respuesta vigente
+  0.98  1834…  @someone  2026-05-02  Claude Code hooks: PreToolUse and PostToolUse, with …  https://x.com/…
+  …
+```
+
+The first line accounts for every post: to ask, `ya respondidos` (the cache, free),
+`sin evidencia`, `fuera del límite` and `descartados por los filtros`. The results cover every
+post the filters kept that has a **current** answer, including answers paid for in earlier
+runs of the same query.
+
+### Estimate and confirmation
+
+Before asking, the command estimates what the call will cost. It uses the same builders the
+call uses: each selected post's `state` as it will be sent, plus the question's text. That is
+a character count. The characters-per-token ratio is **measured**: it is the total
+`prompt_chars` over the total `input_tokens` of every ask answer already paid for, over every
+query. Until one exists, it is `3.0` characters per token. That is lower than English prose
+(about 4), so a first estimate errs towards too many tokens. Tokens are priced by the same
+formula every bill uses ([Vendor facts](#vendor-facts-with-their-dates)).
+
+At or under `[jev].ask_max_usd` (default `0.25 $`) it asks straight away. Above the cap it
+asks `¿Preguntar igualmente?` first. A no, or no answer, exits 1 having asked nothing.
+`--yes` answers yes for you.
+
+**What a whole-corpus query costs, estimated.** An ask sends no topic questions, only
+the evidence plus about 170 characters of question. On the corpus measured in
+[What a pass actually costs](#what-a-pass-actually-costs) (mean evidence 2,476 characters,
+2,609 posts), that is about 6.9 M characters. At 3.5–4 characters per token, that is
+1.7–2.0 M tokens, **about 0.07–0.08 $**; the first-query ratio of 3.0 estimates 0.10 $. That
+is roughly 11 % of a topics pass. The bill is the one the run reports, from the provider's
+usage.
+
+### It never pays twice for the same answer
+
+Each query has its own file, `data/jev/asks/<sha>.json`. `<sha>` is the sha256 of the
+normalised query, and the file holds the query and one `AskAssessment` per post:
+`probability`, `provider`, `model`, `asked_at`, `state_chars`, `truncated`, `prompt_chars` and
+the token counts. Each answer carries a **contract**: sha256 of a version string, the state
+as sent and the question's digest, built like a topics contract (see
+[Staleness](#staleness-when-an-assessment-stops-counting)). So:
+
+- asking the **same query** again asks only posts with no current answer. With nothing new
+  it sends nothing, logs nothing and prints the results for free;
+- a post whose **evidence changed** (new text, a fetched article, a transcript, a different
+  `state_char_limit` cut) is asked again, and only that post;
+- a **different query** is a different file. Change one word and every post is a new
+  question.
+
+The file is written atomically, checkpointed every 25 answers like the topics side-car, and
+kept after Ctrl-C (exit 130). A file that does not parse, holds a record filed under the
+wrong post, or names another query is **refused**, never read as empty. Move it aside or
+fix it by hand.
+
+### History, and what a query has cost
+
+`data/jev/asks/index.json` keeps one entry per query: the query, when it was first and last
+asked, how many times, and from the last run the posts with a current answer, the results,
+the threshold and the filters. Reopening a query (asking it again) costs nothing for posts
+already answered.
+
+What a query cost is in the run log, not in the history. Every ask pass that sent a request
+appends a `runs.jsonl` line with `kind: "ask"` and the query's `query_sha`, with the same
+fields and the same every-exit-path guarantee as a topics pass (see
+[It logs the pass](#it-logs-the-pass-datajevrunsjsonl)). Every topics cost view (`jev report`'s
+`Histórico:`, the page's cost strip, per-pass table and «fuera del registro») counts
+**topics passes only**. An ask never moves a topics number, and never writes
+`data/jev/topics.json`.
+
+### One pass at a time
+
+An ask takes the same pass lock as `jev topics` and a `jev serve` job (`data/jev/.lock`).
+It holds the lock from reading the query's file, through the confirmation, to writing the
+file and the history. A second pass is refused with exit 75. `--dry-run` takes no lock.
+
+### Labelling queries for PR 13 (search quality)
+
+The default threshold and the question's wording are tuned on real queries labelled by
+hand. To label one:
+
+1. Run the query with a low bar, so the candidates near the edge show:
+   `xbrain jev ask "<query>" --threshold 0.3 --top 50`.
+2. Copy the printed list to a note, one line per post: its id, its probability, and your
+   label: `sí` (it answers the query), `no`, or `parcial`.
+3. Label at least the top 20, plus any post you know answers the query that is missing
+   from the list (write down its id).
+4. Do 3–5 queries of different shapes: a how-to ("cómo configurar hooks en Claude Code"), a
+   data request ("posts con datos de estudios sobre creatina"), a story ("hilos donde alguien
+   cuenta cómo levantó una ronda seed").
+
+PR 13 measures the precision of the top 20 against those labels and adjusts the threshold
+and the wording. The answers are cached, so re-reading a labelled query costs nothing.
+
 ## Staleness: when an assessment stops counting
 
 Every stored assessment carries a `contract`: a sha256 over the contract version, the state
@@ -1003,7 +1155,9 @@ retires nothing and says nothing.
 |---|---|
 | `data/jev/topics.json` | the side-car: one `TopicAssessment` per item id |
 | `data/jev/topics.<UTC stamp>.bak` | a copy of the side-car, written before a `--force` run re-asks a current record. Never pruned |
-| `data/jev/runs.jsonl` | the run log: one line per pass that sent a request (`jev topics`, or a job from `jev serve`). Append-only |
+| `data/jev/runs.jsonl` | the run log: one line per pass that sent a request (`jev topics`, a job from `jev serve`, or `jev ask`, marked `kind: "ask"`). Append-only |
+| `data/jev/asks/<sha>.json` | one `jev ask` query: the query and one answer per post. Same standing as the side-car: not snapshotted, not in git |
+| `data/jev/asks/index.json` | the history of queries asked |
 | `data/jev/.lock` | the pass lock: held (a kernel `flock`) by the one pass running. Its text says who holds it; empty otherwise |
 | `data/jev/topics-report.json` · `.md` | the comparison, rewritten on every `jev report` |
 | `<output_dir>/jev.html` | the page, rewritten on every `jev dashboard` |

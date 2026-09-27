@@ -209,3 +209,81 @@ class JevRun(BaseModel):
                 f"input_tokens_by_provider {self.input_tokens_by_provider!r}"
             )
         return self
+
+
+class AskAssessment(BaseModel):
+    """One post, one call, one query: the probability that the post answers the request.
+
+    Kept in `data/jev/asks/<query_sha>.json` (`store.save_asks`), one file per query, keyed by
+    post id. `contract` = `ask.ask_contract(state, questions_digest)`: the same state a topics
+    pass sends and the ask's one question, under its own version string — so repeating a query
+    never re-pays a post whose evidence is unchanged, and new evidence re-asks it.
+    `prompt_chars` is what was sent (state as cut + the question's text): with `input_tokens`
+    it is how the next estimate measures characters per token (`ask.chars_per_token`).
+    """
+
+    model_config = _FROZEN
+
+    item_id: NonEmpty
+    provider: NonEmpty
+    model: NonEmpty
+    asked_at: datetime
+    contract: str = Field(pattern=_SHA256)
+    state_chars: int = Field(ge=0)
+    truncated: bool = False
+    prompt_chars: int = Field(ge=0)
+    probability: Probability
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+
+    @field_validator("asked_at")
+    @classmethod
+    def _utc(cls, value: datetime) -> datetime:
+        return _require_utc("asked_at", value)
+
+
+class AskFile(BaseModel):
+    """`data/jev/asks/<query_sha>.json`: the query it answers, and its records by post id.
+
+    The query is IN the file so the file says what it is without the history, and so a file
+    renamed or copied under another query's sha is refused (`store.load_asks`) instead of
+    passing its answers off as another question's.
+    """
+
+    model_config = _FROZEN
+
+    query: NonEmpty
+    assessments: dict[str, AskAssessment]
+
+    @model_validator(mode="after")
+    def _keyed_by_post(self) -> AskFile:
+        for key, record in self.assessments.items():
+            if key != record.item_id:
+                raise ValueError(f"record for {record.item_id!r} filed under {key!r}")
+        return self
+
+
+class AskHistoryEntry(BaseModel):
+    """One query in `data/jev/asks/index.json`: what was asked, when, and what came of it.
+
+    `evaluated` and `results` are as of the LAST time it was asked (`results` at that
+    `threshold`, over the posts its `filters` kept). Its COST is not here: the run log bills
+    it (`JevRun.query_sha`), priced when read, like every other bill.
+    """
+
+    model_config = _FROZEN
+
+    query_sha: str = Field(pattern=_SHA256)
+    query: NonEmpty
+    first_asked_at: datetime
+    last_asked_at: datetime
+    times: int = Field(ge=1)
+    evaluated: int = Field(ge=0)
+    results: int = Field(ge=0)
+    threshold: Probability
+    filters: dict[str, str | bool]
+
+    @field_validator("first_asked_at", "last_asked_at")
+    @classmethod
+    def _utc(cls, value: datetime, info: ValidationInfo) -> datetime:
+        return _require_utc(str(info.field_name), value)

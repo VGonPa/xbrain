@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Generic
 
 from xbrain.config import Config
-from xbrain.jev.assess import R, RunResult, Selection, run_assessments
+from xbrain.jev.ask import AskQuery, assess_post
+from xbrain.jev.assess import R, RunResult, Selection, run_assessments, run_pool
 from xbrain.jev.client import (
     CountingJevClient,
     JevClient,
@@ -39,8 +40,8 @@ from xbrain.jev.client import (
 )
 from xbrain.jev.defaults import plural
 from xbrain.jev.lock import PassLock
-from xbrain.jev.models import JevRun, RunKind, TopicAssessment
-from xbrain.jev.store import append_run, save_assessments
+from xbrain.jev.models import AskAssessment, JevRun, RunKind, TopicAssessment
+from xbrain.jev.store import append_run, save_asks, save_assessments
 from xbrain.models import Topic
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,63 @@ def run_topics(
         path=cfg.jev_topics_path,
         save=lambda: save_assessments(assessments, cfg.jev_topics_path),
         kind="topics",
+        on_summary=on_summary,
+        on_interrupted=on_interrupted,
+        on_logged=on_logged,
+    )
+
+
+def run_ask(
+    cfg: Config,
+    selection: Selection,
+    query: AskQuery,
+    records: dict[str, AskAssessment],
+    make_client: Callable[[], JevClient],
+    *,
+    lock: PassLock,
+    on_progress: Callable[[int, int], None] | None = None,
+    on_summary: Callable[[RunResult[AskAssessment]], None] | None = None,
+    on_interrupted: Callable[[tuple[AskAssessment, ...], int], None] | None = None,
+    on_logged: LoggedHook | None = None,
+    cancel: threading.Event | None = None,
+) -> RunOutcome[AskAssessment]:
+    """Ask `query` about `selection.items` — `run_topics`' pass with the ask's call and file.
+
+    `records` is the query's file in memory (`store.load_asks`), loaded UNDER `lock` — the
+    same pass lock as topics (one paid pass at a time, whatever it asks) — and updated in
+    place. Written whole to `data/jev/asks/<query.sha>.json`; logged as `kind: "ask"` with
+    `query_sha`. No backup: an ask is never forced, so it only ever replaces an answer whose
+    contract had already expired. Hooks, `cancel` and what it raises are `run_topics`'.
+    """
+    require_lock(cfg, lock)
+    if not selection.items:
+        return RunOutcome(
+            assessed=(), failed=(), stored=len(records), interrupted=False, logged=None
+        )
+    path = cfg.jev_asks_dir / f"{query.sha}.json"
+    char_limit = cfg.jev_state_char_limit
+
+    def _ask_all(
+        client: JevClient, on_result: Callable[[AskAssessment], None]
+    ) -> RunResult[AskAssessment]:
+        return run_pool(
+            list(selection.items),
+            lambda item: assess_post(item, query, client, char_limit=char_limit),
+            concurrency=cfg.jev_concurrency,
+            on_progress=on_progress,
+            on_result=on_result,
+            cancel=cancel,
+        )
+
+    return run_pass(
+        cfg,
+        records,
+        _ask_all,
+        make_client,
+        path=path,
+        save=lambda: save_asks(query, records, path),
+        kind="ask",
+        query_sha=query.sha,
         on_summary=on_summary,
         on_interrupted=on_interrupted,
         on_logged=on_logged,

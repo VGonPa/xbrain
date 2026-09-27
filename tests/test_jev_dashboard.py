@@ -172,6 +172,7 @@ def _settings(**over: Any) -> dict[str, Any]:
         "concurrency": CONCURRENCY,
         "state_char_limit": CHAR_LIMIT,
         "serve_max_usd": 1.0,
+        "ask_max_usd": 0.25,
     }
     settings.update(over)
     return settings
@@ -189,7 +190,15 @@ def _data(
 ) -> dict[str, Any]:
     over = {
         _SETTING_NAMES.get(key, key): kwargs.pop(key)
-        for key in ("threshold", "fallback", "char_limit", "model", "concurrency", "serve_max_usd")
+        for key in (
+            "threshold",
+            "fallback",
+            "char_limit",
+            "model",
+            "concurrency",
+            "serve_max_usd",
+            "ask_max_usd",
+        )
         if key in kwargs
     }
     options: dict[str, Any] = {
@@ -1845,6 +1854,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "concurrency",
         "state_char_limit",
         "serve_max_usd",
+        "ask_max_usd",
     ]
     assert set(JEV_DEFAULTS) == {row["key"] for row in settings}
     values = {row["key"]: row["value"] for row in settings}
@@ -1855,6 +1865,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "concurrency": CONCURRENCY,
         "state_char_limit": CHAR_LIMIT,
         "serve_max_usd": 1.0,
+        "ask_max_usd": 0.25,
     }
     assert {row["key"]: row["default"] for row in settings} == JEV_DEFAULTS
 

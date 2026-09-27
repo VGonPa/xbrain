@@ -55,9 +55,21 @@ from xbrain.jev.assess import (
     Selection,
     select_items,
 )
+from xbrain.jev.ask import (
+    AskFilters,
+    AskQuery,
+    AskResults,
+    ask_results,
+    chars_per_token,
+    estimate_ask,
+    filter_posts,
+    record_ask,
+    select_ask_items,
+)
 from xbrain.jev.client import JevClient, JevError
 from xbrain.jev.dashboard import build_page_data, render_jev_dashboard_html
 from xbrain.jev.defaults import (
+    Billed,
     input_cost_usd,
     input_tokens_total,
     jev_cost_fragment,
@@ -75,10 +87,10 @@ from xbrain.jev.report import (
     write_reports,
 )
 from xbrain.jev.lock import PassLock, PassLockBusy, pass_lock
-from xbrain.jev.run import RunOutcome, run_topics
+from xbrain.jev.run import RunOutcome, run_ask, run_topics
 from xbrain.jev.serve import make_server, serve_until_interrupted
 from xbrain.jev.service import JevService
-from xbrain.jev.store import load_assessments, load_runs
+from xbrain.jev.store import load_all_asks, load_asks, load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
 from xbrain.payloads import payload_stats, reextract_from_payloads
@@ -198,7 +210,7 @@ if TYPE_CHECKING:
     # module-top `xbrain.jev` import list at the eight modules the CLI is meant to depend
     # on directly (assess, client, dashboard, defaults, env, report, run, store), so a ninth
     # is a visible decision rather than a drive-by.
-    from xbrain.jev.models import TopicAssessment
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -2733,7 +2745,7 @@ def _jev_client(cfg: Config) -> JevClient:
     return TypeSafeJevClient(api_key=key, model=cfg.jev_model)
 
 
-def _jev_cost_line(assessments: tuple[TopicAssessment, ...]) -> str:
+def _jev_cost_line(assessments: tuple[Billed, ...]) -> str:
     """`N tokens de entrada (+K sin recuento) (~X $ · proveedor sin tarifa: …)`.
 
     A tuple, not an iterable: the three `jev.defaults` helpers each walk `assessments`, so a
@@ -2776,7 +2788,7 @@ def _jev_selection_line(selection: Selection, stored: int) -> str:
     return f"{' · '.join(segments)} ({stored_text})"
 
 
-def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
+def _echo_jev_outcome(result: RunResult[Any], topics_path: Path) -> None:
     """The run's one-line summary on stdout, then its per-item failures on stderr.
 
     Printed BEFORE the side-car is written, never after. The counters are sitting on
@@ -2799,9 +2811,7 @@ def _echo_jev_outcome(result: RunResult, topics_path: Path) -> None:
         typer.echo(f"  … y {plural(remaining, 'fallo', 'fallos')} más", err=True)
 
 
-def _echo_jev_interrupt(
-    banked: tuple[TopicAssessment, ...], stored: int, *, force: bool, path: Path
-) -> None:
+def _echo_jev_interrupt(banked: tuple[Any, ...], stored: int, *, force: bool, path: Path) -> None:
     """What Ctrl-C kept, on stderr — printed BEFORE `run_topics` saves it.
 
     With nothing banked there is nothing to save and no bill to report: `run_topics` writes
@@ -2931,6 +2941,196 @@ def _jev_topics_pass(
         ),
         on_logged=_echo_jev_logged,
     )
+
+
+#: Results printed by `jev ask` unless `--top` says otherwise; the rest are counted.
+_ASK_TOP = 20
+_DAY = ["%Y-%m-%d"]
+
+
+@jev_app.command("ask")
+@_handle_cli_errors
+def jev_ask_cmd(
+    query: str = typer.Argument(..., help="La pregunta, en cualquier idioma"),
+    topic: str | None = typer.Option(
+        None, help="Solo posts de este topic (enrich, o Jev sobre el umbral)"
+    ),
+    since: datetime | None = typer.Option(
+        None, formats=_DAY, help="Solo posts desde este día (AAAA-MM-DD, incluido)"
+    ),
+    until: datetime | None = typer.Option(
+        None, formats=_DAY, help="Solo posts hasta este día (AAAA-MM-DD, incluido)"
+    ),
+    author: str | None = typer.Option(None, help="Solo posts de este autor (@handle)"),
+    only_evaluated: bool = typer.Option(
+        False, "--only-evaluated", help="Solo posts con evaluación vigente de topics"
+    ),
+    limit: int | None = typer.Option(None, help="Máximo de posts a preguntar (pagar)"),
+    threshold: float | None = typer.Option(
+        None, help="Probabilidad mínima de un resultado (por defecto [jev].threshold)"
+    ),
+    top: int = typer.Option(_ASK_TOP, help="Resultados que se imprimen"),
+    yes: bool = typer.Option(
+        False, "--yes", help="No pedir confirmación por encima de [jev].ask_max_usd"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Solo cuenta y estima; no llama a Jev"),
+) -> None:
+    """Pregunta al corpus: Jev dice, post a post, si responde a la pregunta.
+
+    Una pregunta sí/no por post (la consulta tal cual, frente a la misma evidencia que `jev
+    topics`); resultados = posts con probabilidad ≥ umbral, de mayor a menor. Guarda las
+    respuestas en `data/jev/asks/<sha>.json` (repetir la consulta no vuelve a pagar un post
+    cuya evidencia no cambió), el historial en `data/jev/asks/index.json` y lo que costó en
+    `data/jev/runs.jsonl`. Antes de preguntar estima el coste, y por encima de
+    `[jev].ask_max_usd` pide confirmación. Nunca toca items.json.
+    """
+    cfg = _config()
+    resolved = _jev_threshold(cfg, threshold)
+    if top < 0:
+        raise ValueError("--top debe ser >= 0")
+    ask_query = AskQuery.of(query)
+    filters = AskFilters(
+        topic=topic,
+        since=since.date() if since else None,
+        until=until.date() if until else None,
+        author=author,
+        only_evaluated=only_evaluated,
+    )
+    # The same pass lock as `jev topics` and `jev serve`: ONE paid pass at a time, whatever
+    # it asks. Held from reading the query's file to writing it and the history — through
+    # the confirmation, so the posts confirmed are the posts asked.
+    try:
+        with nullcontext() if dry_run else pass_lock(cfg.jev_lock_path, "xbrain jev ask") as lock:
+            outcome = _jev_ask_pass(
+                cfg, ask_query, filters, limit, threshold=resolved, top=top, yes=yes, lock=lock
+            )
+    except PassLockBusy as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=75) from exc
+    if outcome is not None and outcome.interrupted:
+        raise typer.Exit(code=130)
+
+
+def _jev_ask_selection_line(selection: Selection, dropped: int) -> str:
+    """What the funnel did: the posts to pay for, then every reason a post is not asked."""
+    segments = [plural(len(selection.items), "post por preguntar", "posts por preguntar")]
+    if selection.skipped_current:
+        segments.append(plural(selection.skipped_current, "ya respondido", "ya respondidos"))
+    if selection.skipped_no_evidence:
+        segments.append(f"{selection.skipped_no_evidence} sin evidencia")
+    if selection.remaining:
+        segments.append(f"{selection.remaining} fuera del límite")
+    if dropped:
+        segments.append(
+            plural(dropped, "descartado por los filtros", "descartados por los filtros")
+        )
+    return " · ".join(segments)
+
+
+def _jev_ask_pass(
+    cfg: Config,
+    query: AskQuery,
+    filters: AskFilters,
+    limit: int | None,
+    *,
+    threshold: float,
+    top: int,
+    yes: bool,
+    lock: PassLock | None,
+) -> RunOutcome[Any] | None:
+    """`jev ask` from reading the query's file to printing the results: what the lock covers.
+
+    `lock` is `None` on `--dry-run`, which stops after the estimate. `None` is returned when
+    nothing was asked."""
+    store = load_store(cfg.items_path)
+    jev = load_jev_pairs(cfg) if filters.needs_jev else None
+    candidates, dropped = filter_posts(store, filters, jev=jev, threshold=threshold)
+    records = load_asks(cfg.jev_asks_dir / f"{query.sha}.json", query)
+    char_limit = cfg.jev_state_char_limit
+    selection = select_ask_items(candidates, records, query, char_limit=char_limit, limit=limit)
+    typer.echo(_jev_ask_selection_line(selection, dropped))
+    ratio = chars_per_token(load_all_asks(cfg.jev_asks_dir))
+    estimate = estimate_ask(selection, query, char_limit=char_limit, chars_per_token=ratio)
+    if selection.items:
+        typer.echo(
+            f"estimación: ~{estimate.tokens} tokens de entrada (~{estimate.usd:.4f} $) · "
+            f"{estimate.chars} caracteres a {ratio:.2f} por token"
+        )
+    if lock is None:
+        configured = "configurada" if typesafe_api_key(cfg.repo_root) else "NO configurada"
+        typer.echo(f"--dry-run: no se llama a Jev · clave TYPESAFE_API_KEY: {configured}")
+        return None
+    if selection.items and not yes:
+        _confirm_ask_cost(estimate.usd, cfg.jev_ask_max_usd)
+    outcome = _jev_ask_run(cfg, selection, query, records, lock) if selection.items else None
+    if outcome is not None and outcome.interrupted:
+        return outcome
+    results = ask_results(candidates, records, query, char_limit=char_limit, threshold=threshold)
+    record_ask(
+        cfg,
+        query,
+        filters=filters,
+        evaluated=results.answered,
+        results=len(results.ranked),
+        threshold=threshold,
+    )
+    _echo_ask_results(results, threshold, top)
+    return outcome
+
+
+def _confirm_ask_cost(usd: float, cap: float) -> None:
+    """Above `[jev].ask_max_usd`, spend only on an explicit yes; a no exits 1 having asked
+    nothing. At or under the cap, say nothing: the estimate line was already printed."""
+    if usd <= cap:
+        return
+    typer.echo(f"La estimación (~{usd:.4f} $) pasa de [jev].ask_max_usd = {cap} $.")
+    if not typer.confirm("¿Preguntar igualmente?", default=False):
+        typer.echo("Cancelado: no se ha preguntado nada.")
+        raise typer.Exit(code=1)
+
+
+def _jev_ask_run(
+    cfg: Config, selection: Selection, query: AskQuery, records: dict[str, Any], lock: PassLock
+) -> RunOutcome[Any]:
+    """The paid part: `run.run_ask`, with `jev topics`' hooks and their wording."""
+    path = cfg.jev_asks_dir / f"{query.sha}.json"
+
+    def _progress(done: int, total: int) -> None:
+        if done % 50 == 0 or done == total:
+            typer.echo(f"  {done}/{total}")
+
+    return run_ask(
+        cfg,
+        selection,
+        query,
+        records,
+        lambda: _jev_client(cfg),
+        lock=lock,
+        on_progress=_progress,
+        on_summary=lambda result: _echo_jev_outcome(result, path),
+        on_interrupted=lambda banked, stored: _echo_jev_interrupt(
+            banked, stored, force=False, path=path
+        ),
+        on_logged=_echo_jev_logged,
+    )
+
+
+def _one_line(text: str, width: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _echo_ask_results(results: AskResults, threshold: float, top: int) -> None:
+    """The posts that answer, best first: probability, id, author, day, the post, its link."""
+    noun = plural(results.answered, "post con respuesta vigente", "posts con respuesta vigente")
+    typer.echo(f"Resultados (≥ {threshold}): {len(results.ranked)} de {noun}")
+    for item, record in results.ranked[:top]:
+        typer.echo(
+            f"  {record.probability:.2f}  {item.id}  @{item.author.handle}  "
+            f"{item.created_at:%Y-%m-%d}  {_one_line(item.text, 70)}  {item.url}"
+        )
+    if len(results.ranked) > top:
+        typer.echo(f"  … y {len(results.ranked) - top} más (--top para verlos)")
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:

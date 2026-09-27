@@ -38,12 +38,26 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from xbrain.jev.client import JevError
-from xbrain.jev.models import JevRun, TopicAssessment
+from xbrain.jev.models import (
+    AskAssessment,
+    AskFile,
+    AskHistoryEntry,
+    JevRun,
+    TopicAssessment,
+)
 from xbrain.store import _atomic_write
+
+if TYPE_CHECKING:
+    from xbrain.jev.ask import AskQuery
+
+#: The history file inside the asks directory; every other `*.json` there is one query.
+ASK_INDEX = "index.json"
+_HISTORY = TypeAdapter(dict[str, AskHistoryEntry])
 
 
 def load_assessments(path: Path) -> dict[str, TopicAssessment]:
@@ -145,3 +159,75 @@ def append_run(run: JevRun, path: Path) -> None:
             raise
     finally:
         os.close(fd)
+
+
+# --------------------------------------------------------------------------- `jev ask`
+
+
+def _dump(payload: object, path: Path) -> None:
+    """Pretty, sorted, atomic — the side-car's own reasons (`save_assessments`)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def load_asks(path: Path, query: AskQuery) -> dict[str, AskAssessment]:
+    """One query's answers keyed by post id; `{}` when the query was never asked.
+
+    Same stance as `load_assessments`: a file that exists but cannot be read is REFUSED with
+    its path, never read as empty — that would re-pay every answer in it and then overwrite
+    them. A file whose `query` is another query is refused too: its answers were paid for a
+    different question, and reading them here would present them as answers to this one.
+    """
+    if not path.exists():
+        return {}
+    try:
+        stored = AskFile.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise JevError(f"{path}: consulta guardada ilegible ({exc})") from exc
+    if stored.query != query.text:
+        raise JevError(
+            f"{path} guarda la consulta {stored.query!r}, no {query.text!r}: "
+            "el fichero no corresponde a su nombre; muévelo aparte y vuelve a lanzar"
+        )
+    return dict(stored.assessments)
+
+
+def save_asks(query: AskQuery, records: dict[str, AskAssessment], path: Path) -> None:
+    """Write one query's file whole (atomic): its query and every record, sorted by post id."""
+    stored = AskFile(query=query.text, assessments=dict(sorted(records.items())))
+    _dump(stored.model_dump(mode="json"), path)
+
+
+def load_all_asks(directory: Path) -> list[AskAssessment]:
+    """Every ask answer on disk, over every query — what `ask.chars_per_token` measures on.
+
+    A file that cannot be read is refused like `load_asks` refuses it: an estimate quietly
+    computed over fewer answers than exist is a guess passed off as a measure."""
+    records: list[AskAssessment] = []
+    if not directory.exists():
+        return records
+    for path in sorted(directory.glob("*.json")):
+        if path.name == ASK_INDEX:
+            continue
+        try:
+            stored = AskFile.model_validate_json(path.read_text(encoding="utf-8"))
+        except ValidationError as exc:
+            raise JevError(f"{path}: consulta guardada ilegible ({exc})") from exc
+        records.extend(stored.assessments.values())
+    return records
+
+
+def load_ask_index(path: Path) -> dict[str, AskHistoryEntry]:
+    """The query history keyed by query sha; `{}` before the first query. Refused when corrupt:
+    the history is the only list of what was asked, and an empty one saved over it loses it."""
+    if not path.exists():
+        return {}
+    try:
+        return _HISTORY.validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise JevError(f"{path}: historial de consultas ilegible ({exc})") from exc
+
+
+def save_ask_index(index: dict[str, AskHistoryEntry], path: Path) -> None:
+    """Write the query history whole (atomic), sorted by sha."""
+    _dump({sha: entry.model_dump(mode="json") for sha, entry in sorted(index.items())}, path)
