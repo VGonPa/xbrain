@@ -60,10 +60,12 @@ from xbrain.jev.ask import (
     AskPlan,
     AskQuery,
     ask_path,
+    filter_posts,
     finish_ask,
     plan_ask,
     question_chars,
     same_selection,
+    topic_counts,
 )
 from xbrain.jev.assess import Selection, select_items
 from xbrain.jev.client import CallSkipped, JevClient, JevError, JevResult, Question
@@ -83,6 +85,7 @@ from xbrain.jev.picks import (
     AskPick,
     TopicsPick,
     parse_ask,
+    parse_filters,
     parse_pick,
     pick_ids,
 )
@@ -522,7 +525,8 @@ class _AskKind:
     """`xbrain jev ask` from the page: its query, pre-filters and limit (`AskPick`), planned,
     re-checked, run and finished by the command's own functions (`ask.plan_ask`,
     `ask.same_selection`, `run.run_ask`, `ask.finish_ask`) — the same sequence, never a copy.
-    Results are at `[jev].threshold`; the history rule is `finish_ask`'s."""
+    Results are RANKED, cut only by the pick's own minimum; the history rule is
+    `finish_ask`'s."""
 
     def parse(self, body: Any) -> AskPick:
         return parse_ask(body)
@@ -586,10 +590,13 @@ class _AskKind:
         that function's one rule, its line in the history. With every answer current no
         client is built and nothing is logged."""
         plan: AskPlan = priced.context
+        pick = job.pick
+        if not isinstance(pick, AskPick):  # pragma: no cover — the slot runs its own kind
+            raise TypeError("an ask job carries an AskPick")
         job.post_price = _post_price(plan)
         outcome = run_ask(cfg, plan, lambda: _Metered(make_client(), job), lock=lock, **_hooks(job))
         try:
-            found = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+            found = finish_ask(cfg, plan, outcome, minimum=pick.minimum)
         except Exception as exc:
             # The answers are paid, saved and logged by now: a history that cannot be written
             # must not turn them into «El trabajo falló» with nothing to show.
@@ -604,6 +611,29 @@ class _AskKind:
             "answered": found.answered,
             "recorded": found.recorded,
         }
+
+
+#: The filters `/api/ask/counts` reads from its query string (topics are what it counts).
+_COUNT_PARAMS = ("since", "until", "author", "only_evaluated")
+
+
+def _filters_from_query(params: dict[str, list[str]]) -> dict[str, Any]:
+    """A query string as `AskFilters.from_json` data: one value per key, `only_evaluated` as
+    `true`/`false`; anything else is a 400 naming it."""
+    unknown = sorted(set(params) - set(_COUNT_PARAMS))
+    if unknown:
+        raise refuse(f"parámetro desconocido: {unknown[0]}")
+    data: dict[str, Any] = {}
+    for key, values in params.items():
+        if len(values) != 1:
+            raise refuse(f"el parámetro {key} va una sola vez")
+        data[key] = values[0]
+    if "only_evaluated" in data:
+        flag = {"true": True, "false": False}.get(data["only_evaluated"])
+        if flag is None:
+            raise refuse("el parámetro only_evaluated debe ser true o false")
+        data["only_evaluated"] = flag
+    return data
 
 
 def _post_price(plan: AskPlan) -> Callable[[dict[str, str]], float]:
@@ -626,12 +656,10 @@ def _result_surfaces(row: dict[str, Any], blob: dict[str, Any]) -> dict[str, Any
     the tab's `asks.surfaces` (the blob sends each only once)."""
     cards = {card["id"]: card for card in blob["posts"]}
     out: dict[str, Any] = {}
-    for result in row["results"]:
-        card = cards.get(result["id"])
+    for post_id in row["answers"]["ids"]:
+        card = cards.get(post_id)
         jev = card.get("jev") if card else None
-        out[result["id"]] = (
-            jev["surfaces"] if jev else blob["asks"]["surfaces"].get(result["id"], [])
-        )
+        out[post_id] = jev["surfaces"] if jev else blob["asks"]["surfaces"].get(post_id, [])
     return out
 
 
@@ -682,6 +710,8 @@ class JevService:
         self._state = threading.Lock()
         self._media: MediaFiles | None = None
         self._cache: tuple[Any, dict[str, Any], JevPairs] | None = None
+        self._pairs_lock = threading.Lock()
+        self._pairs_cache: tuple[Any, JevPairs] | None = None
         self._html: tuple[Any, str] | None = None
         self._confirms: dict[str, _Confirm] = {}
         #: THE job slot: the job being started (under the lock, not yet published) and the
@@ -724,8 +754,7 @@ class JevService:
                 return self._cache
             # Read BEFORE the files: a job that had finished by now wrote them before this.
             finished_at = self._last_finished_at()
-            jev = load_jev_pairs(self.cfg)
-            _refuse_nothing_to_ask(jev, self.cfg)
+            jev = self._pairs()
             if self._media is None:
                 self._media = collect_jev_media(
                     list(jev.store.values()), self.cfg.output_dir, self.cfg.media_dir
@@ -742,6 +771,21 @@ class JevService:
             }
             self._cache = (signature, blob, jev)
             return self._cache
+
+    def _pairs(self) -> JevPairs:
+        """The posts and their current topics answers (`load_jev_pairs`), reloaded only when
+        the items, the vocabulary or the topics side-car changed — never for a query's answers
+        or the run log, which an ask job writes at every checkpoint. What the blob is built
+        from, and all `/api/ask/counts` reads: a counts GET never rebuilds the page."""
+        cfg = self.cfg
+        with self._pairs_lock:
+            signature = _signature([cfg.items_path, cfg.vocab_path, cfg.jev_topics_path])
+            if self._pairs_cache is not None and self._pairs_cache[0] == signature:
+                return self._pairs_cache[1]
+            jev = load_jev_pairs(cfg)
+            _refuse_nothing_to_ask(jev, cfg)
+            self._pairs_cache = (signature, jev)
+            return jev
 
     def _last_finished_at(self) -> str | None:
         with self._state:
@@ -776,6 +820,23 @@ class JevService:
             if row["sha"] == sha:
                 return {**row, "surfaces": _result_surfaces(row, blob)}
         raise ServeError(404, "esa consulta no está en el historial")
+
+    def ask_counts(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        """How many posts each topic keeps under the filters in `params` (a query string:
+        `since`, `until`, `author`, `only_evaluated=true|false`; `ask.topic_counts`, the
+        filter's own rule) and how many those filters keep: what the Preguntar tab writes
+        beside each topic. A GET: reads only, costs nothing, and reads the cached posts and
+        topics answers (`_pairs`), never the page's data — so a cross-site GET cannot force a
+        rebuild, and typing while a job checkpoints does not either."""
+        filters = parse_filters(_filters_from_query(params))
+        jev = self._pairs()
+        threshold = self.cfg.jev_threshold
+        try:
+            kept, _ = filter_posts(jev.store, filters, jev=jev, threshold=threshold)
+            counts = topic_counts(jev.store, filters, jev=jev, threshold=threshold)
+        except JevError as exc:
+            raise refuse(str(exc)) from exc
+        return {"posts": len(kept), "topic_counts": counts}
 
     # ------------------------------------------------------------------ picks and prices
 

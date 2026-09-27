@@ -40,7 +40,8 @@ from xbrain.jev.run import run_ask
 from xbrain.jev.store import load_runs
 
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
-#: A query asked only over «startups»: its posts (2, 4) answer 0.1 and 0.2 — no result.
+#: A query asked only over «startups»: its posts (2, 4) answer 0.1 and 0.2 — both results,
+#: ranked (nothing is cut at `[jev].threshold` any more).
 SEED_QUERY = "¿Quién cuenta cómo levantó una ronda seed?"
 #: A query whose file is later broken: its row says so, and costs nothing else.
 BROKEN_QUERY = "posts con datos de estudios sobre creatina"
@@ -53,7 +54,7 @@ def _asked(cfg: Config, text: str, *, when: datetime, **filters: Any) -> AskQuer
         plan = plan_ask(cfg, query, AskFilters(**filters), None)
         # Enough tokens that a query's cost shows at four decimals.
         outcome = run_ask(cfg, plan, lambda: _Asker(input_tokens=200_000), lock=lock)
-        finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold, now=when)
+        finish_ask(cfg, plan, outcome, now=when)
     return query
 
 
@@ -61,7 +62,7 @@ def _asked_repo(cfg: Config) -> dict[str, str]:
     """Three queries: the hooks one (results 1 and 3), a later «startups» one with no result,
     and an earlier one whose file is then broken."""
     hooks = _asked(cfg, QUERY, when=DT + timedelta(hours=1))
-    seed = _asked(cfg, SEED_QUERY, when=DT + timedelta(hours=2), topic="startups")
+    seed = _asked(cfg, SEED_QUERY, when=DT + timedelta(hours=2), topics=("startups",))
     broken = _asked(cfg, BROKEN_QUERY, when=DT + timedelta(minutes=30), author="bob")
     (cfg.jev_asks_dir / f"{broken.sha}.json").write_text("{", encoding="utf-8")
     return {"hooks": hooks.sha, "seed": seed.sha, "broken": broken.sha}
@@ -72,9 +73,14 @@ _ASK_JS = r"""
 const sQHistory = () => [...document.querySelectorAll('#ask-history li')].filter(seen).map(li => ({
   text: [...li.querySelectorAll('b, small')].map(e => e.textContent).join(' · '),
   current: li.querySelector('a').getAttribute('aria-current') === 'true'}));
-const sQResults = () => [...document.querySelectorAll('#ask-results .card')].filter(seen).map(c => ({
-  id: c.dataset.id, p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
-  jev: txt(c.querySelector('.jev .badge'))}));
+const sQResults = () => [...document.querySelectorAll('#ask-results .card')].filter(seen).map(c => {
+  const bar = c.querySelector('.askr .apbar');
+  const fill = bar && bar.firstElementChild;
+  return {id: c.dataset.id, p: txt(c.querySelector('.askr .ap')), saw: txt(c.querySelector('.askr details.saw > summary')),
+    jev: txt(c.querySelector('.jev .badge')), meta: txt(c.querySelector('.askr .jh .meta')),
+    bar: seen(bar) ? {width: fill.style.width, fill: fill.getBoundingClientRect().width,
+      track: bar.getBoundingClientRect().width, label: bar.getAttribute('aria-label')} : null};
+});
 const sQView = () => ({
   hash: location.hash,
   tab: txt(document.querySelector('.tabs a[data-tab="ask"]')),
@@ -86,6 +92,9 @@ const sQView = () => ({
   launch: txt(document.getElementById('ask-launch')),
   history: sQHistory(),
   results: sQResults(),
+  more: txt(document.getElementById('ask-more')),
+  keyless: txt(document.getElementById('ask-keyless')),
+  absent: txt(document.getElementById('refine-absent')),
 });
 const sQOpen = (words) => [...document.querySelectorAll('#ask-history li a')].find(a => seen(a) && a.textContent.includes(words)).click();
 """
@@ -190,8 +199,8 @@ def test_static_the_tab_lists_every_query_last_asked_first(ask_static):
     ]
     seed_cost, hooks_cost = shas["cost:seed"], shas["cost:hooks"]
     assert seed_cost != "~0,0000 $" and hooks_cost != seed_cost
-    assert f"0 resultados · 2 posts con respuesta · {seed_cost}" in view["history"][0]["text"]
-    assert f"3 resultados · 5 posts con respuesta · {hooks_cost}" in view["history"][1]["text"]
+    assert f" · 2 de 2 leídos por Jev · {seed_cost}" in view["history"][0]["text"]
+    assert f" · 5 de 5 leídos por Jev · {hooks_cost}" in view["history"][1]["text"]
     assert view["history"][0]["current"] is True
     # The broken file stopped the history's rebuild: said above the list, its row kept.
     assert view["banner"].startswith("No se pudo leer el historial: ")
@@ -206,11 +215,10 @@ def test_static_the_last_query_opens_by_default_and_says_what_it_found(ask_stati
     assert view["hash"] == "#ask"
     assert view["head"].startswith(f"«{SEED_QUERY}»")
     assert "Filtros: topic Startups" in view["head"]
-    assert view["results"] == []
-    assert view["empty"] == (
-        "Ningún post llega a 0,85: Jev no ve una respuesta a esta pregunta en los 2 posts con "
-        "respuesta vigente."
-    )
+    # Both answers are results, ranked — the old cut at 0,85 showed none.
+    assert _probs(view["results"]) == [("4", "0,20"), ("2", "0,10")]
+    assert view["empty"] is None and view["more"] is None
+    assert "Mostrando 2 de 2 leídos por Jev, de mayor a menor probabilidad." in view["head"]
 
 
 @_requires_chrome
@@ -221,9 +229,16 @@ def test_static_results_are_the_post_cards_ranked_by_probability(ask_static):
     assert view["hash"] == f"#ask?q={shas['hooks']}"
     assert _probs(view["results"]) == _shown(ranked())
     assert [h["current"] for h in view["history"]] == [False, True, False]
-    assert "3 de 5 posts con respuesta vigente llegan a 0,85" in view["head"]
+    assert "Mostrando 5 de 5 leídos por Jev, de mayor a menor probabilidad." in view["head"]
+    assert "0,85" not in view["head"]
     for result in view["results"]:
         assert re.fullmatch(r"Lo que vio Jev · 2 fuentes, \d+ caracteres", result["saw"])
+    # Each result's probability is drawn: the bar's fill is the number, over its track.
+    for result, (_, p) in zip(view["results"], ranked(), strict=True):
+        bar = result["bar"]
+        assert bar["width"] == f"{round(p * 100)}%"
+        assert bar["fill"] == pytest.approx(bar["track"] * p, abs=1.5)
+        assert bar["label"] == "probabilidad " + f"{p:.2f}".replace(".", ",")
 
 
 @_requires_chrome
@@ -451,7 +466,7 @@ def test_served_an_ask_job_ends_on_its_results_and_its_history(ask_served):
     assert sorted(ask_served["asked"]) == ["1", "2"]
     assert done["hash"] == f"#ask?q={sha}"
     assert _probs(done["results"]) == _shown(ranked(posts="12"))
-    assert done["panel"]["progress"].startswith("2 respuestas guardadas · 1 resultado · ")
+    assert done["panel"]["progress"].startswith("2 respuestas guardadas · 2 resultados · ")
     assert [h["text"].split(" · ")[0] for h in done["history"]] == [QUERY]
     assert done["history"][0]["current"] is True
     assert ask_served["job"]["query_sha"] == sha
@@ -473,7 +488,7 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
         "llegar se para; lo que ya esté en vuelo termina y puede pasarlo por poco (como mucho "
         "1 post)."
     )
-    assert again["end_text"].startswith("0 respuestas guardadas · 1 resultado · ")
+    assert again["end_text"].startswith("0 respuestas guardadas · 2 resultados · ")
     assert "runs.jsonl" not in again["end_text"]
     assert "no quedó en el historial" not in again["end_text"]
     # Nothing was sent, so nothing to log: a clean end — no alarm, and the panel stays hidden.
@@ -551,7 +566,7 @@ def test_served_an_ask_cut_by_the_cap_says_so_and_keeps_what_it_paid(ask_ended):
 
     assert (seen["job"]["state"], seen["job"]["reason"]) == ("interrupted", "tope")
     assert seen["end"]["progress"].startswith(
-        "Interrumpido (se alcanzó el tope por trabajo): 1 respuesta guardada · 0 resultados · "
+        "Interrumpido (se alcanzó el tope por trabajo): 1 respuesta guardada · 1 resultado · "
     )
 
 
@@ -582,7 +597,7 @@ def test_served_an_ask_that_failed_says_why(ask_ended):
 def test_served_an_asks_failures_unsaved_and_unpriced_answers_are_named(ask_ended):
     end = ask_ended("failures")["end"]
 
-    assert end["progress"].startswith("4 respuestas guardadas · 0 resultados · ")
+    assert end["progress"].startswith("4 respuestas guardadas · 4 resultados · ")
     assert "1 respuesta cobrada a la media estimada" in end["progress"]
     assert "sin tarifa: fake" in end["progress"]
     assert "1 fallida: 4 (" in end["progress"] and "respuesta ilegible" in end["progress"]
@@ -593,7 +608,7 @@ def test_served_an_asks_failures_unsaved_and_unpriced_answers_are_named(ask_ende
 def test_served_an_ask_that_did_not_reach_the_run_log_says_so(ask_ended):
     end = ask_ended("not-logged")["end"]
 
-    assert end["progress"].startswith("1 respuesta guardada · 0 resultados")
+    assert end["progress"].startswith("1 respuesta guardada · 1 resultado")
     assert "la pasada no quedó en runs.jsonl" in end["progress"]
 
 
@@ -672,13 +687,13 @@ def test_served_a_page_opened_mid_ask_follows_it_and_lists_it_after(ask_resumed)
 
     assert resumed["title"] == "Pregunta en curso"
     assert re.match(r"^[0-4] de 5 posts · ", resumed["progress"])
-    assert end["panel"]["progress"].startswith("5 respuestas guardadas · 3 resultados")
+    assert end["panel"]["progress"].startswith("5 respuestas guardadas · 5 resultados")
     assert [h["text"].split(" · ")[0] for h in end["history"]] == [QUERY]
 
 
 def test_the_fake_answers_what_the_assertions_expect():
     """The results the browser tests read: probability order is not id order, and 1 and 5 tie."""
-    assert ranked() == [("3", 0.97), ("1", 0.9), ("5", 0.9)]
+    assert ranked() == [("3", 0.97), ("1", 0.9), ("5", 0.9), ("4", 0.2), ("2", 0.1)]
     assert json.dumps(PROBS)
 
 
@@ -708,3 +723,644 @@ def test_static_a_rebuilt_query_and_an_unreadable_run_log_say_so(tmp_path):
     assert "~0,0000 $" not in seen["head"]
     assert " · — · reconstruida" in seen["history"][0]["text"]
     assert _probs(seen["results"]) == _shown(ranked())
+
+
+# --------------------------------------------------------------------------- task 14: Víctor's ask
+# His first real ask answered 808 posts with a max of 0.80, and the tab said «0 de 808 llegan a
+# 0,85». The same shape (`jev_ask_fixtures`), reopened: ranked, the first `[jev].ask_top`
+# shown, «Ver más» adding as many, each probability drawn — and REFINED for free: the saved
+# answers filtered by top / minimum / topics / days / author with no request and no cost, the
+# state in the hash, and the list equal to what Python's `ask.refine_results` keeps.
+
+_REFINE_JS = r"""
+const sQRefine = () => {
+  const box = document.getElementById('ask-refine');
+  if (!seen(box)) return null;
+  const val = id => document.getElementById(id).value;
+  return {title: txt(box.querySelector('h4')), top: val('refine-top'), min: val('refine-min'),
+    since: val('refine-since'), until: val('refine-until'), author: val('refine-author'),
+    topics: [...box.querySelectorAll('input[type=checkbox]')].filter(seen).map(b => ({
+      id: b.id, checked: b.checked, count: txt(b.parentNode.querySelector('.tcount'))}))};
+};
+const sQSet = (fields) => {
+  for (const [id, value] of Object.entries(fields)) {
+    const box = document.getElementById(id);
+    if (box.type === 'checkbox') box.checked = value; else box.value = value;
+    box.dispatchEvent(new Event('input', {bubbles: true}));
+    box.dispatchEvent(new Event('change', {bubbles: true}));
+  }
+};
+"""
+
+_VICTOR_STATIC_PROBE = (
+    "<script>"
+    + _SEEN
+    + _ASK_JS
+    + _REFINE_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const view = () => Object.assign(sQView(), {refine: sQRefine()});
+  const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
+  await step('first', async () => { if (!location.hash.startsWith('#ask')) location.hash = '#ask'; await sleep(80); return view(); });
+  await step('more', async () => { document.getElementById('ask-more').click(); await sleep(60); return view(); });
+  await step('more2', async () => { document.getElementById('ask-more').click(); await sleep(60); return view(); });
+  await step('away_back', async () => {
+    location.hash = '#posts?f=all'; await sleep(60);
+    document.querySelector('.tabs a[data-tab="ask"]').click(); await sleep(80);
+    return view();
+  });
+  await step('refined', async () => {
+    sQSet({'refine-min': '0.5', 'refine-topic-agentic-engineering': true});
+    await sleep(80); return view();
+  });
+  await step('cleared', async () => { document.getElementById('refine-clear').click(); await sleep(80); return view(); });
+  await step('clear_race', async () => {
+    // A refine, «Quitar el refinado» and another change in the same moment: the last change
+    // builds on the cleared state, never on the refine the clear removed.
+    sQSet({'refine-min': '0.5'});
+    await sleep(80);
+    document.getElementById('refine-clear').click();
+    sQSet({'refine-top': '30'});
+    await sleep(80);
+    return view();
+  });
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+_VICTOR_READ = (
+    "<script>"
+    + _SEEN
+    + _ASK_JS
+    + _REFINE_JS
+    + r"""
+setTimeout(() => {
+  const pre = document.createElement('pre'); pre.id = 'probe';
+  pre.textContent = JSON.stringify(Object.assign(sQView(), {refine: sQRefine()}));
+  document.body.appendChild(pre);
+}, 200);
+</script>"""
+)
+
+
+def _victor_page(
+    root: Path,
+    probe: str,
+    *,
+    jev: str = "",
+    minimum: float | None = None,
+    topics: bool = False,
+    mutate: Any = None,
+):
+    from tests.jev_ask_fixtures import victor_shaped_repo
+    from xbrain.jev.dashboard import build_page_data
+
+    _need_chrome()
+    cfg = victor_shaped_repo(root, jev=jev, topics=topics)
+    if minimum is not None:
+        path = cfg.jev_asks_dir / "index.json"
+        index = json.loads(path.read_text(encoding="utf-8"))
+        for entry in index["queries"].values():
+            entry["last_min"] = minimum
+        path.write_text(json.dumps(index), encoding="utf-8")
+    data = build_page_data(cfg, now=DT)
+    if mutate is not None:
+        mutate(data)
+    return _page(root, data, probe), data, cfg
+
+
+def _shown2(pairs) -> list[tuple[str, str]]:
+    return [(item.id, f"{record.probability:.2f}".replace(".", ",")) for item, record in pairs]
+
+
+def _refined(cfg: Config, *, minimum: float = 0.0, **refine: Any):
+    """Python's refine of Víctor's saved query: THE list the page must show."""
+    from xbrain.jev.ask import load_history, refine_results, reopen_results
+    from xbrain.jev.load import load_jev_pairs
+
+    jev = load_jev_pairs(cfg)
+    [entry] = load_history(cfg).queries.values()
+    found = reopen_results(cfg, entry, jev)
+    return refine_results(
+        found, AskFilters(**refine), minimum, store=jev.store, jev=jev, threshold=cfg.jev_threshold
+    )
+
+
+@pytest.fixture(scope="module")
+def victor_static(tmp_path_factory):
+    page, data, cfg = _victor_page(tmp_path_factory.mktemp("victor-static"), _VICTOR_STATIC_PROBE)
+    return _dump(page.as_uri()), data, cfg
+
+
+@_requires_chrome
+def test_static_victors_ask_opens_on_the_first_20_ranked_not_on_nothing(victor_static):
+    seen, data, cfg = victor_static
+    first = seen["first"]
+    order = _shown2(_refined(cfg).ranked)
+
+    assert len(order) == 808
+    assert _probs(first["results"]) == order[:20]
+    assert [p for _, p in order[:3]] == ["0,80", "0,79", "0,79"]
+    assert first["head"].startswith("«En qué topics hablo de agentic engineering?»")
+    assert "Filtros: desde 2026-05-07" in first["head"]
+    assert "Mostrando 20 de 808 leídos por Jev, de mayor a menor probabilidad." in first["head"]
+    assert "0,85" not in first["head"] and first["empty"] is None
+    assert first["more"] == "Ver 20 más (quedan 788)"
+    assert " · 20 de 808 leídos por Jev · " in first["history"][0]["text"]
+    for result in first["results"]:
+        assert result["bar"] is not None and result["bar"]["fill"] > 0
+    assert first["refine"]["title"] == "Refinar resultados (gratis)"
+    assert (first["refine"]["top"], first["refine"]["min"]) == ("20", "")
+
+
+@_requires_chrome
+def test_static_see_more_adds_20_and_the_hash_keeps_it(victor_static):
+    seen, data, cfg = victor_static
+    order = _shown2(_refined(cfg).ranked)
+
+    assert _probs(seen["more"]["results"]) == order[:40]
+    assert seen["more"]["more"] == "Ver 20 más (quedan 768)"
+    assert "top=40" in seen["more"]["hash"] and seen["more"]["refine"]["top"] == "40"
+    assert "Mostrando 40 de 808" in seen["more"]["head"]
+    assert _probs(seen["more2"]["results"]) == order[:60]
+    # Leaving the tab and coming back by its link keeps the refine state.
+    assert _probs(seen["away_back"]["results"]) == order[:60]
+    assert seen["away_back"]["hash"] == seen["more2"]["hash"]
+
+
+@_requires_chrome
+def test_static_refining_filters_the_saved_answers_like_python(victor_static):
+    seen, data, cfg = victor_static
+    refined = seen["refined"]
+    expected = _refined(cfg, minimum=0.5, topics=("agentic-engineering",))
+
+    assert _probs(refined["results"]) == _shown2(expected.ranked)[:60]
+    assert "min=0.5" in refined["hash"] and "t=agentic-engineering" in refined["hash"]
+    assert (
+        f"Mostrando {min(60, len(expected.ranked))} de {len(expected.ranked)} con relevancia "
+        "≥ 0,50 que pasan el refinado · 808 leídos por Jev" in refined["head"]
+    )
+    # Quitar el refinado: back to the query's defaults, the first 20 of every answer.
+    cleared = seen["cleared"]
+    assert _probs(cleared["results"]) == _shown2(_refined(cfg).ranked)[:20]
+    assert (
+        cleared["hash"]
+        == f"#ask?q={AskQuery.of('En qué topics hablo de agentic engineering?').sha}"
+    )
+
+
+@_requires_chrome
+def test_static_clearing_the_refine_resets_it_before_the_next_change(victor_static):
+    seen, data, cfg = victor_static
+    race = seen["clear_race"]
+    sha = AskQuery.of("En qué topics hablo de agentic engineering?").sha
+
+    assert race["hash"] == f"#ask?q={sha}&top=30"
+    assert _probs(race["results"]) == _shown2(_refined(cfg).ranked)[:30]
+    assert race["refine"]["min"] == ""
+
+
+@_requires_chrome
+@pytest.mark.parametrize(
+    "params,refine",
+    [
+        ({"min": "0.5", "top": "7"}, {"minimum": 0.5}),
+        (
+            # Víctor's posts run 2026-05-07 … 2026-06-10: this `until` cuts a third of them.
+            {"t": "startups", "since": "2026-05-20", "until": "2026-06-01", "top": "900"},
+            {
+                "topics": ("startups",),
+                "since": datetime(2026, 5, 20).date(),
+                "until": datetime(2026, 6, 1).date(),
+            },
+        ),
+        (
+            {"since": "2026-05-20", "until": "2026-05-20", "top": "900"},
+            {"since": datetime(2026, 5, 20).date(), "until": datetime(2026, 5, 20).date()},
+        ),
+        (
+            {"until": "2026-05-10", "min": "0.1", "top": "900"},
+            {"until": datetime(2026, 5, 10).date(), "minimum": 0.1},
+        ),
+        ({"t": "nutricion,startups", "top": "900"}, {"topics": ("nutricion", "startups")}),
+        (
+            {"t": "agentic-engineering,startups", "author": "@SomeOne", "min": "0.3", "top": "900"},
+            {"topics": ("agentic-engineering", "startups"), "author": "@SomeOne", "minimum": 0.3},
+        ),
+        ({"author": "nadie"}, {"author": "nadie"}),
+        ({"author": " @ SOMEONE ", "min": "0.6"}, {"author": " @ SOMEONE ", "minimum": 0.6}),
+    ],
+)
+def test_a_refined_view_opened_fresh_from_its_url_is_pythons_refine(tmp_path, params, refine):
+    """The refine state lives in the hash: a bookmark (or a reload) shows the same list, and
+    that list is `ask.refine_results`'. Two cases draw every kept answer (`top=900`), so the
+    whole list is compared — a minimum or a day edge cannot hide below the first 20."""
+    from urllib.parse import urlencode
+
+    page, _, cfg = _victor_page(tmp_path, _VICTOR_READ)
+    sha = AskQuery.of("En qué topics hablo de agentic engineering?").sha
+
+    seen = _dump(page.as_uri() + "#ask?" + urlencode({"q": sha, **params}))
+
+    minimum = refine.pop("minimum", 0.0)
+    expected = _shown2(_refined(cfg, minimum=minimum, **refine).ranked)
+    top = int(params.get("top", 20))
+    assert _probs(seen["results"]) == expected[:top]
+    if not expected:
+        assert seen["empty"].startswith("Ningún post pasa el refinado")
+    state = seen["refine"]
+    assert state["top"] == str(top) and state["since"] == params.get("since", "")
+    assert state["author"] == params.get("author", "")
+    ticked = sorted(t["id"].removeprefix("refine-topic-") for t in state["topics"] if t["checked"])
+    assert ticked == sorted(params["t"].split(",")) if "t" in params else ticked == []
+    _assert_refine_counts(cfg, state, minimum, refine)
+    # A topic of the link that no answer is in is listed (ticked, 0) and named.
+    if "nutricion" in params.get("t", ""):
+        assert "nutricion" in seen["absent"].casefold()
+    else:
+        assert seen["absent"] is None
+
+
+def _assert_refine_counts(cfg: Config, state: dict[str, Any], minimum: float, refine: dict) -> None:
+    """Each refine-bar topic's count is Python's refine by that topic alone under the rest of
+    the refine (brute force, topic by topic); every topic of an answer is offered, and every
+    ticked one too."""
+    others = {k: v for k, v in refine.items() if k != "topics"}
+    whole = _refined(cfg)
+    from xbrain.jev.load import load_jev_pairs
+    from xbrain.jev.ask import post_topics
+
+    jev = load_jev_pairs(cfg)
+    current = jev.current_by_id()
+    offered = {
+        t
+        for item, _ in whole.ranked
+        for t in post_topics(item, current.get(item.id), cfg.jev_threshold)
+    } | set(refine.get("topics", ()))
+    shown = {t["id"].removeprefix("refine-topic-"): t["count"] for t in state["topics"]}
+    assert set(shown) == offered
+    for topic in offered:
+        count = len(_refined(cfg, minimum=minimum, topics=(topic,), **others).ranked)
+        assert shown[topic] == f"{count:,}".replace(",", "."), topic
+
+
+@_requires_chrome
+@pytest.mark.parametrize(
+    "params,refine",
+    [
+        ({"t": "agentic-engineering", "top": "900"}, {"topics": ("agentic-engineering",)}),
+        (
+            # The 0.30 answers start on 2026-06-01: some Jev-only posts stay, some are cut.
+            {"t": "agentic-engineering", "min": "0.2", "until": "2026-06-05", "top": "900"},
+            {
+                "topics": ("agentic-engineering",),
+                "minimum": 0.2,
+                "until": datetime(2026, 6, 5).date(),
+            },
+        ),
+    ],
+)
+def test_the_jev_side_of_a_topic_refine_matches_python_at_the_bar(tmp_path, params, refine):
+    """With a current topics side-car, Jev puts some enrich-«startups» posts in
+    agentic-engineering at exactly 0.85 (in) and others at 0.84 (out): the page keeps the
+    same ones Python keeps."""
+    from urllib.parse import urlencode
+    from tests.jev_ask_fixtures import JEV_AGENTIC
+
+    page, data, cfg = _victor_page(tmp_path, _VICTOR_READ, topics=True)
+    sha = AskQuery.of("En qué topics hablo de agentic engineering?").sha
+
+    seen = _dump(page.as_uri() + "#ask?" + urlencode({"q": sha, **params}))
+
+    minimum = refine.pop("minimum", 0.0)
+    ranked = _refined(cfg, minimum=minimum, **refine).ranked
+    assert _probs(seen["results"]) == _shown2(ranked)
+    # The case is live: posts only Jev puts in the topic (at 0.85) are kept; posts it scored
+    # 0.84 are not.
+    from xbrain.jev.load import load_jev_pairs
+
+    jev = load_jev_pairs(cfg)
+    current = jev.current_by_id()
+    kept = {item.id for item, _ in ranked}
+    at = {0.85: set(), 0.84: set()}
+    for n, item in enumerate(jev.store.values()):
+        if (
+            item.id in current
+            and item.enriched.primary_topic == "startups"
+            and n % 7 in JEV_AGENTIC
+        ):
+            at[JEV_AGENTIC[n % 7]].add(item.id)
+    assert at[0.85] & kept and at[0.84] and not at[0.84] & kept
+    _assert_refine_counts(cfg, seen["refine"], minimum, refine)
+
+
+@_requires_chrome
+def test_an_answer_asked_by_another_model_or_pass_says_its_own(tmp_path):
+    """The model and minute asked travel once per query; an answer that differs carries its
+    own in `exceptions`, and its card says it."""
+
+    def _second_pass(data: dict[str, Any]) -> None:
+        answers = data["asks"]["history"][0]["answers"]
+        answers["exceptions"][answers["ids"][1]] = {"model": "jev-2.0.0"}
+
+    page, data, _ = _victor_page(tmp_path, _VICTOR_READ, mutate=_second_pass)
+
+    seen = _dump(page.as_uri() + "#ask")
+
+    metas = [r["meta"] for r in seen["results"]]
+    assert metas[1].startswith("jev-2.0.0 · ")
+    assert all(m.startswith("jev-1.13.0 · ") for i, m in enumerate(metas) if i != 1)
+    assert len(set(metas)) == 2
+
+
+@_requires_chrome
+def test_an_answer_without_refine_keys_is_an_error_not_a_missing_result(tmp_path):
+    """Every answer reaches the page through `ask.answer_view`, keys included; one that
+    arrives without them (a bug, or a stream gone wrong) is said, never silently dropped."""
+
+    def _drop_first(data: dict[str, Any]) -> None:
+        first = data["asks"]["history"][0]["answers"]["ids"][0]
+        del data["asks"]["keys"][first]
+
+    page, data, _ = _victor_page(tmp_path, _VICTOR_READ, mutate=_drop_first)
+
+    seen = _dump(page.as_uri() + "#ask")
+
+    assert seen["keyless"] is not None and "1 respuesta" in seen["keyless"]
+    assert "sin sus claves" in seen["keyless"]
+    assert len(seen["results"]) == 20
+
+
+@_requires_chrome
+def test_static_a_query_asked_with_a_minimum_opens_at_it_and_ask_top_shapes_the_list(tmp_path):
+    page, data, cfg = _victor_page(tmp_path, _VICTOR_STATIC_PROBE, jev="ask_top = 7\n", minimum=0.5)
+    seen = _dump(page.as_uri())
+    first, more = seen["first"], seen["more"]
+    order = _shown2(_refined(cfg, minimum=0.5).ranked)
+
+    assert len(order) == 156 and len(data["asks"]["history"][0]["answers"]["ids"]) == 808
+    assert _probs(first["results"]) == order[:7]
+    assert (
+        "Mostrando 7 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev, de mayor a menor "
+        "probabilidad." in first["head"]
+    )
+    assert first["refine"]["min"] == "0.5" and first["refine"]["top"] == "7"
+    assert first["more"] == "Ver 7 más (quedan 149)"
+    assert _probs(more["results"]) == order[:14]
+    assert " · 7 de 156 ≥ 0,50 · 808 leídos por Jev · " in first["history"][0]["text"]
+
+
+_VICTOR_SERVE_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + _ASK_JS
+    + _REFINE_JS
+    + r"""
+const sQForm = (fields) => { sQSet(fields); sPress(sId('ask-form'), 'Estimar lo que cuesta'); };
+let sCounts = 0;
+const sFetchCounts = window.fetch;
+window.fetch = function (u, init) { if (String(u).includes('/api/ask/counts')) sCounts++; return sFetchCounts.call(window, u, init); };
+const sTopics = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
+  id: b.id, checked: b.checked, text: txt(b.parentNode), count: txt(b.parentNode.querySelector('.tcount'))}));
+const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 && sPanel().go !== null, what); return sLastEstimate; };
+(async () => {
+  await sStep('form', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')) && sQResults().length > 0, 'el formulario y los resultados');
+    return Object.assign(sQView(), {topics: sTopics(), explain: txt(sId('ask-explain')), tip: txt(sId('ask-tip')),
+      form_title: txt(sId('ask-form').querySelector('h4')), min: sId('ask-min') ? 'HAY' : null, posts: sPosts});
+  });
+  await sStep('counts', async () => {
+    const posts0 = sPosts, counts0 = sCounts;
+    const box = sId('ask-since');
+    box.value = '2026-06-01';
+    box.dispatchEvent(new Event('input', {bubbles: true}));
+    box.dispatchEvent(new Event('change', {bubbles: true}));
+    await sWait(() => sTopics().some(t => t.id === 'ask-topic-startups' && t.count === '220'), 'los recuentos con «desde»');
+    return {topics: sTopics(), posts: sPosts - posts0, counts: sCounts - counts0};
+  });
+  await sStep('reload', async () => {
+    // New data (what a job's end brings) with «Desde» still typed: the counts are asked
+    // again for it, never left as the old data's.
+    const c0 = sCounts;
+    document.querySelectorAll('#ask-topics .tcount').forEach(n => { n.textContent = 'viejo'; });
+    await reloadData();
+    await sWait(() => sCounts > c0 && sTopics().some(t => t.id === 'ask-topic-startups' && t.count === '220'), 'los recuentos tras recargar');
+    return {topics: sTopics(), counts: sCounts - c0};
+  });
+  await sStep('one', async () => {
+    const n0 = sEstimates;
+    sQForm({'ask-q': 'posts que explican cómo trabajar con agentes', 'ask-since': '', 'ask-topic-agentic-engineering': true});
+    const e = await sNextEstimate(n0, 'la estimación con un topic');
+    const panel = sPanel();
+    sId('ask-cancel').click();
+    return {estimate: e, panel: panel};
+  });
+  await sStep('two', async () => {
+    const n0 = sEstimates;
+    sQForm({'ask-topic-startups': true});
+    const e = await sNextEstimate(n0, 'la estimación con dos topics');
+    const panel = sPanel();
+    sId('ask-cancel').click();
+    return {estimate: e, panel: panel};
+  });
+  await sStep('refine', async () => {
+    const posts0 = sPosts, r0 = sRefreshed, e0 = sEstimates, c0 = sCounts;
+    sId('ask-more').click();
+    await sWait(() => sQResults().length === 40, 'veinte más');
+    const more = sQView();
+    sQSet({'refine-min': '0.5'});
+    await sWait(() => (sQView().head || '').includes('con relevancia ≥ 0,50'), 'el mínimo');
+    const min = sQView();
+    sQSet({'refine-topic-startups': true, 'refine-min': '0.3'});
+    await sWait(() => (sQView().head || '').includes('que pasan el refinado'), 'el topic');
+    return {more: more, min: min, topic: Object.assign(sQView(), {refine: sQRefine()}),
+      posts: sPosts - posts0, reloads: sRefreshed - r0, estimates: sEstimates - e0, counts: sCounts - c0};
+  });
+  await sStep('reopen', async () => {
+    const posts0 = sPosts, r0 = sRefreshed;
+    location.hash = '#posts?f=all';
+    await sWait(() => seen(document.querySelector('#cards .card')), 'Posts');
+    document.querySelector('.tabs a[data-tab="ask"]').click();
+    await sWait(() => sQResults().length > 0, 'los resultados reabiertos');
+    sQOpen('agentic engineering');
+    await sWait(() => sQResults().length === 20, 'la consulta sin refinado');
+    return Object.assign(sQView(), {posts: sPosts - posts0, reloads: sRefreshed - r0});
+  });
+  await sStep('bad_counts', async () => {
+    sQSet({'ask-since': '2026-06-10', 'ask-until': '2026-06-01'});
+    await sWait(() => txt(sId('ask-topics-error')) !== null, 'el motivo del recuento fallido');
+    return {error: txt(sId('ask-topics-error')), topics: sTopics()};
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@pytest.fixture(scope="module")
+def victor_served(tmp_path_factory) -> dict[str, Any]:
+    from tests.jev_ask_fixtures import victor_shaped_repo
+    from tests.jev_fakes import FakeJevClient
+
+    def _repo_builder(root: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+        monkeypatch.setenv("XBRAIN_REPO_ROOT", str(root))
+        return victor_shaped_repo(root)
+
+    built: list[int] = []
+
+    def _make() -> FakeJevClient:
+        built.append(1)
+        return FakeJevClient()
+
+    seen = _served_dump(
+        tmp_path_factory.mktemp("victor-served"),
+        _VICTOR_SERVE_PROBE,
+        make_client=_make,
+        repo=_repo_builder,
+    )
+    seen["built"] = len(built)
+    return seen
+
+
+def _victor_expected(tmp_path: Path):
+    """What Python says for the same repo: the config, and the topic counts under filters."""
+    from tests.jev_ask_fixtures import victor_shaped_repo
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+
+    cfg = victor_shaped_repo(tmp_path)
+    jev = load_jev_pairs(cfg)
+    return cfg, lambda f: topic_counts(jev.store, f, jev=jev, threshold=cfg.jev_threshold)
+
+
+@_requires_chrome
+def test_served_the_tab_splits_what_is_asked_from_what_is_refined(victor_served):
+    form = victor_served["form"]
+
+    assert form["form_title"] == "Qué posts preguntar"
+    assert form["min"] is None  # the minimum is a free refine, never part of what is paid
+    assert form["explain"] == (
+        "Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan "
+        "por lo seguro que está Jev de que el post responde. Topic: posts que enrich o Jev "
+        "(≥ 0,85) ponen en alguno de los topics marcados."
+    )
+    assert form["tip"] == (
+        'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.'
+    )
+
+
+@_requires_chrome
+def test_served_topics_are_a_multi_select_each_with_its_count(victor_served, tmp_path):
+    form = victor_served["form"]
+    _, counts = _victor_expected(tmp_path)
+    expected = counts(AskFilters())
+
+    shown = {t["id"].removeprefix("ask-topic-"): t for t in form["topics"]}
+    assert set(shown) == set(expected)
+    assert {slug: int(t["count"].replace(".", "")) for slug, t in shown.items()} == expected
+    assert shown["agentic-engineering"]["text"].startswith("Agentic Engineering")
+    assert not any(t["checked"] for t in form["topics"])
+    assert form["posts"] == 0  # the counts the page opens with are the blob's: no request
+
+
+@_requires_chrome
+def test_served_the_counts_follow_the_other_filters_from_the_server(victor_served, tmp_path):
+    counts_step = victor_served["counts"]
+    _, counts = _victor_expected(tmp_path)
+    expected = counts(AskFilters(since=datetime(2026, 6, 1).date()))
+
+    got = {t["id"].removeprefix("ask-topic-"): int(t["count"]) for t in counts_step["topics"]}
+    assert got == expected and expected["agentic-engineering"] == 0
+    # Asked the server (`GET /api/ask/counts`), not computed here — and a GET: no POST.
+    assert counts_step["counts"] >= 1 and counts_step["posts"] == 0
+
+
+@_requires_chrome
+def test_served_new_data_asks_the_counts_again_for_the_filters_typed(victor_served, tmp_path):
+    step = victor_served["reload"]
+    _, counts = _victor_expected(tmp_path)
+    expected = counts(AskFilters(since=datetime(2026, 6, 1).date()))
+
+    assert step["counts"] >= 1
+    assert {t["id"].removeprefix("ask-topic-"): int(t["count"]) for t in step["topics"]} == expected
+
+
+@_requires_chrome
+def test_served_a_count_the_server_refuses_says_why(victor_served):
+    step = victor_served["bad_counts"]
+
+    assert "posterior" in step["error"] and "2026-06-10" in step["error"]
+    assert all(t["count"] == "—" for t in step["topics"])
+
+
+@_requires_chrome
+def test_served_ticking_a_second_topic_widens_the_estimate(victor_served, tmp_path):
+    one, two = victor_served["one"]["estimate"], victor_served["two"]["estimate"]
+    cfg, _ = _victor_expected(tmp_path)
+    query = AskQuery.of("posts que explican cómo trabajar con agentes")
+    plan_one = plan_ask(cfg, query, AskFilters(topics=("agentic-engineering",)), None)
+    plan_two = plan_ask(cfg, query, AskFilters(topics=("agentic-engineering", "startups")), None)
+
+    assert one["pick"]["topics"] == ["agentic-engineering"]
+    assert two["pick"]["topics"] == ["agentic-engineering", "startups"]
+    assert (one["posts"], two["posts"]) == (plan_one.estimate.posts, plan_two.estimate.posts)
+    assert (one["posts"], two["posts"]) == (156, 813)
+    assert (one["usd"], two["usd"]) == (plan_one.estimate.usd, plan_two.estimate.usd)
+    assert victor_served["one"]["panel"]["est"].startswith("156 posts por preguntar")
+    assert victor_served["two"]["panel"]["est"].startswith("813 posts por preguntar")
+
+
+@_requires_chrome
+def test_served_refining_changes_the_list_with_no_request_and_no_client(victor_served, tmp_path):
+    step = victor_served["refine"]
+    cfg, _ = _victor_expected(tmp_path)
+
+    assert len(step["more"]["results"]) == 40
+    assert _probs(step["min"]["results"]) == _shown2(_refined(cfg, minimum=0.5).ranked)[:40]
+    assert "Mostrando 40 de 156 con relevancia ≥ 0,50 · 808 leídos por Jev" in step["min"]["head"]
+    topic = step["topic"]
+    expected = _shown2(_refined(cfg, minimum=0.3, topics=("startups",)).ranked)
+    assert _probs(topic["results"]) == expected[:40]
+    assert "min=0.3" in topic["hash"] and "t=startups" in topic["hash"]
+    # Free: no POST, no estimate, no reload, and no client was ever built.
+    assert (step["posts"], step["estimates"], step["reloads"], step["counts"]) == (0, 0, 0, 0)
+    assert victor_served["built"] == 0
+
+
+@_requires_chrome
+def test_served_reopening_a_query_from_the_history_costs_nothing_and_resets_refine(victor_served):
+    reopen = victor_served["reopen"]
+
+    assert (reopen["posts"], reopen["reloads"]) == (0, 0)
+    assert len(reopen["results"]) == 20
+    assert "min=" not in reopen["hash"] and "t=" not in reopen["hash"]
+
+
+_EXPLAIN_READ = (
+    "<script>"
+    + _SERVE_JS
+    + _ASK_JS
+    + r"""
+(async () => {
+  await sStep('explain', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-explain')), 'la explicación');
+    return txt(sId('ask-explain'));
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_served_the_explanation_says_the_configured_topic_bar(tmp_path):
+    """The «(≥ …)» of the explanation is `[jev].threshold` from the blob, never a literal."""
+    seen = _served_dump(tmp_path, _EXPLAIN_READ, client=_Asker(), jev="threshold = 0.9\n")
+
+    assert "Topic: posts que enrich o Jev (≥ 0,90) ponen en alguno" in seen["explain"]

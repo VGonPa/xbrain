@@ -278,12 +278,19 @@ class AskHistoryEntry(BaseModel):
 
     One entry per query, refreshed each time it is asked: `first_asked_at`, `last_asked_at`
     and `times` span every use; the `last_*` fields are the LAST use only — the posts it had a
-    current answer for, how many were results, at which threshold, under which filters. The
-    full history of uses is the run log (`JevRun.query_sha`), which is also where its COST
-    lives (`report.ask_cost`), priced when read like every other bill. `rebuilt` marks an entry
-    reconstructed from the query's answer file because the index had lost it (a crash between
-    the save and the history write, a deleted `index.json`): its `last_*` are then counted over
-    the whole file at `[jev].threshold`, with no filters.
+    current answer for (`last_evaluated`), how many of them reach its minimum probability
+    (`last_results`; every answer when `last_min` is 0, the default: results are RANKED, not
+    cut), under which filters. The full history of uses is the run log (`JevRun.query_sha`),
+    which is also where its COST lives (`report.ask_cost`), priced when read like every other
+    bill. `rebuilt` marks an entry reconstructed from the query's answer file because the
+    index had lost it (a crash between the save and the history write, a deleted
+    `index.json`): its `last_*` are then counted over the whole file, with no filters.
+
+    `last_threshold` is LEGACY and read only: until 2026-09-27 a use's results were its answers
+    at or above a threshold (`[jev].threshold`, 0.85, by default), and entries written then
+    carry it. Nothing reads it for results — an old entry reopens ranked, with no minimum —
+    and nothing writes it. `last_filters` is `AskFilters.as_json` (an old entry's single
+    `topic` is read by `AskFilters.from_json`).
     """
 
     model_config = _FROZEN
@@ -295,8 +302,9 @@ class AskHistoryEntry(BaseModel):
     times: int = Field(ge=1)
     last_evaluated: int = Field(ge=0)
     last_results: int = Field(ge=0)
-    last_threshold: Probability
-    last_filters: dict[str, str | bool]
+    last_min: Probability = 0.0
+    last_threshold: Probability | None = None
+    last_filters: dict[str, str | bool | list[str]]
     rebuilt: bool = False
 
     @field_validator("first_asked_at", "last_asked_at")

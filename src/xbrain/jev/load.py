@@ -7,7 +7,7 @@ assessments are still current.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from xbrain.config import Config
 from xbrain.jev.assess import CurrentPairs, current_pairs
@@ -41,6 +41,19 @@ class JevPairs:
     #: re-asserting its own `cfg` and calling that agreement.
     fallback: str
     char_limit: int
+    #: `current_by_id`'s answer, built on the first call.
+    _by_id: dict[str, TopicAssessment] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def current_by_id(self) -> dict[str, TopicAssessment]:
+        """Each post's CURRENT topics answer, by post id — built once per load, for every
+        reader (the ask filters, the topic counts, the page's refine keys)."""
+        by_id = self._by_id
+        if by_id is None:
+            by_id = {item.id: assessment for item, assessment in self.pairs}
+            object.__setattr__(self, "_by_id", by_id)
+        return by_id
 
     @property
     def unassessed(self) -> int:

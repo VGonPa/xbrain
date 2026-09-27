@@ -66,6 +66,7 @@ With that in place:
    state_char_limit = 100000   # evidence is cut here; assessments record the pre-cut length
    serve_max_usd = 1.0         # the most one job started from `xbrain jev serve` may cost
    ask_max_usd = 0.25          # `xbrain jev ask` asks for confirmation above this estimate
+   ask_top = 20                # results `jev ask` prints / the Preguntar tab shows first
    ```
 
 Every `[jev]` key is also documented inline in
@@ -98,8 +99,8 @@ The full option list:
 | `xbrain jev report` | `--threshold FLOAT` (default `[jev].threshold`) |
 | `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
 | `xbrain jev serve` | `--port INTEGER` (default 8765; 0 = any free port) · `--no-open` (do not open the browser) |
-| `xbrain jev ask QUERY` | `--topic` · `--since` · `--until` · `--author` · `--only-evaluated` · `--limit` · `--threshold` · `--top` · `--yes` · `--dry-run` ([details](#xbrain-jev-ask--ask-the-corpus-a-question)) |
-| `xbrain jev asks` | none — lists the queries asked and what each cost |
+| `xbrain jev ask QUERY` | `--topic` · `--since` · `--until` · `--author` · `--only-evaluated` · `--limit` · `--min` · `--top` · `--all` · `--yes` · `--dry-run` ([details](#xbrain-jev-ask--ask-the-corpus-a-question)) |
+| `xbrain jev asks [N\|SHA]` | no argument: lists the queries asked (each as `N. <sha8> «query»`) and what each cost · with `N` or a sha prefix, reprints that query refined: `--top` · `--all` · `--min` · `--topic` · `--since` · `--until` · `--author` ([details](#history-and-what-a-query-has-cost)) |
 
 Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed, a busy
 port, a `jev ask` confirmation answered no) · **75** `jev topics` or `jev ask` refused because
@@ -771,22 +772,50 @@ reopening a query costs nothing.
 - **Consultas hechas** (right; below on a narrow screen): every query in
   `data/jev/asks/index.json` (read as `jev ask` reads it: an entry the index lost is rebuilt
   from its answer file and marked *reconstruida*), the last asked first. Each row has the
-  query, the day, how many results, how many posts have a current answer to it, what its
+  query, the day, how many of its results its default view shows (*20 de 808 leídos por Jev*;
+  asked with a minimum, *7 de 156 ≥ 0,50 · 808 leídos por Jev*), what its
   logged passes cost (`report.ask_cost_by_query`; *—* and why when `runs.jsonl` cannot be
   read), and how many times it was asked. A query whose file cannot be read says `ilegible`
   and costs only its own row. A history that cannot be read is said above the list.
 - **The query open** (`#ask?q=<sha>`; without it, the last one asked; a sha the history lacks
   says *Esta consulta no está en el historial*): the query, when it was asked, its filters
-  (*Sin filtros: todo el corpus* when none), its requests and cost, and *R de N posts con
-  respuesta vigente llegan a T*. T is the threshold that use asked for; the topic filter is
-  judged at `[jev].threshold`, as the command does.
+  (*Sin filtros: todo el corpus* when none; several topics read *topics A o B*), its requests
+  and cost, and what the list shows: *Mostrando 20 de 808 leídos por Jev, de mayor a menor
+  probabilidad* — refined, *Mostrando 20 de 156 con relevancia ≥ 0,50 que pasan el refinado ·
+  808 leídos por Jev*. (*Leídos por Jev*: the posts with a current answer — Jev read each one
+  and said how likely it answers the question.)
+  The results are **ranked, not cut**: every post with a current answer, best first (ties by
+  post id), in the order Python ranked them (`ask.saved_results`). `[jev].threshold` is not a
+  results bar — it is the topic-membership bar, and here it only judges the topic filter the
+  query was asked with. (Until 2026-09-27 the results were the answers at or above 0.85; a
+  yes/no to an open question rarely reaches that, and the first real query showed *0 de 808*.
+  Entries written then reopen ranked, for free.)
+  **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers: *Mostrar*
+  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), *Relevancia
+  mínima* (by default the query's `last_min`, set only by `jev ask --min` — none for most), the
+  topics among its answers (checkboxes, each with how many answers it keeps under the rest of
+  the refine — `askTopicCounts`, the one counting function, tested against Python topic by
+  topic; a topic ticked in the link that no answer is in is still listed, at 0, and named),
+  *Desde*, *Hasta* and *Autor* (read like the filter: spaces and a leading `@` dropped, case
+  ignored); **Quitar el refinado** goes back to the defaults. It
+  asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
+  computed in Python per result post by `ask.refine_keys` (its day in UTC, its handle by
+  `ask.normalise_author`, its topics by `ask.post_topics`) plus `n`, the size of the state Jev
+  read; an answer that arrives without its keys is named as an error, never dropped. Each
+  query's answers ship as columns (`{ids, p, model, asked_at, exceptions}`: every current
+  answer in Python's ranked order, the model and minute asked once), and the page keeps what
+  `ask.refine_results` keeps — the
+  function `xbrain jev asks N --min … --topic …` prints with. The state is ONE object in the
+  URL hash (`#ask?q=<sha>&top=40&min=0.5&t=a,b&since=…&until=…&author=…`), so a refined view
+  is a link, and it survives a reload; opening a query from the history starts it unrefined, and
+  so does a job that ends on it.
   The results are **recomputed when the page is built**: an answer to a post whose evidence
   changed since is not a result. They are the **post cards themselves** (the ones in Posts,
-  with their own Jev block), best first, each with a strip on top: *Responde a la pregunta*,
-  the probability, the model and when, and **Lo que vio Jev** — the same state a topics pass
-  sends, surface by surface, so it is there for a post topics never asked. With no result the
-  tab says so: *Ningún post llega a T: Jev no ve una respuesta a esta pregunta en los N posts
-  con respuesta vigente.*
+  with their own Jev block), each with a strip on top: *Responde a la pregunta*, the
+  probability as a number and a **bar** (its fill is the probability), the model and when, and
+  **Lo que vio Jev** — the same state a topics pass sends, surface by surface, so it is there
+  for a post topics never asked. When nothing passes the refine, the tab says so and that
+  changing it is free.
 - **Launching** needs the server. The static `jev.html` says *Para preguntar desde esta
   página, ábrela con `xbrain jev serve`* and gives the terminal command; served, the tab has
   the query box and the filters (see [`xbrain jev serve`](#xbrain-jev-serve--the-page-live-with-a-way-to-ask)).
@@ -798,13 +827,13 @@ written into the page's code; each comes from Python in the blob (`config`), so 
 what `xbrain jev topics` sends as of the last `xbrain jev dashboard`. To change a setting,
 edit `config.toml` and re-run `xbrain jev dashboard`.
 
-1. **Ajustes** — the seven `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
+1. **Ajustes** — the eight `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
    `config.toml` is validated against, read through `Config.jev_settings()`), each with the
    value in effect, its default (*por defecto* or *por defecto: X*), one line on what changing
    it does (the threshold moves every number but retires nothing; a new fallback retires every
    answer; a new char limit only the posts whose cut moves; the model and concurrency retire
-   nothing) and its key. The intro separates the two kinds: the threshold, the fallback and the
-   char limit built this page; the model (*Modelo que se pedirá*), the concurrency,
+   nothing) and its key. The intro separates the two kinds: the threshold, the fallback, the
+   char limit and `ask_top` (*Resultados que se muestran de una pregunta*) built this page; the model (*Modelo que se pedirá*), the concurrency,
    `serve_max_usd` (*Tope por trabajo de xbrain jev serve*) and `ask_max_usd` (*Tope sin
    preguntar de xbrain jev ask*) only matter to the next pass, from the terminal or through
    `xbrain jev serve`'s API. Under the model, the models that answered the
@@ -888,10 +917,27 @@ it starts, so photos mirrored later show after a restart.
 - **Evaluar estos posts** on a pair in Topics and on each list the Comparar tab opens (a band,
   a primary pair).
 
-**The Preguntar tab**, served, adds a **query box** and `jev ask`'s pre-filters — *Topic*,
-*Desde*, *Hasta*, *Autor*, *Como mucho (posts)* (the `--limit`) and *Solo posts con evaluación
-de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as
-every other button. There the estimate reads, for example:
+**The Preguntar tab**, served, adds **Qué posts preguntar**: a **query box** and `jev ask`'s
+pre-filters — the **topics as a multi-select** (none ticked = every topic; several = posts in
+any of them, and still every other filter), *Desde*, *Hasta*, *Autor*, *Como mucho (posts)* (the
+`--limit`) and *Solo posts con evaluación de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as every
+other button. Beside each topic is how many posts it keeps **under the other filters**: the
+blob's `asks.topic_counts` (`ask.topic_counts`, the whole corpus) until you type a filter,
+then the server's answer to `GET /api/ask/counts` — never counted in the browser. When the
+server refuses a count (a range that runs backwards), the counts read *—* and the reason is
+said under the topics; new data (a job's end) asks again for the filters typed. Under the
+filters, one line says what they do and one tip:
+
+> Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan por lo
+> seguro que está Jev de que el post responde. Topic: posts que enrich o Jev (≥ 0,85) ponen en
+> alguno de los topics marcados.
+>
+> Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.
+
+These filters change the posts asked, and so the price: tick a second topic and the
+estimate's post count and cost grow with it. Everything about which results are SHOWN — how
+many, a minimum, topics, days, author — is the free **Refinar resultados** on the open query
+(see [The Preguntar tab](#the-preguntar-tab)); the page's ask never sends a minimum. There the estimate reads, for example:
 
 > 2 posts por preguntar · 4 descartados por los filtros. Coste estimado: ~0,00009 $ — 2 posts
 > × ~1.000 tokens por llamada, más el texto de los posts (348 caracteres ≈ 87 tokens, a 4
@@ -990,10 +1036,11 @@ code:
 **Asking** is the same four steps, with its own pick and pass:
 
 - `POST /api/ask/estimate` takes `query` (required; normalised like the command's, at most
-  2,000 characters) and, optionally, `topic`, `since` and `until` (`AAAA-MM-DD`; a range that
-  runs backwards is refused), `author`, `only_evaluated` and `limit`: exactly `xbrain jev ask`'s
-  flags (`AskFilters.from_json`), planned by the command's own `ask.plan_ask`; results are at
-  `[jev].threshold`. It answers the same fields as a topics estimate (no `forced`, no
+  2,000 characters) and, optionally, `topics` (a list; an older page's single `topic` is read
+  as one), `since` and `until` (`AAAA-MM-DD`; a range that runs backwards is refused),
+  `author`, `only_evaluated`, `limit` and `min` (0–1, the results' minimum): exactly
+  `xbrain jev ask`'s flags (`AskFilters.from_json`), planned by the command's own
+  `ask.plan_ask`. The confirmation is bound to all of them, `min` included. It answers the same fields as a topics estimate (no `forced`, no
   `per_post`) plus `query_sha`, `dropped` (by the filters), `candidates`, `chars`,
   `cost_model` (`{per_call, chars_per_token, measured, answers}`) and `similar` (queries
   asked before that differ only in case, punctuation or spacing). Its `usd` is the estimate of
@@ -1011,12 +1058,19 @@ code:
     call failed.
 
   The job view adds `query_sha`. Its `outcome` adds `sent` (the calls that reached the vendor:
-  0 when every answer was cached, which is a clean end and has nothing to log), `results` (at
-  the threshold), `answered` and `recorded`. When the history cannot be written after the
+  0 when every answer was cached, which is a clean end and has nothing to log), `results` (the
+  answers at or above `min`: every answer when there is none), `answered` and `recorded`. When the history cannot be written after the
   answers were paid, the job still ends `done`, with `history_error` and the answers' `file`.
 - The served cap for an ask is **`[jev].serve_max_usd`**, like any server job.
   `[jev].ask_max_usd` is the terminal's confirmation threshold and does not apply here.
-- `GET /api/asks` is the tab's data, `{history, surfaces, error}` (the blob's `asks`), and
+- `GET /api/ask/counts?since=…&until=…&author=…&only_evaluated=true` takes the filters as a
+  query string (each at most once; `only_evaluated` is `true` or `false`; anything else is a
+  400) and answers `{posts, topic_counts}`: how many posts the filters keep, and how many each
+  topic would keep under them (`ask.topic_counts`, the same rule as `filter_posts` with that one
+  topic). It reads only and costs nothing, under the same guards as `/api/asks`, and reads the
+  server's cached posts and topics answers (reloaded only when items, vocabulary or the topics
+  side-car change): it never rebuilds the page's data, even mid-job.
+- `GET /api/asks` is the tab's data, `{history, surfaces, topic_counts, error}` (the blob's `asks`), and
   `GET /api/ask/<sha>` one query of it plus `surfaces`, what Jev read for each of its results
   (404 for a sha the history lacks). Both are read-only and cost nothing. The routes are
   `/api/ask/estimate` and `/api/ask/evaluate` rather than one `/api/ask`: the same
@@ -1082,8 +1136,10 @@ uv run xbrain jev asks        # the queries asked so far, and what each has cost
 ```
 
 You write a question in any language, and Jev says **post by post** whether each post
-answers it. The results are the posts at or above the threshold, best first. Jev writes no
-answer text. It filters and scores; reading the posts is up to you.
+answers it. The results are **ranked**: every post with a current answer, best first — a search
+ranks, it does not cut. It prints the first `[jev].ask_top` (20). `[jev].threshold` (0.85) is
+the bar for topic *membership*, not for results: a yes/no to an open question rarely reaches it
+(the first real query, 808 posts, topped out at 0.80). Jev writes no answer text. It filters and scores; reading the posts is up to you.
 
 **What each post is asked.** One call per post, with the same `state` a topics pass sends
 (the post, its thread, the quoted post, the article, the transcript, the image descriptions:
@@ -1104,13 +1160,14 @@ are kept, because they reach Jev.
 
 | Flag | What it does |
 |---|---|
-| `--topic SLUG` | only posts that enrich put in that topic (primary or not) **or** whose **current** Jev topics answer backs it at `[jev].threshold` — never at `--threshold`, so a low results bar does not widen what is paid for. A slug that is neither in the vocabulary nor used by enrich is refused |
+| `--topic SLUG` | only posts that enrich put in that topic (primary or not) **or** whose **current** Jev topics answer backs it at `[jev].threshold`. Repeat it for several: a post in **any** of them is kept (and every other filter still applies). A slug that is neither in the vocabulary nor used by enrich is refused |
 | `--since AAAA-MM-DD` · `--until AAAA-MM-DD` | only posts created in those days, both days included (UTC). `--since` after `--until` is refused |
 | `--author HANDLE` | only posts by that account (`@` and case ignored; a blank one is refused) |
 | `--only-evaluated` | only posts with a current Jev topics answer |
 | `--limit N` | ask at most N posts (the rest are counted as `fuera del límite`); below 1 is refused |
-| `--threshold T` | the lowest probability that counts as a **result**. Default `[jev].threshold`. It changes only what is printed, never what is asked |
-| `--top N` | how many results to print (default 20; the rest are counted) |
+| `--min P` | *relevancia mínima*: only answers at or above P are results (0–1; default 0 = none). It changes only what is shown and recorded as the use's `last_min` (the default of its later refines), never what is asked or paid. To look again with another minimum, refine the saved query for free: `xbrain jev asks 1 --min P` |
+| `--top N` | how many results to print (default `[jev].ask_top`, 20; the rest are counted). At least 1 |
+| `--all` | print every result |
 | `--yes` | do not ask for confirmation above `[jev].ask_max_usd` |
 | `--dry-run` | count and estimate, then stop. Needs no key, takes no lock, writes nothing |
 
@@ -1130,17 +1187,23 @@ estimación: ~2985703 tokens de entrada (~0.1254 $) · 4570812 caracteres · a p
   …
 1843 respuestas · 0 fallidas · 2961320 tokens de entrada (~0.1244 $) · modelo jev-1.13.0 → …/data/jev/asks/9f2c….json
 pasada registrada → …/data/jev/runs.jsonl
-Resultados (≥ 0.85): 14 de 1843 posts con respuesta vigente
-  0.98  1834…  @someone  2026-05-02  Claude Code hooks: PreToolUse and PostToolUse, with …  https://x.com/…
+Resultados: los 20 primeros de 1843 leídos por Jev, de mayor a menor probabilidad
+  0.98 ██████████  1834…  @someone  2026-05-02  Claude Code hooks: PreToolUse and PostToolUse, with …  https://x.com/…
+  0.81 ████████··  1790…  @other  2026-04-11  My hooks setup for Claude Code …  https://x.com/…
   …
+  … y 1823 más (--top N o --all para verlos)
 Esta consulta ha costado: 1 pasada · 1843 peticiones · 2961320 tokens de entrada (~0.1244 $)
 ```
 
 The first line accounts for every post: to ask, `ya respondidos` (the cache, free),
 `sin evidencia`, `fuera del límite` and `descartados por los filtros`. The results cover every
 post the filters kept that has a **current** answer, including answers paid for in earlier
-runs of the same query. Each result line is the probability, the post id, the author, the
-day, the post on one line and its link. The last line is everything this query has cost, from
+runs of the same query, ranked by probability (ties by post id). Each result line is the
+probability as a number and as a ten-cell bar (one cell per 0.1, rounded), the post id, the
+author, the day, the post on one line and its link. With `--min P` the header says how many
+reach it: `Resultados: los 20 primeros de 156 con relevancia ≥ 0.5 · 808 leídos por Jev, de
+mayor a menor probabilidad` (*leídos por Jev*: the posts with a current answer). `--threshold`,
+the old results cut, is refused with a message pointing to `--min`. The last line is everything this query has cost, from
 the run log.
 
 When a query already asked differs from yours only in case, punctuation or spacing, it says
@@ -1212,8 +1275,15 @@ run again.
 ### History, and what a query has cost
 
 `data/jev/asks/index.json` keeps **one entry per query**. It records when the query was first
-and last asked and how many times, plus its **last use**: the posts with a current answer,
-the results, the threshold and the filters (`last_*`). Every use is in the run log: each ask
+and last asked and how many times, plus its **last use**: the posts with a current answer
+(`last_evaluated`), how many reach its minimum (`last_results`; all of them without one), the
+minimum (`last_min`, 0 = none) and the filters (`last_filters`, with `topics` as a list).
+`last_min` is set by `jev ask --min` (0 when the flag is not given) and is only the default of
+a later refine: the page ships every current answer whatever it is, and an ask from the page
+sends no minimum, so it keeps the query's `last_min`. An entry rebuilt from its answer file
+counts every answer in the file in `last_evaluated` and `last_results`.
+Entries written before results were ranked also carry `last_threshold`, the old results cut:
+it is read and never used, and never written again, so they reopen ranked. Every use is in the run log: each ask
 pass that sent a request appends a `runs.jsonl` line with `kind: "ask"` and the query's
 `query_sha`, with the same fields and the same every-exit-path guarantee as a topics pass (see
 [It logs the pass](#it-logs-the-pass-datajevrunsjsonl)). The page's
@@ -1223,8 +1293,14 @@ when the page is built, at no cost; served, it can also ask.
 **What a query has cost** is summed from those lines and priced when read, like every bill:
 
 - `jev ask` prints it after the results (`Esta consulta ha costado: …`);
-- `xbrain jev asks` lists every query, newest first, with its dates, how many times it was
-  asked, its last use and its cost;
+- `xbrain jev asks` lists every query, newest first, each headed `N. <sha8> «query»`, with its
+  dates, how many times it was asked, its last use and its cost; `xbrain jev asks N` (that
+  number, 1 = the last) or `xbrain jev asks <sha prefix>` reprints that query's saved results,
+  refined with `--top N`/`--all`, `--min P` (default: its last minimum), `--topic`
+  (repeatable), `--since`, `--until` and `--author` (`ask.refine_results`): no client is
+  built, nothing is asked, nothing is written. The header counts what passes: *Resultados: los
+  20 primeros de 187 que pasan el refinado (topic agentic-engineering) con relevancia ≥ 0.5 ·
+  808 leídos por Jev*, and the tail (*… y 167 más*) adds up to it;
 - `jev report` adds a `Consultas (jev ask): …` line under `Histórico:`.
 
 Every topics cost view (`jev report`'s `Histórico:`, the page's cost strip, per-pass table and
@@ -1235,7 +1311,7 @@ A use is recorded unless it was interrupted before any answer was kept. An inter
 that kept answers is recorded, so the history never lags its file. If the history loses an
 entry anyway (a crash between the two writes, a deleted `index.json`), the next read rebuilds
 it from the query's file and marks it `rebuilt` (`reconstruida desde sus respuestas`). Its last
-use is then counted over the whole file at `[jev].threshold`, with no filters. A corrupt
+use is then counted over the whole file, with no minimum and no filters. A corrupt
 `index.json` is refused before any prompt or payment.
 
 ### One pass at a time
@@ -1246,15 +1322,15 @@ confirmation waits**. A second pass is refused with exit 75. `--dry-run` takes n
 
 ### Labelling queries (search quality)
 
-The default threshold and the question's wording have **not been tuned** for search yet; the
-threshold is `[jev].threshold`, the topics one. A few queries labelled by hand are what that
-tuning needs. To label one:
+The question's wording has **not been tuned** for search yet, and there is no default minimum:
+results are ranked, and where a useful cut lies (if anywhere) is what labelled queries would
+show. A few queries labelled by hand are what that tuning needs. To label one:
 
 1. Look at the cost first: `xbrain jev ask "<query>" --dry-run`. Without filters the query
    pays for the whole corpus (about 0.18 $, see above).
-2. Run it with a low bar, so the posts near the edge show:
-   `xbrain jev ask "<query>" --threshold 0.3 --top 50`. The low bar changes only what is
-   printed; the posts asked are the same.
+2. Run it and print more of the ranking, so the posts near the edge show:
+   `xbrain jev ask "<query>" --top 50`. `--top` changes only what is printed; the posts asked
+   are the same.
 3. Copy the printed list to a note, one line per post: its id, its probability, and your
    label: `sí` (it answers the query), `no`, or `parcial`.
 4. Label at least the top 20. Add any post you know answers the query that is missing from

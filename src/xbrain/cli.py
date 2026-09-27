@@ -63,7 +63,10 @@ from xbrain.jev.ask import (
     ask_path,
     finish_ask,
     load_history,
+    normalise_author,
     plan_ask,
+    refine_results,
+    reopen_results,
     same_selection,
 )
 from xbrain.jev.client import JevClient, JevError
@@ -78,6 +81,7 @@ from xbrain.jev.defaults import (
 )
 from xbrain.jev.env import dry_run_key_line, typesafe_api_key
 from xbrain.jev.load import JevPairs, load_jev_pairs
+from xbrain.jev.models import AskHistoryEntry
 from xbrain.jev.report import (
     ask_cost,
     ask_cost_by_query,
@@ -2946,8 +2950,6 @@ def _jev_topics_pass(
     )
 
 
-#: Results printed by `jev ask` unless `--top` says otherwise; the rest are counted.
-_ASK_TOP = 20
 _DAY = ["%Y-%m-%d"]
 _ASK_HOLDER = "xbrain jev ask"
 
@@ -2956,9 +2958,10 @@ _ASK_HOLDER = "xbrain jev ask"
 @_handle_cli_errors
 def jev_ask_cmd(
     query: str = typer.Argument(..., help="La pregunta, en cualquier idioma"),
-    topic: str | None = typer.Option(
+    topic: list[str] | None = typer.Option(
         None,
-        help="Solo posts de este topic: enrich, o Jev con evaluación vigente ≥ \\[jev].threshold",
+        help="Solo posts de este topic (repetible: de cualquiera de ellos): enrich, o Jev con "
+        "evaluación vigente ≥ \\[jev].threshold",
     ),
     since: datetime | None = typer.Option(
         None, formats=_DAY, help="Solo posts desde este día (AAAA-MM-DD, incluido)"
@@ -2971,10 +2974,21 @@ def jev_ask_cmd(
         False, "--only-evaluated", help="Solo posts con evaluación vigente de topics"
     ),
     limit: int | None = typer.Option(None, help="Máximo de posts a preguntar (pagar)"),
-    threshold: float | None = typer.Option(
-        None, help="Probabilidad mínima de un resultado (por defecto \\[jev].threshold)"
+    minimum: float = typer.Option(
+        0.0,
+        "--min",
+        help="Relevancia mínima: solo resultados con probabilidad ≥ este valor (0 = sin mínimo)",
     ),
-    top: int = typer.Option(_ASK_TOP, help="Resultados que se imprimen"),
+    top: int | None = typer.Option(
+        None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
+    ),
+    show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+    threshold: float | None = typer.Option(
+        None,
+        "--threshold",
+        hidden=True,
+        help="Retirada: los resultados se ordenan; usa --min",
+    ),
     yes: bool = typer.Option(
         False, "--yes", help="No pedir confirmación por encima de \\[jev].ask_max_usd"
     ),
@@ -2983,16 +2997,21 @@ def jev_ask_cmd(
     """Pregunta al corpus: Jev dice, post a post, si responde a la pregunta.
 
     Una pregunta sí/no por post (la consulta tal cual, frente a la misma evidencia que `jev
-    topics`); resultados = posts con probabilidad ≥ umbral, de mayor a menor. Guarda las
+    topics`); resultados = los posts con respuesta, ordenados de mayor a menor probabilidad
+    (se imprimen los `\\[jev].ask_top` primeros; `--min` descarta los de menos). Guarda las
     respuestas en `data/jev/asks/<sha>.json` (repetir la consulta no vuelve a pagar un post
     cuya evidencia no cambió), el historial en `data/jev/asks/index.json` y lo que costó en
     `data/jev/runs.jsonl`. Antes de preguntar estima el coste, y por encima de
     `\\[jev].ask_max_usd` pide confirmación. Nunca toca items.json.
     """
+    if threshold is not None:
+        # The old results cut, typed from habit: said in Spanish, with what replaces it.
+        raise ValueError(
+            "--threshold ya no existe en jev ask: los resultados se ordenan; usa --min P "
+            "(relevancia mínima)"
+        )
     cfg = _config()
-    resolved = _jev_threshold(cfg, threshold)
-    if top < 0:
-        raise ValueError("--top debe ser >= 0")
+    shown = _ask_shown(cfg, minimum, top, show_all)
     ask_query = AskQuery.of(query)
     filters = _ask_filters(topic, since, until, author, only_evaluated)
     # Planned WITHOUT the lock: the estimate and the confirmation must never hold it while a
@@ -3011,8 +3030,8 @@ def jev_ask_cmd(
                 cfg,
                 plan,
                 lock,
-                threshold=resolved,
-                top=top,
+                minimum=minimum,
+                top=shown,
                 yes=yes,
                 confirmed=confirmed,
                 limit=limit,
@@ -3024,8 +3043,19 @@ def jev_ask_cmd(
         raise typer.Exit(code=130)
 
 
+def _ask_shown(cfg: Config, minimum: float, top: int | None, show_all: bool) -> int | None:
+    """How many results to print (`None`: every one), refusing a `--min` outside [0, 1] and a
+    `--top` below 1. The default is `[jev].ask_top`."""
+    if not 0.0 <= minimum <= 1.0:
+        raise ValueError("--min debe estar en [0.0, 1.0]")
+    shown = cfg.jev_ask_top if top is None else top
+    if shown < 1:
+        raise ValueError("--top debe ser >= 1")
+    return None if show_all else shown
+
+
 def _ask_filters(
-    topic: str | None,
+    topic: list[str] | None,
     since: datetime | None,
     until: datetime | None,
     author: str | None,
@@ -3033,7 +3063,7 @@ def _ask_filters(
 ) -> AskFilters:
     """The flags as `AskFilters` — which refuses the ones that could only select nothing."""
     return AskFilters(
-        topic=topic,
+        topics=tuple(topic or ()),
         since=since.date() if since else None,
         until=until.date() if until else None,
         author=author,
@@ -3119,8 +3149,8 @@ def _jev_ask_locked(
     before: AskPlan,
     lock: PassLock,
     *,
-    threshold: float,
-    top: int,
+    minimum: float,
+    top: int | None,
     yes: bool,
     confirmed: bool,
     limit: int | None,
@@ -3139,10 +3169,10 @@ def _jev_ask_locked(
         )
     _refuse_a_price_not_agreed(cfg, before, plan, yes=yes, confirmed=confirmed)
     outcome = _jev_ask_run(cfg, plan, lock) if plan.selection.items else None
-    results = finish_ask(cfg, plan, outcome, threshold=threshold)
+    results = finish_ask(cfg, plan, outcome, minimum=minimum)
     if outcome is not None and outcome.interrupted:
         return outcome
-    _echo_ask_results(results, threshold, top)
+    _echo_ask_results(results, minimum, top)
     cost = ask_cost(load_runs(cfg.jev_runs_path), plan.query.sha)
     if cost["runs"]:
         typer.echo(f"Esta consulta ha costado: {cost_line(cost)}")
@@ -3176,44 +3206,156 @@ def _one_line(text: str, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
-def _echo_ask_results(results: AskResults, threshold: float, top: int) -> None:
-    """The posts that answer, best first: probability, id, author, day, the post, its link."""
-    noun = plural(results.answered, "post con respuesta vigente", "posts con respuesta vigente")
-    typer.echo(f"Resultados (≥ {threshold}): {len(results.ranked)} de {noun}")
-    for item, record in results.ranked[:top]:
+def _bar(probability: float) -> str:
+    """The probability drawn in ten cells, one per 0.1, rounded."""
+    full = round(probability * 10)
+    return "█" * full + "·" * (10 - full)
+
+
+def _refine_words(refine: AskFilters) -> str:
+    """A refine's filters in words, as the header names them: «topic a o b, desde …»."""
+    parts = []
+    if refine.topics:
+        noun = "topic" if len(refine.topics) == 1 else "topics"
+        parts.append(f"{noun} {' o '.join(refine.topics)}")
+    if refine.since is not None:
+        parts.append(f"desde {refine.since}")
+    if refine.until is not None:
+        parts.append(f"hasta {refine.until}")
+    if refine.author is not None:
+        parts.append(f"autor @{normalise_author(refine.author)}")
+    return ", ".join(parts)
+
+
+def _echo_ask_results(
+    results: AskResults, minimum: float, top: int | None, refine: AskFilters | None = None
+) -> None:
+    """The results RANKED, the first `top` (every one when None): probability as a number and
+    a bar, id, author, day, the post, its link; then how many more there are.
+
+    The header counts what the list holds: «los 20 primeros de 187 que pasan el refinado
+    (topic …) con relevancia ≥ 0.5 · 808 leídos por Jev» — the refine (`jev asks … --topic`)
+    and the minimum both named, so shown + «y N más» adds up to the number said."""
+    total = len(results.ranked)
+    shown = total if top is None else min(top, total)
+    read = plural(results.answered, "leído por Jev", "leídos por Jev")
+    which = f"los {shown} primeros" if shown < total else f"los {shown}"
+    words = _refine_words(refine) if refine is not None else ""
+    what = f"{total} que pasan el refinado ({words})" if words else f"{total}"
+    if minimum > 0:
+        what += f" con relevancia ≥ {minimum}"
+    of = f"{what} · {read}" if words or minimum > 0 else read
+    typer.echo(f"Resultados: {which} de {of}, de mayor a menor probabilidad")
+    for item, record in results.ranked[:shown]:
         typer.echo(
-            f"  {record.probability:.2f}  {item.id}  @{item.author.handle}  "
-            f"{item.created_at:%Y-%m-%d}  {_one_line(item.text, 70)}  {item.url}"
+            f"  {record.probability:.2f} {_bar(record.probability)}  {item.id}  "
+            f"@{item.author.handle}  {item.created_at:%Y-%m-%d}  {_one_line(item.text, 70)}  "
+            f"{item.url}"
         )
-    if len(results.ranked) > top:
-        typer.echo(f"  … y {len(results.ranked) - top} más (--top para verlos)")
+    if shown < total:
+        typer.echo(f"  … y {total - shown} más (--top N o --all para verlos)")
 
 
 @jev_app.command("asks")
 @_handle_cli_errors
-def jev_asks_cmd() -> None:
+def jev_asks_cmd(
+    which: str | None = typer.Argument(
+        None,
+        help="Una consulta del historial: su número en esta lista (1 = la última) o el "
+        "principio de su sha. Con ella, reimprime sus resultados refinados, gratis",
+    ),
+    topic: list[str] | None = typer.Option(
+        None, help="Refinar: solo posts de este topic (repetible: de cualquiera de ellos)"
+    ),
+    since: datetime | None = typer.Option(None, formats=_DAY, help="Refinar: desde este día"),
+    until: datetime | None = typer.Option(None, formats=_DAY, help="Refinar: hasta este día"),
+    author: str | None = typer.Option(None, help="Refinar: solo posts de este autor"),
+    minimum: float | None = typer.Option(
+        None, "--min", help="Refinar: relevancia mínima (por defecto, la de su último uso)"
+    ),
+    top: int | None = typer.Option(
+        None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
+    ),
+    show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+) -> None:
     """Las consultas hechas con `jev ask`: cuándo, cuántas veces, su último uso y lo que han
-    costado (del registro de pasadas). Solo lee; no cuesta nada."""
+    costado (del registro de pasadas). Con una consulta (`jev asks 1`), reimprime sus
+    resultados guardados, refinados con --min/--topic/--since/--until/--author/--top: no
+    pregunta nada, no construye cliente y no cuesta nada. Solo lee."""
     cfg = _config()
     history = load_history(cfg)
+    entries = sorted(history.queries.values(), key=lambda e: e.last_asked_at, reverse=True)
+    refining = any((topic, since, until, author, minimum is not None, top is not None, show_all))
+    if which is not None:
+        _reprint_ask(
+            cfg,
+            _pick_saved(entries, which),
+            _ask_filters(topic, since, until, author, False),
+            minimum,
+            _ask_shown(cfg, minimum or 0.0, top, show_all),
+        )
+        return
+    if refining:
+        raise ValueError("refinar necesita una consulta: `xbrain jev asks 1 --min 0.5`")
+    _list_asks(cfg, entries)
+
+
+def _list_asks(cfg: Config, entries: list[AskHistoryEntry]) -> None:
+    """`jev asks` with no query: every query, newest first, its last use and its cost."""
     by_query = ask_cost_by_query(load_runs(cfg.jev_runs_path))
-    if not history.queries:
+    if not entries:
         typer.echo(f"sin consultas en {cfg.jev_asks_dir}")
         return
-    entries = sorted(history.queries.values(), key=lambda e: e.last_asked_at, reverse=True)
-    for entry in entries:
+    for number, entry in enumerate(entries, start=1):
         rebuilt = " · reconstruida desde sus respuestas" if entry.rebuilt else ""
+        # «N. sha8»: what `jev asks N` and `jev asks <sha>` take to reprint it.
         typer.echo(
-            f"«{entry.query}» · {plural(entry.times, 'vez', 'veces')} · "
+            f"{number}. {entry.query_sha[:8]} «{entry.query}» · "
+            f"{plural(entry.times, 'vez', 'veces')} · "
             f"{entry.first_asked_at:%Y-%m-%d} → {entry.last_asked_at:%Y-%m-%d}{rebuilt}"
         )
+        reach = (
+            f", {entry.last_results} ≥ {entry.last_min} (relevancia mínima)"
+            if entry.last_min > 0
+            else ""
+        )
         typer.echo(
-            f"  último uso: {entry.last_evaluated} con respuesta, {entry.last_results} ≥ "
-            f"{entry.last_threshold}"
+            f"  último uso: {entry.last_evaluated} con respuesta{reach}"
             + (f" · filtros {entry.last_filters}" if entry.last_filters else "")
         )
         cost = by_query.get(entry.query_sha)
         typer.echo(f"  {cost_line(cost) if cost else 'sin pasadas registradas'}")
+
+
+def _pick_saved(entries: list[AskHistoryEntry], which: str) -> AskHistoryEntry:
+    """`which` as `jev asks` lists them: a 1-based position (newest first) or a sha prefix."""
+    if which.isdigit() and 1 <= int(which) <= len(entries) and len(which) < 4:
+        return entries[int(which) - 1]
+    found = [entry for entry in entries if entry.query_sha.startswith(which.lower())]
+    if len(which) >= 4 and len(found) == 1:
+        return found[0]
+    raise JevError(
+        f"la consulta {which!r} no está en el historial (usa su número en `xbrain jev asks` "
+        "o el principio de su sha)"
+    )
+
+
+def _reprint_ask(
+    cfg: Config,
+    entry: AskHistoryEntry,
+    refine: AskFilters,
+    minimum: float | None,
+    top: int | None,
+) -> None:
+    """A saved query's results, refined (`ask.refine_results`), from its file: no client."""
+    jev = load_jev_pairs(cfg)
+    found = reopen_results(cfg, entry, jev)
+    used = entry.last_min if minimum is None else minimum
+    refined = refine_results(
+        found, refine, used, store=jev.store, jev=jev, threshold=cfg.jev_threshold
+    )
+    typer.echo(f"«{entry.query}» · {entry.last_asked_at:%Y-%m-%d}")
+    _echo_ask_results(refined, used, top, refine)
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:

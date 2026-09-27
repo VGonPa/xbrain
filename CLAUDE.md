@@ -716,7 +716,14 @@ generates an Obsidian wiki.
   per_call + chars / chars_per_token, fitted on paid answers (prior 1,000 and 4.0); the
   server's per-post price uses the same method. An unknown `--topic` is `JevFilterRefused`.
   The page reads the history with `load_history(skip_unreadable=True)`. `--topic`
-  judges Jev at `[jev].threshold`, never at `--threshold`. It shares — never copies — the
+  (repeatable, OR) judges Jev at `[jev].threshold` (`ask.post_topics`); results are RANKED,
+  never cut at it — only `--min` cuts (`last_min`, just the refine's default: the page ships
+  every answer, and its ask sends no min so it keeps the last one), `[jev].ask_top` is how
+  many show first; an old entry's `last_threshold` is read, never used. A saved query is
+  refined for free (`ask.refine_results`; `jev asks N --min/--topic/--since/--until/--author/--top`;
+  the page's «Refinar resultados» over `asks.keys`, fields in `ASK_REFINE_FIELDS`, topic
+  counts by `askTopicCounts`, state in the hash). Every answer reaches the page through
+  `ask.answer_view`, as columns (`dashboard.answer_columns`: `{ids, p}` + model/minute once). It shares — never copies — the
   pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`),
   contract shape (`assess.contract`) and
   lock with topics. The server runs that same flow as a second kind (`service._AskKind`
@@ -724,7 +731,9 @@ generates an Obsidian wiki.
   cap and end are shared): `POST /api/ask/estimate|evaluate` (query + `jev ask`'s filters;
   capped by `serve_max_usd`, not `ask_max_usd`; an all-cached query runs free and is still
   recorded), `GET /api/asks` and `/api/ask/<sha>` = the blob's `asks` (`dashboard.asks_view`:
-  history, results recomputed at build, `report.ask_cost_by_query`). The page's Preguntar tab
+  history, results recomputed at build, `report.ask_cost_by_query`, `topic_counts`);
+  `GET /api/ask/counts?since=&until=&author=&only_evaluated=` (per-topic counts, read-only,
+  from the cached `JevPairs` — `JevService._pairs` — never a blob rebuild). The page's Preguntar tab
   (`#ask`, `/* ask tab */`) draws only `DATA.asks` — static page included; the job panel is
   `#jobp`. `report` and `dashboard` re-read what was paid for, free. Key from
   `TYPESAFE_API_KEY` or `<repo>/.env`, checked before the SDK is imported so `xbrain --help`

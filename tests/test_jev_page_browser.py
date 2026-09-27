@@ -1457,6 +1457,7 @@ _CONFIG_SETTINGS = {
     "char_limit": 50_000,
     "serve_max_usd": 0.25,
     "ask_max_usd": 0.5,
+    "ask_top": 7,
 }
 #: Four answers from one model and one from another, named so that name order and count
 #: order disagree.
@@ -1652,6 +1653,7 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
         "Límite de evidencia",
         "Tope por trabajo de xbrain jev serve",
         "Tope sin preguntar de xbrain jev ask",
+        "Resultados que se muestran de una pregunta",
         *[f"Precio de entrada · {p}" for p in sorted(prices)],
     ]
     assert by_name["Umbral"][1] == "0,875por defecto: 0,850"
@@ -1663,6 +1665,8 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     assert by_name["Tope por trabajo de xbrain jev serve"][3] == "[jev].serve_max_usd"
     assert by_name["Tope sin preguntar de xbrain jev ask"][1] == "0,50 $por defecto: 0,25 $"
     assert by_name["Tope sin preguntar de xbrain jev ask"][3] == "[jev].ask_max_usd"
+    assert by_name["Resultados que se muestran de una pregunta"][1] == "7por defecto: 20"
+    assert by_name["Resultados que se muestran de una pregunta"][3] == "[jev].ask_top"
     # Most answers first, then by name: here the reverse of name order.
     assert by_name["Modelo que se pedirá"][1] == (
         "jev-9.9.9por defecto: jev-latest · las evaluaciones guardadas no registran qué modelo "
@@ -1674,7 +1678,10 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
         f"{str(prices['typesafe']).replace('.', ',')} $por millón de tokens de entrada"
     )
     intro, output = seen["settings_notes"][0], seen["settings_notes"][-1]
-    assert intro.startswith("Umbral, Opción de escape, Límite de evidencia: con estos valores")
+    assert intro.startswith(
+        "Umbral, Opción de escape, Límite de evidencia, Resultados que se muestran de una "
+        "pregunta: con estos valores"
+    )
     assert (
         "Modelo que se pedirá, Peticiones a la vez, Tope por trabajo de xbrain jev serve y "
         "Tope sin preguntar de xbrain jev ask: no cambian esta página" in intro
@@ -2120,8 +2127,10 @@ def _served_dump(
     base: Any = None,
     patch: Any = None,
     before_dump: Any = None,
+    repo: Any = None,
 ) -> dict[str, Any]:
-    """`probe` run in Chrome against a real `JevService` (or `base`, a subclass) over `_repo`,
+    """`probe` run in Chrome against a real `JevService` (or `base`, a subclass) over `_repo`
+    (or `repo(root, monkeypatch)`, another repo builder),
     every job asking `client` — a fake, never TypeSafe. `prepare(cfg)` edits the repo first,
     `patch(monkeypatch)` swaps what a scenario needs, `before_dump(service, port)` runs with
     the server up. Returns the probe's output with the last job's view as `job`."""
@@ -2134,7 +2143,11 @@ def _served_dump(
     _need_chrome()
     monkeypatch = pytest.MonkeyPatch()
     try:
-        cfg = _repo(root, monkeypatch, jev=jev, seed_tokens=seed_tokens)
+        cfg = (
+            repo(root, monkeypatch)
+            if repo is not None
+            else _repo(root, monkeypatch, jev=jev, seed_tokens=seed_tokens)
+        )
         if prepare is not None:
             prepare(cfg)
         if patch is not None:

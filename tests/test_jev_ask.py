@@ -151,6 +151,11 @@ class _ByText(FakeJevClient):
 
 @pytest.fixture
 def cfg(tmp_path: Path, monkeypatch) -> Config:
+    return make_cfg(tmp_path, monkeypatch)
+
+
+def make_cfg(tmp_path: Path, monkeypatch) -> Config:
+    """The four-post repo (`_corpus`, `VOCAB`) every ask test starts from."""
     vault = tmp_path / "vault"
     vault.mkdir()
     (tmp_path / "config.toml").write_text(
@@ -181,7 +186,7 @@ def _run(
     with pass_lock(cfg.jev_lock_path, "test") as lock:
         plan = plan_ask(cfg, query, filters or AskFilters(), None)
         outcome = run_ask(cfg, plan, lambda: client, lock=lock, **hooks)
-        results = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+        results = finish_ask(cfg, plan, outcome)
     return plan, outcome, results
 
 
@@ -395,7 +400,7 @@ def test_asking_the_same_query_again_costs_nothing(cfg: Config):
     assert plan.selection.skipped_current == 3
     assert outcome.logged is None
     assert len(load_runs(cfg.jev_runs_path)) == 1
-    assert [item.id for item, _ in results.ranked] == ["1", "3"]
+    assert [item.id for item, _ in results.ranked] == ["1", "3", "2"]
 
 
 def test_changed_evidence_re_asks_only_that_post(cfg: Config):
@@ -525,7 +530,8 @@ def test_a_query_whose_history_entry_was_lost_is_rebuilt_from_its_file(cfg: Conf
 
     entry = history.queries[plan.query.sha]
     assert entry.query == QUERY and entry.rebuilt is True
-    assert entry.last_evaluated == 3 and entry.last_results == 2
+    # Rebuilt with no minimum: every answer in the file is a result.
+    assert (entry.last_evaluated, entry.last_results, entry.last_min) == (3, 3, 0.0)
     # The calibration is rebuilt from every file, too.
     assert history.calibration.answers == 3
 
@@ -579,11 +585,11 @@ def test_topic_filter_takes_enrich_or_current_jev_membership(cfg: Config):
     jev = load_jev_pairs(cfg)
     store = jev.store
 
-    kept, dropped = filter_posts(store, AskFilters(topic="startups"), jev=jev, threshold=0.85)
+    kept, dropped = filter_posts(store, AskFilters(topics=("startups",)), jev=jev, threshold=0.85)
 
     # 2 and 4 by enrich; 1 by Jev's 0.9; 3 was never assessed and enrich says ai-coding.
     assert _ids(kept) == ["1", "2", "4"] and dropped == 1
-    kept, _ = filter_posts(store, AskFilters(topic="startups"), jev=jev, threshold=0.95)
+    kept, _ = filter_posts(store, AskFilters(topics=("startups",)), jev=jev, threshold=0.95)
     assert _ids(kept) == ["2", "4"]
 
 
@@ -594,7 +600,7 @@ def test_a_stale_topics_answer_does_not_put_a_post_in_a_topic(cfg: Config):
     save_store(store, cfg.items_path)
     jev = load_jev_pairs(cfg)
 
-    kept, _ = filter_posts(jev.store, AskFilters(topic="startups"), jev=jev, threshold=0.85)
+    kept, _ = filter_posts(jev.store, AskFilters(topics=("startups",)), jev=jev, threshold=0.85)
     assert _ids(kept) == ["2", "4"]
     kept, _ = filter_posts(jev.store, AskFilters(only_evaluated=True), jev=jev, threshold=0.85)
     assert _ids(kept) == ["2", "4"]
@@ -604,7 +610,7 @@ def test_the_plan_filters_topics_at_the_configured_threshold_not_the_results_one
     """`--threshold` is for results; the Jev side of `--topic` is `[jev].threshold` — so a low
     results bar never widens (and re-bills) the posts a query is asked about."""
     _jev_with_topics(cfg, {"startups": 0.5})
-    plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(topic="startups"), None)
+    plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(topics=("startups",)), None)
 
     assert _ids(plan.candidates) == ["2", "4"]  # 1's 0.5 is under [jev].threshold = 0.85
 
@@ -612,7 +618,7 @@ def test_the_plan_filters_topics_at_the_configured_threshold_not_the_results_one
 def test_topic_filter_refuses_a_topic_nobody_uses(cfg: Config):
     jev = load_jev_pairs(cfg)
     with pytest.raises(JevError, match="nutricion"):
-        filter_posts(jev.store, AskFilters(topic="nutricion"), jev=jev, threshold=0.85)
+        filter_posts(jev.store, AskFilters(topics=("nutricion",)), jev=jev, threshold=0.85)
 
 
 def test_only_evaluated_keeps_posts_with_a_current_topics_answer(cfg: Config):
@@ -655,12 +661,12 @@ def test_filters_that_cannot_select_anything_are_refused():
         with pytest.raises(ValueError, match="--author"):
             AskFilters(author=blank)
     with pytest.raises(ValueError, match="--topic"):
-        AskFilters(topic=" ")
+        AskFilters(topics=(" ",))
 
 
 def test_filters_round_trip_through_json_and_refuse_what_they_do_not_know():
     filters = AskFilters(
-        topic="startups",
+        topics=("startups",),
         since=DT.date(),
         until=DT.date(),
         author="bob",
@@ -776,7 +782,7 @@ def _sent(item: Item) -> str:
     return build_topic_state(item, 100_000)[0]["post"]
 
 
-def test_results_are_the_current_answers_over_the_threshold_best_first(cfg: Config):
+def test_results_are_the_current_answers_at_or_over_the_minimum_best_first(cfg: Config):
     plan, _, _ = _run(cfg, _ByText())
     store = load_store(cfg.items_path)
     records = load_asks(_ask_path(cfg, plan.query), plan.query)
@@ -791,7 +797,7 @@ def test_results_are_the_current_answers_over_the_threshold_best_first(cfg: Conf
         AskFilters(),
         records,
         topic_threshold=0.85,
-        threshold=0.9,
+        minimum=0.9,
         state_text=_sent,
     )
 
@@ -813,17 +819,17 @@ def test_results_rank_ties_by_post_id(cfg: Config):
         AskFilters(),
         records,
         topic_threshold=0.85,
-        threshold=0.5,
+        minimum=0.0,
         state_text=_sent,
     )
 
-    assert [item.id for item, _ in results.ranked] == ["1", "3"]
+    assert [item.id for item, _ in results.ranked] == ["1", "3", "2"]
 
 
-def test_a_probability_exactly_at_the_threshold_is_a_result(cfg: Config):
+def test_a_probability_exactly_at_the_minimum_is_a_result(cfg: Config):
     plan, _, _ = _run(cfg, _ByText())
 
-    results = finish_ask(cfg, plan, None, threshold=0.95)
+    results = finish_ask(cfg, plan, None, minimum=0.95)
 
     assert [item.id for item, _ in results.ranked] == ["1", "3"]
 
@@ -832,15 +838,15 @@ def test_a_probability_exactly_at_the_threshold_is_a_result(cfg: Config):
 
 
 def test_each_query_keeps_its_last_use_in_the_history(cfg: Config):
-    _run(cfg, _ByText(), filters=AskFilters(topic="ai-coding"))
+    _run(cfg, _ByText(), filters=AskFilters(topics=("ai-coding",)))
     plan, _, _ = _run(cfg, _ByText())
 
     [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
 
     assert entry.query == QUERY and entry.query_sha == plan.query.sha
     assert entry.first_asked_at <= entry.last_asked_at
-    assert (entry.times, entry.last_evaluated, entry.last_results) == (2, 3, 2)
-    assert (entry.last_threshold, entry.last_filters, entry.rebuilt) == (0.85, {}, False)
+    assert (entry.times, entry.last_evaluated, entry.last_results) == (2, 3, 3)
+    assert (entry.last_min, entry.last_filters, entry.rebuilt) == (0.0, {}, False)
 
 
 def test_a_corrupt_history_is_refused(cfg: Config):
@@ -923,12 +929,13 @@ def test_cli_asks_ranks_the_results_and_keeps_the_history(cfg: Config, monkeypat
     assert result.exit_code == 0, out
     assert len(client.calls) == 3 and client.closed
     lines = out.splitlines()
-    header = lines.index("Resultados (≥ 0.85): 2 de 3 posts con respuesta vigente")
-    assert lines[header + 1].split()[:3] == ["0.95", "1", "@alice"]
-    assert lines[header + 2].split()[:3] == ["0.95", "3", "@alice"]
+    header = lines.index("Resultados: los 3 de 3 leídos por Jev, de mayor a menor probabilidad")
+    assert lines[header + 1].split()[:4] == ["0.95", "██████████", "1", "@alice"]
+    assert lines[header + 2].split()[:4] == ["0.95", "██████████", "3", "@alice"]
+    assert lines[header + 3].split()[:4] == ["0.10", "█·········", "2", "@bob"]
     assert "https://x.com/alice/status/1" in lines[header + 1]
     [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
-    assert (entry.query, entry.last_evaluated, entry.last_results) == (QUERY, 3, 2)
+    assert (entry.query, entry.last_evaluated, entry.last_results) == (QUERY, 3, 3)
     [line] = load_runs(cfg.jev_runs_path)
     assert line.kind == "ask"
     assert "3 respuestas · 0 fallidas" in out
@@ -940,15 +947,15 @@ def test_cli_a_repeated_query_costs_nothing_and_still_answers(cfg: Config, monke
     runner.invoke(app, ["jev", "ask", QUERY])
     monkeypatch.setattr(cli, "_jev_client", _refuse_client)
 
-    result = runner.invoke(app, ["jev", "ask", QUERY, "--threshold", "0.5"])
+    result = runner.invoke(app, ["jev", "ask", QUERY, "--min", "0.5"])
 
     out = result.output
     assert result.exit_code == 0, out
     assert "0 posts por preguntar · 3 ya respondidos" in out
-    assert "Resultados (≥ 0.5): 2 de 3" in out
+    assert "Resultados: los 2 de 2 con relevancia ≥ 0.5 · 3 leídos por Jev" in out
     assert len(load_runs(cfg.jev_runs_path)) == 1
     [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
-    assert (entry.times, entry.last_threshold) == (2, 0.5)
+    assert (entry.times, entry.last_min, entry.last_results) == (2, 0.5, 2)
 
 
 def _cap(tmp_path: Path, monkeypatch, usd: str) -> None:
@@ -1033,11 +1040,11 @@ def test_cli_limit_and_topic(cfg: Config, monkeypatch):
     assert "1 fuera del límite" in out and "2 descartados por los filtros" in out
 
 
-def test_cli_refuses_a_bad_threshold_and_an_unknown_topic(cfg: Config, monkeypatch):
+def test_cli_refuses_a_bad_minimum_and_an_unknown_topic(cfg: Config, monkeypatch):
     monkeypatch.setattr(cli, "_jev_client", _refuse_client)
 
-    result = runner.invoke(app, ["jev", "ask", QUERY, "--threshold", "1.5"])
-    assert result.exit_code == 1 and "--threshold" in result.output
+    result = runner.invoke(app, ["jev", "ask", QUERY, "--min", "1.5"])
+    assert result.exit_code == 1 and "--min" in result.output
     result = runner.invoke(app, ["jev", "ask", QUERY, "--topic", "nutricion"])
     assert result.exit_code == 1 and "topic desconocido" in result.output
     result = runner.invoke(app, ["jev", "ask", "   "])
@@ -1119,12 +1126,12 @@ def test_cli_dry_run_uses_the_cost_model_measured_on_paid_answers(cfg: Config, m
     assert f"~{estimate.tokens} tokens de entrada" in out
 
 
-def test_cli_a_low_results_threshold_does_not_widen_the_topic(cfg: Config, monkeypatch):
+def test_cli_a_low_minimum_does_not_widen_the_topic(cfg: Config, monkeypatch):
     _jev_with_topics(cfg, {"startups": 0.5})
     client = _ByText()
     _use(monkeypatch, client)
 
-    result = runner.invoke(app, ["jev", "ask", QUERY, "--topic", "startups", "--threshold", "0.3"])
+    result = runner.invoke(app, ["jev", "ask", QUERY, "--topic", "startups", "--min", "0.3"])
 
     assert result.exit_code == 0, result.output
     # 1's Jev answer (0.5) is under [jev].threshold: only 2 carries startups with evidence.
@@ -1213,7 +1220,7 @@ def test_cli_points_out_a_near_duplicate_before_paying(cfg: Config, monkeypatch)
 def test_cli_asks_lists_the_history_with_what_each_query_cost(cfg: Config, monkeypatch):
     _use(monkeypatch, _ByText(provider="typesafe", input_tokens=1_000))
     runner.invoke(app, ["jev", "ask", QUERY])
-    runner.invoke(app, ["jev", "ask", QUERY, "--threshold", "0.5"])
+    runner.invoke(app, ["jev", "ask", QUERY, "--min", "0.5"])
     monkeypatch.setattr(cli, "_jev_client", _refuse_client)
 
     result = runner.invoke(app, ["jev", "asks"])
@@ -1221,7 +1228,7 @@ def test_cli_asks_lists_the_history_with_what_each_query_cost(cfg: Config, monke
     out = result.output
     assert result.exit_code == 0, out
     assert f"«{QUERY}»" in out
-    assert "2 veces" in out and "último uso: 3 con respuesta, 2 ≥ 0.5" in out
+    assert "2 veces" in out and "último uso: 3 con respuesta, 2 ≥ 0.5 (relevancia mínima)" in out
     assert "1 pasada · 3 peticiones · 3000 tokens de entrada (~0.0001 $)" in out
 
 
@@ -1353,17 +1360,17 @@ def test_the_page_filters_by_topic_at_the_jev_threshold_like_the_command(cfg: Co
     _run(cfg, _ByText())  # every post answered, post 1 (0.95) included
     query = AskQuery.of(QUERY)
     with pass_lock(cfg.jev_lock_path, "test") as lock:
-        plan = plan_ask(cfg, query, AskFilters(topic="startups"), None)
+        plan = plan_ask(cfg, query, AskFilters(topics=("startups",)), None)
         outcome = run_ask(cfg, plan, lambda: _ByText(), lock=lock)
-        found = finish_ask(cfg, plan, outcome, threshold=0.05)
+        found = finish_ask(cfg, plan, outcome, minimum=0.05)
 
     [row] = _asks(cfg)["history"]
 
     cli = [(item.id, record.probability) for item, record in found.ranked]
     assert "1" not in [item.id for item in plan.candidates]
     assert "1" in plan.records and plan.records["1"].probability == 0.95
-    assert [(r["id"], r["p"]) for r in row["results"]] == cli
-    assert row["answered"] == found.answered and row["threshold"] == 0.05
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == cli
+    assert row["answered"] == found.answered and row["min"] == 0.05
 
 
 def test_the_page_lists_each_query_with_its_current_results_best_first(cfg: Config):
@@ -1377,8 +1384,12 @@ def test_the_page_lists_each_query_with_its_current_results_best_first(cfg: Conf
         1,
         3,
     )
-    assert [(r["id"], r["p"]) for r in row["results"]] == [("1", 0.95), ("3", 0.95)]
-    assert row["threshold"] == cfg.jev_threshold and row["filters"] == {}
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == [
+        ("1", 0.95),
+        ("3", 0.95),
+        ("2", 0.1),
+    ]
+    assert row["min"] == 0.0 and row["filters"] == {}
     assert row["cost"]["cost_usd"] == tokens_cost_usd(300, "typesafe")
     assert row["cost"]["requests"] == 3
     assert "error" not in row
@@ -1399,7 +1410,8 @@ def test_the_page_keeps_what_jev_read_once_per_result_post(cfg: Config):
 
     view = _asks(cfg)
 
-    assert sorted(view["surfaces"]) == ["1", "3"]
+    # Every result post, once — post 2's 0.1 is a result too, ranked last.
+    assert sorted(view["surfaces"]) == ["1", "2", "3"]
     assert view["surfaces"]["1"][0]["chars"] == len(load_store(cfg.items_path)["1"].text)
 
 
@@ -1411,7 +1423,7 @@ def test_a_changed_post_is_not_a_result_on_the_page(cfg: Config):
 
     [row] = _asks(cfg)["history"]
 
-    assert [r["id"] for r in row["results"]] == ["1"] and row["answered"] == 2
+    assert row["answers"]["ids"] == ["1", "2"] and row["answered"] == 2
 
 
 def test_the_page_applies_the_filters_the_query_was_asked_with(cfg: Config):
@@ -1419,7 +1431,8 @@ def test_the_page_applies_the_filters_the_query_was_asked_with(cfg: Config):
 
     [row] = _asks(cfg)["history"]
 
-    assert (row["results"], row["answered"], row["filters"]) == ([], 1, {"author": "bob"})
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == [("2", 0.1)]
+    assert (row["answered"], row["filters"]) == (1, {"author": "bob"})
 
 
 def test_the_last_query_asked_is_listed_first(cfg: Config):
@@ -1437,12 +1450,12 @@ def test_an_unreadable_query_file_costs_its_row_never_the_page(cfg: Config):
     view = _asks(cfg)
     rows = {row["query"]: row for row in view["history"]}
 
-    assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["results"] == []
+    assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["answers"]["ids"] == []
     assert "error" not in rows["otra"]
 
 
 def test_a_history_entry_whose_topic_left_the_vocabulary_says_so(cfg: Config):
-    _run(cfg, _ByText(), filters=AskFilters(topic="ai-coding"))
+    _run(cfg, _ByText(), filters=AskFilters(topics=("ai-coding",)))
     store = load_store(cfg.items_path)
     for item in store.values():
         assert item.enriched is not None
@@ -1466,7 +1479,13 @@ def test_an_unreadable_history_is_the_tabs_error(cfg: Config):
 
 
 def test_a_page_built_without_asks_has_an_empty_tab():
-    assert NO_ASKS == {"history": [], "surfaces": {}, "error": None}
+    assert NO_ASKS == {
+        "history": [],
+        "surfaces": {},
+        "keys": {},
+        "topic_counts": {},
+        "error": None,
+    }
 
 
 def test_a_run_log_that_cannot_be_read_gives_no_cost_rather_than_zero(cfg: Config):
@@ -1502,7 +1521,7 @@ def test_an_unreadable_file_costs_only_its_own_query_when_the_history_is_rebuilt
 
     assert [(row["query"], row["rebuilt"]) for row in view["history"]] == [(QUERY, True)]
     assert f"{bad.query.sha}.json" in view["error"]
-    assert [r["id"] for r in view["history"][0]["results"]] == ["1", "3"]
+    assert view["history"][0]["answers"]["ids"] == ["1", "3", "2"]
 
 
 def test_a_results_failure_that_is_not_a_filter_refusal_says_so_plainly(cfg: Config, monkeypatch):
@@ -1549,7 +1568,7 @@ def test_an_unknown_topic_is_refused_by_its_own_type(cfg: Config):
     store = load_store(cfg.items_path)
 
     with pytest.raises(JevFilterRefused) as refused:
-        filter_posts(store, AskFilters(topic="nadie"), jev=load_jev_pairs(cfg), threshold=0.85)
+        filter_posts(store, AskFilters(topics=("nadie",)), jev=load_jev_pairs(cfg), threshold=0.85)
 
     assert isinstance(refused.value, JevError)
 

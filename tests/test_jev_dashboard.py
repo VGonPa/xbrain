@@ -173,6 +173,7 @@ def _settings(**over: Any) -> dict[str, Any]:
         "state_char_limit": CHAR_LIMIT,
         "serve_max_usd": 1.0,
         "ask_max_usd": 0.25,
+        "ask_top": 20,
     }
     settings.update(over)
     return settings
@@ -198,6 +199,7 @@ def _data(
             "concurrency",
             "serve_max_usd",
             "ask_max_usd",
+            "ask_top",
         )
         if key in kwargs
     }
@@ -1855,6 +1857,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "state_char_limit",
         "serve_max_usd",
         "ask_max_usd",
+        "ask_top",
     ]
     assert set(JEV_DEFAULTS) == {row["key"] for row in settings}
     values = {row["key"]: row["value"] for row in settings}
@@ -1866,6 +1869,7 @@ def test_the_config_block_states_every_jev_setting_with_its_default():
         "state_char_limit": CHAR_LIMIT,
         "serve_max_usd": 1.0,
         "ask_max_usd": 0.25,
+        "ask_top": 20,
     }
     assert {row["key"]: row["default"] for row in settings} == JEV_DEFAULTS
 
@@ -2227,12 +2231,13 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
     assert (
         "const API = {\n"
         "  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},\n"
-        "  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate'},\n"
+        "  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate', counts: '/api/ask/counts'},\n"
         "  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',\n"
         "};" in serve
     )
     assert re.findall(r"\bapi\('", serve) == []
     assert sorted(set(re.findall(r"\bapi\((API[^,)]*)", serve))) == [
+        "API.ask.counts + (query ? '?' + query : ''",
         "API.cancel",
         "API.data",
         "API.job",

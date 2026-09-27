@@ -10,6 +10,7 @@ Every client is a `FakeJevClient`: no test reaches TypeSafe.
 from __future__ import annotations
 
 import threading
+from datetime import date
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,15 +29,18 @@ from xbrain.jev.questions import ASK_KEY
 from xbrain.jev.store import load_ask_index, load_asks, load_runs
 from xbrain.store import load_store, save_store
 
+_DAY = date(2026, 9, 22)
+
 QUERY = "¿Cómo configuro hooks en Claude Code?"
 #: What the fake answers per post. Probability order is NOT id order (3 before 1), and 1 and
 #: 5 tie, so a ranking by id or without its tie-break shows.
 PROBS = {"1": 0.9, "2": 0.1, "3": 0.97, "4": 0.2, "5": 0.9}
 
 
-def ranked(threshold: float = 0.85, posts: str = "12345") -> list[tuple[str, float]]:
-    """THE expected results: every surface's order is compared with this one source."""
-    kept = [(post, PROBS[post]) for post in posts if PROBS[post] >= threshold]
+def ranked(minimum: float = 0.0, posts: str = "12345") -> list[tuple[str, float]]:
+    """THE expected results — every answer at or above `minimum`, ranked: every surface's
+    order is compared with this one source."""
+    kept = [(post, PROBS[post]) for post in posts if PROBS[post] >= minimum]
     return sorted(kept, key=lambda pair: (-pair[1], pair[0]))
 
 
@@ -165,7 +169,8 @@ def test_the_ask_filters_narrow_what_is_paid_for(served: _AskServed):
     assert other_author["ids"] == [] and other_author["dropped"] == 6
     assert evaluated["ids"] == ["1", "2"]
     assert days["ids"] == ["1", "2", "3", "4", "5"]
-    assert by_topic["pick"] == {"query": AskQuery.of(QUERY).text, "topic": "startups"}
+    # An old page's single `topic` is read as the list every pick now carries.
+    assert by_topic["pick"] == {"query": AskQuery.of(QUERY).text, "topics": ["startups"]}
 
 
 @pytest.mark.parametrize(
@@ -185,6 +190,13 @@ def test_the_ask_filters_narrow_what_is_paid_for(served: _AskServed):
         ({"query": QUERY, "limit": True}, "limit"),
         ({"query": QUERY, "only_evaluated": "sí"}, "only_evaluated"),
         ({"query": QUERY, "author": ""}, "author"),
+        ({"query": QUERY, "topics": "startups"}, "lista"),
+        ({"query": QUERY, "topics": ["startups", "inventado"]}, "topic desconocido"),
+        ({"query": QUERY, "topic": "startups", "topics": ["ai-coding"]}, "topic"),
+        ({"query": QUERY, "min": 1.5}, "`min` debe"),
+        ({"query": QUERY, "min": -0.1}, "`min` debe"),
+        ({"query": QUERY, "min": "0.5"}, "`min` debe"),
+        ({"query": QUERY, "min": True}, "`min` debe"),
         ({"query": "x" * 2001}, "2000"),
         ([QUERY], "objeto"),
     ],
@@ -251,7 +263,7 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
     assert job["query_sha"] == query.sha
     assert sorted(served.client.asked) == ["1", "2", "3", "4", "5"]
     assert job["outcome"]["ok"] == 5 and job["outcome"]["logged"] is True
-    assert job["outcome"]["results"] == len(ranked()) == 3
+    assert job["outcome"]["results"] == len(ranked()) == 5
     assert job["outcome"]["recorded"] is True
     assert job["usd"] == pytest.approx(5 * tokens_cost_usd(100, "typesafe"))
     records = load_asks(served.cfg.jev_asks_dir / f"{query.sha}.json", query)
@@ -263,9 +275,10 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
         query.text,
         1,
         5,
-        3,
+        5,
     )
-    assert entry.last_threshold == served.cfg.jev_threshold
+    # Ranked, not cut: `[jev].threshold` is not a results bar, and no minimum was asked.
+    assert (entry.last_min, entry.last_threshold) == (0.0, None)
     assert not _locked(served.cfg.jev_lock_path)
 
 
@@ -273,8 +286,8 @@ def test_the_history_keeps_the_filters_the_job_ran_with(served: _AskServed):
     served.ask_run({"query": QUERY, "topic": "ai-coding", "limit": 2})
 
     entry = _entry(served.cfg)
-    assert entry.last_filters == {"topic": "ai-coding"}
-    assert (entry.last_evaluated, entry.last_results) == (2, 1)
+    assert entry.last_filters == {"topics": ["ai-coding"]}
+    assert (entry.last_evaluated, entry.last_results) == (2, 2)
 
 
 def test_asking_again_costs_nothing_builds_no_client_and_still_counts_in_the_history(
@@ -442,12 +455,14 @@ def test_the_history_and_one_querys_results_are_the_blob_the_page_carries(served
     assert {k: v for k, v in one.items() if k != "surfaces"} == blob["asks"]["history"][0]
     assert one["sha"] == query.sha and one["query"] == query.text
     assert (
-        [(r["id"], r["p"]) for r in one["results"]]
+        list(zip(one["answers"]["ids"], one["answers"]["p"]))
         == ranked()
         == [
             ("3", 0.97),
             ("1", 0.9),
             ("5", 0.9),
+            ("4", 0.2),
+            ("2", 0.1),
         ]
     )
     assert one["answered"] == 5
@@ -482,7 +497,7 @@ def test_the_data_follows_an_ask_a_terminal_made(served: _AskServed):
     with pass_lock(served.cfg.jev_lock_path, "xbrain jev ask") as lock:
         plan = _plan(served.cfg)
         outcome = run_ask(served.cfg, plan, lambda: _Asker(), lock=lock)
-        finish_ask(served.cfg, plan, outcome, threshold=served.cfg.jev_threshold)
+        finish_ask(served.cfg, plan, outcome)
     query = plan.query
 
     _, history, _ = served.request("GET", "/api/asks")
@@ -499,15 +514,15 @@ def test_the_results_follow_a_querys_answers_file_even_without_the_history(serve
     query = AskQuery.of(QUERY)
     # Read once, so the server holds this data; only the answers file changes after.
     _, before, _ = served.request("GET", f"/api/ask/{query.sha}")
-    assert [r["id"] for r in before["results"]] == ["3", "1", "5"]
+    assert before["answers"]["ids"] == ["3", "1", "5", "4", "2"]
     path = served.cfg.jev_asks_dir / f"{query.sha}.json"
     records = load_asks(path, query)
-    records["3"] = records["3"].model_copy(update={"probability": 0.1})
+    records["3"] = records["3"].model_copy(update={"probability": 0.15})
     save_asks(query, records, path)
 
     _, one, _ = served.request("GET", f"/api/ask/{query.sha}")
 
-    assert [r["id"] for r in one["results"]] == ["1", "5"]
+    assert one["answers"]["ids"] == ["1", "5", "4", "3", "2"]
 
 
 # --------------------------------------------------------------------------- the fix wave
@@ -544,7 +559,7 @@ def test_a_query_the_history_lost_is_rebuilt_on_the_tab(served: _AskServed):
 
     [row] = asks["history"]
     assert row["rebuilt"] is True and row["sha"] == AskQuery.of(QUERY).sha
-    assert [(r["id"], r["p"]) for r in row["results"]] == ranked()
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == ranked()
 
 
 class _FailsAfterStop(_Asker):
@@ -654,7 +669,7 @@ def test_one_query_carries_what_jev_read_for_each_of_its_results(served: _AskSer
     _, blob, _ = served.request("GET", "/api/data")
 
     cards = {card["id"]: card for card in blob["posts"]}
-    assert sorted(one["surfaces"]) == sorted(r["id"] for r in one["results"])
+    assert sorted(one["surfaces"]) == sorted(one["answers"]["ids"])
     for post, surfaces in one["surfaces"].items():
         card = cards[post]
         expected = card["jev"]["surfaces"] if card["jev"] else blob["asks"]["surfaces"][post]
@@ -762,3 +777,184 @@ def test_a_posts_planned_price_is_the_cost_models_tokens_at_the_one_price(
 
     chars = len(state) + question_chars(plan.query.questions)
     assert priced == [plan.estimate.model.tokens(chars)]
+
+
+# --------------------------------------------------------------------------- task 14: rank, topics
+
+
+def test_several_topics_ask_their_union_and_the_estimate_counts_it(served: _AskServed):
+    one = served.ask_estimate({"query": QUERY, "topics": ["startups"]})
+    two = served.ask_estimate({"query": QUERY, "topics": ["startups", "ai-coding"]})
+
+    assert one["ids"] == ["2", "4"] and one["posts"] == 2
+    assert two["ids"] == ["1", "2", "3", "4", "5"] and two["posts"] == 5
+    assert two["usd"] > one["usd"]
+    assert two["pick"]["topics"] == ["ai-coding", "startups"]
+    plan = _plan(served.cfg, topics=("ai-coding", "startups"))
+    assert (two["tokens"], two["usd"]) == (plan.estimate.tokens, plan.estimate.usd)
+
+
+def test_a_minimum_is_recorded_and_cuts_only_the_results(served: _AskServed):
+    job = served.ask_run({"query": QUERY, "min": 0.5})
+
+    assert sorted(served.client.asked) == ["1", "2", "3", "4", "5"]  # all asked, all paid
+    assert job["outcome"]["results"] == len(ranked(0.5)) == 3
+    assert job["outcome"]["answered"] == 5
+    entry = _entry(served.cfg)
+    assert (entry.last_min, entry.last_results, entry.last_evaluated) == (0.5, 3, 5)
+    [row] = served.request("GET", "/api/asks")[1]["history"]
+    # The page gets every answer ranked; the use's minimum is its free refine's default.
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == ranked()
+    assert (row["min"], row["answered"]) == (0.5, 5)
+
+
+def test_a_confirmation_is_bound_to_its_minimum(served: _AskServed):
+    estimate = served.ask_estimate({"query": QUERY, "min": 0.5})
+
+    status, error = served.ask_evaluate(
+        {"query": QUERY, "min": 0.6, "confirm_token": estimate["confirm_token"]}
+    )
+
+    assert status == 409, error
+
+
+def _counts(served: _AskServed, params: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """`GET /api/ask/counts?…`: the other filters as query parameters (a read, like /api/asks)."""
+    from urllib.parse import urlencode
+
+    query = urlencode(params)
+    status, data, _ = served.request("GET", "/api/ask/counts" + ("?" + query if query else ""))
+    return status, data
+
+
+def test_the_topic_counts_are_the_filter_rule_under_the_other_filters(served: _AskServed):
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+
+    jev = load_jev_pairs(served.cfg)
+    for params, filters in (
+        ({}, AskFilters()),
+        ({"author": "alice"}, AskFilters(author="alice")),
+        ({"only_evaluated": "true"}, AskFilters(only_evaluated=True)),
+        ({"since": "2026-09-22", "until": "2026-09-22"}, AskFilters(since=_DAY, until=_DAY)),
+    ):
+        status, data = _counts(served, params)
+        assert status == 200, data
+        expected = topic_counts(jev.store, filters, jev=jev, threshold=served.cfg.jev_threshold)
+        assert data["topic_counts"] == expected, params
+    assert _counts(served, {})[1]["topic_counts"] == served.service.blob()["asks"]["topic_counts"]
+    assert served.built == 0 and not served.cfg.jev_asks_dir.exists()
+
+
+def test_the_topic_counts_refuse_what_is_not_a_filter(served: _AskServed):
+    for params, word in (
+        ({"query": QUERY}, "desconocido"),
+        ({"since": "ayer"}, "since"),
+        ({"only_evaluated": "quizás"}, "only_evaluated"),
+        ({"author": ["a", "b"]}, "author"),
+    ):
+        from urllib.parse import urlencode
+
+        status, data, _ = served.request("GET", "/api/ask/counts?" + urlencode(params, doseq=True))
+        assert status == 400 and word in data["error"], data
+
+
+@pytest.mark.parametrize(
+    "refusal", [{"headers": {"Host": "evil.example:1"}}, {"origin": "http://evil.example"}]
+)
+def test_the_topic_counts_are_only_read_by_this_page(served: _AskServed, refusal: dict[str, Any]):
+    status, _, _ = served.request("GET", "/api/ask/counts", **refusal)
+    assert status == 403
+
+
+def test_the_topic_counts_are_a_get_not_a_post(served: _AskServed):
+    status, _, _ = served.request("POST", "/api/ask/counts", {})
+    assert status == 404
+
+
+def test_the_topic_counts_never_rebuild_the_page_even_mid_job(tmp_path: Path, monkeypatch):
+    """The counts read the cached posts and topics answers (`JevPairs`), rebuilt only when
+    items, vocabulary or the topics side-car change: a cross-site GET, or a keystroke while an
+    ask job checkpoints its answers, never forces the page's data to be built again."""
+    from xbrain.jev import service as jev_service
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+
+    builds: list[int] = []
+    loads: list[int] = []
+    real_build, real_load = jev_service.build_page_data, jev_service.load_jev_pairs
+    monkeypatch.setattr(
+        jev_service, "build_page_data", lambda *a, **k: builds.append(1) or real_build(*a, **k)
+    )
+    monkeypatch.setattr(
+        jev_service, "load_jev_pairs", lambda *a, **k: loads.append(1) or real_load(*a, **k)
+    )
+    gate = threading.Event()
+    s = _served(tmp_path, monkeypatch, _Asker(gate=gate), jev="concurrency = 1\n")
+    try:
+        assert _counts(s, {})[0] == 200
+        assert (builds, loads) == ([], [1])
+        estimate = s.ask_estimate({"query": QUERY})
+        assert (
+            s.ask_evaluate({"query": QUERY, "confirm_token": estimate["confirm_token"]})[0] == 202
+        )
+        s.wait_job(lambda job: len(s.client.asked) >= 1)
+        before = (len(builds), len(loads))
+        # What a checkpoint does to the page's inputs: a query's answers file changes.
+        stray = s.cfg.jev_asks_dir / ("0" * 64 + ".json")
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text("{}", encoding="utf-8")
+        status, data = _counts(s, {"author": "alice"})
+        stray.unlink()
+        after = (len(builds), len(loads))
+    finally:
+        gate.set()
+        s.close()
+
+    assert status == 200, data
+    jev = load_jev_pairs(s.cfg)
+    assert data["topic_counts"] == topic_counts(
+        jev.store, AskFilters(author="alice"), jev=jev, threshold=s.cfg.jev_threshold
+    )
+    assert after == before
+
+
+def test_the_topic_counts_follow_a_new_topics_side_car(served: _AskServed):
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+    from tests.test_jev_ask import _jev_with_topics
+
+    before = _counts(served, {})[1]["topic_counts"]
+    _jev_with_topics(served.cfg, {"startups": 0.95})
+    jev = load_jev_pairs(served.cfg)
+
+    after = _counts(served, {})[1]["topic_counts"]
+
+    assert after == topic_counts(
+        jev.store, AskFilters(), jev=jev, threshold=served.cfg.jev_threshold
+    )
+    assert after != before
+
+
+def test_an_ask_that_sends_no_minimum_keeps_the_querys_last_one(served: _AskServed):
+    """The page never sends a minimum (it refines for free): asking again from it must not
+    wipe the minimum a terminal set (`jev ask --min`), which is the refine's default."""
+    served.ask_run({"query": QUERY, "min": 0.5})
+    assert _entry(served.cfg).last_min == 0.5
+
+    job = served.ask_run({"query": QUERY})
+
+    entry = _entry(served.cfg)
+    assert (entry.times, entry.last_min, entry.last_results) == (2, 0.5, len(ranked(0.5)))
+    assert job["outcome"]["results"] == len(ranked(0.5))
+    [row] = served.request("GET", "/api/asks")[1]["history"]
+    assert row["min"] == 0.5
+    # A minimum that IS sent is recorded, 0 included.
+    served.ask_run({"query": QUERY, "min": 0})
+    assert _entry(served.cfg).last_min == 0.0
+
+
+def test_a_new_query_asked_with_no_minimum_has_none(served: _AskServed):
+    served.ask_run({"query": QUERY})
+    entry = _entry(served.cfg)
+    assert (entry.last_min, entry.last_results) == (0.0, 5)

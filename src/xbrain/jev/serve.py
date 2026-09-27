@@ -16,7 +16,9 @@ Routes: `/` (the page), `/api/data` (its blob), `/api/job`
 (the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, per
 kind of pass (`topics`, `ask`) `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate`,
 and what was asked: `/api/asks` (the query history with each query's results) and
-`/api/ask/<sha>` (one query) — both read-only, both slices of the blob.
+`/api/ask/<sha>` (one query) — both read-only, both slices of the blob — and
+`/api/ask/counts?since=…&until=…&author=…&only_evaluated=true` (how many posts each topic keeps
+under those filters), a read like them, under the same GET guards.
 
 Bound to 127.0.0.1 only; there is no option to bind anything else. Ctrl-C stops accepting
 requests, stops the job softly (what is in flight is waited for, saved and logged) and exits
@@ -33,7 +35,7 @@ import re
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from xbrain.generate import VAULT_MEDIA_SUBDIR
 from xbrain.jev.client import JevError
@@ -164,6 +166,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, service.page_html().encode("utf-8"), "text/html; charset=utf-8")
         elif url.path.startswith(f"/{VAULT_MEDIA_SUBDIR}/"):
             self._media(url.path)
+        elif url.path == "/api/ask/counts":
+            self._json(200, service.ask_counts(parse_qs(url.query, keep_blank_values=True)))
         else:
             self._json(200, self._get_json(url.path))
 
