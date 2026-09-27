@@ -20,10 +20,9 @@ import pytest
 from tests.jev_fakes import FakeJevClient
 from tests.test_jev_serve import ITEMS, _locked, _repo, _Served
 from xbrain.config import Config
-from xbrain.jev.ask import AskFilters, AskQuery, estimate_ask, filter_posts, select_ask_items
+from xbrain.jev.ask import AskFilters, AskQuery, plan_ask
 from xbrain.jev.client import JevResult, NoulAnswer
-from xbrain.jev.defaults import DEFAULT_CHARS_PER_TOKEN, tokens_cost_usd
-from xbrain.jev.load import load_jev_pairs
+from xbrain.jev.defaults import tokens_cost_usd
 from xbrain.jev.lock import pass_lock
 from xbrain.jev.questions import ASK_KEY
 from xbrain.jev.store import load_ask_index, load_asks, load_runs
@@ -95,31 +94,31 @@ def served(tmp_path: Path, monkeypatch) -> Iterator[_AskServed]:
     s.close()
 
 
-def _expected(cfg: Config, query: str = QUERY, **filters: Any):
-    """What the CLI's own functions select and estimate for `query` today."""
-    ask_query = AskQuery.of(query)
-    store = load_store(cfg.items_path)
-    wanted = AskFilters(**filters)
-    jev = load_jev_pairs(cfg) if wanted.needs_jev else None
-    candidates, dropped = filter_posts(store, wanted, jev=jev, threshold=cfg.jev_threshold)
-    records = load_asks(cfg.jev_asks_dir / f"{ask_query.sha}.json", ask_query)
-    selection = select_ask_items(
-        candidates, records, ask_query, char_limit=cfg.jev_state_char_limit, limit=None
-    )
-    return ask_query, selection, dropped
+def _plan(cfg: Config, query: str = QUERY, **filters: Any):
+    """What the command's own planner selects and estimates for `query` today."""
+    return plan_ask(cfg, AskQuery.of(query), AskFilters(**filters), None)
+
+
+def _model(plan) -> dict[str, Any]:
+    model = plan.estimate.model
+    return {
+        "per_call": model.per_call,
+        "chars_per_token": model.chars_per_token,
+        "measured": model.measured,
+        "answers": model.answers,
+    }
+
+
+def _entry(cfg: Config, query: str = QUERY):
+    return load_ask_index(cfg.jev_asks_dir / "index.json").queries[AskQuery.of(query).sha]
 
 
 # --------------------------------------------------------------------------- the estimate
 
 
 def test_the_ask_estimate_is_the_commands_selection_and_price(served: _AskServed):
-    query, selection, _ = _expected(served.cfg)
-    priced = estimate_ask(
-        selection,
-        query,
-        char_limit=served.cfg.jev_state_char_limit,
-        chars_per_token=DEFAULT_CHARS_PER_TOKEN,
-    )
+    plan = _plan(served.cfg)
+    query, priced = plan.query, plan.estimate
 
     estimate = served.ask_estimate({"query": QUERY})
 
@@ -132,7 +131,8 @@ def test_the_ask_estimate_is_the_commands_selection_and_price(served: _AskServed
         1,
     )
     assert (estimate["tokens"], estimate["usd"]) == (priced.tokens, priced.usd)
-    assert estimate["chars_per_token"] == {"value": DEFAULT_CHARS_PER_TOKEN, "measured": 0}
+    assert estimate["cost_model"] == _model(plan) and plan.estimate.model.measured is False
+    assert estimate["chars"] == priced.chars and estimate["similar"] == []
     assert estimate["allowed"] is True and estimate["confirm_token"]
     assert estimate["max_usd"] == served.cfg.jev_serve_max_usd
     assert served.built == 0
@@ -209,18 +209,25 @@ def test_an_ask_over_the_cap_is_refused_and_says_so(tmp_path: Path, monkeypatch)
     assert "serve_max_usd" in estimate["refusal"]
 
 
-def test_the_ask_estimate_measures_chars_per_token_once_answers_exist(served: _AskServed):
-    served.ask_run({"query": QUERY, "limit": 2})
-    records = load_asks(
-        served.cfg.jev_asks_dir / f"{AskQuery.of(QUERY).sha}.json", AskQuery.of(QUERY)
-    )
-    ratio = sum(r.prompt_chars for r in records.values()) / sum(
-        r.input_tokens or 0 for r in records.values()
-    )
+def test_the_ask_estimate_uses_the_model_fitted_on_paid_answers(served: _AskServed):
+    served.ask_run({"query": QUERY})
 
     estimate = served.ask_estimate({"query": "posts sobre rondas seed"})
 
-    assert estimate["chars_per_token"] == {"value": ratio, "measured": 2}
+    plan = _plan(served.cfg, "posts sobre rondas seed")
+    # Five paid answers are in the calibration; the fake bills a flat 100 tokens, so the fit
+    # may keep the prior — whichever it is, the server says exactly what the planner used.
+    assert load_ask_index(served.cfg.jev_asks_dir / "index.json").calibration.answers == 5
+    assert estimate["cost_model"] == _model(plan)
+    assert (estimate["tokens"], estimate["usd"]) == (plan.estimate.tokens, plan.estimate.usd)
+
+
+def test_the_ask_estimate_names_a_query_asked_before_in_other_words(served: _AskServed):
+    served.ask_run({"query": QUERY, "limit": 1})
+
+    estimate = served.ask_estimate({"query": QUERY.lower().rstrip("?")})
+
+    assert estimate["similar"] == [AskQuery.of(QUERY).text]
 
 
 # --------------------------------------------------------------------------- the job
@@ -243,18 +250,23 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
     assert {post: r.probability for post, r in records.items()} == PROBS
     (run,) = [r for r in load_runs(served.cfg.jev_runs_path) if r.kind == "ask"]
     assert (run.query_sha, run.ok, run.requests) == (query.sha, 5, 5)
-    entry = load_ask_index(served.cfg.jev_asks_dir / "index.json")[query.sha]
-    assert (entry.query, entry.times, entry.evaluated, entry.results) == (query.text, 1, 5, 2)
-    assert entry.threshold == served.cfg.jev_threshold
+    entry = _entry(served.cfg)
+    assert (entry.query, entry.times, entry.last_evaluated, entry.last_results) == (
+        query.text,
+        1,
+        5,
+        2,
+    )
+    assert entry.last_threshold == served.cfg.jev_threshold
     assert not _locked(served.cfg.jev_lock_path)
 
 
 def test_the_history_keeps_the_filters_the_job_ran_with(served: _AskServed):
     served.ask_run({"query": QUERY, "topic": "ai-coding", "limit": 2})
 
-    entry = load_ask_index(served.cfg.jev_asks_dir / "index.json")[AskQuery.of(QUERY).sha]
-    assert entry.filters == {"topic": "ai-coding"}
-    assert (entry.evaluated, entry.results) == (2, 1)
+    entry = _entry(served.cfg)
+    assert entry.last_filters == {"topic": "ai-coding"}
+    assert (entry.last_evaluated, entry.last_results) == (2, 1)
 
 
 def test_asking_again_costs_nothing_builds_no_client_and_still_counts_in_the_history(
@@ -271,7 +283,7 @@ def test_asking_again_costs_nothing_builds_no_client_and_still_counts_in_the_his
     assert job["state"] == "done" and job["total"] == 0 and job["usd"] == 0
     assert served.built == built
     assert len([r for r in load_runs(served.cfg.jev_runs_path) if r.kind == "ask"]) == 1
-    entry = load_ask_index(served.cfg.jev_asks_dir / "index.json")[AskQuery.of(QUERY).sha]
+    entry = _entry(served.cfg)
     assert entry.times == 2
 
 
@@ -357,14 +369,14 @@ def test_an_ask_job_stops_at_the_cap_keeps_what_it_paid_and_keeps_the_history(
         job = s.ask_run({"query": QUERY, "limit": 2})
         query = AskQuery.of(QUERY)
         records = load_asks(s.cfg.jev_asks_dir / f"{query.sha}.json", query)
-        entry = load_ask_index(s.cfg.jev_asks_dir / "index.json")[query.sha]
+        entry = _entry(s.cfg)
     finally:
         s.close()
 
     assert job["state"] == "interrupted" and job["reason"] == "tope"
     assert job["outcome"]["ok"] == len(records) >= 1
     assert job["usd"] <= cap * (1 + 1e-9) + 5000 / 1e6 * 0.042
-    assert entry.evaluated == len(records)
+    assert entry.last_evaluated == len(records)
 
 
 def test_a_page_stop_ends_an_ask_job_softly_and_the_history_has_it(tmp_path: Path, monkeypatch):
@@ -379,7 +391,7 @@ def test_a_page_stop_ends_an_ask_job_softly_and_the_history_has_it(tmp_path: Pat
         status, _, _ = s.request("POST", "/api/job/cancel", {})
         gate.set()
         job = s.wait_job()
-        entry = load_ask_index(s.cfg.jev_asks_dir / "index.json")[AskQuery.of(QUERY).sha]
+        entry = _entry(s.cfg)
     finally:
         gate.set()
         s.close()
@@ -387,7 +399,7 @@ def test_a_page_stop_ends_an_ask_job_softly_and_the_history_has_it(tmp_path: Pat
     assert status == 200
     assert (job["state"], job["reason"]) == ("interrupted", "cancelado")
     assert job["outcome"]["ok"] == 1 and job["outcome"]["logged"] is True
-    assert entry.evaluated == 1
+    assert entry.last_evaluated == 1
 
 
 def test_an_ask_job_that_fails_says_why_and_records_no_history(tmp_path: Path, monkeypatch):
@@ -445,21 +457,14 @@ def test_reopening_a_query_costs_nothing(served: _AskServed):
 
 def test_the_data_follows_an_ask_a_terminal_made(served: _AskServed):
     """`xbrain jev ask` in a terminal while the page is open: the next GET shows it."""
-    from xbrain.jev.ask import record_ask
+    from xbrain.jev.ask import finish_ask
     from xbrain.jev.run import run_ask
 
-    query, selection, _ = _expected(served.cfg)
     with pass_lock(served.cfg.jev_lock_path, "xbrain jev ask") as lock:
-        records: dict[str, Any] = {}
-        run_ask(served.cfg, selection, query, records, lambda: _Asker(), lock=lock)
-        record_ask(
-            served.cfg,
-            query,
-            filters=AskFilters(),
-            evaluated=5,
-            results=2,
-            threshold=served.cfg.jev_threshold,
-        )
+        plan = _plan(served.cfg)
+        outcome = run_ask(served.cfg, plan, lambda: _Asker(), lock=lock)
+        finish_ask(served.cfg, plan, outcome, threshold=served.cfg.jev_threshold)
+    query = plan.query
 
     _, history, _ = served.request("GET", "/api/asks")
 

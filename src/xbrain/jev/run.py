@@ -1,20 +1,21 @@
-"""One paid `jev topics` pass: back up, ask, checkpoint, save, log, release — and nothing else.
+"""One paid Jev pass — topics or ask: ask, checkpoint, save, log, release — and nothing else.
 
-THE ONE RUN LOOP. `xbrain jev topics` calls it today; a local server that lets the page
-request evaluations calls the SAME function, so both get the same backup rule, the same
-checkpointing, the same run-log line and the same teardown. A second loop would be a second
-place where a paid record can be lost.
+THE ONE RUN LOOP, `run_pass`. `run_topics` (`xbrain jev topics` and a `jev serve` job) adds
+the `--force` backup and the topics side-car; `run_ask` (`xbrain jev ask`) adds the query's
+answer file. Both get the same checkpointing, the same run-log line and the same teardown. A
+second loop would be a second place where a paid record can be lost.
 
 IT PRINTS NOTHING. A server has no terminal, so the pass reports through hooks (called at the
 moments the CLI needs to speak — the summary BEFORE the save, the log line AFTER it) and
 through its return value. An interrupt is RETURNED (`RunOutcome.interrupted`), not raised: the
 shell's exit 130 is the CLI's business, not the loop's.
 
-What it raises: the all-failed `JevError` from `run_assessments` (after logging the pass), a
-side-car that cannot be written (`JevError` naming the paid count), a backup that cannot be
-made (before any client exists, so before any cost), and whatever `make_client` raises (a
-missing key). A run-log line that cannot be written is NEVER raised: it goes to `on_logged`
-with its error, because an exception from a `finally` would replace the pass's real verdict.
+What it raises: the all-failed `JevError` from the pool (`assess.run_pool`, after logging the
+pass), a side-car or answer file that cannot be written (`JevError` naming the paid count), a
+backup that cannot be made (topics; before any client exists, so before any cost), and
+whatever `make_client` raises (a missing key). A run-log line that cannot be written is NEVER
+raised: it goes to `on_logged` with its error, because an exception from a `finally` would
+replace the pass's real verdict.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Generic
 
 from xbrain.config import Config
-from xbrain.jev.ask import AskQuery, assess_post
+from xbrain.jev.ask import AskPlan, ask_path, assess_post
 from xbrain.jev.assess import R, RunResult, Selection, run_assessments, run_pool
 from xbrain.jev.client import (
     CountingJevClient,
@@ -57,9 +58,10 @@ CHECKPOINT_EVERY = 25
 
 @dataclass(frozen=True)
 class RunOutcome(Generic[R]):
-    """What one pass did. `assessed` is what THIS pass banked, never the whole side-car.
+    """What one pass did. `assessed` is what THIS pass banked, never the whole side-car (or
+    answer file); `stored` is how many records that file now holds, earlier ones included.
 
-    `failed` is empty after Ctrl-C: `run_assessments` discards its own collection on that
+    `failed` is empty after Ctrl-C: the pool (`assess.run_pool`) discards its own collection on that
     emergency path, and the run log's `requests - ok - failed - unsaved` says how many were in
     flight. After a SOFT cancel (`cancel`) every call was drained, so `failed` is complete.
     `logged` is the run-log line written, or `None` when nothing was sent or the write failed.
@@ -387,9 +389,7 @@ def run_topics(
 
 def run_ask(
     cfg: Config,
-    selection: Selection,
-    query: AskQuery,
-    records: dict[str, AskAssessment],
+    plan: AskPlan,
     make_client: Callable[[], JevClient],
     *,
     lock: PassLock,
@@ -399,20 +399,21 @@ def run_ask(
     on_logged: LoggedHook | None = None,
     cancel: threading.Event | None = None,
 ) -> RunOutcome[AskAssessment]:
-    """Ask `query` about `selection.items` — `run_topics`' pass with the ask's call and file.
+    """Ask `plan.query` about `plan.selection.items` — `run_pass` with the ask's call and file.
 
-    `records` is the query's file in memory (`store.load_asks`), loaded UNDER `lock` — the
-    same pass lock as topics (one paid pass at a time, whatever it asks) — and updated in
-    place. Written whole to `data/jev/asks/<query.sha>.json`; logged as `kind: "ask"` with
-    `query_sha`. No backup: an ask is never forced, so it only ever replaces an answer whose
-    contract had already expired. Hooks, `cancel` and what it raises are `run_topics`'.
+    `plan` is `ask.plan_ask`'s, made UNDER `lock` — the same pass lock as topics (one paid
+    pass at a time, whatever it asks) — and its `records` are updated in place. Written whole
+    to `data/jev/asks/<sha>.json`; logged as `kind: "ask"` with `query_sha`. No backup: an ask
+    is never forced, so it only replaces an answer whose contract had already expired. Hooks,
+    `cancel` and what it raises are `run_topics`'. `ask.finish_ask` comes after.
     """
     require_lock(cfg, lock)
+    query, records, selection = plan.query, plan.records, plan.selection
     if not selection.items:
         return RunOutcome(
             assessed=(), failed=(), stored=len(records), interrupted=False, logged=None
         )
-    path = cfg.jev_asks_dir / f"{query.sha}.json"
+    path = ask_path(cfg, query)
     char_limit = cfg.jev_state_char_limit
 
     def _ask_all(

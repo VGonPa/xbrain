@@ -33,19 +33,9 @@ from tests.test_jev_page_browser import (
 )
 from tests.test_jev_serve_ask import PROBS, QUERY, _Asker
 from xbrain.config import Config
-from xbrain.jev.ask import (
-    AskFilters,
-    AskQuery,
-    ask_results,
-    filter_posts,
-    record_ask,
-    select_ask_items,
-)
-from xbrain.jev.load import load_jev_pairs
+from xbrain.jev.ask import AskFilters, AskQuery, finish_ask, plan_ask
 from xbrain.jev.lock import pass_lock
 from xbrain.jev.run import run_ask
-from xbrain.jev.store import load_asks
-from xbrain.store import load_store
 
 DT = datetime(2026, 9, 22, tzinfo=timezone.utc)
 #: A query asked only over «startups»: its posts (2, 4) answer 0.1 and 0.2 — no result.
@@ -55,29 +45,12 @@ BROKEN_QUERY = "posts con datos de estudios sobre creatina"
 
 
 def _asked(cfg: Config, text: str, *, when: datetime, **filters: Any) -> AskQuery:
-    """`xbrain jev ask` in a terminal, with the fake: the pass, its results, the history."""
-    query, wanted = AskQuery.of(text), AskFilters(**filters)
+    """`xbrain jev ask` in a terminal, with the fake: plan → run → finish, under the lock."""
+    query = AskQuery.of(text)
     with pass_lock(cfg.jev_lock_path, "xbrain jev ask") as lock:
-        store = load_store(cfg.items_path)
-        candidates, _ = filter_posts(
-            store, wanted, jev=load_jev_pairs(cfg), threshold=cfg.jev_threshold
-        )
-        records = load_asks(cfg.jev_asks_dir / f"{query.sha}.json", query)
-        char_limit = cfg.jev_state_char_limit
-        selection = select_ask_items(candidates, records, query, char_limit=char_limit, limit=None)
-        run_ask(cfg, selection, query, records, lambda: _Asker(), lock=lock)
-        found = ask_results(
-            candidates, records, query, char_limit=char_limit, threshold=cfg.jev_threshold
-        )
-        record_ask(
-            cfg,
-            query,
-            filters=wanted,
-            evaluated=found.answered,
-            results=len(found.ranked),
-            threshold=cfg.jev_threshold,
-            now=when,
-        )
+        plan = plan_ask(cfg, query, AskFilters(**filters), None)
+        outcome = run_ask(cfg, plan, lambda: _Asker(), lock=lock)
+        finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold, now=when)
     return query
 
 
@@ -375,8 +348,9 @@ def test_served_an_ask_estimate_is_the_servers_and_says_what_it_will_pay(ask_ser
     assert estimate["go_text"] == "Preguntar y pagar " + money
     assert estimate["est"] == (
         f"2 posts por preguntar · 4 descartados por los filtros. Coste estimado: {money} "
-        f"({_nf(e['chars'])} caracteres a 3,00 por token, sin medir todavía: una estimación alta "
-        "a propósito). Tope: 1,00 $. Al llegar se para; lo que ya esté en vuelo termina y puede "
+        f"(2 llamadas × {_nf(1000)} tokens fijos + {_nf(e['chars'])} caracteres a 4,00 por "
+        "token; sin medir todavía: la estimación de partida). Tope: 1,00 $. Al llegar se para; "
+        "lo que ya esté en vuelo termina y puede "
         "pasarlo por poco (como mucho 1 post)."
     )
 

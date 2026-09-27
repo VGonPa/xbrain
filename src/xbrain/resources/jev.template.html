@@ -2871,10 +2871,15 @@ function askPickText(e) {
   if (e.dropped) parts.push(pl(e.dropped, 'descartado por los filtros', 'descartados por los filtros'));
   let t = parts.join(' · ') + '.';
   if (e.posts) {
-    const ratio = e.chars_per_token;
-    t += ' Coste estimado: ' + usd(e.usd, 5) + ' (' + nf(e.chars) + ' caracteres a ' + dec(ratio.value, 2) +
-      ' por token, ' + (ratio.measured ? 'medido en ' + pl(ratio.measured, 'respuesta pagada', 'respuestas pagadas')
-        : 'sin medir todavía: una estimación alta a propósito') + ').';
+    const m = e.cost_model;
+    t += ' Coste estimado: ' + usd(e.usd, 5) + ' (' + pl(e.posts, 'llamada', 'llamadas') + ' × ' + nf(Math.round(m.per_call)) +
+      ' tokens fijos + ' + nf(e.chars) + ' caracteres a ' + dec(m.chars_per_token, 2) + ' por token; ' +
+      (m.measured ? 'medido en ' + pl(m.answers, 'respuesta pagada', 'respuestas pagadas')
+        : 'sin medir todavía: la estimación de partida') + ').';
+  }
+  if (e.similar && e.similar.length) {
+    t += ' Ya preguntaste algo casi igual (cambia solo en mayúsculas, puntuación o espacios, y se paga ' +
+      'aparte): ' + e.similar.map(q => '«' + q + '»').join(', ') + '.';
   }
   return t + ' ' + capText(e.max_usd);
 }

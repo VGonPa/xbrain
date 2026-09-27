@@ -51,15 +51,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from xbrain.config import Config
-from xbrain.jev.ask import (
-    AskQuery,
-    ask_results,
-    estimate_ask,
-    filter_posts,
-    record_ask,
-    select_ask_items,
-    token_ratio,
-)
+from xbrain.jev.ask import AskPlan, AskQuery, finish_ask, plan_ask, same_selection
 from xbrain.jev.assess import Selection, select_items
 from xbrain.jev.client import CallSkipped, JevClient, JevError, JevResult, Question
 from xbrain.jev.dashboard import (
@@ -82,7 +74,7 @@ from xbrain.jev.picks import (
 )
 from xbrain.jev.report import report_paths, topics_pass_estimate
 from xbrain.jev.run import RunOutcome, run_ask, run_topics
-from xbrain.jev.store import ASK_INDEX, load_all_asks, load_asks
+from xbrain.jev.store import ASK_INDEX
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +117,7 @@ class _Confirm:
     ids: tuple[str, ...]
     usd: float
     minted_at: float
+    priced: _Priced | None = None
 
 
 @dataclass
@@ -139,6 +132,8 @@ class _Job:
     per_post_usd: float
     #: What a kind adds to the view (the ask's `query_sha`).
     extra: dict[str, Any] = field(default_factory=dict)
+    #: What the confirmed estimate selected, for the re-check under the lock (`_PassKind.same`).
+    confirmed: Any = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     cancel: threading.Event = field(default_factory=threading.Event)
     ready: threading.Event = field(default_factory=threading.Event)
@@ -369,6 +364,8 @@ class _PassKind(Protocol):
 
     def view(self, pick: Any) -> dict[str, Any]: ...
 
+    def same(self, confirmed: _Priced, now: _Priced) -> bool: ...
+
     def run(
         self,
         cfg: Config,
@@ -427,6 +424,9 @@ class _TopicsKind:
     def view(self, pick: TopicsPick) -> dict[str, Any]:
         return {}
 
+    def same(self, confirmed: _Priced, now: _Priced) -> bool:
+        return confirmed.ids == now.ids
+
     def run(
         self,
         cfg: Config,
@@ -473,44 +473,33 @@ def _select_topics(cfg: Config, pick: TopicsPick, blob: dict[str, Any], jev: Jev
         raise refuse(str(exc)) from exc
 
 
-@dataclass(frozen=True)
-class _AskContext:
-    query: AskQuery
-    candidates: list[Any]
-    records: dict[str, Any]
-
-
 class _AskKind:
-    """`xbrain jev ask` from the page: its query, pre-filters and limit (`AskPick`), its
-    funnel and its estimate — the command's own functions, at `[jev].threshold`."""
+    """`xbrain jev ask` from the page: its query, pre-filters and limit (`AskPick`), planned,
+    re-checked, run and finished by the command's own functions (`ask.plan_ask`,
+    `ask.same_selection`, `run.run_ask`, `ask.finish_ask`) — the same sequence, never a copy.
+    Results are at `[jev].threshold`; the history rule is `finish_ask`'s."""
 
     def parse(self, body: Any) -> AskPick:
         return parse_ask(body)
 
     def price(self, cfg: Config, pick: AskPick, blob: dict[str, Any], jev: JevPairs) -> _Priced:
-        query = AskQuery.of(pick.query)
-        candidates, dropped = filter_posts(
-            jev.store, pick.filters, jev=jev, threshold=cfg.jev_threshold
-        )
-        records = load_asks(cfg.jev_asks_dir / f"{query.sha}.json", query)
-        char_limit = cfg.jev_state_char_limit
-        selection = select_ask_items(
-            candidates, records, query, char_limit=char_limit, limit=pick.limit
-        )
-        ratio = token_ratio(load_all_asks(cfg.jev_asks_dir))
-        estimate = estimate_ask(
-            selection, query, char_limit=char_limit, chars_per_token=ratio.value
-        )
+        plan = plan_ask(cfg, AskQuery.of(pick.query), pick.filters, pick.limit, jev=jev)
+        estimate, model = plan.estimate, plan.estimate.model
         reply = {
-            "query_sha": query.sha,
-            "dropped": dropped,
-            "candidates": len(candidates),
+            "query_sha": plan.query.sha,
+            "dropped": plan.dropped,
+            "candidates": len(plan.candidates),
             "chars": estimate.chars,
-            "chars_per_token": {"value": ratio.value, "measured": ratio.measured},
+            "cost_model": {
+                "per_call": model.per_call,
+                "chars_per_token": model.chars_per_token,
+                "measured": model.measured,
+                "answers": model.answers,
+            },
+            "similar": list(plan.similar),
         }
-        ids = tuple(item.id for item in selection.items)
-        context = _AskContext(query, candidates, records)
-        return _Priced(selection, ids, estimate.tokens, estimate.usd, reply, context)
+        ids = tuple(item.id for item in plan.selection.items)
+        return _Priced(plan.selection, ids, estimate.tokens, estimate.usd, reply, plan)
 
     def refusal(self, cfg: Config, priced: _Priced) -> str | None:
         selection = priced.selection
@@ -524,6 +513,9 @@ class _AskKind:
     def view(self, pick: AskPick) -> dict[str, Any]:
         return {"query_sha": AskQuery.of(pick.query).sha}
 
+    def same(self, confirmed: _Priced, now: _Priced) -> bool:
+        return same_selection(confirmed.context, now.context)
+
     def run(
         self,
         cfg: Config,
@@ -533,35 +525,17 @@ class _AskKind:
         make_client: Callable[[], JevClient],
         lock: PassLock,
     ) -> tuple[RunOutcome, dict[str, Any]]:
-        """The ask's pass, then — still under the lock — its results and the history line.
-        With nothing to ask (every answer current) no client is built and nothing is logged."""
-        context: _AskContext = priced.context
-        outcome = run_ask(
-            cfg,
-            priced.selection,
-            context.query,
-            context.records,
-            lambda: _Metered(make_client(), job),
-            lock=lock,
-            **_hooks(job),
-        )
-        pick: AskPick = job.pick  # type: ignore[assignment]
-        found = ask_results(
-            context.candidates,
-            context.records,
-            context.query,
-            char_limit=cfg.jev_state_char_limit,
-            threshold=cfg.jev_threshold,
-        )
-        record_ask(
-            cfg,
-            context.query,
-            filters=pick.filters,
-            evaluated=found.answered,
-            results=len(found.ranked),
-            threshold=cfg.jev_threshold,
-        )
-        return outcome, {"results": len(found.ranked), "answered": found.answered}
+        """The ask's pass, then — still under the lock — `finish_ask`: its results and, by
+        that function's one rule, its line in the history. With every answer current no
+        client is built and nothing is logged."""
+        plan: AskPlan = priced.context
+        outcome = run_ask(cfg, plan, lambda: _Metered(make_client(), job), lock=lock, **_hooks(job))
+        found = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+        return outcome, {
+            "results": len(found.ranked),
+            "answered": found.answered,
+            "recorded": found.recorded,
+        }
 
 
 def _signature(paths: list[Path]) -> tuple[tuple[int, int] | None, ...]:
@@ -733,7 +707,7 @@ class JevService:
         confirm_token = None
         if refusal is None:
             confirm_token = secrets.token_urlsafe(16)
-            confirm = _Confirm(kind, pick, priced.ids, priced.usd or 0.0, _monotonic())
+            confirm = _Confirm(kind, pick, priced.ids, priced.usd or 0.0, _monotonic(), priced)
             with self._state:
                 self._confirms[confirm_token] = confirm
                 while len(self._confirms) > _CONFIRMS_KEPT:
@@ -783,6 +757,7 @@ class JevService:
             per_post = confirm.usd / len(confirm.ids) if confirm.ids else 0.0
             job = _Job(kind, pick, confirm.ids, self.cfg.jev_serve_max_usd, per_post)
             job.extra = self._kinds[kind].view(pick)
+            job.confirmed = confirm.priced
             self._starting = job
             return job, confirm
 
@@ -818,8 +793,9 @@ class JevService:
         if job.cancel.is_set():
             job.refusal, job.refusal_status = "el servidor se está parando", 503
             return None
-        priced = self._kinds[job.kind].price(self.cfg, job.pick, blob, jev)
-        if priced.ids != job.ids:
+        kind = self._kinds[job.kind]
+        priced = kind.price(self.cfg, job.pick, blob, jev)
+        if priced.ids != job.ids or not kind.same(job.confirmed, priced):
             job.refusal = (
                 "la selección cambió desde la estimación (otra pasada o un cambio en los "
                 "datos): vuelve a estimar"

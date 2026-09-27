@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
 from xbrain.jev.ask import AskFilters
@@ -182,27 +181,6 @@ class AskPick:
         return out
 
 
-def _optional_text(body: dict[str, Any], key: str) -> str | None:
-    value = body.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise refuse(f"`{key}` debe ser texto no vacío")
-    return value.strip()
-
-
-def _day(body: dict[str, Any], key: str) -> date | None:
-    value = body.get(key)
-    if value is None:
-        return None
-    try:
-        if not isinstance(value, str):
-            raise ValueError(value)
-        return date.fromisoformat(value)
-    except ValueError:
-        raise refuse(f"`{key}` debe ser un día AAAA-MM-DD") from None
-
-
 def _query(value: Any) -> str:
     if not isinstance(value, str):
         raise refuse("falta `query`: la pregunta, como texto")
@@ -226,26 +204,19 @@ def _limit(value: Any) -> int | None:
 def parse_ask(body: Any) -> AskPick:
     """The ask a request body names — a query, optional filters, an optional limit — or a 400.
 
-    The same checks `xbrain jev ask` makes on its options, plus two a page needs: a day range
-    that runs backwards is refused (it selects nothing, and looks like «no post answers»), and
-    a query longer than `MAX_QUERY_CHARS` is refused (it would travel with every post)."""
+    The filters are `AskFilters.from_json`'s, the command's own checks (a range that runs
+    backwards, an empty topic or author, a malformed day); on top, a query longer than
+    `MAX_QUERY_CHARS` is refused (it would travel with every post)."""
     if not isinstance(body, dict):
         raise refuse("el cuerpo debe ser un objeto JSON")
     unknown = sorted(set(body) - set(ASK_FIELDS))
     if unknown:
         raise refuse(f"campos desconocidos: {', '.join(unknown)}")
     query = _query(body.get("query"))
-    since, until = _day(body, "since"), _day(body, "until")
-    if since is not None and until is not None and since > until:
-        raise refuse("`since` es posterior a `until`: ese intervalo no tiene ningún día")
-    only_evaluated = body.get("only_evaluated", False)
-    if not isinstance(only_evaluated, bool):
-        raise refuse("`only_evaluated` debe ser true o false")
-    filters = AskFilters(
-        topic=_optional_text(body, "topic"),
-        since=since,
-        until=until,
-        author=_optional_text(body, "author"),
-        only_evaluated=only_evaluated,
-    )
+    try:
+        filters = AskFilters.from_json(
+            {key: body[key] for key in ASK_FIELDS if key not in ("query", "limit") and key in body}
+        )
+    except ValueError as exc:
+        raise refuse(str(exc)) from exc
     return AskPick(query=query, filters=filters, limit=_limit(body.get("limit")))

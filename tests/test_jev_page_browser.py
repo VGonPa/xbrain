@@ -1894,7 +1894,7 @@ const sId = id => document.getElementById(id);
 // Bounded by REAL time — the server's `Date` header — since the page's clock is virtual: 30 s
 // for one wait, and one deadline for the WHOLE probe (from its first wait), so a probe whose
 // first step fails names that step instead of running out Chrome's own timeout.
-const sBudgetMs = /*BUDGET*/90000;
+const sBudgetMs = /*BUDGET*/75000;
 let sDeadline = null;
 const sWait = async (cond, what) => {
   let start = null;

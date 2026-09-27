@@ -66,7 +66,7 @@ STATE_SURFACE_KEYS: tuple[str, ...] = tuple(
 _STATE_POSITION = {key: n for n, key in enumerate(STATE_SURFACE_KEYS)}
 
 
-def _nfc(text: str) -> str:
+def nfc(text: str) -> str:
     """Unicode-normalise before hashing.
 
     The same visible description in NFC and NFD is two different byte strings. Without this,
@@ -76,7 +76,8 @@ def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
-def _sha256(text: str) -> str:
+def sha256(text: str) -> str:
+    """The hex sha256 of `text` as UTF-8 — every jev contract, digest and query sha."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -177,7 +178,7 @@ def questions_digest(questions: dict[str, Question]) -> str:
         sort_keys=True,
         ensure_ascii=False,
     )
-    return _sha256(_nfc(payload))
+    return sha256(nfc(payload))
 
 
 def topic_contract(state_text: str, digest: str) -> str:
@@ -195,10 +196,19 @@ def topic_contract(state_text: str, digest: str) -> str:
     `digest` is `questions_digest(questions)`, taken as a parameter rather than the question
     map so a run serialises the canonical JSON once instead of once per item.
     """
-    return _sha256("\x1f".join((_CONTRACT_VERSION, _nfc(state_text), digest)))
+    return contract(_CONTRACT_VERSION, state_text, digest)
 
 
-def _record_refusal(exc: ValidationError) -> JevError:
+def contract(version: str, state_text: str, digest: str) -> str:
+    """THE contract shape: sha256(version ∥ state as sent, NFC ∥ questions digest).
+
+    `topic_contract` and `ask.ask_contract` are this with their own `version`, so the two
+    kinds of answer are bound the same way and can never be mistaken for each other.
+    """
+    return sha256("\x1f".join((version, nfc(state_text), digest)))
+
+
+def record_refusal(exc: ValidationError) -> JevError:
     """The seam's Spanish message for an answer this repo's own validators refuse.
 
     Both records built from a Jev answer — `PrimaryChoice` here and `TopicAssessment` in
@@ -266,7 +276,7 @@ def parse_topic_result(
         # The guards above cover the answer's SHAPE; the model still owns its own bounds (a
         # confidence outside [0, 1], a probability that is not one). Wrapped here so this
         # function is total with respect to `JevError` for a direct caller too.
-        raise _record_refusal(exc) from exc
+        raise record_refusal(exc) from exc
     return membership, choice
 
 
@@ -317,7 +327,7 @@ def assess_topics(
             output_tokens=result.output_tokens,
         )
     except ValidationError as exc:
-        raise _record_refusal(exc) from exc
+        raise record_refusal(exc) from exc
 
 
 def _contract_matches(assessment: TopicAssessment | None, state_text: str, digest: str) -> bool:
@@ -512,11 +522,16 @@ def select_by_contract(
     limit: int | None,
     force: bool,
     char_limit: int,
+    state_of: Callable[[Item], tuple[str, int]] | None = None,
 ) -> Selection:
     """THE FUNNEL, whatever is being asked: every candidate ends selected, current (its
     stored record's contract still matches — `is_current(item, state_text)`), evidence-free,
     or cut by `limit`. `select_items` (topics) and `ask.select_ask_items` (a query) differ only
     in `is_current`, so the partition `Selection` promises is computed in one place.
+
+    `state_of(item)` → `(state text as sent, pre-cut length)`, when the caller has already
+    built every candidate's state (`ask.plan_ask` builds each one once and reuses it for the
+    estimate and the results); `build_topic_state` otherwise.
     """
     if limit is not None and limit < 1:
         raise JevError("--limit debe ser >= 1")
@@ -528,7 +543,11 @@ def select_by_contract(
     skipped_current = 0
     skipped_no_evidence = 0
     for item in candidates:
-        state, state_chars = build_topic_state(item, char_limit)
+        if state_of is None:
+            built, state_chars = build_topic_state(item, char_limit)
+            state_text = built[STATE_KEY]
+        else:
+            state_text, state_chars = state_of(item)
         # Judged on the PRE-cut evidence: an item with evidence but a tiny window has
         # something to ask about, and `evidence_surfaces` already drops blank values.
         if state_chars == 0:
@@ -537,7 +556,7 @@ def select_by_contract(
         # Computed even under `force`, which costs nothing and is the whole point: the
         # answer is what tells a forced re-bill of a current corpus apart from a corpus
         # whose contracts had expired. Skipping the check would make the two identical.
-        current = is_current(item, state[STATE_KEY])
+        current = is_current(item, state_text)
         if current and not force:
             skipped_current += 1
             continue
@@ -708,7 +727,7 @@ def run_pool(
 ) -> RunResult[R]:
     """THE POOL: `ask_one(item)` for every item, `concurrency` at a time — whatever is asked.
 
-    `run_assessments` (the topic questions) and `ask.run_ask_pool` (a user's query) are both
+    `run_assessments` (the topic questions) and `run.run_ask` (a user's query) are both
     this function with a different `ask_one`, so the stop rules, the failure accounting and the
     checkpoint delivery below exist once. `ask_one` makes ONE call and returns the record, or
     raises; it runs in `concurrency` threads at once.

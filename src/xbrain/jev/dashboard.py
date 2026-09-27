@@ -19,7 +19,7 @@ NOTHING HERE RE-IMPLEMENTS A NUMBER.
   into its evidence surfaces — the same order and the same cut.
 * What was asked («Preguntar», `asks`) is the query history (`data/jev/asks/index.json`), each
   query's results recomputed now by `ask.ask_results` over its own filters and threshold, and
-  its cost `report.ask_bill` — so the static page shows what the server's `/api/asks` does.
+  its cost `report.ask_cost_by_query` — so the static page shows what the server's `/api/asks` does.
 
 PURE, EXCEPT ONE FUNCTION. `compute_jev_dashboard_data` touches no disk: which media files
 exist is `collect_jev_media`'s answer, handed in. `build_page_data` is the IO shell that loads
@@ -64,7 +64,8 @@ from xbrain.jev.load import JevPairs, load_jev_pairs
 from xbrain.jev.models import AskAssessment, AskHistoryEntry, JevRun, TopicAssessment
 from xbrain.jev.report import (
     ItemComparison,
-    ask_bill,
+    ask_cost,
+    ask_cost_by_query,
     assessment_cost_usd,
     bill,
     build_report,
@@ -756,6 +757,9 @@ def compute_jev_dashboard_data(
 
 #: `asks` when nothing was ever asked (and what a pure caller gets).
 NO_ASKS: dict[str, Any] = {"history": [], "surfaces": {}, "error": None}
+#: The cost of a query no logged pass paid for (every answer came from the cache, or the
+#: passes that paid were never logged): `report.ask_cost`'s zero.
+_NO_COST = ask_cost([], "")
 
 
 @dataclass(frozen=True)
@@ -771,7 +775,7 @@ class SavedAsk:
 def _ask_row(
     saved: SavedAsk,
     jev: JevPairs,
-    runs: Sequence[JevRun],
+    costs: dict[str, dict[str, Any]],
     char_limit: int,
     surfaces: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
@@ -786,11 +790,11 @@ def _ask_row(
         "first_asked_at": entry.first_asked_at.isoformat(),
         "last_asked_at": entry.last_asked_at.isoformat(),
         "times": entry.times,
-        "threshold": entry.threshold,
-        "filters": entry.filters,
+        "threshold": entry.last_threshold,
+        "filters": entry.last_filters,
         "answered": 0,
         "results": [],
-        "cost": ask_bill(runs, entry.query_sha),
+        "cost": costs.get(entry.query_sha, _NO_COST),
     }
     error = saved.error
     if error is None:
@@ -798,12 +802,16 @@ def _ask_row(
             query = AskQuery.of(entry.query)
             candidates, _ = filter_posts(
                 jev.store,
-                AskFilters.from_json(entry.filters),
+                AskFilters.from_json(entry.last_filters),
                 jev=jev,
-                threshold=entry.threshold,
+                threshold=entry.last_threshold,
             )
             found = ask_results(
-                candidates, saved.records, query, char_limit=char_limit, threshold=entry.threshold
+                candidates,
+                saved.records,
+                query,
+                char_limit=char_limit,
+                threshold=entry.last_threshold,
             )
         except (JevError, ValueError) as exc:
             error = str(exc)
@@ -839,7 +847,8 @@ def asks_view(
     results and cost. `error` is why the history itself could not be read."""
     surfaces: dict[str, list[dict[str, Any]]] = {}
     ordered = sorted(saved, key=lambda s: (s.entry.last_asked_at, s.entry.query_sha), reverse=True)
-    history = [_ask_row(one, jev, runs, char_limit, surfaces) for one in ordered]
+    costs = ask_cost_by_query(runs)
+    history = [_ask_row(one, jev, costs, char_limit, surfaces) for one in ordered]
     return {"history": history, "surfaces": surfaces, "error": error}
 
 
@@ -851,7 +860,7 @@ def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:
     except JevError as exc:
         return [], str(exc)
     saved: list[SavedAsk] = []
-    for entry in index.values():
+    for entry in index.queries.values():
         try:
             query = AskQuery.of(entry.query)
             if query.sha != entry.query_sha:

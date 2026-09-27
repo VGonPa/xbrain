@@ -32,7 +32,7 @@ from xbrain.jev.picks import ServeError
 
 _DEADLINE_PROBE = (
     "<script>"
-    + _SERVE_JS.replace("/*BUDGET*/90000", "/*BUDGET*/2000")
+    + _SERVE_JS.replace("/*BUDGET*/75000", "/*BUDGET*/2000")
     + r"""
 (async () => {
   for (const name of ['uno', 'dos', 'tres', 'cuatro']) {

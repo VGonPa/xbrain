@@ -304,3 +304,18 @@ def test_an_ask_line_needs_its_query_and_a_topics_line_has_none():
         _run(kind="ask", query_sha="not-a-sha")
     with pytest.raises(ValidationError, match="kind"):
         _run(kind="search", query_sha="a" * 64)
+
+
+def test_a_topics_line_carries_no_query_sha_key_so_an_older_xbrain_still_reads_the_log(
+    tmp_path: Path,
+):
+    """`JevRun` refuses unknown keys, so a `"query_sha": null` on every topics line would make
+    a copy of xbrain from before `jev ask` refuse the whole log."""
+    path = tmp_path / "runs.jsonl"
+    append_run(_run(), path)
+    append_run(_run(kind="ask", query_sha="a" * 64), path)
+
+    topics, ask = (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+
+    assert "query_sha" not in topics and "query_sha" not in json.loads(_run().model_dump_json())
+    assert ask["query_sha"] == "a" * 64
