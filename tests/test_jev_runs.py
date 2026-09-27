@@ -211,8 +211,9 @@ def test_answers_that_came_back_but_were_not_saved_are_their_own_bucket():
 
     assert run.requests - run.ok - run.failed - run.unsaved == 3  # in flight
 
-    with pytest.raises(ValidationError, match="unsaved"):
-        _run(requests=20, ok=18, failed=0, unsaved=2)  # only an interrupt leaves any
+    # A pass that ran to the end whose final save failed: answered, billed, never on disk.
+    saved_short = _run(requests=20, ok=18, failed=0, unsaved=2)
+    assert saved_short.requests == saved_short.ok + saved_short.failed + saved_short.unsaved
     with pytest.raises(ValidationError, match="requests"):
         _run(requests=5, ok=4, failed=1, unsaved=1, interrupted=True)
 

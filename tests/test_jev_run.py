@@ -298,7 +298,8 @@ def test_a_side_car_that_cannot_be_written_still_logs_the_pass(cfg: Config, monk
     with pytest.raises(JevError, match="2 evaluaciones pagadas sin guardar"):
         _pass(cfg, FakeJevClient())
 
-    assert (_only_run(cfg).requests, _only_run(cfg).ok) == (2, 2)
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.unsaved) == (2, 0, 2)  # billed, never on disk
 
 
 # --------------------------------------------------------------- the log step is never the verdict
@@ -587,3 +588,46 @@ def test_the_failures_listed_are_capped_by_one_constant():
 
     assert run.FAILURES_SHOWN == 10
     assert not hasattr(cli, "_JEV_FAILURES_SHOWN") and not hasattr(service, "_FAILURES_SHOWN")
+
+
+def test_a_final_save_that_fails_books_only_what_reached_the_disk(cfg: Config, monkeypatch):
+    """The disk fills at the end: the run log must not book the answers held only in memory as
+    `ok`. `ok` is what a save persisted (here the first checkpoint's one record); every other
+    answer kept is `unsaved` — billed, not on disk."""
+    from xbrain.jev import run as jev_run
+
+    real = jev_run.save_assessments
+    saves: list[int] = []
+
+    def _fills_after_first(assessments, path):
+        saves.append(len(assessments))
+        if len(saves) > 1:
+            raise OSError(28, "No space left on device")
+        real(assessments, path)
+
+    monkeypatch.setattr(jev_run, "CHECKPOINT_EVERY", 1)
+    monkeypatch.setattr(jev_run, "save_assessments", _fills_after_first)
+
+    with pytest.raises(JevError, match="sin guardar"):
+        _pass(cfg, FakeJevClient())
+
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.unsaved, run.failed) == (2, 1, 1, 0)
+    assert list(load_assessments(cfg.jev_topics_path)) == ["1"]
+
+
+def test_a_final_save_that_fails_with_nothing_checkpointed_books_everything_unsaved(
+    cfg: Config, monkeypatch
+):
+    from xbrain.jev import run as jev_run
+
+    def _full(assessments, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(jev_run, "save_assessments", _full)
+
+    with pytest.raises(JevError, match="sin guardar"):
+        _pass(cfg, FakeJevClient())
+
+    run = _only_run(cfg)
+    assert (run.requests, run.ok, run.unsaved, run.failed) == (2, 0, 2, 0)

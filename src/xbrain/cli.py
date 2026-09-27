@@ -93,7 +93,7 @@ from xbrain.jev.report import (
 from xbrain.jev.lock import PassLock, PassLockBusy, pass_lock
 from xbrain.jev.run import FAILURES_SHOWN, RunOutcome, run_ask, run_topics
 from xbrain.jev.serve import make_server, serve_until_interrupted
-from xbrain.jev.service import JevService
+from xbrain.jev.service import JevService, over_cap
 from xbrain.jev.store import load_assessments, load_runs
 from xbrain.media import download_all as run_media_download
 from xbrain.media import emit_summary_line as media_emit_summary_line
@@ -3113,12 +3113,22 @@ def _jev_ask_locked(
     limit: int | None,
 ) -> RunOutcome[Any] | None:
     """Under the lock: plan AGAIN, refuse if the posts or the price moved since the estimate,
-    ask, record and print. `None` when nothing needed asking."""
+    ask, record and print. `None` when nothing needed asking.
+
+    The price is held to what was agreed: a prompted yes (`confirmed` without `--yes`) to the
+    estimate it showed; no prompt (under the cap) to `[jev].ask_max_usd`. `--yes` agreed to
+    spend without asking."""
     plan = plan_ask(cfg, before.query, before.filters, limit)
     if not same_selection(before, plan):
         raise JevError(
             "la selección cambió desde la estimación (otra pasada o un cambio en los datos): "
             "no se ha preguntado nada; vuelve a lanzar la consulta"
+        )
+    if confirmed and not yes and over_cap(plan.estimate.usd, before.estimate.usd):
+        # The prompt agreed to the price it showed, never to whatever the lock finds.
+        raise JevError(
+            f"la estimación subió de ~{before.estimate.usd:.4f} $ confirmados a "
+            f"~{plan.estimate.usd:.4f} $: no se ha preguntado nada; vuelve a lanzar la consulta"
         )
     if plan.selection.items and not (yes or confirmed) and plan.estimate.usd > cfg.jev_ask_max_usd:
         raise JevError(
@@ -3428,13 +3438,15 @@ def jev_serve_cmd(
 ) -> None:
     r"""Sirve la página de Jev en 127.0.0.1, en vivo, con una API local para evaluar.
 
-    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local
-    (POST /api/topics/estimate → /api/topics/evaluate) para pedir a Jev unos posts, un topic,
-    los N siguientes sin evaluar, los posts de un cruce o de una banda: primero una
-    estimación (posts y $), después la confirmación, y un único trabajo en segundo plano que
-    corre la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Cada
-    trabajo tiene un tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para:
-    deja que el trabajo guarde lo pagado y sale con 130.
+    La misma página que `xbrain jev dashboard`, dibujada al vuelo, y una API local para dos
+    clases de trabajo. Topics (POST /api/topics/estimate → /api/topics/evaluate): pedir a Jev
+    unos posts, un topic, los N siguientes sin evaluar, los posts de un cruce o de una banda;
+    la misma pasada que `xbrain jev topics` (copia, checkpoints, runs.jsonl). Preguntar
+    (la pestaña Preguntar, POST /api/ask/estimate → /api/ask/evaluate): una consulta al
+    corpus, la misma que `xbrain jev ask`. Siempre primero una estimación (posts y $),
+    después la confirmación, y un único trabajo en segundo plano. Cada trabajo gasta, con un
+    tope de \[jev].serve_max_usd. Solo escucha en 127.0.0.1. Ctrl-C para: deja que el
+    trabajo guarde lo pagado y sale con 130.
     """
     cfg = _config()
     service = JevService(cfg, lambda: _jev_client(cfg))
@@ -3460,6 +3472,13 @@ def jev_serve_cmd(
         raise typer.Exit(code=code)
 
 
+#: What a finished job saved, per kind: a topics pass evaluations, an ask answers.
+_LAST_JOB_SAVED = {
+    "topics": ("evaluación guardada", "evaluaciones guardadas"),
+    "ask": ("respuesta guardada", "respuestas guardadas"),
+}
+
+
 def _echo_last_job(job: dict[str, Any]) -> None:
     """The last job the server ran, in the terminal, like `jev topics` ends: what it saved,
     what it could not, the backup, and a run-log line that has to be appended by hand."""
@@ -3470,8 +3489,9 @@ def _echo_last_job(job: dict[str, Any]) -> None:
     if job.get("reason"):
         line += f" ({job['reason']})"
     if outcome:
+        saved = _LAST_JOB_SAVED[job.get("kind", "topics")]
         line += (
-            f" · {plural(outcome['ok'], 'evaluación guardada', 'evaluaciones guardadas')}"
+            f" · {plural(outcome['ok'], *saved)}"
             f" · {plural(outcome['failed'], 'fallida', 'fallidas')}"
         )
         if outcome["unsaved"]:

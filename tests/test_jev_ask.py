@@ -1580,3 +1580,28 @@ def test_the_cost_model_counts_tokens_once_for_every_caller():
     assert model.tokens(400) == 1100.0
     assert model.tokens(400, posts=3) == 3100.0
     assert estimate_ask([150, 250, 1], model).tokens == round(model.tokens(401, posts=3))
+
+
+def test_cli_refuses_a_confirmed_ask_whose_price_rose_under_the_lock(cfg: Config, monkeypatch):
+    """Over the cap the user agreed to ONE price. If the plan made again under the lock costs
+    more than that, nothing is asked: the yes was for the estimate shown, not for any price."""
+    from dataclasses import replace
+
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    plans: list[object] = []
+    real = cli.plan_ask
+
+    def _dearer_under_the_lock(*args, **kwargs):
+        plan = real(*args, **kwargs)
+        plans.append(plan)
+        usd = cfg.jev_ask_max_usd * (2 if len(plans) == 1 else 3)
+        return replace(plan, estimate=replace(plan.estimate, usd=usd))
+
+    monkeypatch.setattr(cli, "plan_ask", _dearer_under_the_lock)
+
+    result = runner.invoke(app, ["jev", "ask", QUERY], input="y\n")
+
+    assert result.exit_code == 1, result.output
+    assert "¿Preguntar igualmente?" in result.output
+    assert "la estimación subió" in result.output and "confirmad" in result.output
+    assert not cfg.jev_runs_path.exists()

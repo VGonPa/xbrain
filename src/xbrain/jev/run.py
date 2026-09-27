@@ -202,18 +202,23 @@ def run_record(
     drained: bool = False,
     kind: RunKind = "topics",
     query_sha: str | None = None,
+    saved: int | None = None,
 ) -> JevRun:
     """The `runs.jsonl` line for one pass, from what the seam saw and what was kept.
 
-    `kept` is what was BANKED into the side-car. Everything else that came back is either a
-    failure (`raised`, plus answers xbrain refused) or — on an interrupted pass only —
-    `unsaved`: answered but never drained. An interrupt cannot tell a refused answer that
-    was not yet drained from a good one, and neither was kept, so both land in `unsaved`.
+    `kept` is what was BANKED into the side-car in memory; `saved` how many of those a save
+    actually PERSISTED (`None`: all of them). `ok` is `saved`: a record the disk never got —
+    the final save failed — is `unsaved`, billed and not kept, never `ok`. Everything else
+    that came back is either a failure (`raised`, plus answers xbrain refused) or — on an
+    interrupted pass only — `unsaved` too: answered but never drained. An interrupt cannot
+    tell a refused answer that was not yet drained from a good one, and neither was kept, so
+    both land in `unsaved`.
 
     `finished_at` is clamped to `started_at`: a wall clock that steps back (NTP, a laptop
     waking) must not make the record invalid — this is built inside a `finally`.
     """
     answered_not_kept = counts.answered - kept
+    persisted = kept if saved is None else saved
     # `unsaved` is Ctrl-C's word: answered, never drained. A SOFT cancel drained every call, so
     # an answer it did not keep was refused — a failure, as on a pass that ran to the end.
     lost_in_flight = interrupted and not drained
@@ -224,9 +229,9 @@ def run_record(
         finished_at=max(finished_at, started_at),
         models=list(counts.models),
         requests=counts.sent,
-        ok=kept,
+        ok=persisted,
         failed=counts.raised + (0 if lost_in_flight else answered_not_kept),
-        unsaved=answered_not_kept if lost_in_flight else 0,
+        unsaved=(answered_not_kept if lost_in_flight else 0) + kept - persisted,
         input_tokens_by_provider=counts.input_tokens_by_provider,
         input_tokens=sum(counts.input_tokens_by_provider.values()),
         input_tokens_unknown=counts.input_tokens_unknown,
@@ -245,13 +250,14 @@ def _log_pass(
     kept: int,
     started_at: datetime,
     *,
+    saved: int,
     interrupted: bool,
     drained: bool,
     on_logged: LoggedHook | None,
     kind: RunKind,
     query_sha: str | None,
 ) -> JevRun | None:
-    """Append the pass to the run log. NEVER raises — it runs inside `run_topics`' `finally`.
+    """Append the pass to the run log. NEVER raises — it runs inside `run_pass`' `finally`.
 
     Nothing is written when nothing was SENT (a Ctrl-C before the first call): the log is a
     history of requests made, not of invocations.
@@ -279,6 +285,7 @@ def _log_pass(
             drained=drained,
             kind=kind,
             query_sha=query_sha,
+            saved=saved,
         )
         line = run.model_dump_json()
         append_run(run, path)
@@ -483,6 +490,9 @@ def run_pass(
     # earlier pass's work, so reporting its length as the rescue would tell an operator who
     # banked 3 records into a side-car of 500 that they rescued 503.
     banked: dict[str, R] = {}
+    # How many of `banked` a save has PERSISTED: the run log's `ok`. A final save that fails
+    # leaves it at the last checkpoint that did not.
+    persisted = 0
 
     def _checkpoint(record: R) -> None:
         """Bank each record as it lands, and flush to disk every `CHECKPOINT_EVERY`.
@@ -492,10 +502,13 @@ def run_pass(
         this raises (a broken checkpoint must never discard the record it was called to save),
         so the log line is the only surface there is.
         """
+        nonlocal persisted
         records[record.item_id] = record
         banked[record.item_id] = record
         if len(banked) % CHECKPOINT_EVERY == 0:
-            _save_side_car(save, path, paid=len(banked))
+            count = len(banked)
+            _save_side_car(save, path, paid=count)
+            persisted = count
 
     # Wrapped so the run log can say how many calls were SENT, which nothing else observes.
     client = CountingJevClient(make_client())
@@ -516,6 +529,7 @@ def run_pass(
             # With nothing banked, saving would write `records` UNCHANGED — for a first
             # run that is `{}` over the side-car.
             _save_side_car(save, path, paid=len(banked))
+            persisted = len(banked)
         failed: tuple[tuple[str, str], ...] = ()
     else:
         # A soft cancel (the server's cap or shutdown) waited for every call in flight, so
@@ -532,6 +546,7 @@ def run_pass(
         # skips it the same way.
         if result.assessed or path.exists():
             _save_side_car(save, path, paid=len(result.assessed))
+        persisted = len(banked)
         failed = result.failed
     finally:
         # EVERY exit path of a pass that sent something lands here: success, a partial
@@ -542,6 +557,7 @@ def run_pass(
             client,
             len(banked),
             started_at,
+            saved=persisted,
             interrupted=interrupted,
             drained=drained,
             on_logged=on_logged,

@@ -1029,7 +1029,7 @@ def test_the_run_is_logged_even_when_the_side_car_cannot_be_written(tmp_path, mo
     assert result.exit_code == 1
     assert "2 evaluaciones pagadas sin guardar" in result.stderr
     [run] = load_runs(_runs_path(tmp_path))
-    assert (run.requests, run.ok) == (2, 2)
+    assert (run.requests, run.ok, run.unsaved) == (2, 0, 2)  # billed, never on disk
 
 
 def test_a_log_that_cannot_be_written_never_costs_the_run_its_records_or_its_verdict(
@@ -2089,3 +2089,34 @@ def test_jev_serve_says_nothing_about_a_job_it_never_ran(tmp_path: Path, monkeyp
     result = runner.invoke(app, ["jev", "serve", "--port", "0", "--no-open"])
 
     assert "Último trabajo" not in result.output
+
+
+def test_jev_serve_ends_an_ask_job_in_answers_not_evaluations(tmp_path: Path, monkeypatch):
+    """The last job's words follow its kind: an ask saves answers (`jev ask`'s noun)."""
+    _serve_seeded(tmp_path, monkeypatch)
+    last = {
+        "state": "done",
+        "kind": "ask",
+        "outcome": {"ok": 3, "failed": 0, "unsaved": 0, "ids": ["1"], "logged": True},
+    }
+
+    def _stopped(server, service):
+        server.server_close()
+        return 130, last
+
+    monkeypatch.setattr(cli, "serve_until_interrupted", _stopped)
+
+    result = runner.invoke(app, ["jev", "serve", "--port", "0", "--no-open"])
+
+    assert "Último trabajo: done · 3 respuestas guardadas · 0 fallidas" in result.output
+    assert "evaluaci" not in result.output
+
+
+def test_jev_serve_help_names_both_kinds_of_job():
+    """`--help` is where the Preguntar tab and its routes are found from the terminal."""
+    result = runner.invoke(app, ["jev", "serve", "--help"], terminal_width=200)
+
+    text = " ".join(result.output.split())
+    assert result.exit_code == 0
+    assert "Preguntar" in text and "/api/ask/estimate" in text and "/api/ask/evaluate" in text
+    assert "xbrain jev ask" in text

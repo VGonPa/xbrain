@@ -637,7 +637,7 @@ function renderRuns(runs) {
     usd(r.cost_usd) + unpricedNote(r.unpriced_providers),
     esc(r.models.join(', ') || '—'),
     r.interrupted ? 'sí (' + nf(r.requests - r.ok - r.failed - (r.unsaved || 0)) + ' en vuelo, ' +
-      nf(r.unsaved || 0) + ' sin guardar)' : 'no',
+      nf(r.unsaved || 0) + ' sin guardar)' : r.unsaved ? 'no (' + nf(r.unsaved) + ' sin guardar)' : 'no',
   ];
   t.innerHTML = '<thead><tr>' + heads.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
     runs.map(r => '<tr>' + row(r).map((v, i) => '<td class="n" data-h="' + heads[i] + '">' + v + '</td>').join('') + '</tr>').join('') +
