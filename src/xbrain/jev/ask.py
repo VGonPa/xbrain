@@ -523,29 +523,61 @@ def _calibrate(calibration: AskCalibration, records: Iterable[AskAssessment]) ->
     return calibration
 
 
+def _mtime(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def _newer(file: Path, written: int | None) -> bool:
+    """Whether `file` was written after the history (`written`: its mtime; `None`: absent)."""
+    return written is None or (_mtime(file) or 0) > written
+
+
+def _unseen(stored: AskFile, entry: AskHistoryEntry | None) -> list[AskAssessment]:
+    """The answers the calibration has not folded: all of them for a query with no entry,
+    else those asked after the entry's last use."""
+    return [
+        record
+        for record in stored.assessments.values()
+        if entry is None or record.asked_at > entry.last_asked_at
+    ]
+
+
 def load_history(cfg: Config) -> AskIndex:
     """`asks/index.json`, with what it lost put back from the answer files.
 
-    Only files with no entry are opened (a history in step costs one read). A lost entry is
-    rebuilt from its file (`AskHistoryEntry.rebuilt`); a lost calibration (no index at all) is
-    re-summed from every file. A file that cannot be read is refused and named as another
-    query's (`store.load_ask_file`). Nothing is written here: the rebuilt history is saved
-    by the next `finish_ask`, under the lock.
+    `finish_ask` writes the history AFTER the pass saved the query's file, so a file NEWER
+    than `index.json` (or any file, when there is no index) holds answers the history never
+    recorded: a crash between the two writes. Only those files are opened — a history in step
+    costs one read and a `stat` per query. From each:
+
+    * a query with no entry gets one rebuilt from its file (`AskHistoryEntry.rebuilt`);
+    * the answers the calibration has not seen are folded in: every answer of a query with no
+      entry, or those asked after its entry's `last_asked_at` (the older ones were folded when
+      they were paid).
+
+    An entry missing from a NEWER index (removed by hand) is rebuilt too, but its answers are
+    not re-counted. A file that cannot be read is refused and named as another query's
+    (`store.load_ask_file`). Nothing is written here: the next `finish_ask` saves it, under
+    the lock.
     """
     path = cfg.jev_asks_dir / ASK_INDEX
     index = load_ask_index(path)
-    missing = [p for p in ask_files(cfg.jev_asks_dir) if p.stem not in index.queries]
-    if not missing:
-        return index
+    written = _mtime(path)
     queries = dict(index.queries)
     calibration = index.calibration
-    files = ask_files(cfg.jev_asks_dir) if not path.exists() else missing
-    for file in files:
+    for file in ask_files(cfg.jev_asks_dir):
+        entry = queries.get(file.stem)
+        newer = _newer(file, written)
+        if entry is not None and not newer:
+            continue
         stored = load_ask_file(file)
-        if file in missing:
+        if newer:
+            calibration = _calibrate(calibration, _unseen(stored, entry))
+        if entry is None:
             queries[file.stem] = _rebuilt_entry(stored, file.stem, cfg.jev_threshold)
-        if not path.exists():
-            calibration = _calibrate(calibration, stored.assessments.values())
     return AskIndex(queries=queries, calibration=calibration)
 
 
