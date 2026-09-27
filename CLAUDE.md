@@ -718,7 +718,9 @@ generates an Obsidian wiki.
   The page reads the history with `load_history(skip_unreadable=True)`. `--topic`
   (repeatable, OR) judges Jev at `[jev].threshold` (`ask.post_topics`); results are RANKED,
   never cut at it — only `--min` cuts (`last_min`), `[jev].ask_top` is how many show first;
-  an old entry's `last_threshold` is read, never used. It shares — never copies — the
+  an old entry's `last_threshold` is read, never used. A saved query is refined for free
+  (`ask.refine_results`; `jev asks N --min/--topic/--since/--until/--author/--top`; the page's
+  «Refinar resultados» over `asks.keys`, state in the hash). It shares — never copies — the
   pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`),
   contract shape (`assess.contract`) and
   lock with topics. The server runs that same flow as a second kind (`service._AskKind`
