@@ -18,8 +18,10 @@ NOTHING HERE RE-IMPLEMENTS A NUMBER.
 * What Jev read is `assess.state_surfaces`: the state `build_topic_state` sends, split back
   into its evidence surfaces — the same order and the same cut.
 * What was asked («Preguntar», `asks`) is the query history (`data/jev/asks/index.json`), each
-  query's results recomputed now by `ask.saved_results` over its own filters and minimum —
-  RANKED, every current answer, never cut at `[jev].threshold` — its cost
+  query's answers recomputed now by `ask.saved_results` over its own filters — RANKED, every
+  current answer, never cut at `[jev].threshold` nor at its `last_min`, which travels only as
+  the default of the page's free refine — each through `ask.answer_view`, as compact columns
+  (`answer_columns`) with each post's refine keys once (`asks.keys`), its cost
   `report.ask_cost_by_query`, and each topic's post count (`ask.topic_counts`) for the form —
   so the static page shows what the server's `/api/asks` does.
 
@@ -39,7 +41,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -49,11 +51,12 @@ from xbrain.dashboard import _resource, humanize_topic, render_dashboard_html
 from xbrain.executors.api import quoted_source
 from xbrain.generate import VAULT_MEDIA_SUBDIR
 from xbrain.jev.ask import (
+    AnswerView,
     JevFilterRefused,
     AskFilters,
     AskQuery,
+    answer_view,
     load_history,
-    refine_keys,
     saved_results,
     topic_counts,
 )
@@ -803,17 +806,21 @@ class _AskPage:
     runs_error: str | None
     #: Posts whose card already carries what Jev read (a current topics answer).
     carded: frozenset[str]
-    states: dict[str, str] = field(default_factory=dict)
+    #: Each post's state as sent and its size before the cut, built at most once.
+    states: dict[str, tuple[str, int]] = field(default_factory=dict)
     surfaces: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    #: `ask.refine_keys` of every result post, once: what «Refinar resultados» compares.
+    #: Per result post, once: `ask.answer_view`'s refine keys plus `n`, the size of the state
+    #: Jev read (the «what Jev read» line; cut when above `char_limit`).
     keys: dict[str, dict[str, Any]] = field(default_factory=dict)
-    #: Each post's current topics answer, for its keys' topics.
-    assessments: dict[str, TopicAssessment] = field(default_factory=dict)
+
+    def state(self, item: Item) -> tuple[str, int]:
+        if item.id not in self.states:
+            state, chars = build_topic_state(item, self.char_limit)
+            self.states[item.id] = (state[STATE_KEY], chars)
+        return self.states[item.id]
 
     def state_text(self, item: Item) -> str:
-        if item.id not in self.states:
-            self.states[item.id] = build_topic_state(item, self.char_limit)[0][STATE_KEY]
-        return self.states[item.id]
+        return self.state(item)[0]
 
 
 def _ask_cost(page: _AskPage, sha: str) -> dict[str, Any]:
@@ -824,11 +831,51 @@ def _ask_cost(page: _AskPage, sha: str) -> dict[str, Any]:
     return page.costs.get(sha, _NO_COST)
 
 
-def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]], int]:
-    """The rows of one query: EVERY current answer over its last filters, ranked by
-    `ask.saved_results` (the one order; `[jev].threshold` is the topic bar only). The use's
-    minimum is not applied here: it is the default of the page's free refine (`row["min"]`),
-    which filters these rows by `page.keys` without asking anything."""
+def _minute(moment: datetime) -> str:
+    """An instant to the minute, in UTC: as precise as the page shows it."""
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
+def _most_common(values: list[str]) -> str | None:
+    """The value most answers share (the first seen on a tie), or None for no answers."""
+    return Counter(values).most_common(1)[0][0] if values else None
+
+
+def _differs(own: dict[str, str], model: str | None, asked_at: str | None) -> dict[str, str]:
+    """What of one answer's model and minute differs from its query's."""
+    query = {"model": model, "asked_at": asked_at}
+    return {key: value for key, value in own.items() if value != query[key]}
+
+
+def answer_columns(views: Sequence[AnswerView]) -> dict[str, Any]:
+    """A query's answers as the page's blob carries them, in their ranked order: two columns
+    (`ids`, `p` — full floats) and the model and minute asked ONCE, the most common of each;
+    an answer that differs is in `exceptions` with what differs. ~45 B per answer, where one
+    object per answer took ~130 B: a whole-corpus query is ~3,000 answers, and the blob is
+    re-sent after every job."""
+    minutes = [_minute(view.asked_at) for view in views]
+    model = _most_common([view.model for view in views])
+    asked_at = _most_common(minutes)
+    exceptions: dict[str, dict[str, str]] = {}
+    for view, minute in zip(views, minutes, strict=True):
+        differs = _differs({"model": view.model, "asked_at": minute}, model, asked_at)
+        if differs:
+            exceptions[view.id] = differs
+    return {
+        "ids": [view.id for view in views],
+        "p": [view.p for view in views],
+        "model": model,
+        "asked_at": asked_at,
+        "exceptions": exceptions,
+    }
+
+
+def _ask_answers(saved: SavedAsk, page: _AskPage) -> tuple[dict[str, Any], int]:
+    """The answers of one query: EVERY current answer over its last filters, ranked by
+    `ask.saved_results` (the one order; `[jev].threshold` is the topic bar only), each through
+    `ask.answer_view`, as `answer_columns`. The use's minimum is not applied here: it is the
+    default of the page's free refine (`row["min"]`), which filters these by `page.keys`
+    without asking anything."""
     entry = saved.entry
     found = saved_results(
         page.jev.store,
@@ -840,26 +887,17 @@ def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]],
         minimum=0.0,
         state_text=page.state_text,
     )
-    rows = []
+    current = page.jev.current_by_id()
+    views = []
     for item, record in found.ranked:
-        rows.append(
-            {
-                "id": item.id,
-                "p": record.probability,
-                "model": record.model,
-                "asked_at": record.asked_at.isoformat(),
-                "state_chars": record.state_chars,
-                "truncated": record.truncated,
-            }
-        )
+        view = answer_view(item, record, current.get(item.id), page.topic_threshold)
+        views.append(view)
         if item.id not in page.keys:
-            page.keys[item.id] = refine_keys(
-                item, page.assessments.get(item.id), page.topic_threshold
-            )
+            page.keys[item.id] = {**view.keys, "n": page.state(item)[1]}
         # A post whose card has a Jev block already shows what Jev read: sent once.
         if item.id not in page.carded and item.id not in page.surfaces:
             page.surfaces[item.id] = _surfaces(item, page.char_limit)
-    return rows, found.answered
+    return answer_columns(views), found.answered
 
 
 def _filters_view(stored: dict[str, Any]) -> dict[str, Any]:
@@ -887,14 +925,14 @@ def _ask_row(saved: SavedAsk, page: _AskPage) -> dict[str, Any]:
         "filters": _filters_view(entry.last_filters),
         "rebuilt": entry.rebuilt,
         "answered": 0,
-        "results": [],
+        "answers": answer_columns([]),
         "cost": _ask_cost(page, entry.query_sha),
     }
     if saved.error is not None:
         row["error"] = f"No se pudieron leer las respuestas de esta consulta: {saved.error}"
         return row
     try:
-        row["results"], row["answered"] = _ask_results(saved, page)
+        row["answers"], row["answered"] = _ask_answers(saved, page)
     except JevFilterRefused as exc:
         # A filter the corpus no longer supports (a topic removed from the vocabulary).
         row["error"] = f"El filtro con el que se preguntó ya no aplica: {exc}"
@@ -924,8 +962,7 @@ def asks_view(
         char_limit=char_limit,
         costs=ask_cost_by_query(runs) if runs is not None else None,
         runs_error=runs_error,
-        carded=frozenset(item.id for item, _ in jev.current().pairs),
-        assessments={item.id: assessment for item, assessment in jev.pairs},
+        carded=frozenset(jev.current_by_id()),
     )
     ordered = sorted(saved, key=lambda s: (s.entry.last_asked_at, s.entry.query_sha), reverse=True)
     history = [_ask_row(one, page) for one in ordered]

@@ -18,9 +18,10 @@ from pathlib import Path
 from tests.jev_fakes import FakeJevClient
 from xbrain.config import Config, load_config
 from xbrain.jev.ask import AskQuery, assess_post
+from xbrain.jev.assess import assess_topics
 from xbrain.jev.client import JevResult, NoulAnswer, Question
-from xbrain.jev.questions import ASK_KEY
-from xbrain.jev.store import ASK_INDEX, save_asks
+from xbrain.jev.questions import ASK_KEY, build_topic_questions
+from xbrain.jev.store import ASK_INDEX, save_asks, save_assessments
 from xbrain.models import Author, Enrichment, Item, Topic
 from xbrain.rubrics import save_vocab
 from xbrain.store import save_store
@@ -85,10 +86,37 @@ def victor_item(n: int, *, topic: str, created: datetime) -> Item:
     )
 
 
-def victor_shaped_repo(root: Path, *, older: int = 5, jev: str = "") -> Config:
+#: With `topics=True`: Jev's `agentic-engineering` noul for the enrich-`startups` posts, by
+#: `n % 7` — 0 puts the post in the topic at the default bar (0.85), 1 falls just short
+#: (0.84), anything else is far below. So the Jev side of a topic refine is exercised on both
+#: sides of the bar, on posts enrich alone would never put there.
+JEV_AGENTIC = {0: 0.85, 1: 0.84}
+
+
+def victor_topic_side_car(cfg: Config, store: dict[str, Item]) -> None:
+    """A CURRENT topics side-car over every other post: Jev puts some enrich-`startups` posts
+    in `agentic-engineering` at exactly 0.85, some at 0.84 (`JEV_AGENTIC`)."""
+    questions = build_topic_questions(VOCAB, cfg.jev_fallback_option)
+    records = {}
+    for n, item in enumerate(store.values()):
+        if n % 2:
+            continue
+        startups = item.enriched is not None and item.enriched.primary_topic == "startups"
+        noul = JEV_AGENTIC.get(n % 7, 0.05) if startups else 0.9
+        client = FakeJevClient(nouls={"agentic-engineering": noul})
+        records[item.id] = assess_topics(
+            item, questions, client, char_limit=cfg.jev_state_char_limit
+        )
+    save_assessments(records, cfg.jev_topics_path)
+
+
+def victor_shaped_repo(
+    root: Path, *, older: int = 5, jev: str = "", topics: bool = False
+) -> Config:
     """A repo whose one query is Víctor's, answered on the 808 posts since 2026-05-07, with
     `older` posts before that day (outside the filter, never asked). Enrich puts the posts
-    with the higher probabilities in `agentic-engineering`, the rest in `startups`."""
+    with the higher probabilities in `agentic-engineering`, the rest in `startups`. With
+    `topics`, a current topics side-car too (`victor_topic_side_car`)."""
     vault = root / "vault"
     vault.mkdir(parents=True, exist_ok=True)
     (root / "config.toml").write_text(
@@ -115,6 +143,8 @@ def victor_shaped_repo(root: Path, *, older: int = 5, jev: str = "") -> Config:
     save_store(store, root / "data" / "items.json")
     save_vocab(VOCAB, root / "data" / "vocab.yaml")
     cfg = load_config(root)
+    if topics:
+        victor_topic_side_car(cfg, store)
     query = AskQuery.of(VICTOR_QUERY)
     client = _Planned(planned)
     asked_at = datetime(2026, 9, 27, 7, 16, 32, tzinfo=timezone.utc)

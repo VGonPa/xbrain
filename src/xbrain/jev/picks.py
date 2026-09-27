@@ -159,18 +159,20 @@ class AskPick:
     """One «preguntar» request: the query as filed (`normalize_query`), the pre-filters, the
     limit and the results' minimum — `xbrain jev ask QUERY [--topic …] [--since] [--until]
     [--author] [--only-evaluated] [--limit] [--min]`. Frozen and comparable, so a
-    confirmation is bound to exactly the query, filters and minimum it priced."""
+    confirmation is bound to exactly the query, filters and minimum it priced. `minimum`
+    `None` = not sent (the page never sends one): the use keeps the query's last minimum
+    (`ask.finish_ask`), so asking again from the page never wipes a terminal's `--min`."""
 
     query: str
     filters: AskFilters
     limit: int | None
-    minimum: float = 0.0
+    minimum: float | None = None
 
     def as_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"query": self.query, **self.filters.as_json()}
         if self.limit is not None:
             out["limit"] = self.limit
-        if self.minimum:
+        if self.minimum is not None:
             out["min"] = self.minimum
         return out
 
@@ -195,9 +197,9 @@ def _limit(value: Any) -> int | None:
     return value
 
 
-def _minimum(value: Any) -> float:
+def _minimum(value: Any) -> float | None:
     if value is None:
-        return 0.0
+        return None
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
         raise refuse("`min` debe ser un número entre 0 y 1 (la relevancia mínima)")
     return float(value)

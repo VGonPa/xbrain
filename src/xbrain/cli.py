@@ -63,6 +63,7 @@ from xbrain.jev.ask import (
     ask_path,
     finish_ask,
     load_history,
+    normalise_author,
     plan_ask,
     refine_results,
     reopen_results,
@@ -2982,6 +2983,12 @@ def jev_ask_cmd(
         None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
     ),
     show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+    threshold: float | None = typer.Option(
+        None,
+        "--threshold",
+        hidden=True,
+        help="Retirada: los resultados se ordenan; usa --min",
+    ),
     yes: bool = typer.Option(
         False, "--yes", help="No pedir confirmación por encima de \\[jev].ask_max_usd"
     ),
@@ -2997,6 +3004,12 @@ def jev_ask_cmd(
     `data/jev/runs.jsonl`. Antes de preguntar estima el coste, y por encima de
     `\\[jev].ask_max_usd` pide confirmación. Nunca toca items.json.
     """
+    if threshold is not None:
+        # The old results cut, typed from habit: said in Spanish, with what replaces it.
+        raise ValueError(
+            "--threshold ya no existe en jev ask: los resultados se ordenan; usa --min P "
+            "(relevancia mínima)"
+        )
     cfg = _config()
     shown = _ask_shown(cfg, minimum, top, show_all)
     ask_query = AskQuery.of(query)
@@ -3199,20 +3212,40 @@ def _bar(probability: float) -> str:
     return "█" * full + "·" * (10 - full)
 
 
-def _echo_ask_results(results: AskResults, minimum: float, top: int | None) -> None:
+def _refine_words(refine: AskFilters) -> str:
+    """A refine's filters in words, as the header names them: «topic a o b, desde …»."""
+    parts = []
+    if refine.topics:
+        noun = "topic" if len(refine.topics) == 1 else "topics"
+        parts.append(f"{noun} {' o '.join(refine.topics)}")
+    if refine.since is not None:
+        parts.append(f"desde {refine.since}")
+    if refine.until is not None:
+        parts.append(f"hasta {refine.until}")
+    if refine.author is not None:
+        parts.append(f"autor @{normalise_author(refine.author)}")
+    return ", ".join(parts)
+
+
+def _echo_ask_results(
+    results: AskResults, minimum: float, top: int | None, refine: AskFilters | None = None
+) -> None:
     """The results RANKED, the first `top` (every one when None): probability as a number and
-    a bar, id, author, day, the post, its link; then how many more there are."""
+    a bar, id, author, day, the post, its link; then how many more there are.
+
+    The header counts what the list holds: «los 20 primeros de 187 que pasan el refinado
+    (topic …) con relevancia ≥ 0.5 · 808 leídos por Jev» — the refine (`jev asks … --topic`)
+    and the minimum both named, so shown + «y N más» adds up to the number said."""
     total = len(results.ranked)
     shown = total if top is None else min(top, total)
-    noun = plural(results.answered, "post con respuesta vigente", "posts con respuesta vigente")
+    read = plural(results.answered, "leído por Jev", "leídos por Jev")
     which = f"los {shown} primeros" if shown < total else f"los {shown}"
+    words = _refine_words(refine) if refine is not None else ""
+    what = f"{total} que pasan el refinado ({words})" if words else f"{total}"
     if minimum > 0:
-        typer.echo(
-            f"Resultados: {total} de {noun} llegan a la relevancia mínima {minimum}; "
-            f"se muestran {which}, de mayor a menor probabilidad"
-        )
-    else:
-        typer.echo(f"Resultados: {which} de {noun}, de mayor a menor probabilidad")
+        what += f" con relevancia ≥ {minimum}"
+    of = f"{what} · {read}" if words or minimum > 0 else read
+    typer.echo(f"Resultados: {which} de {of}, de mayor a menor probabilidad")
     for item, record in results.ranked[:shown]:
         typer.echo(
             f"  {record.probability:.2f} {_bar(record.probability)}  {item.id}  "
@@ -3273,10 +3306,12 @@ def _list_asks(cfg: Config, entries: list[AskHistoryEntry]) -> None:
     if not entries:
         typer.echo(f"sin consultas en {cfg.jev_asks_dir}")
         return
-    for entry in entries:
+    for number, entry in enumerate(entries, start=1):
         rebuilt = " · reconstruida desde sus respuestas" if entry.rebuilt else ""
+        # «N. sha8»: what `jev asks N` and `jev asks <sha>` take to reprint it.
         typer.echo(
-            f"«{entry.query}» · {plural(entry.times, 'vez', 'veces')} · "
+            f"{number}. {entry.query_sha[:8]} «{entry.query}» · "
+            f"{plural(entry.times, 'vez', 'veces')} · "
             f"{entry.first_asked_at:%Y-%m-%d} → {entry.last_asked_at:%Y-%m-%d}{rebuilt}"
         )
         reach = (
@@ -3320,7 +3355,7 @@ def _reprint_ask(
         found, refine, used, store=jev.store, jev=jev, threshold=cfg.jev_threshold
     )
     typer.echo(f"«{entry.query}» · {entry.last_asked_at:%Y-%m-%d}")
-    _echo_ask_results(refined, used, top)
+    _echo_ask_results(refined, used, top, refine)
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:

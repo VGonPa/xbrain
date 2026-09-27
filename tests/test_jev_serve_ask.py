@@ -455,7 +455,7 @@ def test_the_history_and_one_querys_results_are_the_blob_the_page_carries(served
     assert {k: v for k, v in one.items() if k != "surfaces"} == blob["asks"]["history"][0]
     assert one["sha"] == query.sha and one["query"] == query.text
     assert (
-        [(r["id"], r["p"]) for r in one["results"]]
+        list(zip(one["answers"]["ids"], one["answers"]["p"]))
         == ranked()
         == [
             ("3", 0.97),
@@ -514,7 +514,7 @@ def test_the_results_follow_a_querys_answers_file_even_without_the_history(serve
     query = AskQuery.of(QUERY)
     # Read once, so the server holds this data; only the answers file changes after.
     _, before, _ = served.request("GET", f"/api/ask/{query.sha}")
-    assert [r["id"] for r in before["results"]] == ["3", "1", "5", "4", "2"]
+    assert before["answers"]["ids"] == ["3", "1", "5", "4", "2"]
     path = served.cfg.jev_asks_dir / f"{query.sha}.json"
     records = load_asks(path, query)
     records["3"] = records["3"].model_copy(update={"probability": 0.15})
@@ -522,7 +522,7 @@ def test_the_results_follow_a_querys_answers_file_even_without_the_history(serve
 
     _, one, _ = served.request("GET", f"/api/ask/{query.sha}")
 
-    assert [r["id"] for r in one["results"]] == ["1", "5", "4", "3", "2"]
+    assert one["answers"]["ids"] == ["1", "5", "4", "3", "2"]
 
 
 # --------------------------------------------------------------------------- the fix wave
@@ -559,7 +559,7 @@ def test_a_query_the_history_lost_is_rebuilt_on_the_tab(served: _AskServed):
 
     [row] = asks["history"]
     assert row["rebuilt"] is True and row["sha"] == AskQuery.of(QUERY).sha
-    assert [(r["id"], r["p"]) for r in row["results"]] == ranked()
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == ranked()
 
 
 class _FailsAfterStop(_Asker):
@@ -669,7 +669,7 @@ def test_one_query_carries_what_jev_read_for_each_of_its_results(served: _AskSer
     _, blob, _ = served.request("GET", "/api/data")
 
     cards = {card["id"]: card for card in blob["posts"]}
-    assert sorted(one["surfaces"]) == sorted(r["id"] for r in one["results"])
+    assert sorted(one["surfaces"]) == sorted(one["answers"]["ids"])
     for post, surfaces in one["surfaces"].items():
         card = cards[post]
         expected = card["jev"]["surfaces"] if card["jev"] else blob["asks"]["surfaces"][post]
@@ -804,7 +804,7 @@ def test_a_minimum_is_recorded_and_cuts_only_the_results(served: _AskServed):
     assert (entry.last_min, entry.last_results, entry.last_evaluated) == (0.5, 3, 5)
     [row] = served.request("GET", "/api/asks")[1]["history"]
     # The page gets every answer ranked; the use's minimum is its free refine's default.
-    assert [(r["id"], r["p"]) for r in row["results"]] == ranked()
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == ranked()
     assert (row["min"], row["answered"]) == (0.5, 5)
 
 
@@ -870,3 +870,91 @@ def test_the_topic_counts_are_only_read_by_this_page(served: _AskServed, refusal
 def test_the_topic_counts_are_a_get_not_a_post(served: _AskServed):
     status, _, _ = served.request("POST", "/api/ask/counts", {})
     assert status == 404
+
+
+def test_the_topic_counts_never_rebuild_the_page_even_mid_job(tmp_path: Path, monkeypatch):
+    """The counts read the cached posts and topics answers (`JevPairs`), rebuilt only when
+    items, vocabulary or the topics side-car change: a cross-site GET, or a keystroke while an
+    ask job checkpoints its answers, never forces the page's data to be built again."""
+    from xbrain.jev import service as jev_service
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+
+    builds: list[int] = []
+    loads: list[int] = []
+    real_build, real_load = jev_service.build_page_data, jev_service.load_jev_pairs
+    monkeypatch.setattr(
+        jev_service, "build_page_data", lambda *a, **k: builds.append(1) or real_build(*a, **k)
+    )
+    monkeypatch.setattr(
+        jev_service, "load_jev_pairs", lambda *a, **k: loads.append(1) or real_load(*a, **k)
+    )
+    gate = threading.Event()
+    s = _served(tmp_path, monkeypatch, _Asker(gate=gate), jev="concurrency = 1\n")
+    try:
+        assert _counts(s, {})[0] == 200
+        assert (builds, loads) == ([], [1])
+        estimate = s.ask_estimate({"query": QUERY})
+        assert (
+            s.ask_evaluate({"query": QUERY, "confirm_token": estimate["confirm_token"]})[0] == 202
+        )
+        s.wait_job(lambda job: len(s.client.asked) >= 1)
+        before = (len(builds), len(loads))
+        # What a checkpoint does to the page's inputs: a query's answers file changes.
+        stray = s.cfg.jev_asks_dir / ("0" * 64 + ".json")
+        stray.parent.mkdir(parents=True, exist_ok=True)
+        stray.write_text("{}", encoding="utf-8")
+        status, data = _counts(s, {"author": "alice"})
+        stray.unlink()
+        after = (len(builds), len(loads))
+    finally:
+        gate.set()
+        s.close()
+
+    assert status == 200, data
+    jev = load_jev_pairs(s.cfg)
+    assert data["topic_counts"] == topic_counts(
+        jev.store, AskFilters(author="alice"), jev=jev, threshold=s.cfg.jev_threshold
+    )
+    assert after == before
+
+
+def test_the_topic_counts_follow_a_new_topics_side_car(served: _AskServed):
+    from xbrain.jev.ask import topic_counts
+    from xbrain.jev.load import load_jev_pairs
+    from tests.test_jev_ask import _jev_with_topics
+
+    before = _counts(served, {})[1]["topic_counts"]
+    _jev_with_topics(served.cfg, {"startups": 0.95})
+    jev = load_jev_pairs(served.cfg)
+
+    after = _counts(served, {})[1]["topic_counts"]
+
+    assert after == topic_counts(
+        jev.store, AskFilters(), jev=jev, threshold=served.cfg.jev_threshold
+    )
+    assert after != before
+
+
+def test_an_ask_that_sends_no_minimum_keeps_the_querys_last_one(served: _AskServed):
+    """The page never sends a minimum (it refines for free): asking again from it must not
+    wipe the minimum a terminal set (`jev ask --min`), which is the refine's default."""
+    served.ask_run({"query": QUERY, "min": 0.5})
+    assert _entry(served.cfg).last_min == 0.5
+
+    job = served.ask_run({"query": QUERY})
+
+    entry = _entry(served.cfg)
+    assert (entry.times, entry.last_min, entry.last_results) == (2, 0.5, len(ranked(0.5)))
+    assert job["outcome"]["results"] == len(ranked(0.5))
+    [row] = served.request("GET", "/api/asks")[1]["history"]
+    assert row["min"] == 0.5
+    # A minimum that IS sent is recorded, 0 included.
+    served.ask_run({"query": QUERY, "min": 0})
+    assert _entry(served.cfg).last_min == 0.0
+
+
+def test_a_new_query_asked_with_no_minimum_has_none(served: _AskServed):
+    served.ask_run({"query": QUERY})
+    entry = _entry(served.cfg)
+    assert (entry.last_min, entry.last_results) == (0.0, 5)

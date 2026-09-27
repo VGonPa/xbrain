@@ -237,6 +237,11 @@ def load_ask_index(path: Path) -> AskIndex:
 
 
 def save_ask_index(index: AskIndex, path: Path) -> None:
-    """Write the history whole (atomic), queries sorted by sha. A legacy field an entry does
-    not carry (`AskHistoryEntry.last_threshold`) is left out rather than written as null."""
-    _dump(index.model_dump(mode="json", exclude_none=True), path)
+    """Write the history whole (atomic), queries sorted by sha. The legacy field an entry does
+    not carry (`AskHistoryEntry.last_threshold`) is left out rather than written as null — by
+    name: any other empty field is written, never dropped for being empty."""
+    data = index.model_dump(mode="json")
+    for entry in data["queries"].values():
+        if entry.get("last_threshold") is None:
+            entry.pop("last_threshold", None)
+    _dump(data, path)

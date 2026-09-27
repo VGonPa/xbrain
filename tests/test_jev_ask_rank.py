@@ -45,6 +45,7 @@ from xbrain.jev.ask import (
     saved_results,
     topic_counts,
 )
+from xbrain.jev.assess import build_topic_state
 from xbrain.jev.dashboard import ask_page_data
 from xbrain.jev.load import load_jev_pairs
 from xbrain.jev.models import AskHistoryEntry
@@ -79,7 +80,7 @@ def test_the_configured_threshold_never_reaches_the_results(tmp_path: Path, monk
     """`[jev].threshold` is the topic-membership bar; at 0.99 the results are unchanged."""
     cfg = victor_shaped_repo(tmp_path, jev="threshold = 0.99\n")
     [row] = ask_page_data(cfg, load_jev_pairs(cfg), [])["history"]
-    assert len(row["results"]) == 808 and row["answered"] == 808
+    assert len(row["answers"]["ids"]) == 808 and row["answered"] == 808
 
 
 def test_ties_rank_by_post_id_whatever_the_candidates_order(cfg: Config):
@@ -145,7 +146,7 @@ def test_victors_saved_ask_reopens_ranked_at_no_cost(tmp_path: Path):
 
     [row] = ask_page_data(cfg, load_jev_pairs(cfg), [])["history"]
 
-    ps = [r["p"] for r in row["results"]]
+    ps = row["answers"]["p"]
     assert row["answered"] == 808 and len(ps) == 808
     assert ps == sorted(ps, reverse=True) and ps[0] == 0.80 and ps[19] == 0.72
     assert row["min"] == 0.0 and row["filters"] == {"since": "2026-05-07"}
@@ -171,8 +172,7 @@ def test_cli_victors_query_again_prints_the_first_20_ranked_for_free(tmp_path: P
     lines = out.splitlines()
     header = next(i for i, line in enumerate(lines) if line.startswith("Resultados"))
     assert lines[header] == (
-        "Resultados: los 20 primeros de 808 posts con respuesta vigente, "
-        "de mayor a menor probabilidad"
+        "Resultados: los 20 primeros de 808 leídos por Jev, de mayor a menor probabilidad"
     )
     rows = lines[header + 1 : header + 21]
     assert [row.split()[0] for row in rows][:3] == ["0.80", "0.79", "0.79"]
@@ -205,11 +205,11 @@ def test_cli_top_all_and_min(cfg: Config, monkeypatch):
     every = runner.invoke(app, ["jev", "ask", QUERY, "--top", "1", "--all"]).output
     at_min = runner.invoke(app, ["jev", "ask", QUERY, "--min", "0.5"]).output
 
-    assert "los 1 primeros de 3 posts" in top1 and "… y 2 más" in top1
-    assert "Resultados: los 3 de 3 posts con respuesta vigente" in every and "más (" not in every
+    assert "los 1 primeros de 3 leídos por Jev" in top1 and "… y 2 más" in top1
+    assert "Resultados: los 3 de 3 leídos por Jev" in every and "más (" not in every
     assert (
-        "Resultados: 2 de 3 posts con respuesta vigente llegan a la relevancia mínima 0.5; "
-        "se muestran los 2, de mayor a menor probabilidad" in at_min
+        "Resultados: los 2 de 2 con relevancia ≥ 0.5 · 3 leídos por Jev, "
+        "de mayor a menor probabilidad" in at_min
     )
 
 
@@ -222,8 +222,12 @@ def test_cli_refuses_a_bad_minimum_or_top_and_has_no_threshold_flag(cfg: Config,
     ):
         result = runner.invoke(app, ["jev", "ask", QUERY, *args])
         assert result.exit_code == 1 and word in result.output, result.output
+    # The results cut is gone; an old habit gets told, in Spanish, what replaces it.
     result = runner.invoke(app, ["jev", "ask", QUERY, "--threshold", "0.5"])
-    assert result.exit_code == 2  # the results cut is gone; `--min` replaces it
+    assert result.exit_code == 1, result.output
+    assert "--threshold ya no existe en jev ask" in result.output
+    assert "--min" in result.output and "relevancia mínima" in result.output
+    assert "--threshold" not in runner.invoke(app, ["jev", "ask", "--help"]).output
 
 
 def test_cli_the_top_defaults_to_the_configured_ask_top(tmp_path: Path, monkeypatch):
@@ -310,7 +314,7 @@ def test_an_old_history_entry_with_one_topic_reopens(cfg: Config):
     [row] = ask_page_data(cfg, load_jev_pairs(cfg), [])["history"]
 
     assert row["filters"] == {"topics": ["ai-coding"]}
-    assert [r["id"] for r in row["results"]] == ["1", "3"] and "error" not in row
+    assert row["answers"]["ids"] == ["1", "3"] and "error" not in row
 
 
 def test_the_plan_asks_the_union_of_the_topics(cfg: Config):
@@ -475,14 +479,15 @@ def test_the_page_ships_every_answer_ranked_and_the_python_refine_keys(tmp_path:
     [row] = view["history"]
 
     # The use's minimum is the refine DEFAULT, never a cut of what ships.
-    assert (len(row["results"]), row["min"], row["answered"]) == (808, 0.5, 808)
-    item = jev.store[row["results"][0]["id"]]
+    assert (len(row["answers"]["ids"]), row["min"], row["answered"]) == (808, 0.5, 808)
+    item = jev.store[row["answers"]["ids"][0]]
     assert view["keys"][item.id] == {
         "d": item.created_at.astimezone(timezone.utc).date().isoformat(),
         "a": item.author.handle.casefold(),
         "t": sorted(post_topics(item, None, cfg.jev_threshold)),
+        "n": build_topic_state(item, cfg.jev_state_char_limit)[1],
     }
-    assert set(view["keys"]) == {r["id"] for r in row["results"]}
+    assert set(view["keys"]) == set(row["answers"]["ids"])
 
 
 def test_cli_asks_reprints_a_saved_query_refined_without_a_client(tmp_path: Path, monkeypatch):
@@ -500,9 +505,11 @@ def test_cli_asks_reprints_a_saved_query_refined_without_a_client(tmp_path: Path
     assert result.exit_code == 0, out
     assert f"«{VICTOR_QUERY}»" in out
     assert (
-        f"Resultados: {len(expected)} de 808 posts con respuesta vigente llegan a la relevancia "
-        "mínima 0.5; se muestran los 3 primeros" in out
+        f"Resultados: los 3 primeros de {len(expected)} que pasan el refinado (topic "
+        "agentic-engineering) con relevancia ≥ 0.5 · 808 leídos por Jev, de mayor a menor "
+        "probabilidad" in out
     )
+    assert f"  … y {len(expected) - 3} más (--top N o --all para verlos)" in out
     lines = [line for line in out.splitlines() if "https://x.com/" in line]
     assert [line.split()[2] for line in lines] == expected[:3]
     assert not load_runs(cfg.jev_runs_path)
@@ -524,7 +531,10 @@ def test_cli_asks_picks_a_query_by_sha_prefix_and_refuses_an_unknown_one(
     beyond = runner.invoke(app, ["jev", "asks", "2"])
 
     assert by_sha.exit_code == 0, by_sha.output
-    assert "Resultados: los 220 de 808 posts con respuesta vigente" in by_sha.output
+    assert (
+        "Resultados: los 220 de 220 que pasan el refinado (desde 2026-06-01) · 808 leídos por "
+        "Jev" in by_sha.output
+    )
     for bad in (unknown, beyond):
         assert bad.exit_code == 1 and "no está en el historial" in bad.output
 
@@ -537,10 +547,52 @@ def test_cli_asks_a_saved_query_defaults_to_its_own_minimum(cfg: Config, monkeyp
     default = runner.invoke(app, ["jev", "asks", "1"]).output
     none = runner.invoke(app, ["jev", "asks", "1", "--min", "0"]).output
 
-    assert "2 de 3 posts con respuesta vigente llegan a la relevancia mínima 0.5" in default
-    assert "Resultados: los 3 de 3 posts con respuesta vigente" in none
+    assert "Resultados: los 2 de 2 con relevancia ≥ 0.5 · 3 leídos por Jev" in default
+    assert "Resultados: los 3 de 3 leídos por Jev" in none
 
 
 def test_refine_flags_without_a_query_are_refused(cfg: Config):
     result = runner.invoke(app, ["jev", "asks", "--min", "0.5"])
     assert result.exit_code == 1 and "consulta" in result.output
+
+
+def test_cli_a_refined_reprint_counts_what_passes_the_refine(tmp_path: Path, monkeypatch):
+    """The first real refine: «agentic-engineering, ≥ 0.5» keeps 156 − those enrich puts
+    elsewhere; the header counts THAT (never «105 de 808 llegan a 0.5»), and the tail adds up:
+    shown + «y N más» == what passes."""
+    victor_shaped_repo(tmp_path)
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    _, jev, found = _victor(tmp_path / "again")
+    kept = _expected(found, jev, topics=("startups",), author="@someone")
+
+    out = runner.invoke(
+        app, ["jev", "asks", "1", "--topic", "startups", "--author", "@someone"]
+    ).output
+
+    assert (
+        f"Resultados: los 20 primeros de {len(kept)} que pasan el refinado (topic startups, "
+        "autor @someone) · 808 leídos por Jev, de mayor a menor probabilidad" in out
+    )
+    assert f"  … y {len(kept) - 20} más (--top N o --all para verlos)" in out
+
+
+def test_cli_asks_numbers_each_query_and_the_number_or_sha_reopens_it(cfg: Config, monkeypatch):
+    """What `jev asks` prints is what `jev asks N` / `jev asks <sha>` takes."""
+    _use(monkeypatch, _ByText())
+    runner.invoke(app, ["jev", "ask", QUERY])
+    runner.invoke(app, ["jev", "ask", "otra consulta", "--min", "0.96"])
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+
+    listed = runner.invoke(app, ["jev", "asks"]).output
+
+    heads = [line for line in listed.splitlines() if line[:1].isdigit()]
+    assert len(heads) == 2
+    for n, head in enumerate(heads, start=1):
+        number, sha, rest = head.split(" ", 2)
+        assert number == f"{n}." and len(sha) == 8 and rest.startswith("«")
+        query = rest[1 : rest.index("»")]
+        assert sha == AskQuery.of(query).sha[:8]
+        for which in (str(n), sha):
+            again = runner.invoke(app, ["jev", "asks", which, "--top", "1"])
+            assert again.exit_code == 0 and f"«{query}»" in again.output, which

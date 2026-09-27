@@ -929,9 +929,7 @@ def test_cli_asks_ranks_the_results_and_keeps_the_history(cfg: Config, monkeypat
     assert result.exit_code == 0, out
     assert len(client.calls) == 3 and client.closed
     lines = out.splitlines()
-    header = lines.index(
-        "Resultados: los 3 de 3 posts con respuesta vigente, de mayor a menor probabilidad"
-    )
+    header = lines.index("Resultados: los 3 de 3 leídos por Jev, de mayor a menor probabilidad")
     assert lines[header + 1].split()[:4] == ["0.95", "██████████", "1", "@alice"]
     assert lines[header + 2].split()[:4] == ["0.95", "██████████", "3", "@alice"]
     assert lines[header + 3].split()[:4] == ["0.10", "█·········", "2", "@bob"]
@@ -954,7 +952,7 @@ def test_cli_a_repeated_query_costs_nothing_and_still_answers(cfg: Config, monke
     out = result.output
     assert result.exit_code == 0, out
     assert "0 posts por preguntar · 3 ya respondidos" in out
-    assert "Resultados: 2 de 3 posts con respuesta vigente llegan a la relevancia mínima 0.5" in out
+    assert "Resultados: los 2 de 2 con relevancia ≥ 0.5 · 3 leídos por Jev" in out
     assert len(load_runs(cfg.jev_runs_path)) == 1
     [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
     assert (entry.times, entry.last_min, entry.last_results) == (2, 0.5, 2)
@@ -1371,7 +1369,7 @@ def test_the_page_filters_by_topic_at_the_jev_threshold_like_the_command(cfg: Co
     cli = [(item.id, record.probability) for item, record in found.ranked]
     assert "1" not in [item.id for item in plan.candidates]
     assert "1" in plan.records and plan.records["1"].probability == 0.95
-    assert [(r["id"], r["p"]) for r in row["results"]] == cli
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == cli
     assert row["answered"] == found.answered and row["min"] == 0.05
 
 
@@ -1386,7 +1384,11 @@ def test_the_page_lists_each_query_with_its_current_results_best_first(cfg: Conf
         1,
         3,
     )
-    assert [(r["id"], r["p"]) for r in row["results"]] == [("1", 0.95), ("3", 0.95), ("2", 0.1)]
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == [
+        ("1", 0.95),
+        ("3", 0.95),
+        ("2", 0.1),
+    ]
     assert row["min"] == 0.0 and row["filters"] == {}
     assert row["cost"]["cost_usd"] == tokens_cost_usd(300, "typesafe")
     assert row["cost"]["requests"] == 3
@@ -1421,7 +1423,7 @@ def test_a_changed_post_is_not_a_result_on_the_page(cfg: Config):
 
     [row] = _asks(cfg)["history"]
 
-    assert [r["id"] for r in row["results"]] == ["1", "2"] and row["answered"] == 2
+    assert row["answers"]["ids"] == ["1", "2"] and row["answered"] == 2
 
 
 def test_the_page_applies_the_filters_the_query_was_asked_with(cfg: Config):
@@ -1429,7 +1431,7 @@ def test_the_page_applies_the_filters_the_query_was_asked_with(cfg: Config):
 
     [row] = _asks(cfg)["history"]
 
-    assert [(r["id"], r["p"]) for r in row["results"]] == [("2", 0.1)]
+    assert list(zip(row["answers"]["ids"], row["answers"]["p"])) == [("2", 0.1)]
     assert (row["answered"], row["filters"]) == (1, {"author": "bob"})
 
 
@@ -1448,7 +1450,7 @@ def test_an_unreadable_query_file_costs_its_row_never_the_page(cfg: Config):
     view = _asks(cfg)
     rows = {row["query"]: row for row in view["history"]}
 
-    assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["results"] == []
+    assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["answers"]["ids"] == []
     assert "error" not in rows["otra"]
 
 
@@ -1519,7 +1521,7 @@ def test_an_unreadable_file_costs_only_its_own_query_when_the_history_is_rebuilt
 
     assert [(row["query"], row["rebuilt"]) for row in view["history"]] == [(QUERY, True)]
     assert f"{bad.query.sha}.json" in view["error"]
-    assert [r["id"] for r in view["history"][0]["results"]] == ["1", "3", "2"]
+    assert view["history"][0]["answers"]["ids"] == ["1", "3", "2"]
 
 
 def test_a_results_failure_that_is_not_a_filter_refusal_says_so_plainly(cfg: Config, monkeypatch):

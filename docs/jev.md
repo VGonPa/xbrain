@@ -100,7 +100,7 @@ The full option list:
 | `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
 | `xbrain jev serve` | `--port INTEGER` (default 8765; 0 = any free port) · `--no-open` (do not open the browser) |
 | `xbrain jev ask QUERY` | `--topic` · `--since` · `--until` · `--author` · `--only-evaluated` · `--limit` · `--min` · `--top` · `--all` · `--yes` · `--dry-run` ([details](#xbrain-jev-ask--ask-the-corpus-a-question)) |
-| `xbrain jev asks` | none — lists the queries asked and what each cost |
+| `xbrain jev asks [N\|SHA]` | no argument: lists the queries asked (each as `N. <sha8> «query»`) and what each cost · with `N` or a sha prefix, reprints that query refined: `--top` · `--all` · `--min` · `--topic` · `--since` · `--until` · `--author` ([details](#history-and-what-a-query-has-cost)) |
 
 Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed, a busy
 port, a `jev ask` confirmation answered no) · **75** `jev topics` or `jev ask` refused because
@@ -772,17 +772,18 @@ reopening a query costs nothing.
 - **Consultas hechas** (right; below on a narrow screen): every query in
   `data/jev/asks/index.json` (read as `jev ask` reads it: an entry the index lost is rebuilt
   from its answer file and marked *reconstruida*), the last asked first. Each row has the
-  query, the day, how many of its results its default view shows (*20 de 808 respondidos*;
-  asked with a minimum, *7 de 156 ≥ 0,50 · 808 respondidos*), what its
+  query, the day, how many of its results its default view shows (*20 de 808 leídos por Jev*;
+  asked with a minimum, *7 de 156 ≥ 0,50 · 808 leídos por Jev*), what its
   logged passes cost (`report.ask_cost_by_query`; *—* and why when `runs.jsonl` cannot be
   read), and how many times it was asked. A query whose file cannot be read says `ilegible`
   and costs only its own row. A history that cannot be read is said above the list.
 - **The query open** (`#ask?q=<sha>`; without it, the last one asked; a sha the history lacks
   says *Esta consulta no está en el historial*): the query, when it was asked, its filters
   (*Sin filtros: todo el corpus* when none; several topics read *topics A o B*), its requests
-  and cost, and what the list shows: *Mostrando 20 de 808 respondidos, de mayor a menor
+  and cost, and what the list shows: *Mostrando 20 de 808 leídos por Jev, de mayor a menor
   probabilidad* — refined, *Mostrando 20 de 156 con relevancia ≥ 0,50 que pasan el refinado ·
-  808 respondidos*.
+  808 leídos por Jev*. (*Leídos por Jev*: the posts with a current answer — Jev read each one
+  and said how likely it answers the question.)
   The results are **ranked, not cut**: every post with a current answer, best first (ties by
   post id), in the order Python ranked them (`ask.saved_results`). `[jev].threshold` is not a
   results bar — it is the topic-membership bar, and here it only judges the topic filter the
@@ -791,12 +792,19 @@ reopening a query costs nothing.
   Entries written then reopen ranked, for free.)
   **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers: *Mostrar*
   (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), *Relevancia
-  mínima* (by default the minimum the query was last asked with, none for most), the topics
-  among its answers (checkboxes, each with how many answers it keeps under the rest of the
-  refine), *Desde*, *Hasta* and *Autor*; **Quitar el refinado** goes back to the defaults. It
+  mínima* (by default the query's `last_min`, set only by `jev ask --min` — none for most), the
+  topics among its answers (checkboxes, each with how many answers it keeps under the rest of
+  the refine — `askTopicCounts`, the one counting function, tested against Python topic by
+  topic; a topic ticked in the link that no answer is in is still listed, at 0, and named),
+  *Desde*, *Hasta* and *Autor* (read like the filter: spaces and a leading `@` dropped, case
+  ignored); **Quitar el refinado** goes back to the defaults. It
   asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
-  computed in Python per result post by `ask.refine_keys` (its day in UTC, its handle
-  casefolded, its topics by `ask.post_topics`), and keeps what `ask.refine_results` keeps — the
+  computed in Python per result post by `ask.refine_keys` (its day in UTC, its handle by
+  `ask.normalise_author`, its topics by `ask.post_topics`) plus `n`, the size of the state Jev
+  read; an answer that arrives without its keys is named as an error, never dropped. Each
+  query's answers ship as columns (`{ids, p, model, asked_at, exceptions}`: every current
+  answer in Python's ranked order, the model and minute asked once), and the page keeps what
+  `ask.refine_results` keeps — the
   function `xbrain jev asks N --min … --topic …` prints with. The state is ONE object in the
   URL hash (`#ask?q=<sha>&top=40&min=0.5&t=a,b&since=…&until=…&author=…`), so a refined view
   is a link, and it survives a reload; opening a query from the history starts it unrefined, and
@@ -915,7 +923,9 @@ any of them, and still every other filter), *Desde*, *Hasta*, *Autor*, *Como muc
 `--limit`) and *Solo posts con evaluación de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as every
 other button. Beside each topic is how many posts it keeps **under the other filters**: the
 blob's `asks.topic_counts` (`ask.topic_counts`, the whole corpus) until you type a filter,
-then the server's answer to `GET /api/ask/counts` — never counted in the browser. Under the
+then the server's answer to `GET /api/ask/counts` — never counted in the browser. When the
+server refuses a count (a range that runs backwards), the counts read *—* and the reason is
+said under the topics; new data (a job's end) asks again for the filters typed. Under the
 filters, one line says what they do and one tip:
 
 > Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan por lo
@@ -1057,7 +1067,9 @@ code:
   query string (each at most once; `only_evaluated` is `true` or `false`; anything else is a
   400) and answers `{posts, topic_counts}`: how many posts the filters keep, and how many each
   topic would keep under them (`ask.topic_counts`, the same rule as `filter_posts` with that one
-  topic). It reads only and costs nothing, under the same guards as `/api/asks`.
+  topic). It reads only and costs nothing, under the same guards as `/api/asks`, and reads the
+  server's cached posts and topics answers (reloaded only when items, vocabulary or the topics
+  side-car change): it never rebuilds the page's data, even mid-job.
 - `GET /api/asks` is the tab's data, `{history, surfaces, topic_counts, error}` (the blob's `asks`), and
   `GET /api/ask/<sha>` one query of it plus `surfaces`, what Jev read for each of its results
   (404 for a sha the history lacks). Both are read-only and cost nothing. The routes are
@@ -1175,7 +1187,7 @@ estimación: ~2985703 tokens de entrada (~0.1254 $) · 4570812 caracteres · a p
   …
 1843 respuestas · 0 fallidas · 2961320 tokens de entrada (~0.1244 $) · modelo jev-1.13.0 → …/data/jev/asks/9f2c….json
 pasada registrada → …/data/jev/runs.jsonl
-Resultados: los 20 primeros de 1843 posts con respuesta vigente, de mayor a menor probabilidad
+Resultados: los 20 primeros de 1843 leídos por Jev, de mayor a menor probabilidad
   0.98 ██████████  1834…  @someone  2026-05-02  Claude Code hooks: PreToolUse and PostToolUse, with …  https://x.com/…
   0.81 ████████··  1790…  @other  2026-04-11  My hooks setup for Claude Code …  https://x.com/…
   …
@@ -1189,8 +1201,9 @@ post the filters kept that has a **current** answer, including answers paid for 
 runs of the same query, ranked by probability (ties by post id). Each result line is the
 probability as a number and as a ten-cell bar (one cell per 0.1, rounded), the post id, the
 author, the day, the post on one line and its link. With `--min P` the header says how many
-reach it: `Resultados: 156 de 808 posts con respuesta vigente llegan a la relevancia mínima
-0.5; se muestran los 20 primeros, de mayor a menor probabilidad`. The last line is everything this query has cost, from
+reach it: `Resultados: los 20 primeros de 156 con relevancia ≥ 0.5 · 808 leídos por Jev, de
+mayor a menor probabilidad` (*leídos por Jev*: the posts with a current answer). `--threshold`,
+the old results cut, is refused with a message pointing to `--min`. The last line is everything this query has cost, from
 the run log.
 
 When a query already asked differs from yours only in case, punctuation or spacing, it says
@@ -1265,6 +1278,10 @@ run again.
 and last asked and how many times, plus its **last use**: the posts with a current answer
 (`last_evaluated`), how many reach its minimum (`last_results`; all of them without one), the
 minimum (`last_min`, 0 = none) and the filters (`last_filters`, with `topics` as a list).
+`last_min` is set by `jev ask --min` (0 when the flag is not given) and is only the default of
+a later refine: the page ships every current answer whatever it is, and an ask from the page
+sends no minimum, so it keeps the query's `last_min`. An entry rebuilt from its answer file
+counts every answer in the file in `last_evaluated` and `last_results`.
 Entries written before results were ranked also carry `last_threshold`, the old results cut:
 it is read and never used, and never written again, so they reopen ranked. Every use is in the run log: each ask
 pass that sent a request appends a `runs.jsonl` line with `kind: "ask"` and the query's
@@ -1276,12 +1293,14 @@ when the page is built, at no cost; served, it can also ask.
 **What a query has cost** is summed from those lines and priced when read, like every bill:
 
 - `jev ask` prints it after the results (`Esta consulta ha costado: …`);
-- `xbrain jev asks` lists every query, newest first, with its dates, how many times it was
-  asked, its last use and its cost; `xbrain jev asks N` (its position in that list, 1 = the
-  last) or `xbrain jev asks <sha prefix>` reprints that query's saved results, refined with
-  `--top N`/`--all`, `--min P` (default: its last minimum), `--topic` (repeatable),
-  `--since`, `--until` and `--author` (`ask.refine_results`): no client is built, nothing is
-  asked, nothing is written;
+- `xbrain jev asks` lists every query, newest first, each headed `N. <sha8> «query»`, with its
+  dates, how many times it was asked, its last use and its cost; `xbrain jev asks N` (that
+  number, 1 = the last) or `xbrain jev asks <sha prefix>` reprints that query's saved results,
+  refined with `--top N`/`--all`, `--min P` (default: its last minimum), `--topic`
+  (repeatable), `--since`, `--until` and `--author` (`ask.refine_results`): no client is
+  built, nothing is asked, nothing is written. The header counts what passes: *Resultados: los
+  20 primeros de 187 que pasan el refinado (topic agentic-engineering) con relevancia ≥ 0.5 ·
+  808 leídos por Jev*, and the tail (*… y 167 más*) adds up to it;
 - `jev report` adds a `Consultas (jev ask): …` line under `Histórico:`.
 
 Every topics cost view (`jev report`'s `Histórico:`, the page's cost strip, per-pass table and

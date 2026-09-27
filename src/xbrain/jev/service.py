@@ -656,12 +656,10 @@ def _result_surfaces(row: dict[str, Any], blob: dict[str, Any]) -> dict[str, Any
     the tab's `asks.surfaces` (the blob sends each only once)."""
     cards = {card["id"]: card for card in blob["posts"]}
     out: dict[str, Any] = {}
-    for result in row["results"]:
-        card = cards.get(result["id"])
+    for post_id in row["answers"]["ids"]:
+        card = cards.get(post_id)
         jev = card.get("jev") if card else None
-        out[result["id"]] = (
-            jev["surfaces"] if jev else blob["asks"]["surfaces"].get(result["id"], [])
-        )
+        out[post_id] = jev["surfaces"] if jev else blob["asks"]["surfaces"].get(post_id, [])
     return out
 
 
@@ -712,6 +710,8 @@ class JevService:
         self._state = threading.Lock()
         self._media: MediaFiles | None = None
         self._cache: tuple[Any, dict[str, Any], JevPairs] | None = None
+        self._pairs_lock = threading.Lock()
+        self._pairs_cache: tuple[Any, JevPairs] | None = None
         self._html: tuple[Any, str] | None = None
         self._confirms: dict[str, _Confirm] = {}
         #: THE job slot: the job being started (under the lock, not yet published) and the
@@ -754,8 +754,7 @@ class JevService:
                 return self._cache
             # Read BEFORE the files: a job that had finished by now wrote them before this.
             finished_at = self._last_finished_at()
-            jev = load_jev_pairs(self.cfg)
-            _refuse_nothing_to_ask(jev, self.cfg)
+            jev = self._pairs()
             if self._media is None:
                 self._media = collect_jev_media(
                     list(jev.store.values()), self.cfg.output_dir, self.cfg.media_dir
@@ -772,6 +771,21 @@ class JevService:
             }
             self._cache = (signature, blob, jev)
             return self._cache
+
+    def _pairs(self) -> JevPairs:
+        """The posts and their current topics answers (`load_jev_pairs`), reloaded only when
+        the items, the vocabulary or the topics side-car changed — never for a query's answers
+        or the run log, which an ask job writes at every checkpoint. What the blob is built
+        from, and all `/api/ask/counts` reads: a counts GET never rebuilds the page."""
+        cfg = self.cfg
+        with self._pairs_lock:
+            signature = _signature([cfg.items_path, cfg.vocab_path, cfg.jev_topics_path])
+            if self._pairs_cache is not None and self._pairs_cache[0] == signature:
+                return self._pairs_cache[1]
+            jev = load_jev_pairs(cfg)
+            _refuse_nothing_to_ask(jev, cfg)
+            self._pairs_cache = (signature, jev)
+            return jev
 
     def _last_finished_at(self) -> str | None:
         with self._state:
@@ -811,9 +825,11 @@ class JevService:
         """How many posts each topic keeps under the filters in `params` (a query string:
         `since`, `until`, `author`, `only_evaluated=true|false`; `ask.topic_counts`, the
         filter's own rule) and how many those filters keep: what the Preguntar tab writes
-        beside each topic. A GET: reads only, costs nothing."""
+        beside each topic. A GET: reads only, costs nothing, and reads the cached posts and
+        topics answers (`_pairs`), never the page's data — so a cross-site GET cannot force a
+        rebuild, and typing while a job checkpoints does not either."""
         filters = parse_filters(_filters_from_query(params))
-        _, _, jev = self._built()
+        jev = self._pairs()
         threshold = self.cfg.jev_threshold
         try:
             kept, _ = filter_posts(jev.store, filters, jev=jev, threshold=threshold)

@@ -5,8 +5,11 @@ criterion, over the SAME state a topics pass sends (`assess.build_topic_state`).
 judged alone, so its probability does not depend on the company it was asked in. The results
 are the posts with a CURRENT answer RANKED by probability, best first (ties by post id): a
 search ranks, it does not cut. `[jev].threshold` is a TOPIC-membership bar and never touches
-them; an optional minimum (`--min`, the page's «Relevancia mínima», 0 = off) is the only cut,
-and how many are shown first is the caller's (`[jev].ask_top`).
+them; an optional minimum is the only cut — `jev ask --min` (recorded as `last_min`) or a free
+refine (`refine_results`, `jev asks N --min`, the page's «Relevancia mínima»). `last_min` is
+only a refine's DEFAULT: the page ships every current answer ranked, and an ask that sends no
+minimum (the page's) keeps the query's last one. How many are shown first is the caller's
+(`[jev].ask_top`).
 
 THE FLOW, shared by `xbrain jev ask` and the server's ask job: `plan_ask` (load, filter,
 select, estimate — nothing paid, no lock needed) → the caller confirms → under the pass lock,
@@ -196,7 +199,7 @@ class AskFilters:
     def __post_init__(self) -> None:
         if self.since is not None and self.until is not None and self.since > self.until:
             raise ValueError(f"--since {self.since} es posterior a --until {self.until}")
-        if self.author is not None and not self.author.strip().lstrip("@").strip():
+        if self.author is not None and not normalise_author(self.author):
             raise ValueError("--author está vacío")
         if any(not topic.strip() for topic in self.topics):
             raise ValueError("--topic está vacío")
@@ -316,8 +319,15 @@ def _in_days(item: Item, filters: AskFilters) -> bool:
     )
 
 
+def normalise_author(handle: str) -> str:
+    """THE one reading of a handle, typed or stored: trimmed, leading «@» dropped, trimmed
+    again, casefolded. The `author` filter, the refine keys' `a` and the page's refine
+    (`askAuthor`) all compare through it."""
+    return handle.strip().lstrip("@").strip().casefold()
+
+
 def _by_author(item: Item, author: str | None) -> bool:
-    return author is None or item.author.handle.casefold() == author.lstrip("@").casefold()
+    return author is None or normalise_author(item.author.handle) == normalise_author(author)
 
 
 class JevFilterRefused(JevError):
@@ -351,7 +361,7 @@ def filter_posts(
     enrich — is refused: it would select nothing and look like "no post answers".
     """
     _refuse_unusable(store, filters, jev)
-    current = {item.id: assessment for item, assessment in (jev.pairs if jev else [])}
+    current = jev.current_by_id() if jev else {}
     kept = [
         item
         for item in store.values()
@@ -376,7 +386,7 @@ def topic_counts(
     one pass instead of one filter per topic."""
     others = replace(filters, topics=())
     kept, _ = filter_posts(store, others, jev=jev, threshold=threshold)
-    current = {item.id: assessment for item, assessment in (jev.pairs if jev else [])}
+    current = jev.current_by_id() if jev else {}
     counts = dict.fromkeys(sorted(_known_topics(store, jev)), 0)
     for item in kept:
         for topic in post_topics(item, current.get(item.id), threshold):
@@ -601,13 +611,41 @@ def refine_keys(
     item: Item, assessment: TopicAssessment | None, threshold: float
 ) -> dict[str, str | list[str]]:
     """What the page refines a result post by, computed HERE so the browser only compares:
-    its day in UTC (`d`, as `since`/`until` read it), its handle casefolded (`a`, as `author`
-    matches it) and its topics (`t`, `post_topics` at `threshold`)."""
+    its day in UTC (`d`, as `since`/`until` read it), its handle normalised (`a`,
+    `normalise_author`, as `author` matches it) and its topics (`t`, `post_topics` at `threshold`)."""
     return {
         "d": item.created_at.astimezone(timezone.utc).date().isoformat(),
-        "a": item.author.handle.casefold(),
+        "a": normalise_author(item.author.handle),
         "t": sorted(post_topics(item, assessment, threshold)),
     }
+
+
+@dataclass(frozen=True)
+class AnswerView:
+    """ONE saved answer as a reader of results sees it: the post, its probability, who
+    answered and when, and the post's refine keys (`refine_keys`). The page's blob builds every
+    answer through `answer_view` (and a stream of answers mid-job goes through it too), so an
+    answer can never reach the page without the keys «Refinar resultados» compares on."""
+
+    id: str
+    p: float
+    model: str
+    asked_at: datetime
+    keys: dict[str, str | list[str]]
+
+
+def answer_view(
+    item: Item, record: AskAssessment, assessment: TopicAssessment | None, threshold: float
+) -> AnswerView:
+    """`record` (the answer about `item`) as an `AnswerView`; `assessment` is the post's
+    CURRENT topics answer, if any, judged at `threshold` (`[jev].threshold`) for its topics."""
+    return AnswerView(
+        id=item.id,
+        p=record.probability,
+        model=record.model,
+        asked_at=record.asked_at,
+        keys=refine_keys(item, assessment, threshold),
+    )
 
 
 # --------------------------------------------------------------------------- history
@@ -632,6 +670,10 @@ def similar_queries(index: AskIndex, query: AskQuery) -> tuple[str, ...]:
 
 
 def _rebuilt_entry(stored: AskFile, sha: str) -> AskHistoryEntry:
+    """An entry the index lost, from the query's file: `last_evaluated` and `last_results`
+    count EVERY answer in the file, current or not (no filters, no minimum are known), as
+    `AskHistoryEntry.rebuilt` says; what the page and `jev asks` show is recomputed from the
+    current answers anyway."""
     records = list(stored.assessments.values())
     moments = [record.asked_at for record in records] or [datetime.now(timezone.utc)]
     return AskHistoryEntry(
@@ -828,7 +870,7 @@ def finish_ask(
     plan: AskPlan,
     outcome: RunOutcome[AskAssessment] | None,
     *,
-    minimum: float = 0.0,
+    minimum: float | None = 0.0,
     now: datetime | None = None,
 ) -> AskResults:
     """The results of this use, and its line in the history. THE CALLER HOLDS THE LOCK.
@@ -839,14 +881,18 @@ def finish_ask(
     interrupted before banking anything (Ctrl-C or a soft cancel with nothing kept). A pass
     whose every call failed raises out of `run_ask` and never gets here: it banked nothing.
     An interrupted pass that banked answers IS recorded, so the history never lags the file.
-    `minimum` is the use's `--min` (0 = none), recorded as `last_min`.
+    `minimum` is the use's `--min` (0 = none), recorded as `last_min` — the default of the
+    page's free refine, never a cut of what the page ships. `None` (the page's ask, which
+    sends none) keeps the query's last minimum (0 for a new query).
     """
+    previous = plan.history.queries.get(plan.query.sha)
+    if minimum is None:
+        minimum = previous.last_min if previous else 0.0
     results = _rank(plan.candidates, plan.records, plan.query, _state_lookup(plan), minimum)
     banked = outcome.assessed if outcome is not None else ()
     if outcome is not None and outcome.interrupted and not banked:
         return results
     moment = now or datetime.now(timezone.utc)
-    previous = plan.history.queries.get(plan.query.sha)
     entry = AskHistoryEntry(
         query_sha=plan.query.sha,
         query=plan.query.text,
