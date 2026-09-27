@@ -468,9 +468,19 @@ def test_finish_records_the_history_when_an_interrupted_pass_banked_something(cf
     def _stop_after_first(done: int, total: int) -> None:
         cancel.set()
 
-    plan, outcome, results = _run(cfg, _ByText(), cancel=cancel, on_progress=_stop_after_first)
+    class _SecondWaits(_ByText):
+        """A second call that starts before the cancel waits for it, so the one worker can
+        never run ahead and answer every post before the cancel lands (the race under load)."""
 
-    # The one worker may already hold the next post when the cancel lands: it is drained.
+        def ask(self, state, questions):
+            if len(self.calls) == 1:
+                assert cancel.wait(10)
+            return super().ask(state, questions)
+
+    plan, outcome, results = _run(cfg, _SecondWaits(), cancel=cancel, on_progress=_stop_after_first)
+
+    # Post 2 is skipped if the cancel came first, or drained if it was already in flight; post 3
+    # is never sent either way (post 2's call holds the one worker until the cancel lands).
     assert outcome.interrupted and 1 <= len(outcome.assessed) < 3
     assert results.recorded is True
     [entry] = load_history(cfg).queries.values()
