@@ -55,7 +55,10 @@ logger = logging.getLogger(__name__)
 #: (`media`, `describe` and `refetch` all write between units rather than at the end).
 CHECKPOINT_EVERY = 25
 #: Failures a pass's end lists by post (the terminal's summary and a served job's outcome
-#: alike); the rest are counted.
+#: alike); the rest are counted. This is the PARTIAL-failure path: a pass where nothing
+#: succeeded raises instead. The case it serves is a provider rate-limiting or timing out
+#: across most of a large batch while some answers still land — one line each would bury
+#: the summary printed above them.
 FAILURES_SHOWN = 10
 
 

@@ -68,7 +68,8 @@ def load_assessments(path: Path) -> dict[str, TopicAssessment]:
     whole corpus, then overwrite whatever was still readable with only the new records.
 
     Every way the file can be unusable — bytes that are not UTF-8, unparseable JSON, a top
-    level that is not an object, a record this build's validator refuses — raises `JevError` naming the PATH.
+    level that is not an object, a record this build's validator refuses — raises `JevError`
+    naming the PATH.
     `jev topics` loads three files back to back (`items.json`, `vocab.yaml`, the side-car),
     and a bare `Expecting value: line 1 column 1` sends the operator to none of them.
     """

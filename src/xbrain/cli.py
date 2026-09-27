@@ -2696,12 +2696,6 @@ jev_app = typer.Typer(
 )
 app.add_typer(jev_app, name="jev")
 
-#: Failures echoed in full before the rest are summarised. This is the PARTIAL-failure path:
-#: a run where NOTHING succeeded never gets here, because `run_assessments` raises instead of
-#: returning an empty `RunResult`. The case that hurts is a provider rate-limiting or timing
-#: out across most of a large batch while some answers still land — one line each would bury
-#: the summary printed above them.
-
 
 def _jev_client(cfg: Config) -> JevClient:
     """The TypeSafe client for this run — the seam tests monkeypatch.
