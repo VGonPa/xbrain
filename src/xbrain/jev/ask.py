@@ -290,12 +290,17 @@ def _by_author(item: Item, author: str | None) -> bool:
     return author is None or item.author.handle.casefold() == author.lstrip("@").casefold()
 
 
+#: How a filter the corpus cannot apply is refused (`filter_posts`): the page tells it from
+#: any other failure by this prefix.
+FILTER_REFUSAL = "topic desconocido"
+
+
 def _refuse_unusable(store: dict[str, Item], filters: AskFilters, jev: JevPairs | None) -> None:
     """A caller that forgot the side-car (a bug), or a `topic` nobody uses (a typo)."""
     if filters.needs_jev and jev is None:
         raise ValueError("filter_posts: --topic y --only-evaluated necesitan las evaluaciones")
     if filters.topic is not None and filters.topic not in _known_topics(store, jev):
-        raise JevError(f"topic desconocido: {filters.topic!r} (ni en el vocabulario ni en enrich)")
+        raise JevError(f"{FILTER_REFUSAL}: {filters.topic!r} (ni en el vocabulario ni en enrich)")
 
 
 def filter_posts(
@@ -446,8 +451,10 @@ def _rank(
     current: list[tuple[Item, AskAssessment]] = []
     for item in candidates:
         record = records.get(item.id)
+        if record is None:
+            continue
         text = state_text(item)
-        if record is not None and text is not None and _is_current(record, text, query):
+        if text is not None and _is_current(record, text, query):
             current.append((item, record))
     ranked = sorted(
         ((item, record) for item, record in current if record.probability >= threshold),
@@ -476,6 +483,26 @@ def ask_results(
         lambda item: build_topic_state(item, char_limit)[0][STATE_KEY],
         threshold,
     )
+
+
+def saved_results(
+    store: dict[str, Item],
+    jev: JevPairs | None,
+    query: AskQuery,
+    filters: AskFilters,
+    records: dict[str, AskAssessment],
+    *,
+    topic_threshold: float,
+    threshold: float,
+    state_text: Callable[[Item], str | None],
+) -> AskResults:
+    """The results of a query asked before, over the filters it was asked with: what the page
+    shows and `finish_ask` ranked. TWO BARS, never one: `topic_threshold` is `[jev].threshold`,
+    the bar `--topic` and `--only-evaluated` judge Jev's topics answers at (as `plan_ask`
+    does); `threshold` is the results bar that use asked for, which only ranks. `state_text`
+    is each post's state as sent, so a caller ranking many queries builds it once."""
+    candidates, _ = filter_posts(store, filters, jev=jev, threshold=topic_threshold)
+    return _rank(candidates, records, query, state_text, threshold)
 
 
 # --------------------------------------------------------------------------- history

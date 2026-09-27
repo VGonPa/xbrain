@@ -8,6 +8,7 @@ by `test_jev_run.py` and `test_jev_assess.py`.
 from __future__ import annotations
 
 import json
+from typing import Any
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,7 @@ from xbrain.jev.ask import (
     select_ask_items,
 )
 from xbrain.jev.assess import assess_topics, build_topic_state, topic_contract
+from xbrain.jev.dashboard import NO_ASKS, ask_page_data
 from xbrain.jev.client import JevError, JevResult, NoulAnswer, NoulQuestion, Question
 from xbrain.jev.defaults import (
     DEFAULT_ASK_TOKENS_PER_CALL,
@@ -462,14 +464,26 @@ def test_finish_records_the_history_when_an_interrupted_pass_banked_something(cf
         encoding="utf-8",
     )
     cfg = load_config(cfg.repo_root)
+    # One worker: the race this test holds shut is about the one worker running ahead.
+    assert cfg.jev_concurrency == 1
     cancel = threading.Event()
 
     def _stop_after_first(done: int, total: int) -> None:
         cancel.set()
 
-    plan, outcome, results = _run(cfg, _ByText(), cancel=cancel, on_progress=_stop_after_first)
+    class _SecondWaits(_ByText):
+        """A second call that starts before the cancel waits for it, so the one worker can
+        never run ahead and answer every post before the cancel lands (the race under load)."""
 
-    # The one worker may already hold the next post when the cancel lands: it is drained.
+        def ask(self, state, questions):
+            if len(self.calls) == 1:
+                assert cancel.wait(10)
+            return super().ask(state, questions)
+
+    plan, outcome, results = _run(cfg, _SecondWaits(), cancel=cancel, on_progress=_stop_after_first)
+
+    # Post 2 is skipped if the cancel came first, or drained if it was already in flight; post 3
+    # is never sent either way (post 2's call holds the one worker until the cancel lands).
     assert outcome.interrupted and 1 <= len(outcome.assessed) < 3
     assert results.recorded is True
     [entry] = load_history(cfg).queries.values()
@@ -484,6 +498,23 @@ def test_finish_records_nothing_when_an_interrupted_pass_banked_nothing(cfg: Con
 
     assert results.recorded is False
     assert not (cfg.jev_asks_dir / ASK_INDEX).exists()
+
+
+def test_a_use_stopped_before_any_answer_writes_no_answers_file(cfg: Config):
+    """Nothing banked, nothing saved: an empty file would come back from `load_history` as a
+    «rebuilt» query nobody asked for, first in the Preguntar tab."""
+    cancel = threading.Event()
+
+    class _FailsOnceCancelled(_ByText):
+        def ask(self, state, questions):
+            cancel.set()
+            raise JevError("respuesta ilegible")
+
+    plan, outcome, results = _run(cfg, _FailsOnceCancelled(), cancel=cancel)
+
+    assert outcome.interrupted and outcome.assessed == () and results.recorded is False
+    assert not _ask_path(cfg, plan.query).exists()
+    assert load_history(cfg).queries == {}
 
 
 def test_a_query_whose_history_entry_was_lost_is_rebuilt_from_its_file(cfg: Config):
@@ -1282,3 +1313,187 @@ def test_a_file_older_than_the_history_is_not_counted_twice(cfg: Config):
 
     assert history.queries[plan.query.sha].rebuilt is True
     assert history.calibration.answers == 3
+
+
+# --------------------------------------------------------------------------- the page's view
+# `dashboard.asks_view`: what the static `jev.html` and the server's `/api/asks` show of every
+# query asked — results recomputed now over each query's own filters and threshold, its cost
+# from the run log, what Jev read once per result post, an unreadable file costing its row.
+
+
+def _asks(cfg: Config) -> dict[str, Any]:
+    return ask_page_data(cfg, load_jev_pairs(cfg), load_runs(cfg.jev_runs_path))
+
+
+def test_the_page_filters_by_topic_at_the_jev_threshold_like_the_command(cfg: Config):
+    """`--topic` judges Jev at `[jev].threshold`; the results bar (here 0.5) only ranks. Post
+    1 is enrich's ai-coding with Jev's «startups» at 0.7: not a startups post at 0.85."""
+    _jev_with_topics(cfg, {"startups": 0.7})
+    _run(cfg, _ByText())  # every post answered, post 1 (0.95) included
+    query = AskQuery.of(QUERY)
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        plan = plan_ask(cfg, query, AskFilters(topic="startups"), None)
+        outcome = run_ask(cfg, plan, lambda: _ByText(), lock=lock)
+        found = finish_ask(cfg, plan, outcome, threshold=0.05)
+
+    [row] = _asks(cfg)["history"]
+
+    cli = [(item.id, record.probability) for item, record in found.ranked]
+    assert "1" not in [item.id for item in plan.candidates]
+    assert "1" in plan.records and plan.records["1"].probability == 0.95
+    assert [(r["id"], r["p"]) for r in row["results"]] == cli
+    assert row["answered"] == found.answered and row["threshold"] == 0.05
+
+
+def test_the_page_lists_each_query_with_its_current_results_best_first(cfg: Config):
+    plan, _, _ = _run(cfg, _ByText(provider="typesafe"))
+
+    [row] = _asks(cfg)["history"]
+
+    assert (row["sha"], row["query"], row["times"], row["answered"]) == (
+        plan.query.sha,
+        QUERY,
+        1,
+        3,
+    )
+    assert [(r["id"], r["p"]) for r in row["results"]] == [("1", 0.95), ("3", 0.95)]
+    assert row["threshold"] == cfg.jev_threshold and row["filters"] == {}
+    assert row["cost"]["cost_usd"] == tokens_cost_usd(300, "typesafe")
+    assert row["cost"]["requests"] == 3
+    assert "error" not in row
+
+
+def test_a_query_no_logged_pass_paid_for_costs_zero_on_the_page(cfg: Config):
+    _run(cfg, _ByText(provider="typesafe"))
+    cfg.jev_runs_path.unlink()
+
+    [row] = _asks(cfg)["history"]
+
+    assert (row["cost"]["runs"], row["cost"]["cost_usd"]) == (0, 0.0)
+
+
+def test_the_page_keeps_what_jev_read_once_per_result_post(cfg: Config):
+    _run(cfg, _ByText())
+    _run(cfg, _ByText(), query_text="hooks otra vez")
+
+    view = _asks(cfg)
+
+    assert sorted(view["surfaces"]) == ["1", "3"]
+    assert view["surfaces"]["1"][0]["chars"] == len(load_store(cfg.items_path)["1"].text)
+
+
+def test_a_changed_post_is_not_a_result_on_the_page(cfg: Config):
+    _run(cfg, _ByText())
+    store = load_store(cfg.items_path)
+    store["3"].text = "Hooks in Claude Code, a thread (edited)"
+    save_store(store, cfg.items_path)
+
+    [row] = _asks(cfg)["history"]
+
+    assert [r["id"] for r in row["results"]] == ["1"] and row["answered"] == 2
+
+
+def test_the_page_applies_the_filters_the_query_was_asked_with(cfg: Config):
+    _run(cfg, _ByText(), filters=AskFilters(author="bob"))
+
+    [row] = _asks(cfg)["history"]
+
+    assert (row["results"], row["answered"], row["filters"]) == ([], 1, {"author": "bob"})
+
+
+def test_the_last_query_asked_is_listed_first(cfg: Config):
+    _run(cfg, _ByText(), query_text="primera")
+    _run(cfg, _ByText(), query_text="segunda")
+
+    assert [row["query"] for row in _asks(cfg)["history"]] == ["segunda", "primera"]
+
+
+def test_an_unreadable_query_file_costs_its_row_never_the_page(cfg: Config):
+    plan, _, _ = _run(cfg, _ByText())
+    _run(cfg, _ByText(), query_text="otra")
+    _ask_path(cfg, plan.query).write_text("{", encoding="utf-8")
+
+    view = _asks(cfg)
+    rows = {row["query"]: row for row in view["history"]}
+
+    assert "ilegible" in rows[QUERY]["error"] and rows[QUERY]["results"] == []
+    assert "error" not in rows["otra"]
+
+
+def test_a_history_entry_whose_topic_left_the_vocabulary_says_so(cfg: Config):
+    _run(cfg, _ByText(), filters=AskFilters(topic="ai-coding"))
+    store = load_store(cfg.items_path)
+    for item in store.values():
+        assert item.enriched is not None
+        item.enriched.topics, item.enriched.primary_topic = ["startups"], "startups"
+    save_store(store, cfg.items_path)
+    save_vocab([VOCAB[1]], cfg.vocab_path)
+
+    [row] = _asks(cfg)["history"]
+
+    assert "topic desconocido" in row["error"]
+
+
+def test_an_unreadable_history_is_the_tabs_error(cfg: Config):
+    path = cfg.jev_asks_dir / "index.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("[]", encoding="utf-8")
+
+    view = _asks(cfg)
+
+    assert view["history"] == [] and "ilegible" in view["error"]
+
+
+def test_a_page_built_without_asks_has_an_empty_tab():
+    assert NO_ASKS == {"history": [], "surfaces": {}, "error": None}
+
+
+def test_a_run_log_that_cannot_be_read_gives_no_cost_rather_than_zero(cfg: Config):
+    from xbrain.jev.dashboard import build_page_data
+
+    _run(cfg, _ByText(provider="typesafe"))
+    with cfg.jev_runs_path.open("a", encoding="utf-8") as log:
+        log.write("{roto\n")
+
+    [row] = build_page_data(cfg, now=DT)["asks"]["history"]
+
+    assert set(row["cost"]) == {"error"} and "runs.jsonl" in row["cost"]["error"]
+
+
+def test_the_page_cost_of_a_query_is_the_run_logs(cfg: Config):
+    plan, _, _ = _run(cfg, _ByText(provider="typesafe", input_tokens=200_000))
+
+    [row] = _asks(cfg)["history"]
+
+    assert row["cost"] == ask_cost_by_query(load_runs(cfg.jev_runs_path))[plan.query.sha]
+    assert row["cost"]["cost_usd"] > 0.01
+
+
+def test_an_unreadable_file_costs_only_its_own_query_when_the_history_is_rebuilt(cfg: Config):
+    """The index is gone and one answer file is broken: every other lost query still comes
+    back (rebuilt) and the broken file is named — it never blanks the tab."""
+    good, _, _ = _run(cfg, _ByText())
+    bad, _, _ = _run(cfg, _ByText(), query_text="otra")
+    (cfg.jev_asks_dir / ASK_INDEX).unlink()
+    _ask_path(cfg, bad.query).write_text("{", encoding="utf-8")
+
+    view = _asks(cfg)
+
+    assert [(row["query"], row["rebuilt"]) for row in view["history"]] == [(QUERY, True)]
+    assert f"{bad.query.sha}.json" in view["error"]
+    assert [r["id"] for r in view["history"][0]["results"]] == ["1", "3"]
+
+
+def test_a_results_failure_that_is_not_a_filter_refusal_says_so_plainly(cfg: Config, monkeypatch):
+    from xbrain.jev import dashboard
+
+    _run(cfg, _ByText())
+
+    def _broken(*args, **kwargs):
+        raise JevError("algo distinto")
+
+    monkeypatch.setattr(dashboard, "saved_results", _broken)
+
+    [row] = _asks(cfg)["history"]
+
+    assert row["error"] == "No se pudieron calcular los resultados de esta consulta: algo distinto"

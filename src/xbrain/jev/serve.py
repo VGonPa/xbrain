@@ -13,8 +13,10 @@ estimate, the confirmation, the one job and its cap); this module routes and gua
   outside that folder however the path is spelled.
 
 Routes: `/` (the page), `/api/data` (its blob), `/api/cards?ids=` (cards by id), `/api/job`
-(the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, and per
-kind of pass `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate` (`topics` today).
+(the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, per
+kind of pass (`topics`, `ask`) `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate`,
+and what was asked: `/api/asks` (the query history with each query's results) and
+`/api/ask/<sha>` (one query) — both read-only, both slices of the blob.
 
 Bound to 127.0.0.1 only; there is no option to bind anything else. Ctrl-C stops accepting
 requests, stops the job softly (what is in flight is waited for, saved and logged) and exits
@@ -48,6 +50,8 @@ TOKEN_HEADER = "X-Xbrain-Token"
 MAX_BODY = 64 * 1024
 #: `/api/<kind>/<action>`.
 _PASS_ROUTE = re.compile(r"^/api/([a-z]+)/(estimate|evaluate)$")
+#: `/api/ask/<sha>`: one query of the history, by the sha256 of its normalised text.
+_ASK_ROUTE = re.compile(r"^/api/ask/([0-9a-f]{64})$")
 #: What `/_media/` serves: what the page shows. An `.svg` or `.html` there would run as this
 #: origin and could read the token, so anything else is not served.
 _MEDIA_TYPES = ("image/", "video/")
@@ -158,17 +162,27 @@ class _Handler(BaseHTTPRequestHandler):
         service = self.server.service
         if url.path in ("/", "/jev.html"):
             self._send(200, service.page_html().encode("utf-8"), "text/html; charset=utf-8")
-        elif url.path == "/api/data":
-            self._json(200, service.blob())
-        elif url.path == "/api/cards":
-            ids = [i for raw in parse_qs(url.query).get("ids", []) for i in raw.split(",") if i]
-            self._json(200, {"cards": service.cards(ids)})
-        elif url.path == "/api/job":
-            self._json(200, service.job_view())
         elif url.path.startswith(f"/{VAULT_MEDIA_SUBDIR}/"):
             self._media(url.path)
         else:
-            raise ServeError(404, "no existe")
+            self._json(200, self._get_json(url.path, url.query))
+
+    def _get_json(self, path: str, query: str) -> Any:
+        """The read-only JSON routes: the blob, cards by id, the job, and what was asked."""
+        service = self.server.service
+        if path == "/api/data":
+            return service.blob()
+        if path == "/api/cards":
+            ids = [i for raw in parse_qs(query).get("ids", []) for i in raw.split(",") if i]
+            return {"cards": service.cards(ids)}
+        if path == "/api/job":
+            return service.job_view()
+        if path == "/api/asks":
+            return service.asks()
+        asked = _ASK_ROUTE.match(path)
+        if asked is not None:
+            return service.ask(asked.group(1))
+        raise ServeError(404, "no existe")
 
     def _post(self) -> None:
         self._guard(post=True)

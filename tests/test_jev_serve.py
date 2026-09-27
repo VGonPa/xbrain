@@ -1149,9 +1149,9 @@ def test_the_estimate_and_the_job_say_which_kind_of_pass(served: _Served):
 
 
 def test_an_unknown_kind_of_pass_is_404(served: _Served):
-    status, _, _ = served.request("POST", "/api/ask/estimate", {"ids": ["3"]})
+    status, error, _ = served.request("POST", "/api/verify/estimate", {"ids": ["3"]})
 
-    assert status == 404
+    assert status == 404 and "verify" in error["error"]
 
 
 # --------------------------------------------------------------------------- the terminal log

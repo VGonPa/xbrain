@@ -2223,10 +2223,11 @@ def test_the_serve_code_builds_text_nodes_and_sends_the_token_only_to_its_own_se
     for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
         assert sink not in serve, sink
     # Relative URLs only, all in ONE table: the API is this page's own server. Each kind of
-    # pass has its routes (PR 12 adds one); the job slot is one for every kind.
+    # pass has its routes; the job slot is one for every kind.
     assert (
         "const API = {\n"
         "  topics: {estimate: '/api/topics/estimate', evaluate: '/api/topics/evaluate'},\n"
+        "  ask: {estimate: '/api/ask/estimate', evaluate: '/api/ask/evaluate'},\n"
         "  job: '/api/job', cancel: '/api/job/cancel', data: '/api/data',\n"
         "};" in serve
     )
@@ -2254,7 +2255,15 @@ def test_the_serve_words_that_carry_meaning_are_pinned():
         "'Evaluar los '",
         "' siguientes sin evaluar'",
         "'Evaluar y pagar'",
-        "'Evaluar y pagar ' + usd(e.usd, 5)",
+        "words.go + ' ' + usd(e.usd, 5)",
+        "'Preguntar y pagar'",
+        "'Ver resultados (gratis)'",
+        "'No se puede preguntar: '",
+        "' (gratis)'",
+        "'Aún sin preguntas pagadas: cifras de partida.'",
+        "' tokens por llamada, más el texto de los posts ('",
+        "'; el historial no se pudo escribir: '",
+        "'Pregunta en curso'",
         "'Cancelar'",
         "' Coste estimado: '",
         "' (coste medio por post de '",
@@ -2269,6 +2278,20 @@ def test_the_serve_words_that_carry_meaning_are_pinned():
         "'No se puede evaluar: '",
     ):
         assert words in serve, words
+
+
+def test_the_ask_tab_builds_text_nodes_and_calls_no_server_itself():
+    """The Preguntar tab draws the history and the results from DATA, as text nodes; it asks
+    the server nothing — launching goes through the serve panel (`openAsk`)."""
+    ask = _script_section(_resource("jev.template.html"), "/* ask tab */", "/* end ask tab */")
+
+    for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser"):
+        assert sink not in ask, sink
+    assert "fetch(" not in ask and "api(" not in ask
+    assert "SERVED() ? askFormBox() : askLaunchLine()" in ask
+    assert "openAsk('ask', askBody()" in ask
+    assert "'Esta consulta no está en el historial.'" in ask
+    assert "{missing: askView.q}" in ask
 
 
 def test_the_page_draws_serve_controls_only_when_served():
