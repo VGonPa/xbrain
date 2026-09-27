@@ -198,6 +198,17 @@ const cards = async () => { await drawAll(); return seenCards(document.getElemen
   renderCost(); out.cost_unlogged = totalOf();
   DATA.cost.out_of_log = Object.assign({}, DATA.cost.out_of_log, {assessments: 0, cost_usd: 0});
   renderCost(); out.cost_nothing = totalOf();
+  // Each figure once: with no logged pass and every saved answer current, the Total already is
+  // what the current answers cost, so their tile does not say the number again.
+  const storedCtx = () => txt(document.querySelectorAll('#kpis .kpi .ctx')[2]);
+  DATA.cost.out_of_log = Object.assign({}, DATA.cost.out_of_log, {assessments: 2, cost_usd: 0.0769});
+  DATA.cost.current = Object.assign({}, DATA.cost.current, {assessments: 2, cost_usd: 0.0769});
+  renderCost(); out.cost_echo = {kpis: txt(document.getElementById('kpis')), stored: storedCtx()};
+  DATA.cost.current = Object.assign({}, DATA.cost.current, {cost_usd: 0.05});
+  renderCost(); out.cost_apart = {stored: storedCtx()};
+  // One answer with no token count, in a logged total: the noun agrees with the number.
+  DATA.cost.total = Object.assign({}, DATA.cost.total, {runs: 1, requests: 3, cost_usd: 0.0123, input_tokens: 900, input_tokens_unknown: 1});
+  renderCost(); out.cost_one_unknown = totalOf();
   DATA.cost = JSON.parse(saved); renderCost();
   // The URL keeps a search with characters that need escaping.
   const box = document.getElementById('search');
@@ -536,6 +547,20 @@ def test_the_cost_strip_opens_on_a_number_and_an_amber_dash_never(probed):
     # Nothing paid at all: «—», in ink, not in the colour of money.
     assert nothing["num"] == "—" and nothing["amber"] is False
     assert nothing["ctx"] == "sin pasadas registradas: aún no se ha pagado nada"
+
+
+@_requires_chrome
+def test_the_cost_strip_says_each_figure_once(probed):
+    _data_, seen = probed
+
+    # No logged pass, every saved answer current: 0,0769 is said once, by the Total.
+    echo = seen["cost_echo"]
+    assert echo["kpis"].count("0,0769") == 1
+    assert echo["stored"].startswith("lo que costaron: el Total · ")
+    # Current answers that cost something else: their own figure.
+    assert seen["cost_apart"]["stored"].startswith("lo que costaron: ~0,0500 $ · ")
+    # «+1 respuesta», as the Preguntar line says it.
+    assert "(+1 respuesta sin recuento)" in seen["cost_one_unknown"]["ctx"]
 
 
 @_requires_chrome

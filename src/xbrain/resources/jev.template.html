@@ -45,7 +45,7 @@
     color-scheme:light;
     --bg:#F1F4F6; --surface:#FFFFFF; --surface-2:#E8EDF1; --sunk:#E2E8ED;
     --line:rgba(26,37,48,.15); --line-2:rgba(26,37,48,.08);
-    --ctl:#788794;
+    --ctl:#788794; /* 2.99:1 on --sunk: no control sits on --sunk */
     --text:#1A2530; --muted:#4D5D6A; --faint:#56656F;
     --agree:#1B7466; --agree-fill:#2E9C8C; --agree-soft:rgba(46,156,140,.13); --agree-line:rgba(27,116,102,.45);
     --pencil:#5642BF; --pencil-soft:rgba(86,66,191,.09); --pencil-line:rgba(86,66,191,.42);
@@ -795,12 +795,14 @@ function renderCost() {
     'media de ' + nf(c.per_post.n) + ' de las ' + nf(c.per_post.of) + ' evaluaciones vigentes: las que tienen recuento de tokens' +
     (c.per_post.unpriced_providers.length ? ' y tarifa (sin tarifa: ' +
       esc(c.per_post.unpriced_providers.join(', ')) + ')' : ''));
-  const stored = kpi('Evaluaciones vigentes', nf(cur.assessments),
-    'lo que costaron: ' + usd(cur.cost_usd) + ' · ' + pl(cur.input_tokens, 'token', 'tokens') + ' de entrada' +
+  // What the current answers cost, unless the Total beside it already says that very figure.
+  const stored = (costWords) => kpi('Evaluaciones vigentes', nf(cur.assessments),
+    'lo que costaron: ' + costWords + ' · ' + pl(cur.input_tokens, 'token', 'tokens') + ' de entrada' +
     curUnknown + unpricedNote(cur.unpriced_providers), true);
   if (c.error) {
     // The run log could not be read: say so where the total would be, keep everything else.
-    $('kpis').innerHTML = kpi('Total', '—', 'no se pudo leer el registro de pasadas: ' + esc(c.error)) + perPost + stored;
+    $('kpis').innerHTML = kpi('Total', '—', 'no se pudo leer el registro de pasadas: ' + esc(c.error)) + perPost +
+      stored(usd(cur.cost_usd));
     $('before-log').hidden = true;
     $('runs-box').innerHTML = '<div class="empty">Sin histórico: corrige la línea indicada arriba en runs.jsonl ' +
       '(si contiene un registro válido pegado tras un fragmento, sepáralo; no la borres).</div>';
@@ -808,7 +810,7 @@ function renderCost() {
   }
   const T = c.total;
   const out = c.out_of_log;
-  const unknown = T.input_tokens_unknown ? ' (+' + nf(T.input_tokens_unknown) + ' respuestas sin recuento)' : '';
+  const unknown = T.input_tokens_unknown ? ' (+' + pl(T.input_tokens_unknown, 'respuesta', 'respuestas') + ' sin recuento)' : '';
   // The strip opens on a number. Logged passes: their total. None logged but answers saved:
   // what those answers cost, by their own tokens, named as such (no logged pass is not a free
   // history, and a bare ~0,0000 $ would read as one). Nothing paid at all: «—», in ink.
@@ -825,7 +827,10 @@ function renderCost() {
   } else {
     total = kpi('Total', '—', 'sin pasadas registradas: aún no se ha pagado nada', true);
   }
-  $('kpis').innerHTML = total + perPost + stored;
+  // No logged pass: the Total is what the saved answers cost. When the current ones cost the
+  // same figure (every saved answer is current), it is said once, in the Total.
+  const echo = !T.runs && out.assessments && usd(out.cost_usd) === usd(cur.cost_usd);
+  $('kpis').innerHTML = total + perPost + stored(echo ? 'el Total' : usd(cur.cost_usd));
   // Answers out of the log beside a logged total: said apart, since they are not in it. With
   // no logged pass the Total above already is their cost. Drawn again after a served job: a
   // note that no longer applies goes away.
@@ -3621,7 +3626,7 @@ function askCostLine() {
   } else {
     line.appendChild(document.createTextNode('Lo que ha costado preguntar: '));
     line.appendChild(el('b', 'money', usd(c.cost_usd)));
-    // As the CLI's «Consultas» line and the topics strip say it: answers with no token count.
+    // As the topics strip's Total says it: answers with no token count, named as answers.
     const unknown = c.input_tokens_unknown ? ' (+' + pl(c.input_tokens_unknown, 'respuesta', 'respuestas') + ' sin recuento)' : '';
     line.appendChild(document.createTextNode(' en ' + pl(c.runs, 'pasada', 'pasadas') + ' y ' +
       pl(c.requests, 'petición', 'peticiones') + unpricedWords(c.unpriced_providers) + unknown + '.'));
@@ -4084,15 +4089,21 @@ async function estimate() {
       // A query every post already answered asks nobody: it only opens the results.
       P.go.textContent = e.posts ? words.go + ' ' + usd(e.usd, 5) : 'Ver resultados (gratis)';
     } else {
-      showError(words.cant + e.refusal);
+      estimateError(mine, words.cant + e.refusal);
     }
   } catch (err) {
     if (!latest(mine, seq)) return;
     P.est.textContent = '';
-    showError(words.cant + err.message);
+    estimateError(mine, words.cant + err.message);
   } finally {
     if (latest(mine, seq)) P.force.disabled = false;
   }
+}
+
+/** Why an estimate cannot be paid, for the form as it was sent. Edited meanwhile: the block
+    keeps saying the question changed, and the reason is kept for when the edit is undone. */
+function estimateError(mine, text) {
+  if (mine.changed) mine.said = text; else showError(text);
 }
 
 function pickText(e) {

@@ -394,6 +394,29 @@ _ASK_SERVE_PROBE = (
     + _SERVE_JS
     + _ASK_JS
     + r"""
+// Holds the page's next ask estimate until the probe lets it answer: the answer arrives
+// after whatever the probe does while the block says «Estimando…».
+let sHold = null;
+const sFetchHeld = window.fetch;
+window.fetch = function (u, init) {
+  const p = sFetchHeld.call(window, u, init);
+  if (sHold && String(u).includes('/api/ask/estimate')) {
+    const h = sHold;
+    sHold = null;
+    h.sent = true;
+    return p.then(r => h.gate.then(() => r));
+  }
+  return p;
+};
+const sHoldNext = () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  sHold = {gate, release, sent: false};
+  return sHold;
+};
+const sEstimating = (h) => sWait(() => h.sent && sPanel().est === 'Estimando…', 'la estimación en vuelo');
+const sAnswered = () => sWait(() => sPanel().est && sPanel().est !== 'Estimando…', 'la respuesta tardía');
+const sQEdit = (value) => { const q = sId('ask-q'); q.value = value; q.dispatchEvent(new Event('input', {bubbles: true})); };
 const sQForm = (fields) => {
   for (const [id, value] of Object.entries(fields)) {
     const box = sId(id);
@@ -485,6 +508,46 @@ const sQForm = (fields) => {
     sId('ask-cancel').click();
     return panel;
   });
+  await sStep('inflight', async () => {
+    // Edited while the estimate is out: the answer, for the old question, arrives priced and
+    // allowed, and «… y pagar» must stay held — a click would pay for the question as sent.
+    let h = sHoldNext();
+    sQForm({'ask-q': 'hooks en vuelo', 'ask-evaluated': true, 'ask-author': ''});
+    await sEstimating(h);
+    sQEdit('hooks en vuelo y skills');
+    const during = sPanel();
+    h.release();
+    await sAnswered();
+    const late = Object.assign(sPanel(), {allowed: !!(sLastEstimate && sLastEstimate.allowed)});
+    const posts0 = sPosts;
+    await confirmAsk();  // what a click would run, were the button not held
+    late.paid = sPosts - posts0;
+    // Estimated again, then edited and undone while that estimate is out: nothing is payable
+    // until it answers, and then it is.
+    h = sHoldNext();
+    sPress(sId('ask-form'), 'Estimar lo que cuesta');
+    await sEstimating(h);
+    sQEdit('hooks en vuelo');
+    sQEdit('hooks en vuelo y skills');
+    const undone = sPanel();
+    h.release();
+    await sAnswered();
+    const answered = sPanel();
+    sId('ask-cancel').click();
+    // Refused while edited: the block keeps saying the question changed, and the refusal is
+    // what it says once the edit is undone.
+    h = sHoldNext();
+    sQForm({'ask-q': 'otra', 'ask-evaluated': false, 'ask-author': 'nadie'});
+    await sEstimating(h);
+    sQEdit('otra más');
+    h.release();
+    await sWait(() => sLastEstimate && sLastEstimate.allowed === false && sPanel().est !== 'Estimando…', 'la negativa tardía');
+    const refused = sPanel();
+    sQEdit('otra');
+    const refused_undone = sPanel();
+    sId('ask-cancel').click();
+    return {during, late, undone, answered, refused, refused_undone};
+  });
   sDone();
 })();
 </script>"""
@@ -553,6 +616,31 @@ def test_served_editing_the_form_after_an_estimate_holds_the_pay_button(ask_serv
     assert edited["back"]["go"] is True and edited["back"]["error"] is None
     assert edited["after"]["go"] is True and edited["after"]["error"] is None
     assert edited["after"]["go_text"] == edited["back"]["go_text"]
+
+
+@_requires_chrome
+def test_served_an_estimate_that_answers_after_an_edit_leaves_nothing_to_pay(ask_served):
+    step = _step(ask_served, "inflight")
+    said = "La pregunta cambió desde la estimación: vuelve a estimar."
+
+    assert step["during"]["go"] is False and step["during"]["error"] == said
+    # The old question's estimate came back payable, and still nothing can be paid.
+    assert step["late"]["allowed"] is True
+    assert step["late"]["go"] is False and step["late"]["error"] == said
+    assert step["late"]["paid"] == 0
+    # An edit undone while the estimate is out: held until it answers, then offered.
+    assert step["undone"]["go"] is False and step["undone"]["error"] is None
+    assert step["answered"]["go"] is True and step["answered"]["error"] is None
+
+
+@_requires_chrome
+def test_served_a_refusal_that_answers_after_an_edit_comes_back_on_undo(ask_served):
+    step = _step(ask_served, "inflight")
+
+    assert step["refused"]["go"] is False
+    assert step["refused"]["error"] == "La pregunta cambió desde la estimación: vuelve a estimar."
+    assert step["refused_undone"]["go"] is False
+    assert step["refused_undone"]["error"].startswith("No se puede preguntar: ningún post")
 
 
 @_requires_chrome
