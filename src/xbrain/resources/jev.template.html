@@ -295,8 +295,6 @@ details.saw[open]>summary{color:var(--text)}
 /* Preguntar */
 .askcost{font-size:13.5px;color:var(--muted);margin:4px 0 0}
 .money{color:var(--money);font-weight:600}
-.askfs{display:flex;flex-wrap:wrap;gap:10px 14px;margin:10px 0}
-.askform{margin-bottom:14px}
 /* Preguntar: the question is the page's one large thing; everything around it stays quiet */
 .askl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:32px;align-items:start}
 .askmain,.askres{min-width:0}
@@ -2895,6 +2893,83 @@ function openAskRow() {
 /** The query as the server files it: whitespace runs as one space, trimmed. */
 const askText = (q) => String(q || '').trim().split(/\s+/).join(' ');
 
+/** A filter as a compact pill that opens a small panel (a popover) under it: the pill names
+    the filter's current value (`summary()`), the panel holds its controls. Accessible:
+    `aria-expanded`/`aria-controls`, Escape closes it and gives focus back to the pill, Tab
+    stays inside while it is open, a click outside closes it. The tab is redrawn whole on every
+    refine (its state lives in the hash), so which panel was open and which control had the
+    focus are kept (`popsOpen`) and given back after the redraw (`restorePops`). */
+const popsOpen = new Set();
+function popPill(id, name, summary, build) {
+  const wrap = el('div', 'pill');
+  const b = el('button', 'pillb');
+  b.type = 'button';
+  b.id = id + '-open';
+  b.setAttribute('aria-expanded', 'false');
+  b.setAttribute('aria-controls', id + '-pop');
+  const pop = el('div', 'pop');
+  pop.id = id + '-pop';
+  pop.hidden = true;
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', name);
+  const label = () => {
+    const now = summary();
+    b.replaceChildren(el('span', 'pn', now || name));
+    b.classList.toggle('set', !!now);
+    const chev = el('span', 'chev');
+    chev.setAttribute('aria-hidden', 'true');
+    b.appendChild(chev);
+    b.title = name + (now ? ': ' + now : '');
+  };
+  const show = (open) => {
+    pop.hidden = !open;
+    b.setAttribute('aria-expanded', String(open));
+    if (open) popsOpen.add(id); else popsOpen.delete(id);
+  };
+  b.addEventListener('click', () => {
+    const open = pop.hidden;
+    if (open) closePops(id);
+    show(open);
+    if (open) { const first = focusables(pop)[0]; if (first) first.focus(); }
+  });
+  pop.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); show(false); b.focus(); return; }
+    if (e.key !== 'Tab') return;
+    const f = focusables(pop);
+    if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+  });
+  build(pop, label);
+  label();
+  wrap.appendChild(b);
+  wrap.appendChild(pop);
+  wrap.dataset.pop = id;
+  wrap.show = show;
+  return wrap;
+}
+
+const focusables = (root) => [...root.querySelectorAll('input, button, select, textarea, a[href]')]
+  .filter(n => !n.disabled && n.getClientRects().length);
+
+/** Closes every open popover but `keep`. */
+function closePops(keep) {
+  document.querySelectorAll('.pill').forEach(w => { if (w.dataset.pop !== keep && w.show) w.show(false); });
+}
+
+/** After the tab is redrawn: the popovers that were open, open again, and the focus back on
+    the control that had it (by id). */
+function restorePops(focusId) {
+  document.querySelectorAll('.pill').forEach(w => { if (popsOpen.has(w.dataset.pop) && w.show) w.show(true); });
+  const f = focusId && document.getElementById(focusId);
+  if (f) f.focus({preventScroll: true});
+}
+
+addEventListener('click', (e) => {
+  if (!popsOpen.size || (e.target.closest && e.target.closest('.pill'))) return;
+  closePops(null);
+});
+
 function askField(text, input, cls) {
   const box = el('label', 'askfld' + (cls ? ' ' + cls : ''));
   if (cls === 'chk') {
@@ -2924,7 +2999,7 @@ function askInput(id, key, type, attrs) {
 
 /** The topics, as a multi-select: none ticked = every topic; several = posts in ANY of them.
     Beside each, how many posts it keeps under the other filters (`askCounts`). */
-function askTopicBoxes() {
+function askTopicBoxes(onChange) {
   const box = el('fieldset', 'asktopics');
   box.id = 'ask-topics';
   box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
@@ -2932,6 +3007,7 @@ function askTopicBoxes() {
   const offered = DATA.topics.map(t => t.slug).concat(Object.keys(counts).filter(k => !DATA.topics.some(t => t.slug === k)));
   offered.forEach(slug => {
     const item = el('label');
+    item.dataset.find = label(slug) + ' ' + slug;
     const input = el('input');
     input.type = 'checkbox';
     input.id = 'ask-topic-' + slug;
@@ -2939,6 +3015,7 @@ function askTopicBoxes() {
     input.checked = askForm.topics.includes(slug);
     const read = () => {
       askForm.topics = askForm.topics.filter(t => t !== slug).concat(input.checked ? [slug] : []);
+      if (onChange) onChange();
     };
     input.addEventListener('input', read);
     input.addEventListener('change', read);
@@ -2950,11 +3027,16 @@ function askTopicBoxes() {
     item.appendChild(n);
     box.appendChild(item);
   });
+  return box;
+}
+
+/** Why the server refused the last recount of the topics (a range that runs backwards), said
+    under the filters — never folded away inside the topics' panel. */
+function askCountsErrorLine() {
   const err = el('p', 'err', askCountsError || '');
   err.id = 'ask-topics-error';
   err.hidden = !askCountsError;
-  box.appendChild(err);
-  return box;
+  return err;
 }
 
 /** The filters as `AskFilters.from_json` reads them: only those set. */
@@ -2975,52 +3057,152 @@ function askBody() {
   return body;
 }
 
-/** Served: the query box and `xbrain jev ask`'s pre-filters; the button only ESTIMATES. */
+/** A calendar day as the reader reads it: «3 jun 2026». */
+const dayWords = (d) => (d ? day(d + 'T12:00:00Z') : '');
+/** The dates filter in words, «desde … hasta …», or '' when there is none. */
+function datesWords(since, until) {
+  if (since && until) return dayWords(since) + ' – ' + dayWords(until);
+  if (since) return 'Desde ' + dayWords(since);
+  if (until) return 'Hasta ' + dayWords(until);
+  return '';
+}
+/** The first day of a preset range ending today (UTC, as the filters compare): the last month,
+    the last three months, this year. */
+function presetSince(key) {
+  const now = new Date();
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (key === 'year') return d.getUTCFullYear() + '-01-01';
+  d.setUTCMonth(d.getUTCMonth() - (key === 'month' ? 1 : 3));
+  return d.toISOString().slice(0, 10);
+}
+const DATE_PRESETS = [['', 'Todas las fechas'], ['month', 'Último mes'], ['quarter', 'Últimos 3 meses'], ['year', 'Este año']];
+
+/** «Fechas»: presets and a range, both into the same two date inputs (`sinceId`, `untilId`).
+    `set(since, until)` stores them wherever the caller keeps them. Empty = every date: never
+    today by default. */
+function datesPill(id, sinceId, untilId, get, set) {
+  return popPill(id, 'Fechas', () => datesWords(get().since, get().until), (pop, label) => {
+    const presets = el('div', 'presets');
+    DATE_PRESETS.forEach(([key, words]) => {
+      const b = el('button', 'preset', words);
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        const since = key ? presetSince(key) : '';
+        pop.querySelector('#' + sinceId).value = since;
+        pop.querySelector('#' + untilId).value = '';
+        set(since, '');
+        label();
+      });
+      presets.appendChild(b);
+    });
+    pop.appendChild(presets);
+    const range = el('div', 'range');
+    [[sinceId, 'Desde', 'since'], [untilId, 'Hasta', 'until']].forEach(([inputId, words, key]) => {
+      const input = el('input');
+      input.type = 'date';
+      input.id = inputId;
+      input.value = get()[key];
+      const read = () => { const now = get(); now[key] = input.value; set(now.since, now.until); label(); };
+      input.addEventListener('change', read);
+      input.addEventListener('input', read);
+      range.appendChild(askField(words, input));
+    });
+    pop.appendChild(range);
+  });
+}
+
+/** Served: the question — the tab's one large thing — and `xbrain jev ask`'s pre-filters as
+    pills; the button only ESTIMATES (the price and «Preguntar y pagar» come in the block
+    under the form). */
 function askFormBox() {
-  const form = el('form', 'askform');
+  const form = el('form', 'askform hero');
   form.id = 'ask-form';
-  form.appendChild(el('h4', null, 'Qué posts preguntar'));
+  const qLabel = el('label', 'asklabel', 'Pregunta a tu archivo');
+  qLabel.htmlFor = 'ask-q';
+  form.appendChild(qLabel);
   const q = askInput('ask-q', 'query', 'textarea', {rows: '2', maxlength: '2000',
-    placeholder: '¿Qué posts explican cómo configurar hooks en Claude Code?', 'aria-label': 'La pregunta'});
+    placeholder: 'Posts que explican cómo configurar hooks en Claude Code…'});
   q.value = askForm.query;
+  // Enter asks for the estimate; Shift+Enter is a new line.
+  q.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+  });
   form.appendChild(q);
-  const fs = el('div', 'askfs');
-  const since = askInput('ask-since', 'since', 'date');
-  since.value = askForm.since;
-  const until = askInput('ask-until', 'until', 'date');
-  until.value = askForm.until;
-  const author = askInput('ask-author', 'author', 'text', {placeholder: '@handle', size: '12'});
-  author.value = askForm.author;
-  const limit = askInput('ask-limit', 'limit', 'number', {min: '1', placeholder: 'todos'});
-  limit.value = askForm.limit;
+  form.appendChild(el('h4', null, 'Qué posts preguntar'));
+  const pills = el('div', 'pills');
+  pills.appendChild(askTopicsPill());
+  pills.appendChild(datesPill('ask-dates', 'ask-since', 'ask-until', () => askForm,
+    (since, until) => { askForm.since = since; askForm.until = until; askRecount(); }));
+  pills.appendChild(popPill('ask-who', 'Autor', () => (askForm.author.trim() ? '@' + askForm.author.trim().replace(/^@+/, '') : ''), (pop, label) => {
+    const author = askInput('ask-author', 'author', 'text', {placeholder: '@handle', size: '16', autocomplete: 'off', spellcheck: 'false'});
+    author.value = askForm.author;
+    [['input', askRecount], ['change', askRecount], ['input', label]].forEach(([ev, fn]) => author.addEventListener(ev, fn));
+    pop.appendChild(askField('Autor', author));
+  }));
+  pills.appendChild(popPill('ask-cap', 'Límite', () => (String(askForm.limit).trim() ? 'Hasta ' + nf(Number(askForm.limit)) + ' posts' : ''), (pop, label) => {
+    const limit = askInput('ask-limit', 'limit', 'number', {min: '1', placeholder: 'todos'});
+    limit.value = askForm.limit;
+    limit.addEventListener('input', label);
+    pop.appendChild(askField('Como mucho (posts)', limit));
+  }));
   const evaluated = askInput('ask-evaluated', 'only_evaluated', 'checkbox');
   evaluated.checked = askForm.only_evaluated;
-  // Served: the counts beside the topics follow these filters (`askRecount`, the serve section's).
-  [since, until, author, evaluated].forEach(i => { i.addEventListener('input', askRecount); i.addEventListener('change', askRecount); });
-  [askField('Desde', since), askField('Hasta', until),
-    askField('Autor', author), askField('Como mucho (posts)', limit),
-    askField('Solo posts con evaluación de topics vigente', evaluated, 'chk')].forEach(f => fs.appendChild(f));
-  form.appendChild(askTopicBoxes());
-  form.appendChild(fs);
-  const explain = el('p', 'muted', 'Los filtros eligen qué posts se preguntan (y lo que cuesta); los ' +
-    'resultados se ordenan por lo seguro que está Jev de que el post responde. Topic: posts que enrich o ' +
-    'Jev (≥ ' + pfmt(DATA.threshold) + ') ponen en alguno de los topics marcados.');
+  evaluated.addEventListener('input', askRecount);
+  evaluated.addEventListener('change', askRecount);
+  pills.appendChild(askField('Solo posts con evaluación de topics vigente', evaluated, 'chk'));
+  form.appendChild(pills);
+  form.appendChild(askCountsErrorLine());
+  const explain = el('p', 'muted', 'Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después es gratis.');
   explain.id = 'ask-explain';
   form.appendChild(explain);
-  const tip = el('p', 'muted', 'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.');
-  tip.id = 'ask-tip';
-  form.appendChild(tip);
-  const go = el('button', 'evalb go', 'Estimar lo que cuesta');
+  const row = el('div', 'askgo');
+  const go = el('button', 'evalb primary', 'Estimar lo que cuesta');
   go.type = 'submit';
-  form.appendChild(go);
-  form.appendChild(el('p', 'muted', 'Nada se paga hasta que confirmes en el panel. Un post que ya ' +
-    'respondió a esta misma pregunta no se vuelve a pagar mientras su evidencia no cambie.'));
+  row.appendChild(go);
+  row.appendChild(el('span', 'muted', 'Nada se paga hasta que confirmes. Un post que ya respondió a esta pregunta no se vuelve a pagar.'));
+  form.appendChild(row);
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     openAsk('ask', askBody(), 'Preguntar: «' + askText(askForm.query) + '»', go);
   });
   return form;
 }
+
+/** The form's topics: a pill whose panel lists every topic with its count under the other
+    filters (none ticked = every topic; several = posts in ANY of them), a box to find one, and
+    the rule a topic filter follows. */
+function askTopicsPill() {
+  return popPill('ask-topics', 'Topics', () => askTopicsWords(askForm.topics), (pop, label) => {
+    const find = el('input', 'find');
+    find.type = 'search';
+    find.id = 'ask-topics-find';
+    find.placeholder = 'Buscar un topic…';
+    find.setAttribute('aria-label', 'Buscar un topic');
+    pop.appendChild(find);
+    const box = askTopicBoxes(label);
+    find.addEventListener('input', () => filterTopicList(box, find.value));
+    pop.appendChild(box);
+    const rule = el('p', 'muted', 'Un post está en un topic si enrich o Jev (≥ ' + pfmt(DATA.threshold) + ') lo ponen en él.');
+    rule.id = 'ask-topics-rule';
+    pop.appendChild(rule);
+  });
+}
+
+/** «AI Coding», «AI Coding y 2 más», or '' with none ticked. */
+function askTopicsWords(topics) {
+  if (!topics.length) return '';
+  return label(topics[0]) + (topics.length > 1 ? ' y ' + nf(topics.length - 1) + ' más' : '');
+}
+
+/** Hides the topics whose name or slug does not contain `text` (case and accents ignored). */
+function filterTopicList(box, text) {
+  const fold = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const want = fold(text.trim());
+  box.querySelectorAll('label').forEach(l => {
+    l.hidden = !!want && !fold(l.dataset.find || '').includes(want);
+  });
+}
+
 
 /** Static: nothing is asked from here; the command that would. */
 function askLaunchLine() {
@@ -3058,6 +3240,9 @@ function askCostText(cost) {
 function askCard(p, r) {
   const a = safeCard(p);
   a.id = 'ask-post-' + p.id;
+  // The card's left edge is the answer's relevance: verdigris, as strong as the probability.
+  a.classList.add('asked');
+  a.style.setProperty('--p', String(r.p));
   const strip = el('div', 'askr');
   const top = el('div', 'jh');
   top.appendChild(el('span', 'kick', 'Responde a la pregunta'));
@@ -3128,7 +3313,7 @@ function askResults(row) {
   const refine = askEffective(row, askView.refine);
   box.appendChild(askRefineBar(row, refine));
   const list = askResultList(askAnswers(row), refine, {answered: row.answered, sha: row.sha});
-  head.appendChild(el('p', null, list.reach));
+  head.appendChild(el('p', 'reach', list.reach));
   box.appendChild(list.el);
   return box;
 }
@@ -3233,12 +3418,11 @@ function askRefineTo(sha, change) {
 /** «Refinar resultados (gratis)»: top, minimum, topics, days and author over this query's
     saved answers. Every change is a new hash; nothing is asked or paid. */
 function askRefineBar(row, refine) {
-  const bar = el('section', 'askform askrefine');
+  const bar = el('section', 'askrefine');
   bar.id = 'ask-refine';
   bar.appendChild(el('h4', null, 'Refinar resultados (gratis)'));
-  bar.appendChild(el('p', 'muted', 'Sobre las respuestas ya guardadas de esta consulta: no se pregunta nada ni se ' +
-    'paga, y el enlace de la página guarda el refinado.'));
-  const fs = el('div', 'askfs');
+  const pills = el('div', 'pills');
+  const numOrNull = (v) => (String(v).trim() === '' ? null : Number(v));
   const field = (id, type, value, attrs, key, read) => {
     const input = el('input');
     input.type = type;
@@ -3248,37 +3432,51 @@ function askRefineBar(row, refine) {
     input.addEventListener('change', () => askRefineTo(row.sha, {[key]: read(input.value)}));
     return input;
   };
-  const numOrNull = (v) => (String(v).trim() === '' ? null : Number(v));
-  fs.appendChild(askField('Mostrar', field('refine-top', 'number', String(refine.top), {min: '1', step: '1'}, 'top', (v) => { const n = numOrNull(v); return n && n >= 1 ? Math.floor(n) : null; })));
-  fs.appendChild(askField('Relevancia mínima (0–1)', field('refine-min', 'number', refine.min > 0 ? String(refine.min) : '', {min: '0', max: '1', step: '0.05', placeholder: 'sin mínimo'}, 'min', (v) => { const n = numOrNull(v); return n === null ? 0 : Math.min(1, Math.max(0, n)); })));
-  fs.appendChild(askField('Desde', field('refine-since', 'date', refine.since, {}, 'since', (v) => v)));
-  fs.appendChild(askField('Hasta', field('refine-until', 'date', refine.until, {}, 'until', (v) => v)));
-  fs.appendChild(askField('Autor', field('refine-author', 'text', refine.author, {placeholder: '@handle', size: '12'}, 'author', (v) => v.trim())));
-  bar.appendChild(fs);
+  pills.appendChild(askField('Mostrar', field('refine-top', 'number', String(refine.top), {min: '1', step: '1'}, 'top',
+    (v) => { const n = numOrNull(v); return n && n >= 1 ? Math.floor(n) : null; }), 'inline'));
+  pills.appendChild(popPill('refine-rel', 'Relevancia', () => (refine.min > 0 ? 'Relevancia ≥ ' + dec(refine.min, 2) : ''), (pop) => {
+    pop.appendChild(askField('Relevancia mínima (0–1)', field('refine-min', 'number', refine.min > 0 ? String(refine.min) : '',
+      {min: '0', max: '1', step: '0.05', placeholder: 'sin mínimo'}, 'min',
+      (v) => { const n = numOrNull(v); return n === null ? 0 : Math.min(1, Math.max(0, n)); })));
+  }));
   // Topics among this query's answers (and every one ticked), each with how many it keeps
   // under the rest of the refine.
   const keys = askKeys();
   const answers = askAnswers(row);
   const counts = askTopicCounts(answers, refine, keys);
   const inAnswers = new Set(answers.flatMap(r => (keys[r.id] ? keys[r.id].t : [])));
-  const box = el('fieldset', 'asktopics');
-  box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
-  Object.keys(counts).sort((a, b) => label(a).localeCompare(label(b))).forEach(slug => {
-    const item = el('label');
-    const input = el('input');
-    input.type = 'checkbox';
-    input.id = 'refine-topic-' + slug;
-    input.checked = refine.topics.includes(slug);
-    input.addEventListener('change', () => askRefineTo(row.sha, {topics: input.checked
-      ? refine.topics.concat([slug]) : refine.topics.filter(t => t !== slug)}));
-    item.appendChild(input);
-    item.appendChild(el('span', null, label(slug)));
-    const n = el('span', 'tcount', nf(counts[slug]));
-    n.title = 'respuestas de este topic con el resto del refinado';
-    item.appendChild(n);
-    box.appendChild(item);
-  });
-  bar.appendChild(box);
+  pills.appendChild(popPill('refine-topics', 'Topics', () => askTopicsWords(refine.topics), (pop) => {
+    const box = el('fieldset', 'asktopics');
+    box.appendChild(el('legend', null, 'Topics (ninguno marcado = todos; varios = cualquiera de ellos)'));
+    Object.keys(counts).sort((a, b) => label(a).localeCompare(label(b))).forEach(slug => {
+      const item = el('label');
+      const input = el('input');
+      input.type = 'checkbox';
+      input.id = 'refine-topic-' + slug;
+      input.checked = refine.topics.includes(slug);
+      input.addEventListener('change', () => askRefineTo(row.sha, {topics: input.checked
+        ? refine.topics.concat([slug]) : refine.topics.filter(t => t !== slug)}));
+      item.appendChild(input);
+      item.appendChild(el('span', null, label(slug)));
+      const n = el('span', 'tcount', nf(counts[slug]));
+      n.title = 'respuestas de este topic con el resto del refinado';
+      item.appendChild(n);
+      box.appendChild(item);
+    });
+    pop.appendChild(box);
+  }));
+  pills.appendChild(datesPill('refine-dates', 'refine-since', 'refine-until', () => ({since: refine.since, until: refine.until}),
+    (since, until) => askRefineTo(row.sha, {since: since, until: until})));
+  pills.appendChild(popPill('refine-who', 'Autor', () => (String(refine.author || '').trim() ? '@' + refine.author.trim().replace(/^@+/, '') : ''), (pop) => {
+    pop.appendChild(askField('Autor', field('refine-author', 'text', refine.author, {placeholder: '@handle', size: '16', autocomplete: 'off', spellcheck: 'false'}, 'author', (v) => v.trim())));
+  }));
+  const clear = el('button', 'evalb', 'Quitar el refinado');
+  clear.type = 'button';
+  clear.id = 'refine-clear';
+  // The state is reset NOW, like any other refine change: a change right after builds on it.
+  clear.addEventListener('click', () => askRefineTo(row.sha, askNoRefine()));
+  pills.appendChild(clear);
+  bar.appendChild(pills);
   const absent = refine.topics.filter(t => !inAnswers.has(t));
   if (absent.length) {
     const note = el('p', 'muted', 'Ninguna respuesta de esta consulta está en ' +
@@ -3286,12 +3484,6 @@ function askRefineBar(row, refine) {
     note.id = 'refine-absent';
     bar.appendChild(note);
   }
-  const clear = el('button', 'evalb', 'Quitar el refinado');
-  clear.type = 'button';
-  clear.id = 'refine-clear';
-  // The state is reset NOW, like any other refine change: a change right after builds on it.
-  clear.addEventListener('click', () => askRefineTo(row.sha, askNoRefine()));
-  bar.appendChild(clear);
   return bar;
 }
 
@@ -3331,10 +3523,10 @@ const unpricedWords = (names) => (names && names.length ? ', sin tarifa: ' + nam
 
 function askHistory(open) {
   const side = el('aside', 'askside');
-  side.setAttribute('aria-label', 'Consultas hechas');
-  side.appendChild(el('h3', 'tsec', 'Consultas hechas'));
+  side.setAttribute('aria-label', 'Tus preguntas');
+  side.appendChild(el('h3', 'tsec', 'Tus preguntas'));
   side.appendChild(askCostLine());
-  side.appendChild(el('p', 'muted', 'Reabrir una consulta no cuesta nada: sus respuestas están guardadas.'));
+  side.appendChild(el('p', 'muted', 'Reabrir una no cuesta nada: sus respuestas están guardadas.'));
   if (DATA.asks && DATA.asks.error) {
     const banner = el('p', 'err', 'No se pudo leer el historial: ' + DATA.asks.error);
     banner.id = 'ask-history-error';
@@ -3360,6 +3552,9 @@ function askHistory(open) {
 function renderAsk() {
   document.querySelector('.tabs a[data-tab="ask"]').setAttribute('href', askHref(askView.q, askView.refine));
   const box = $('ask-body');
+  // The tab is redrawn whole on every refine: the open filter panel and the focused control
+  // are given back after it (`restorePops`).
+  const focusId = box.contains(document.activeElement) ? document.activeElement.id : '';
   try {
     const row = openAskRow();
     const grid = el('div', 'askl');
@@ -3371,6 +3566,7 @@ function renderAsk() {
     box.replaceChildren(grid);
     placeVista();
     if (SERVED()) placePanel();
+    restorePops(focusId);
   } catch (err) {
     console.error(err);
     box.replaceChildren(el('p', 'empty', 'La pestaña Preguntar no pudo dibujarse: ' +

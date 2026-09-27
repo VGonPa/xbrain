@@ -811,7 +811,11 @@ sit between the threshold and 0.95 and 69 at 0.95 or above.
 (`dashboard.asks_view`), built from `data/jev/asks/`: nothing on the tab calls Jev, and
 reopening a query costs nothing.
 
-- **Consultas hechas** (right; below on a narrow screen): every query in
+- **Tus preguntas** (right; below on a narrow screen) opens with what asking has cost, every
+  query together: *Lo que ha costado preguntar: ~X $ en N pasadas y M peticiones*
+  (`asks.cost`, `report.ask_cost_total` — the same total as `jev report`'s *Consultas* line;
+  *—* and why when `runs.jsonl` cannot be read; *Aún no se ha pagado ninguna pregunta.* when
+  none was). Then every query in
   `data/jev/asks/index.json` (read as `jev ask` reads it: an entry the index lost is rebuilt
   from its answer file and marked *reconstruida*), the last asked first. Each row has the
   query, the day, how many of its results its default view shows (*20 de 808 leídos por Jev*;
@@ -833,13 +837,17 @@ reopening a query costs nothing.
   yes/no to an open question rarely reaches that, and the first real query showed *0 de 808*.
   Entries written then reopen ranked, for free.)
   **Refinar resultados (gratis)**, above the list, filters the query's SAVED answers: *Mostrar*
-  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), *Relevancia
-  mínima* (by default the query's `last_min`, set only by `jev ask --min` — none for most), the
-  topics among its answers (checkboxes, each with how many answers it keeps under the rest of
+  (how many; `[jev].ask_top` by default, and **Ver N más (quedan R)** adds as many), then
+  pills that each open a small panel and name what is set: *Relevancia* (the minimum; by
+  default the query's `last_min`, set only by `jev ask --min` — none for most), *Topics* (the
+  topics among its answers, as checkboxes, each with how many answers it keeps under the rest of
   the refine — `askTopicCounts`, the one counting function, tested against Python topic by
   topic; a topic ticked in the link that no answer is in is still listed, at 0, and named),
-  *Desde*, *Hasta* and *Autor* (read like the filter: spaces and a leading `@` dropped, case
-  ignored); **Quitar el refinado** goes back to the defaults. It
+  *Fechas* (presets — every date, the last month, the last three months, this year — or a
+  range; empty means every date, never today) and *Autor* (read like the filter: spaces and a
+  leading `@` dropped, case ignored); **Quitar el refinado** goes back to the defaults. A panel
+  opens with the focus inside, keeps Tab inside, and closes on Escape (focus back on its pill)
+  or a click outside; one left open stays open while the refine redraws the list. It
   asks nothing and costs nothing: no request, no client. The page compares on `asks.keys`,
   computed in Python per result post by `ask.refine_keys` (its day in UTC, its handle by
   `ask.normalise_author`, its topics by `ask.post_topics`) plus `n`, the size of the state Jev
@@ -959,22 +967,25 @@ it starts, so photos mirrored later show after a restart.
 - **Evaluar estos posts** on a pair in Topics and on each list the Comparar tab opens (a band,
   a primary pair).
 
-**The Preguntar tab**, served, adds **Qué posts preguntar**: a **query box** and `jev ask`'s
-pre-filters — the **topics as a multi-select** (none ticked = every topic; several = posts in
-any of them, and still every other filter), *Desde*, *Hasta*, *Autor*, *Como mucho (posts)* (the
-`--limit`) and *Solo posts con evaluación de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as every
-other button. Beside each topic is how many posts it keeps **under the other filters**: the
+**The Preguntar tab**, served, opens on the question: a large box, **Pregunta a tu archivo**
+(Enter estimates; Shift+Enter is a new line), and under it **Qué posts preguntar** — `jev
+ask`'s pre-filters as pills: *Topics* (a panel with a search box and every topic as a
+checkbox; none ticked = every topic; several = posts in any of them, and still every other
+filter), *Fechas* (presets or a range, into *Desde* / *Hasta*), *Autor*, *Límite* (*Como
+mucho (posts)*, the `--limit`) and the checkbox *Solo posts con evaluación de topics
+vigente* — and one button, **Estimar lo que cuesta**, whose estimate opens in the block under
+the form. Beside each topic is how many posts it keeps **under the other filters**: the
 blob's `asks.topic_counts` (`ask.topic_counts`, the whole corpus) until you type a filter,
 then the server's answer to `GET /api/ask/counts` — never counted in the browser. When the
 server refuses a count (a range that runs backwards), the counts read *—* and the reason is
-said under the topics; new data (a job's end) asks again for the filters typed. Under the
-filters, one line says what they do and one tip:
+said under the pills; new data (a job's end) asks again for the filters typed. Under the
+pills, one line:
 
-> Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan por lo
-> seguro que está Jev de que el post responde. Topic: posts que enrich o Jev (≥ 0,85) ponen en
-> alguno de los topics marcados.
->
-> Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.
+> Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después es gratis.
+
+and in the Topics panel, the rule a topic filter follows: *Un post está en un topic si enrich
+o Jev (≥ 0,85) lo ponen en él.* The box's placeholder is the kind of question that works best
+— about content, not topics (*Posts que explican cómo configurar hooks en Claude Code…*).
 
 These filters change the posts asked, and so the price: tick a second topic and the
 estimate's post count and cost grow with it. Everything about which results are SHOWN — how
@@ -998,7 +1009,7 @@ When an ask you followed from the tab ends and was recorded, the tab opens its r
 stopped before keeping any answer stays where it is and says *no quedó en el historial*. A
 history that could not be written after the answers were paid says *N respuestas pagadas y
 guardadas en <fichero>; el historial no se pudo escribir: …*. Reopening a query from
-**Consultas hechas** asks the server nothing.
+**Tus preguntas** asks the server nothing.
 
 A button opens a block **in the page, right under it** — under the card whose *Evaluar este
 post* you pressed, under the Posts toolbar, the topic, the list, or the Preguntar form — never a

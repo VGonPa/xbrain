@@ -762,6 +762,9 @@ _REFINE_JS = r"""
 const sQRefine = () => {
   const box = document.getElementById('ask-refine');
   if (!seen(box)) return null;
+  // The refine's topics are in their pill's panel: opened, as a reader would, to be read.
+  const pill = document.getElementById('refine-topics-open');
+  if (pill && pill.getAttribute('aria-expanded') !== 'true') pill.click();
   const val = id => document.getElementById(id).value;
   return {title: txt(box.querySelector('h4')), top: val('refine-top'), min: val('refine-min'),
     since: val('refine-since'), until: val('refine-until'), author: val('refine-author'),
@@ -1150,14 +1153,19 @@ const sQForm = (fields) => { sQSet(fields); sPress(sId('ask-form'), 'Estimar lo 
 let sCounts = 0;
 const sFetchCounts = window.fetch;
 window.fetch = function (u, init) { if (String(u).includes('/api/ask/counts')) sCounts++; return sFetchCounts.call(window, u, init); };
-const sTopics = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
+// The topics live in the Topics pill's panel: opened (as a reader would) before they are read.
+const sOpenPop = (id) => { const b = sId(id + '-open'); if (b && b.getAttribute('aria-expanded') !== 'true') b.click(); };
+const sTopics = () => { sOpenPop('ask-topics'); return sTopicsSeen(); };
+const sTopicsSeen = () => [...document.querySelectorAll('#ask-topics input[type=checkbox]')].filter(seen).map(b => ({
   id: b.id, checked: b.checked, text: txt(b.parentNode), count: txt(b.parentNode.querySelector('.tcount'))}));
 const sNextEstimate = async (n0, what) => { await sWait(() => sEstimates > n0 && sPanel().go !== null, what); return sLastEstimate; };
 (async () => {
   await sStep('form', async () => {
     location.hash = '#ask';
     await sWait(() => seen(sId('ask-form')) && sQResults().length > 0, 'el formulario y los resultados');
-    return Object.assign(sQView(), {topics: sTopics(), explain: txt(sId('ask-explain')), tip: txt(sId('ask-tip')),
+    const closed = sTopicsSeen().length;
+    return Object.assign(sQView(), {topics: sTopics(), closed_topics: closed, rule: txt(sId('ask-topics-rule')),
+      explain: txt(sId('ask-explain')), placeholder: sId('ask-q').getAttribute('placeholder'),
       form_title: txt(sId('ask-form').querySelector('h4')), min: sId('ask-min') ? 'HAY' : null, posts: sPosts});
   });
   await sStep('counts', async () => {
@@ -1274,13 +1282,15 @@ def test_served_the_tab_splits_what_is_asked_from_what_is_refined(victor_served)
     assert form["form_title"] == "Qué posts preguntar"
     assert form["min"] is None  # the minimum is a free refine, never part of what is paid
     assert form["explain"] == (
-        "Los filtros eligen qué posts se preguntan (y lo que cuesta); los resultados se ordenan "
-        "por lo seguro que está Jev de que el post responde. Topic: posts que enrich o Jev "
-        "(≥ 0,85) ponen en alguno de los topics marcados."
+        "Los filtros eligen qué posts se preguntan y se pagan; refinar los resultados después "
+        "es gratis."
     )
-    assert form["tip"] == (
-        'Pregunta por el contenido que buscas ("posts que explican…"), no por los topics.'
-    )
+    # How a topic filter decides, said where the topics are: in their panel.
+    assert form["rule"] == "Un post está en un topic si enrich o Jev (≥ 0,85) lo ponen en él."
+    # The question box shows the kind of question that works: about content, not topics.
+    assert form["placeholder"] == "Posts que explican cómo configurar hooks en Claude Code…"
+    # Folded until the reader opens the pill: no wall of checkboxes over the form.
+    assert form["closed_topics"] == 0
 
 
 @_requires_chrome
@@ -1378,8 +1388,10 @@ _EXPLAIN_READ = (
 (async () => {
   await sStep('explain', async () => {
     location.hash = '#ask';
-    await sWait(() => seen(sId('ask-explain')), 'la explicación');
-    return txt(sId('ask-explain'));
+    await sWait(() => seen(sId('ask-topics-open')), 'el filtro de topics');
+    sId('ask-topics-open').click();
+    await sWait(() => seen(sId('ask-topics-rule')), 'la regla de los topics');
+    return txt(sId('ask-topics-rule'));
   });
   sDone();
 })();
@@ -1389,7 +1401,82 @@ _EXPLAIN_READ = (
 
 @_requires_chrome
 def test_served_the_explanation_says_the_configured_topic_bar(tmp_path):
-    """The «(≥ …)» of the explanation is `[jev].threshold` from the blob, never a literal."""
+    """The «(≥ …)» of the topics' rule is `[jev].threshold` from the blob, never a literal."""
     seen = _served_dump(tmp_path, _EXPLAIN_READ, client=_Asker(), jev="threshold = 0.9\n")
 
-    assert "Topic: posts que enrich o Jev (≥ 0,90) ponen en alguno" in _step(seen, "explain")
+    assert _step(seen, "explain") == (
+        "Un post está en un topic si enrich o Jev (≥ 0,90) lo ponen en él."
+    )
+
+
+# --------------------------------------------------------------------------- PR 15: the filter pills
+# Víctor, 2026-09-27: «esto no es una interfaz bonita» — the ~45 topic checkboxes were a wall
+# over the form. They are a pill's panel now; the panel must be as usable as the wall was.
+
+_POP_PROBE = (
+    "<script>"
+    + _SEEN
+    + _ASK_JS
+    + r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const out = {};
+  const pill = () => document.getElementById('refine-topics-open');
+  const pop = () => document.getElementById('refine-topics-pop');
+  const inPop = () => !!pop() && pop().contains(document.activeElement);
+  await sleep(150);
+  out.closed = {expanded: pill().getAttribute('aria-expanded'), shown: seen(pop()),
+    controls: pill().getAttribute('aria-controls'), role: pop().getAttribute('role'),
+    boxes: [...document.querySelectorAll('#ask-refine input[type=checkbox]')].filter(seen).length};
+  pill().click(); await sleep(20);
+  out.opened = {expanded: pill().getAttribute('aria-expanded'), shown: seen(pop()), focus_inside: inPop(),
+    boxes: [...document.querySelectorAll('#ask-refine input[type=checkbox]')].filter(seen).length};
+  // Tab from the last control comes back to the first: the focus stays in the panel.
+  const f = [...pop().querySelectorAll('input')].filter(seen);
+  f[f.length - 1].focus();
+  f[f.length - 1].dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, cancelable: true}));
+  out.trapped = document.activeElement === f[0];
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  await sleep(20);
+  out.escaped = {shown: seen(pop()), expanded: pill().getAttribute('aria-expanded'), focus_on_pill: document.activeElement === pill()};
+  pill().click(); await sleep(20);
+  document.getElementById('ask-head').click(); await sleep(20);
+  out.outside = {shown: seen(pop())};
+  // A refine redraws the tab: the panel stays open and the box keeps the focus.
+  pill().click(); await sleep(20);
+  const box = [...pop().querySelectorAll('input[type=checkbox]')][0];
+  const id = box.id;
+  box.focus(); box.checked = true; box.dispatchEvent(new Event('change', {bubbles: true}));
+  await sleep(120);
+  out.refined = {hash_has_t: /[?&]t=/.test(location.hash), shown: seen(pop()),
+    focus: document.activeElement && document.activeElement.id, id: id,
+    pill: txt(pill())};
+  const pre = document.createElement('pre'); pre.id = 'probe'; pre.textContent = JSON.stringify(out);
+  document.body.appendChild(pre);
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_the_refine_topics_are_a_pill_whose_panel_opens_traps_focus_and_closes(tmp_path):
+    page, _, _ = _victor_page(tmp_path, _POP_PROBE)
+    seen = _dump(page.as_uri() + "#ask")
+
+    assert seen["closed"] == {
+        "expanded": "false",
+        "shown": False,
+        "controls": "refine-topics-pop",
+        "role": "dialog",
+        "boxes": 0,
+    }
+    assert seen["opened"]["expanded"] == "true" and seen["opened"]["shown"] is True
+    assert seen["opened"]["focus_inside"] is True and seen["opened"]["boxes"] > 0
+    assert seen["trapped"] is True
+    assert seen["escaped"] == {"shown": False, "expanded": "false", "focus_on_pill": True}
+    assert seen["outside"] == {"shown": False}
+    refined = seen["refined"]
+    assert refined["hash_has_t"] is True and refined["shown"] is True
+    assert refined["focus"] == refined["id"]
+    # The pill names what is ticked, so the filter is readable with its panel closed.
+    assert refined["pill"] != "Topics"
