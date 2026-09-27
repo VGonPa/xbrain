@@ -547,7 +547,7 @@ _NOTHING_KEPT_PROBE = (
     await sQuery(1);
     sId('ask-go').click();
     await sWait(() => sPanel().stop !== null, 'el trabajo');
-    sPress(sId('jobp'), 'Parar (se guarda lo ya pagado)');
+    sPress(sId('jobp'), 'Parar');
     await sWait(() => sRefreshed > 0, 'el final');
     for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
     return Object.assign(sPanel(), {hash: location.hash,

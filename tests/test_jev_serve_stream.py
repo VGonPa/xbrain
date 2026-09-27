@@ -128,16 +128,32 @@ def test_each_answer_is_handed_over_once_across_polls_as_it_is_banked(tmp_path: 
 def test_concurrent_pollers_each_get_every_answer_exactly_once(
     tmp_path: Path, monkeypatch, pollers: int
 ):
-    """Answers land from 4 workers at once, while several pages poll with their own cursors."""
-    client = _Asker(delay=0.02)
+    """Answers land from 4 workers at once, while several pages poll with their own cursors.
+    The answers are let through one by one WHILE the pages poll, and each page must have been
+    handed answers mid-job: reads and appends really interleave (a test that only ever polled
+    after the end would pass a stream with no lock)."""
+    client = _Metered(delay=0.005)
     served = _served(tmp_path, monkeypatch, client, concurrency=4)
     results: list[list[str]] = []
+    overlaps: list[int] = []
     errors: list[BaseException] = []
+    polling = threading.Barrier(pollers + 1)
 
     def _page() -> None:
         try:
-            got, _, _ = _drain(served)
+            cursor, got, mid = "0", [], 0
+            polling.wait(5)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                job = _poll(served, cursor)
+                stream = job["stream"]
+                got += stream["answers"]
+                cursor = stream["next"]
+                mid += job["state"] == "running" and bool(stream["answers"])
+                if job["state"] != "running" and not stream["more"]:
+                    break
             results.append([a["id"] for a in got])
+            overlaps.append(mid)
         except BaseException as exc:  # pragma: no cover — reported below
             errors.append(exc)
 
@@ -146,6 +162,10 @@ def test_concurrent_pollers_each_get_every_answer_exactly_once(
         threads = [threading.Thread(target=_page) for _ in range(pollers)]
         for thread in threads:
             thread.start()
+        polling.wait(5)
+        for _ in ASKED:
+            client.permits.release()
+            time.sleep(0.06)
         for thread in threads:
             thread.join(15)
     finally:
@@ -157,6 +177,8 @@ def test_concurrent_pollers_each_get_every_answer_exactly_once(
         assert sorted(ids) == ASKED and len(ids) == len(set(ids))
     # One stream: every page saw the same arrival order.
     assert all(ids == results[0] for ids in results)
+    # Each page was handed answers while the job still ran.
+    assert len(overlaps) == pollers and min(overlaps) >= 1, overlaps
 
 
 def test_a_cursor_into_another_job_starts_at_the_beginning_of_this_one(tmp_path: Path, monkeypatch):
@@ -188,6 +210,93 @@ def test_a_cursor_past_the_end_of_its_job_is_refused(tmp_path: Path, monkeypatch
         served.close()
 
     assert status == 400 and "cursor" in error["error"]
+
+
+def test_parar_mid_run_streams_the_answers_drained_after_it(tmp_path: Path, monkeypatch):
+    """The soft cancel: calls already in flight are waited for, banked, and still streamed.
+    The stream is then exactly the answers the query had (the seed) plus the job's banked
+    ones — `outcome.ok`, no more, no fewer."""
+    client = _Metered()
+    served = _served(tmp_path, monkeypatch, client, concurrency=2)
+    try:
+        for _ in range(2):
+            client.permits.release()
+        served.ask_run({"query": QUERY, "limit": 2})  # 1 and 2 current: the seed
+        _start(served)
+        client.permits.release()
+        cursor, got = "0", []
+        deadline = time.monotonic() + 10
+        while sum(not a["cached"] for a in got) < 1 and time.monotonic() < deadline:
+            stream = _poll(served, cursor)["stream"]
+            got += stream["answers"]
+            cursor = stream["next"]
+        status, cancelled, _ = served.request("POST", "/api/job/cancel", {})
+        # The two calls in flight when Parar was pressed may now answer; nothing new is sent.
+        for _ in range(4):
+            client.permits.release()
+        rest, _, end = _drain(served, cursor)
+    finally:
+        served.close()
+
+    streamed = got + rest
+    assert status == 200 and cancelled["state"] == "running"
+    assert end["state"] == "interrupted" and end["reason"] == "cancelado"
+    assert [a["id"] for a in streamed if a["cached"]] == ["1", "2"]
+    fresh = [a["id"] for a in streamed if not a["cached"]]
+    assert sorted(fresh) == sorted(end["outcome"]["ids"]) and len(fresh) == len(set(fresh))
+    # The one released before Parar, and the two in flight at it, drained after it.
+    assert len(fresh) == end["outcome"]["ok"] == 3
+    assert len(streamed) == end["outcome"]["ok"] + 2
+
+
+def test_an_ended_jobs_stream_is_let_go_after_its_keep_time(tmp_path: Path, monkeypatch):
+    """Every page takes the blob at the end: the stream is held `STREAM_KEEP_S` after the job
+    ended (for a page still behind), then emptied — its size kept, so every cursor still
+    means what it meant and one past the end is still refused."""
+    now = [1000.0]
+    monkeypatch.setattr(service_module, "_monotonic", lambda: now[0])
+    served = _served(tmp_path, monkeypatch, _Asker())
+    try:
+        job = _start(served)
+        served.wait_job()
+        n = job["number"]
+        within = _poll(served, f"{n}-2")["stream"]
+        now[0] += service_module.STREAM_KEEP_S - 1
+        still = _poll(served, f"{n}-2")["stream"]
+        now[0] += 1
+        late = _poll(served, f"{n}-2")["stream"]
+        held = served.service._job.stream
+        again = _poll(served, "0")["stream"]
+        past, error, _ = served.request("GET", f"/api/job?since={n}-{len(ASKED) + 1}")
+    finally:
+        served.close()
+
+    assert len(within["answers"]) == len(still["answers"]) == len(ASKED) - 2
+    assert held == []
+    assert (late["answers"], late["next"], late["more"]) == ([], f"{n}-{len(ASKED)}", False)
+    assert (again["from"], again["answers"], again["next"]) == (f"{n}-0", [], f"{n}-{len(ASKED)}")
+    assert past == 400 and "cursor" in error["error"]
+
+
+def test_a_stream_that_cannot_be_prepared_does_not_stop_the_paid_job(tmp_path: Path, monkeypatch):
+    """Arch M3: the stream is display. Its inputs failing to read cost the page its live
+    results, never the job."""
+
+    def _broken(*args: Any, **kw: Any):
+        raise RuntimeError("roto")
+
+    monkeypatch.setattr(service_module, "_stream_entry", _broken)
+    served = _served(tmp_path, monkeypatch, _Asker())
+    try:
+        _start(served)
+        end = served.wait_job()
+        stream = _poll(served, "0")["stream"]
+    finally:
+        served.close()
+
+    assert end["state"] == "done" and end["outcome"]["ok"] == len(ASKED)
+    assert end["outcome"]["results"] == len(ASKED)
+    assert stream is None
 
 
 # --------------------------------------------------------------------------- order (arch I4)

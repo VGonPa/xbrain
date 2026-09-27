@@ -3073,20 +3073,32 @@ _END_PROBE = (
     + _SERVE_JS
     + r"""
 const sScenario = /*SCENARIO*/;
+// While `sHoldJob` is a promise, the page's reads of the job wait for it: the reader hides the
+// block while the job RUNS, whatever the job's speed (a job that fails at once — `error` —
+// could otherwise end before the hide, and a block closed after its end stays closed).
+let sHoldJob = null;
+const sFetchJob = window.fetch;
+window.fetch = function (u, init) {
+  if (sHoldJob && /\/api\/job(\?|$)/.test(String(u))) { const h = sHoldJob; return h.then(() => sFetchJob.call(window, u, init)); }
+  return sFetchJob.call(window, u, init);
+};
 (async () => {
   await sStep('estimate', async () => {
     await (sScenario.kind === 'ask' ? sQuery : sNext)(sScenario.n);
     return sPanel();
   });
   await sStep('run', async () => {
+    let go = null;
+    if (sScenario.hide) sHoldJob = new Promise(r => { go = r; });
     sId('ask-go').click();
     await sWait(() => sPanel().stop !== null || sPanel().close === 'Cerrar', 'el trabajo');
     let hidden = null;
-    if (sScenario.hide) { sId('ask-cancel').click(); hidden = !sPanel().shown; }
+    if (sScenario.hide) { sId('ask-cancel').click(); hidden = !sPanel().shown; sHoldJob = null; go(); }
     if (sScenario.stop) {
       // A topics pass counts «N respuestas»; a running ask's status line «Preguntando… k de N».
       await sWait(() => /[1-9]\d* respuesta|^Preguntando… [1-9]/.test(sPanel().progress || ''), 'la primera respuesta');
-      sPress(sId('jobp'), 'Parar (se guarda lo ya pagado)');
+      // «Parar (se guarda lo ya pagado)» in a topics block, «Parar» in an ask's status line.
+      sId('ask-stop').click();
     }
     return {hidden};
   });

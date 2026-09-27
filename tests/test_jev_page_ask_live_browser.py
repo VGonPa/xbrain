@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -26,6 +27,9 @@ from typing import Any
 import pytest
 
 from tests.jev_ask_fixtures import _START, VOCAB, _Planned, victor_item
+from xbrain.jev.ask import AskFilters, AskQuery, finish_ask, plan_ask
+from xbrain.jev.run import run_ask
+from xbrain.jev.lock import pass_lock
 from tests.test_jev_page_ask_browser import _ASK_JS, _REFINE_JS, _static_page
 from tests.test_jev_page_browser import (
     _SEEN,
@@ -37,6 +41,7 @@ from tests.test_jev_page_browser import (
     _step,
 )
 from xbrain.config import Config, load_config
+from xbrain.jev import run as run_module
 from xbrain.jev import service as service_module
 from xbrain.jev.service import JevService
 from xbrain.models import Item
@@ -110,8 +115,9 @@ class _Gated(_Planned):
         self.moved = threading.Condition()
 
     def release(self, n: int) -> None:
+        """`n` more posts may answer; a negative `n` starts the count again (a new job)."""
         with self.moved:
-            self.allowed += n
+            self.allowed = 0 if n < 0 else self.allowed + n
             self.moved.notify_all()
 
     def ask(self, state, questions):
@@ -131,6 +137,7 @@ const sLiveView = () => ({
   nuevo: [...document.querySelectorAll('#ask-list > .card')].filter(c => seen(c.querySelector('.askr .nuevo'))).map(c => c.dataset.id),
   more: txt(sId('ask-more')),
   empty: txt(sId('ask-empty')),
+  number: askLive ? askLive.number : null,
   live: sId('ask-list') ? sId('ask-list').dataset.live || null : null,
   min: askView.refine.min,
   hash: location.hash,
@@ -141,21 +148,39 @@ const sLiveView = () => ({
 const sAbsorbed = [];
 const sAbsorb0 = askAbsorb;
 askAbsorb = function (job) {
-  sAbsorb0(job);
-  if (job && job.stream && job.stream.answers.length) {
-    sAbsorbed.push(Object.assign(sLiveView(), {got: job.stream.answers.map(a => a.id)}));
+  // The cards of THIS job's live list before the look (another list's are not its cards).
+  const l = sId('ask-list');
+  const before = l && askLive && l.dataset.live === askLive.sha ? [...l.querySelectorAll(':scope > .card')].map(c => c.dataset.id) : [];
+  const took = sAbsorb0(job);
+  if (took && job.stream.answers.length) {
+    sAbsorbed.push(Object.assign(sLiveView(), {got: job.stream.answers.map(a => a.id), before: before,
+      job: job.number, more: job.stream.more, state: job.state, at: performance.now(),
+      cached: job.stream.answers.filter(a => a.cached).map(a => a.id)}));
   }
+  return took;
 };
-let sBeforeEnd = null;
+let sBeforeEnd = null, sEndList = null;
 const sFinished0 = finished;
-finished = async function (job) { sBeforeEnd = sLiveView(); return sFinished0(job); };
+finished = async function (job) {
+  sBeforeEnd = sLiveView();
+  // The cards and the place right before the end replaces the live list.
+  sEndList = sId('ask-list');
+  document.querySelectorAll('#ask-list > .card').forEach(c => { c.__end = true; });
+  sBeforeEnd.list_top = sEndList ? Math.round(sEndList.getBoundingClientRect().top) : null;
+  const firstSeen = [...document.querySelectorAll('#ask-list > .card')].find(c => c.getBoundingClientRect().bottom > 0);
+  sBeforeEnd.reader = firstSeen ? {id: firstSeen.dataset.id, top: Math.round(firstSeen.getBoundingClientRect().top)} : null;
+  return sFinished0(job);
+};
 // When (page clock) the ask was confirmed and each look at its stream went out.
 const sLooks = [];
 let sConfirmed = null;
+// While `sHold` is a promise, the page's looks at its stream wait for it before they go out.
+let sHold = null;
 const sFetchLooks = window.fetch;
 window.fetch = function (u, init) {
-  const p = sFetchLooks.call(window, u, init);
-  if (String(u).includes('/api/job?since=')) sLooks.push(performance.now());
+  const look = String(u).includes('/api/job?since=');
+  const p = look && sHold ? sHold.then(() => sFetchLooks.call(window, u, init)) : sFetchLooks.call(window, u, init);
+  if (look) sLooks.push(performance.now());
   if (String(u).includes('/api/ask/evaluate')) p.then(() => { sConfirmed = performance.now(); });
   return p;
 };
@@ -166,7 +191,25 @@ const sStatus = () => { const box = sId('jobp'), bar = box.querySelector('[role=
   return {text: txt(sId('ask-progress')), slim: box.classList.contains('slim'), shown: seen(box),
     bar: seen(bar), title: seen(sId('ask-title')), prev: box.previousElementSibling && box.previousElementSibling.id,
     next: box.nextElementSibling && box.nextElementSibling.id, height: Math.round(box.getBoundingClientRect().height),
-    stop: txt(sId('ask-stop'))}; };
+    top: Math.round(box.getBoundingClientRect().top), stop: txt(sId('ask-stop')), stop_title: sId('ask-stop').title}; };
+// The ids of the list's cards on screen now.
+const sOnScreen = () => [...document.querySelectorAll('#ask-list > .card')].filter(c => {
+  const r = c.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; }).map(c => c.dataset.id);
+// The job, asked of the server the way the page does (never one of the page's looks), until
+// `ok(job)`: each try paced by one `/probe-wait`.
+const sJobUntil = async (ok, what) => {
+  for (let i = 0; i < 3000; i++) {
+    const j = await api(API.job);
+    if (ok(j)) return j;
+    await sFetch0.call(window, '/probe-wait');
+  }
+  throw new Error('nunca: ' + what);
+};
+// Another tab's ask: estimate and confirm through the API, as a page would.
+const sAskElsewhere = async (query) => {
+  const e = await api(API.ask.estimate, {query: query});
+  return api(API.ask.evaluate, {query: query, confirm_token: e.confirm_token});
+};
 const sTag = (tag) => document.querySelectorAll('#ask-list > .card').forEach(c => { c.__probe = c.__probe || tag; });
 const sTags = () => [...document.querySelectorAll('#ask-list > .card')].map(c => c.__probe || null);
 """
@@ -203,12 +246,12 @@ _LIVE_PROBE = (
     const anchor = cards[1];
     scrollTo({top: scrollY + anchor.getBoundingClientRect().top, behavior: 'instant'});
     const before = {id: anchor.dataset.id, top: anchor.getBoundingClientRect().top,
-      list_top: sId('ask-list').getBoundingClientRect().top, scroll: Math.round(scrollY)};
+      list_top: sId('ask-list').getBoundingClientRect().top, scroll: Math.round(scrollY), on_screen: sOnScreen()};
     await sRelease(4);
     await sAnswered(8);
     const again = sId('ask-post-' + before.id);
     return Object.assign(sLiveView(), {before, after: again ? again.getBoundingClientRect().top : null,
-      same_node: again === anchor, tags: sTags()});
+      same_node: again === anchor, tags: sTags(), status: sStatus()});
   });
   await sStep('top', async () => {
     // The list's start on screen, 40 px down: new answers are seen landing there — nothing is
@@ -225,17 +268,40 @@ _LIVE_PROBE = (
     sQSet({'refine-min': '0.6'});
     await sWait(() => (txt(sId('ask-reach')) || '').includes('≥ 0,60'), 'el mínimo en vivo');
     const set = sLiveView();
+    // The reader is typing in the free refine («Autor») while answers land: left alone.
+    sId('refine-who-open').click();
+    const input = sId('refine-author');
+    input.focus();
+    input.value = 'som';
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.setSelectionRange(2, 2);
     await sRelease(6);
     await sAnswered(16);
     await sWait(() => /^Preguntando… 16 de /.test(sStatus().text || ''), 'la línea de estado');
-    return {set, after: Object.assign(sLiveView(), {refine: sQRefine(), status: sStatus()})};
+    const typing = {same: sId('refine-author') === input, connected: input.isConnected, value: input.value,
+      active: document.activeElement === input, caret: [input.selectionStart, input.selectionEnd]};
+    // Put back as it was before leaving it: no change, so nothing is refined by it.
+    input.value = '';
+    input.blur();
+    return {set, typing, after: Object.assign(sLiveView(), {refine: sQRefine(), status: sStatus()})};
+  });
+  await sStep('rail', async () => {
+    // The page's data built mid-run (a reload does this): the history has the running query's
+    // row, rebuilt from its checkpoint. The rail says the job's live numbers, not that row's.
+    await reloadData();
+    const row = askRows().find(r => r.sha === askLive.sha);
+    return {history: sQHistory(), rebuilt: row ? row.rebuilt : null, status: sStatus()};
   });
   await sStep('end', async () => {
     const r0 = sRefreshed;
     await sRelease(8);
     await sWait(() => sRefreshed > r0, 'el final del trabajo');
     return Object.assign(sLiveView(), {before_end: sBeforeEnd, head: txt(sId('ask-head')),
-      history: sQHistory(), panel: sPanel()});
+      history: sQHistory(), panel: sPanel(), status: sStatus(),
+      same_list: sId('ask-list') === sEndList, kept: [...document.querySelectorAll('#ask-list > .card')].map(c => !!c.__end),
+      list_top: Math.round(sId('ask-list').getBoundingClientRect().top),
+      reader_top: sBeforeEnd && sBeforeEnd.reader && sId('ask-post-' + sBeforeEnd.reader.id)
+        ? Math.round(sId('ask-post-' + sBeforeEnd.reader.id).getBoundingClientRect().top) : null});
   });
   await sStep('absorbed', async () => sAbsorbed);
   await sStep('looks', async () => ({confirmed: sConfirmed, looks: sLooks}));
@@ -266,7 +332,12 @@ def live(tmp_path_factory) -> dict[str, Any]:
         make_client=lambda: client,
         repo=_live_repo,
         base=_Releasing,
-        patch=lambda mp: mp.setattr(service_module, "finish_ask", _spy),
+        patch=lambda mp: (
+            mp.setattr(service_module, "finish_ask", _spy),
+            # A checkpoint per answer: the page's data built mid-run has the running query's
+            # row, rebuilt from it (`reconstruida`), as a long real ask does.
+            mp.setattr(run_module, "CHECKPOINT_EVERY", 1),
+        ),
     )
     seen["finished"] = [
         [(item.id, record.probability) for item, record in found.ranked] for found in finished
@@ -280,6 +351,22 @@ def _ids(n: int) -> list[str]:
     return [item.id for item in _items()[:n]]
 
 
+#: The money a line says: four decimals, as the history says it.
+_USD = r"~\d,\d{4} \$"
+
+
+def _nuevo_rule(look: dict[str, Any], order: list[str]) -> None:
+    """«nuevo» marks a new answer that lands ABOVE a card already on the list — never one that
+    only extends the list's end, and nothing on a first fill. `order` is the ranking so far."""
+    rank = {post: i for i, post in enumerate(order)}
+    before = [post for post in look["before"] if post in rank]
+    lowest = max((rank[post] for post in before), default=-1)
+    new = set(look["got"]) & set(look["ids"])
+    above = {post for post in new if rank[post] < lowest}
+    assert above <= set(look["nuevo"]), look
+    assert not (new - above) & set(look["nuevo"]), look
+
+
 @_requires_chrome
 def test_the_live_list_opens_empty_under_the_asked_query_and_the_rail_says_it_runs(live):
     start = _step(live, "start")
@@ -287,37 +374,46 @@ def test_the_live_list_opens_empty_under_the_asked_query_and_the_rail_says_it_ru
     assert start["hash"].startswith("#ask?q=") and start["live"]
     assert start["ids"] == [] and start["more"] is None
     assert start["empty"].startswith("Aún no ha llegado ninguna respuesta")
-    assert start["reach"] == (
-        f"Mostrando 0 de 0 respondidos hasta ahora (de {POSTS}), de mayor a menor probabilidad."
+    # The gallery's line says what it shows; k of N is the status line's, not said twice.
+    assert (
+        start["reach"] == "Mostrando 0 de 0 respondidos hasta ahora, de mayor a menor probabilidad."
     )
-    # No bar-only phase: the job block is already one status line over the (empty) gallery.
+    # No bar-only phase: the job block is already one status line — under the query's title,
+    # over the refine bar and the (empty) gallery.
     status = start["status"]
     assert status["slim"] and status["shown"] and not status["bar"] and not status["title"]
-    assert (status["prev"], status["next"]) == ("ask-refine", "ask-list")
-    assert status["stop"] == "Parar (se guarda lo ya pagado)"
-    assert "Preguntando ahora" in start["head"]
-    assert start["history"][0]["text"] == LIVE_QUERY + " · en curso"
+    assert (status["prev"], status["next"]) == ("ask-head", "ask-refine")
+    assert (status["stop"], status["stop_title"]) == ("Parar", "se guarda lo ya pagado")
+    assert start["head"].startswith(f"«{LIVE_QUERY}»Preguntando ahora · Sin filtros")
+    assert "cada respuesta entra" not in start["head"]
+    assert re.fullmatch(
+        rf"{re.escape(LIVE_QUERY)} · en curso · 0 de {POSTS} · {_USD}", start["history"][0]["text"]
+    )
     assert start["history"][0]["current"] is True
 
 
 @_requires_chrome
 def test_every_answer_arrives_once_and_each_look_shows_the_ranked_top(live):
     """After EVERY look that brought answers: the cards on screen are the top of the answers so
-    far, ranked by `(-p, id)` (and kept by the refine in effect), and every new one says
-    «nuevo»."""
+    far, ranked by `(-p, id)` (and kept by the refine in effect) — plus, briefly, cards the
+    reader has on screen that better answers pushed past the top — and «nuevo» marks exactly
+    the new ones landing above a card already there."""
     absorbed = _step(live, "absorbed")
     so_far: list[str] = []
 
     assert len(absorbed) >= len(WAVES)
+    assert absorbed[0]["nuevo"] == []  # the first fill marks nothing
     for look in absorbed:
         so_far += look["got"]
         expected = _ranked(so_far, look["min"] or 0.0)
-        assert look["ids"] == expected[:TOP], look
-        shown = len(look["ids"])
+        assert look["ids"][:TOP] == expected[:TOP], look
+        # Past the top: only cards that were already there, still in rank order.
+        assert set(look["ids"][TOP:]) <= set(look["before"]), look
+        assert look["ids"] == [post for post in expected if post in set(look["ids"])], look
         assert look["reach"].startswith(
-            f"Mostrando {shown} de {len(so_far)} respondidos hasta ahora (de {POSTS})"
+            f"Mostrando {min(len(expected), TOP)} de {len(so_far)} respondidos hasta ahora"
         )
-        assert set(look["got"]) & set(look["ids"]) <= set(look["nuevo"])
+        _nuevo_rule(look, expected)
     assert sorted(so_far) == sorted(PLANNED) and len(so_far) == len(set(so_far))
 
 
@@ -326,18 +422,20 @@ def test_a_new_answer_lands_in_its_ranked_place_and_the_cards_there_stay(live):
     wave1, anchored = _step(live, "wave1"), _step(live, "anchored")
 
     assert wave1["ids"] == _ranked(_ids(4))
-    strong = sum(PLANNED[post] >= 0.7 for post in _ids(4))
-    assert wave1["status"]["text"].startswith(
-        f"Preguntando… 4 de {POSTS} · {strong} muy relevantes (≥ 0,70) · "
-    )
+    assert wave1["nuevo"] == []  # the list's first fill: nothing to be news against
+    # No answer reaches the bar yet (`[jev].threshold`): the status line does not say «0».
+    assert re.fullmatch(rf"Preguntando… 4 de {POSTS} · {_USD} gastado", wave1["status"]["text"])
     assert wave1["status"]["slim"] and wave1["status"]["height"] < 90
-    assert anchored["ids"] == _ranked(_ids(8))[:TOP]
-    # n=4..7 outrank n=0..3: four new cards above. The two old ones still shown are the SAME
-    # nodes (never drawn again); the two pushed past the top are gone.
-    assert anchored["tags"] == [None, None, None, None, "w1", "w1"]
-    # Each new card says «nuevo» (the older ones may still, for the rest of their NUEVO_MS).
+    ranked8 = _ranked(_ids(8))
+    # n=4..7 outrank n=0..3: four new cards above, all «nuevo». The old ones still in the top
+    # are the SAME nodes (never drawn again); of the two pushed past it, those on the reader's
+    # screen stay, briefly, below them.
+    held = [post for post in ranked8[TOP:] if post in anchored["before"]["on_screen"]]
+    assert anchored["ids"] == ranked8[:TOP] + held
+    assert anchored["tags"] == [("w1" if post in _ids(4) else None) for post in anchored["ids"]]
     assert set(_ids(8)[4:]) <= set(anchored["nuevo"])
-    assert anchored["more"] == "Ver 2 más (quedan 2)"
+    left = 2 - len(held)
+    assert anchored["more"] == (f"Ver {left} más (quedan {left})" if left else None)
 
 
 @_requires_chrome
@@ -350,6 +448,15 @@ def test_the_readers_place_holds_while_answers_land_above_it(live):
     assert anchored["after"] == pytest.approx(before["top"], abs=1)
     # The page moved under the reader (four cards above), the reader did not.
     assert anchored["scroll"] > before["scroll"]
+
+
+@_requires_chrome
+def test_the_status_line_and_parar_stay_on_screen_while_the_gallery_scrolls(live):
+    anchored = _step(live, "anchored")
+
+    assert anchored["before"]["list_top"] < 0
+    assert anchored["status"]["shown"] and anchored["status"]["top"] == 0
+    assert anchored["status"]["stop"] == "Parar"
 
 
 @_requires_chrome
@@ -377,7 +484,7 @@ def test_the_free_refine_works_while_the_ask_runs(live):
     assert after["ids"] == _ranked(_ids(16), 0.6)[:TOP]
     over = len(_ranked(_ids(16), 0.6))
     assert after["reach"] == (
-        f"Mostrando {over} de 16 respondidos hasta ahora (de {POSTS}) · "
+        f"Mostrando {over} de 16 respondidos hasta ahora · "
         f"{over} con relevancia ≥ 0,60, de mayor a menor probabilidad."
     )
     # The status line counts at the refine's minimum once one is set.
@@ -385,6 +492,35 @@ def test_the_free_refine_works_while_the_ask_runs(live):
         f"Preguntando… 16 de {POSTS} · {over} con relevancia ≥ 0,60 · "
     )
     assert after["refine"]["min"] == "0.6"
+    assert after["refine"]["author"] == ""
+
+
+@_requires_chrome
+def test_typing_in_the_free_refine_is_left_alone_while_answers_land(live):
+    """PR 16 tests I2: six answers landed while the reader typed «som» in «Autor» (no change
+    yet): the field is the same node, still focused, with what they typed and the caret."""
+    typing = _step(live, "refined")["typing"]
+
+    assert typing == {
+        "same": True,
+        "connected": True,
+        "value": "som",
+        "active": True,
+        "caret": [2, 2],
+    }
+
+
+@_requires_chrome
+def test_the_rail_says_the_running_querys_live_numbers_never_reconstruida(live):
+    rail = _step(live, "rail")
+
+    # The mid-run data really had the checkpoint's rebuilt row …
+    assert rail["rebuilt"] is True
+    # … and the rail says the job, as the status line does.
+    first = rail["history"][0]["text"]
+    assert re.fullmatch(rf"{re.escape(LIVE_QUERY)} · en curso · 16 de {POSTS} · {_USD}", first)
+    assert "reconstruida" not in first
+    assert rail["status"]["text"].startswith(f"Preguntando… 16 de {POSTS} · ")
 
 
 @_requires_chrome
@@ -399,14 +535,268 @@ def test_the_final_list_is_finish_asks_ranking_in_the_live_order(live):
     # Complete, the live list already WAS that ranking under the reader's refine; the end
     # replaced it with the blob's row and nothing moved.
     expected = [post for post, p in ranking if p >= 0.6][:TOP]
-    assert f" de {POSTS} respondidos hasta ahora (de {POSTS})" in end["before_end"]["reach"]
+    assert f" de {POSTS} respondidos hasta ahora" in end["before_end"]["reach"]
     assert live_order == expected == end["ids"]
     # Its refine stayed; the head is the history's now.
     assert "min=0.6" in end["hash"] and end["live"] is None
     assert end["reach"].startswith(f"Mostrando {TOP} de ")
     assert end["history"][0]["text"].startswith(LIVE_QUERY + " · ")
     assert "en curso" not in end["history"][0]["text"]
-    assert end["panel"]["progress"].startswith(f"{POSTS} respuestas guardadas · {POSTS} resultados")
+
+
+@_requires_chrome
+def test_at_the_end_the_list_is_refilled_in_place_and_the_status_line_says_how_it_went(live):
+    """UX I4: no progress bar comes back and the gallery does not move — the same list, the
+    same card nodes, the same place — and one quiet line says what the ask did."""
+    end = _step(live, "end")
+    status = end["status"]
+    over = len(_ranked(list(PLANNED), 0.6))
+
+    assert end["same_list"] is True and end["kept"] == [True] * TOP
+    # The reader's first card on screen stays where it was (the head above it may change).
+    assert end["before_end"]["reader"] is not None
+    assert end["reader_top"] == pytest.approx(end["before_end"]["reader"]["top"], abs=1)
+    assert status["slim"] and status["shown"] and not status["bar"] and not status["title"]
+    assert status["prev"] == "ask-head"
+    assert re.fullmatch(
+        rf"Preguntado: {POSTS} leídos · {over} con relevancia ≥ 0,60 · {_USD} gastado",
+        status["text"],
+    )
+    assert end["panel"]["close"] == "Cerrar" and end["panel"]["stop"] is None
+
+
+# --------------------------------------------------------------------------- asked again
+
+#: The query's first use (before the page loads): two posts, at a minimum of 0.5 — both
+#: current when it is asked again, with probabilities of their own.
+SEEDED = {0: 0.95, 1: 0.9}
+#: Two more queries, each asked by «another tab» through the API while the page watches.
+QUERY_B = "¿Qué posts hablan de startups?"
+QUERY_C = "¿Qué posts hablan de precios?"
+
+
+def _reasked(n: int) -> float:
+    """What the re-asked query's answer for post n is: the seed's for 0 and 1, else planned."""
+    return SEEDED.get(n, _p(n))
+
+
+def _reask_repo(root: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+    """`_live_repo`, and LIVE_QUERY already asked in a terminal: `--limit 2 --min 0.5`."""
+    cfg = _live_repo(root, monkeypatch)
+    with pass_lock(cfg.jev_lock_path, "xbrain jev ask") as lock:
+        plan = plan_ask(cfg, AskQuery.of(LIVE_QUERY), AskFilters(), 2)
+        seeded = _Planned({f"p{n:04d}": p for n, p in SEEDED.items()})
+        outcome = run_ask(cfg, plan, lambda: seeded, lock=lock)
+        finish_ask(cfg, plan, outcome, minimum=0.5, now=_START + timedelta(days=3))
+    return cfg
+
+
+_REASK_PROBE = (
+    (
+        "<script>"
+        + _SERVE_JS
+        + _ASK_JS
+        + _REFINE_JS
+        + _LIVE_JS
+        + r"""
+// Holds the page's looks at its stream (`sHold`) until the returned function is called.
+const sHoldLooks = () => { let go; sHold = new Promise(r => { go = r; }); return () => { sHold = null; go(); }; };
+(async () => {
+  await sStep('first', async () => {
+    location.hash = '#ask';
+    await sWait(() => seen(sId('ask-form')), 'el formulario');
+    sId('ask-q').value = '__QUERY__';
+    sId('ask-q').dispatchEvent(new Event('input', {bubbles: true}));
+    sPress(sId('ask-form'), 'Estimar lo que cuesta');
+    await sWait(() => sPanel().go, 'la estimación');
+    sId('ask-go').click();
+    await sWait(() => sAbsorbed.length >= 1, 'la primera mirada');
+    return Object.assign(sLiveView(), {live_min: askLive.min, refine: sQRefine(), status: sStatus()});
+  });
+  await sStep('more', async () => {
+    // Twelve answers banked while the page's looks wait: more than a reply carries (3 here).
+    const unhold = sHoldLooks();
+    await sRelease(14);
+    await sJobUntil(j => j.done >= 12, '12 respuestas');
+    unhold();
+    await sAnswered(14);
+    return {looks: sLooks.slice()};
+  });
+  await sStep('reask_end', async () => {
+    const r0 = sRefreshed;
+    await sRelease(10);
+    await sWait(() => sRefreshed > r0, 'el final del trabajo');
+    return Object.assign(sLiveView(), {before_end: sBeforeEnd, status: sStatus()});
+  });
+  let b = null;
+  await sStep('follower', async () => {
+    // Another tab asks QUERY_B; four answers are in before this page meets the job.
+    location.hash = '#ask';
+    await sRelease(-1);
+    b = await sAskElsewhere('__QUERY_B__');
+    await sRelease(4);
+    await sJobUntil(j => j.number === b.number && j.done >= 4, 'B: 4');
+    await sWait(() => askLive && askLive.number === b.number && sAbsorbed.some(l => l.job === b.number), 'la página sigue B');
+    await sRelease(4);
+    await sWait(() => askLive.answers.length >= 8, 'B: 8');
+    return {number: b.number, looks: sAbsorbed.filter(l => l.job === b.number)};
+  });
+  await sStep('switch', async () => {
+    // B ends and C starts between two of this page's looks.
+    const unhold = sHoldLooks();
+    await sRelease(16);
+    await sJobUntil(j => j.number === b.number && j.state !== 'running', 'B termina');
+    await sRelease(-1);
+    const c = await sAskElsewhere('__QUERY_C__');
+    await sRelease(7);
+    await sJobUntil(j => j.number === c.number && j.done >= 7, 'C: 7');
+    const n0 = sLooks.length;
+    unhold();
+    await sWait(() => askLive && askLive.number === c.number && askLive.answers.length >= 7, 'la página sigue C');
+    const t1 = performance.now();
+    await sWait(() => performance.now() - t1 >= 1500, 'un segundo y medio');
+    return {b: b.number, c: c.number, looks: sLooks.length - n0, live: askLive.number,
+      answers: askLive.answers.map(r => r.id), history: sQHistory(), status: sStatus()};
+  });
+  await sStep('c_end', async () => {
+    const r0 = sRefreshed;
+    await sRelease(17);
+    await sWait(() => sRefreshed > r0, 'el final de C');
+    return {status: sStatus(), history: sQHistory()};
+  });
+  await sStep('absorbed', async () => sAbsorbed);
+  sDone();
+})();
+</script>"""
+    )
+    .replace("__QUERY__", LIVE_QUERY)
+    .replace("__QUERY_B__", QUERY_B)
+    .replace("__QUERY_C__", QUERY_C)
+)
+
+
+@pytest.fixture(scope="module")
+def reasked(tmp_path_factory) -> dict[str, Any]:
+    client = _Gated()
+
+    class _Releasing(JevService):
+        def probe_release(self, n: int) -> None:
+            client.release(n)
+
+    return _served_dump(
+        tmp_path_factory.mktemp("ask-again"),
+        _REASK_PROBE,
+        make_client=lambda: client,
+        repo=_reask_repo,
+        base=_Releasing,
+        patch=lambda mp: mp.setattr(service_module, "STREAM_PAGE", 3),
+    )
+
+
+def _reranked(ids: list[str], minimum: float = 0.0) -> list[str]:
+    probs = {item.id: _reasked(n) for n, item in enumerate(_items())}
+    return sorted(
+        (post for post in ids if probs[post] >= minimum), key=lambda post: (-probs[post], post)
+    )
+
+
+@_requires_chrome
+def test_asked_again_the_live_list_opens_at_the_querys_minimum_with_its_answers(reasked):
+    """PR 16 tests I1: the answers the query had come first, ranked, at the stream's minimum
+    (the query's last one, 0.5) from the first look — and none of them is «nuevo»."""
+    first = _step(reasked, "first")
+    cached = _ids(2)
+
+    assert first["live_min"] == 0.5 and first["refine"]["min"] == "0.5"
+    assert first["ids"] == _reranked(cached, 0.5) == cached
+    assert first["nuevo"] == []
+    assert first["reach"] == (
+        "Mostrando 2 de 2 respondidos hasta ahora · 2 con relevancia ≥ 0,50, "
+        "de mayor a menor probabilidad."
+    )
+    # The status line counts this job's answers only: the two it had are not «relevantes» of it.
+    assert re.fullmatch(rf"Preguntando… 0 de {POSTS - 2} · {_USD} gastado", first["status"]["text"])
+
+
+@_requires_chrome
+def test_asked_again_cached_answers_are_never_nuevo_and_the_list_never_recuts_at_the_end(reasked):
+    absorbed = [
+        look
+        for look in _step(reasked, "absorbed")
+        if look["job"] == _step(reasked, "follower")["number"] - 1
+    ]
+    end = _step(reasked, "reask_end")
+    so_far: list[str] = []
+
+    for look in absorbed:
+        so_far += look["got"]
+        assert not set(look["cached"]) & set(look["nuevo"]), look
+        assert look["ids"][:TOP] == _reranked(so_far, 0.5)[:TOP], look
+        _nuevo_rule(look, _reranked(so_far, 0.5))
+    # Each answer once — the ones still waiting when the job ended too: read to the end first.
+    assert sorted(so_far) == sorted(item.id for item in _items()) and len(so_far) == len(
+        set(so_far)
+    )
+    assert set(absorbed[0]["cached"]) == set(_ids(2))
+    # The end takes the blob's row at the SAME minimum: the live list was already it.
+    final = _reranked(so_far, 0.5)[:TOP]
+    assert end["before_end"]["ids"] == final == end["ids"]
+    assert "min=" not in end["hash"] and end["reach"].startswith(f"Mostrando {TOP} de ")
+
+
+@_requires_chrome
+def test_a_reply_saying_more_is_followed_by_a_look_at_once(reasked):
+    """PR 16 tests M1: STREAM_PAGE is 3 here and twelve answers wait: each reply that says
+    `more` is followed by the next look at once, never a second later — and nothing twice."""
+    looks = _step(reasked, "more")["looks"]
+    absorbed = [
+        look
+        for look in _step(reasked, "absorbed")
+        if look["job"] == _step(reasked, "follower")["number"] - 1
+    ]
+    more = [look for look in absorbed if look["more"] and look["state"] == "running"]
+
+    assert len(more) >= 3
+    for look in more:
+        after = [t for t in looks if t >= look["at"]]
+        assert after and after[0] - look["at"] < 100, look
+    got = [post for look in absorbed for post in look["got"]]
+    assert len(got) == len(set(got))
+
+
+@_requires_chrome
+def test_a_page_that_meets_a_job_mid_way_marks_only_what_lands_above_its_cards(reasked):
+    """PR 16 tests M2: the first look of a job another tab started fills the list, no «nuevo»;
+    later answers landing above those cards say it."""
+    follower = _step(reasked, "follower")
+    looks = follower["looks"]
+
+    assert looks[0]["nuevo"] == [] and len(looks[0]["got"]) >= 3
+    so_far: list[str] = []
+    for look in looks:
+        so_far += look["got"]
+        _nuevo_rule(look, _ranked(so_far))
+    assert any(look["nuevo"] for look in looks[1:])
+
+
+@_requires_chrome
+def test_when_the_followed_job_changes_the_page_follows_the_new_one_without_a_hot_loop(reasked):
+    """PR 16 arch I1: B ended and C started between two looks; the held look's reply is about
+    C, with `more` (7 answers, 3 a reply). The page switches to C and reads its stream from 0 —
+    a bounded number of looks, not a 0 ms loop on a reply it did not take."""
+    switch = _step(reasked, "switch")
+
+    assert switch["c"] == switch["b"] + 1 and switch["live"] == switch["c"]
+    assert sorted(switch["answers"]) == sorted(_ids(7))
+    # The held look, three pages of C, and a look or two a second after.
+    assert switch["looks"] <= 8, switch["looks"]
+    # B's end was seen through the new data: its row is in the history, not «en curso».
+    rows = {row["text"].split(" · ")[0]: row["text"] for row in switch["history"]}
+    assert "en curso" not in rows[QUERY_B]
+    assert rows[QUERY_C].startswith(QUERY_C + " · en curso · 7 de ")
+    assert switch["status"]["text"].startswith(f"Preguntando… 7 de {POSTS}")
+    c_end = _step(reasked, "c_end")
+    assert c_end["status"]["text"].startswith(f"Preguntado: {POSTS} leídos")
 
 
 # --------------------------------------------------------------------------- the page alone
@@ -423,8 +813,8 @@ _FEED_PROBE = (
   const out = {};
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = 'ERROR ' + e.message; } };
   const FEED = __FEED__;
-  const job = (answers, next) => ({number: 1, kind: 'ask', state: 'running',
-    stream: {answers: answers, next: '1-' + next, expected: FEED.expected, min: 0, more: false}});
+  const job = (answers, from, next) => ({number: 1, kind: 'ask', state: 'running',
+    stream: {answers: answers, from: '1-' + from, next: '1-' + next, expected: FEED.expected, min: 0, more: false}});
   await step('order', async () => FEED.order.map(pairs => pairs.slice().sort(askOrder).map(r => r.id)));
   await step('fed', async () => {
     location.hash = '#ask';
@@ -432,10 +822,17 @@ _FEED_PROBE = (
     askLiveStart({number: 1, kind: 'ask', query_sha: FEED.sha, total: FEED.expected, pick: {query: FEED.query}}, true);
     location.hash = askHref(FEED.sha);
     await sleep(50);
-    askAbsorb(job(FEED.answers, FEED.answers.length));
+    // The first answer fills an empty list (nothing to be news against); the next two land
+    // above it — the one with refine keys says «nuevo».
+    const first = askAbsorb(job(FEED.answers.slice(0, 1), 0, 1));
+    const firstMarks = document.querySelectorAll('#ask-list .nuevo').length;
+    // A reply that does not continue the cursor is not taken.
+    const stray = askAbsorb(job(FEED.answers.slice(1), 0, 2));
+    const rest = askAbsorb(job(FEED.answers.slice(1), 1, FEED.answers.length));
     await sleep(10);
     const mark = document.querySelector('#ask-list .askr .nuevo');
-    return {ids: [...document.querySelectorAll('#ask-list > .card')].map(c => c.dataset.id),
+    return {took: [first, stray, rest], first_marks: firstMarks,
+      ids: [...document.querySelectorAll('#ask-list > .card')].map(c => c.dataset.id),
       keyless: txt(document.getElementById('ask-keyless')),
       mark: mark ? {text: txt(mark), animation: getComputedStyle(mark).animationName,
         color: getComputedStyle(mark).color} : null,
@@ -536,6 +933,7 @@ def test_a_streamed_answer_without_refine_keys_is_named_not_dropped(fed):
     got = seen["fed"]
 
     assert got["ids"] == ["4", "3"]
+    assert got["took"] == [True, False, True]
     assert got["keyless"] == (
         "1 respuesta llegó sin sus claves de refinado y no se muestran (un fallo del servidor): 5."
     )
@@ -550,6 +948,7 @@ def test_a_new_answer_says_nuevo_then_the_mark_goes_and_with_reduced_motion_it_n
     got, later = seen["fed"], seen["later"]
 
     assert got["reduced"] is reduced
+    assert got["first_marks"] == 0
     assert got["mark"]["text"] == "nuevo"
     assert got["mark"]["animation"] == ("none" if reduced else "nuevo")
     # Verdigris: `--agree`, dark or light.

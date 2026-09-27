@@ -247,9 +247,16 @@ details.hist[open]>summary{margin-bottom:8px}
 .lc:hover{border-color:var(--muted)}
 .lc .dom{font-size:12.5px;color:var(--faint)}
 .lc b{font-size:15px;font-weight:600;overflow-wrap:anywhere}
-.xembed{max-width:550px;margin-top:10px}
-.xembed:empty{height:220px;border-radius:var(--r-l);background:var(--surface-2)}
+.xembed{max-width:550px;margin-top:10px;position:relative}
 .xembed iframe{display:block;width:100%;border:0;border-radius:var(--r-l);color-scheme:normal}
+/* Until X answers, the slot shows the saved copy (`.xwait`: who, when, the text) and X's frame
+   loads out of sight under it; X's first height swaps them (`xHeight`), once. */
+.xembed iframe.xhid{position:absolute;top:0;left:0;visibility:hidden;pointer-events:none}
+.xembed.xgrow{overflow:hidden;transition:height .2s ease-out}
+.xwait>.xby{font-size:14px;line-height:1.3;margin-top:2px}
+.xwait>.xby b{font-weight:600}
+.xwait>.xby span{color:var(--faint)}
+.xwait>.local>.twt:first-child{margin-top:6px}
 .xnote{font-size:13px;color:var(--faint);margin-top:10px}
 .vtog{background:none;border:0;cursor:pointer;padding:0;font-family:inherit}
 
@@ -326,7 +333,8 @@ details.saw[open]>summary{color:var(--text)}
 .jobp .askb{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 /* A followed ask: the block is ONE status line over the results gallery that is filling in —
    no title, no estimate, no bar: the gallery is the progress. */
-.jobp.slim{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:8px 12px;margin:10px 0 12px}
+.jobp.slim{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:8px 12px;margin:10px 0 12px;
+  position:sticky;top:0;z-index:3}
 .jobp.slim>.tsec,.jobp.slim>.est,.jobp.slim .pbar{display:none}
 .jobp.slim>.prog{flex:1 1 280px;min-width:0}
 .jobp.slim .prog .muted{color:var(--text)}
@@ -407,6 +415,9 @@ details.saw[open]>summary{color:var(--text)}
 @keyframes nuevo{0%,55%{opacity:1}100%{opacity:0}}
 /* The page holds the reader's place itself while answers land (`askKeepAnchor`). */
 .asklist{overflow-anchor:none}
+/* A new answer's card comes in with a short fade (none with reduced motion: the global guard). */
+@keyframes cardin{from{opacity:0}}
+.asklist>.card.fresh{animation:cardin .15s ease-out}
 .askmore{margin:6px 0 12px}
 .askside{position:sticky;top:14px;max-height:calc(100vh - 28px);overflow:auto;min-width:0;padding-left:24px;border-left:1px solid var(--line-2)}
 .askside .tsec{margin-top:0;font-size:16px}
@@ -1460,8 +1471,10 @@ const X_ID = /^\d{1,25}$/;
     copy. Any message from X counts: a frame off screen is throttled and sends its height only
     once it is scrolled into view, long after it said it has the post. */
 const X_WAIT_MS = 8000;
-/** The height reserved for a frame until X says its own, so the list does not jump twice. */
+/** A frame's height until X says its own (it loads hidden, under the saved copy). */
 const X_MIN_H = 220;
+/** How long the slot takes to go from the saved copy's height to X's (none with reduced motion). */
+const X_GROW_MS = 200;
 /** Frames are made only for cards this close to the viewport: a page of fifty loads a handful. */
 const X_NEAR = '800px 0px';
 const VISTA_KEY = 'xbrain.jev.vista';
@@ -1534,13 +1547,29 @@ function articleBody(p) {
   return box;
 }
 
-/** A place for X's frame; the frame itself is made when the card comes near the viewport. */
+/** A place for X's frame; the frame itself is made when the card comes near the viewport. It
+    is never empty: until X answers it shows the saved copy (`xWait`), which costs no network,
+    and X's frame loads hidden under it and takes its place on its first height (`xHeight`). */
 function xSlot(p) {
   const slot = el('div', 'xembed');
   slot.dataset.id = p.id;
   slot.dataset.handle = p.author.handle || '';
+  slot.setAttribute('aria-busy', 'true');
+  slot.appendChild(xWait(p));
   xNear(slot);
   return slot;
+}
+
+/** The saved copy standing in for X's frame: who and when (X's embed says them, so the card's
+    head does not), then the copy itself. When X never answers it simply stays (`xSettle`). */
+function xWait(p) {
+  const wait = el('div', 'xwait');
+  const who = el('div', 'who xby');
+  who.appendChild(el('b', null, p.author.name || p.author.handle));
+  who.appendChild(el('span', null, ' @' + p.author.handle + ' · ' + day(p.created)));
+  wait.appendChild(who);
+  wait.appendChild(localView(p));
+  return wait;
 }
 
 let xObserver = null;
@@ -1583,8 +1612,8 @@ function xForget() {
 }
 
 function xFrame(slot) {
-  if (slot.firstChild || !X_ID.test(slot.dataset.id)) return;
-  const f = el('iframe');
+  if (!slot.isConnected || slot.querySelector('iframe') || !X_ID.test(slot.dataset.id)) return;
+  const f = el('iframe', 'xhid');
   f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox');
   f.setAttribute('referrerpolicy', 'no-referrer');
   f.setAttribute('loading', 'lazy');
@@ -1601,15 +1630,68 @@ function xFrame(slot) {
 }
 
 /** X's frame gave up (timeout, or X has no such post): every card of that post shows the saved
-    copy and why. */
+    copy and why. A card still showing the copy it opened on keeps it — its frame goes and the
+    note is added, nothing is drawn again (`xSettle`); any other is drawn again. */
 function xFallBack(f, why) {
   clearTimeout(f.xTimer);
   const a = f.isConnected && f.closest('.card');
   const id = a && a.dataset.id;
-  if (!id || !postById()[id]) return;
+  const p = id && postById()[id];
+  if (!p) return;
   cardVista.delete(id);
   xFell.set(id, why);
-  redrawPreviews(id);
+  document.querySelectorAll('.card[data-id]').forEach((c) => {
+    if (c.dataset.id !== id || !c.querySelector('.pv')) return;
+    const wait = c.querySelector('.pv > .xembed > .xwait');
+    if (wait) xSettle(c, wait, why);
+    else preview(c, p);
+  });
+}
+
+/** The saved copy a card opened on becomes its view: the slot (and X's frame in it) goes, the
+    copy stays where it is — the same nodes, with its who-and-when line, so the card keeps its
+    layout — and the note says why. */
+function xSettle(a, wait, why) {
+  const slot = wait.parentNode;
+  slot.querySelectorAll('iframe').forEach((f) => clearTimeout(f.xTimer));
+  wait.classList.add('settled');
+  slot.replaceWith(wait);
+  wait.before(el('p', 'xnote', XNOTE[why]));
+  const t = a.querySelector('.vtog');
+  if (t) t.textContent = 'ver en X';
+}
+
+/** X said its frame's height `h`. The first time, the frame takes the saved copy's place: the
+    slot goes from the copy's height to X's once — over X_GROW_MS on screen (not with reduced
+    motion), at once off screen; above the reader in the live results (which hold the reader's
+    place themselves, `overflow-anchor: none`) the page moves by the difference, the reader does
+    not. Later heights only set the frame's. */
+function xHeight(f, h) {
+  const slot = f.parentNode;
+  f.style.height = h + 'px';
+  if (!slot) return;
+  const wait = slot.querySelector(':scope > .xwait');
+  if (!wait) {
+    if (slot.classList.contains('xgrow')) slot.style.height = h + 'px';
+    return;
+  }
+  const before = slot.getBoundingClientRect();
+  wait.remove();
+  f.classList.remove('xhid');
+  slot.removeAttribute('aria-busy');
+  const after = slot.getBoundingClientRect().height;
+  if (Math.abs(after - before.height) < 1) return;
+  if (before.top < 0 && slot.closest('.asklist')) {
+    scrollBy({top: after - before.height, behavior: 'instant'});
+    return;
+  }
+  if (SCROLL === 'auto' || before.top >= innerHeight || before.bottom <= 0) return;
+  slot.style.height = before.height + 'px';
+  slot.classList.add('xgrow');
+  void slot.offsetHeight;  // the start height is laid out before the end one is set
+  slot.style.height = after + 'px';
+  clearTimeout(slot.xGrow);
+  slot.xGrow = setTimeout(() => { slot.classList.remove('xgrow'); slot.style.height = ''; }, X_GROW_MS + 50);
 }
 
 /** The only messages read: from X's origin, from one of this page's frames (matched by
@@ -1630,7 +1712,7 @@ function onXMessage(e) {
   clearTimeout(f.xTimer);
   if (m.method === 'twttr.private.resize') {
     const h = Number(m.params && m.params[0] && m.params[0].height);
-    if (h > 0 && h < 20000) f.style.height = Math.ceil(h) + 'px';
+    if (h > 0 && h < 20000) xHeight(f, Math.ceil(h));
   } else if (m.method === 'twttr.private.no_results') {
     xFallBack(f, 'gone');
   }
@@ -2935,10 +3017,11 @@ function askNoRefine() {
 const askView = {q: '', refine: askNoRefine()};
 /** THE live results of the ask job being followed (served; `/api/job?since=<cursor>`): its
     answers so far, kept RANKED by `askOrder` as they arrive (the server hands them over in
-    arrival order), the cursor of the next poll, how many answers are expected and the minimum
-    the results open at (the server's, `ask.use_minimum`: the same default the final row
-    carries, so the end never re-cuts). `null` while no ask runs. `marks`: whether an arriving
-    answer gets its «nuevo» mark — not for what had arrived before this page was watching. */
+    arrival order; `fresh`: asked by this job, not an answer the query had), the cursor of the
+    next poll, the minimum the results open at (the server's, `ask.use_minimum`: the same
+    default the final row carries, so the end never re-cuts) and the job's own numbers at the
+    last look (`job`: done, total, spent — the status line's and the rail's). `null` while no
+    ask runs. */
 let askLive = null;
 /** When each answer of a live ask arrived (`sha + ' ' + id` → ms on the page's clock), for its
     «nuevo» mark: it outlives the card (a redraw, the final list), never the mark's time. */
@@ -3462,8 +3545,7 @@ function askResults(row) {
   const head = el('div', 'askhead');
   head.id = 'ask-head';
   head.appendChild(el('h3', 'tsec', '«' + row.query + '»'));
-  if (row.live) head.appendChild(el('p', null, 'Preguntando ahora · ' + askFiltersText(row.filters) +
-    ' · cada respuesta entra en su puesto según llega; lo que cuesta, en el bloque del trabajo.'));
+  if (row.live) head.appendChild(el('p', null, 'Preguntando ahora · ' + askFiltersText(row.filters)));
   else head.appendChild(el('p', null, 'Preguntada ' + when(row.last_asked_at) +
     (row.times > 1 ? ' (' + nf(row.times) + ' veces)' : '') + ' · ' + askFiltersText(row.filters) +
     ' · ' + askCostText(row.cost) +
@@ -3477,7 +3559,11 @@ function askResults(row) {
   }
   const refine = askEffective(row, askView.refine);
   box.appendChild(askRefineBar(row, refine));
-  const list = askResultList(askAnswers(row), refine, {answered: row.answered, sha: row.sha, live: row.live ? row : null});
+  // The live list of this query, at the job's end: refilled in place with the final ranking,
+  // so the cards the reader is looking at stay (the same nodes, X's frames not reloaded).
+  const old = $('ask-list');
+  const reuse = !row.live && old && old.dataset.live === row.sha ? old : null;
+  const list = askResultList(askAnswers(row), refine, {answered: row.answered, sha: row.sha, live: row.live ? row : null}, reuse);
   const reach = el('p', 'reach', list.reach);
   reach.id = 'ask-reach';
   head.appendChild(reach);
@@ -3532,10 +3618,11 @@ const askRefining = (refine) => !!(refine.topics.length || refine.since || refin
 /** The results list, a component: (ranked answers, refine state in effect, context) → its
     element and the sentence saying what it shows. A live ask's answers (they arrive and are
     ranked by `askOrder`) refill the same list (`askFillList`), never a second one. */
-function askResultList(ranked, refine, ctx) {
-  const wrap = el('div', 'asklist');
+function askResultList(ranked, refine, ctx, reuse) {
+  const wrap = reuse || el('div', 'asklist');
   wrap.id = 'ask-list';
   if (ctx.live) wrap.dataset.live = ctx.sha;
+  else delete wrap.dataset.live;
   return Object.assign({el: wrap}, askFillList(wrap, ranked, refine, ctx));
 }
 
@@ -3559,8 +3646,14 @@ function askFillList(wrap, ranked, refine, ctx) {
     nodes.push(bad);
   }
   const byId = postById();
-  kept.slice(0, shown).forEach(r => {
-    if (byId[r.id]) nodes.push(had.get(r.id) || askCard(byId[r.id], r, ctx.sha));
+  // While an ask runs, a card on the reader's screen is not taken away under them when better
+  // answers push it past the top: it stays (the list is briefly longer) until it is off screen.
+  const held = ctx.live ? askOnScreen(wrap) : new Set();
+  let listed = 0;
+  kept.forEach((r, i) => {
+    if (!byId[r.id] || !(i < shown || (held.has(r.id) && had.has(r.id)))) return;
+    nodes.push(had.get(r.id) || askCard(byId[r.id], r, ctx.sha));
+    if (i >= shown) listed++;
   });
   if (!kept.length) {
     const none = el('p', 'empty', ctx.live && !ctx.answered
@@ -3571,8 +3664,8 @@ function askFillList(wrap, ranked, refine, ctx) {
     none.id = 'ask-empty';
     nodes.push(none);
   }
-  if (shown < kept.length) {
-    const left = kept.length - shown;
+  if (shown + listed < kept.length) {
+    const left = kept.length - shown - listed;
     const more = el('button', 'evalb askmore', 'Ver ' + nf(Math.min(askTop(), left)) + ' más (quedan ' + nf(left) + ')');
     more.type = 'button';
     more.id = 'ask-more';
@@ -3593,11 +3686,24 @@ function askFillList(wrap, ranked, refine, ctx) {
   return {kept: kept, shown: shown, reach: reach};
 }
 
-/** A live ask's gallery line: how many it shows of the answers so far (of how many there will
-    be), M at or above the minimum in effect, what the refine keeps. The job's progress and
-    spending are the status line's (`askStatusText`), right above. */
+/** The cards of `wrap` on the reader's screen, by post id, when the list starts above the top
+    of the screen (the reader has scrolled into it); none otherwise. */
+function askOnScreen(wrap) {
+  const on = new Set();
+  if (!wrap.isConnected || wrap.getBoundingClientRect().top >= 0) return on;
+  for (const card of wrap.querySelectorAll(':scope > .card')) {
+    const r = card.getBoundingClientRect();
+    if (r.top >= innerHeight) break;
+    if (r.bottom > 0) on.add(card.dataset.id);
+  }
+  return on;
+}
+
+/** A live ask's gallery line: how many it shows of the answers so far, M at or above the
+    minimum in effect, what the refine keeps. The job's progress (k of N) and spending are the
+    status line's (`askStatusText`), right above: not said twice. */
 function askLiveReach(ranked, kept, shown, refine, row) {
-  let t = 'Mostrando ' + nf(shown) + ' de ' + nf(row.answered) + ' respondidos hasta ahora (de ' + nf(row.expected) + ')';
+  let t = 'Mostrando ' + nf(shown) + ' de ' + nf(row.answered) + ' respondidos hasta ahora';
   if (refine.min > 0) t += ' · ' + nf(ranked.filter(r => r.p >= refine.min).length) + ' con relevancia ≥ ' + dec(refine.min, 2);
   if (askRefining(refine)) t += ' · ' + nf(kept.length) + ' pasan el refinado';
   return t + ', de mayor a menor probabilidad.';
@@ -3743,7 +3849,7 @@ function askHistory(open) {
       li.id = 'ask-history-live';
       const a = link(askHref(askLive.sha), null, '');
       a.appendChild(el('b', null, askLive.query));
-      a.appendChild(el('small', null, 'en curso'));
+      a.appendChild(askRailLive());
       if (open && open.live) a.setAttribute('aria-current', 'true');
       li.appendChild(a);
       list.appendChild(li);
@@ -3753,10 +3859,13 @@ function askHistory(open) {
     const li = el('li');
     const a = link(askHref(row.sha), null, '');
     a.appendChild(el('b', null, row.query));
-    a.appendChild(el('small', null, day(row.last_asked_at) + ' · ' + askHistoryCount(row) + ' · ' +
+    // The query running now says the job's live numbers only: never its last use's day, count
+    // or cost, nor «reconstruida» — a mid-run checkpoint's file before `finish_ask` writes the
+    // history, which this job's own end records.
+    if (askLive && askLive.sha === row.sha) a.appendChild(askRailLive());
+    else a.appendChild(el('small', null, day(row.last_asked_at) + ' · ' + askHistoryCount(row) + ' · ' +
       (row.cost.error ? '—' : usd(row.cost.cost_usd)) + (row.times > 1 ? ' · ' + nf(row.times) + ' veces' : '') +
-      (row.rebuilt ? ' · reconstruida' : '') + (row.error ? ' · ilegible' : '') +
-      (askLive && askLive.sha === row.sha ? ' · en curso' : '')));
+      (row.rebuilt ? ' · reconstruida' : '') + (row.error ? ' · ilegible' : '')));
     if (open && row.sha === open.sha) a.setAttribute('aria-current', 'true');
     li.appendChild(a);
     list.appendChild(li);
@@ -3812,53 +3921,77 @@ ONE_COLUMN.addEventListener('change', placeAskCost);
    held (`askKeepAnchor`), and the counters say how far it got. At the job's end the page takes
    the reloaded blob's row — `finish_ask`'s ranking, the same order — and draws it whole. */
 
+/** The rail's line for the query running now: «en curso · k de N · ~X $», the job's own numbers
+    (the status line's), kept current by `askRailUpdate` at every look. */
+function askRailLive() {
+  const small = el('small', null, askRailText());
+  small.dataset.live = '';
+  return small;
+}
+function askRailText() {
+  const j = askLive && askLive.job;
+  return 'en curso' + (j ? ' · ' + nf(j.done) + ' de ' + nf(j.total) + ' · ' + usd(j.usd) : '');
+}
+function askRailUpdate() {
+  document.querySelectorAll('#ask-history small[data-live]').forEach(s => { s.textContent = askRailText(); });
+}
+
 /** Whether the tab shows the live ask: the query open is it, or none is named. */
 const askShowsLive = () => !!askLive && (askView.q === askLive.sha || !askView.q);
 
 /** The live ask as a history row: what `askResults` draws. */
 function askLiveRow() {
   return {sha: askLive.sha, query: askLive.query, live: true, filters: askLive.filters, min: askLive.min,
-    answered: askLive.answers.length, expected: askLive.expected};
+    answered: askLive.answers.length};
 }
 
 /** The filters of an ask job's pick (`AskPick.as_json`: the query and limit beside them). */
 const ASK_FILTER_KEYS = ['topics', 'since', 'until', 'author', 'only_evaluated'];
 
-/** A followed ask job's live results start empty, cursor `0`. `marks`: this page pressed it,
-    so every answer that arrives is news; a job met mid-way (a reload, another tab) marks only
-    what arrives after the first look. */
-function askLiveStart(job, marks) {
+/** A followed ask job's live results start empty, cursor `0` — pressed here, or met mid-way (a
+    reload, another tab): either way the first look only fills the list (`askAbsorb` marks
+    nothing then). */
+function askLiveStart(job) {
   if (!job || job.kind !== 'ask' || !job.query_sha || (askLive && askLive.number === job.number)) return;
   const filters = {};
   ASK_FILTER_KEYS.forEach(k => { if (job.pick && job.pick[k] != null) filters[k] = job.pick[k]; });
   askLive = {number: job.number, sha: job.query_sha, query: job.pick.query, filters: filters, cursor: '0',
-    answers: [], expected: job.total || 0, min: 0, marks: !!marks};
+    answers: [], min: 0, job: {done: job.done || 0, total: job.total || 0, usd: job.usd || 0}};
 }
 
 /** What a poll of the running job adds to the live results: the next answers of its stream,
     each put in its ranked place (a binary search by `askOrder`: equal keys cannot happen, ids
-    are unique), their refine keys and what Jev read beside the blob's, and the cursor on. */
+    are unique), their refine keys and what Jev read beside the blob's, and the cursor on.
+    Only a reply that continues THIS job's stream from the cursor asked is taken; whether it
+    was is the answer (`poll` looks again at once for `more` only then).
+    «nuevo» marks what is news to the reader: a new answer (not one the query had) that lands
+    ABOVE a card already on the list — an answer that only extends the list's end, and any on
+    the first fill (a job pressed here, or met mid-way), is not marked. */
 function askAbsorb(job) {
   const s = job && job.stream;
-  if (!askLive || !s || job.number !== askLive.number) return;
+  if (!askLive || !s || job.number !== askLive.number) return false;
+  if (s.from !== (askLive.cursor === '0' ? job.number + '-0' : askLive.cursor)) return false;
   const now = performance.now();
   const asks = DATA.asks;
+  const list = askLive.answers;
+  const wrap = $('ask-list');
+  const shownIds = new Set(wrap && wrap.dataset.live === askLive.sha
+    ? [...wrap.querySelectorAll(':scope > .card')].map(c => c.dataset.id) : []);
+  const lowest = list.filter(r => shownIds.has(r.id)).pop() || null;
   s.answers.forEach(a => {
     asks.keys[a.id] = a.keys;
     if (a.surfaces) asks.surfaces[a.id] = a.surfaces;
-    const r = {id: a.id, p: a.p, model: a.model, asked_at: a.asked_at};
-    const list = askLive.answers;
+    const r = {id: a.id, p: a.p, model: a.model, asked_at: a.asked_at, fresh: !a.cached};
     let lo = 0, hi = list.length;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (askOrder(list[mid], r) < 0) lo = mid + 1; else hi = mid; }
     list.splice(lo, 0, r);
-    if (!a.cached && askLive.marks) askArrived.set(askLive.sha + ' ' + a.id, now);
+    if (r.fresh && lowest && askOrder(r, lowest) < 0) askArrived.set(askLive.sha + ' ' + a.id, now);
   });
-  askLive.marks = true;
   askLive.cursor = s.next;
-  askLive.expected = s.expected;
   askLive.min = s.min;
   askLiveDraw();
   if (following) progress(job);
+  return true;
 }
 
 /** The live results on screen, when the tab shows them: the list refilled in place (a first
@@ -3890,11 +4023,12 @@ function askLiveDraw() {
     screen that is still there afterwards stays at the same height — answers landing above it
     push the page, not the reader. With the list's top on screen nothing is held: new answers
     are seen landing. The browser's own scroll anchoring is off for the list (`overflow-anchor`),
-    so the two never correct the same move twice. */
-function askKeepAnchor(change) {
+    so the two never correct the same move twice. `always`: held even with the list's top on
+    screen — the live list's end, where nothing lands and only the head above it changes. */
+function askKeepAnchor(change, always) {
   const list = $('ask-list');
   const marks = [];
-  if (list && list.getBoundingClientRect().top < 0) {
+  if (list && (always || list.getBoundingClientRect().top < 0)) {
     for (const card of list.querySelectorAll(':scope > .card')) {
       const r = card.getBoundingClientRect();
       if (r.top >= innerHeight) break;
@@ -3943,6 +4077,9 @@ const EVAL_POST = 'Evaluar este post';
 const EVAL_AGAIN = 'Re-evaluar';
 const EVAL_THESE = 'Evaluar estos posts';
 const STOP_TEXT = 'Parar (se guarda lo ya pagado)';
+/** A followed ask's one status line has room for the verb only; what it keeps is its title. */
+const STOP_SHORT = 'Parar';
+const STOP_KEEPS = 'se guarda lo ya pagado';
 const FORCE_TEXT = 'Volver a evaluar también los posts que ya tienen evaluación vigente: se pagan ' +
   'otra vez y se sustituye su evaluación (antes se guarda una copia)';
 /** Why an interrupted job stopped, as `/api/job`'s `reason` says it. */
@@ -3959,9 +4096,10 @@ const POLL_MS = 400;
 /** A followed ask is looked at once when it starts, then every ASK_POLL_MS — each look brings
     its new answers (at once again while a reply says `more`): live, without hammering. */
 const ASK_POLL_MS = 1000;
-/** «Muy relevantes» in a live ask's status line: answers at or above this probability (or the
-    refine's own minimum, when one is set). A reading aid; it cuts nothing. */
-const ASK_STRONG = 0.7;
+/** «Muy relevantes» in an ask's status and end lines: this job's answers at or above
+    `[jev].threshold` — the one bar at which the page reads a Jev probability as «yes» — or at
+    the refine's own minimum, when one is set. A reading aid; it cuts nothing. */
+const askStrongBar = () => DATA.threshold;
 const RETRY_MS = [500, 1000, 2000, 4000];
 const WATCH_MS = 3000;
 /** The selection the panel is about: its kind, what was asked, what was sent, what the server
@@ -3969,6 +4107,8 @@ const WATCH_MS = 3000;
 let asking = null;
 /** True while a job is being followed: another button re-opens its panel instead. */
 let following = false;
+/** The number of the job `poll` follows: a reply about another one means it changed. */
+let followed = null;
 let PANEL = null;
 let ESTIMATES = 0;
 /** The button that opened the panel: focus goes back to it when the panel closes. */
@@ -4133,9 +4273,10 @@ function panelAnchor(from) {
 function placePanel() {
   if (!PANEL) return;
   const box = PANEL.box;
-  // A followed ask's status line sits right over its gallery (after the refine bar) while the
-  // tab shows it; under the form otherwise.
-  if (following && askLive && panelHome.top === 'ask') panelHome.anchor = askShowsLive() ? '#ask-refine' : '#ask-form';
+  // A followed ask's status line sits right under the query's title (before the refine bar and
+  // the gallery; sticky while the gallery scrolls) while the tab shows it; under the form
+  // otherwise. Its end line stays there.
+  if (askLive && panelHome.top === 'ask' && P_SLIM()) panelHome.anchor = askShowsLive() ? '#ask-head' : '#ask-form';
   const found = panelHome.anchor ? [...document.querySelectorAll(panelHome.anchor)] : [];
   const shownTop = topOf(view.tab);
   const spot = found.find(n => !n.closest('[hidden]')) || (panelHome.top !== shownTop ? found[0] : null);
@@ -4150,6 +4291,9 @@ function placePanel() {
 
 /** A small badge on a top tab whose panel is out of sight: a job running there, or an end
     there that needs reading. */
+/** The job block is an ask's one status line (`.jobp.slim`). */
+const P_SLIM = () => !!PANEL && PANEL.box.classList.contains('slim');
+
 function renderBadges() {
   document.querySelectorAll('#toptabs a[data-tab]').forEach(a => {
     const badge = a.querySelector('.tbadge');
@@ -4238,13 +4382,22 @@ function showError(text) {
 /** The panel's buttons for one moment of its life: asking, following a job, or done. */
 function panelMode(mode) {
   const P = panel();
-  if (mode !== 'follow') P.box.classList.remove('slim');
+  // A new estimate is the full block; an ask's status line stays one line to its end.
+  if (mode === 'ask') P.box.classList.remove('slim');
   P.go.hidden = mode !== 'ask';
   P.stop.hidden = mode !== 'follow';
   P.stop.disabled = false;
-  P.stop.textContent = STOP_TEXT;
+  stopWords(P);
   P.reload.hidden = true;
   P.cancel.textContent = {ask: 'Cancelar', follow: 'Ocultar', done: 'Cerrar'}[mode];
+}
+
+/** «Parar» and what it keeps: the whole sentence in the full block, the verb in an ask's
+    status line (with the rest as its title and description). */
+function stopWords(P) {
+  P.stop.textContent = P_SLIM() ? STOP_SHORT : STOP_TEXT;
+  P.stop.title = STOP_KEEPS;
+  P.stop.setAttribute('aria-description', STOP_KEEPS);
 }
 
 function openAsk(kind, ask, title, from) {
@@ -4390,7 +4543,7 @@ async function confirmAsk() {
   P.error.hidden = true;
   try {
     const job = await api(API[mine.kind].evaluate, Object.assign({}, mine.sent, {confirm_token: e.confirm_token}));
-    askLiveStart(job, true);
+    askLiveStart(job);
     follow(job);
     // An ask pressed on Preguntar opens its own results, unrefined, and they fill as it runs.
     // Where the reader was is kept: a use that keeps nothing is not in the history, and the
@@ -4400,6 +4553,12 @@ async function confirmAsk() {
       const href = askHref(job.query_sha);
       if (location.hash !== href) location.hash = href;
       else renderAsk();
+      // The form has done its job: beside the history, the query's title goes to the top of
+      // the screen, so the gallery forming under it is what the reader sees.
+      if (!ONE_COLUMN.matches) requestAnimationFrame(() => {
+        const head = $('ask-head');
+        if (head && askShowsLive()) head.scrollIntoView({block: 'start', behavior: SCROLL});
+      });
     }
   } catch (err) {
     if (asking !== mine || following) return;
@@ -4418,11 +4577,12 @@ function follow(job) {
   const P = panel();
   watchLostShown = false;
   following = true;
+  followed = job.number;
   P.box.hidden = false;
   P.forceRow.hidden = true;
   P.prog.hidden = false;
-  panelMode('follow');
   P.box.classList.toggle('slim', job.kind === 'ask');
+  panelMode('follow');
   placePanel();
   progress(job);
   setTimeout(() => poll(0), job.kind === 'ask' ? 0 : POLL_MS);
@@ -4440,7 +4600,7 @@ function resume(job) {
   P.est.textContent = 'Empezó ' + when(job.started_at) + ' · ' + pl(job.total, 'post', 'posts') +
     '. ' + capText(job.max_usd);
   P.error.hidden = true;
-  askLiveStart(job, false);
+  askLiveStart(job);
   follow(job);
 }
 
@@ -4457,14 +4617,38 @@ async function poll(failures) {
     lost(err);
     return;
   }
+  if (followed !== null && job.number != null && job.number !== followed) {
+    await switched(job);
+    return;
+  }
   progress(job);
-  askAbsorb(job);
-  if (job.state === 'running') {
-    // More answers waiting than one reply carries: the next look at once.
-    setTimeout(() => poll(0), job.stream && job.stream.more ? 0 : job.kind === 'ask' ? ASK_POLL_MS : POLL_MS);
+  const took = askAbsorb(job);
+  const more = took && job.stream.more;
+  if (job.state === 'running' || more) {
+    // More answers waiting than one reply carries: the next look at once — only when this
+    // reply's were taken, so a reply that was not can never loop at 0 ms. An ask that ended
+    // with answers still waiting is read to its end first, so the live list is whole when
+    // the final ranking replaces it.
+    setTimeout(() => poll(0), more ? 0 : job.kind === 'ask' ? ASK_POLL_MS : POLL_MS);
     return;
   }
   await finished(job);
+}
+
+/** The job followed ended between two looks and another has started since (a hidden tab looks
+    about once a minute; a retry waits): the one that ended is seen through the new data, and
+    the new one is followed from where it is (`resume`) — its own stream from 0, never with the
+    old job's cursor. */
+async function switched(job) {
+  following = false;
+  asking = null;
+  seenFinish = followed;
+  followed = null;
+  askLive = null;
+  await reloadData();
+  if (following) return;  // the watch met the new job during the reload, and follows it
+  if (job.state === 'running') resume(job);
+  else if (job.finished_at && job.number !== seenFinish) await endedElsewhere(job);
 }
 
 /** The server stopped answering: said, and never hidden — the job may still be spending. */
@@ -4488,7 +4672,7 @@ async function stopJob() {
   } catch (err) {
     if (err.status === 409) return;  // it had already ended: the next poll says how
     P.stop.disabled = false;
-    P.stop.textContent = STOP_TEXT;
+    stopWords(P);
     showError('No se pudo parar: ' + err.message);
   }
 }
@@ -4496,7 +4680,8 @@ async function stopJob() {
 /** «gastado» and what is in it: answers charged at the estimate's mean (no token count or no
     price), answers with no token count, providers with no price. */
 function spentText(job) {
-  const parts = [usd(job.usd, 5) + ' gastado'];
+  // An ask's money is said as its history says it (4 decimals); a topics job keeps 5.
+  const parts = [usd(job.usd, job.kind === 'ask' ? 4 : 5) + ' gastado'];
   if (job.charged_at_estimate) {
     parts.push(pl(job.charged_at_estimate, 'respuesta cobrada', 'respuestas cobradas') + ' a la media estimada');
   }
@@ -4512,6 +4697,10 @@ function progress(job) {
   const share = total ? Math.round(100 * done / total) : 0;
   P.fill.style.width = share + '%';
   P.track.setAttribute('aria-valuenow', String(share));
+  if (askLive && job.number === askLive.number) {
+    askLive.job = {done: done, total: total, usd: job.usd || 0};
+    askRailUpdate();
+  }
   if (job.kind === 'ask' && job.state === 'running') {
     P.progText.textContent = askStatusText(job);
     return;
@@ -4521,19 +4710,30 @@ function progress(job) {
     (job.failed_calls ? ' · ' + pl(job.failed_calls, 'llamada fallida', 'llamadas fallidas') : '');
 }
 
-/** A running ask's status line: «Preguntando… k de N · M muy relevantes · ~X $ gastado» —
-    posts asked of those to ask (the server's), how many answers so far reach ASK_STRONG (or
-    the refine's minimum), what it has spent — and failed calls when there are. */
+/** A running ask's status line: «Preguntando… k de N · M muy relevantes (≥ t) · ~X $ gastado»
+    — posts asked of those to ask (the server's), how many of THIS job's answers reach the bar
+    (`askStrongBar`, or the refine's minimum; the same base as k: answers the query already had
+    are not counted), what it has spent — and failed calls when there are. No M until one. */
 function askStatusText(job) {
-  const answers = askLive && askLive.number === job.number ? askLive.answers : [];
-  const row = askLive ? askLiveRow() : null;
-  const min = row ? askEffective(row, askView.refine).min : 0;
-  const bar = min > 0 ? min : ASK_STRONG;
-  const strong = answers.filter(r => r.p >= bar).length;
-  return 'Preguntando… ' + nf(job.done || 0) + ' de ' + nf(job.total || 0) + ' · ' +
-    (min > 0 ? nf(strong) + ' con relevancia ≥ ' + dec(min, 2) : nf(strong) + ' muy relevantes (≥ ' + dec(ASK_STRONG, 2) + ')') +
-    ' · ' + spentText(job) +
+  return 'Preguntando… ' + nf(job.done || 0) + ' de ' + nf(job.total || 0) +
+    askStrongText(askLive && askLive.number === job.number ? askLive : null) + ' · ' + spentText(job) +
     (job.failed_calls ? ' · ' + pl(job.failed_calls, 'llamada fallida', 'llamadas fallidas') : '');
+}
+
+/** « · M muy relevantes (≥ t)» over `live`'s new answers (or « · M con relevancia ≥ min» with a
+    refine minimum); nothing while M is 0 or nothing is live. */
+function askStrongText(live) {
+  if (!live) return '';
+  const min = askEffective({min: live.min}, askView.refine).min;
+  const bar = min > 0 ? min : askStrongBar();
+  const strong = live.answers.filter(r => r.fresh && r.p >= bar).length;
+  if (!strong) return '';
+  return ' · ' + nf(strong) + (min > 0 ? ' con relevancia ≥ ' + dec(min, 2) : ' ' + (strong === 1 ? 'muy relevante' : 'muy relevantes') + ' (≥ ' + pfmt(bar) + ')');
+}
+
+/** A clean ask's end, in its status line: «Preguntado: N leídos · M muy relevantes · ~X $». */
+function askEndText(job, live) {
+  return 'Preguntado: ' + pl(job.outcome.ok, 'leído', 'leídos') + askStrongText(live) + ' · ' + spentText(job);
 }
 
 function outcomeText(job) {
@@ -4569,8 +4769,11 @@ function endedCleanly(job) {
 
 /** The panel says how `job` ended: its outcome, or why it failed. Shown by itself when the
     job did not end cleanly, even if the reader hid it. */
-function showEnd(job) {
+function showEnd(job, live) {
   const P = panel();
+  // The status line of the ask this page followed stays one line (no bar comes back, the
+  // gallery does not move); any other end is the full block.
+  if (!live || job.kind !== 'ask') P.box.classList.remove('slim');
   panelMode('done');
   P.prog.hidden = false;
   if (!endedCleanly(job)) P.box.hidden = false;
@@ -4579,17 +4782,18 @@ function showEnd(job) {
     P.progText.textContent = spentText(job);
     showError('El trabajo falló: ' + job.error);
   } else {
-    P.progText.textContent = outcomeText(job);
+    P.progText.textContent = live && job.kind === 'ask' && endedCleanly(job) ? askEndText(job, live) : outcomeText(job);
   }
 }
 
 async function finished(job) {
   following = false;
+  followed = null;
   asking = null;
   seenFinish = job.number;
-  showEnd(job);
   // The live results end here: the reloaded blob's row (`finish_ask`'s ranking) replaces them.
-  const live = askLive;
+  const live = askLive && askLive.number === job.number ? askLive : null;
+  showEnd(job, live);
   askLive = null;
   await reloadData();
   showAskResults(job, live);
@@ -4666,7 +4870,10 @@ function refresh(blob) {
   }
   if (view.tab === 'topics') renderTopics();
   if (view.tab === 'compare') renderCompare();
-  if (view.tab === 'ask') askKeepAnchor(renderAsk);
+  // The live list's end (the job ended, its list is still the live one): the final ranking
+  // refills it in place and the reader's card does not move, whatever the head above says.
+  const ending = !askLive && !!$('ask-list') && !!$('ask-list').dataset.live;
+  if (view.tab === 'ask') askKeepAnchor(renderAsk, ending);
   if (view.tab === 'config') renderConfig();
   placePanel();
 }

@@ -178,7 +178,10 @@ const sCard = (id, root) => {
       title: f.getAttribute('title'), height: Math.round(f.getBoundingClientRect().height),
       seen: seen(f)} : null,
     slot: !!(c && c.querySelector('.xembed')),
-    local: txt(c.querySelector('.twt')),
+    // The saved copy as the card's view (not the one standing in, in X's slot, until X answers).
+    local: txt([...c.querySelectorAll('.twt')].find(t => !t.closest('.xembed')) || null),
+    wait: txt(c.querySelector('.xembed > .xwait .twt')),
+    busy: c.querySelector('.xembed') ? c.querySelector('.xembed').getAttribute('aria-busy') : null,
     article: txt(c.querySelector('.artb')),
     article_folded: !!(c.querySelector('.artb') && c.querySelector('.artb').classList.contains('clamp')),
     article_links: [...c.querySelectorAll('.artmore a')].map(a => [txt(a), a.getAttribute('href')]),
@@ -216,7 +219,15 @@ _PROBE = (
   cardOf(A).scrollIntoView();
   await until(() => frameOf(A) && frameOf(B) && frameOf(C));
   await step('theme', async () => (xTestTheme.matches ? 'light' : 'dark'));
+  // B's saved copy, as it stands in for X, and B's height: what X never answering changes.
+  const bWait = cardOf(B).querySelector('.xembed > .xwait > .local');
+  if (bWait) bWait.__probe = 'b';
+  const bHeight = cardOf(B).getBoundingClientRect().height;
   await step('start', async () => ({a: sCard(A), b: sCard(B), c: sCard(C), bad: sCard(BAD_ID),
+    // A slot showing nothing: neither the saved copy nor X's frame on screen.
+    empty: [...document.querySelectorAll('.xembed')].filter(sl => !(seen(sl.querySelector(':scope > .xwait')) &&
+      txt(sl.querySelector(':scope > .xwait .twt'))) && !seen(sl.querySelector('iframe'))).length,
+    slots: document.querySelectorAll('.xembed').length,
     odd: ODD_JSON.map(id => sCard(id)), art: sCard(ART), frames: document.querySelectorAll('iframe').length,
     scripts: [...document.scripts].map(s => s.src).filter(Boolean)}));
   await step('net', async () => {
@@ -260,8 +271,19 @@ _PROBE = (
   });
   await step('resize', async () => {
     const other = sCard(B).frame.height;
+    // Every height A's slot takes from X's first height on: it goes once, one way.
+    const slot = cardOf(A).querySelector('.xembed');
+    const heights = [Math.round(slot.getBoundingClientRect().height)];
+    const watch = new ResizeObserver(() => heights.push(Math.round(slot.getBoundingClientRect().height)));
+    watch.observe(slot);
     xSays(A, 'twttr.private.resize', [{width: 550, height: 640, data: {tweet_id: A}}]);
-    return {a: sCard(A).frame.height, b_before: other, b: sCard(B).frame.height};
+    const now = sCard(A);
+    await until(() => !slot.classList.contains('xgrow') && !slot.style.height, 3000);
+    await sleep(100);
+    watch.disconnect();
+    return {a: now, b_before: other, b: sCard(B).frame.height, heights: heights,
+      settled: {height: Math.round(slot.getBoundingClientRect().height), grow: slot.classList.contains('xgrow'),
+        inline: slot.style.height}};
   });
   let quietAt = null;
   await step('quiet', async () => {
@@ -286,7 +308,12 @@ _PROBE = (
   // that loaded with it would long have timed out (its own 8 s, plus 1 s).
   await step('timeout', async () => {
     await until(() => sCard(B).local !== null && Date.now() - quietAt >= 9000, 30000);
-    return {a: sCard(A), b: sCard(B), b_twin: sCard(B, twins), q: sCard(Q)};
+    const local = cardOf(B).querySelector('.local');
+    const note = cardOf(B).querySelector('.xnote');
+    return {a: sCard(A), b: sCard(B), b_twin: sCard(B, twins), q: sCard(Q),
+      b_same_copy: !!local && local.__probe === 'b' && local === bWait,
+      b_grew: Math.round(cardOf(B).getBoundingClientRect().height - bHeight),
+      b_note: note ? Math.round(note.getBoundingClientRect().height + parseFloat(getComputedStyle(note).marginTop)) : null};
   });
   await step('retry', async () => {
     cardOf(B).querySelector('.vtog').click();
@@ -381,10 +408,12 @@ def test_a_post_with_an_x_id_is_xs_own_embed_in_a_sandboxed_frame(embedded):
     assert a["frame"]["referrerpolicy"] == "no-referrer"
     assert a["frame"]["loading"] == "lazy"
     assert a["frame"]["title"] == "Post de @alice en X"
-    assert a["frame"]["seen"] is True
+    # Until X says its height the frame loads out of sight, and the saved copy stands in.
+    assert a["frame"]["seen"] is False
+    assert a["wait"] == f"texto local de {IDS[0]}" and a["busy"] == "true"
     # X's frame, never X's script in this page's origin.
     assert embedded["start"]["scripts"] == []
-    # The saved copy is not drawn beside it; the Jev block stays under it.
+    # The saved copy is not drawn as the card's view beside it; the Jev block stays under it.
     assert a["local"] is None
     assert a["jev"] is True
     assert a["toggle"] == "ver copia guardada"
@@ -484,8 +513,35 @@ def test_a_resize_outside_one_to_twenty_thousand_px_is_ignored(embedded):
 def test_xs_resize_sets_the_height_of_its_own_frame_only(embedded):
     resize = embedded["resize"]
 
-    assert resize["a"] == 640
+    assert resize["a"]["frame"]["height"] == 640
     assert resize["b"] == resize["b_before"] == 220
+
+
+@_requires_chrome
+def test_no_slot_is_ever_an_empty_box_the_saved_copy_stands_in_until_x_answers(embedded):
+    """PR 16 UX C1: a card with X's view shows the saved copy at once, in X's place (no
+    network needed), however long X takes — never a blank slot."""
+    start = embedded["start"]
+
+    assert start["slots"] >= 3 and start["empty"] == 0
+    for key, post in zip("bc", IDS[1:], strict=True):
+        assert start[key]["wait"] == f"texto local de {post}"
+        assert start[key]["frame"]["seen"] is False and start[key]["local"] is None
+
+
+@_requires_chrome
+def test_xs_first_height_swaps_its_frame_in_for_the_saved_copy_once(embedded):
+    """The frame takes the saved copy's place on X's first height: the copy goes, the frame is
+    shown at X's height, and the slot's height moves once, one way, then is left to the frame."""
+    resize = embedded["resize"]
+    a, heights = resize["a"], resize["heights"]
+
+    assert a["frame"]["seen"] is True and a["frame"]["height"] == 640
+    assert a["wait"] is None and a["local"] is None and a["busy"] is None
+    assert heights[-1] == 640 and heights[0] != 640
+    step = 1 if heights[-1] > heights[0] else -1
+    assert all((b - h) * step >= 0 for h, b in zip(heights, heights[1:], strict=False)), heights
+    assert resize["settled"] == {"height": 640, "grow": False, "inline": ""}
 
 
 @_requires_chrome
@@ -510,6 +566,10 @@ def test_a_frame_x_never_answers_falls_back_after_the_wait_in_every_card_of_the_
         assert b["local"] == f"texto local de {IDS[1]}"
         assert b["note"] == _note("X no respondió en 8 s (¿sin red?)")
         assert b["toggle"] == "ver en X"
+    # PR 16 UX C1: the saved copy that stood in stays — the same nodes, nothing drawn again —
+    # and the card grows by no more than the note (the slot's own margin goes with it).
+    assert timeout["b_same_copy"] is True
+    assert timeout["b_note"] and 0 < timeout["b_grew"] <= timeout["b_note"] + 1
     # A frame that said anything is X answering: it waits for its height, it does not fall back.
     assert embedded["quiet"] is True
     assert timeout["q"]["frame"]["src"] == _src(QUIET, embedded["theme"])
@@ -678,7 +738,7 @@ _LAZY_PROBE = (
   out.at_bottom = frames();
   out.last_has_frame = !!document.querySelector('#cards .card:nth-child(50) iframe');
   // The slots jumped over are still watched; turning the page to the saved copy drops them.
-  const waiting = [...document.querySelectorAll('#cards .xembed')].filter(s => !s.firstChild);
+  const waiting = [...document.querySelectorAll('#cards .xembed')].filter(s => !s.querySelector('iframe'));
   out.waiting = waiting.length;
   document.querySelector('#vista button[data-vista="local"]').click();
   await until(() => waiting.every(s => let_go.has(s)), 3000);

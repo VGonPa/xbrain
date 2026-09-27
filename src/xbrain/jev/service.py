@@ -124,6 +124,12 @@ _CAP_ROOM = 1e-9
 #: which the page makes at once when a reply says `more`. What Jev read ships cut per surface
 #: (`dashboard.PAGE_SURFACE_CHARS`), so this bounds the reply's size too.
 STREAM_PAGE = 100
+#: Seconds an ended job keeps its stream in memory. Every page takes the blob at a job's end
+#: (`finish_ask`'s ranking) and never needs the tail, but a page may still be behind when the
+#: job ends (a hidden tab looks about once a minute): past this, the entries are let go and a
+#: late cursor gets no answers and a `next` at the end. Without it a whole-corpus stream
+#: (~3,000 entries, 5-10 MB) would live until the next job.
+STREAM_KEEP_S = 120.0
 #: A stream cursor: `0` (the start of whatever job is current) or `<job number>-<index>`.
 _CURSOR = re.compile(r"^(?:0|([1-9][0-9]*)-(0|[1-9][0-9]*))$")
 
@@ -212,8 +218,13 @@ class _Job:
     number: int = 0
     #: What the page's live results receive (`dashboard.streamed_answer` each), in arrival
     #: order: the answers already current first, then each one the pass banks. `None` for a
-    #: kind that does not stream (topics). Append-only: a cursor is an index into it.
+    #: kind that does not stream (topics). Append-only: a cursor is an index into it. Held
+    #: until `STREAM_KEEP_S` after the job ended (`_let_go`), then emptied; `stream_size`
+    #: keeps its length, so cursors keep their meaning.
     stream: list[dict[str, Any]] | None = None
+    stream_size: int = 0
+    #: When the job ended, on `_monotonic`'s clock (for `STREAM_KEEP_S`).
+    ended_mono: float | None = None
     #: How many answers the stream will hold if every post answers: current + to ask.
     stream_expected: int = 0
     #: The minimum the results open at (`ask.use_minimum`): the live list's refine default.
@@ -238,32 +249,41 @@ class _Job:
         """What `/api/job` sends; with `since` (a parsed cursor, `_read_cursor`), the stream's
         answers from there too — read under the same lock as the counters beside them."""
         with self.lock:
+            self._let_go()
             view = self.view_unlocked()
             if since is not None:
                 view["stream"] = self._stream_from(since)
             return view
 
+    def _let_go(self) -> None:
+        """An ended job's stream, `STREAM_KEEP_S` after its end: emptied (its size kept)."""
+        if (
+            self.stream
+            and self.ended_mono is not None
+            and _monotonic() - self.ended_mono >= STREAM_KEEP_S
+        ):
+            self.stream = []
+
     def _stream_from(self, since: tuple[int, int]) -> dict[str, Any] | None:
         """At most `STREAM_PAGE` answers from the cursor `since`, and the cursor after them.
         A cursor into another job (or `0`) starts at this job's first answer; one past this
-        job's end is not a cursor this server gave."""
+        job's end is not a cursor this server gave. Once the ended job's entries were let go
+        (`_let_go`), a cursor before its end gets none and the cursor at the end."""
         if self.stream is None:
             return None
+        size = self.stream_size
         number, index = since
         if number != self.number:
             index = 0
-        elif index > len(self.stream):
-            raise refuse(
-                f"cursor fuera de rango: el trabajo {self.number} tiene "
-                f"{len(self.stream)} respuestas"
-            )
+        elif index > size:
+            raise refuse(f"cursor fuera de rango: el trabajo {self.number} tiene {size} respuestas")
         answers = self.stream[index : index + STREAM_PAGE]
-        after = index + len(answers)
+        after = index + len(answers) if len(self.stream) == size else size
         return {
             "from": f"{self.number}-{index}",
             "next": f"{self.number}-{after}",
             "answers": answers,
-            "more": after < len(self.stream),
+            "more": after < size,
             "expected": self.stream_expected,
             "min": self.stream_min,
         }
@@ -409,6 +429,7 @@ def _finish(job: _Job, outcome: RunOutcome, extra: dict[str, Any]) -> None:
             **extra,
         }
         job.terminal = True
+        job.ended_mono = _monotonic()
     if outcome.interrupted:
         logger.warning(
             "trabajo de Jev interrumpido (%s): %d guardadas de %d",
@@ -422,6 +443,7 @@ def _fail(job: _Job, message: str) -> None:
     with job.lock:
         job.state, job.error, job.finished_at = "error", message, _now_iso()
         job.terminal = True
+        job.ended_mono = _monotonic()
     logger.error("el trabajo de Jev falló: %s", message)
 
 
@@ -656,19 +678,31 @@ class _AskKind:
         if not isinstance(pick, AskPick):  # pragma: no cover — the slot runs its own kind
             raise TypeError("an ask job carries an AskPick")
         job.post_price = _post_price(plan)
-        answer = _stream_entry(cfg, plan, jev)
-        _open_stream(
-            job,
-            lambda: [answer(record, True) for _, record in current_answers(plan).ranked],
-            asking=len(plan.selection.items),
-            minimum=use_minimum(plan, pick.minimum),
-        )
+        on_answer: Callable[[AskAssessment], None] | None = None
+        try:
+            answer = _stream_entry(cfg, plan, jev)
+        except Exception as exc:
+            # Display only: the job runs with no stream (the page shows its results at the
+            # end), never refused over what the page would show.
+            logger.warning(
+                "sin resultados en vivo: no se pudo preparar el stream (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            _open_stream(
+                job,
+                lambda: [answer(record, True) for _, record in current_answers(plan).ranked],
+                asking=len(plan.selection.items),
+                minimum=use_minimum(plan, pick.minimum),
+            )
+            on_answer = lambda record: _stream(job, answer(record, False))  # noqa: E731
         outcome = run_ask(
             cfg,
             plan,
             lambda: _Metered(make_client(), job),
             lock=lock,
-            on_answer=lambda record: _stream(job, answer(record, False)),
+            on_answer=on_answer,
             **_hooks(job),
         )
         try:
@@ -748,6 +782,7 @@ def _open_stream(
         opened = []
     with job.lock:
         job.stream = opened
+        job.stream_size = len(opened)
         job.stream_expected = len(opened) + asking
         job.stream_min = minimum
 
@@ -758,6 +793,7 @@ def _stream(job: _Job, entry: dict[str, Any]) -> None:
     with job.lock:
         if job.stream is not None and not job.terminal:
             job.stream.append(entry)
+            job.stream_size += 1
 
 
 def _read_cursor(params: dict[str, list[str]]) -> tuple[int, int]:

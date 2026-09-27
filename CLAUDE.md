@@ -746,8 +746,13 @@ generates an Obsidian wiki.
   `service.STREAM_PAGE` per reply): the query's current answers first, then each one
   `run.run_pass`' `on_answer` banks, each `dashboard.streamed_answer` (the same `answer_view`),
   from the job's memory, in ARRIVAL order; the page ranks by `askOrder` (`_rank`'s key) and
-  refills the one list (`askFillList`, cards kept by id, `askKeepAnchor`), then takes the
-  reloaded row at the end. It shares — never copies — the
+  refills the one list (`askFillList`, cards kept by id, `askKeepAnchor`), then refills the
+  SAME list with the reloaded row at the end. `more` is honoured only for a reply `askAbsorb`
+  took; a job-number change under a follower `switched`s to the new job (no 0 ms loop). The
+  status line is sticky, under the title, and stays one line at the end; «muy relevantes» =
+  `[jev].threshold` over this job's answers. An X slot is never empty: the saved copy stands in
+  (`xWait`) until X's first height (`xHeight`), and stays if X never answers (`xSettle`).
+  The server lets an ended job's stream go after `STREAM_KEEP_S`. It shares — never copies — the
   pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`),
   contract shape (`assess.contract`) and
   lock with topics. The server runs that same flow as a second kind (`service._AskKind`
