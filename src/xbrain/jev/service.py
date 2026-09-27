@@ -115,6 +115,8 @@ class _Job:
     state: str = "starting"
     terminal: bool = False
     refusal: str | None = None
+    #: 409 for a job the data or the price no longer allow; 503 when the server is stopping.
+    refusal_status: int = 409
     total: int = 0
     done: int = 0
     answered: int = 0
@@ -226,10 +228,14 @@ class _Metered:
         try:
             result = self._inner.ask(state, questions)
         except Exception:
+            # Fail closed: a call can raise AFTER the vendor answered and billed (an answer
+            # the adapter cannot model), and nothing here can tell which, so a raised call is
+            # charged its reservation against the cap.
             with self._job.lock:
                 self._job.in_flight_usd -= reserve
                 if not self._job.terminal:
                     self._job.failed_calls += 1
+                    self._job.usd += reserve
             raise
         except BaseException:
             with self._job.lock:
@@ -437,6 +443,9 @@ class JevService:
         and — when it may run — the single-use confirmation `evaluate` needs."""
         self._kind(kind)
         pick = parse_pick(body)
+        with self._state:
+            if self._closing:
+                raise ServeError(503, "el servidor se está parando")
         _, blob, jev = self._built()
         selection = self._select(pick, blob, jev)
         per_post = blob["cost"]["per_post"]
@@ -542,14 +551,14 @@ class JevService:
             if job.refusal is None:
                 self._job = job
         if job.refusal is not None:
-            raise ServeError(409, job.refusal)
+            raise ServeError(job.refusal_status, job.refusal)
         return job.view()
 
     def _recheck(self, job: _Job, blob: dict[str, Any], jev: JevPairs) -> Selection | None:
         """Under the lock, before anything is written: still running, still the same posts,
         still under the cap at today's mean. `None` (and `job.refusal`) when not."""
         if job.cancel.is_set():
-            job.refusal = "el servidor se está parando"
+            job.refusal, job.refusal_status = "el servidor se está parando", 503
             return None
         selection = self._select(job.pick, blob, jev)
         if tuple(item.id for item in selection.items) != job.ids:
