@@ -58,6 +58,11 @@ DEFAULT_SERVE_MAX_USD = 1.00
 #: 2026-09-22 corpus figures), so the default lets a whole-corpus ask through and stops a larger
 #: one (a far longer query, a grown corpus).
 DEFAULT_ASK_MAX_USD = 0.25
+#: How many of a query's results are shown at first: `xbrain jev ask` prints this many
+#: (`--top N`, `--all`), the Preguntar tab shows this many and adds as many with «Ver más».
+#: Results are RANKED by probability, never cut by `[jev].threshold` (a topic-membership bar
+#: that a yes/no to an open question rarely reaches).
+DEFAULT_ASK_TOP = 20
 #: The provider the CLI builds (`typesafe.PROVIDER` is this constant): what a call not yet
 #: made will be billed as, so an estimate is priced without importing the vendor SDK.
 DEFAULT_PROVIDER = "typesafe"
@@ -80,6 +85,7 @@ JEV_DEFAULTS: dict[str, str | float | int] = {
     "state_char_limit": DEFAULT_STATE_CHAR_LIMIT,
     "serve_max_usd": DEFAULT_SERVE_MAX_USD,
     "ask_max_usd": DEFAULT_ASK_MAX_USD,
+    "ask_top": DEFAULT_ASK_TOP,
 }
 
 #: USD per million INPUT tokens, per provider; output tokens are free. The rate, the model

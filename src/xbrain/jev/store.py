@@ -237,5 +237,6 @@ def load_ask_index(path: Path) -> AskIndex:
 
 
 def save_ask_index(index: AskIndex, path: Path) -> None:
-    """Write the history whole (atomic), queries sorted by sha."""
-    _dump(index.model_dump(mode="json"), path)
+    """Write the history whole (atomic), queries sorted by sha. A legacy field an entry does
+    not carry (`AskHistoryEntry.last_threshold`) is left out rather than written as null."""
+    _dump(index.model_dump(mode="json", exclude_none=True), path)

@@ -18,8 +18,10 @@ NOTHING HERE RE-IMPLEMENTS A NUMBER.
 * What Jev read is `assess.state_surfaces`: the state `build_topic_state` sends, split back
   into its evidence surfaces — the same order and the same cut.
 * What was asked («Preguntar», `asks`) is the query history (`data/jev/asks/index.json`), each
-  query's results recomputed now by `ask.saved_results` over its own filters and threshold, and
-  its cost `report.ask_cost_by_query` — so the static page shows what the server's `/api/asks` does.
+  query's results recomputed now by `ask.saved_results` over its own filters and minimum —
+  RANKED, every current answer, never cut at `[jev].threshold` — its cost
+  `report.ask_cost_by_query`, and each topic's post count (`ask.topic_counts`) for the form —
+  so the static page shows what the server's `/api/asks` does.
 
 PURE, EXCEPT ONE FUNCTION. `compute_jev_dashboard_data` touches no disk: which media files
 exist is `collect_jev_media`'s answer, handed in. `build_page_data` is the IO shell that loads
@@ -52,6 +54,7 @@ from xbrain.jev.ask import (
     AskQuery,
     load_history,
     saved_results,
+    topic_counts,
 )
 from xbrain.jev.assess import (
     CUT_MARKER,
@@ -765,7 +768,7 @@ def compute_jev_dashboard_data(
 
 
 #: `asks` when nothing was ever asked (and what a pure caller gets).
-NO_ASKS: dict[str, Any] = {"history": [], "surfaces": {}, "error": None}
+NO_ASKS: dict[str, Any] = {"history": [], "surfaces": {}, "topic_counts": {}, "error": None}
 #: The cost of a query no logged pass paid for (every answer came from the cache, or the
 #: passes that paid were never logged): `report.ask_cost`'s zero.
 _NO_COST = ask_cost([], "")
@@ -811,8 +814,9 @@ def _ask_cost(page: _AskPage, sha: str) -> dict[str, Any]:
 
 
 def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]], int]:
-    """The rows of one query: `ask.saved_results` over its last filters, `[jev].threshold` as
-    the topic bar and its own last threshold as the results bar."""
+    """The rows of one query, ranked: `ask.saved_results` over its last filters, with
+    `[jev].threshold` as the topic bar only and its own last minimum (0 for an entry written
+    before minimums, whose legacy `last_threshold` is never a cut)."""
     entry = saved.entry
     found = saved_results(
         page.jev.store,
@@ -821,7 +825,7 @@ def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]],
         AskFilters.from_json(entry.last_filters),
         saved.records,
         topic_threshold=page.topic_threshold,
-        threshold=entry.last_threshold,
+        minimum=entry.last_min,
         state_text=page.state_text,
     )
     rows = []
@@ -842,6 +846,16 @@ def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]],
     return rows, found.answered
 
 
+def _filters_view(stored: dict[str, Any]) -> dict[str, Any]:
+    """A use's filters as the page reads them: `AskFilters.as_json`, so an old entry's single
+    `topic` arrives as `topics` like every other. Unreadable, they go as stored (the row
+    carries the error)."""
+    try:
+        return AskFilters.from_json(stored).as_json()
+    except ValueError:
+        return stored
+
+
 def _ask_row(saved: SavedAsk, page: _AskPage) -> dict[str, Any]:
     """One query as the «Preguntar» tab lists it. Its results are recomputed NOW: an answer
     whose post changed since is not a result. A row the history rebuilt from the answer file
@@ -853,8 +867,8 @@ def _ask_row(saved: SavedAsk, page: _AskPage) -> dict[str, Any]:
         "first_asked_at": entry.first_asked_at.isoformat(),
         "last_asked_at": entry.last_asked_at.isoformat(),
         "times": entry.times,
-        "threshold": entry.last_threshold,
-        "filters": entry.last_filters,
+        "min": entry.last_min,
+        "filters": _filters_view(entry.last_filters),
         "rebuilt": entry.rebuilt,
         "answered": 0,
         "results": [],
@@ -898,7 +912,8 @@ def asks_view(
     )
     ordered = sorted(saved, key=lambda s: (s.entry.last_asked_at, s.entry.query_sha), reverse=True)
     history = [_ask_row(one, page) for one in ordered]
-    return {"history": history, "surfaces": page.surfaces, "error": error}
+    counts = topic_counts(jev.store, AskFilters(), jev=jev, threshold=topic_threshold)
+    return {"history": history, "surfaces": page.surfaces, "topic_counts": counts, "error": error}
 
 
 def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:

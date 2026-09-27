@@ -60,10 +60,12 @@ from xbrain.jev.ask import (
     AskPlan,
     AskQuery,
     ask_path,
+    filter_posts,
     finish_ask,
     plan_ask,
     question_chars,
     same_selection,
+    topic_counts,
 )
 from xbrain.jev.assess import Selection, select_items
 from xbrain.jev.client import CallSkipped, JevClient, JevError, JevResult, Question
@@ -83,6 +85,7 @@ from xbrain.jev.picks import (
     AskPick,
     TopicsPick,
     parse_ask,
+    parse_filters,
     parse_pick,
     pick_ids,
 )
@@ -522,7 +525,8 @@ class _AskKind:
     """`xbrain jev ask` from the page: its query, pre-filters and limit (`AskPick`), planned,
     re-checked, run and finished by the command's own functions (`ask.plan_ask`,
     `ask.same_selection`, `run.run_ask`, `ask.finish_ask`) — the same sequence, never a copy.
-    Results are at `[jev].threshold`; the history rule is `finish_ask`'s."""
+    Results are RANKED, cut only by the pick's own minimum; the history rule is
+    `finish_ask`'s."""
 
     def parse(self, body: Any) -> AskPick:
         return parse_ask(body)
@@ -586,10 +590,13 @@ class _AskKind:
         that function's one rule, its line in the history. With every answer current no
         client is built and nothing is logged."""
         plan: AskPlan = priced.context
+        pick = job.pick
+        if not isinstance(pick, AskPick):  # pragma: no cover — the slot runs its own kind
+            raise TypeError("an ask job carries an AskPick")
         job.post_price = _post_price(plan)
         outcome = run_ask(cfg, plan, lambda: _Metered(make_client(), job), lock=lock, **_hooks(job))
         try:
-            found = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+            found = finish_ask(cfg, plan, outcome, minimum=pick.minimum)
         except Exception as exc:
             # The answers are paid, saved and logged by now: a history that cannot be written
             # must not turn them into «El trabajo falló» with nothing to show.
@@ -776,6 +783,20 @@ class JevService:
             if row["sha"] == sha:
                 return {**row, "surfaces": _result_surfaces(row, blob)}
         raise ServeError(404, "esa consulta no está en el historial")
+
+    def ask_counts(self, body: Any) -> dict[str, Any]:
+        """How many posts each topic keeps under `body`'s other filters (`ask.topic_counts`,
+        the filter's own rule, its `topics` ignored) and how many the filters keep as they
+        are: what the Preguntar tab writes beside each topic. Reads only; costs nothing."""
+        filters = parse_filters(body)
+        _, _, jev = self._built()
+        threshold = self.cfg.jev_threshold
+        try:
+            kept, _ = filter_posts(jev.store, filters, jev=jev, threshold=threshold)
+            counts = topic_counts(jev.store, filters, jev=jev, threshold=threshold)
+        except JevError as exc:
+            raise refuse(str(exc)) from exc
+        return {"posts": len(kept), "topic_counts": counts}
 
     # ------------------------------------------------------------------ picks and prices
 

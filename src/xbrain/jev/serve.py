@@ -16,7 +16,9 @@ Routes: `/` (the page), `/api/data` (its blob), `/api/job`
 (the one job), `POST /api/job/cancel` (the page's soft stop of that job), `/_media/…`, per
 kind of pass (`topics`, `ask`) `POST /api/<kind>/estimate` and `POST /api/<kind>/evaluate`,
 and what was asked: `/api/asks` (the query history with each query's results) and
-`/api/ask/<sha>` (one query) — both read-only, both slices of the blob.
+`/api/ask/<sha>` (one query) — both read-only, both slices of the blob. `POST /api/ask/counts`
+(filters → how many posts each topic keeps under the others) reads only and costs nothing; it
+is a POST because it carries a body, and so takes the POST guards.
 
 Bound to 127.0.0.1 only; there is no option to bind anything else. Ctrl-C stops accepting
 requests, stops the job softly (what is in flight is waited for, saved and logged) and exits
@@ -188,6 +190,9 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(self._body(), (dict, type(None))):
                 raise refuse("el cuerpo debe ser un objeto JSON ({})")
             self._json(200, self.server.service.cancel_job())
+            return
+        if path == "/api/ask/counts":
+            self._json(200, self.server.service.ask_counts(self._body()))
             return
         route = _PASS_ROUTE.match(path)
         if route is None:

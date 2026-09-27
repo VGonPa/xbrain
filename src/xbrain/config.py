@@ -102,6 +102,7 @@ class Config:
     jev_state_char_limit: int
     jev_serve_max_usd: float
     jev_ask_max_usd: float
+    jev_ask_top: int
 
     @property
     def payload_dir(self) -> Path:
@@ -248,9 +249,9 @@ def _jev_max_usd(jev: dict, key: str, default: float) -> float:
     return value
 
 
-def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, float]:
+def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, float, int]:
     """`[jev]` → `(model, threshold, fallback_option, concurrency, state_char_limit,
-    serve_max_usd, ask_max_usd)`.
+    serve_max_usd, ask_max_usd, ask_top)`.
 
     THE DEFAULTS ARE IMPORTED FROM `xbrain.jev.defaults`, NEVER RETYPED (rule 5) — the same
     rule `_index_settings` above shouts about, and the import is LOCAL for the same reason:
@@ -262,6 +263,7 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, flo
     """
     from xbrain.jev.defaults import (
         DEFAULT_ASK_MAX_USD,
+        DEFAULT_ASK_TOP,
         DEFAULT_CONCURRENCY,
         DEFAULT_FALLBACK_OPTION,
         DEFAULT_MODEL,
@@ -288,6 +290,7 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, flo
     for key, default in (
         ("concurrency", DEFAULT_CONCURRENCY),
         ("state_char_limit", DEFAULT_STATE_CHAR_LIMIT),
+        ("ask_top", DEFAULT_ASK_TOP),
     ):
         message = f"[jev].{key} must be an integer >= 1"
         value = jev.get(key, default)
@@ -298,7 +301,7 @@ def _jev_settings(settings: dict) -> tuple[str, float, str, int, int, float, flo
     max_usd = _jev_max_usd(jev, "serve_max_usd", DEFAULT_SERVE_MAX_USD)
     ask_max_usd = _jev_max_usd(jev, "ask_max_usd", DEFAULT_ASK_MAX_USD)
     model = _jev_text(jev, "model", DEFAULT_MODEL)
-    return model, threshold, fallback, counts[0], counts[1], max_usd, ask_max_usd
+    return model, threshold, fallback, counts[0], counts[1], max_usd, ask_max_usd, counts[2]
 
 
 def load_config(repo_root: Path) -> Config:
@@ -366,6 +369,7 @@ def load_config(repo_root: Path) -> Config:
         jev_char_limit,
         jev_max_usd,
         jev_ask_max_usd,
+        jev_ask_top,
     ) = _jev_settings(settings)
     return Config(
         repo_root=repo_root,
@@ -401,4 +405,5 @@ def load_config(repo_root: Path) -> Config:
         jev_state_char_limit=jev_char_limit,
         jev_serve_max_usd=jev_max_usd,
         jev_ask_max_usd=jev_ask_max_usd,
+        jev_ask_top=jev_ask_top,
     )

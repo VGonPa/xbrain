@@ -6,8 +6,10 @@ whether current answers are re-asked (`force`). It is parsed here, strictly, and
 post ids from the page's own blob, so a pick means exactly the posts the page lists under it.
 
 The «Preguntar» ask (`/api/ask/…`) names its posts another way: a query, the pre-filters of
-`xbrain jev ask` and a limit (`AskPick`, `parse_ask`). The server's job slot and the pass lock
-are shared by both kinds.
+`xbrain jev ask` and a limit (`AskPick`, `parse_ask`), plus the minimum probability its
+results are recorded with (`min`). What the tab offers beside each topic is `parse_filters`'
+(the same filters, nothing else). The server's job slot and the pass lock are shared by both
+kinds.
 """
 
 from __future__ import annotations
@@ -147,24 +149,29 @@ def pick_ids(pick: TopicsPick, blob: dict[str, Any], vocab: list[Topic]) -> list
 #: sentence or two; the bound keeps a pasted document from being sent with every post.
 MAX_QUERY_CHARS = 2000
 #: The fields an ask body may carry: the query, `xbrain jev ask`'s pre-filters and its limit.
-ASK_FIELDS = ("query", "topic", "since", "until", "author", "only_evaluated", "limit")
+#: `topics` is a list (OR within topics); `topic` is the single topic an older page sends.
+FILTER_FIELDS = ("topics", "topic", "since", "until", "author", "only_evaluated")
+ASK_FIELDS = ("query", *FILTER_FIELDS, "limit", "min")
 
 
 @dataclass(frozen=True)
 class AskPick:
-    """One «preguntar» request: the query as filed (`normalize_query`), the pre-filters and
-    the limit — `xbrain jev ask QUERY [--topic] [--since] [--until] [--author]
-    [--only-evaluated] [--limit]`. Frozen and comparable, so a confirmation is bound to
-    exactly the query and filters it priced."""
+    """One «preguntar» request: the query as filed (`normalize_query`), the pre-filters, the
+    limit and the results' minimum — `xbrain jev ask QUERY [--topic …] [--since] [--until]
+    [--author] [--only-evaluated] [--limit] [--min]`. Frozen and comparable, so a
+    confirmation is bound to exactly the query, filters and minimum it priced."""
 
     query: str
     filters: AskFilters
     limit: int | None
+    minimum: float = 0.0
 
     def as_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"query": self.query, **self.filters.as_json()}
         if self.limit is not None:
             out["limit"] = self.limit
+        if self.minimum:
+            out["min"] = self.minimum
         return out
 
 
@@ -188,6 +195,27 @@ def _limit(value: Any) -> int | None:
     return value
 
 
+def _minimum(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+        raise refuse("`min` debe ser un número entre 0 y 1 (la relevancia mínima)")
+    return float(value)
+
+
+def parse_filters(body: Any) -> AskFilters:
+    """The pre-filters a request body names, alone (`/api/ask/counts`), or a 400."""
+    if not isinstance(body, dict):
+        raise refuse("el cuerpo debe ser un objeto JSON")
+    unknown = sorted(set(body) - set(FILTER_FIELDS))
+    if unknown:
+        raise refuse(f"campos desconocidos: {', '.join(unknown)}")
+    try:
+        return AskFilters.from_json(body)
+    except ValueError as exc:
+        raise refuse(str(exc)) from exc
+
+
 def parse_ask(body: Any) -> AskPick:
     """The ask a request body names — a query, optional filters, an optional limit — or a 400.
 
@@ -200,10 +228,10 @@ def parse_ask(body: Any) -> AskPick:
     if unknown:
         raise refuse(f"campos desconocidos: {', '.join(unknown)}")
     query = _query(body.get("query"))
-    try:
-        filters = AskFilters.from_json(
-            {key: body[key] for key in ASK_FIELDS if key not in ("query", "limit") and key in body}
-        )
-    except ValueError as exc:
-        raise refuse(str(exc)) from exc
-    return AskPick(query=query, filters=filters, limit=_limit(body.get("limit")))
+    filters = parse_filters({key: body[key] for key in FILTER_FIELDS if key in body})
+    return AskPick(
+        query=query,
+        filters=filters,
+        limit=_limit(body.get("limit")),
+        minimum=_minimum(body.get("min")),
+    )

@@ -1457,6 +1457,7 @@ _CONFIG_SETTINGS = {
     "char_limit": 50_000,
     "serve_max_usd": 0.25,
     "ask_max_usd": 0.5,
+    "ask_top": 7,
 }
 #: Four answers from one model and one from another, named so that name order and count
 #: order disagree.
