@@ -1136,7 +1136,9 @@ query, once answers of at least two different sizes exist. Until then they are t
 (2026-09-27): about 4.3 characters per token on the evidence, and about 1,050 fixed tokens
 per call beyond the topic questions. The line says which model it used (`a priori` or
 `medido en N respuestas`). The sums the fit needs are kept in `data/jev/asks/index.json`, so
-an estimate never reads every answer file. Tokens are priced by the same formula every bill
+an estimate never reads every answer file. Answers saved but never folded in (a crash between
+saving the file and writing the history) are folded in on the next read: that file is newer
+than `index.json`. Tokens are priced by the same formula every bill
 uses ([Vendor facts](#vendor-facts-with-their-dates)).
 
 When the estimate is at or under `[jev].ask_max_usd` (default `0.25 $`), it asks Jev with no
@@ -1149,10 +1151,12 @@ answered some, the corpus moved), or if the new estimate is above the cap and no
 confirmed a price.
 
 **What a whole-corpus query costs, estimated, not measured.** The corpus in
-[What a pass actually costs](#what-a-pass-actually-costs) has 2,609 posts, a mean of 2,476
-characters of evidence, and about 170 characters of question. With the topics fit above,
-that is about 2,597 × 1,096 + 2,597 × 2,476 ÷ 4.34 ≈ 4.3 M tokens, **about 0.18 $**. The
-prior estimates the same corpus at 0.18 $ as well. Most of it is the per-call part: an ask
+[What a pass actually costs](#what-a-pass-actually-costs) has 2,609 posts, of which 2,601
+have evidence (the other 8 are never asked), a mean of 2,476 characters of evidence, and about
+170 characters of question. With the topics fit above (about 1,096 fixed tokens per ask call,
+4.34 characters per token), that is 2,601 × 1,096 + 2,601 × 2,476 ÷ 4.34 ≈ 4.3 M tokens,
+**about 0.18 $**. The prior (2,601 × 1,000 + 2,601 × 2,646 ÷ 4.0) estimates the same corpus at
+0.18 $ as well. Most of it is the per-call part: an ask
 has one question, but every call still carries the provider's fixed prompt. The bill is the
 one the run reports from the provider's usage.
 

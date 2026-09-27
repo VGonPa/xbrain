@@ -1240,6 +1240,51 @@ def test_cli_refuses_when_the_price_rose_over_the_cap_while_nobody_confirmed(
     assert not cfg.jev_runs_path.exists()
 
 
+def _touch(path: Path, seconds: float) -> None:
+    """Move `path`'s mtime `seconds` from now — which of two files was written last."""
+    import os
+
+    moment = time.time() + seconds
+    os.utime(path, (moment, moment))
+
+
+def test_answers_saved_after_the_history_are_folded_into_the_calibration(cfg: Config):
+    """A crash between saving a query's file and writing the history leaves paid answers the
+    calibration never saw. The file is then newer than `index.json`, and only its answers newer
+    than the entry's last use are folded in — the older ones were counted already."""
+    plan, _, _ = _run(cfg, _ByText())
+    path = _ask_path(cfg, plan.query)
+    records = load_asks(path, plan.query)
+    entry = load_history(cfg).queries[plan.query.sha]
+    records["2"] = records["2"].model_copy(
+        update={"asked_at": entry.last_asked_at + timedelta(minutes=5), "input_tokens": 250}
+    )
+    save_asks(plan.query, records, path)
+    _touch(cfg.jev_asks_dir / ASK_INDEX, -60)
+
+    history = load_history(cfg)
+
+    assert history.calibration.answers == 4
+    assert history.calibration.tokens == 3 * 100 + 250
+    assert history.queries[plan.query.sha] == entry
+
+
+def test_a_file_older_than_the_history_is_not_counted_twice(cfg: Config):
+    """An entry removed by hand from a newer `index.json` is rebuilt, but its answers were
+    folded when they were paid: the calibration does not count them again."""
+    plan, _, _ = _run(cfg, _ByText())
+    index_path = cfg.jev_asks_dir / ASK_INDEX
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    data["queries"] = {}
+    index_path.write_text(json.dumps(data), encoding="utf-8")
+    _touch(_ask_path(cfg, plan.query), -60)
+
+    history = load_history(cfg)
+
+    assert history.queries[plan.query.sha].rebuilt is True
+    assert history.calibration.answers == 3
+
+
 # --------------------------------------------------------------------------- the page's view
 # `dashboard.asks_view`: what the static `jev.html` and the server's `/api/asks` show of every
 # query asked — results recomputed now over each query's own filters and threshold, its cost
