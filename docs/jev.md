@@ -248,9 +248,9 @@ returns it, whatever xbrain does with it next:
 | `query_sha` | an `ask` pass only: which query it paid for (the name of `data/jev/asks/<sha>.json`) |
 | `started_at` · `finished_at` | UTC. The page's history table shows the start, in local time |
 | `requests` | calls xbrain **sent**, each item once. Retries inside the vendor SDK are invisible to xbrain and are not counted |
-| `ok` | answers kept in the side-car |
+| `ok` | answers kept in the side-car — saved to disk |
 | `failed` | calls that raised (a provider error, a 402) plus answers xbrain refused (a malformed answer set) |
-| `unsaved` | only after Ctrl-C in the terminal: answers that came back but were not yet saved when the interrupt landed. Paid, not kept, not failed. A stop of a `jev serve` job waits for every call, so it never leaves any |
+| `unsaved` | answers that came back and never reached the disk: after Ctrl-C in the terminal, those not yet saved when the interrupt landed; on any pass, those whose final save failed (a full disk). Paid, not kept, not failed. A stop of a `jev serve` job waits for every call, so only a failed save leaves any there |
 | `input_tokens_by_provider` · `input_tokens` | tokens of **every** answer that came back — refused and unsaved ones included, because each was billed — per provider, and their sum. Empty and 0 when nothing answered |
 | `input_tokens_unknown` | answers that reported no usage |
 | `models` | the distinct models that answered, sorted |
@@ -545,9 +545,11 @@ Top to bottom:
      provider reported usage and has a price). Unpriced providers are named, not averaged in.
    - **Evaluaciones vigentes**: how many current answers the side-car holds and what exactly
      those cost.
-   - **Histórico por pasada** (click to unfold): one row per `xbrain jev topics` pass,
-     newest first — start date, requests, ok, failed, tokens, cost, model, and for an
-     interrupted pass how many calls were in flight and how many answers were not saved.
+   - **Histórico por pasada** (click to unfold): one row per topics pass — an
+     `xbrain jev topics` run or a topics job from `xbrain jev serve` — newest first: start
+     date, requests, ok, failed, tokens, cost, model, and for an interrupted pass how many
+     calls were in flight and how many answers were not saved (a pass whose final save
+     failed shows its unsaved answers too). Asks are billed in the Preguntar tab instead.
 
    Answers no logged pass covers are named in one line
    (`N evaluaciones fuera del registro de pasadas (~X $ según sus propios tokens) …`) and are
@@ -842,7 +844,7 @@ If the tab ever fails to draw, it says so inside the tab (and logs the error to 
 
 **Limitation.** An assessment records the model that *answered*, never the one *requested*;
 the run log does not record it either. So the tab cannot say which `[jev].model` produced the
-stored answers. Recording the requested model in `JevRun` is a follow-up.
+stored answers.
 
 Two more things the page cannot tell you itself:
 
@@ -1023,9 +1025,7 @@ code:
 Every estimate and job view carries its `kind` (`topics` or `ask`): the server has ONE job
 slot for both, and both take the pass lock. The page's data is `GET /api/data`
 (the same blob the page embeds); its `serve.finished_at` is the last job whose files that data
-already includes, which is how an idle tab knows a job ended since. `GET /api/cards?ids=a,b`
-returns those posts' cards, in that order, and 404 names any id the corpus lacks: a by-id card
-lookup, which no page control calls.
+already includes, which is how an idle tab knows a job ended since.
 
 **What stops a job from spending more than you meant:**
 
@@ -1159,8 +1159,8 @@ The two numbers are **fitted** (least squares) on the ask answers already paid f
 query, once answers of at least two different sizes exist. Until then they are the prior:
 **1,000 tokens per call and 4.0 characters per token** (`defaults.DEFAULT_ASK_TOKENS_PER_CALL`,
 `DEFAULT_CHARS_PER_TOKEN`). The prior comes from a fit over 293 real topics answers
-(2026-09-27): about 4.3 characters per token on the evidence, and about 1,050 fixed tokens
-per call beyond the topic questions. The line says which model it used (`a priori` or
+(2026-09-27): about **4.34 characters per token** on the evidence, and about **1,050 fixed
+tokens per call** beyond the topic questions. The line says which model it used (`a priori` or
 `medido en N respuestas`). The sums the fit needs are kept in `data/jev/asks/index.json`, so
 an estimate never reads every answer file. Answers saved but never folded in (a crash between
 saving the file and writing the history) are folded in on the next read: that file is newer
@@ -1173,16 +1173,17 @@ having asked nothing; `--yes` answers yes for you.
 
 **The prompt never holds the lock.** After you confirm, it takes the pass lock, plans again
 and refuses — asking nothing — if the posts it would pay for changed meanwhile (another pass
-answered some, the corpus moved), or if the new estimate is above the cap and nobody
-confirmed a price.
+answered some, the corpus moved), or if the price moved past what was agreed: above the
+estimate you said yes to, or, when nobody was asked, above the cap. `--yes` agreed to spend
+without asking, so it is held to neither.
 
 **What a whole-corpus query costs, estimated, not measured.** The corpus in
 [What a pass actually costs](#what-a-pass-actually-costs) has 2,609 posts, of which 2,601
-have evidence (the other 8 are never asked), a mean of 2,476 characters of evidence, and about
-170 characters of question. With the topics fit above (about 1,096 fixed tokens per ask call,
-4.34 characters per token), that is 2,601 × 1,096 + 2,601 × 2,476 ÷ 4.34 ≈ 4.3 M tokens,
-**about 0.18 $**. The prior (2,601 × 1,000 + 2,601 × 2,646 ÷ 4.0) estimates the same corpus at
-0.18 $ as well. Most of it is the per-call part: an ask
+have evidence (the other 8 are never asked). Each call sends a mean of **2,646 characters**:
+2,476 of evidence plus about 170 of question. With the topics fit above (1,050 fixed tokens
+per call, 4.34 characters per token), that is 2,601 × 1,050 + 2,601 × 2,646 ÷ 4.34 ≈ 4.3 M
+tokens, **about 0.18 $**. The prior (2,601 × 1,000 + 2,601 × 2,646 ÷ 4.0) estimates the same
+corpus at 0.18 $ as well. Most of it is the per-call part: an ask
 has one question, but every call still carries the provider's fixed prompt. The bill is the
 one the run reports from the provider's usage.
 
@@ -1247,7 +1248,7 @@ confirmation waits**. A second pass is refused with exit 75. `--dry-run` takes n
 
 The default threshold and the question's wording have **not been tuned** for search yet; the
 threshold is `[jev].threshold`, the topics one. A few queries labelled by hand are what that
-tuning needs (issue #211). To label one:
+tuning needs. To label one:
 
 1. Look at the cost first: `xbrain jev ask "<query>" --dry-run`. Without filters the query
    pays for the whole corpus (about 0.18 $, see above).
@@ -1368,8 +1369,9 @@ consequences:
   the size of the side-car.
 - **Two passes at once are refused.** The file is rewritten wholesale on every save, so two
   passes that each loaded it would each save their own map and the second would drop the
-  first one's records. `jev topics` and `jev serve`'s jobs hold `data/jev/.lock` from reading
-  the side-car to saving it, and a second pass is refused (see [Daily use](#daily-use)).
+  first one's records. `jev topics`, `jev ask` and `jev serve`'s jobs hold `data/jev/.lock`
+  from reading the side-car to saving it, and a second pass is refused — exit 75 in the
+  terminal (see [Daily use](#daily-use)).
 
 It is written atomically and dumped sorted and pretty, so an unchanged corpus re-dumps
 byte-identically and a hand `diff` between two runs shows only what moved.
@@ -1410,7 +1412,9 @@ model that answered, so a report can always say what it priced.
 
 ## Troubleshooting
 
-Operator-facing failures print as `Error: <mensaje>` and exit 1.
+Operator-facing failures print as `Error: <mensaje>` and exit 1. Two exits are not failures:
+another pass holding the pass lock exits **75** (try again when it ends), and Ctrl-C exits
+**130** after saving what was paid.
 
 ```text
 Error: TYPESAFE_API_KEY no encontrada: expórtala o pégala en <repo>/.env (ver .env.example)
@@ -1471,7 +1475,8 @@ Error: no se pudo guardar <path> (N evaluaciones pagadas sin guardar): …
 ```
 
 The run completed and the write failed — a full disk, a permission, a read-only mount. **N
-records were billed and are lost.** Fix the path and re-run.
+records were billed and are lost.** The run log books them as `unsaved`, never `ok` (the ones
+an earlier checkpoint saved stay `ok`). Fix the path and re-run.
 
 ```text
 Error: el vocabulario está vacío: ejecuta `xbrain vocab` antes de `xbrain jev topics`

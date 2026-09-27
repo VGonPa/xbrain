@@ -666,8 +666,9 @@ generates an Obsidian wiki.
   alone, so a second judge OVERWRITES the first's records; `provider`/`model` are provenance,
   not a panel. Every pass that SENT a request appends one `JevRun` line to
   `data/jev/runs.jsonl` (requests, ok, failed, unsaved, tokens per provider, interrupted),
-  counted at the client seam (`CountingJevClient`) and appended from `jev.run.run_topics`'
-  `finally` — every exit path, 402s and Ctrl-C included, and the log step never becomes the
+  counted at the client seam (`CountingJevClient`) and appended from `jev.run.run_pass`'
+  `finally` — every exit path (`ok` = what a save persisted; a failed final save books the
+  rest `unsaved`), 402s and Ctrl-C included, and the log step never becomes the
   verdict; tokens, never dollars (priced at read time by `report.run_history`, which also
   prices assessments no logged pass covers as "fuera del registro"). `jev dashboard` compares at the FIXED
   `[jev].threshold`, recomputes nothing in the browser (no slider, no JS mirror, no node in
@@ -688,8 +689,9 @@ generates an Obsidian wiki.
   `build_topic_questions` (never copied into the template), `STATE_SURFACE_KEYS`/`CUT_MARKER`
   from assess.py, the pass estimate from `report.estimate_selection` (topics-only means:
   `topics_pass_estimate`); settings through `Config.jev_settings()`. Plus
-  cost total / per pass / per post. `jev topics` spends, and so does a job started through
-  `jev serve`'s API (`jev/picks.py` → `jev/service.py` → `jev/serve.py`: the page live on
+  cost total / per pass / per post. `jev topics` and `jev ask` spend, and so does a job
+  started through `jev serve`'s API (`jev/picks.py` → `jev/service.py` → `jev/serve.py`,
+  refusals `jev/errors.py`'s `ServeError`: the page live on
   127.0.0.1 ONLY; routes `/api/<kind>/estimate|evaluate`, ONE job slot for every kind; the
   estimate = `select_items` + `topics_pass_estimate` over the blob's `cost.per_post`; a
   single-use, 10-minute confirmation bound to the pick as asked; the job re-selects and
@@ -702,15 +704,18 @@ generates an Obsidian wiki.
   reason `cancelado`), a job that did not end cleanly un-hides the panel, and an idle page
   watches `/api/job` against `blob.serve.finished_at`). A paid pass holds
   `data/jev/.lock` (`jev/lock.py`, `flock`) from LOADING the side-car to saving it —
-  `run_topics` requires the `PassLock` handle — so the terminal and the server never lose
-  each other's records; `jev topics` refused by it exits 75. `jev ask "<query>"` (`jev/ask.py`)
+  `run_topics`/`run_ask` require the `PassLock` handle — so the terminal and the server never
+  lose each other's records; `jev topics` and `jev ask` refused by it exit 75. `jev ask "<query>"` (`jev/ask.py`)
   asks ONE Noul per post (query verbatim as `true`, same state as topics), caches answers per
   query in `data/jev/asks/<sha>.json` by contract, keeps each query's last use + the cost-model
   sums in `asks/index.json`, logs `kind: "ask"` + `query_sha` in runs.jsonl (topics cost views
-  filter it out; `report.ask_cost` prices a query; `jev asks` lists them). Flow shared with PR
-  12's server: `ask.plan_ask` (no lock) → confirm above `[jev].ask_max_usd` → lock, plan again,
-  `same_selection` → `run.run_ask` → `ask.finish_ask` (history rule). Estimate = posts ×
-  per_call + chars / chars_per_token, fitted on paid answers (prior 1,000 and 4.0). `--topic`
+  filter it out; `report.ask_cost` prices a query; `jev asks` lists them). Flow shared with the
+  server (`service._AskKind`): `ask.plan_ask` (no lock) → confirm above `[jev].ask_max_usd` →
+  lock, plan again, `same_selection` and the price agreed (a prompted yes holds its estimate)
+  → `run.run_ask` → `ask.finish_ask` (history rule). Estimate = `CostModel.tokens`: posts ×
+  per_call + chars / chars_per_token, fitted on paid answers (prior 1,000 and 4.0); the
+  server's per-post price uses the same method. An unknown `--topic` is `JevFilterRefused`.
+  The page reads the history with `load_history(skip_unreadable=True)`. `--topic`
   judges Jev at `[jev].threshold`, never at `--threshold`. It shares — never copies — the
   pool (`assess.run_pool`), funnel (`assess.select_by_contract`), pass (`run.run_pass`),
   contract shape (`assess.contract`) and

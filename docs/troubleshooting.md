@@ -192,13 +192,14 @@ on that keyless `claude-code` (or `manual`) track; they have no `api` track at a
 LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an optional
 fallback fetcher for JavaScript-heavy pages.
 
-`TYPESAFE_API_KEY` is the third, and the only one attached to a command that bills
-per run: `xbrain jev topics`, the second opinion on topic assignment (and the jobs you
-start through `xbrain jev serve`'s API, which run the same pass). Nothing in the
+`TYPESAFE_API_KEY` is the third, and the only one attached to commands that bill
+per run: `xbrain jev topics`, the second opinion on topic assignment; `xbrain jev ask`,
+which asks the corpus a question; and the jobs you start through `xbrain jev serve`'s API,
+which run those same passes. Nothing in the
 pipeline needs it — `jev` is a side-car you can ignore entirely — and unlike the other
 two it may also be read from `<repo>/.env` (gitignored; `.env.example` is the committed
-template). `xbrain jev report` and `xbrain jev dashboard` need no key at all: they
-re-read what `jev topics` already paid for. See [jev.md](jev.md).
+template). `xbrain jev report`, `xbrain jev dashboard` and `xbrain jev asks` need no key at
+all: they re-read what `jev topics` and `jev ask` already paid for. See [jev.md](jev.md).
 
 ## `video-digest` / `verify` say "no pending" or "nothing to verify"
 
@@ -464,14 +465,16 @@ right, so nobody was stranded; the help was the copy that lied.
 
 ## `xbrain jev` — the second opinion on topics
 
-Every failure of `xbrain jev topics|report|dashboard|serve` is covered, message by message,
+Every failure of `xbrain jev topics|report|dashboard|serve|ask|asks` is covered, message by message,
 in **[jev.md § Troubleshooting](jev.md#troubleshooting)** — a missing or empty
 `TYPESAFE_API_KEY`, an unimportable SDK, per-item `FALLO` lines, a run where every call
 failed, the Ctrl-C checkpoint, a failed save that names what it cost you, an unreadable
 side-car, and the five refusals that protect an existing report or page from being
 overwritten with zeros.
 
-Three that send people here first, because the symptom does not name Jev:
+Six that send people here first, because the symptom does not name Jev (or not clearly).
+The exits: **1** is a failure, **75** another pass holds the lock, **130** Ctrl-C after saving
+what was paid.
 
 - **`0 evaluaciones vigentes de N guardadas` with a full side-car.** The vocabulary or
   the evidence moved, so the stored contracts no longer describe today's question. The
@@ -485,9 +488,10 @@ Three that send people here first, because the symptom does not name Jev:
   re-bill; only a restore that leaves both the item's evidence and the vocabulary
   untouched leaves an assessment current. Retired records report as `caducadas` on the
   next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
-- **`otra pasada de Jev está en curso (…)`.** A `jev topics` in another terminal, or a job
-  started from `xbrain jev serve`, holds `data/jev/.lock`. Nothing was read or spent; wait
-  for it and re-run; `jev topics` exits **75** here (EX_TEMPFAIL), so a script can retry.
+- **`otra pasada de Jev está en curso (…)`.** A `jev topics` or `jev ask` in another
+  terminal, or a job started from `xbrain jev serve`, holds `data/jev/.lock`. Nothing was read
+  or spent; wait for it and re-run; `jev topics` and `jev ask` exit **75** here
+  (EX_TEMPFAIL), so a script can retry.
   The lock dies with its process, so there is never one to delete.
   [Why](jev.md#daily-use).
 - **A red *"La página no pudo dibujarse"* banner on `jev.html`.** The page's script failed
