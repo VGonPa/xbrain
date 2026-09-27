@@ -19,6 +19,7 @@ read it, and throw it away without touching the corpus.
 - [`xbrain jev topics` — what a run does](#xbrain-jev-topics--what-a-run-does)
 - [`xbrain jev report` — reading the comparison](#xbrain-jev-report--reading-the-comparison)
 - [`xbrain jev dashboard` — reading the page](#xbrain-jev-dashboard--reading-the-page)
+- [`xbrain jev serve` — the page, live, with a way to ask](#xbrain-jev-serve--the-page-live-with-a-way-to-ask)
 - [Staleness: when an assessment stops counting](#staleness-when-an-assessment-stops-counting)
 - [Where the files live, and what protects them](#where-the-files-live-and-what-protects-them)
 - [Vendor facts, with their dates](#vendor-facts-with-their-dates)
@@ -59,6 +60,7 @@ With that in place:
    fallback_option = "otro"    # the escape option of the primary question
    concurrency = 8             # requests in flight
    state_char_limit = 100000   # evidence is cut here; assessments record the pre-cut length
+   serve_max_usd = 1.0         # the most one job started from `xbrain jev serve` may cost
    ```
 
 Every `[jev]` key is also documented inline in
@@ -73,10 +75,12 @@ uv run xbrain jev topics                    # the whole backlog
 uv run xbrain jev report                    # data/jev/topics-report.{json,md} at [jev].threshold
 uv run xbrain jev report --threshold 0.95   # the same side-car, read more strictly
 uv run xbrain jev dashboard                 # <output_dir>/jev.html at [jev].threshold — open the printed URI
+uv run xbrain jev serve                     # the same page, live on http://127.0.0.1:8765/
 ```
 
-`jev topics` is the only command that spends money. `report` and `dashboard` re-read the
-side-car it already paid for: no API call, no key needed, no cost, any number of times.
+`jev topics` spends money, and so does a job you confirm from the page `jev serve` serves.
+`report` and `dashboard` re-read the side-car already paid for: no API call, no key needed,
+no cost, any number of times. `jev serve` costs nothing until you confirm a job.
 
 The full option list:
 
@@ -85,9 +89,23 @@ The full option list:
 | `xbrain jev topics` | `--id TEXT` (repeatable — only these items) · `--limit INTEGER` · `--force` · `--dry-run` |
 | `xbrain jev report` | `--threshold FLOAT` (default `[jev].threshold`) |
 | `xbrain jev dashboard` | none — it always compares at `[jev].threshold` |
+| `xbrain jev serve` | `--port INTEGER` (default 8765; 0 = any free port) · `--no-open` (do not open the browser) |
 
-Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed) ·
-**130** interrupted with Ctrl-C.
+Exit codes: **0** normal · **1** operator error (no key, a refusal, every item failed, a busy
+port) · **130** interrupted with Ctrl-C (`jev topics`, and `jev serve` when you stop it).
+
+**One pass at a time.** `jev topics` and a job started from `jev serve` both hold
+`data/jev/.lock` from the moment they read the side-car to the moment they have saved it. A
+second pass started meanwhile is refused before it reads anything or spends anything, and
+the message says who holds the lock:
+
+```text
+Error: otra pasada de Jev está en curso (xbrain jev serve · pid 4242 · desde 2026-09-27T10:12:03+00:00): espera a que termine y vuelve a lanzarla. Candado: data/jev/.lock
+```
+
+`--dry-run` only reads, so it neither needs the lock nor waits for it. The lock is a
+kernel lock on the file (`flock`): a pass that crashes or is killed releases it with its
+process, so there is never a stale lock to delete by hand. The file itself stays, empty.
 
 ## `xbrain jev topics` — what a run does
 
@@ -723,14 +741,15 @@ written into the page's code; each comes from Python in the blob (`config`), so 
 what `xbrain jev topics` sends as of the last `xbrain jev dashboard`. To change a setting,
 edit `config.toml` and re-run `xbrain jev dashboard`.
 
-1. **Ajustes** — the five `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
+1. **Ajustes** — the six `[jev]` keys (`JEV_DEFAULTS` in `jev/defaults.py`, the same list
    `config.toml` is validated against, read through `Config.jev_settings()`), each with the
    value in effect, its default (*por defecto* or *por defecto: X*), one line on what changing
    it does (the threshold moves every number but retires nothing; a new fallback retires every
    answer; a new char limit only the posts whose cut moves; the model and concurrency retire
    nothing) and its key. The intro separates the two kinds: the threshold, the fallback and the
-   char limit built this page; the model (*Modelo que se pedirá*) and the concurrency only
-   matter to the next `xbrain jev topics`. Under the model, the models that answered the
+   char limit built this page; the model (*Modelo que se pedirá*), the concurrency and
+   `serve_max_usd` (*Tope por trabajo desde la página*) only matter to the next pass, from
+   the terminal or from the page `xbrain jev serve` serves. Under the model, the models that answered the
    current answers, most answers first, and the reminder that a stored answer does not record
    which model was *requested*. Then the input price per provider from `INPUT_USD_PER_MTOK`
    (not a config key) and *Los tokens de salida son gratis.*
@@ -778,11 +797,82 @@ Two more things the page cannot tell you itself:
 - It is **static**. It goes stale the moment the side-car, the run log, the corpus or
   `vocab.yaml` moves. `dashboard.html` and `jev.html` are siblings — same directory, same
   template mechanism, same visual language — but different commands write them and neither
-  regenerates the other. Re-run `xbrain jev dashboard` to refresh.
+  regenerates the other. Re-run `xbrain jev dashboard` to refresh, or use `xbrain jev serve`,
+  which draws the page from the files each time you load it.
 
 `xbrain generate` links `jev.html` from `_index.md` by absolute `file://` URI, exactly as
 it links `dashboard.html`, **but only when the page is already on disk**: the link appears
 after your first `xbrain jev dashboard`, on the next `generate`.
+
+## `xbrain jev serve` — the page, live, with a way to ask
+
+```bash
+uv run xbrain jev serve                  # http://127.0.0.1:8765/, opened in your browser
+uv run xbrain jev serve --port 9000 --no-open
+```
+
+It serves the page `xbrain jev dashboard` writes, drawn live from the files: load it again
+after a `jev topics` in another terminal and the new answers are there. Its Configuración tab
+says so on the page's own row in *Ficheros*. It listens on **127.0.0.1 only**, and there is
+no option to listen on anything else. Photos are served from `<output_dir>/_media/`, the
+folder `xbrain generate` mirrors them into; the server looks up which photos exist once, when
+it starts, so photos mirrored later show after a restart.
+
+It also answers a small JSON API, which is how the page asks Jev about posts without leaving
+the browser. Every step is the terminal's, run by the same code:
+
+1. **Estimate** (`POST /api/estimate`). The selection is one of: some posts by id, a topic
+   (the posts the page lists under it: enrich's topics and Jev's rows), the next N posts
+   without a current answer, the posts behind a pair on the Topics or Comparar tab, or the
+   posts in a confidence band — and whether to re-ask current answers (`force`). The server
+   runs `select_items`, the `--dry-run` count, and answers how many posts it would ask, how
+   many it skips as current or without evidence, and what that would cost: **an estimate**,
+   the mean cost of the answers already paid for (the Configuración tab's figure) times the
+   posts. When the job may run, it also returns a one-time confirmation.
+2. **Confirm** (`POST /api/evaluate` with that confirmation). It starts **one** background
+   job: under the pass lock it reads the side-car again, selects again, and refuses if the
+   posts are no longer exactly the ones estimated (another pass answered some meanwhile).
+   Then it runs the same pass as `xbrain jev topics`: the `--force` backup, checkpoints every
+   25 answers, one line in `data/jev/runs.jsonl`, the same key (`TYPESAFE_API_KEY`).
+3. **Progress** (`GET /api/job`): posts done of total, answers, failed calls, tokens and
+   dollars so far, then the outcome — how many were saved, which failed and why, whether
+   the pass was logged.
+
+The page's data is `GET /api/data` (the same blob the page embeds) and one post's card is
+`GET /api/cards?ids=a,b`.
+
+**What stops a job from spending more than you meant:**
+
+- **The cap, `[jev].serve_max_usd`** (default 1.00 $). A selection whose estimate is above
+  it gets no confirmation, and the answer says why. The estimate is a mean, so a job is also
+  **stopped when what it has really spent reaches the cap**, counted from each answer's own
+  tokens as it lands; what was answered is saved and logged, and the job says *tope*. An
+  answer with no token count adds nothing to that count, so the stop can come late, never
+  early. The terminal's `xbrain jev topics` has no cap.
+- **No mean, no job.** When no current answer has both a token count and a price, there is
+  nothing to estimate from and the cap cannot be checked, so the page gets no confirmation.
+  Run a small pass from the terminal first (`xbrain jev topics --limit 5`).
+- **One job at a time**, and never beside a terminal pass (the pass lock).
+- **A confirmation is for one selection, once.** It is bound to the selection as you asked
+  it, not just to the posts it came to: «post 3» and «the next unevaluated post» can both be
+  post 3 today, and confirming one does not confirm the other.
+- **Only this page can ask.** The page carries a random token the server makes when it
+  starts; every POST needs it, needs an `Origin` that is this server, and needs a JSON body.
+  Every request needs a `Host` that is this server (`127.0.0.1:<port>` or
+  `localhost:<port>`), so a web page elsewhere cannot reach the API even by pointing its own
+  name at your machine.
+- **Re-asking current answers is explicit** (`force`), as `--force` is in the terminal, and
+  it makes the same backup first.
+
+**Ctrl-C** stops accepting requests, stops the running job at its next call (what was
+answered is saved and the pass is logged as interrupted, as in the terminal), and exits
+**130**. The job's thread is not a daemon: even a second Ctrl-C leaves Python waiting for
+that save.
+
+The server builds the page once before it listens, so a corrupt side-car or a missing
+vocabulary is refused the way `jev dashboard` refuses it. Unlike `jev dashboard`, it serves a
+corpus with **no answers yet**: that is where a first job can start, once a terminal pass has
+given it a mean to estimate from.
 
 ## Staleness: when an assessment stops counting
 
@@ -833,7 +923,8 @@ retires nothing and says nothing.
 |---|---|
 | `data/jev/topics.json` | the side-car: one `TopicAssessment` per item id |
 | `data/jev/topics.<UTC stamp>.bak` | a copy of the side-car, written before a `--force` run re-asks a current record. Never pruned |
-| `data/jev/runs.jsonl` | the run log: one line per `jev topics` pass that sent a request. Append-only |
+| `data/jev/runs.jsonl` | the run log: one line per pass that sent a request (`jev topics`, or a job from `jev serve`). Append-only |
+| `data/jev/.lock` | the pass lock: held (a kernel `flock`) by the one pass running. Its text says who holds it; empty otherwise |
 | `data/jev/topics-report.json` · `.md` | the comparison, rewritten on every `jev report` |
 | `<output_dir>/jev.html` | the page, rewritten on every `jev dashboard` |
 
@@ -882,7 +973,10 @@ consequences:
   `snapshot restore`, not a retention rule — because the copy an operator wants is the one
   from before the run they regret, which the tool cannot know. Delete them by hand; each is
   the size of the side-car.
-- **Two runs at once are last-write-wins.** The file is rewritten wholesale on every save.
+- **Two passes at once are refused.** The file is rewritten wholesale on every save, so two
+  passes that each loaded it would each save their own map and the second would drop the
+  first one's records. `jev topics` and `jev serve`'s jobs hold `data/jev/.lock` from reading
+  the side-car to saving it, and a second pass is refused (see [Daily use](#daily-use)).
 
 It is written atomically and dumped sorted and pretty, so an unchanged corpus re-dumps
 byte-identically and a hand `diff` between two runs shows only what moved.
@@ -1055,7 +1149,44 @@ copy of xbrain that does not write it). The `fuera del registro` line under the 
 gives those answers' cost from their own tokens.
 
 **The dashboard numbers look old**
-It is a static page. Re-run `xbrain jev dashboard`.
+It is a static page. Re-run `xbrain jev dashboard`, or use `xbrain jev serve`, which draws it
+from the files on every load.
+
+```text
+Error: otra pasada de Jev está en curso (…): espera a que termine y vuelve a lanzarla. Candado: data/jev/.lock
+```
+
+Another pass holds the lock: a `jev topics` in another terminal, or a job started from `jev
+serve`. Nothing was read or spent. Wait for it, or stop it (Ctrl-C saves what it had). The
+lock goes with the process, so if nothing is running there is nothing to delete.
+
+```text
+Error: el puerto 8765 está ocupado o no se puede usar (…): elige otro con --port
+```
+
+Another program (or another `jev serve`) listens there. `--port 0` takes any free port and
+prints it.
+
+**The page's estimate says *no hay coste medio con el que estimar***
+No current answer has a token count and a price to average, so the server cannot check the
+cap and will not start a job. Run `xbrain jev topics --limit 5` in the terminal once.
+
+**The estimate says it *pasa del tope por trabajo***
+The estimate is above `[jev].serve_max_usd`. Choose fewer posts, raise the cap in
+`config.toml` (and restart the server), or run the pass from the terminal.
+
+**A job ends *interrumpido* with *tope***
+What the job really spent reached the cap before it finished. What it answered is saved and
+logged; the rest is still pending, and the next estimate counts it.
+
+**`la selección cambió desde la estimación … vuelve a estimar`**
+Between the estimate and the confirmation, another pass answered some of those posts or the
+data changed. Nothing was spent. Estimate again.
+
+**`Host no permitido` / `Origin no permitido` / `falta el token de este servidor`**
+The request did not come from the page this server served: another host name, another tab's
+origin, or a page loaded from an older run of the server (the token is new each start).
+Reload the page from the URL `xbrain jev serve` printed.
 
 ---
 

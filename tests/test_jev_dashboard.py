@@ -189,7 +189,7 @@ def _data(
 ) -> dict[str, Any]:
     over = {
         _SETTING_NAMES.get(key, key): kwargs.pop(key)
-        for key in ("threshold", "fallback", "char_limit", "model", "concurrency")
+        for key in ("threshold", "fallback", "char_limit", "model", "concurrency", "serve_max_usd")
         if key in kwargs
     }
     options: dict[str, Any] = {

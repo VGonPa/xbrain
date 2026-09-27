@@ -1445,7 +1445,12 @@ _CONFIG_FILES = [
     },
 ]
 #: Every setting away from its default, so a value the template hard-codes cannot pass.
-_CONFIG_SETTINGS = {"threshold": 0.875, "fallback": "ninguno", "char_limit": 50_000}
+_CONFIG_SETTINGS = {
+    "threshold": 0.875,
+    "fallback": "ninguno",
+    "char_limit": 50_000,
+    "serve_max_usd": 0.25,
+}
 #: Four answers from one model and one from another, named so that name order and count
 #: order disagree.
 _MANY, _FEW = "jev-9.0.0", "jev-1.0.0"
@@ -1638,6 +1643,7 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
         "Opción de escape",
         "Peticiones a la vez",
         "Límite de evidencia",
+        "Tope por trabajo desde la página",
         *[f"Precio de entrada · {p}" for p in sorted(prices)],
     ]
     assert by_name["Umbral"][1] == "0,875por defecto: 0,850"
@@ -1645,6 +1651,8 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     assert by_name["Opción de escape"][1] == "«ninguno»por defecto: «otro»"
     assert by_name["Peticiones a la vez"][1] == "3por defecto: 8"
     assert by_name["Límite de evidencia"][1] == "50.000 caracterespor defecto: 100.000 caracteres"
+    assert by_name["Tope por trabajo desde la página"][1] == "0,25 $por defecto: 1,00 $"
+    assert by_name["Tope por trabajo desde la página"][3] == "[jev].serve_max_usd"
     # Most answers first, then by name: here the reverse of name order.
     assert by_name["Modelo que se pedirá"][1] == (
         "jev-9.9.9por defecto: jev-latest · las evaluaciones guardadas no registran qué modelo "

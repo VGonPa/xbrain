@@ -193,7 +193,8 @@ LLM runs) and cloud vision (`--vision-model opus`). `FIRECRAWL_API_KEY` is an op
 fallback fetcher for JavaScript-heavy pages.
 
 `TYPESAFE_API_KEY` is the third, and the only one attached to a command that bills
-per run: `xbrain jev topics`, the second opinion on topic assignment. Nothing in the
+per run: `xbrain jev topics`, the second opinion on topic assignment (and the jobs you
+confirm from the page `xbrain jev serve` serves, which run the same pass). Nothing in the
 pipeline needs it — `jev` is a side-car you can ignore entirely — and unlike the other
 two it may also be read from `<repo>/.env` (gitignored; `.env.example` is the committed
 template). `xbrain jev report` and `xbrain jev dashboard` need no key at all: they
@@ -463,7 +464,7 @@ right, so nobody was stranded; the help was the copy that lied.
 
 ## `xbrain jev` — the second opinion on topics
 
-Every failure of `xbrain jev topics|report|dashboard` is covered, message by message,
+Every failure of `xbrain jev topics|report|dashboard|serve` is covered, message by message,
 in **[jev.md § Troubleshooting](jev.md#troubleshooting)** — a missing or empty
 `TYPESAFE_API_KEY`, an unimportable SDK, per-item `FALLO` lines, a run where every call
 failed, the Ctrl-C checkpoint, a failed save that names what it cost you, an unreadable
@@ -484,6 +485,10 @@ Three that send people here first, because the symptom does not name Jev:
   re-bill; only a restore that leaves both the item's evidence and the vocabulary
   untouched leaves an assessment current. Retired records report as `caducadas` on the
   next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
+- **`otra pasada de Jev está en curso (…)`.** A `jev topics` in another terminal, or a job
+  started from `xbrain jev serve`, holds `data/jev/.lock`. Nothing was read or spent; wait
+  for it and re-run. The lock dies with its process, so there is never one to delete.
+  [Why](jev.md#daily-use).
 - **A red *"La página no pudo dibujarse"* banner on `jev.html`.** The page's script failed
   while loading. The numbers are in `xbrain jev report`; report the banner's message as a bug.
   One post that cannot be drawn only shows *no se pudo dibujar* on its own card.
