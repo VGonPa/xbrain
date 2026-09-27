@@ -843,7 +843,8 @@ def test_the_cap_is_a_hard_bound_at_concurrency_with_posts_queued(tmp_path: Path
     assert run.input_tokens == 150 * client.sent == job["tokens"]
     assert run.unsaved == 0 and run.interrupted is True
     assert job["usd"] == pytest.approx(client.sent * per_post)
-    assert job["usd"] <= cap + (4 - 1) * (per_post - MEAN_USD) + 1e-12
+    # Every post in flight may cost more than its reservation: at most `concurrency` of them.
+    assert job["usd"] <= cap + 4 * (per_post - MEAN_USD) + 1e-12
 
 
 def test_a_job_that_finishes_every_post_at_the_cap_is_done_without_a_reason(
@@ -983,7 +984,7 @@ def test_a_stop_during_the_start_refuses_the_job_before_any_backup(served: _Serv
         {"ids": ["1"], "force": True, "confirm_token": estimate["confirm_token"]}
     )
 
-    assert status == 409 and error["error"] == "el servidor se está parando"
+    assert status == 503 and error["error"] == "el servidor se está parando"
     assert list(served.cfg.jev_dir.glob("topics.*.bak")) == [] and served.built == 0
 
 
@@ -1283,3 +1284,48 @@ def test_the_job_view_counts_calls_that_failed(tmp_path: Path, monkeypatch):
         s.close()
 
     assert (job["failed_calls"], job["answered"], job["outcome"]["failed"]) == (1, 1, 1)
+
+
+def test_refused_answers_under_a_cap_stop_are_failures_not_unsaved(tmp_path: Path, monkeypatch):
+    """A soft stop DRAINS: every answer that came back was seen. One xbrain refuses is a
+    failure — never `unsaved`, which means "answered, not kept, because of Ctrl-C"."""
+    cap = 2 * MEAN_USD
+    cfg = _big_repo(
+        tmp_path, monkeypatch, posts=6, jev=f"concurrency = 1\nserve_max_usd = {cap!r}\n"
+    )
+    # Refused by the parser, and 1.5× the mean: the first answer lifts the reservation and the
+    # cap cuts the second post off.
+    s = _Served(cfg, _Priced(input_tokens=150, primary="banana"))
+    try:
+        estimate = s.estimate({"unevaluated": 2})
+        s.evaluate({"unevaluated": 2, "confirm_token": estimate["confirm_token"]})
+        job = s.wait_job()
+    finally:
+        s.close()
+
+    run = load_runs(cfg.jev_runs_path)[-1]
+    assert job["state"] == "interrupted" and job["reason"] == "tope"
+    assert (run.ok, run.unsaved, run.failed) == (0, 0, run.requests)
+    assert job["outcome"]["failed"] == run.requests and job["outcome"]["unsaved"] == 0
+
+
+def test_a_call_that_raised_is_charged_its_reservation(tmp_path: Path, monkeypatch):
+    """Fail closed: a call can raise AFTER the vendor answered and billed (an answer type the
+    adapter does not model), so a raised call counts against the cap at its reservation."""
+    cfg = _big_repo(tmp_path, monkeypatch, posts=4, jev="concurrency = 1\n")
+    s = _Served(cfg, _Priced(fail_when=lambda state: True))
+    try:
+        job = _run_job(s, {"unevaluated": 3})
+    finally:
+        s.close()
+
+    assert job["failed_calls"] == 3
+    assert job["usd"] == pytest.approx(3 * MEAN_USD)
+
+
+def test_a_stopped_server_mints_no_confirmation(served: _Served):
+    served.service.stop()
+
+    status, error, _ = served.request("POST", "/api/topics/estimate", {"ids": ["3"]})
+
+    assert status == 503 and error["error"] == "el servidor se está parando"

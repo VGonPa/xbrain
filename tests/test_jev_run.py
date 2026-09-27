@@ -549,3 +549,31 @@ def test_a_failed_release_never_replaces_the_error_in_flight(cfg: Config, monkey
     monkeypatch.undo()
     with pass_lock(cfg.jev_lock_path, "after"):
         pass  # the flock was still released
+
+
+def test_a_cancelled_pass_books_refused_answers_as_failed_not_unsaved(cfg: Config):
+    """After a soft cancel every answer was drained: a refused one is a failure."""
+    import threading
+
+    cancel = threading.Event()
+
+    class _Refused(FakeJevClient):
+        def ask(self, state, questions):
+            result = super().ask(state, questions)
+            cancel.set()
+            return result
+
+    with pass_lock(cfg.jev_lock_path, "test") as lock:
+        outcome = run_topics(
+            cfg,
+            _selection(cfg, {}),
+            {},
+            VOCAB,
+            lambda: _Refused(primary="banana"),
+            lock=lock,
+            cancel=cancel,
+        )
+
+    run = _only_run(cfg)
+    assert outcome.interrupted is True
+    assert (run.requests, run.ok, run.failed, run.unsaved) == (1, 0, 1, 0)

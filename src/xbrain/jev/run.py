@@ -57,8 +57,9 @@ CHECKPOINT_EVERY = 25
 class RunOutcome:
     """What one pass did. `assessed` is what THIS pass banked, never the whole side-car.
 
-    `failed` is empty on an interrupted pass: `run_assessments` discards its own collection
-    when interrupted, and the run log's `requests - ok - failed` says how many were in flight.
+    `failed` is empty after Ctrl-C: `run_assessments` discards its own collection on that
+    emergency path, and the run log's `requests - ok - failed - unsaved` says how many were in
+    flight. After a SOFT cancel (`cancel`) every call was drained, so `failed` is complete.
     `logged` is the run-log line written, or `None` when nothing was sent or the write failed.
     """
 
@@ -136,9 +137,10 @@ def _release(client: JevClient) -> None:
     `original_error` is read BEFORE the `try`: inside an `except` block `sys.exc_info()`
     reports the exception being handled here, not the one that was already travelling.
 
-    On the interrupt path this can close the transport while a worker is still in flight —
+    On the Ctrl-C path this can close the transport while a worker is still in flight —
     `run_assessments` shuts its pool down with `wait=False`, so a call already issued is
-    cancelled rather than awaited. That worker's exception lands in a future nobody reads,
+    cancelled rather than awaited (a SOFT cancel waits for them, so it never gets here with
+    one running). That worker's exception lands in a future nobody reads,
     which makes it noise and not a lost record: every record that completed was handed to
     the checkpoint and written before this runs.
     """
@@ -189,6 +191,7 @@ def run_record(
     started_at: datetime,
     finished_at: datetime,
     interrupted: bool,
+    drained: bool = False,
 ) -> JevRun:
     """The `runs.jsonl` line for one pass, from what the seam saw and what was kept.
 
@@ -201,14 +204,17 @@ def run_record(
     waking) must not make the record invalid — this is built inside a `finally`.
     """
     answered_not_kept = counts.answered - kept
+    # `unsaved` is Ctrl-C's word: answered, never drained. A SOFT cancel drained every call, so
+    # an answer it did not keep was refused — a failure, as on a pass that ran to the end.
+    lost_in_flight = interrupted and not drained
     return JevRun(
         started_at=started_at,
         finished_at=max(finished_at, started_at),
         models=list(counts.models),
         requests=counts.sent,
         ok=kept,
-        failed=counts.raised + (0 if interrupted else answered_not_kept),
-        unsaved=answered_not_kept if interrupted else 0,
+        failed=counts.raised + (0 if lost_in_flight else answered_not_kept),
+        unsaved=answered_not_kept if lost_in_flight else 0,
         input_tokens_by_provider=counts.input_tokens_by_provider,
         input_tokens=sum(counts.input_tokens_by_provider.values()),
         input_tokens_unknown=counts.input_tokens_unknown,
@@ -228,6 +234,7 @@ def _log_pass(
     started_at: datetime,
     *,
     interrupted: bool,
+    drained: bool,
     on_logged: LoggedHook | None,
 ) -> JevRun | None:
     """Append the pass to the run log. NEVER raises — it runs inside `run_topics`' `finally`.
@@ -250,7 +257,12 @@ def _log_pass(
     run: JevRun | None = None
     try:
         run = run_record(
-            counts, kept=kept, started_at=started_at, finished_at=_now(), interrupted=interrupted
+            counts,
+            kept=kept,
+            started_at=started_at,
+            finished_at=_now(),
+            interrupted=interrupted,
+            drained=drained,
         )
         line = run.model_dump_json()
         append_run(run, path)
@@ -360,6 +372,8 @@ def run_topics(
     client = CountingJevClient(make_client())
     started_at = _now()
     interrupted = False
+    # False only on Ctrl-C's path, where calls in flight are abandoned rather than awaited.
+    drained = True
     logged: JevRun | None = None
     try:
         result = run_assessments(
@@ -375,6 +389,7 @@ def run_topics(
         )
     except KeyboardInterrupt:
         interrupted = True
+        drained = False
         # Summary first, then persist — the tally can never fail, so a save that does never
         # suppresses it.
         _call_hook("on_interrupted", on_interrupted, tuple(banked.values()), len(assessments))
@@ -405,6 +420,7 @@ def run_topics(
             len(banked),
             started_at,
             interrupted=interrupted,
+            drained=drained,
             on_logged=on_logged,
         )
         # LAST, and guarded: releasing the pool is cleanup, never the pass's verdict.

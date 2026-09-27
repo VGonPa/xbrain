@@ -238,11 +238,11 @@ returns it, whatever xbrain does with it next:
 | `requests` | calls xbrain **sent**, each item once. Retries inside the vendor SDK are invisible to xbrain and are not counted |
 | `ok` | answers kept in the side-car |
 | `failed` | calls that raised (a provider error, a 402) plus answers xbrain refused (a malformed answer set) |
-| `unsaved` | only after Ctrl-C: answers that came back but were not yet saved when the interrupt landed. Paid, not kept, not failed |
+| `unsaved` | only after Ctrl-C in the terminal: answers that came back but were not yet saved when the interrupt landed. Paid, not kept, not failed. A stop of a `jev serve` job waits for every call, so it never leaves any |
 | `input_tokens_by_provider` · `input_tokens` | tokens of **every** answer that came back — refused and unsaved ones included, because each was billed — per provider, and their sum. Empty and 0 when nothing answered |
 | `input_tokens_unknown` | answers that reported no usage |
 | `models` | the distinct models that answered, sorted |
-| `interrupted` | Ctrl-C. `requests - ok - failed - unsaved` is then the number of calls still in flight |
+| `interrupted` | Ctrl-C, or a `jev serve` job stopped by its cap or by the server. After Ctrl-C `requests - ok - failed - unsaved` is the number of calls still in flight; after a server stop it is 0 |
 
 It stores **tokens, never dollars**: every report prices the history at read time with the
 same formula the side-car uses, so a price correction reprices every past pass.
@@ -891,9 +891,10 @@ that order, and 404 names any id the corpus lacks; it is the by-id refresh for r
   own reservation would pass the cap. An answer then replaces its reservation with its real
   cost; one with no token count, or from a provider with no price (a `jev-latest` answering
   as a new model can be one), is **charged the reservation, never $0**, and the job view
-  lists those. So the bill can pass the cap only by what the posts in flight at that moment
-  cost above their reservation: with `concurrency = 8`, at most 7 posts' worth of the
-  difference. When the cap stops a job, what was answered is saved and logged and the job
+  lists those. A call that raises is charged its reservation too (it may have been answered
+  and billed before it failed). So the bill can pass the cap only by what the posts in flight
+  at that moment cost above their reservation: up to `concurrency` posts' worth of the
+  difference — 8 with the default. When the cap stops a job, what was answered is saved and logged and the job
   says `interrupted` with reason `tope`. The terminal's `xbrain jev topics` has no cap.
 - **No mean, no job.** When no current answer has both a token count and a price, there is
   nothing to estimate from and the cap cannot be checked, so there is no confirmation. Run a
