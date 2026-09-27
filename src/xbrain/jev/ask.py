@@ -554,6 +554,62 @@ def saved_results(
     return _rank(candidates, records, query, state_text, minimum)
 
 
+def refine_results(
+    results: AskResults,
+    refine: AskFilters,
+    minimum: float,
+    *,
+    store: dict[str, Item],
+    jev: JevPairs | None,
+    threshold: float,
+) -> AskResults:
+    """A saved query's results REFINED for free: its ranked answers kept at or above
+    `minimum` and passing `refine` (topics, days, author — `filter_posts`' own rules, topics at
+    `threshold`), in the ranking's order. Nothing is asked and nothing re-ranked; `answered` is
+    unchanged. What `jev asks <query> --min … --topic …` prints, and what the page's
+    «Refinar resultados» must agree with (it filters the same order by `refine_keys`)."""
+    check_minimum(minimum)
+    kept: set[str] | None = None
+    if refine != AskFilters():
+        kept = {item.id for item in filter_posts(store, refine, jev=jev, threshold=threshold)[0]}
+    ranked = tuple(
+        (item, record)
+        for item, record in results.ranked
+        if record.probability >= minimum and (kept is None or item.id in kept)
+    )
+    return AskResults(ranked=ranked, answered=results.answered, recorded=results.recorded)
+
+
+def reopen_results(cfg: Config, entry: AskHistoryEntry, jev: JevPairs) -> AskResults:
+    """A saved query's results as its file holds them NOW: every current answer over the
+    filters it was last asked with, ranked, no minimum — read only, nothing asked."""
+    query = AskQuery.of(entry.query)
+    char_limit = cfg.jev_state_char_limit
+    return saved_results(
+        jev.store,
+        jev,
+        query,
+        AskFilters.from_json(entry.last_filters),
+        load_asks(ask_path(cfg, query), query),
+        topic_threshold=cfg.jev_threshold,
+        minimum=0.0,
+        state_text=lambda item: build_topic_state(item, char_limit)[0][STATE_KEY],
+    )
+
+
+def refine_keys(
+    item: Item, assessment: TopicAssessment | None, threshold: float
+) -> dict[str, str | list[str]]:
+    """What the page refines a result post by, computed HERE so the browser only compares:
+    its day in UTC (`d`, as `since`/`until` read it), its handle casefolded (`a`, as `author`
+    matches it) and its topics (`t`, `post_topics` at `threshold`)."""
+    return {
+        "d": item.created_at.astimezone(timezone.utc).date().isoformat(),
+        "a": item.author.handle.casefold(),
+        "t": sorted(post_topics(item, assessment, threshold)),
+    }
+
+
 # --------------------------------------------------------------------------- history
 
 

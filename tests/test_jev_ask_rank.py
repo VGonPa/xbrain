@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -40,6 +40,8 @@ from xbrain.jev.ask import (
     finish_ask,
     load_history,
     plan_ask,
+    post_topics,
+    refine_results,
     saved_results,
     topic_counts,
 )
@@ -383,3 +385,162 @@ def test_a_history_entry_model_accepts_the_old_shape_and_the_new():
     new = AskHistoryEntry.model_validate({**base, "last_min": 0.4})
     assert (old.last_min, old.last_threshold) == (0.0, 0.85)
     assert (new.last_min, new.last_threshold) == (0.4, None)
+
+
+# --------------------------------------------------------------------------- refine, free
+
+
+def _victor(tmp_path: Path):
+    cfg = victor_shaped_repo(tmp_path)
+    jev = load_jev_pairs(cfg)
+    query = AskQuery.of(VICTOR_QUERY)
+    records = load_asks(cfg.jev_asks_dir / f"{query.sha}.json", query)
+    found = saved_results(
+        jev.store,
+        jev,
+        query,
+        AskFilters(since=datetime(2026, 5, 7).date()),
+        records,
+        topic_threshold=cfg.jev_threshold,
+        minimum=0.0,
+        state_text=_sent,
+    )
+    return cfg, jev, found
+
+
+def _expected(found, jev, *, minimum=0.0, topics=(), since=None, until=None, author=None):
+    """Brute force, straight from the rules: day in UTC, handle casefold, `post_topics`."""
+    current = {i.id: a for i, a in jev.pairs}
+    out = []
+    for item, record in found.ranked:
+        day = item.created_at.astimezone(timezone.utc).date()
+        if record.probability < minimum:
+            continue
+        if since and day < since or until and day > until:
+            continue
+        if author and item.author.handle.casefold() != author.lstrip("@").casefold():
+            continue
+        if topics and not set(topics) & post_topics(item, current.get(item.id), 0.85):
+            continue
+        out.append(item.id)
+    return out
+
+
+@pytest.mark.parametrize(
+    "refine",
+    [
+        {},
+        {"minimum": 0.5},
+        {"topics": ("agentic-engineering",)},
+        {"topics": ("startups", "agentic-engineering"), "minimum": 0.2},
+        {"since": datetime(2026, 5, 20).date(), "until": datetime(2026, 5, 30).date()},
+        {"author": "@SOMEONE", "minimum": 0.7},
+        {"author": "nadie"},
+    ],
+)
+def test_refining_a_saved_query_filters_its_ranked_answers_by_the_filter_rules(
+    tmp_path: Path, refine: dict
+):
+    cfg, jev, found = _victor(tmp_path)
+    minimum = refine.pop("minimum", 0.0)
+
+    refined = refine_results(
+        found,
+        AskFilters(**refine),
+        minimum,
+        store=jev.store,
+        jev=jev,
+        threshold=cfg.jev_threshold,
+    )
+
+    assert [item.id for item, _ in refined.ranked] == _expected(
+        found, jev, minimum=minimum, **refine
+    )
+    assert refined.answered == found.answered == 808
+    # Order is the ranking's, untouched: refining never re-ranks.
+    kept = {item.id for item, _ in refined.ranked}
+    assert [i.id for i, _ in found.ranked if i.id in kept] == [i.id for i, _ in refined.ranked]
+
+
+def test_the_page_ships_every_answer_ranked_and_the_python_refine_keys(tmp_path: Path):
+    cfg = victor_shaped_repo(tmp_path)
+    path = cfg.jev_asks_dir / ASK_INDEX
+    data = json.loads(path.read_text(encoding="utf-8"))
+    [entry] = data["queries"].values()
+    entry["last_min"] = 0.5
+    path.write_text(json.dumps(data), encoding="utf-8")
+    jev = load_jev_pairs(cfg)
+
+    view = ask_page_data(cfg, jev, [])
+    [row] = view["history"]
+
+    # The use's minimum is the refine DEFAULT, never a cut of what ships.
+    assert (len(row["results"]), row["min"], row["answered"]) == (808, 0.5, 808)
+    item = jev.store[row["results"][0]["id"]]
+    assert view["keys"][item.id] == {
+        "d": item.created_at.astimezone(timezone.utc).date().isoformat(),
+        "a": item.author.handle.casefold(),
+        "t": sorted(post_topics(item, None, cfg.jev_threshold)),
+    }
+    assert set(view["keys"]) == {r["id"] for r in row["results"]}
+
+
+def test_cli_asks_reprints_a_saved_query_refined_without_a_client(tmp_path: Path, monkeypatch):
+    cfg = victor_shaped_repo(tmp_path)
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    _, jev, found = _victor(tmp_path / "again")
+    expected = _expected(found, jev, minimum=0.5, topics=("agentic-engineering",))
+
+    result = runner.invoke(
+        app, ["jev", "asks", "1", "--min", "0.5", "--topic", "agentic-engineering", "--top", "3"]
+    )
+
+    out = result.output
+    assert result.exit_code == 0, out
+    assert f"«{VICTOR_QUERY}»" in out
+    assert (
+        f"Resultados: {len(expected)} de 808 posts con respuesta vigente llegan a la relevancia "
+        "mínima 0.5; se muestran los 3 primeros" in out
+    )
+    lines = [line for line in out.splitlines() if "https://x.com/" in line]
+    assert [line.split()[2] for line in lines] == expected[:3]
+    assert not load_runs(cfg.jev_runs_path)
+    # Reprinting is reading: the history is not touched.
+    [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
+    assert (entry.times, entry.last_min) == (1, 0.0)
+
+
+def test_cli_asks_picks_a_query_by_sha_prefix_and_refuses_an_unknown_one(
+    tmp_path: Path, monkeypatch
+):
+    victor_shaped_repo(tmp_path)
+    monkeypatch.setenv("XBRAIN_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    sha = AskQuery.of(VICTOR_QUERY).sha
+
+    by_sha = runner.invoke(app, ["jev", "asks", sha[:8], "--since", "2026-06-01", "--all"])
+    unknown = runner.invoke(app, ["jev", "asks", "ffffffff"])
+    beyond = runner.invoke(app, ["jev", "asks", "2"])
+
+    assert by_sha.exit_code == 0, by_sha.output
+    assert "Resultados: los 220 de 808 posts con respuesta vigente" in by_sha.output
+    for bad in (unknown, beyond):
+        assert bad.exit_code == 1 and "no está en el historial" in bad.output
+
+
+def test_cli_asks_a_saved_query_defaults_to_its_own_minimum(cfg: Config, monkeypatch):
+    _use(monkeypatch, _ByText())
+    runner.invoke(app, ["jev", "ask", QUERY, "--min", "0.5"])
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+
+    default = runner.invoke(app, ["jev", "asks", "1"]).output
+    none = runner.invoke(app, ["jev", "asks", "1", "--min", "0"]).output
+
+    assert "2 de 3 posts con respuesta vigente llegan a la relevancia mínima 0.5" in default
+    assert "Resultados: los 3 de 3 posts con respuesta vigente" in none
+
+
+def test_refine_flags_without_a_query_are_refused(cfg: Config):
+    result = runner.invoke(app, ["jev", "asks", "--min", "0.5"])
+    assert result.exit_code == 1 and "consulta" in result.output

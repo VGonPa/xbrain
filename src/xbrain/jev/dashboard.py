@@ -53,6 +53,7 @@ from xbrain.jev.ask import (
     AskFilters,
     AskQuery,
     load_history,
+    refine_keys,
     saved_results,
     topic_counts,
 )
@@ -768,7 +769,13 @@ def compute_jev_dashboard_data(
 
 
 #: `asks` when nothing was ever asked (and what a pure caller gets).
-NO_ASKS: dict[str, Any] = {"history": [], "surfaces": {}, "topic_counts": {}, "error": None}
+NO_ASKS: dict[str, Any] = {
+    "history": [],
+    "surfaces": {},
+    "keys": {},
+    "topic_counts": {},
+    "error": None,
+}
 #: The cost of a query no logged pass paid for (every answer came from the cache, or the
 #: passes that paid were never logged): `report.ask_cost`'s zero.
 _NO_COST = ask_cost([], "")
@@ -798,6 +805,10 @@ class _AskPage:
     carded: frozenset[str]
     states: dict[str, str] = field(default_factory=dict)
     surfaces: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: `ask.refine_keys` of every result post, once: what «Refinar resultados» compares.
+    keys: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Each post's current topics answer, for its keys' topics.
+    assessments: dict[str, TopicAssessment] = field(default_factory=dict)
 
     def state_text(self, item: Item) -> str:
         if item.id not in self.states:
@@ -814,9 +825,10 @@ def _ask_cost(page: _AskPage, sha: str) -> dict[str, Any]:
 
 
 def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]], int]:
-    """The rows of one query, ranked: `ask.saved_results` over its last filters, with
-    `[jev].threshold` as the topic bar only and its own last minimum (0 for an entry written
-    before minimums, whose legacy `last_threshold` is never a cut)."""
+    """The rows of one query: EVERY current answer over its last filters, ranked by
+    `ask.saved_results` (the one order; `[jev].threshold` is the topic bar only). The use's
+    minimum is not applied here: it is the default of the page's free refine (`row["min"]`),
+    which filters these rows by `page.keys` without asking anything."""
     entry = saved.entry
     found = saved_results(
         page.jev.store,
@@ -825,7 +837,7 @@ def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]],
         AskFilters.from_json(entry.last_filters),
         saved.records,
         topic_threshold=page.topic_threshold,
-        minimum=entry.last_min,
+        minimum=0.0,
         state_text=page.state_text,
     )
     rows = []
@@ -840,6 +852,10 @@ def _ask_results(saved: SavedAsk, page: _AskPage) -> tuple[list[dict[str, Any]],
                 "truncated": record.truncated,
             }
         )
+        if item.id not in page.keys:
+            page.keys[item.id] = refine_keys(
+                item, page.assessments.get(item.id), page.topic_threshold
+            )
         # A post whose card has a Jev block already shows what Jev read: sent once.
         if item.id not in page.carded and item.id not in page.surfaces:
             page.surfaces[item.id] = _surfaces(item, page.char_limit)
@@ -909,11 +925,18 @@ def asks_view(
         costs=ask_cost_by_query(runs) if runs is not None else None,
         runs_error=runs_error,
         carded=frozenset(item.id for item, _ in jev.current().pairs),
+        assessments={item.id: assessment for item, assessment in jev.pairs},
     )
     ordered = sorted(saved, key=lambda s: (s.entry.last_asked_at, s.entry.query_sha), reverse=True)
     history = [_ask_row(one, page) for one in ordered]
     counts = topic_counts(jev.store, AskFilters(), jev=jev, threshold=topic_threshold)
-    return {"history": history, "surfaces": page.surfaces, "topic_counts": counts, "error": error}
+    return {
+        "history": history,
+        "surfaces": page.surfaces,
+        "keys": page.keys,
+        "topic_counts": counts,
+        "error": error,
+    }
 
 
 def load_saved_asks(cfg: Config) -> tuple[list[SavedAsk], str | None]:

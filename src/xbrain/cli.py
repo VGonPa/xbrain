@@ -64,6 +64,8 @@ from xbrain.jev.ask import (
     finish_ask,
     load_history,
     plan_ask,
+    refine_results,
+    reopen_results,
     same_selection,
 )
 from xbrain.jev.client import JevClient, JevError
@@ -78,6 +80,7 @@ from xbrain.jev.defaults import (
 )
 from xbrain.jev.env import dry_run_key_line, typesafe_api_key
 from xbrain.jev.load import JevPairs, load_jev_pairs
+from xbrain.jev.models import AskHistoryEntry
 from xbrain.jev.report import (
     ask_cost,
     ask_cost_by_query,
@@ -3222,16 +3225,54 @@ def _echo_ask_results(results: AskResults, minimum: float, top: int | None) -> N
 
 @jev_app.command("asks")
 @_handle_cli_errors
-def jev_asks_cmd() -> None:
+def jev_asks_cmd(
+    which: str | None = typer.Argument(
+        None,
+        help="Una consulta del historial: su número en esta lista (1 = la última) o el "
+        "principio de su sha. Con ella, reimprime sus resultados refinados, gratis",
+    ),
+    topic: list[str] | None = typer.Option(
+        None, help="Refinar: solo posts de este topic (repetible: de cualquiera de ellos)"
+    ),
+    since: datetime | None = typer.Option(None, formats=_DAY, help="Refinar: desde este día"),
+    until: datetime | None = typer.Option(None, formats=_DAY, help="Refinar: hasta este día"),
+    author: str | None = typer.Option(None, help="Refinar: solo posts de este autor"),
+    minimum: float | None = typer.Option(
+        None, "--min", help="Refinar: relevancia mínima (por defecto, la de su último uso)"
+    ),
+    top: int | None = typer.Option(
+        None, help="Resultados que se imprimen (por defecto \\[jev].ask_top)"
+    ),
+    show_all: bool = typer.Option(False, "--all", help="Imprimir todos los resultados"),
+) -> None:
     """Las consultas hechas con `jev ask`: cuándo, cuántas veces, su último uso y lo que han
-    costado (del registro de pasadas). Solo lee; no cuesta nada."""
+    costado (del registro de pasadas). Con una consulta (`jev asks 1`), reimprime sus
+    resultados guardados, refinados con --min/--topic/--since/--until/--author/--top: no
+    pregunta nada, no construye cliente y no cuesta nada. Solo lee."""
     cfg = _config()
     history = load_history(cfg)
+    entries = sorted(history.queries.values(), key=lambda e: e.last_asked_at, reverse=True)
+    refining = any((topic, since, until, author, minimum is not None, top is not None, show_all))
+    if which is not None:
+        _reprint_ask(
+            cfg,
+            _pick_saved(entries, which),
+            AskFilters(
+                topics=tuple(topic or ()),
+                since=since.date() if since else None,
+                until=until.date() if until else None,
+                author=author,
+            ),
+            minimum,
+            _ask_shown(cfg, minimum or 0.0, top, show_all),
+        )
+        return
+    if refining:
+        raise ValueError("refinar necesita una consulta: `xbrain jev asks 1 --min 0.5`")
     by_query = ask_cost_by_query(load_runs(cfg.jev_runs_path))
     if not history.queries:
         typer.echo(f"sin consultas en {cfg.jev_asks_dir}")
         return
-    entries = sorted(history.queries.values(), key=lambda e: e.last_asked_at, reverse=True)
     for entry in entries:
         rebuilt = " · reconstruida desde sus respuestas" if entry.rebuilt else ""
         typer.echo(
@@ -3249,6 +3290,37 @@ def jev_asks_cmd() -> None:
         )
         cost = by_query.get(entry.query_sha)
         typer.echo(f"  {cost_line(cost) if cost else 'sin pasadas registradas'}")
+
+
+def _pick_saved(entries: list[AskHistoryEntry], which: str) -> AskHistoryEntry:
+    """`which` as `jev asks` lists them: a 1-based position (newest first) or a sha prefix."""
+    if which.isdigit() and 1 <= int(which) <= len(entries) and len(which) < 4:
+        return entries[int(which) - 1]
+    found = [entry for entry in entries if entry.query_sha.startswith(which.lower())]
+    if len(which) >= 4 and len(found) == 1:
+        return found[0]
+    raise JevError(
+        f"la consulta {which!r} no está en el historial (usa su número en `xbrain jev asks` "
+        "o el principio de su sha)"
+    )
+
+
+def _reprint_ask(
+    cfg: Config,
+    entry: AskHistoryEntry,
+    refine: AskFilters,
+    minimum: float | None,
+    top: int | None,
+) -> None:
+    """A saved query's results, refined (`ask.refine_results`), from its file: no client."""
+    jev = load_jev_pairs(cfg)
+    found = reopen_results(cfg, entry, jev)
+    used = entry.last_min if minimum is None else minimum
+    refined = refine_results(
+        found, refine, used, store=jev.store, jev=jev, threshold=cfg.jev_threshold
+    )
+    typer.echo(f"«{entry.query}» · {entry.last_asked_at:%Y-%m-%d}")
+    _echo_ask_results(refined, used, top)
 
 
 def _refuse_empty_report(jev: JevPairs, cfg: Config, artifact: Path) -> None:

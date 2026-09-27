@@ -1477,7 +1477,13 @@ def test_an_unreadable_history_is_the_tabs_error(cfg: Config):
 
 
 def test_a_page_built_without_asks_has_an_empty_tab():
-    assert NO_ASKS == {"history": [], "surfaces": {}, "topic_counts": {}, "error": None}
+    assert NO_ASKS == {
+        "history": [],
+        "surfaces": {},
+        "keys": {},
+        "topic_counts": {},
+        "error": None,
+    }
 
 
 def test_a_run_log_that_cannot_be_read_gives_no_cost_rather_than_zero(cfg: Config):

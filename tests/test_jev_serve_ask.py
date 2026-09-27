@@ -800,7 +800,8 @@ def test_a_minimum_is_recorded_and_cuts_only_the_results(served: _AskServed):
     entry = _entry(served.cfg)
     assert (entry.last_min, entry.last_results, entry.last_evaluated) == (0.5, 3, 5)
     [row] = served.request("GET", "/api/asks")[1]["history"]
-    assert [(r["id"], r["p"]) for r in row["results"]] == ranked(0.5)
+    # The page gets every answer ranked; the use's minimum is its free refine's default.
+    assert [(r["id"], r["p"]) for r in row["results"]] == ranked()
     assert (row["min"], row["answered"]) == (0.5, 5)
 
 
