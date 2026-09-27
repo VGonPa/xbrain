@@ -47,6 +47,11 @@ from xbrain.jev.dashboard import compute_jev_dashboard_data
 from xbrain.jev.models import PrimaryChoice
 from xbrain.models import Author, Topic
 
+#: Every page test runs with no network: each host but localhost resolves to NOTFOUND, so a
+#: test can never pass (or hang) on what X's embed or a font server sent — X's messages are
+#: handed to the page by the probe instead (tests/test_jev_page_embed_browser.py).
+_NO_NETWORK = "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
+
 _REQUIRED = os.environ.get("XBRAIN_REQUIRE_CHROME", "").strip() not in ("", "0", "false", "False")
 _MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -234,6 +239,7 @@ def _dump(url: str, budget_ms: int = 8000) -> dict[str, Any]:
             "--headless=new",
             "--disable-gpu",
             "--no-sandbox",
+            _NO_NETWORK,
             f"--virtual-time-budget={budget_ms}",
             "--dump-dom",
             url,
@@ -1888,7 +1894,7 @@ def test_the_config_tab_draws_when_reached_from_another_tab(tmp_path):
 # to the server, so real time passes for the job thread while Chrome's virtual clock waits.
 
 #: The served probes' helpers, all prefixed `s` (the probe shares the page's scope). Every wait
-#: fetches a path the server does not have (a quick 404, never a call the page makes), so real
+#: fetches `/probe-wait` (a paced look, never a call the page makes: `_probe_handler`), so real
 #: time passes for the job thread while Chrome's clock waits, and gives up after 30 real
 #: seconds by the server's `Date` (the virtual budget is large: the waits bound the probe).
 #: `refresh` is wrapped to count the page's reloads; `fetch` to count estimate replies and keep
@@ -1953,10 +1959,15 @@ let sRefreshed = 0;
 const sRefresh0 = refresh;
 refresh = function (blob) { sRefresh0(blob); sRefreshed++; };
 let sEstimates = 0, sLastEstimate = null;
-const sFetch0 = window.fetch;
+const sFetchRaw = window.fetch;
+// The probe's own requests: one that fails at the network says which it was (a bare «Failed
+// to fetch» names nothing). The page's requests keep the browser's own error.
+const sFetch0 = (u, init) => sFetchRaw.call(window, u, init).catch((e) => {
+  throw new Error(e.message + ' (' + ((init && init.method) || 'GET') + ' ' + u + ')');
+});
 let sPosts = 0;
 window.fetch = function (u, init) {
-  const p = sFetch0.call(window, u, init);
+  const p = sFetchRaw.call(window, u, init);
   if (init && init.method === 'POST') sPosts++;
   if (String(u).includes('/estimate')) {
     p.then(r => r.clone().json()).then(j => { sLastEstimate = j; sEstimates++; }, () => { sEstimates++; });
@@ -2184,12 +2195,29 @@ def _served_dump(
 _SERVED_DEADLINE_S = 110
 
 
+#: Real seconds `/probe-wait` holds each look. A wait is a loop of looks while Chrome's clock
+#: stands still; unpaced, one that never comes true opened ~2,500 connections a second and
+#: ran the machine out of ephemeral ports (TIME_WAIT) long before its 30 s bound — a bare
+#: «Failed to fetch» on Linux, a stalled Chrome on macOS (16,377 looks: its 16,384 ports).
+#: Paced, 30 s of looks is ~3,000 connections.
+_PROBE_WAIT_S = 0.01
+
+
 def _probe_handler() -> Any:
-    """The server's handler, plus two POST routes only a probe uses: `/probe-step` (the step
-    now running) and `/probe-done` (the output). Both land on the server object."""
+    """The server's handler, plus the routes only a probe uses: `/probe-step` (the step now
+    running) and `/probe-done` (the output), which land on the server object, and
+    `/probe-wait` (one paced look: 204 with the server's `Date`, for `sWait`)."""
     from xbrain.jev.serve import _Handler
 
     class _ProbeHandler(_Handler):
+        def do_GET(self) -> None:  # noqa: N802 — the stdlib's name
+            if self.path != "/probe-wait":
+                super().do_GET()
+                return
+            time.sleep(_PROBE_WAIT_S)
+            self.send_response(204)
+            self.end_headers()
+
         def do_POST(self) -> None:  # noqa: N802 — the stdlib's name
             if self.path not in ("/probe-step", "/probe-done"):
                 super().do_POST()
@@ -2216,6 +2244,7 @@ def _dump_served(server: Any, url: str) -> dict[str, Any]:
             "--headless=new",
             "--disable-gpu",
             "--no-sandbox",
+            _NO_NETWORK,
             "--virtual-time-budget=900000",
             "--dump-dom",
             url,
@@ -2238,13 +2267,39 @@ def _dump_served(server: Any, url: str) -> dict[str, Any]:
             chrome.kill()
         stdout, stderr = chrome.communicate()
     if server.probe_out is not None:
-        return json.loads(server.probe_out)
-    found = re.search(r'<pre id="probe">(.*?)</pre>', stdout, re.S)
-    assert found, (
-        f"la página no escribió el probe (rc={chrome.returncode}, último paso: "
-        f"{server.probe_step!r}): {stderr[-800:]}"
+        seen = json.loads(server.probe_out)
+    else:
+        found = re.search(r'<pre id="probe">(.*?)</pre>', stdout, re.S)
+        assert found, (
+            f"la página no escribió el probe (rc={chrome.returncode}, último paso: "
+            f"{server.probe_step!r}): {stderr[-800:]}"
+        )
+        seen = json.loads(html.unescape(found.group(1)))
+    if any(_failed_step(v) for v in seen.values()):
+        # What Chrome said, for the step that failed (`_step` shows it).
+        seen[_CHROME_SAID] = f"{len(stderr)} caracteres; el final: {stderr[-3000:]}"
+    return seen
+
+
+#: The key `_dump_served` adds, when a step failed, with the end of Chrome's stderr.
+_CHROME_SAID = "chrome_stderr"
+
+
+def _failed_step(value: Any) -> bool:
+    """A probe step that threw: `sStep` stores it as the string `ERROR <message>`."""
+    return isinstance(value, str) and value.startswith("ERROR ")
+
+
+def _step(seen: dict[str, Any], name: str) -> Any:
+    """Step `name` of a served probe's output; a step that threw fails HERE, naming the step,
+    its error (the request, when a request failed) and what Chrome said — not later, as a
+    TypeError on a string indexed like the dict it should have been."""
+    assert name in seen, f"el probe no llegó al paso {name!r}: {sorted(seen)}"
+    value = seen[name]
+    assert not _failed_step(value), (
+        f"el paso {name!r} del probe falló: {value} · Chrome: {seen.get(_CHROME_SAID)}"
     )
-    return json.loads(html.unescape(found.group(1)))
+    return value
 
 
 def _stale_post_2(cfg: Any) -> None:

@@ -25,6 +25,7 @@ from tests.test_jev_page_browser import (
     _page_saw,
     _requires_chrome,
     _served_dump,
+    _step,
 )
 from xbrain.jev.errors import ServeError
 
@@ -57,6 +58,39 @@ def test_a_probe_that_cannot_finish_names_every_step_before_chromes_timeout(tmp_
         assert seen[name] == f"ERROR nunca (se acabó el plazo del probe): lo imposible {name}"
     # One 2 s budget for the four waits, not 4 × 30 s: well inside Chrome's 120 s.
     assert took < 60
+
+
+# --------------------------------------------------------------------------- a request that fails
+
+#: Port 9 (discard) on this machine: nothing listens there, so the connection is refused.
+_REFUSED_REQUEST_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('gone', async () => (await sFetch0('http://127.0.0.1:9/')).status);
+  sDone();
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_a_probe_request_that_fails_is_named_and_so_is_its_step(tmp_path):
+    from tests.test_jev_serve import _Recorder
+
+    seen = _served_dump(tmp_path, _REFUSED_REQUEST_PROBE, client=_Recorder())
+
+    assert seen["gone"] == "ERROR Failed to fetch (GET http://127.0.0.1:9/)"
+    assert seen["chrome_stderr"].split(" ", 1)[0].isdigit()
+    with pytest.raises(AssertionError, match=r"el paso 'gone' del probe falló: ERROR Failed"):
+        _step(seen, "gone")
+
+
+def test_a_step_the_probe_never_reached_is_named():
+    with pytest.raises(AssertionError, match=r"no llegó al paso 'free'"):
+        _step({"before": {}}, "free")
+    assert _step({"free": {"shown": False}}, "free") == {"shown": False}
 
 
 # --------------------------------------------------------------------------- which 503 gives it back
@@ -117,7 +151,7 @@ def refused(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_confirm_comes_back_after_a_job_that_could_not_start(refused):
-    panel = refused["not_started"]
+    panel = _step(refused, "not_started")
 
     assert panel["error"] == "No se puede evaluar: no se pudo arrancar el trabajo: sin hilos"
     assert panel["go"] is True
@@ -125,7 +159,7 @@ def test_confirm_comes_back_after_a_job_that_could_not_start(refused):
 
 @_requires_chrome
 def test_confirm_stays_off_while_the_server_is_stopping(refused):
-    panel = refused["stopping"]
+    panel = _step(refused, "stopping")
 
     assert panel["error"] == "No se puede evaluar: el servidor se está parando"
     assert panel["go"] is False
@@ -211,7 +245,7 @@ def elsewhere(request, tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_a_job_that_failed_in_another_tab_opens_the_panel_here(elsewhere):
-    panel = elsewhere["opened"]
+    panel = _step(elsewhere, "opened")
 
     assert (
         panel["title"]
@@ -287,7 +321,7 @@ def narrow(tmp_path_factory) -> dict[str, Any]:
 @_requires_chrome
 @pytest.mark.parametrize("view", ["panel", "posts", "ask"])
 def test_the_panel_and_the_tabs_fit_a_375_px_screen(narrow, view):
-    measured = narrow[view]
+    measured = _step(narrow, view)
 
     assert isinstance(measured, dict), measured
     assert measured["page"] <= 375, measured
@@ -346,7 +380,7 @@ def out_of_log(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_the_out_of_log_line_goes_when_its_last_answer_is_logged(out_of_log):
-    before, after = out_of_log["before"], out_of_log["after"]
+    before, after = _step(out_of_log, "before"), _step(out_of_log, "after")
 
     assert before["n"] == 1 and "1 evaluación" in before["line"]
     assert after["n"] == 0
@@ -410,9 +444,9 @@ def follow_409(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_a_confirm_refused_because_another_job_runs_follows_that_job(follow_409):
-    followed = follow_409["followed"]
+    followed = _step(follow_409, "followed")
 
-    assert follow_409["other"] == 202
+    assert _step(follow_409, "other") == 202
     assert followed["during"]["progress"].startswith("0 de 1 post · ")
     assert followed["after"]["progress"].startswith("1 evaluación guardada")
     assert followed["card4"] == ["Re-evaluar"]
@@ -451,21 +485,27 @@ _FREE_ELSEWHERE_PROBE = (
 
 @pytest.fixture(scope="module")
 def free_elsewhere(tmp_path_factory) -> dict[str, Any]:
-    """An ask answered before the page opened, then asked again from another tab: free."""
+    """An ask answered before the page opened, then asked again from another tab: free — and
+    both end in the same second (the clock is pinned), as a free ask right after another does:
+    the page must still see that the second one ended (CI failed on this, twice)."""
     from tests.test_jev_serve_ask import _Asker
 
     return _served_dump(
         tmp_path_factory.mktemp("free-elsewhere"),
         _FREE_ELSEWHERE_PROBE,
         client=_Asker(),
+        patch=lambda mp: mp.setattr(
+            "xbrain.jev.service._now_iso", lambda: "2026-09-27T12:00:00+00:00"
+        ),
         before_dump=lambda service, port: _http_job(service, port, "ask", _FREE),
     )
 
 
 @_requires_chrome
 def test_a_free_ask_in_another_tab_reloads_here_without_opening_the_panel(free_elsewhere):
-    seen = free_elsewhere["free"]
+    seen = _step(free_elsewhere, "free")
 
+    assert isinstance(seen, dict), seen
     assert (seen["posts"], seen["usd"]) == (0, 0.0)
     assert seen["shown"] is False
     job = free_elsewhere["job"]
@@ -541,7 +581,7 @@ def nothing_kept(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_an_ask_that_kept_nothing_stays_on_the_tab_and_says_it_was_not_recorded(nothing_kept):
-    seen = nothing_kept["stopped"]
+    seen = _step(nothing_kept, "stopped")
     job = nothing_kept["job"]
 
     assert (job["state"], job["outcome"]["ok"], job["outcome"]["recorded"]) == (
@@ -604,9 +644,9 @@ def idle_lost(tmp_path_factory) -> dict[str, Any]:
 
 @_requires_chrome
 def test_an_idle_page_says_when_it_lost_the_server(idle_lost):
-    panel = idle_lost["lost"]
+    panel = _step(idle_lost, "lost")
 
     assert panel["title"] == "Sin contacto con el servidor"
     assert panel["error"] == "Se perdió el contacto con el servidor; recarga la página."
     assert panel["reload"] == "Recargar la página"
-    assert idle_lost["found"]["shown"] is False
+    assert _step(idle_lost, "found")["shown"] is False

@@ -38,6 +38,7 @@ ECharts. Nothing is fetched at runtime except the Google Fonts stylesheet.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -117,6 +118,13 @@ from xbrain.worksheet import link_content_source
 #: How much of each evidence surface, and of a quoted post, the page ships, in characters.
 #: Enough to recognise what Jev read; the whole corpus of them must stay a fraction of the page.
 PAGE_SURFACE_CHARS = 600
+#: How much of an X Article's body the saved copy on a card ships, in characters, cut at a
+#: boundary (`_cut_at_boundary`). X's embed of an Article is its bare link, so the page opens
+#: it on the saved copy; the whole body is in the vault note («nota ↗») and on X. 201 Articles
+#: × this cap is ~0.4 MB of page; whole, they were 2.3 MB.
+PAGE_ARTICLE_CHARS = 2000
+#: What a cut body ends with.
+CUT_MARK = " …"
 #: A photo's vision caption, as the page's alt text and tooltip, in characters.
 _CAPTION_CHARS = 280
 #: Topics enrich put on fewer posts than this sort after the rest in the Topics index, and are
@@ -199,6 +207,58 @@ def collect_jev_media(items: Sequence[Item], page_dir: Path, media_root: Path | 
             p for p in paths if media_root is not None and (media_root / p).is_file()
         ),
     )
+
+
+def _cut_at_boundary(text: str, width: int) -> str:
+    """`text` whole when it fits; else at most `width` characters ending in `CUT_MARK`, cut
+    at the last paragraph end in the second half of the window, else the last sentence end
+    there, else the last space there, else hard (marked with a bare ellipsis)."""
+    if len(text) <= width:
+        return text
+    head = text[: width - len(CUT_MARK)]
+    floor = width // 2
+    # (the ends a rule cuts at, how many of their characters the kept text ends with)
+    rules: tuple[tuple[tuple[str, ...], int], ...] = (
+        (("\n\n",), 0),
+        ((". ", "! ", "? ", ".\n", "!\n", "?\n"), 1),  # keeps the full stop
+        ((" ", "\n"), 0),
+    )
+    for ends, kept in rules:
+        at = max(head.rfind(end) for end in ends)
+        if at >= floor:
+            return head[: at + kept].rstrip() + CUT_MARK
+    return text[: _grapheme_start(text, width - 1)] + "…"
+
+
+#: Code points that belong to the grapheme before them: joiner, variation selectors, skin
+#: tones, emoji tag characters (combining marks are asked of `unicodedata`).
+_ZWJ = "\u200d"
+_EXTENDS = (("\ufe00", "\ufe0f"), ("\U0001f3fb", "\U0001f3ff"), ("\U000e0020", "\U000e007f"))
+_REGIONAL = ("\U0001f1e6", "\U0001f1ff")
+
+
+def _extends(char: str) -> bool:
+    return (
+        char == _ZWJ
+        or unicodedata.combining(char) > 0
+        or any(lo <= char <= hi for lo, hi in _EXTENDS)
+    )
+
+
+def _grapheme_start(text: str, at: int) -> int:
+    """`at`, moved back to where the grapheme it falls inside starts, so a hard cut there
+    keeps no half of one: not before a mark or a joiner that belongs to what precedes it, not
+    after a joiner, not between the two letters of a flag. Close enough to UAX #29 for a cut
+    that is only a fallback (the corpus has none)."""
+    while 0 < at < len(text) and (_extends(text[at]) or text[at - 1] == _ZWJ):
+        at -= 1
+    lo, hi = _REGIONAL
+    run = 0
+    while run < at and lo <= text[at - 1 - run] <= hi:
+        run += 1
+    if run % 2 and at < len(text) and lo <= text[at] <= hi:
+        at -= 1
+    return at
 
 
 def _cut(text: str, width: int) -> str:
@@ -325,6 +385,47 @@ def _link_card(item: Item) -> dict[str, Any] | None:
             "kind": None,
             "failed": False,
         }
+    return None
+
+
+#: The hosts an X link can have (as `xbrain.fetch`'s, which this page does not import: it
+#: loads the article extractor).
+_X_HOSTS = frozenset({"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"})
+
+
+def _is_x_article_url(url: str) -> bool:
+    """`x.com/i/article/<id>` (or twitter.com's)."""
+    parts = urlsplit(url)
+    return (parts.hostname or "").lower() in _X_HOSTS and parts.path.startswith("/i/article/")
+
+
+def _is_x_article(item: Item) -> bool:
+    """The post links an X Article (`x.com/i/article/<id>`). X's embed of such a post shows
+    only that link, so the page opens it on the saved copy."""
+    return any(_is_x_article_url(link.url) for link in item.links)
+
+
+def _article_body(item: Item) -> dict[str, Any] | None:
+    """An X Article's fetched body for the saved copy, cut to `PAGE_ARTICLE_CHARS` at a
+    boundary, with its full size and URL; None for any other post, or when the body was never
+    fetched."""
+    if not _is_x_article(item) or item.content is None:
+        return None
+    for source in item.content.sources:
+        if (
+            isinstance(source, ContentSourceSuccess)
+            and source.kind == "x_article"
+            and source.text
+            and _is_x_article_url(source.url)
+        ):
+            text = _cut_at_boundary(source.text, PAGE_ARTICLE_CHARS)
+            return {
+                "text": text,
+                "cut": text != source.text,
+                "chars": len(source.text),
+                # «sigue en X» goes over https, whatever scheme the fetch stored.
+                "url": urlsplit(source.url)._replace(scheme="https").geturl(),
+            }
     return None
 
 
@@ -508,6 +609,8 @@ def _card(item: Item, corpus: _Corpus) -> dict[str, Any]:
         "media": _card_media(item, corpus.media),
         "quoted": _quoted_card(item),
         "link": _link_card(item),
+        "x_article": _is_x_article(item),
+        "article": _article_body(item),
         "enrich": (
             {"topics": enrich_topics, "primary": enriched.primary_topic} if enriched else None
         ),

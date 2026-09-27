@@ -107,7 +107,8 @@ details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;lette
 .empty{font-family:var(--mono);font-size:11px;color:var(--ink-faint);padding:14px 0}
 
 /* tabs */
-.tabs{display:flex;gap:4px;margin-top:30px;border-bottom:1px solid var(--hairline);overflow-x:auto}
+.tabbar{display:flex;align-items:flex-end;margin-top:30px;border-bottom:1px solid var(--hairline)}
+.tabs{display:flex;gap:4px;flex:1 1 auto;min-width:0;overflow-x:auto}
 .tabs a{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;text-decoration:none;
   color:var(--ink-faint);padding:12px 16px 11px;border-bottom:2px solid transparent;white-space:nowrap}
 .tabs a:hover{color:var(--ink)}
@@ -160,6 +161,7 @@ details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;lette
 .st{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border:1px dashed var(--hairline);border-radius:999px;padding:1px 8px;color:var(--ink-faint)}
 .twt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15.5px;line-height:1.55;margin:10px 0 4px}
 .twt a{color:var(--accent)}
+.artmore{display:flex;gap:14px;margin:6px 0 0}
 .twt.clamp{max-height:12.5em;overflow:hidden;-webkit-mask-image:linear-gradient(#000 70%,transparent)}
 .toggle{background:none;border:0;color:var(--accent);cursor:pointer;font-size:13px;padding:2px 0}
 .media{display:grid;gap:4px;border-radius:12px;overflow:hidden;margin-top:10px}
@@ -198,6 +200,17 @@ details.hist>summary{cursor:pointer;font-family:var(--mono);font-size:10px;lette
 .v.jv{border-color:var(--accent-line);color:var(--accent);background:var(--accent-soft)}
 .v.un{border-style:dashed;color:var(--ink-faint)}
 .prim{font-size:13px;margin-top:9px;color:var(--ink-muted)}
+/* X's own embed (the frame is X's page; the note and the toggle are ours) */
+.xembed{max-width:550px;margin-top:10px}
+.xembed:empty{height:220px;border-radius:12px;background:var(--surface-2)}
+.xembed iframe{display:block;width:100%;border:0;border-radius:12px}
+.xnote{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);margin-top:10px}
+.vtog{background:none;border:0;cursor:pointer;padding:0}
+.vista{display:flex;align-items:center;gap:4px;padding:0 0 6px 12px;white-space:nowrap}
+.vista span{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-faint);margin-right:4px}
+.vista button{font-family:var(--mono);font-size:11px;background:none;border:1px solid var(--hairline);border-radius:999px;padding:2px 10px;cursor:pointer;color:var(--ink-muted)}
+.vista button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--ink)}
+.vista button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .prim b{color:var(--ink);font-weight:600}
 .prim.diff b{color:var(--sienna)}
 details.saw{margin-top:10px}
@@ -402,6 +415,8 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
   .phead .sub{text-align:left}
   .card{padding:14px 14px 12px}
   .links{margin-left:0;width:100%}
+  .tabbar{flex-wrap:wrap}
+  .vista{order:-1;flex:0 0 100%;padding:0 0 8px}
   .rows td.tp{width:auto}
   .tnums{grid-template-columns:1fr 1fr}
   .pgrid{grid-template-columns:1fr}
@@ -465,13 +480,20 @@ footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--hairline);
     <div class="facts" id="facts"></div>
   </section>
 
-  <nav class="tabs" aria-label="Secciones">
-    <a href="#posts" data-tab="posts">Posts</a>
-    <a href="#topics" data-tab="topics">Topics</a>
-    <a href="#compare" data-tab="compare">Comparar Jev vs enrich</a>
-    <a href="#ask" data-tab="ask">Preguntar</a>
-    <a href="#config" data-tab="config">Configuración</a>
-  </nav>
+  <div class="tabbar">
+    <nav class="tabs" aria-label="Secciones">
+      <a href="#posts" data-tab="posts">Posts</a>
+      <a href="#topics" data-tab="topics">Topics</a>
+      <a href="#compare" data-tab="compare">Comparar Jev vs enrich</a>
+      <a href="#ask" data-tab="ask">Preguntar</a>
+      <a href="#config" data-tab="config">Configuración</a>
+    </nav>
+    <div class="vista" id="vista" role="group" aria-label="Cómo se ven los posts">
+      <span>Vista</span>
+      <button type="button" data-vista="x" aria-pressed="true">X</button>
+      <button type="button" data-vista="local" aria-pressed="false">copia guardada</button>
+    </div>
+  </div>
 
   <section id="tab-posts" class="tab">
     <div class="browse">
@@ -899,11 +921,17 @@ function header(p) {
   const links = el('div', 'links');
   const x = httpUrl(p.url);
   if (x) links.appendChild(link(x, 'lk', 'X ↗'));
-  if (p.note && DATA.notes_dir) {
-    links.appendChild(link('obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note), 'lk', 'nota ↗'));
-  }
+  const note = noteLink(p);
+  if (note) links.appendChild(note);
+  if (X_ID.test(p.id)) links.appendChild(vistaToggle(p));
   h.appendChild(links);
   return h;
+}
+
+/** «nota ↗»: the post's note in the vault, when the page knows where the notes are. */
+function noteLink(p) {
+  if (!p.note || !DATA.notes_dir) return null;
+  return link('obsidian://open?path=' + encodeURIComponent(DATA.notes_dir + '/' + p.note), 'lk', 'nota ↗');
 }
 
 /** The text, whole; a long one starts collapsed with a "ver todo" toggle. */
@@ -1150,17 +1178,257 @@ function askLine(id) {
   return line;
 }
 
+/* embed */
+/** X's own view of a post: a plain frame to X's embed page, with the local card one click
+    away. NEVER `widgets.js`: X's script would run in THIS page's origin, where the served page
+    keeps the token that spends money. The frame is X's origin, sandboxed; X receives the post id
+    and the viewer's IP (and its own cookies), `dnt=true` asks it not to personalise, and
+    `no-referrer` sends no referrer: X can learn this page's ORIGIN (`location.ancestorOrigins`:
+    `file://` or the local port), never its path or data. The resize message X posts is recorded in
+    ARCHITECTURE.md (jev · The X embed). */
+const X_ORIGIN = 'https://platform.twitter.com';
+/** A post id X can have: digits only. Anything else is never put in a URL. */
+const X_ID = /^\d{1,25}$/;
+/** How long a LOADED frame has to say anything at all before the card falls back to the local
+    copy. Any message from X counts: a frame off screen is throttled and sends its height only
+    once it is scrolled into view, long after it said it has the post. */
+const X_WAIT_MS = 8000;
+/** The height reserved for a frame until X says its own, so the list does not jump twice. */
+const X_MIN_H = 220;
+/** Frames are made only for cards this close to the viewport: a page of fifty loads a handful. */
+const X_NEAR = '800px 0px';
+const VISTA_KEY = 'xbrain.jev.vista';
+const XNOTE = {
+  id: 'Sin vista de X: el id de este post no es de X · se muestra la copia guardada',
+  timeout: 'X no respondió en ' + X_WAIT_MS / 1000 + ' s (¿sin red?) · se muestra la copia guardada',
+  gone: 'X no tiene este post (borrado, protegido o de una cuenta suspendida) · se muestra la copia guardada',
+  article: 'Artículo de X: la vista de X solo enseña su enlace · se muestra la copia guardada',
+};
+/** The saved copy's one name, everywhere the page offers it. */
+const SAVED = 'copia guardada';
+
+/** «Vista: X | copia guardada» for the whole page: `?embed=0` in the URL, else the viewer's last choice
+    (this browser only), else X. */
+function readViewMode() {
+  if (new URLSearchParams(location.search).get('embed') === '0') return 'local';
+  try {
+    return localStorage.getItem(VISTA_KEY) === 'local' ? 'local' : 'x';
+  } catch (err) {
+    return 'x';
+  }
+}
+let vista = readViewMode();
+/** The reader's choice for one post («ver copia guardada» / «ver en X»), over the page's. Keyed
+    by post id, like `xFell`: every card of the same post (Posts and a Preguntar result, say)
+    follows it, and a change redraws them all (`redrawPreviews(id)`). */
+const cardVista = new Map();
+/** Posts whose X view fell back to the saved copy, and why (`XNOTE`). */
+const xFell = new Map();
+
+const xTheme = () => (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+/** The one frame URL: X's embed page, a validated id, the page's theme at the time it is drawn. */
+const xSrc = (id) => X_ORIGIN + '/embed/Tweet.html?id=' + id + '&dnt=true&theme=' + xTheme() + '&lang=es';
+
+/** What a card shows now: X's view, or the saved copy and why (null: the reader chose it).
+    An X Article (`p.x_article`) opens on the saved copy: X's view of one is its bare link. */
+function cardShows(p) {
+  if (!X_ID.test(p.id)) return {x: false, why: 'id'};
+  const chosen = cardVista.get(p.id);
+  if (chosen) return {x: chosen === 'x', why: null};
+  if (xFell.has(p.id)) return {x: false, why: xFell.get(p.id)};
+  if (vista === 'x' && p.x_article) return {x: false, why: 'article'};
+  return {x: vista === 'x', why: null};
+}
+
+/** The saved copy: text, pictures, quoted post, link card — and an X Article's body. */
+function localView(p) {
+  const box = el('div', 'local');
+  box.appendChild(body(p.text));
+  if (p.media.length) box.appendChild(mediaGrid(p.media));
+  if (p.quoted) box.appendChild(quotedCard(p.quoted));
+  if (p.link) box.appendChild(linkCard(p.link));
+  if (p.article) box.appendChild(articleBody(p));
+  return box;
+}
+
+/** An X Article's body as the page ships it (cut in Python to `PAGE_ARTICLE_CHARS` at a
+    paragraph or sentence end), folded under «ver todo»; a cut one says where the rest is. */
+function articleBody(p) {
+  const box = document.createDocumentFragment();
+  box.appendChild(body(p.article.text, 'twt artb'));
+  if (p.article.cut) {
+    const more = el('p', 'artmore');
+    const x = httpUrl(p.article.url);
+    if (x) more.appendChild(link(x, 'lk', 'sigue en X ↗'));
+    const note = noteLink(p);
+    if (note) more.appendChild(note);
+    box.appendChild(more);
+  }
+  return box;
+}
+
+/** A place for X's frame; the frame itself is made when the card comes near the viewport. */
+function xSlot(p) {
+  const slot = el('div', 'xembed');
+  slot.dataset.id = p.id;
+  slot.dataset.handle = p.author.handle || '';
+  xNear(slot);
+  return slot;
+}
+
+let xObserver = null;
+/** The slots the observer watches, so a slot that left the page (a redraw, a new list, a
+    refresh) is let go (`xForget`) instead of held until the page closes. */
+const xWatched = new Set();
+let xSweep = null;
+function xNear(slot) {
+  if (!('IntersectionObserver' in window)) {
+    // No observer: the frame's own `loading="lazy"` is the browser's limit.
+    xFrame(slot);
+    return;
+  }
+  if (!xObserver) {
+    xObserver = new IntersectionObserver((entries) => entries.forEach((e) => {
+      if (!e.isIntersecting) return;
+      xObserver.unobserve(e.target);
+      xWatched.delete(e.target);
+      xFrame(e.target);
+    }), {rootMargin: X_NEAR});
+  }
+  xObserver.observe(slot);
+  xWatched.add(slot);
+  xForgetSoon();
+}
+
+/** Stops watching every slot that is no longer in the page — in the NEXT task: a card is
+    built detached and attached by the same (synchronous) draw, so a sweep inside that draw
+    would drop the slots it is making. */
+function xForgetSoon() {
+  if (xSweep === null) xSweep = setTimeout(xForget, 0);
+}
+function xForget() {
+  xSweep = null;
+  xWatched.forEach((s) => {
+    if (s.isConnected) return;
+    xObserver.unobserve(s);
+    xWatched.delete(s);
+  });
+}
+
+function xFrame(slot) {
+  if (slot.firstChild || !X_ID.test(slot.dataset.id)) return;
+  const f = el('iframe');
+  f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox');
+  f.setAttribute('referrerpolicy', 'no-referrer');
+  f.setAttribute('loading', 'lazy');
+  f.title = slot.dataset.handle ? 'Post de @' + slot.dataset.handle + ' en X' : 'Post en X';
+  f.style.height = X_MIN_H + 'px';
+  f.setAttribute('src', xSrc(slot.dataset.id));
+  // The wait starts when the frame has LOADED — X's page, or the browser's error page when X
+  // cannot be reached — never at creation: `loading="lazy"` may hold a frame made near the
+  // viewport back until it is closer, and that frame has said nothing because it has not asked.
+  f.addEventListener('load', () => {
+    if (!f.xHeard) f.xTimer = setTimeout(() => xFallBack(f, 'timeout'), X_WAIT_MS);
+  }, {once: true});
+  slot.appendChild(f);
+}
+
+/** X's frame gave up (timeout, or X has no such post): every card of that post shows the saved
+    copy and why. */
+function xFallBack(f, why) {
+  clearTimeout(f.xTimer);
+  const a = f.isConnected && f.closest('.card');
+  const id = a && a.dataset.id;
+  if (!id || !postById()[id]) return;
+  cardVista.delete(id);
+  xFell.set(id, why);
+  redrawPreviews(id);
+}
+
+/** The only messages read: from X's origin, from one of this page's frames (matched by
+    `event.source`), in X's `{"twttr.embed": {method, params}}` shape. Any of them means X
+    answered (the wait ends); a resize sets that frame's height and nothing else; `no_results`
+    falls back. */
+function onXMessage(e) {
+  if (e.origin !== X_ORIGIN || !e.source) return;
+  const f = [...document.querySelectorAll('.xembed iframe')].find((x) => x.contentWindow === e.source);
+  if (!f) return;
+  let d = e.data;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (err) { return; }
+  }
+  const m = d && d['twttr.embed'];
+  if (!m || typeof m.method !== 'string') return;
+  f.xHeard = true;
+  clearTimeout(f.xTimer);
+  if (m.method === 'twttr.private.resize') {
+    const h = Number(m.params && m.params[0] && m.params[0].height);
+    if (h > 0 && h < 20000) f.style.height = Math.ceil(h) + 'px';
+  } else if (m.method === 'twttr.private.no_results') {
+    xFallBack(f, 'gone');
+  }
+}
+addEventListener('message', onXMessage);
+
+/** Fills a card's preview (X's frame or the local copy, with why) and names its toggle. */
+function preview(a, p) {
+  const shows = cardShows(p);
+  const pv = a.querySelector('.pv');
+  pv.replaceChildren();
+  if (xObserver) xForgetSoon();
+  if (shows.why) pv.appendChild(el('p', 'xnote', XNOTE[shows.why]));
+  pv.appendChild(shows.x ? xSlot(p) : localView(p));
+  const t = a.querySelector('.vtog');
+  if (t) t.textContent = shows.x ? 'ver ' + SAVED : 'ver en X';
+}
+
+function vistaToggle(p) {
+  const b = el('button', 'lk vtog');
+  b.type = 'button';
+  b.addEventListener('click', () => {
+    cardVista.set(p.id, cardShows(p).x ? 'local' : 'x');
+    xFell.delete(p.id);
+    redrawPreviews(p.id);
+  });
+  return b;
+}
+
+/** Every drawn card again (after the page's «Vista» or the system theme changes), or only the
+    cards of post `id` (its toggle, its fallback). */
+function redrawPreviews(id) {
+  const byId = postById();
+  document.querySelectorAll('.card[data-id]').forEach((a) => {
+    if (id !== undefined && a.dataset.id !== id) return;
+    const p = byId[a.dataset.id];
+    if (p && a.querySelector('.pv')) preview(a, p);
+  });
+}
+
+function renderVista() {
+  document.querySelectorAll('#vista button').forEach((b) => {
+    b.setAttribute('aria-pressed', String(b.dataset.vista === vista));
+  });
+}
+
+function setVista(mode) {
+  vista = mode;
+  try { localStorage.setItem(VISTA_KEY, mode); } catch (err) { /* this browser keeps nothing */ }
+  cardVista.clear();
+  xFell.clear();
+  renderVista();
+  redrawPreviews();
+}
+/* end embed */
+
 function card(p) {
   const a = el('article', 'card');
   a.id = 'post-' + p.id;
   a.tabIndex = -1;
   a.dataset.id = p.id;
   a.appendChild(header(p));
-  a.appendChild(body(p.text));
-  if (p.media.length) a.appendChild(mediaGrid(p.media));
-  if (p.quoted) a.appendChild(quotedCard(p.quoted));
-  if (p.link) a.appendChild(linkCard(p.link));
+  a.appendChild(el('div', 'pv'));
   a.appendChild(jevBlock(p));
+  preview(a, p);
   return a;
 }
 
@@ -1320,7 +1588,15 @@ const TOPIC_PAIRS_SHOWN = 8;
     refreshed blob is read afresh rather than through a row captured earlier. */
 const topicsView = {t: '', unknownT: '', cx: '', px: '', o: '', d: ''};
 const topicRows = () => Object.fromEntries(DATA.summary.per_topic.map(r => [r.slug, r]));
-const postById = () => Object.fromEntries(DATA.posts.map(p => [p.id, p]));
+/** Post id → post, built once per data load (a new `DATA.posts` is a new map), not per call. */
+let postMap = null, postMapOf = null;
+const postById = () => {
+  if (postMapOf !== DATA.posts) {
+    postMap = Object.fromEntries(DATA.posts.map(p => [p.id, p]));
+    postMapOf = DATA.posts;
+  }
+  return postMap;
+};
 
 /** A hash link inside the page: `#<tab>?<params>`, the params encoded by URLSearchParams. */
 function hashHref(tab, params) {
@@ -2938,7 +3214,8 @@ let PANEL = null;
 let ESTIMATES = 0;
 /** The button that opened the panel: focus goes back to it when the panel closes. */
 let opener = null;
-/** The last finished job whose files this page's data includes (`/api/job`'s `finished_at`). */
+/** The last finished job whose files this page's data includes, by its `number` (`/api/job`'s):
+    its `finished_at` is a time to the second, and two jobs can end in the same one. */
 let seenFinish = null;
 /** Consecutive failed looks at `/api/job` by the idle watch. */
 let watchFailures = 0;
@@ -3428,7 +3705,7 @@ function showEnd(job) {
 async function finished(job) {
   following = false;
   asking = null;
-  seenFinish = job.finished_at;
+  seenFinish = job.number;
   showEnd(job);
   await reloadData();
   showAskResults(job);
@@ -3447,7 +3724,7 @@ function showAskResults(job) {
 /** Another tab's job ended while this page was idle: new data, and — when it did not end
     cleanly (the cap, a failure, answers unsaved or unlogged) — the panel saying how. */
 async function endedElsewhere(job) {
-  seenFinish = job.finished_at;
+  seenFinish = job.number;
   if (!endedCleanly(job)) {
     const P = panel();
     asking = null;
@@ -3509,7 +3786,7 @@ function watch(delay) {
         // `following` again: asked before this page confirmed a job and answered after, the
         // answer is about the job `poll` already has — neither followed twice nor reloaded.
         if (!following && job.state === 'running') resume(job);
-        else if (!following && job.finished_at && job.finished_at !== seenFinish) await endedElsewhere(job);
+        else if (!following && job.finished_at && job.number !== seenFinish) await endedElsewhere(job);
         watchFailures = 0;
         if (watchLostShown) watchFound();
       } catch (err) {
@@ -3525,7 +3802,7 @@ function watch(delay) {
 /** Serve mode at load: the toolbar's control, and the watch — whose first look, right away,
     picks up a job already running. */
 function bootServe() {
-  seenFinish = DATA.serve.finished_at || null;
+  seenFinish = DATA.serve.finished_job || null;
   renderNextControl();
   watch(0);
 }
@@ -3598,6 +3875,11 @@ function boot() {
     if (view.tab === 'config') renderConfig();
   });
   document.addEventListener('keydown', onKey);
+  renderVista();
+  document.querySelectorAll('#vista button').forEach((b) => b.addEventListener('click', () => setVista(b.dataset.vista)));
+  // A frame takes the theme it was drawn in: the system theme changing redraws them.
+  // Every card again (an argument would be read as a post id): the frames take the new theme.
+  matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => redrawPreviews());
   if ('IntersectionObserver' in window) {
     new IntersectionObserver((entries) => {
       if (entries.some(e => e.isIntersecting) && drawn < shown.length && view.tab === 'posts') drawMore();

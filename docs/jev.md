@@ -600,11 +600,35 @@ Click the topic again, or its chip above the list, to drop it. On a narrow scree
 list starts folded.
 
 **Right, the posts**, fifty at a time and more as you scroll (or with *Mostrar más*). Each
-card is a share-style preview built from data XBrain already has, with nothing fetched from
-X:
+card shows **the post through X's own embed** — the post as X shows it, loaded from X when the
+card comes near the screen — under a head of ours (author, `@handle`, date, `X ↗`, `nota ↗` and
+the toggle). The embed is a plain frame to X's embed page: X's script never runs in this page,
+where the served page keeps the token that can spend money. X receives the post id and your
+IP (and its own cookies in your browser). It gets no referrer: at most the page's origin
+(`file://` or the local port), never its path or data. See ARCHITECTURE.md (jev · *The X
+embed*).
 
-- the author, `@handle` and date, the whole text (a long one starts folded behind *ver
-  todo*), `X ↗` and `nota ↗`;
+**The saved copy is always one click away.** *ver copia guardada* on a card swaps X's view for
+the copy XBrain saved (below), and *ver en X* swaps it back. The choice is per post: when the
+same post is on screen twice (Posts and a Preguntar result), both cards follow. The switch
+**Vista: X | copia guardada** beside the tabs (on a phone, on its own row above them) sets
+every card at once; this browser remembers it. Opening the page with `?embed=0`
+(`jev.html?embed=0`, or `http://127.0.0.1:8765/?embed=0` served) starts every card on the
+saved copy. A card shows the saved copy by itself, with one line saying why (*… · se muestra
+la copia guardada*), when:
+
+- the post's id is not an X id (*Sin vista de X: el id de este post no es de X*);
+- the post is an X Article (it links `x.com/i/article/…`): X's view of an Article is only its
+  link, so the card opens on the saved copy (*Artículo de X: la vista de X solo enseña su
+  enlace*); *ver en X* still shows X's view;
+- X has not got the post — deleted, protected or a suspended account (*X no tiene este post*);
+- X did not answer within 8 seconds — no network, X blocked, the file opened offline (*X no
+  respondió en 8 s (¿sin red?)*). *ver en X* tries again.
+
+The saved copy is a share-style preview built from data XBrain already has, with nothing
+fetched from X:
+
+- the whole text (a long one starts folded behind *ver todo*);
 - up to four photos, from the vault's `_media/` folder (the same files the notes embed) by a
   path relative to the page. A video shows the first extracted frame of **its own** video
   source with ▶. A picture the page cannot show says why: *falta en _media/: corre xbrain
@@ -615,7 +639,13 @@ X:
   fetch failed, or *sin leer todavía: corre xbrain refresh-quoted* when none was tried;
 - the fetched linked page as a mini card with its domain and kind (`artículo`, or
   `x_article · página de X` — some of those hold scraped replies rather than an article),
-  marked *no se pudo leer* when the fetch failed, or else the first link in the post.
+  marked *no se pudo leer* when the fetch failed, or else the first link in the post;
+- for an X Article, its body as XBrain fetched it, as text (any markup in it is shown, never
+  run), up to 2,000 characters cut at the end of a paragraph or sentence (marked *…*; a body
+  with no space to cut at is cut between two characters, never inside an emoji or an accented
+  letter), folded behind *ver todo*; a cut body ends with *sigue en X ↗* (https) and *nota ↗*
+  (the vault note has the whole article). The bodies add about 0.43 MB
+  to the page (201 Articles, measured 2026-09-27).
 
 Under the preview, **Jev vs enrich**: one row per topic either side has — enrich ✓ or —,
 Jev's probability as a bar (the tick is the threshold) and a number, and the verdict
@@ -654,8 +684,10 @@ evaluated posts with no enrichment to compare against.
 
 It is **one file**: the data as a JSON blob in the page, no charting library, no external
 scripts. Photos are files next to it in `_media/`, not embedded, so moving `jev.html` out of
-the vault loses the pictures and nothing else. The only network reference is the Google
-Fonts stylesheet. Measured 2026-09-26 on the real vault (2,609 posts, 293 evaluated):
+the vault loses the pictures and nothing else. Two things come off the network: the Google
+Fonts stylesheet, and X's embed for each card near the screen (a frame from
+`platform.twitter.com`; offline, the cards fall back to the saved copy after 8 s). Measured
+2026-09-26 on the real vault (2,609 posts, 293 evaluated):
 **3,799,403 bytes**, about **1.4 KB per post** — ~2.7 KB for an evaluated post (its topic
 rows and evidence) and ~1.2 KB for the rest. The Topics and Comparar tabs' data is the
 confusion lists and bands (~19 KB of counts) and `post_sets` (~38 KB, ~130 bytes per evaluated
@@ -1019,7 +1051,7 @@ code:
    under the lock needs a new estimate; a 409 because a job is already running spends
    nothing.
 3. **Progress** (`GET /api/job`): `state` (`running`, then `done`, `interrupted` or
-   `error`), `done` of `total`, `answered`, `failed_calls`, `tokens`, `usd` spent,
+   `error`), the job's `number` (1, 2, … per server), `done` of `total`, `answered`, `failed_calls`, `tokens`, `usd` spent,
    `tokens_unknown`, `unpriced_providers` and `charged_at_estimate` (answers charged the
    mean because they could not be priced), then the `outcome` — `ok` saved (and their
    `ids`), `failed` with the first `failures`, `unsaved`, whether the pass was `logged` —
@@ -1078,8 +1110,11 @@ code:
 
 Every estimate and job view carries its `kind` (`topics` or `ask`): the server has ONE job
 slot for both, and both take the pass lock. The page's data is `GET /api/data`
-(the same blob the page embeds); its `serve.finished_at` is the last job whose files that data
-already includes, which is how an idle tab knows a job ended since.
+(the same blob the page embeds); its `serve.finished_job` is the `number` of the last job whose
+files that data already includes (with its `serve.finished_at`), which is how an idle tab knows
+a job ended since: every job view carries its `number` (1, 2, … per server). The time alone
+could not say it: it is to the second, and two jobs can end in the same one (a free ask right
+after another).
 
 **What stops a job from spending more than you meant:**
 
