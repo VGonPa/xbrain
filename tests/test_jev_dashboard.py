@@ -2132,10 +2132,11 @@ def test_the_config_words_that_carry_meaning_are_pinned():
         "como si se volviera a preguntar todo",
         "(aún no existe: lo crea ",
         "'Modelo que se pedirá'",
-        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo "
-        "lanzado desde la página que sirve `xbrain jev serve`",
-        "'Tope por trabajo desde la página'",
+        "no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, "
+        "o un trabajo de `xbrain jev serve`",
+        "'Tope por trabajo de xbrain jev serve'",
         "el servidor rechaza un trabajo cuya estimación lo pase",
+        "no envía un post más cuando lo gastado y lo reservado",
         "las evaluaciones guardadas no registran qué modelo se pidió",
         "el $ solo promedia proveedores con tarifa",
         "la que ves la dibuja el servidor en vivo",

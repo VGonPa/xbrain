@@ -2018,8 +2018,8 @@ const CONFIG_SETTINGS = {
     why: 'cuántos posts pregunta a la vez `xbrain jev topics`. Solo cambia la velocidad de una pasada.'},
   state_char_limit: {name: 'Límite de evidencia', page: true, fmt: (v) => pl(v, 'carácter', 'caracteres'),
     why: 'cuánta evidencia de un post se envía; lo que pasa de ahí se corta por el final. Cambiarlo caduca solo los posts cuyo corte se mueve.'},
-  serve_max_usd: {name: 'Tope por trabajo desde la página', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
-    why: 'lo más que puede costar un trabajo lanzado desde la página que sirve `xbrain jev serve`: el servidor rechaza un trabajo cuya estimación lo pase, y lo para si lo gastado de verdad lo alcanza. `xbrain jev topics` desde la terminal no tiene tope.'},
+  serve_max_usd: {name: 'Tope por trabajo de xbrain jev serve', page: false, fmt: (v) => dec(v, v < 0.01 ? 4 : 2) + ' $',
+    why: 'lo más que puede costar un trabajo lanzado con la API de `xbrain jev serve`: el servidor rechaza un trabajo cuya estimación lo pase, y no envía un post más cuando lo gastado y lo reservado para los posts en curso lo pasarían. `xbrain jev topics` desde la terminal no tiene tope.'},
 };
 /** The files, by `config.files` key: what each one is, and the command that creates it. The
     name, path, whether it exists and whether a snapshot carries it are Python's. */
@@ -2079,7 +2079,7 @@ function configSettings(C) {
   const built = C.settings.filter(s => CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
   const next = C.settings.filter(s => !CONFIG_SETTINGS[s.key].page).map(s => CONFIG_SETTINGS[s.key].name);
   const sec = cfgSection('Ajustes', built.join(', ') + ': con estos valores se calculó esta página. ' +
-    andList(next) + ': no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo lanzado desde la página que sirve `xbrain jev serve`. ' +
+    andList(next) + ': no cambian esta página; los usa la próxima pasada: `xbrain jev topics`, o un trabajo de `xbrain jev serve`. ' +
     'Todo se cambia en config.toml, nunca aquí.');
   // Shipped most answers first, then by name: drawn in that order.
   const models = C.models_answered;

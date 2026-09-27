@@ -182,10 +182,11 @@ concurrency = 8
 # sends, so this setting is not the cost lever; the vocabulary size is. 100k chars is
 # ~25k tokens. Assessments record the pre-cut length and `truncated`. See docs/jev.md.
 state_char_limit = 100000
-# The most ONE job started from the page (`xbrain jev serve`) may cost, in USD, by the same
-# estimate the page shows before confirming (the mean cost of the answers already paid for ×
-# the posts it would ask). The server refuses a job whose estimate is above it, and stops a
-# job whose real spend reaches it. `xbrain jev topics` in the terminal has no cap.
+# The most ONE job started through `xbrain jev serve`'s API may cost, in USD. The estimate
+# (/api/topics/estimate) is the mean cost of the answers already paid for × the posts; a job
+# whose estimate is above the cap is refused. While it runs, each post's expected cost is
+# reserved before it is sent, and no post is sent that would pass the cap; the bill passes it
+# only by what the posts in flight cost above that mean. `xbrain jev topics` has no cap.
 serve_max_usd = 1.0
 # Output: <data_dir>/jev/topics.json — a side-car, NOT part of the store and NOT snapshotted.
 # It costs money to regenerate and has no undo; see docs/jev.md.

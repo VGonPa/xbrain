@@ -1643,7 +1643,7 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
         "Opción de escape",
         "Peticiones a la vez",
         "Límite de evidencia",
-        "Tope por trabajo desde la página",
+        "Tope por trabajo de xbrain jev serve",
         *[f"Precio de entrada · {p}" for p in sorted(prices)],
     ]
     assert by_name["Umbral"][1] == "0,875por defecto: 0,850"
@@ -1651,8 +1651,8 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     assert by_name["Opción de escape"][1] == "«ninguno»por defecto: «otro»"
     assert by_name["Peticiones a la vez"][1] == "3por defecto: 8"
     assert by_name["Límite de evidencia"][1] == "50.000 caracterespor defecto: 100.000 caracteres"
-    assert by_name["Tope por trabajo desde la página"][1] == "0,25 $por defecto: 1,00 $"
-    assert by_name["Tope por trabajo desde la página"][3] == "[jev].serve_max_usd"
+    assert by_name["Tope por trabajo de xbrain jev serve"][1] == "0,25 $por defecto: 1,00 $"
+    assert by_name["Tope por trabajo de xbrain jev serve"][3] == "[jev].serve_max_usd"
     # Most answers first, then by name: here the reverse of name order.
     assert by_name["Modelo que se pedirá"][1] == (
         "jev-9.9.9por defecto: jev-latest · las evaluaciones guardadas no registran qué modelo "
@@ -1666,7 +1666,7 @@ def test_each_setting_shows_the_value_in_effect_and_its_default(config_probed):
     intro, output = seen["settings_notes"][0], seen["settings_notes"][-1]
     assert intro.startswith("Umbral, Opción de escape, Límite de evidencia: con estos valores")
     assert (
-        "Modelo que se pedirá, Peticiones a la vez y Tope por trabajo desde la página: "
+        "Modelo que se pedirá, Peticiones a la vez y Tope por trabajo de xbrain jev serve: "
         "no cambian esta página" in intro
     )
     assert output == "Los tokens de salida son gratis."

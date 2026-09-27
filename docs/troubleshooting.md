@@ -194,7 +194,7 @@ fallback fetcher for JavaScript-heavy pages.
 
 `TYPESAFE_API_KEY` is the third, and the only one attached to a command that bills
 per run: `xbrain jev topics`, the second opinion on topic assignment (and the jobs you
-confirm from the page `xbrain jev serve` serves, which run the same pass). Nothing in the
+start through `xbrain jev serve`'s API, which run the same pass). Nothing in the
 pipeline needs it — `jev` is a side-car you can ignore entirely — and unlike the other
 two it may also be read from `<repo>/.env` (gitignored; `.env.example` is the committed
 template). `xbrain jev report` and `xbrain jev dashboard` need no key at all: they
@@ -487,7 +487,8 @@ Three that send people here first, because the symptom does not name Jev:
   next run. [Why](jev.md#where-the-files-live-and-what-protects-them).
 - **`otra pasada de Jev está en curso (…)`.** A `jev topics` in another terminal, or a job
   started from `xbrain jev serve`, holds `data/jev/.lock`. Nothing was read or spent; wait
-  for it and re-run. The lock dies with its process, so there is never one to delete.
+  for it and re-run; `jev topics` exits **75** here (EX_TEMPFAIL), so a script can retry.
+  The lock dies with its process, so there is never one to delete.
   [Why](jev.md#daily-use).
 - **A red *"La página no pudo dibujarse"* banner on `jev.html`.** The page's script failed
   while loading. The numbers are in `xbrain jev report`; report the banner's message as a bug.
