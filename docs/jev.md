@@ -1053,7 +1053,9 @@ After a refused **Evaluar y pagar**, the button comes back only when the confirm
 good: a malformed request (400) or a job thread that could not start (503 *no se pudo
 arrancar*); never while the server is stopping. A refusal because another job runs (409)
 follows that job. The static `jev.html` never shows these buttons (its data says it is not
-served) and keeps «copiar comando».
+served) and keeps «copiar comando». The served page is sent with a content security policy: no script from
+any host, requests only to its own server, X's embed the only outside frame, and no other site
+can put the page in a frame of its own.
 
 Those buttons call a small JSON API to run a topics pass over chosen posts, or an ask over
 the corpus; anything else on this machine that has the page's token can call it too (`curl`

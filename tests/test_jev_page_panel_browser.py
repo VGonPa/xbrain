@@ -664,3 +664,44 @@ def test_an_idle_page_says_when_it_lost_the_server(idle_lost):
     assert panel["error"] == "Se perdió el contacto con el servidor; recarga la página."
     assert panel["reload"] == "Recargar la página"
     assert _step(idle_lost, "found")["shown"] is False
+
+
+# --------------------------------------------------------------------------- the served page's policy
+
+_POLICY_PROBE = (
+    "<script>"
+    + _SERVE_JS
+    + r"""
+(async () => {
+  await sStep('policy', async () => {
+    await sWait(() => seen(sCard('3')), 'la página');
+    const refused = [];
+    document.addEventListener('securitypolicyviolation', (e) => refused.push(e.violatedDirective + ' ' + e.blockedURI));
+    // What a reintroduced `widgets.js` would be: refused by the policy before any request.
+    const s = document.createElement('script');
+    s.src = 'https://platform.twitter.com/widgets.js';
+    document.head.appendChild(s);
+    const f = document.createElement('iframe');
+    f.src = 'https://example.com/';
+    document.body.appendChild(f);
+    for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
+    return {refused: refused.sort(), page_drew: seen(sCard('3'))};
+  });
+  sDone();
+})();
+</script>"""
+)
+
+
+@_requires_chrome
+def test_the_served_page_refuses_a_third_party_script_and_frame_by_policy(tmp_path):
+    from tests.test_jev_serve import _Recorder
+
+    seen = _served_dump(tmp_path, _POLICY_PROBE, client=_Recorder())
+    policy = _step(seen, "policy")
+
+    assert policy["page_drew"] is True  # the page itself runs under the policy
+    assert policy["refused"] == [
+        "frame-src https://example.com",
+        "script-src-elem https://platform.twitter.com/widgets.js",
+    ]
