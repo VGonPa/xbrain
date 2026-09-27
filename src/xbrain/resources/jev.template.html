@@ -2545,7 +2545,9 @@ function askHistory(open) {
   side.appendChild(el('h3', 'tsec', 'Consultas hechas'));
   side.appendChild(el('p', 'muted', 'Reabrir una consulta no cuesta nada: sus respuestas están guardadas.'));
   if (DATA.asks && DATA.asks.error) {
-    side.appendChild(el('p', 'err', 'No se pudo leer el historial: ' + DATA.asks.error));
+    const banner = el('p', 'err', 'No se pudo leer el historial: ' + DATA.asks.error);
+    banner.id = 'ask-history-error';
+    side.appendChild(banner);
   }
   const list = el('ol');
   list.id = 'ask-history';
@@ -2644,6 +2646,31 @@ let opener = null;
 let seenFinish = null;
 /** Consecutive failed looks at `/api/job` by the idle watch. */
 let watchFailures = 0;
+/** Whether the panel shows the idle watch's «lost» message (cleared when the server answers). */
+let watchLostShown = false;
+
+/** The idle page lost its server: no job was being followed, so there is nothing to lose but
+    the live data — said as such, and taken back when a later look gets an answer. */
+function watchLost() {
+  const P = panel();
+  asking = null;
+  watchLostShown = true;
+  P.title.textContent = 'Sin contacto con el servidor';
+  P.est.textContent = '';
+  P.forceRow.hidden = true;
+  P.prog.hidden = true;
+  panelMode('done');
+  P.reload.hidden = false;
+  P.box.hidden = false;
+  showError('Se perdió el contacto con el servidor; recarga la página.');
+}
+
+function watchFound() {
+  const P = panel();
+  watchLostShown = false;
+  P.error.hidden = true;
+  P.box.hidden = true;
+}
 
 /** A call to this page's server: GET without a body, POST (JSON, with the page's token) with
     one. The server's Spanish error, when it gives one, is the message; `status` is kept. */
@@ -2793,6 +2820,7 @@ function panelMode(mode) {
 
 function openAsk(kind, ask, title, from) {
   const P = panel();
+  watchLostShown = false;  // the panel is the reader's now
   opener = from || null;
   P.box.hidden = false;
   P.title.focus();
@@ -2940,6 +2968,7 @@ async function confirmAsk() {
 /** The panel turns into the job's progress, polled until it ends. */
 function follow(job) {
   const P = panel();
+  watchLostShown = false;
   following = true;
   P.box.hidden = false;
   P.forceRow.hidden = true;
@@ -3157,10 +3186,11 @@ function watch(delay) {
         if (!following && job.state === 'running') resume(job);
         else if (!following && job.finished_at && job.finished_at !== seenFinish) await endedElsewhere(job);
         watchFailures = 0;
+        if (watchLostShown) watchFound();
       } catch (err) {
         console.warn('jev serve: no se pudo leer /api/job', err);
         // Once, after as many tries as a followed job gets: a server that went away is said.
-        if (++watchFailures === RETRY_MS.length + 1) lost(err);
+        if (++watchFailures === RETRY_MS.length + 1) watchLost();
       }
     }
     watch(WATCH_MS);

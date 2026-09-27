@@ -290,12 +290,17 @@ def _by_author(item: Item, author: str | None) -> bool:
     return author is None or item.author.handle.casefold() == author.lstrip("@").casefold()
 
 
+#: How a filter the corpus cannot apply is refused (`filter_posts`): the page tells it from
+#: any other failure by this prefix.
+FILTER_REFUSAL = "topic desconocido"
+
+
 def _refuse_unusable(store: dict[str, Item], filters: AskFilters, jev: JevPairs | None) -> None:
     """A caller that forgot the side-car (a bug), or a `topic` nobody uses (a typo)."""
     if filters.needs_jev and jev is None:
         raise ValueError("filter_posts: --topic y --only-evaluated necesitan las evaluaciones")
     if filters.topic is not None and filters.topic not in _known_topics(store, jev):
-        raise JevError(f"topic desconocido: {filters.topic!r} (ni en el vocabulario ni en enrich)")
+        raise JevError(f"{FILTER_REFUSAL}: {filters.topic!r} (ni en el vocabulario ni en enrich)")
 
 
 def filter_posts(

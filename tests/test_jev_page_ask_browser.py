@@ -81,6 +81,7 @@ const sQView = () => ({
   head: txt(document.getElementById('ask-head')),
   empty: txt(document.getElementById('ask-empty')),
   error: txt(document.getElementById('ask-row-error')),
+  banner: txt(document.getElementById('ask-history-error')),
   form: seen(document.getElementById('ask-form')),
   launch: txt(document.getElementById('ask-launch')),
   history: sQHistory(),
@@ -192,6 +193,9 @@ def test_static_the_tab_lists_every_query_last_asked_first(ask_static):
     assert f"0 resultados · 2 posts con respuesta · {seed_cost}" in view["history"][0]["text"]
     assert f"3 resultados · 5 posts con respuesta · {hooks_cost}" in view["history"][1]["text"]
     assert view["history"][0]["current"] is True
+    # The broken file stopped the history's rebuild: said above the list, its row kept.
+    assert view["banner"].startswith("No se pudo leer el historial: ")
+    assert f"{shas['broken']}.json" in view["banner"]
 
 
 @_requires_chrome
@@ -319,7 +323,9 @@ const sQForm = (fields) => {
     const hidden = !sPanel().shown;
     await sWait(() => sRefreshed > r0, 'la consulta gratis');
     for (let i = 0; i < 3; i++) await sFetch0.call(window, '/probe-wait');
-    return Object.assign(sQView(), {panel, hidden, after: sPanel()});
+    // The end text the panel would show, from the page's own function over the job it saw.
+    const endText = outcomeText(await (await sFetch0('/api/job')).json());
+    return Object.assign(sQView(), {panel, hidden, after: sPanel(), end_text: endText});
   });
   await sStep('reopen', async () => {
     const posts0 = sPosts, r0 = sRefreshed;
@@ -467,6 +473,9 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
         "llegar se para; lo que ya esté en vuelo termina y puede pasarlo por poco (como mucho "
         "1 post)."
     )
+    assert again["end_text"].startswith("0 respuestas guardadas · 1 resultado · ")
+    assert "runs.jsonl" not in again["end_text"]
+    assert "no quedó en el historial" not in again["end_text"]
     # Nothing was sent, so nothing to log: a clean end — no alarm, and the panel stays hidden.
     assert again["hidden"] is True and again["after"]["shown"] is False
     # The probe's last job is this free one.

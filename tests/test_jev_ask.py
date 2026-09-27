@@ -1467,3 +1467,33 @@ def test_the_page_cost_of_a_query_is_the_run_logs(cfg: Config):
 
     assert row["cost"] == ask_cost_by_query(load_runs(cfg.jev_runs_path))[plan.query.sha]
     assert row["cost"]["cost_usd"] > 0.01
+
+
+def test_an_unreadable_file_costs_only_its_own_query_when_the_history_is_rebuilt(cfg: Config):
+    """The index is gone and one answer file is broken: every other lost query still comes
+    back (rebuilt) and the broken file is named — it never blanks the tab."""
+    good, _, _ = _run(cfg, _ByText())
+    bad, _, _ = _run(cfg, _ByText(), query_text="otra")
+    (cfg.jev_asks_dir / ASK_INDEX).unlink()
+    _ask_path(cfg, bad.query).write_text("{", encoding="utf-8")
+
+    view = _asks(cfg)
+
+    assert [(row["query"], row["rebuilt"]) for row in view["history"]] == [(QUERY, True)]
+    assert f"{bad.query.sha}.json" in view["error"]
+    assert [r["id"] for r in view["history"][0]["results"]] == ["1", "3"]
+
+
+def test_a_results_failure_that_is_not_a_filter_refusal_says_so_plainly(cfg: Config, monkeypatch):
+    from xbrain.jev import dashboard
+
+    _run(cfg, _ByText())
+
+    def _broken(*args, **kwargs):
+        raise JevError("algo distinto")
+
+    monkeypatch.setattr(dashboard, "saved_results", _broken)
+
+    [row] = _asks(cfg)["history"]
+
+    assert row["error"] == "No se pudieron calcular los resultados de esta consulta: algo distinto"

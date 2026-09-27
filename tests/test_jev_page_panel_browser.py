@@ -564,8 +564,14 @@ _IDLE_LOST_PROBE = (
 (async () => {
   await sStep('lost', async () => {
     // Five failed looks, WATCH_MS apart, on the page's own clock (see the free-ask probe).
-    await new Promise(r => setTimeout(r, (RETRY_MS.length + 2) * WATCH_MS));
+    await new Promise(r => setTimeout(r, (RETRY_MS.length + 0.5) * WATCH_MS));
     await sWait(() => sPanel().shown, 'el aviso de que se perdió el servidor');
+    return sPanel();
+  });
+  await sStep('found', async () => {
+    // The server answers again from the seventh look: the message goes.
+    await new Promise(r => setTimeout(r, 3 * WATCH_MS));
+    await sWait(() => !sPanel().shown, 'el aviso retirado');
     return sPanel();
   });
   sDone();
@@ -580,8 +586,15 @@ def idle_lost(tmp_path_factory) -> dict[str, Any]:
     from xbrain.jev.service import JevService
 
     class _Down(JevService):
+        """Down for the page's first six looks at `/api/job`, then back."""
+
+        looks = 0
+
         def job_view(self) -> dict[str, Any]:
-            raise RuntimeError("se cayó")
+            _Down.looks += 1
+            if _Down.looks <= 6:
+                raise RuntimeError("se cayó")
+            return super().job_view()
 
     seen = _served_dump(
         tmp_path_factory.mktemp("idle-lost"), _IDLE_LOST_PROBE, client=_Recorder(), base=_Down
@@ -593,5 +606,7 @@ def idle_lost(tmp_path_factory) -> dict[str, Any]:
 def test_an_idle_page_says_when_it_lost_the_server(idle_lost):
     panel = idle_lost["lost"]
 
-    assert panel["error"].startswith("Se perdió el contacto con el servidor")
+    assert panel["title"] == "Sin contacto con el servidor"
+    assert panel["error"] == "Se perdió el contacto con el servidor; recarga la página."
     assert panel["reload"] == "Recargar la página"
+    assert idle_lost["found"]["shown"] is False
