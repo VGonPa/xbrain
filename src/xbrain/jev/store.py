@@ -40,13 +40,13 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from xbrain.jev.client import JevError
 from xbrain.jev.models import (
     AskAssessment,
     AskFile,
-    AskHistoryEntry,
+    AskIndex,
     JevRun,
     TopicAssessment,
 )
@@ -57,7 +57,6 @@ if TYPE_CHECKING:
 
 #: The history file inside the asks directory; every other `*.json` there is one query.
 ASK_INDEX = "index.json"
-_HISTORY = TypeAdapter(dict[str, AskHistoryEntry])
 
 
 def load_assessments(path: Path) -> dict[str, TopicAssessment]:
@@ -198,36 +197,40 @@ def save_asks(query: AskQuery, records: dict[str, AskAssessment], path: Path) ->
     _dump(stored.model_dump(mode="json"), path)
 
 
-def load_all_asks(directory: Path) -> list[AskAssessment]:
-    """Every ask answer on disk, over every query — what `ask.chars_per_token` measures on.
-
-    A file that cannot be read is refused like `load_asks` refuses it: an estimate quietly
-    computed over fewer answers than exist is a guess passed off as a measure."""
-    records: list[AskAssessment] = []
+def ask_files(directory: Path) -> list[Path]:
+    """Every query's answer file under `directory` (not the history), by name."""
     if not directory.exists():
-        return records
-    for path in sorted(directory.glob("*.json")):
-        if path.name == ASK_INDEX:
-            continue
-        try:
-            stored = AskFile.model_validate_json(path.read_text(encoding="utf-8"))
-        except ValidationError as exc:
-            raise JevError(f"{path}: consulta guardada ilegible ({exc})") from exc
-        records.extend(stored.assessments.values())
-    return records
+        return []
+    return sorted(path for path in directory.glob("*.json") if path.name != ASK_INDEX)
 
 
-def load_ask_index(path: Path) -> dict[str, AskHistoryEntry]:
-    """The query history keyed by query sha; `{}` before the first query. Refused when corrupt:
-    the history is the only list of what was asked, and an empty one saved over it loses it."""
-    if not path.exists():
-        return {}
+def load_ask_file(path: Path) -> AskFile:
+    """A query's file read on its own — for a reader that does not know its query yet (the
+    history rebuilding a lost entry). A file that cannot be read is refused and named as
+    ANOTHER query's, with where to move it: the operator is asking something else, and the
+    fix is to take this file out of the way, not to repair the query they typed."""
     try:
-        return _HISTORY.validate_json(path.read_text(encoding="utf-8"))
+        return AskFile.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise JevError(
+            f"{path}: consulta guardada ilegible (otra consulta; sácalo de {path.parent}/ "
+            f"y vuelve a lanzar): {exc}"
+        ) from exc
+
+
+def load_ask_index(path: Path) -> AskIndex:
+    """The query history and the cost calibration; empty before the first query.
+
+    Refused when corrupt — the history is the only list of what was asked, and an empty one
+    saved over it loses it — including an entry filed under another query's sha."""
+    if not path.exists():
+        return AskIndex()
+    try:
+        return AskIndex.model_validate_json(path.read_text(encoding="utf-8"))
     except ValidationError as exc:
         raise JevError(f"{path}: historial de consultas ilegible ({exc})") from exc
 
 
-def save_ask_index(index: dict[str, AskHistoryEntry], path: Path) -> None:
-    """Write the query history whole (atomic), sorted by sha."""
-    _dump({sha: entry.model_dump(mode="json") for sha, entry in sorted(index.items())}, path)
+def save_ask_index(index: AskIndex, path: Path) -> None:
+    """Write the history whole (atomic), queries sorted by sha."""
+    _dump(index.model_dump(mode="json"), path)

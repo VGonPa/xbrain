@@ -173,7 +173,7 @@ class Config:
 
     @property
     def jev_runs_path(self) -> Path:
-        """Append-only log of `jev topics` passes (`jev/store.append_run`), beside the side-car."""
+        """Append-only log of every paid Jev pass — topics and ask (`jev/store.append_run`)."""
         return self.jev_dir / "runs.jsonl"
 
     @property

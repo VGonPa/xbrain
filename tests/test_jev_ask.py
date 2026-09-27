@@ -27,22 +27,30 @@ from xbrain.jev.ask import (
     AskQuery,
     ask_results,
     assess_post,
-    chars_per_token,
-    estimate_ask,
+    cost_model,
     filter_posts,
-    record_ask,
+    finish_ask,
+    load_history,
+    plan_ask,
+    same_selection,
     select_ask_items,
 )
 from xbrain.jev.assess import assess_topics, build_topic_state, topic_contract
 from xbrain.jev.client import JevError, JevResult, NoulAnswer, NoulQuestion, Question
-from xbrain.jev.defaults import DEFAULT_CHARS_PER_TOKEN, tokens_cost_usd
+from xbrain.jev.defaults import (
+    DEFAULT_ASK_TOKENS_PER_CALL,
+    DEFAULT_CHARS_PER_TOKEN,
+    tokens_cost_usd,
+)
 from xbrain.jev.load import load_jev_pairs
-from xbrain.jev.lock import pass_lock
-from xbrain.jev.models import AskAssessment
+from xbrain.jev.lock import PassLockBusy, pass_lock
+from xbrain.jev.models import AskAssessment, AskCalibration, JevRun
 from xbrain.jev.questions import ASK_KEY, build_ask_questions, normalize_query
-from xbrain.jev.report import run_history
+from xbrain.jev.report import ask_cost, ask_cost_by_query, run_history
 from xbrain.jev.run import run_ask
 from xbrain.jev.store import (
+    ASK_INDEX,
+    append_run,
     load_ask_index,
     load_asks,
     load_assessments,
@@ -103,9 +111,14 @@ class _ByText(FakeJevClient):
     """Answers the ask's Noul by what the post says: `hooks` → 0.95, else 0.1. Optional
     `delay` and a high-water mark of calls in flight, to prove the pool really overlaps."""
 
-    def __init__(self, *, delay: float = 0.0, **kwargs) -> None:
+    def __init__(
+        self, *, delay: float = 0.0, bill: tuple[int, float] | None = None, **kwargs
+    ) -> None:
         super().__init__(**kwargs)
         self.delay = delay
+        #: `(per_call, chars_per_token)`: bill each call a constant plus its characters, the
+        #: shape a real provider bills in (a fixed prompt around the state and question).
+        self.bill = bill
         self._lock = threading.Lock()
         self.in_flight = 0
         self.max_in_flight = 0
@@ -121,11 +134,15 @@ class _ByText(FakeJevClient):
             with self._lock:
                 self.in_flight -= 1
         noul = 0.95 if "hooks" in state["post"].lower() else 0.1
+        tokens = result.input_tokens
+        if self.bill is not None:
+            chars = len(state["post"]) + jev_ask.question_chars(questions)
+            tokens = round(self.bill[0] + chars / self.bill[1])
         return JevResult(
             provider=result.provider,
             model=result.model,
             answers={ASK_KEY: NoulAnswer(noul=noul)},
-            input_tokens=result.input_tokens,
+            input_tokens=tokens,
             output_tokens=result.output_tokens,
         )
 
@@ -150,16 +167,20 @@ def _ask_path(cfg: Config, query: AskQuery) -> Path:
     return cfg.jev_asks_dir / f"{query.sha}.json"
 
 
-def _run(cfg: Config, client: FakeJevClient, query_text: str = QUERY, **hooks):
+def _run(
+    cfg: Config,
+    client: FakeJevClient,
+    query_text: str = QUERY,
+    filters: AskFilters | None = None,
+    **hooks,
+):
+    """plan → run → finish, the flow the CLI and the server share, under the lock."""
     query = AskQuery.of(query_text)
-    store = load_store(cfg.items_path)
-    records = load_asks(_ask_path(cfg, query), query)
-    selection = select_ask_items(
-        list(store.values()), records, query, char_limit=cfg.jev_state_char_limit, limit=None
-    )
     with pass_lock(cfg.jev_lock_path, "test") as lock:
-        outcome = run_ask(cfg, selection, query, records, lambda: client, lock=lock, **hooks)
-    return query, selection, outcome
+        plan = plan_ask(cfg, query, filters or AskFilters(), None)
+        outcome = run_ask(cfg, plan, lambda: client, lock=lock, **hooks)
+        results = finish_ask(cfg, plan, outcome, threshold=cfg.jev_threshold)
+    return plan, outcome, results
 
 
 # --------------------------------------------------------------------------- the question
@@ -334,31 +355,45 @@ def test_a_record_filed_under_another_post_id_is_refused(tmp_path: Path):
 def test_a_pass_asks_the_selection_at_concurrency_saves_and_logs_an_ask_line(cfg: Config):
     client = _ByText(delay=0.05)
 
-    query, selection, outcome = _run(cfg, client)
+    plan, outcome, _ = _run(cfg, client)
 
     assert client.max_in_flight == 2  # `[jev].concurrency = 2`, and the pool really overlaps
     assert sorted(state["post"] for state, _ in client.calls) == sorted(
-        build_topic_state(item, cfg.jev_state_char_limit)[0]["post"] for item in selection.items
+        build_topic_state(item, cfg.jev_state_char_limit)[0]["post"]
+        for item in plan.selection.items
     )
     assert [a.item_id for a in outcome.assessed] == ["1", "2", "3"]
-    assert set(load_asks(_ask_path(cfg, query), query)) == {"1", "2", "3"}
+    assert set(load_asks(_ask_path(cfg, plan.query), plan.query)) == {"1", "2", "3"}
     [line] = load_runs(cfg.jev_runs_path)
-    assert (line.kind, line.query_sha, line.requests, line.ok) == ("ask", query.sha, 3, 3)
+    assert (line.kind, line.query_sha, line.requests, line.ok) == ("ask", plan.query.sha, 3, 3)
     assert outcome.logged == line
     assert client.closed is True
     # An ask never writes the topics side-car.
     assert not cfg.jev_topics_path.exists()
 
 
+def test_stored_counts_the_answers_already_there_plus_the_new_ones(cfg: Config):
+    query = AskQuery.of(QUERY)
+    prior = assess_post(_corpus()["1"], query, _ByText(), char_limit=cfg.jev_state_char_limit)
+    save_asks(query, {"1": prior}, _ask_path(cfg, query))
+
+    _, outcome, _ = _run(cfg, _ByText())
+
+    assert [a.item_id for a in outcome.assessed] == ["2", "3"]
+    assert outcome.stored == 3
+
+
 def test_asking_the_same_query_again_costs_nothing(cfg: Config):
     _run(cfg, _ByText())
     again = _ByText()
 
-    _, selection, outcome = _run(cfg, again)
+    plan, outcome, results = _run(cfg, again)
 
-    assert again.calls == [] and selection.items == () and selection.skipped_current == 3
+    assert again.calls == [] and plan.selection.items == ()
+    assert plan.selection.skipped_current == 3
     assert outcome.logged is None
     assert len(load_runs(cfg.jev_runs_path)) == 1
+    assert [item.id for item, _ in results.ranked] == ["1", "3"]
 
 
 def test_changed_evidence_re_asks_only_that_post(cfg: Config):
@@ -368,22 +403,19 @@ def test_changed_evidence_re_asks_only_that_post(cfg: Config):
     save_store(store, cfg.items_path)
     again = _ByText()
 
-    _, selection, _ = _run(cfg, again)
+    plan, _, _ = _run(cfg, again)
 
-    assert [item.id for item in selection.items] == ["3"]
+    assert [item.id for item in plan.selection.items] == ["3"]
     assert len(again.calls) == 1
 
 
 def test_an_ask_pass_needs_the_pass_lock(cfg: Config):
-    query = AskQuery.of(QUERY)
-    selection = select_ask_items(
-        list(_corpus().values()), {}, query, char_limit=100_000, limit=None
-    )
+    plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None)
     with pass_lock(cfg.jev_lock_path, "test") as lock:
         pass
     client = _ByText()
     with pytest.raises(JevError, match="candado"):
-        run_ask(cfg, selection, query, {}, lambda: client, lock=lock)
+        run_ask(cfg, plan, lambda: client, lock=lock)
     assert client.calls == []
 
 
@@ -399,16 +431,101 @@ def test_a_soft_cancel_stops_an_ask_pass_like_a_topics_one(cfg: Config):
     cancel = threading.Event()
     cancel.set()
 
-    _, _, outcome = _run(cfg, _ByText(), cancel=cancel)
+    _, outcome, _ = _run(cfg, _ByText(), cancel=cancel)
 
     assert outcome.interrupted is True and outcome.assessed == ()
+
+
+# --------------------------------------------------------------------------- plan / finish
+
+
+def test_the_plan_builds_each_posts_evidence_once(cfg: Config, monkeypatch):
+    built: list[str] = []
+    real = jev_ask.build_topic_state
+
+    def _counting(item, char_limit):
+        built.append(item.id)
+        return real(item, char_limit)
+
+    monkeypatch.setattr(jev_ask, "build_topic_state", _counting)
+
+    plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None)
+
+    assert sorted(built) == ["1", "2", "3", "4"]
+    assert set(plan.states) == {"1", "2", "3"}  # the evidence-free post has no state to send
+
+
+def test_finish_records_the_history_when_an_interrupted_pass_banked_something(cfg: Config):
+    config = cfg.repo_root / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("concurrency = 2", "concurrency = 1"),
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg.repo_root)
+    cancel = threading.Event()
+
+    def _stop_after_first(done: int, total: int) -> None:
+        cancel.set()
+
+    plan, outcome, results = _run(cfg, _ByText(), cancel=cancel, on_progress=_stop_after_first)
+
+    # The one worker may already hold the next post when the cancel lands: it is drained.
+    assert outcome.interrupted and 1 <= len(outcome.assessed) < 3
+    assert results.recorded is True
+    [entry] = load_history(cfg).queries.values()
+    assert entry.last_evaluated == len(outcome.assessed)
+
+
+def test_finish_records_nothing_when_an_interrupted_pass_banked_nothing(cfg: Config):
+    cancel = threading.Event()
+    cancel.set()
+
+    _, _, results = _run(cfg, _ByText(), cancel=cancel)
+
+    assert results.recorded is False
+    assert not (cfg.jev_asks_dir / ASK_INDEX).exists()
+
+
+def test_a_query_whose_history_entry_was_lost_is_rebuilt_from_its_file(cfg: Config):
+    plan, _, _ = _run(cfg, _ByText())
+    (cfg.jev_asks_dir / ASK_INDEX).unlink()
+
+    history = load_history(cfg)
+
+    entry = history.queries[plan.query.sha]
+    assert entry.query == QUERY and entry.rebuilt is True
+    assert entry.last_evaluated == 3 and entry.last_results == 2
+    # The calibration is rebuilt from every file, too.
+    assert history.calibration.answers == 3
+
+
+def test_the_selection_is_compared_by_the_posts_it_would_pay_for(cfg: Config):
+    query = AskQuery.of(QUERY)
+    before = plan_ask(cfg, query, AskFilters(), None)
+    store = load_store(cfg.items_path)
+    store["5"] = _item("5", "More hooks")
+    save_store(store, cfg.items_path)
+
+    assert same_selection(before, plan_ask(cfg, query, AskFilters(), None)) is False
+    assert same_selection(before, before) is True
+
+
+def test_a_near_duplicate_query_is_pointed_out(cfg: Config):
+    _run(cfg, _ByText())
+
+    plan = plan_ask(cfg, AskQuery.of("como configuro HOOKS en claude code"), AskFilters(), None)
+
+    assert plan.similar == ()  # accents differ: not the same after casefold
+    plan = plan_ask(cfg, AskQuery.of("¿cómo configuro hooks en Claude Code"), AskFilters(), None)
+    assert plan.similar == (QUERY,)
+    assert plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None).similar == ()
 
 
 # --------------------------------------------------------------------------- filters
 
 
 def _jev_with_topics(cfg: Config, nouls: dict[str, float]) -> None:
-    """Assess every post for topics so the Jev side of `--topic` has something to read."""
+    """Assess every post but 3 for topics, so the Jev side of `--topic` has something."""
     store = load_store(cfg.items_path)
     client = FakeJevClient(nouls=nouls)
     from xbrain.jev.questions import build_topic_questions
@@ -422,7 +539,7 @@ def _jev_with_topics(cfg: Config, nouls: dict[str, float]) -> None:
     save_assessments(records, cfg.jev_topics_path)
 
 
-def _ids(items: list[Item]) -> list[str]:
+def _ids(items) -> list[str]:
     return sorted(item.id for item in items)
 
 
@@ -437,6 +554,28 @@ def test_topic_filter_takes_enrich_or_current_jev_membership(cfg: Config):
     assert _ids(kept) == ["1", "2", "4"] and dropped == 1
     kept, _ = filter_posts(store, AskFilters(topic="startups"), jev=jev, threshold=0.95)
     assert _ids(kept) == ["2", "4"]
+
+
+def test_a_stale_topics_answer_does_not_put_a_post_in_a_topic(cfg: Config):
+    _jev_with_topics(cfg, {"startups": 0.9})
+    store = load_store(cfg.items_path)
+    store["1"] = store["1"].model_copy(update={"text": "Claude Code hooks, rewritten"})
+    save_store(store, cfg.items_path)
+    jev = load_jev_pairs(cfg)
+
+    kept, _ = filter_posts(jev.store, AskFilters(topic="startups"), jev=jev, threshold=0.85)
+    assert _ids(kept) == ["2", "4"]
+    kept, _ = filter_posts(jev.store, AskFilters(only_evaluated=True), jev=jev, threshold=0.85)
+    assert _ids(kept) == ["2", "4"]
+
+
+def test_the_plan_filters_topics_at_the_configured_threshold_not_the_results_one(cfg: Config):
+    """`--threshold` is for results; the Jev side of `--topic` is `[jev].threshold` — so a low
+    results bar never widens (and re-bills) the posts a query is asked about."""
+    _jev_with_topics(cfg, {"startups": 0.5})
+    plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(topic="startups"), None)
+
+    assert _ids(plan.candidates) == ["2", "4"]  # 1's 0.5 is under [jev].threshold = 0.85
 
 
 def test_topic_filter_refuses_a_topic_nobody_uses(cfg: Config):
@@ -477,58 +616,140 @@ def test_no_filter_keeps_every_post(cfg: Config):
     assert _ids(kept) == ["1", "2", "3", "4"] and dropped == 0
 
 
+def test_filters_that_cannot_select_anything_are_refused():
+    day = DT.date()
+    with pytest.raises(ValueError, match="--since"):
+        AskFilters(since=day, until=day - timedelta(days=1))
+    for blank in ("", "  ", "@"):
+        with pytest.raises(ValueError, match="--author"):
+            AskFilters(author=blank)
+    with pytest.raises(ValueError, match="--topic"):
+        AskFilters(topic=" ")
+
+
+def test_filters_round_trip_through_json_and_refuse_what_they_do_not_know():
+    filters = AskFilters(
+        topic="startups",
+        since=DT.date(),
+        until=DT.date(),
+        author="bob",
+        only_evaluated=True,
+    )
+    assert AskFilters.from_json(filters.as_json()) == filters
+    assert AskFilters.from_json({}) == AskFilters()
+    with pytest.raises(ValueError, match="colour"):
+        AskFilters.from_json({"colour": "red"})
+    with pytest.raises(ValueError, match="since"):
+        AskFilters.from_json({"since": "ayer"})
+    with pytest.raises(ValueError, match="only_evaluated"):
+        AskFilters.from_json({"only_evaluated": "yes"})
+    with pytest.raises(ValueError, match="author"):
+        AskFilters.from_json({"author": 3})
+
+
+def test_a_limit_below_one_is_refused_never_read_as_a_smaller_bill(cfg: Config):
+    for limit in (0, -1):
+        with pytest.raises(JevError, match="--limit"):
+            plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), limit)
+
+
 # --------------------------------------------------------------------------- estimate
 
 
-def test_the_estimate_covers_exactly_the_posts_the_pass_asks(cfg: Config):
-    query = AskQuery.of(QUERY)
-    store = load_store(cfg.items_path)
-    selection = select_ask_items(list(store.values()), {}, query, char_limit=100_000, limit=None)
+def test_the_estimate_counts_the_posts_the_pass_asks_and_the_chars_it_sends(cfg: Config):
+    plan = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None)
+    prior = cost_model(AskCalibration())
 
-    estimate = estimate_ask(selection, query, char_limit=100_000, chars_per_token=4.0)
-
-    chars = sum(
-        len(build_topic_state(item, 100_000)[0]["post"]) + jev_ask.question_chars(query.questions)
-        for item in selection.items
+    assert (prior.per_call, prior.chars_per_token, prior.measured) == (
+        DEFAULT_ASK_TOKENS_PER_CALL,
+        DEFAULT_CHARS_PER_TOKEN,
+        False,
     )
-    assert estimate.posts == len(selection.items) == 3
-    assert estimate.tokens == round(chars / 4.0)
+    per_question = jev_ask.question_chars(plan.query.questions)
+    chars = sum(
+        len(build_topic_state(item, 100_000)[0]["post"]) + per_question
+        for item in plan.selection.items
+    )
+    estimate = plan.estimate
+    assert (estimate.posts, estimate.chars) == (3, chars)
+    assert estimate.tokens == round(3 * DEFAULT_ASK_TOKENS_PER_CALL + chars / 4.0)
     assert estimate.usd == pytest.approx(tokens_cost_usd(estimate.tokens, "typesafe"))
-    # The pass then asks exactly those posts.
-    client = _ByText()
-    with pass_lock(cfg.jev_lock_path, "t") as lock:
-        run_ask(cfg, selection, query, {}, lambda: client, lock=lock)
-    assert len(client.calls) == estimate.posts
 
 
-def test_chars_per_token_is_measured_from_paid_answers_and_falls_back_when_none():
-    query = AskQuery.of(QUERY)
-    item = _corpus()["1"]
-    measured = assess_post(item, query, FakeJevClient(input_tokens=None), char_limit=100_000)
-    assert chars_per_token([measured]) == DEFAULT_CHARS_PER_TOKEN  # no usage: not a measure
-    priced = [
-        assess_post(i, query, _ByText(input_tokens=50), char_limit=100_000)
-        for i in _corpus().values()
-        if i.text
-    ]
-    expected = sum(r.prompt_chars for r in priced) / (50 * len(priced))
-    assert chars_per_token(priced) == pytest.approx(expected)
-    assert chars_per_token([]) == DEFAULT_CHARS_PER_TOKEN
+def test_the_estimate_is_built_from_the_same_cut_as_the_call(cfg: Config):
+    config = cfg.repo_root / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + "state_char_limit = 12\n", encoding="utf-8"
+    )
+    cfg = load_config(cfg.repo_root)
+
+    plan, outcome, _ = _run(cfg, _ByText())
+
+    assert plan.estimate.chars == sum(record.prompt_chars for record in outcome.assessed)
+    assert all(record.truncated for record in outcome.assessed)
+
+
+def test_the_cost_model_is_fitted_from_paid_answers_once_two_sizes_exist():
+    calibration = AskCalibration()
+    calibration = calibration.add(1_000, 500 + 1_000 // 4)
+    assert cost_model(calibration).measured is False  # one size cannot separate the two terms
+    calibration = calibration.add(3_000, 500 + 3_000 // 4)
+
+    model = cost_model(calibration)
+
+    assert model.measured is True and model.answers == 2
+    assert model.per_call == pytest.approx(500)
+    assert model.chars_per_token == pytest.approx(4.0)
+
+
+def test_a_fit_that_makes_no_sense_falls_back_to_the_prior():
+    decreasing = AskCalibration().add(1_000, 900).add(3_000, 100)
+    assert cost_model(decreasing) == cost_model(AskCalibration())
+
+
+def test_a_negative_intercept_is_refitted_through_zero():
+    calibration = AskCalibration().add(1_000, 100).add(3_000, 900)
+
+    model = cost_model(calibration)
+
+    assert model.per_call == 0.0
+    assert model.chars_per_token == pytest.approx((1_000**2 + 3_000**2) / (100_000 + 2_700_000))
+
+
+def test_answers_without_usage_do_not_calibrate(cfg: Config):
+    _run(cfg, _ByText(input_tokens=None))
+
+    assert load_history(cfg).calibration.answers == 0
+
+
+def test_after_one_paid_query_the_next_estimate_is_the_real_bill(cfg: Config):
+    """A provider that bills a constant per call plus the characters: the first pass teaches
+    the model both terms, and the next query's estimate is what it is then billed."""
+    bill = (700, 3.5)
+    _run(cfg, _ByText(bill=bill))
+
+    plan = plan_ask(cfg, AskQuery.of("posts sobre seed rounds"), AskFilters(), None)
+    assert plan.estimate.model.measured is True
+    assert plan.estimate.model.per_call == pytest.approx(700, abs=2)
+    _, outcome, _ = _run(cfg, _ByText(bill=bill), "posts sobre seed rounds")
+
+    billed = sum(record.input_tokens for record in outcome.assessed)
+    assert plan.estimate.tokens == pytest.approx(billed, abs=3)
 
 
 # --------------------------------------------------------------------------- results
 
 
 def test_results_are_the_current_answers_over_the_threshold_best_first(cfg: Config):
-    query, _, _ = _run(cfg, _ByText())
+    plan, _, _ = _run(cfg, _ByText())
     store = load_store(cfg.items_path)
-    records = load_asks(_ask_path(cfg, query), query)
+    records = load_asks(_ask_path(cfg, plan.query), plan.query)
     # 3's answer is rewritten above the bar; 1's evidence moves, so its answer is stale.
     records["3"] = records["3"].model_copy(update={"probability": 0.97})
     store["1"] = store["1"].model_copy(update={"text": "Claude Code hooks, v2"})
 
     results = ask_results(
-        list(store.values()), records, query, char_limit=cfg.jev_state_char_limit, threshold=0.9
+        list(store.values()), records, plan.query, char_limit=100_000, threshold=0.9
     )
 
     assert [(item.id, record.probability) for item, record in results.ranked] == [("3", 0.97)]
@@ -536,66 +757,82 @@ def test_results_are_the_current_answers_over_the_threshold_best_first(cfg: Conf
 
 
 def test_results_rank_ties_by_post_id(cfg: Config):
-    query, _, _ = _run(cfg, _ByText())
+    plan, _, _ = _run(cfg, _ByText())
     store = load_store(cfg.items_path)
-    records = load_asks(_ask_path(cfg, query), query)
+    records = load_asks(_ask_path(cfg, plan.query), plan.query)
 
     # Candidates in REVERSE id order: the tie is broken by id, not by the order asked.
     candidates = list(reversed(store.values()))
-    results = ask_results(candidates, records, query, char_limit=100_000, threshold=0.5)
+    results = ask_results(candidates, records, plan.query, char_limit=100_000, threshold=0.5)
 
     assert [item.id for item, _ in results.ranked] == ["1", "3"]
 
 
 def test_a_probability_exactly_at_the_threshold_is_a_result(cfg: Config):
-    query, _, _ = _run(cfg, _ByText())
-    store = load_store(cfg.items_path)
-    records = load_asks(_ask_path(cfg, query), query)
+    plan, _, _ = _run(cfg, _ByText())
 
-    results = ask_results(list(store.values()), records, query, char_limit=100_000, threshold=0.95)
+    results = finish_ask(cfg, plan, None, threshold=0.95)
 
     assert [item.id for item, _ in results.ranked] == ["1", "3"]
 
 
-# --------------------------------------------------------------------------- history
+# --------------------------------------------------------------------------- history and cost
 
 
-def test_each_query_made_is_kept_in_the_history(cfg: Config):
-    query = AskQuery.of(QUERY)
-    first = DT + timedelta(days=1)
-    record_ask(
-        cfg,
-        query,
-        filters=AskFilters(topic="ai-coding"),
-        evaluated=3,
-        results=2,
-        threshold=0.85,
-        now=first,
-    )
-    record_ask(
-        cfg,
-        query,
-        filters=AskFilters(),
-        evaluated=3,
-        results=1,
-        threshold=0.9,
-        now=first + timedelta(hours=1),
-    )
+def test_each_query_keeps_its_last_use_in_the_history(cfg: Config):
+    _run(cfg, _ByText(), filters=AskFilters(topic="ai-coding"))
+    plan, _, _ = _run(cfg, _ByText())
 
-    [entry] = load_ask_index(cfg.jev_asks_dir / "index.json").values()
+    [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
 
-    assert entry.query == QUERY and entry.query_sha == query.sha
-    assert (entry.first_asked_at, entry.last_asked_at) == (first, first + timedelta(hours=1))
-    assert (entry.times, entry.evaluated, entry.results, entry.threshold) == (2, 3, 1, 0.9)
-    assert entry.filters == {}
+    assert entry.query == QUERY and entry.query_sha == plan.query.sha
+    assert entry.first_asked_at <= entry.last_asked_at
+    assert (entry.times, entry.last_evaluated, entry.last_results) == (2, 3, 2)
+    assert (entry.last_threshold, entry.last_filters, entry.rebuilt) == (0.85, {}, False)
 
 
 def test_a_corrupt_history_is_refused(cfg: Config):
-    path = cfg.jev_asks_dir / "index.json"
+    path = cfg.jev_asks_dir / ASK_INDEX
     path.parent.mkdir(parents=True)
     path.write_text("[]", encoding="utf-8")
     with pytest.raises(JevError, match="ilegible"):
         load_ask_index(path)
+
+
+def test_a_history_entry_filed_under_another_sha_is_refused(cfg: Config):
+    plan, _, _ = _run(cfg, _ByText())
+    path = cfg.jev_asks_dir / ASK_INDEX
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["queries"] = {"b" * 64: data["queries"][plan.query.sha]}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(JevError, match="ilegible"):
+        load_ask_index(path)
+
+
+def test_an_unreadable_file_of_another_query_is_named_as_such(cfg: Config):
+    cfg.jev_asks_dir.mkdir(parents=True)
+    other = cfg.jev_asks_dir / f"{'c' * 64}.json"
+    other.write_text("{", encoding="utf-8")
+
+    with pytest.raises(JevError, match="otra consulta; sácalo de"):
+        plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None)
+
+
+def test_what_each_query_has_cost_comes_from_the_run_log(cfg: Config):
+    first, _, _ = _run(cfg, _ByText(input_tokens=1_000))
+    second, _, _ = _run(cfg, _ByText(input_tokens=2_000), "otra consulta")
+    runs = load_runs(cfg.jev_runs_path)
+
+    cost = ask_cost(runs, first.query.sha)
+
+    assert (cost["runs"], cost["requests"], cost["input_tokens"]) == (1, 3, 3_000)
+    assert cost["cost_usd"] == pytest.approx(0.0)  # the fake provider has no price
+    assert cost["unpriced_providers"] == ["fake"]
+    by_query = ask_cost_by_query(runs)
+    assert set(by_query) == {first.query.sha, second.query.sha}
+    assert by_query[second.query.sha]["input_tokens"] == 6_000
+    assert ask_cost(runs, "d" * 64)["runs"] == 0
 
 
 # --------------------------------------------------------------------------- the CLI
@@ -617,14 +854,9 @@ def test_cli_dry_run_prints_the_estimate_and_never_builds_a_client(cfg: Config, 
     out = result.output
     assert result.exit_code == 0, out
     assert "3 posts por preguntar · 1 sin evidencia" in out
-    query = AskQuery.of(QUERY)
-    selection = select_ask_items(
-        list(load_store(cfg.items_path).values()), {}, query, char_limit=100_000, limit=None
-    )
-    estimate = estimate_ask(
-        selection, query, char_limit=100_000, chars_per_token=DEFAULT_CHARS_PER_TOKEN
-    )
+    estimate = plan_ask(cfg, AskQuery.of(QUERY), AskFilters(), None).estimate
     assert f"estimación: ~{estimate.tokens} tokens de entrada (~{estimate.usd:.4f} $)" in out
+    assert "a priori: 1000 tokens por petición + 4.00 caracteres por token" in out
     assert "--dry-run: no se llama a Jev" in out
     assert not cfg.jev_asks_dir.exists() and not cfg.jev_runs_path.exists()
 
@@ -643,10 +875,12 @@ def test_cli_asks_ranks_the_results_and_keeps_the_history(cfg: Config, monkeypat
     assert lines[header + 1].split()[:3] == ["0.95", "1", "@alice"]
     assert lines[header + 2].split()[:3] == ["0.95", "3", "@alice"]
     assert "https://x.com/alice/status/1" in lines[header + 1]
-    [entry] = load_ask_index(cfg.jev_asks_dir / "index.json").values()
-    assert (entry.query, entry.evaluated, entry.results) == (QUERY, 3, 2)
+    [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
+    assert (entry.query, entry.last_evaluated, entry.last_results) == (QUERY, 3, 2)
     [line] = load_runs(cfg.jev_runs_path)
     assert line.kind == "ask"
+    assert "3 respuestas · 0 fallidas" in out
+    assert "Esta consulta ha costado: 1 pasada · 3 peticiones · 300 tokens de entrada" in out
 
 
 def test_cli_a_repeated_query_costs_nothing_and_still_answers(cfg: Config, monkeypatch):
@@ -661,8 +895,8 @@ def test_cli_a_repeated_query_costs_nothing_and_still_answers(cfg: Config, monke
     assert "0 posts por preguntar · 3 ya respondidos" in out
     assert "Resultados (≥ 0.5): 2 de 3" in out
     assert len(load_runs(cfg.jev_runs_path)) == 1
-    [entry] = load_ask_index(cfg.jev_asks_dir / "index.json").values()
-    assert (entry.times, entry.threshold) == (2, 0.5)
+    [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
+    assert (entry.times, entry.last_threshold) == (2, 0.5)
 
 
 def _cap(tmp_path: Path, monkeypatch, usd: str) -> None:
@@ -731,8 +965,8 @@ def test_cli_filters_narrow_what_is_paid_for(cfg: Config, monkeypatch):
     assert result.exit_code == 0, out
     assert [state["post"].splitlines()[0] for state, _ in client.calls] == ["Seed round tips"]
     assert "3 descartados por los filtros" in out
-    [entry] = load_ask_index(cfg.jev_asks_dir / "index.json").values()
-    assert entry.filters == {"author": "bob", "since": "2026-09-01"}
+    [entry] = load_ask_index(cfg.jev_asks_dir / ASK_INDEX).queries.values()
+    assert entry.last_filters == {"author": "bob", "since": "2026-09-01"}
 
 
 def test_cli_limit_and_topic(cfg: Config, monkeypatch):
@@ -795,3 +1029,211 @@ def test_cli_ctrl_c_keeps_what_was_paid_and_exits_130(cfg: Config, monkeypatch):
     assert list(load_asks(_ask_path(cfg, query), query)) == ["1"]
     [line] = load_runs(cfg.jev_runs_path)
     assert (line.kind, line.interrupted, line.ok) == ("ask", True, 1)
+    # Something was banked, so the history knows the query (and what it holds).
+    [entry] = load_history(cfg).queries.values()
+    assert entry.last_evaluated == 1
+
+
+def test_cli_ctrl_c_before_any_answer_leaves_no_history(cfg: Config, monkeypatch):
+    monkeypatch.setattr(cli, "_jev_client", lambda c: _ByText(interrupt_after=0))
+    config = cfg.repo_root / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("concurrency = 2", "concurrency = 1"),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["jev", "ask", QUERY])
+
+    assert result.exit_code == 130, result.output
+    assert not (cfg.jev_asks_dir / ASK_INDEX).exists()
+
+
+def test_cli_dry_run_uses_the_cost_model_measured_on_paid_answers(cfg: Config, monkeypatch):
+    _use(monkeypatch, _ByText(bill=(700, 3.5)))
+    runner.invoke(app, ["jev", "ask", QUERY])
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+
+    result = runner.invoke(app, ["jev", "ask", "posts sobre seed rounds", "--dry-run"])
+
+    out = result.output
+    model = load_history(cfg)
+    fitted = cost_model(model.calibration)
+    assert fitted.measured
+    assert (
+        f"medido en 3 respuestas: {fitted.per_call:.0f} tokens por petición + "
+        f"{fitted.chars_per_token:.2f} caracteres por token" in out
+    )
+    estimate = plan_ask(cfg, AskQuery.of("posts sobre seed rounds"), AskFilters(), None).estimate
+    assert f"~{estimate.tokens} tokens de entrada" in out
+
+
+def test_cli_a_low_results_threshold_does_not_widen_the_topic(cfg: Config, monkeypatch):
+    _jev_with_topics(cfg, {"startups": 0.5})
+    client = _ByText()
+    _use(monkeypatch, client)
+
+    result = runner.invoke(app, ["jev", "ask", QUERY, "--topic", "startups", "--threshold", "0.3"])
+
+    assert result.exit_code == 0, result.output
+    # 1's Jev answer (0.5) is under [jev].threshold: only 2 carries startups with evidence.
+    assert [state["post"].splitlines()[0] for state, _ in client.calls] == ["Seed round tips"]
+
+
+def test_cli_confirms_without_the_lock_and_refuses_if_the_posts_moved(cfg: Config, monkeypatch):
+    """The prompt never holds the lock (a server job may run meanwhile), so the selection is
+    re-made under it — and a different one is refused, not paid."""
+    _cap(cfg.repo_root, monkeypatch, "0.0000001")
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    seen: list[bool] = []
+
+    def _confirm(*args, **kwargs) -> bool:
+        try:
+            with pass_lock(cfg.jev_lock_path, "probe"):
+                seen.append(False)
+        except PassLockBusy:
+            seen.append(True)
+        store = load_store(cfg.items_path)
+        store["5"] = _item("5", "More hooks")
+        save_store(store, cfg.items_path)
+        return True
+
+    monkeypatch.setattr(cli.typer, "confirm", _confirm)
+
+    result = runner.invoke(app, ["jev", "ask", QUERY])
+
+    assert seen == [False]  # the lock was free while the prompt waited
+    assert result.exit_code == 1
+    assert "cambió desde la estimación" in result.output
+    assert not cfg.jev_runs_path.exists()
+
+
+def test_cli_refuses_a_limit_below_one(cfg: Config, monkeypatch):
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+
+    result = runner.invoke(app, ["jev", "ask", QUERY, "--limit", "0"])
+
+    assert result.exit_code == 1 and "--limit" in result.output
+
+
+def test_cli_refuses_since_after_until_and_a_blank_author(cfg: Config, monkeypatch):
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+
+    result = runner.invoke(
+        app, ["jev", "ask", QUERY, "--since", "2026-09-02", "--until", "2026-09-01"]
+    )
+    assert result.exit_code == 1 and "--since" in result.output
+    result = runner.invoke(app, ["jev", "ask", QUERY, "--author", "@"])
+    assert result.exit_code == 1 and "--author" in result.output
+
+
+def test_cli_a_corrupt_history_stops_before_the_prompt_and_the_client(cfg: Config, monkeypatch):
+    _cap(cfg.repo_root, monkeypatch, "0.0000001")
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    path = cfg.jev_asks_dir / ASK_INDEX
+    path.parent.mkdir(parents=True)
+    path.write_text("{", encoding="utf-8")
+
+    result = runner.invoke(app, ["jev", "ask", QUERY])  # no input: a prompt would abort
+
+    assert result.exit_code == 1 and "historial de consultas ilegible" in result.output
+    assert "¿Preguntar" not in result.output
+
+
+def test_cli_an_unreadable_file_of_another_query_stops_before_the_client(cfg: Config, monkeypatch):
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    cfg.jev_asks_dir.mkdir(parents=True)
+    (cfg.jev_asks_dir / f"{'c' * 64}.json").write_text("{", encoding="utf-8")
+
+    result = runner.invoke(app, ["jev", "ask", QUERY])
+
+    assert result.exit_code == 1 and "otra consulta; sácalo de" in result.output
+
+
+def test_cli_points_out_a_near_duplicate_before_paying(cfg: Config, monkeypatch):
+    _use(monkeypatch, _ByText())
+    runner.invoke(app, ["jev", "ask", QUERY])
+
+    result = runner.invoke(app, ["jev", "ask", "¿cómo configuro hooks en claude code", "--dry-run"])
+
+    assert f"consulta parecida ya hecha: «{QUERY}»" in result.output
+
+
+def test_cli_asks_lists_the_history_with_what_each_query_cost(cfg: Config, monkeypatch):
+    _use(monkeypatch, _ByText(provider="typesafe", input_tokens=1_000))
+    runner.invoke(app, ["jev", "ask", QUERY])
+    runner.invoke(app, ["jev", "ask", QUERY, "--threshold", "0.5"])
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+
+    result = runner.invoke(app, ["jev", "asks"])
+
+    out = result.output
+    assert result.exit_code == 0, out
+    assert f"«{QUERY}»" in out
+    assert "2 veces" in out and "último uso: 3 con respuesta, 2 ≥ 0.5" in out
+    assert "1 pasada · 3 peticiones · 3000 tokens de entrada (~0.0001 $)" in out
+
+
+def test_cli_asks_with_no_history_says_so(cfg: Config):
+    result = runner.invoke(app, ["jev", "asks"])
+    assert result.exit_code == 0 and "sin consultas" in result.output
+
+
+def test_jev_report_adds_what_queries_cost_and_leaves_the_topics_numbers(cfg: Config, monkeypatch):
+    _jev_with_topics(cfg, {"ai-coding": 0.9})
+
+    def _line(output: str, prefix: str) -> str:
+        return next(line for line in output.splitlines() if line.startswith(prefix))
+
+    before = runner.invoke(app, ["jev", "report"]).output
+    _use(monkeypatch, _ByText(provider="typesafe", input_tokens=1_000))
+    runner.invoke(app, ["jev", "ask", QUERY])
+
+    after = runner.invoke(app, ["jev", "report"]).output
+
+    assert _line(after, "Histórico:") == _line(before, "Histórico:")  # asks never in it
+    queries = "Consultas (jev ask): 1 pasada · 3 peticiones · 3000 tokens de entrada (~0.0001 $)"
+    assert _line(after, "Consultas") == queries
+    # A topics pass in the same log stays out of the queries' line.
+    append_run(
+        JevRun(
+            started_at=DT,
+            finished_at=DT,
+            models=["jev-1.13.0"],
+            requests=7,
+            ok=7,
+            failed=0,
+            input_tokens_by_provider={"typesafe": 70},
+            input_tokens=70,
+            input_tokens_unknown=0,
+            interrupted=False,
+        ),
+        cfg.jev_runs_path,
+    )
+    assert _line(runner.invoke(app, ["jev", "report"]).output, "Consultas") == queries
+
+
+def test_cli_refuses_when_the_price_rose_over_the_cap_while_nobody_confirmed(
+    cfg: Config, monkeypatch
+):
+    """Under the cap there is no prompt, so nobody agreed to a price: if the re-made plan
+    under the lock costs more than the cap, it is refused rather than paid."""
+    from dataclasses import replace
+
+    monkeypatch.setattr(cli, "_jev_client", _refuse_client)
+    plans: list[object] = []
+    real = cli.plan_ask
+
+    def _dearer_second_time(*args, **kwargs):
+        plan = real(*args, **kwargs)
+        plans.append(plan)
+        if len(plans) == 2:
+            return replace(plan, estimate=replace(plan.estimate, usd=cfg.jev_ask_max_usd * 2))
+        return plan
+
+    monkeypatch.setattr(cli, "plan_ask", _dearer_second_time)
+
+    result = runner.invoke(app, ["jev", "ask", QUERY])
+
+    assert result.exit_code == 1, result.output
+    assert "la estimación subió" in result.output
+    assert not cfg.jev_runs_path.exists()

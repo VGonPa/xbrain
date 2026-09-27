@@ -54,16 +54,20 @@ DEFAULT_STATE_CHAR_LIMIT = 100_000
 #: operator chose the selection on the command line.
 DEFAULT_SERVE_MAX_USD = 1.00
 #: Above this estimate, in USD, `xbrain jev ask` asks before spending (`--yes` skips the
-#: question). A query over the whole corpus is measured at a few cents (`docs/jev.md`), so the
-#: default stops only an unusually large or unusually long-winded ask.
+#: question). A query over the whole corpus is ESTIMATED at ~0.18 $ (`docs/jev.md`, from the
+#: 2026-09-22 corpus figures), so the default lets a whole-corpus ask through and stops a larger
+#: one (a far longer query, a grown corpus).
 DEFAULT_ASK_MAX_USD = 0.25
-#: The provider the CLI builds (`typesafe.PROVIDER`, restated here so an estimate can be
-#: priced without importing the vendor SDK): what a call not yet made will be billed as.
+#: The provider the CLI builds (`typesafe.PROVIDER` is this constant): what a call not yet
+#: made will be billed as, so an estimate is priced without importing the vendor SDK.
 DEFAULT_PROVIDER = "typesafe"
-#: Characters per input token when no paid ask answer can measure it yet. Deliberately LOW —
-#: English prose runs near 4 and the answers themselves replace this as soon as one query has
-#: been paid — so a first estimate errs towards more tokens, never towards "cheaper than it is".
-DEFAULT_CHARS_PER_TOKEN = 3.0
+#: THE PRIOR of `jev ask`'s cost model, `tokens = posts × per_call + chars / chars_per_token`,
+#: used until paid ask answers of two different sizes let `ask.cost_model` fit both terms.
+#: From a fit over 293 real topics answers (2026-09-27, `docs/jev.md` § Estimate): about 1,050
+#: fixed tokens per call beyond the questions, and 4.3 characters per token on the evidence —
+#: rounded to 1,000 and a lower 4.0, which leans towards more tokens on long posts.
+DEFAULT_ASK_TOKENS_PER_CALL = 1_000
+DEFAULT_CHARS_PER_TOKEN = 4.0
 #: THE `[jev]` keys `config.toml` accepts, each with its default, in the order the
 #: Configuración tab lists them. `config.py` refuses any other key by this list, and the page
 #: states each one's value next to this default — one list, so a new key cannot reach the

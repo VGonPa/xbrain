@@ -21,9 +21,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     StringConstraints,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -183,6 +185,15 @@ class JevRun(BaseModel):
     def _utc(cls, value: datetime, info: ValidationInfo) -> datetime:
         return _require_utc(str(info.field_name), value)
 
+    @model_serializer(mode="wrap")
+    def _no_null_query(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        """A topics line has NO `query_sha` key, rather than `null`: this model refuses unknown
+        keys, so a copy of xbrain from before `jev ask` would otherwise refuse the whole log."""
+        data: dict[str, object] = handler(self)
+        if data.get("query_sha") is None:
+            data.pop("query_sha", None)
+        return data
+
     @model_validator(mode="after")
     def _consistent(self) -> JevRun:
         if (self.kind == "ask") != (self.query_sha is not None):
@@ -264,11 +275,16 @@ class AskFile(BaseModel):
 
 
 class AskHistoryEntry(BaseModel):
-    """One query in `data/jev/asks/index.json`: what was asked, when, and what came of it.
+    """One query in `data/jev/asks/index.json`: what was asked, when, and its LAST USE.
 
-    `evaluated` and `results` are as of the LAST time it was asked (`results` at that
-    `threshold`, over the posts its `filters` kept). Its COST is not here: the run log bills
-    it (`JevRun.query_sha`), priced when read, like every other bill.
+    One entry per query, refreshed each time it is asked: `first_asked_at`, `last_asked_at`
+    and `times` span every use; the `last_*` fields are the LAST use only — the posts it had a
+    current answer for, how many were results, at which threshold, under which filters. The
+    full history of uses is the run log (`JevRun.query_sha`), which is also where its COST
+    lives (`report.ask_cost`), priced when read like every other bill. `rebuilt` marks an entry
+    reconstructed from the query's answer file because the index had lost it (a crash between
+    the save and the history write, a deleted `index.json`): its `last_*` are then counted over
+    the whole file at `[jev].threshold`, with no filters.
     """
 
     model_config = _FROZEN
@@ -278,12 +294,57 @@ class AskHistoryEntry(BaseModel):
     first_asked_at: datetime
     last_asked_at: datetime
     times: int = Field(ge=1)
-    evaluated: int = Field(ge=0)
-    results: int = Field(ge=0)
-    threshold: Probability
-    filters: dict[str, str | bool]
+    last_evaluated: int = Field(ge=0)
+    last_results: int = Field(ge=0)
+    last_threshold: Probability
+    last_filters: dict[str, str | bool]
+    rebuilt: bool = False
 
     @field_validator("first_asked_at", "last_asked_at")
     @classmethod
     def _utc(cls, value: datetime, info: ValidationInfo) -> datetime:
         return _require_utc(str(info.field_name), value)
+
+
+class AskCalibration(BaseModel):
+    """What paid ask answers say about the bill: the sufficient sums of a straight-line fit
+    `tokens = per_call + chars / chars_per_token` over `(prompt_chars, input_tokens)`.
+
+    Kept in `index.json` so an estimate never has to parse every answer file (one unreadable
+    file of another query would otherwise block every estimate). `answers` counts the pairs;
+    an answer with no usage is not one. `ask.cost_model` turns it into a model.
+    """
+
+    model_config = _FROZEN
+
+    answers: int = Field(default=0, ge=0)
+    chars: float = Field(default=0.0, ge=0)
+    tokens: float = Field(default=0.0, ge=0)
+    chars_sq: float = Field(default=0.0, ge=0)
+    chars_tokens: float = Field(default=0.0, ge=0)
+
+    def add(self, chars: int, tokens: int) -> AskCalibration:
+        """This calibration with one more paid answer folded in."""
+        return AskCalibration(
+            answers=self.answers + 1,
+            chars=self.chars + chars,
+            tokens=self.tokens + tokens,
+            chars_sq=self.chars_sq + chars * chars,
+            chars_tokens=self.chars_tokens + chars * tokens,
+        )
+
+
+class AskIndex(BaseModel):
+    """`data/jev/asks/index.json`: the history of queries by sha, and the cost calibration."""
+
+    model_config = _FROZEN
+
+    queries: dict[str, AskHistoryEntry] = Field(default_factory=dict)
+    calibration: AskCalibration = Field(default_factory=AskCalibration)
+
+    @model_validator(mode="after")
+    def _keyed_by_sha(self) -> AskIndex:
+        for key, entry in self.queries.items():
+            if key != entry.query_sha:
+                raise ValueError(f"entry for {entry.query_sha!r} filed under {key!r}")
+        return self
