@@ -297,6 +297,13 @@ const sQForm = (fields) => {
     await sWait(() => sRefreshed > r0, 'la consulta gratis');
     return Object.assign(sQView(), {panel});
   });
+  await sStep('similar', async () => {
+    sQForm({'ask-q': '¿cómo configuro hooks en claude code', 'ask-evaluated': true});
+    await sWait(() => (sPanel().est || '').includes('casi igual'), 'la consulta parecida');
+    const panel = sPanel();
+    sId('ask-cancel').click();
+    return panel;
+  });
   await sStep('refused', async () => {
     sQForm({'ask-q': 'otra', 'ask-evaluated': false, 'ask-author': 'nadie'});
     await sWait(() => (sPanel().error || '').includes('ningún post'), 'la negativa');
@@ -380,6 +387,17 @@ def test_served_asking_again_what_is_answered_is_free_and_counted(ask_served):
     assert sorted(ask_served["asked"]) == ["1", "2"]
     assert "2 veces" in again["history"][0]["text"]
     assert _probs(again["results"]) == [("1", "0,97")]
+
+
+@_requires_chrome
+def test_served_a_query_asked_before_in_other_words_is_named(ask_served):
+    assert isinstance(ask_served["similar"], dict), ask_served["similar"]
+    est = ask_served["similar"]["est"]
+
+    assert (
+        "Ya preguntaste algo casi igual (cambia solo en mayúsculas, puntuación o espacios, y se "
+        f"paga aparte): «{AskQuery.of(QUERY).text}»." in est
+    )
 
 
 @_requires_chrome

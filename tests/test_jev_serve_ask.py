@@ -245,6 +245,7 @@ def test_an_ask_job_asks_what_was_estimated_saves_logs_and_keeps_the_history(
     assert sorted(served.client.asked) == ["1", "2", "3", "4", "5"]
     assert job["outcome"]["ok"] == 5 and job["outcome"]["logged"] is True
     assert job["outcome"]["results"] == 2
+    assert job["outcome"]["recorded"] is True
     assert job["usd"] == pytest.approx(5 * tokens_cost_usd(100, "typesafe"))
     records = load_asks(served.cfg.jev_asks_dir / f"{query.sha}.json", query)
     assert {post: r.probability for post, r in records.items()} == PROBS

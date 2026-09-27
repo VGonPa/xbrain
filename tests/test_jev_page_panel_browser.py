@@ -243,7 +243,10 @@ if (window.top === window) (async () => {
     await sWait(() => w.document.getElementById('ask-form'), 'el formulario a 375 px');
     w.openAsk('ask', {query: 'hooks'}, 'Preguntar: «' + 'una pregunta larga '.repeat(12) + '»', null);
     await sWait(() => { const g = w.document.getElementById('ask-go'); return g && !g.disabled; }, 'la estimación de la pregunta');
-    return Object.assign(measure(w, w.document.body), {width: w.innerWidth});
+    const main = w.document.querySelector('.askmain').getBoundingClientRect();
+    const side = w.document.querySelector('.askside').getBoundingClientRect();
+    return Object.assign(measure(w, w.document.body), {width: w.innerWidth,
+      main: Math.round(main.width), side_below: side.top >= main.bottom - 1});
   });
   sDone();
 })();
@@ -266,6 +269,9 @@ def test_the_panel_and_the_tabs_fit_a_375_px_screen(narrow, view):
     assert isinstance(measured, dict), measured
     assert measured["page"] <= 375, measured
     assert measured["over"] == [], measured
+    if view == "ask":
+        # One column: the results use the width, the history goes below them.
+        assert measured["main"] >= 300 and measured["side_below"] is True, measured
 
 
 # --------------------------------------------------------------------------- «fuera del registro»

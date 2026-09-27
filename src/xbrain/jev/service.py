@@ -795,7 +795,7 @@ class JevService:
             return None
         kind = self._kinds[job.kind]
         priced = kind.price(self.cfg, job.pick, blob, jev)
-        if priced.ids != job.ids or not kind.same(job.confirmed, priced):
+        if not kind.same(job.confirmed, priced):
             job.refusal = (
                 "la selección cambió desde la estimación (otra pasada o un cambio en los "
                 "datos): vuelve a estimar"
