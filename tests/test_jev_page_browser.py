@@ -2755,6 +2755,19 @@ def _ended(tmp_path: Path, scenario: str, kind: str = "topics") -> dict[str, Any
             client=_Mixed(),
             patch=_outcome(lambda o: replace(o, logged=o.logged.model_copy(update={"unsaved": 2}))),
         )
+    if scenario == "history":
+        # The answers are paid, saved and logged; then the history cannot be written.
+        def _no_history(*args: Any, **kwargs: Any) -> Any:
+            raise OSError(28, "No space left on device")
+
+        return _served_dump(
+            tmp_path,
+            _end_probe(2, hide=True),
+            client=_Recorder(),
+            patch=lambda monkeypatch: monkeypatch.setattr(
+                service_module, "finish_ask", _no_history
+            ),
+        )
     if scenario == "not-logged":
         return _served_dump(
             tmp_path,

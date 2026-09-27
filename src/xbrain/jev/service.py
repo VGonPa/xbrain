@@ -10,10 +10,11 @@ is parsed, what it selects and costs, and which pass it runs; everything below i
   - topics: resolved from the blob the page is showing, `assess.select_items` over them (the
     `--dry-run` answer), priced by `report.topics_pass_estimate` over the blob's
     `cost.per_post` — the one mean the cost strip and the Configuración tab show;
-  - ask: `jev ask`'s own pre-filters and funnel (`ask.filter_posts`, `ask.select_ask_items`)
-    priced by `ask.estimate_ask` at the measured characters per token. A query every
-    candidate already answers selects nothing and costs nothing: it may still run, to be
-    counted in the history — the job asks nobody and builds no client.
+  - ask: `ask.plan_ask`, the call `jev ask` makes: its pre-filters, funnel and estimate
+    (posts × tokens per call + characters ÷ characters per token, fitted on paid answers or
+    the prior until they exist). No price, no confirmation. A query every candidate already
+    answers selects nothing and costs nothing: it may still run, to be counted in the
+    history — the job asks nobody and builds no client.
   Under `[jev].serve_max_usd` (at most equal) it mints a
   single-use confirmation, bound to the kind and the pick AS ASKED, that expires after
   `CONFIRM_TTL_S`. With no priced mean there is nothing to check the cap against, so no
@@ -24,18 +25,22 @@ is parsed, what it selects and costs, and which pass it runs; everything below i
   refuses (409, before any client exists and before any backup) if the posts moved or the
   price went over the cap. Only a job that passed all that is published in the slot.
 * The job runs `run.run_topics` or `run.run_ask` — the terminal's pass — through `_Metered`,
-  which makes the
-  cap a HARD bound by reservation: before each call it reserves that post's expected cost (the
-  estimate's mean, or this job's own priced mean when higher) and does not send when spent +
-  reserved + the next reservation would pass the cap. An answer replaces its reservation with
+  which makes the cap a HARD bound by reservation: before each call it reserves that post's
+  expected cost and does not send when spent + reserved + that reservation would pass the cap.
+  For topics that is the estimate's mean (or this job's own priced mean when higher); for an
+  ask it is the post's OWN planned price (its characters by the plan's cost model, scaled to
+  the confirmed estimate, and raised by the job's real/planned ratio once answers are dearer
+  than planned), so a long post first does not make every later post look as dear. An answer replaces its reservation with
   its real cost; an answer with no token count or from a provider with no price is charged
   the reservation, never $0. So the bill passes the cap only by what the posts in flight
   cost above their reservation.
 * Every stop from here is SOFT (`run_topics(cancel=…)`) — the cap, the server stopping, and
   the page's «Parar» (`cancel_job`, reason `cancelado`): nothing queued is sent, every call
   in flight is waited for, banked, saved and logged. Counters freeze when the job ends. An
-  ask that ended (done or stopped softly) is recorded in the query history, under the lock,
-  so what it paid for can be reopened; one that failed is not.
+  ask then runs `ask.finish_ask` under the lock, whose one rule decides the history: a use
+  that kept answers is recorded (a soft stop included); one stopped before keeping any, or
+  whose every call failed, is not. A history that cannot be written after the answers were
+  paid leaves the job `done` with its outcome and `history_error` — never «failed».
 """
 
 from __future__ import annotations
@@ -663,7 +668,7 @@ class JevService:
     """Everything the server does, without HTTP: the page's data, estimates, and the one job.
 
     `make_client` builds the client a job asks through — `cli._jev_client` in production, a
-    fake in tests. It is called only inside `run_topics`, after the backup and under the lock,
+    fake in tests. It is called only inside the pass (`run_topics` / `run_ask`), under the lock,
     so serving the page never needs a key.
     """
 

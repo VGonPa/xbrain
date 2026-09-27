@@ -526,7 +526,7 @@ def ask_ended(tmp_path_factory):
 
 
 @_requires_chrome
-@pytest.mark.parametrize("scenario", ["tope", "error", "failures", "not-logged", "lost"])
+@pytest.mark.parametrize("scenario", ["tope", "error", "failures", "not-logged", "lost", "history"])
 def test_served_an_ask_that_did_not_end_cleanly_is_shown_even_if_hidden(ask_ended, scenario):
     seen = ask_ended(scenario)
 
@@ -544,6 +544,21 @@ def test_served_an_ask_cut_by_the_cap_says_so_and_keeps_what_it_paid(ask_ended):
     assert seen["end"]["progress"].startswith(
         "Interrumpido (se alcanzó el tope por trabajo): 1 respuesta guardada · 0 resultados · "
     )
+
+
+@_requires_chrome
+def test_served_an_ask_whose_history_could_not_be_written_keeps_its_paid_answers_in_view(
+    ask_ended,
+):
+    seen = ask_ended("history")
+    job = seen["job"]
+
+    assert job["state"] == "done" and job["outcome"]["recorded"] is False
+    assert seen["end"]["progress"].startswith("2 respuestas guardadas · ")
+    assert (
+        f"2 respuestas pagadas y guardadas en {job['outcome']['file']}; el historial no se pudo "
+        "escribir: [Errno 28] No space left on device"
+    ) in seen["end"]["progress"]
 
 
 @_requires_chrome
@@ -656,3 +671,31 @@ def test_the_fake_answers_what_the_assertions_expect():
     """The results the browser tests read: probability order is not id order, and 1 and 5 tie."""
     assert ranked() == [("3", 0.97), ("1", 0.9), ("5", 0.9)]
     assert json.dumps(PROBS)
+
+
+@_requires_chrome
+def test_static_a_rebuilt_query_and_an_unreadable_run_log_say_so(tmp_path):
+    """The index lost the query (it is rebuilt from its answers) and runs.jsonl has a bad
+    line: the row says «reconstruida», and its cost is «—» with why — never «0,0000 $»."""
+    from tests.test_jev_serve import _repo
+    from xbrain.jev.dashboard import build_page_data
+
+    _need_chrome()
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        cfg = _repo(tmp_path, monkeypatch)
+        _asked(cfg, QUERY, when=DT)
+        (cfg.jev_asks_dir / "index.json").unlink()
+        with cfg.jev_runs_path.open("a", encoding="utf-8") as log:
+            log.write("{roto\n")
+        data = build_page_data(cfg, now=DT)
+    finally:
+        monkeypatch.undo()
+
+    seen = _dump(_page(tmp_path, data, _ASK_READ).as_uri() + "#ask")
+
+    assert "reconstruida desde sus respuestas (el historial la había perdido)" in seen["head"]
+    assert "coste: — (" in seen["head"] and "runs.jsonl" in seen["head"]
+    assert "~0,0000 $" not in seen["head"]
+    assert " · — · reconstruida" in seen["history"][0]["text"]
+    assert _probs(seen["results"]) == _shown(ranked())

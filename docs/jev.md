@@ -767,14 +767,17 @@ sit between the threshold and 0.95 and 69 at 0.95 or above.
 reopening a query costs nothing.
 
 - **Consultas hechas** (right; below on a narrow screen): every query in
-  `data/jev/asks/index.json`, the last asked first — the query, the day, how many results,
-  how many posts have a current answer to it, what its logged passes cost
-  (`report.ask_cost_by_query`), and how many times it was asked. A query whose file cannot be read
-  says `ilegible` and costs only its own row; a history that cannot be read is said above
-  the list.
-- **The query open** (`#ask?q=<sha>`; without it, the last one asked): the query, when it
-  was asked, its filters (*Sin filtros: todo el corpus* when none), its requests and cost,
-  and *R de N posts con respuesta vigente llegan a T* — T being the threshold it was asked at.
+  `data/jev/asks/index.json` (read as `jev ask` reads it: an entry the index lost is rebuilt
+  from its answer file and marked *reconstruida*), the last asked first. Each row has the
+  query, the day, how many results, how many posts have a current answer to it, what its
+  logged passes cost (`report.ask_cost_by_query`; *—* and why when `runs.jsonl` cannot be
+  read), and how many times it was asked. A query whose file cannot be read says `ilegible`
+  and costs only its own row. A history that cannot be read is said above the list.
+- **The query open** (`#ask?q=<sha>`; without it, the last one asked; a sha the history lacks
+  says *Esta consulta no está en el historial*): the query, when it was asked, its filters
+  (*Sin filtros: todo el corpus* when none), its requests and cost, and *R de N posts con
+  respuesta vigente llegan a T*. T is the threshold that use asked for; the topic filter is
+  judged at `[jev].threshold`, as the command does.
   The results are **recomputed when the page is built**: an answer to a post whose evidence
   changed since is not a result. They are the **post cards themselves** (the ones in Posts,
   with their own Jev block), best first, each with a strip on top: *Responde a la pregunta*,
@@ -886,15 +889,26 @@ it starts, so photos mirrored later show after a restart.
 **The Preguntar tab**, served, adds a **query box** and `jev ask`'s pre-filters — *Topic*,
 *Desde*, *Hasta*, *Autor*, *Como mucho (posts)* (the `--limit`) and *Solo posts con evaluación
 de topics vigente* — with one button, **Estimar lo que cuesta**, which opens the same panel as
-every other button. There the estimate reads *«N posts por preguntar · M ya respondidos
-(gratis) · … descartados por los filtros. Coste estimado: ~X $ (N llamadas × P tokens fijos + C
-caracteres a R por token; medido en K respuestas pagadas).»* — the command's estimate, see
-[Estimate and confirmation](#estimate-and-confirmation) (before it is fitted: *sin medir
-todavía: la estimación de partida*) — then a query asked before in other words, if any (*Ya
-preguntaste algo casi igual …*: it is paid separately), then the cap. The button that spends says **Preguntar y pagar
-~X $**; when every post the filters keep has already answered this query it says **Ver
-resultados (gratis)**: it still runs, asks nobody, builds no client, and counts the query once
-more in the history. When an ask you followed from the tab ends, the tab opens its results.
+every other button. There the estimate reads, for example:
+
+> 2 posts por preguntar · 4 descartados por los filtros. Coste estimado: ~0,00009 $ — 2 posts
+> × ~1.000 tokens por llamada, más el texto de los posts (348 caracteres ≈ 87 tokens, a 4
+> caracteres por token). Aún sin preguntas pagadas: cifras de partida.
+
+That is the command's estimate (see [Estimate and confirmation](#estimate-and-confirmation)):
+a fixed cost per call plus the posts' text. Once answers have been paid for it says *Cifras
+ajustadas con K respuestas ya pagadas*, and the figures are the ones fitted on them. Then
+comes a query asked before in other words, if any (*Ya preguntaste algo casi igual …*: it is
+paid separately), then the cap. The button that spends says **Preguntar y pagar ~X $**. When
+every post the filters keep has already answered this query it says **Ver resultados
+(gratis)**, and the estimate adds *No se paga nada; se anota como una consulta más en el
+historial*: it still runs, asks nobody, builds no client, and counts the query once more.
+
+When an ask you followed from the tab ends and was recorded, the tab opens its results. One
+stopped before keeping any answer stays where it is and says *no quedó en el historial*. A
+history that could not be written after the answers were paid says *N respuestas pagadas y
+guardadas en <fichero>; el historial no se pudo escribir: …*. Reopening a query from
+**Consultas hechas** asks the server nothing.
 
 A button opens a panel in the corner (Escape closes it; focus goes back to the button). The
 panel shows the server's estimate first: *«Coste estimado: ~X $ (coste medio por post de las
@@ -977,38 +991,50 @@ code:
   2,000 characters) and, optionally, `topic`, `since` and `until` (`AAAA-MM-DD`; a range that
   runs backwards is refused), `author`, `only_evaluated` and `limit`: exactly `xbrain jev ask`'s
   flags (`AskFilters.from_json`), planned by the command's own `ask.plan_ask`; results are at
-  `[jev].threshold`. It answers the same
-  fields as a topics estimate (no `forced`, no `per_post`) plus `query_sha`, `dropped` (by the
-  filters), `candidates`, `chars`, `cost_model` (`{per_call, chars_per_token, measured,
-  answers}`) and `similar` (queries asked before that differ only in case, punctuation or
-  spacing). Its `usd` is the command's estimate: `ask.plan_ask`, the same call `jev ask` makes. A query no post can answer (the filters keep nothing with
-  evidence) is refused; one every candidate already answered is **allowed at 0 $**.
+  `[jev].threshold`. It answers the same fields as a topics estimate (no `forced`, no
+  `per_post`) plus `query_sha`, `dropped` (by the filters), `candidates`, `chars`,
+  `cost_model` (`{per_call, chars_per_token, measured, answers}`) and `similar` (queries
+  asked before that differ only in case, punctuation or spacing). Its `usd` is the estimate of
+  `ask.plan_ask`, the same call `jev ask` makes. A query no post can answer (the filters keep
+  nothing with evidence) is refused, and so is one with no price; one every candidate already
+  answered is **allowed at 0 $**.
 - `POST /api/ask/evaluate` (the same body plus `confirm_token`): under the lock the job plans
   again and refuses (409) unless `ask.same_selection` holds and the price still fits; then
   `run.run_ask` — the command's pass, its checkpoints, its `runs.jsonl` line with `kind: "ask"`
   and `query_sha` — through the same cap by reservation, and, still under the lock,
-  `ask.finish_ask`, whose one rule records the use in `data/jev/asks/index.json` (every use
-  that kept answers, a soft stop included; nothing when it was stopped before keeping any or
-  every call failed). The job view adds `query_sha`, and its `outcome` adds `results` (at the
-  threshold), `answered` and `recorded`.
+  `ask.finish_ask`. Its one rule decides what goes into `data/jev/asks/index.json`:
+  - every use that kept answers is recorded, a soft stop included;
+  - a use with nothing to ask (every answer cached) is recorded too;
+  - nothing is recorded when the use was stopped before keeping any answer, or when every
+    call failed.
+
+  The job view adds `query_sha`. Its `outcome` adds `sent` (the calls that reached the vendor:
+  0 when every answer was cached, which is a clean end and has nothing to log), `results` (at
+  the threshold), `answered` and `recorded`. When the history cannot be written after the
+  answers were paid, the job still ends `done`, with `history_error` and the answers' `file`.
 - The served cap for an ask is **`[jev].serve_max_usd`**, like any server job.
   `[jev].ask_max_usd` is the terminal's confirmation threshold and does not apply here.
 - `GET /api/asks` is the tab's data, `{history, surfaces, error}` (the blob's `asks`), and
-  `GET /api/ask/<sha>` one query of it (404 for a sha the history lacks). Both are read-only
-  and cost nothing.
+  `GET /api/ask/<sha>` one query of it plus `surfaces`, what Jev read for each of its results
+  (404 for a sha the history lacks). Both are read-only and cost nothing. The routes are
+  `/api/ask/estimate` and `/api/ask/evaluate` rather than one `/api/ask`: the same
+  `/api/<kind>/…` pair as topics, so both kinds go through one flow and one set of guards.
 
 Every estimate and job view carries its `kind` (`topics` or `ask`): the server has ONE job
 slot for both, and both take the pass lock. The page's data is `GET /api/data`
 (the same blob the page embeds); its `serve.finished_at` is the last job whose files that data
-already includes, which is how an idle tab knows a job ended since. `GET /api/cards?ids=a,b` returns those posts' cards, in
-that order, and 404 names any id the corpus lacks; it is the by-id refresh for result lists.
+already includes, which is how an idle tab knows a job ended since. `GET /api/cards?ids=a,b`
+returns those posts' cards, in that order, and 404 names any id the corpus lacks: a by-id card
+lookup, which no page control calls.
 
 **What stops a job from spending more than you meant:**
 
 - **The cap, `[jev].serve_max_usd`** (default 1.00 $). An estimate above it gets no
   confirmation (equal is allowed). While the job runs, each post's expected cost is
-  **reserved before it is sent** — the estimate's mean, or the job's own priced mean once
-  that is higher — and no post is sent when spent + reserved for the posts in flight + its
+  **reserved before it is sent** — for topics the estimate's mean, or the job's own priced
+  mean once that is higher; for an ask the post's own planned price (its characters by the
+  cost model), raised when the job's answers turn out dearer than planned — and no post is
+  sent when spent + reserved for the posts in flight + its
   own reservation would pass the cap. An answer then replaces its reservation with its real
   cost; one with no token count, or from a provider with no price (a `jev-latest` answering
   as a new model can be one), is **charged the reservation, never $0**, and the job view

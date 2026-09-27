@@ -1446,3 +1446,24 @@ def test_an_unreadable_history_is_the_tabs_error(cfg: Config):
 
 def test_a_page_built_without_asks_has_an_empty_tab():
     assert NO_ASKS == {"history": [], "surfaces": {}, "error": None}
+
+
+def test_a_run_log_that_cannot_be_read_gives_no_cost_rather_than_zero(cfg: Config):
+    from xbrain.jev.dashboard import build_page_data
+
+    _run(cfg, _ByText(provider="typesafe"))
+    with cfg.jev_runs_path.open("a", encoding="utf-8") as log:
+        log.write("{roto\n")
+
+    [row] = build_page_data(cfg, now=DT)["asks"]["history"]
+
+    assert set(row["cost"]) == {"error"} and "runs.jsonl" in row["cost"]["error"]
+
+
+def test_the_page_cost_of_a_query_is_the_run_logs(cfg: Config):
+    plan, _, _ = _run(cfg, _ByText(provider="typesafe", input_tokens=200_000))
+
+    [row] = _asks(cfg)["history"]
+
+    assert row["cost"] == ask_cost_by_query(load_runs(cfg.jev_runs_path))[plan.query.sha]
+    assert row["cost"]["cost_usd"] > 0.01
